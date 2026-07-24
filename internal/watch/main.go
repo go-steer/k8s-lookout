@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
@@ -63,6 +64,9 @@ type flags struct {
 	dedupPersist      string
 	unhealthyMinCount int
 	recoveryStableFor time.Duration
+	storm             bool
+	stormWindow       time.Duration
+	stormMin          int
 	inCluster         bool
 	kubeconfig        string
 	clusterName       string
@@ -107,6 +111,17 @@ func parseFlags(args []string) (*flags, error) {
 
 	// Recovery injects (§7.4).
 	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")
+
+	// Storm correlation (§7.5). ADDITIVE and default-OFF in this
+	// change: the topology-graph informers need RBAC (pods, nodes,
+	// apps/replicasets list+watch) that deployments running the M0
+	// ClusterRole may lack, and — unlike the recovery observer —
+	// correlation is opted into explicitly, so a missing grant is a
+	// loud startup error rather than a silent degrade. Flipping the
+	// default is an M2-exit decision.
+	fs.BoolVar(&f.storm, "storm", false, "Enable storm correlation (§7.5): group new incidents sharing a blast-radius key (nearest common topology ancestor) into one kind=storm session. Requires pods/nodes/replicasets list+watch RBAC for the graph informers (verified loudly at startup).")
+	fs.DurationVar(&f.stormWindow, "storm-window", engine.DefaultStormWindow, "Second-level correlation window for storm formation. 0 disables correlation even with --storm.")
+	fs.IntVar(&f.stormMin, "storm-min", engine.DefaultStormMin, "Minimum incidents sharing a blast-radius key within --storm-window to form a storm. Must be >= 2.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -158,6 +173,15 @@ func (f *flags) validate() error {
 			return fmt.Errorf("--sources: unknown source %q (known: %s, %s)", name, k8sevents.Name, objectstate.Name)
 		}
 	}
+	// Storm bounds are validated before the mode switch's dry-run
+	// early return, like --sources: a nonsensical value is a config
+	// error in every mode.
+	if f.stormWindow < 0 {
+		return errors.New("--storm-window must be >= 0 (0 disables storm correlation)")
+	}
+	if f.stormMin < 2 {
+		return errors.New("--storm-min must be >= 2 (a storm of one is an incident)")
+	}
 	switch f.mode {
 	case "per-incident":
 		if f.dryRun {
@@ -184,6 +208,10 @@ func (f *flags) validate() error {
 	}
 	return nil
 }
+
+// stormEnabled reports whether §7.5 storm correlation is on: the
+// explicit --storm opt-in AND a non-zero correlation window.
+func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
 
 // splitCSV parses a comma-separated flag value. Empty strings after
 // split are dropped; whitespace around values trimmed.
@@ -221,6 +249,12 @@ type dispatcher struct {
 	// DispatchSignal. Nil when recovery is disabled
 	// (--recovery-stable-for=0, dry-run, or missing pods RBAC).
 	tracker *engine.RecoveryTracker
+	// storm, when non-nil, is the §7.5 correlation stage sitting
+	// between dedup and session creation: new incidents pass through
+	// it and may be folded into a kind=storm session instead of
+	// opening their own. Nil when storm correlation is disabled
+	// (--storm absent — the default).
+	storm *engine.StormCorrelator
 	// injectLock serializes per-(app, sid) session creation +
 	// injects so two rapid-fire events for the same key don't
 	// both call CreateSession. Coarse-grained; a per-key map of
@@ -295,9 +329,24 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
 		return
 	}
-	// New incident: create or reuse a session, then inject.
+	// New incident: correlate, then create or reuse a session and
+	// inject. The lock serializes storm formation with session
+	// creation so two racing incidents cannot both open the storm.
 	d.injectLock.Lock()
 	defer d.injectLock.Unlock()
+	// Storm correlation (§7.5, pipeline position: after dedup,
+	// before severity routing): a new incident may form a storm,
+	// attach to an open one, or fall through per-incident.
+	if d.storm != nil {
+		switch v := d.storm.Observe(sig); v.Kind {
+		case engine.StormFormed:
+			d.stormFormed(ctx, sig, v)
+			return
+		case engine.StormAttached:
+			d.stormAttached(ctx, sig, v)
+			return
+		}
+	}
 	sid := d.targetSid
 	if d.mode == "per-incident" && !d.dryRun {
 		newSid, err := d.injector.CreateSession(ctx)
@@ -312,6 +361,12 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// BindIncident = BindSession + the identity the recovery
 		// tracker needs to survive a restart (rides on dedup-persist).
 		d.dedup.BindIncident(sig.Key, sid, sig.IncidentRef())
+		if d.storm != nil {
+			// Remember the session for a possible later supersede:
+			// if this incident becomes a founding storm member, the
+			// storm inject points its session at the storm's.
+			d.storm.NoteMemberSession(sig.Key, sid)
+		}
 	}
 	// Hand the bound incident to the recovery tracker (§7.4) so the
 	// fix-verify loop closes into this session. Shared mode tracks
@@ -379,6 +434,26 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 		log.Printf("recovery: %s signal for %s/%s missing Recovery attachment — dropping (programming error)",
 			sig.Kind, sig.Namespace, sig.Name)
 		return
+	}
+	// Storm bookkeeping first (§7.5): member clearance feeds the
+	// storm's recovery — the LAST member to clear resolves the storm.
+	// Recorded before the member's own routing so a lost binding
+	// (dropped outcome below) still keeps storm accounting correct.
+	var stormFinal *engine.StormInfo
+	if d.storm != nil {
+		switch sig.Kind {
+		case engine.KindResolved:
+			if info, done, ok := d.storm.MemberResolved(sig.Key); ok && done {
+				stormFinal = &info
+			}
+		case engine.KindResolvedReverted:
+			d.storm.MemberReverted(sig.Key)
+		}
+		defer func() {
+			if stormFinal != nil {
+				d.stormResolved(ctx, sig, *stormFinal)
+			}
+		}()
 	}
 	sid := d.targetSid
 	if d.mode == "per-incident" {
@@ -569,12 +644,35 @@ func realMain(argv []string) error {
 		return err
 	}
 
+	// Storm correlation (§7.5): ONE shared informer factory serves
+	// the sources and the graph (§6.3) — when enabled, the
+	// object-state source registers on the same factory as the graph
+	// feed, so pods/nodes are watched once.
+	var sharedFactory informers.SharedInformerFactory
+	var feed *graphFeed
+	if f.stormEnabled() {
+		sharedFactory = informers.NewSharedInformerFactory(client, 0)
+		if objState != nil {
+			objState.WithFactory(sharedFactory)
+		}
+		feed = newGraphFeed(sharedFactory)
+	} else if f.storm {
+		log.Printf("storm: disabled (--storm-window=0)")
+	}
+
 	// §11: verify each source's declared RBAC before watching
 	// anything — a deployment whose ServiceAccount can't support a
 	// source fails loudly here, naming the source and the missing
 	// permission, never a silently empty watch.
 	if err := sources.Probe(ctx, sources.NewAccessReviewer(client), registry.All()...); err != nil {
 		return err
+	}
+	if feed != nil {
+		// Same posture for the graph feed's informers: --storm is an
+		// explicit opt-in, so a missing grant fails loudly at startup.
+		if err := probeGraphAccess(ctx, sources.NewAccessReviewer(client)); err != nil {
+			return err
+		}
 	}
 
 	// Recovery injects (§7.4): watch bound incidents for symptom
@@ -583,6 +681,29 @@ func realMain(argv []string) error {
 		if err := setupRecovery(ctx, f, client, dedup, disp, m, objState); err != nil {
 			return err
 		}
+	}
+
+	// Arm the correlator and start the graph ingest loop. A feed
+	// failure is fatal like a source failure (§7.2 posture: a
+	// sentinel with a dead stage lies about its coverage) — it
+	// cancels the process and its error surfaces after RunAll.
+	var feedErr error
+	var feedMu sync.Mutex
+	if feed != nil {
+		correlator, cerr := engine.NewStormCorrelator(f.stormWindow, f.stormMin, feed)
+		if cerr != nil {
+			return cerr
+		}
+		disp.storm = correlator
+		go func() {
+			if ferr := feed.Run(ctx); ferr != nil && ctx.Err() == nil {
+				feedMu.Lock()
+				feedErr = ferr
+				feedMu.Unlock()
+				cancel()
+			}
+		}()
+		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
 	}
 
 	log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
@@ -594,6 +715,11 @@ func realMain(argv []string) error {
 	// isn't lost. Best-effort — failure is logged, not fatal.
 	if snapErr := dedup.Snapshot(); snapErr != nil {
 		log.Printf("dedup snapshot on shutdown: %v", snapErr)
+	}
+	if err == nil {
+		feedMu.Lock()
+		err = feedErr
+		feedMu.Unlock()
 	}
 	return err
 }

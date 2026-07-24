@@ -42,6 +42,10 @@ type metrics struct {
 	recoveriesReverted  prometheus.Counter
 	recoveryTracking    prometheus.Gauge
 	recoveryDrops       *prometheus.CounterVec
+	stormsFormed        prometheus.Counter
+	stormsResolved      prometheus.Counter
+	stormsActive        prometheus.Gauge
+	stormMembers        *prometheus.CounterVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -91,6 +95,22 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_recovery_drops_total",
 			Help: "Total resolved signals dropped instead of injected, by cause (unknown_session: binding lost, e.g. restart without --dedup-persist).",
 		}, []string{"cause"}),
+		stormsFormed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_storms_formed_total",
+			Help: "Total kind=storm incidents opened by blast-radius correlation (§7.5).",
+		}),
+		stormsResolved: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_storms_resolved_total",
+			Help: "Total storms resolved because every member incident cleared (§7.4 + §7.5).",
+		}),
+		stormsActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8s_event_watcher_storms_active",
+			Help: "Currently open (unresolved) storms.",
+		}),
+		stormMembers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_storm_members_total",
+			Help: "Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival).",
+		}, []string{"kind"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -103,6 +123,10 @@ func newMetrics() *metrics {
 		m.recoveriesReverted,
 		m.recoveryTracking,
 		m.recoveryDrops,
+		m.stormsFormed,
+		m.stormsResolved,
+		m.stormsActive,
+		m.stormMembers,
 	)
 	return m
 }

@@ -167,6 +167,19 @@ func (i *Injector) InjectResolved(ctx context.Context, sessionID string, payload
 	return i.injectJSON(ctx, sessionID, payload)
 }
 
+// InjectStorm POSTs the §7.5 aggregate storm payload into the storm's
+// session. Same envelope and endpoint — only the payload differs.
+func (i *Injector) InjectStorm(ctx context.Context, sessionID string, payload StormPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
+// InjectStormMember POSTs a storm membership record: kind=storm.member
+// into the storm session (late arrival), or
+// kind=storm.member_superseded into a member's own pre-storm session.
+func (i *Injector) InjectStormMember(ctx context.Context, sessionID string, payload StormMemberPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
 // injectJSON is the shared body of the Inject* methods: marshal the
 // payload, wrap it in the inject-message envelope, POST it.
 func (i *Injector) injectJSON(ctx context.Context, sessionID string, payload any) error {

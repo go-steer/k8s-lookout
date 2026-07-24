@@ -41,6 +41,23 @@ const (
 	KindResolvedReverted = "resolved.reverted"
 )
 
+// Storm kinds (§7.3/§7.5): cross-cutting like resolved — any mix of
+// sources can supply a storm's members, so the kinds are not
+// source-namespaced. Mirrored by pkg/inject's wire constants; the
+// internal/watch contract test pins the pairs to the same values.
+const (
+	// KindStorm is the one aggregate incident a correlated burst
+	// opens (§7.5); also the "kind" input of the storm fingerprint.
+	KindStorm = "storm"
+	// KindStormMember marks a late-arrival member attached to an
+	// open storm's session as a followup.
+	KindStormMember = "storm.member"
+	// KindStormMemberSuperseded is injected into a member's OWN
+	// per-incident session (opened before the storm formed) to point
+	// it at the storm session that now owns the incident.
+	KindStormMemberSuperseded = "storm.member_superseded"
+)
+
 // Values for Signal.Source (the §8 "source" field): which path
 // produced the signal. Not to be confused with a signal *source*
 // implementation (pkg/sources.Source), whose Name() namespaces new
