@@ -44,6 +44,11 @@ type Command struct {
 	// a concept the model already knows — not a restatement of
 	// the name.
 	Summary string
+	// Positional declares the command's positional argument, if it
+	// takes one (at most one; multi-positional surfaces are not
+	// part of the design). Content validation is the command's own
+	// job — return emit.UsageErrorf for exit 2.
+	Positional *Positional
 	// Flags declares the command-specific flags. The §4.2 common
 	// flags are implicit on every command and must not be
 	// redeclared.
@@ -67,6 +72,17 @@ type Command struct {
 type OutputField struct {
 	Name string
 	Doc  string
+}
+
+// Positional documents a command's positional argument for the
+// usage line, --help, and (later) the MCP schema.
+type Positional struct {
+	// Meta is the placeholder shown in the usage line, e.g.
+	// "<Kind>/[<namespace>/]<name>".
+	Meta string
+	// Doc explains the argument's syntax and defaults, --help
+	// style: terse, exhaustive, written for an agent reader.
+	Doc string
 }
 
 // Group returns the command's group ("" for top-level commands).
@@ -131,6 +147,14 @@ func (c Command) Validate() error {
 	if c.Run == nil {
 		return fmt.Errorf("command %q: nil Run", c.Name)
 	}
+	if p := c.Positional; p != nil {
+		if p.Meta == "" || strings.ContainsAny(p.Meta, " \n") {
+			return fmt.Errorf("command %q: positional meta must be one non-empty token, got %q", c.Name, p.Meta)
+		}
+		if p.Doc == "" || strings.ContainsRune(p.Doc, '\n') {
+			return fmt.Errorf("command %q: positional doc must be one non-empty line", c.Name)
+		}
+	}
 	if err := emit.ValidateSpecs(c.Flags); err != nil {
 		return fmt.Errorf("command %q: %w", c.Name, err)
 	}
@@ -158,12 +182,17 @@ func (c Command) Validate() error {
 // scaffolding go through here so there is exactly one place a
 // command's metadata is bound to the runner.
 func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
+	maxArgs := 0
+	if c.Positional != nil {
+		maxArgs = 1
+	}
 	return emit.RunConfig{
-		Name:   "lookout " + c.Name,
-		Flags:  c.Flags,
-		Check:  c.Run,
-		Help:   c.Help(),
-		Stdout: stdout,
-		Stderr: stderr,
+		Name:    "lookout " + c.Name,
+		Flags:   c.Flags,
+		Check:   c.Run,
+		Help:    c.Help(),
+		MaxArgs: maxArgs,
+		Stdout:  stdout,
+		Stderr:  stderr,
 	}
 }

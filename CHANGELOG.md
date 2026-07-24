@@ -73,6 +73,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values are never stored — Secret ingestion reads `ObjectMeta` only.
   Benchmarks set the §15 Q5 compaction gate, recorded in
   `docs/graph-q5-gate.md`.
+- `lookout triage spec` — the first registered read-path command (M1, §5):
+  the sanitized, token-dense spec of ONE resource, "kubectl describe, but
+  for agents" (MCP tool `k8s_resource_spec`). Takes
+  `<Kind>/[<namespace>/]<name>` positionally (case-insensitive kinds with a
+  small kubectl-alias table: po, deploy, rs, sts, ds, svc, cm, pvc, ing,
+  netpol, no) or `--workload=`; the §6.1 pod-nexus kinds fetch through
+  typed clients, everything else resolves via API discovery + the dynamic
+  client. Output is the §6.5-sanitized object flattened into the finding
+  model — metadata essentials, per-container image/resources/probes/env
+  (credential values `[REDACTED]`), workload replicas/strategy/selector,
+  service ports/selector, ConfigMap/Secret data KEYS only (values never
+  rendered) — with healthy conditions and defaulted fields elided; abnormal
+  conditions emit as warnings. `--diff` is a registered surface that
+  returns an honest usage error until graph history lands (M3, §6.6). To
+  carry it, the §4.2 runner gained positional-argument support
+  (interspersed with flags, kubectl-style) and check-raised usage errors
+  (`emit.UsageErrorf` → exit 2), and `pkg/kube` gained
+  `BuildConfig`/`BuildDynamicClient`.
 
 ## [0.1.0] - 2026-07-24
 
