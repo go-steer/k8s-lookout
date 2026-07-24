@@ -1,0 +1,4 @@
+kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-7d9c4b-x2n8p reason=CrashLoopBackOff message="back-off 5m0s restarting failed container" restarts=17 container=api
+kind=quota.exhausted message="used 100% of quota \"CPUS\" in us-east1 — scale-up blocked" limit="=" note="tab\there"
+kind=node.pressure name=gke-pool-1-node-3 reason=MemoryPressure
+scanned=412 findings=3 elapsed=1.2s

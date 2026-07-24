@@ -1,0 +1,29 @@
+Usage: lookout triage demo [flags]
+
+Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.
+
+Flags:
+  --count=2  number of synthetic findings to emit
+  --fail     return a runtime error after emitting
+  --hang     block until the --timeout context fires
+
+Common flags (every lookout command):
+  --namespace=<string>  limit the scan to one namespace
+  -A                    scan all namespaces
+  --workload=<string>   target one workload as <Kind>/<namespace>/<name>, e.g. Deployment/prod/api
+  --since=<duration>    how far back to look (0 = command default)
+  --format=logfmt       output format: logfmt|json (one record per line either way)
+  --timeout=10s         abort the invocation after this long (exit 1)
+
+Output fields (beyond the shared envelope fields kind, severity, namespace, kind_of_object, name, reason, message):
+  index  1-based ordinal of the synthetic finding
+
+Output: one finding per line (logfmt; --format=json for one JSON object
+per line), keys in fixed order; healthy resources emit nothing. The final
+line is always the summary: scanned=<n> findings=<n> elapsed=<d> —
+findings=0 with a summary present means "scanned and healthy"; a stream
+without a summary line is void. Exit 0 data, 1 runtime error (diagnostics
+on stderr only), 2 usage.
+
+Examples:
+  lookout triage demo --count=1 --format=json
