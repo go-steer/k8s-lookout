@@ -39,6 +39,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 )
 
 // flags is the CLI-shaped config, parsed once in main and threaded
@@ -171,8 +173,9 @@ func splitCSV(s string) []string {
 }
 
 // dispatcher is the pipeline that ties filter → dedup → injector +
-// metrics for one event. Implements eventDispatcher so watcher.go
-// can call Dispatch on it.
+// metrics for one signal. Sources (pkg/sources) feed it through
+// DispatchSignal; storm correlation, severity routing, and
+// enrichment slot in here as they land (§7.1).
 type dispatcher struct {
 	filter    *engine.Filter
 	dedup     *engine.DedupCache
@@ -190,16 +193,51 @@ type dispatcher struct {
 	injectLock sync.Mutex
 }
 
-// Dispatch is the eventDispatcher entry point.
+// Dispatch is the TriageEvent-shaped entry point, kept from M0: it
+// wraps the event in the kind=k8s-event Signal the k8s-events source
+// would emit and forwards to DispatchSignal. The M0 contract tests
+// (wire shape, dispatcher logs) pin this path; keep it until every
+// caller speaks Signal.
 func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
-	d.metrics.eventsSeen.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
-	if !d.filter.Accept(ev) {
+	d.DispatchSignal(ctx, engine.Signal{
+		Kind:        engine.KindK8sEvent,
+		Source:      engine.SourceSentinel,
+		Severity:    engine.SeverityCritical,
+		TriageEvent: ev,
+	})
+}
+
+// DispatchSignal is the pipeline entry point for signals emitted by
+// sources (§7.1: filter → dedup → inject; the correlation / routing /
+// enrichment stages land in later M2 changes).
+//
+// For Kind=k8s-event the inject payload is the frozen
+// pkg/inject.Payload, byte-identical to the M0 watcher's — the
+// Signal-only fields (severity, fingerprint, source, zone) are
+// carried in-process but not serialized for that kind (§8: existing
+// fields keep their exact names; new fields ship with new kinds).
+func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
+	// Stamp deployment identity + derived fields sources leave
+	// blank: sources don't know which cluster they run in (§7.2),
+	// and the fingerprint (§8) needs the canonicalized reason-class
+	// + zone, so it is computed here, once, for every source.
+	if sig.Cluster == "" {
+		sig.Cluster = d.cluster
+	}
+	if sig.Source == "" {
+		sig.Source = engine.SourceSentinel
+	}
+	if sig.Fingerprint == "" {
+		sig.Fingerprint = engine.Fingerprint(sig.Kind, engine.CanonicalReason(sig.Key.Reason), sig.KindOfObject, sig.Zone)
+	}
+	d.metrics.eventsSeen.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	if !d.filter.Accept(sig) {
 		return
 	}
-	result := d.dedup.Observe(ev.Key, ev.LastSeen)
+	result := d.dedup.Observe(sig.Key, sig.LastSeen)
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
 	if result.Kind == engine.DedupDuplicate {
-		d.metrics.eventsDedupSuppress.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
+		d.metrics.eventsDedupSuppress.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 		// Info-level log: the operator asked "is the watcher seeing
 		// events?" and today the answer was "yes when things break,
 		// silent when things work" — this line makes suppressed
@@ -209,7 +247,7 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
 		// --dedup-window, default 5m); result.Count is the running
 		// hit count for this key within the current window.
 		log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
-			ev.Key.Reason, ev.Namespace, ev.Name, result.Count)
+			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
 		return
 	}
 	// New incident: create or reuse a session, then inject.
@@ -219,48 +257,48 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
 	if d.mode == "per-incident" && !d.dryRun {
 		newSid, err := d.injector.CreateSession(ctx)
 		if err != nil {
-			log.Printf("dispatcher: create session for %s/%s: %v", ev.Namespace, ev.Name, err)
+			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
-			d.metrics.injectErrors.WithLabelValues(ev.Key.Reason, "session_create").Inc()
+			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
 			return
 		}
 		sid = newSid
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
-		d.dedup.BindSession(ev.Key, sid)
+		d.dedup.BindSession(sig.Key, sid)
 	}
 	payload := inject.Payload{
-		Kind:         inject.KindEvent,
-		Reason:       ev.Key.Reason,
-		Namespace:    ev.Namespace,
-		KindOfObject: ev.KindOfObject,
-		Name:         ev.Name,
-		Container:    ev.Container,
-		UID:          ev.Key.UID,
-		Message:      ev.Message,
+		Kind:         sig.Kind,
+		Reason:       sig.Key.Reason,
+		Namespace:    sig.Namespace,
+		KindOfObject: sig.KindOfObject,
+		Name:         sig.Name,
+		Container:    sig.Container,
+		UID:          sig.Key.UID,
+		Message:      sig.Message,
 		Count:        result.Count,
-		FirstSeen:    ev.FirstSeen,
-		LastSeen:     ev.LastSeen,
-		Cluster:      d.cluster,
+		FirstSeen:    sig.FirstSeen,
+		LastSeen:     sig.LastSeen,
+		Cluster:      sig.Cluster,
 		Context: inject.PayloadContext{
-			ControllerRef: ev.ControllerRef,
-			Node:          ev.Node,
-			Labels:        ev.Labels,
+			ControllerRef: sig.ControllerRef,
+			Node:          sig.Node,
+			Labels:        sig.Labels,
 		},
 	}
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-		d.metrics.eventsInjected.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
+		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 		log.Printf("would-fire %s pod=%s/%s (sid=%s, mode=%s, dry-run)",
-			ev.Key.Reason, ev.Namespace, ev.Name, sid, d.mode)
+			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 		return
 	}
 	if err := d.injector.Inject(ctx, sid, payload); err != nil {
-		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", ev.Namespace, ev.Name, sid, err)
-		d.metrics.injectErrors.WithLabelValues(ev.Key.Reason, "inject").Inc()
+		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 		return
 	}
-	d.metrics.eventsInjected.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
+	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 	// Info-level log: the successful-inject case was silent before
 	// #212 — operators had to correlate client-go informer warnings
 	// with daemon session-list dumps to infer whether the watcher
@@ -269,7 +307,7 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
 	// own logs / /sessions API so cross-container reconstruction of
 	// an incident is a single traceID-style filter.
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
-		ev.Key.Reason, ev.Namespace, ev.Name, sid, d.mode)
+		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
 
 // Main is the `lookout watch` entry point; argv is the argument list
@@ -384,10 +422,29 @@ func realMain(argv []string) error {
 		return err
 	}
 
-	w := newWatcher(client, disp, f.clusterName, 0)
+	// Signal sources (§7.2). One source today — the M0 event watcher
+	// refactored into pkg/sources/k8sevents — but registered, probed,
+	// and run through the generic interface the rest of M2 plugs into.
+	// The flag surface deliberately gains nothing here: source
+	// enablement config lands with the second source.
+	registry := sources.NewRegistry()
+	if err := registry.Register(k8sevents.New(client, 0)); err != nil {
+		return err
+	}
+
+	// §11: verify each source's declared RBAC before watching
+	// anything — a deployment whose ServiceAccount can't support a
+	// source fails loudly here, naming the source and the missing
+	// permission, never a silently empty watch.
+	if err := sources.Probe(ctx, sources.NewAccessReviewer(client), registry.All()...); err != nil {
+		return err
+	}
+
 	log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 		f.clusterName, f.daemonURL, f.mode, f.owner)
-	err = w.Run(ctx)
+	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
+		disp.DispatchSignal(ctx, sig)
+	})
 	// Final snapshot on shutdown so any un-persisted dedup state
 	// isn't lost. Best-effort — failure is logged, not fatal.
 	if snapErr := dedup.Snapshot(); snapErr != nil {

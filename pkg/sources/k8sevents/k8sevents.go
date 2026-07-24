@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+// Package k8sevents is the first signal source (DESIGN.md §7.2): the
+// core/v1 Event informer that was internal/watch's watcher — the M0
+// k8s-event-watcher — refactored behind the pkg/sources.Source
+// interface with semantics unchanged. It emits kind=k8s-event Signals
+// per the existing Reason allow-list; filter/dedup/inject stay in the
+// shared pipeline downstream.
+package k8sevents
 
 import (
 	"context"
@@ -28,61 +34,70 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
 
-// eventDispatcher is the callback the watcher invokes for every k8s
-// event that arrives from the informer. Injected here (not called
-// from watcher.go) so tests can wire a stub that just records what
-// was dispatched.
-type eventDispatcher interface {
-	Dispatch(ctx context.Context, ev engine.TriageEvent)
-}
+// Name is the stable source name (§7.2 table) used in the signal
+// schema and config.
+const Name = "k8s-events"
 
-// watcher wires a client-go informer for core/v1.Events into an
-// eventDispatcher. The informer resyncs every resyncPeriod; on Add
-// (new event object) and Update (event count bump), the handler
-// converts the *corev1.Event to a TriageEvent and hands it to the
-// dispatcher.
+// Source wires a client-go informer for core/v1.Events into the
+// sentinel pipeline. On Add (new event object) and Update (event
+// count bump), the handler converts the *corev1.Event to a Signal and
+// hands it to emit.
 //
-// The dispatcher decides whether to filter/dedup/inject — watcher
-// itself is just the informer boilerplate.
-type watcher struct {
+// The pipeline decides whether to filter/dedup/inject — the source
+// itself is just the informer boilerplate plus the Event → Signal
+// conversion.
+type Source struct {
 	client       kubernetes.Interface
-	dispatcher   eventDispatcher
-	clusterName  string
 	resyncPeriod time.Duration
 }
 
-// newWatcher constructs a watcher. resyncPeriod == 0 disables the
-// periodic resync (informer only fires on real API events); non-zero
-// values re-fire every registered event through the handler at that
-// cadence — usually not what you want, so default 0 in main.go.
-func newWatcher(client kubernetes.Interface, dispatcher eventDispatcher, clusterName string, resyncPeriod time.Duration) *watcher {
-	return &watcher{
-		client:       client,
-		dispatcher:   dispatcher,
-		clusterName:  clusterName,
-		resyncPeriod: resyncPeriod,
+// New constructs the source. resyncPeriod == 0 disables the periodic
+// resync (informer only fires on real API events); non-zero values
+// re-fire every registered event through the handler at that cadence
+// — usually not what you want, so callers pass 0.
+func New(client kubernetes.Interface, resyncPeriod time.Duration) *Source {
+	return &Source{client: client, resyncPeriod: resyncPeriod}
+}
+
+// Name implements sources.Source.
+func (s *Source) Name() string { return Name }
+
+// Scope implements sources.Source. The Event informer lists and
+// watches events across all namespaces (namespace filtering happens
+// downstream in the engine filter), so the source needs cluster-wide
+// RBAC.
+func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// RequiredAccess implements sources.AccessDeclarer (§11): the
+// informer's initial List plus the Watch it maintains. Matches the
+// shipped ClusterRole in deploy/12-clusterrole-watcher.yaml.
+func (s *Source) RequiredAccess() []sources.Requirement {
+	return []sources.Requirement{
+		{Resource: "events", Verb: "list"},
+		{Resource: "events", Verb: "watch"},
 	}
 }
 
-// Run starts the informer + handler goroutines and blocks until ctx
-// is cancelled. Returns any startup error (e.g., initial list
-// failure); shutdown-path errors are logged but not returned so
-// callers can distinguish "startup failed, restart me" from "clean
-// shutdown."
-func (w *watcher) Run(ctx context.Context) error {
-	factory := informers.NewSharedInformerFactory(w.client, w.resyncPeriod)
+// Run implements sources.Source: starts the informer + handler
+// goroutines and blocks until ctx is cancelled. Returns any startup
+// error (e.g., initial list failure); shutdown-path errors are logged
+// but not returned so callers can distinguish "startup failed,
+// restart me" from "clean shutdown."
+func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	factory := informers.NewSharedInformerFactory(s.client, s.resyncPeriod)
 	eventInformer := factory.Core().V1().Events().Informer()
 
 	handler, err := eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			ev, ok := obj.(*corev1.Event)
 			if !ok {
-				log.Printf("watcher: unexpected object type on Add: %T", obj)
+				log.Printf("k8s-events: unexpected object type on Add: %T", obj)
 				return
 			}
-			w.dispatch(ctx, ev)
+			emit(toSignal(ev))
 		},
 		UpdateFunc: func(_, newObj any) {
 			// Update fires when the k8s API bumps the Event's
@@ -92,10 +107,10 @@ func (w *watcher) Run(ctx context.Context) error {
 			// window's LastSeen bump.
 			ev, ok := newObj.(*corev1.Event)
 			if !ok {
-				log.Printf("watcher: unexpected object type on Update: %T", newObj)
+				log.Printf("k8s-events: unexpected object type on Update: %T", newObj)
 				return
 			}
-			w.dispatch(ctx, ev)
+			emit(toSignal(ev))
 		},
 		// No DeleteFunc — event deletion is not a signal we care
 		// about; the underlying incident may or may not be
@@ -103,7 +118,7 @@ func (w *watcher) Run(ctx context.Context) error {
 		// on tombstones.
 	})
 	if err != nil {
-		return fmt.Errorf("watcher: register event handler: %w", err)
+		return fmt.Errorf("k8s-events: register event handler: %w", err)
 	}
 	// Silence the client-go internal error log ("unknown object
 	// type in cache") on shutdown — cache.HandleCrash trips over
@@ -111,7 +126,7 @@ func (w *watcher) Run(ctx context.Context) error {
 	// fires for real crashes.
 	runtime.ErrorHandlers = []runtime.ErrorHandler{
 		func(_ context.Context, err error, _ string, _ ...any) {
-			log.Printf("watcher: informer error: %v", err)
+			log.Printf("k8s-events: informer error: %v", err)
 		},
 	}
 
@@ -121,20 +136,25 @@ func (w *watcher) Run(ctx context.Context) error {
 	// arrive without their prior Count/LastTimestamp, breaking
 	// the dedup logic.
 	if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
-		return fmt.Errorf("watcher: cache sync failed (informer stopped before initial list completed)")
+		return fmt.Errorf("k8s-events: cache sync failed (informer stopped before initial list completed)")
 	}
 	<-ctx.Done()
 	return nil
 }
 
-// dispatch converts a *corev1.Event to the internal TriageEvent
-// shape and hands it to the dispatcher. Extracted so both AddFunc
-// and UpdateFunc share one code path. The cluster name is added
-// downstream (dispatcher.Dispatch stamps it onto InjectPayload)
-// rather than TriageEvent so tests don't have to thread it through.
-func (w *watcher) dispatch(ctx context.Context, ev *corev1.Event) {
-	triage := toTriageEvent(ev)
-	w.dispatcher.Dispatch(ctx, triage)
+// toSignal converts a *corev1.Event to the pipeline Signal: the
+// frozen kind=k8s-event with the TriageEvent core populated from the
+// event. Severity is critical — the §7.7 default for k8s-event, i.e.
+// today's per-incident routing. Cluster/Zone/Fingerprint are left
+// empty for the pipeline to stamp (the source doesn't know the
+// deployment's identity).
+func toSignal(ev *corev1.Event) engine.Signal {
+	return engine.Signal{
+		Kind:        engine.KindK8sEvent,
+		Source:      engine.SourceSentinel,
+		Severity:    engine.SeverityCritical,
+		TriageEvent: toTriageEvent(ev),
+	}
 }
 
 // toTriageEvent flattens a *corev1.Event to the internal payload
@@ -190,6 +210,10 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 // messages are supposed to be small but we've seen kubelet emit
 // multi-KB stack traces; playbook skills don't need more than a
 // few hundred bytes to categorize.
+//
+// The truncation marker still says "k8s-event-watcher": it appears
+// inside message text that shipped payloads carry, so it stays
+// byte-identical through the source refactor.
 func truncateMessage(msg string) string {
 	const max = 2048
 	if len(msg) <= max {

@@ -16,11 +16,16 @@ package engine
 
 import "testing"
 
-func makeEvent(reason, namespace string, count int) TriageEvent {
-	return TriageEvent{
-		Key:       EventKey{UID: "u1", Reason: reason},
-		Namespace: namespace,
-		Count:     count,
+func makeEvent(reason, namespace string, count int) Signal {
+	return Signal{
+		Kind:     KindK8sEvent,
+		Source:   SourceSentinel,
+		Severity: SeverityCritical,
+		TriageEvent: TriageEvent{
+			Key:       EventKey{UID: "u1", Reason: reason},
+			Namespace: namespace,
+			Count:     count,
+		},
 	}
 }
 
