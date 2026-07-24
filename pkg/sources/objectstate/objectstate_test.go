@@ -29,6 +29,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -791,5 +792,50 @@ func TestKindInventoryFrozen(t *testing.T) {
 		if reasonOf(kind) == kind || strings.Contains(reasonOf(kind), ".") {
 			t.Errorf("reasonOf(%q) = %q, want the bare kind suffix", kind, reasonOf(kind))
 		}
+	}
+}
+
+// TestWithFactory_SharedInformerSet proves the §6.3 shared-factory
+// path: the source runs its informers on an externally owned factory
+// (as the sentinel wires when storm correlation shares one informer
+// set between sources and the graph) with behavior identical to the
+// private-factory default — arm-after-sync silence, then live
+// transitions fire.
+func TestWithFactory_SharedInformerSet(t *testing.T) {
+	t.Parallel()
+	client := fake.NewSimpleClientset(node("n1", "node-1", corev1.ConditionTrue))
+	factory := informers.NewSharedInformerFactory(client, 0)
+	s := New(client, Config{TickInterval: 10 * time.Millisecond})
+	s.WithFactory(factory)
+	col := &collector{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, col.emit) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		armed := s.armed
+		s.mu.Unlock()
+		if armed {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := client.CoreV1().Nodes().Update(ctx, node("n1", "node-1", corev1.ConditionFalse), metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update node: %v", err)
+	}
+	waitForKinds(t, col, []string{KindNodeNotReady})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v on clean shutdown, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
 	}
 }

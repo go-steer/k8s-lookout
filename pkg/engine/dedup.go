@@ -63,6 +63,12 @@ type dedupEntry struct {
 	// recovery tracking is lost), and older binaries reading a newer
 	// snapshot ignore the unknown key per encoding/json.
 	Incident *IncidentRef `json:"incident,omitempty"`
+	// Storm, when non-empty, records that this incident was folded
+	// into a §7.5 storm: the value is the storm's fingerprint and
+	// SessionID is the storm's session, so followups and recovery
+	// outcomes route there instead of a per-incident session. Same
+	// version tolerance as Incident (older snapshots simply lack it).
+	Storm string `json:"storm,omitempty"`
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -317,6 +323,49 @@ func (c *DedupCache) BindIncident(key EventKey, sessionID string, ref IncidentRe
 		r := ref
 		entry.Incident = &r
 	}
+}
+
+// AttachToStorm rebinds key to a §7.5 storm: SessionID becomes the
+// storm's session (followups and §7.4 outcomes now route there) and
+// the storm's fingerprint is recorded on the entry. ref supplies the
+// incident identity when the entry has none yet (the storm's trigger
+// incident never went through BindIncident — its per-incident session
+// was suppressed); an existing richer ref is kept. Same
+// no-op-on-evicted-entry semantics as BindSession.
+func (c *DedupCache) AttachToStorm(key EventKey, sessionID, stormFingerprint string, ref IncidentRef) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	entry.SessionID = sessionID
+	entry.Storm = stormFingerprint
+	if entry.Incident == nil {
+		r := ref
+		entry.Incident = &r
+	}
+}
+
+// LookupBinding returns the full bound incident for key (session +
+// identity ref), if the entry is bound and carries a ref. The storm
+// path uses it to supersede a member's per-incident session with the
+// member's complete identity.
+func (c *DedupCache) LookupBinding(key EventKey) (BoundIncident, bool) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || entry.SessionID == "" || entry.Incident == nil {
+		return BoundIncident{}, false
+	}
+	return BoundIncident{
+		Key:       key,
+		SessionID: entry.SessionID,
+		FirstSeen: entry.FirstSeen,
+		Ref:       *entry.Incident,
+	}, true
 }
 
 // LookupSession returns the session currently bound to key, if any.

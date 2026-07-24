@@ -38,6 +38,15 @@
 #                       not ClusterRole) cannot satisfy these and gets
 #                       the same loud per-source failure instead of a
 #                       silently empty watch.
+#   - list/watch replicasets — the storm-correlation topology graph
+#                       (DESIGN.md §6.3 + §7.5, enabled via --storm):
+#                       a ReplicaSet's ownerReferences extend the
+#                       blast-radius owner chain to the Deployment,
+#                       the ancestor operators recognize. The graph's
+#                       pods/nodes informers ride the grants above
+#                       (one shared informer set). Harmless when
+#                       --storm is off (the default); required when on
+#                       — verified loudly at startup like a source.
 #
 # What the sentinel deliberately does NOT get:
 #   - patch/update/delete on anything — the sentinel is read-only
@@ -58,6 +67,9 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
     verbs: ["list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]

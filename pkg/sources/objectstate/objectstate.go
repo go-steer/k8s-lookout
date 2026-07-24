@@ -266,6 +266,12 @@ type Source struct {
 	// pc is the shared §7.4 pod-clearance state machine, fed by this
 	// source's pod informer. See ClearanceObserver.
 	pc *PodClearance
+	// factory, when set via WithFactory, is the externally owned
+	// shared informer factory Run registers on instead of creating
+	// its own — §6.3's "one informer set serves the sentinel sources
+	// and the graph". Nil (the default) preserves the shipped
+	// behavior exactly: Run builds a private factory.
+	factory informers.SharedInformerFactory
 
 	mu sync.Mutex
 	// armed flips true after every informer cache syncs. Handlers
@@ -307,6 +313,19 @@ func (s *Source) Name() string { return Name }
 // source needs cluster RBAC (§11 — namespace-tier deployments get the
 // loud startup failure, never a silent gap).
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// WithFactory directs Run to register its informers on an externally
+// owned shared factory (DESIGN.md §6.3: one informer set serves the
+// sentinel sources AND the graph — the sentinel passes the same
+// factory to this source and to the storm-correlation graph feed, so
+// pods/nodes are watched once, not twice). Call before Run; nil is
+// ignored. SharedInformerFactory.Start and Shutdown are idempotent,
+// so both parties may drive the shared lifecycle safely.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.factory = f
+	}
+}
 
 // ClearanceObserver returns the §7.4 clearance predicate backed by
 // this source's pod informer. The recovery tracker uses it instead of
@@ -392,7 +411,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
-	factory := informers.NewSharedInformerFactory(s.client, 0)
+	factory := s.factory
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(s.client, 0)
+	}
 
 	podH, err := factory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { s.asPod(obj, s.onPod) },

@@ -85,6 +85,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracking runs off the source's informer (one pod watch total); the
   standalone observer remains the zero-config fallback with behavior
   unchanged.
+- Storm correlation via graph blast-radius keys (M2, DESIGN.md §7.5) —
+  the second-level correlation stage between dedup and severity
+  routing, and the first wiring of the `pkg/graph` topology index into
+  the sentinel. When enabled, a graph ingest loop shares ONE informer
+  set with the signal sources (§6.3: the object-state source and the
+  graph register on the same shared factory; the graph adds only a
+  ReplicaSet watch — pods/nodes are already watched,
+  ConfigMap/Secret/PVC ancestors come free as identities referenced by
+  pod specs, and Zone is excluded because zone-tier grouping is AX's
+  fleet join). New incidents enter a rolling window (default 60s);
+  when `--storm-min` (default 3) of them share a blast-radius key —
+  the nearest common topology ancestor, priority node > owner chain
+  (nearest first: ReplicaSet, then Deployment) > shared
+  ConfigMap/Secret/PVC > namespace — they collapse into ONE
+  `kind=storm` incident/session carrying the ancestor identity,
+  affected/namespace counts, the first 3 representative incidents, ALL
+  member fingerprints, and severity = max member severity with a size
+  escalator (≥10 members bumps warning→critical). Member signals are
+  recorded but open no sessions; members that fired per-incident
+  before the storm formed (inherent for a burst's first arrivals) get
+  a `kind=storm.member_superseded` pointer in their own session and
+  their dedup binding is rebound to the storm session (the entry also
+  records the storm fingerprint and persists via `--dedup-persist`),
+  so followups and §7.4 outcomes route to the storm. Late arrivals
+  attach as `kind=storm.member` followups while the storm is
+  unresolved; member clearance feeds the storm's recovery — when ALL
+  members clear, the storm session receives its own `kind=resolved`
+  record (reason `storm`, uid `storm:<ancestor key>`). All three storm
+  payloads are schema-stable with byte-exact wire pins; the storm
+  fingerprint is `sha256(storm ⊕ reason-class ⊕ ancestor-kind ⊕ zone)`
+  so AX joins the same node-failure storm across clusters. ADDITIVE
+  flags, default OFF: `--storm` (opt-in — the graph informers need
+  pods/nodes/replicasets list+watch; ClusterRole updated, §11 probe
+  fails loudly when the grant is missing; flipping the default is an
+  M2-exit decision), `--storm-window` (60s; 0 disables), `--storm-min`
+  (3). New metrics: `storms_formed_total`, `storms_resolved_total`,
+  `storms_active`, `storm_members_total{kind}`.
 
 ## [0.2.0] - 2026-07-24
 
