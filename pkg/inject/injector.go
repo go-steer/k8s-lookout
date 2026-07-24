@@ -180,6 +180,20 @@ func (i *Injector) InjectStormMember(ctx context.Context, sessionID string, payl
 	return i.injectJSON(ctx, sessionID, payload)
 }
 
+// InjectWatchboardDigest POSTs a §7.7 rolling digest of warning-class
+// signals into the shared watchboard session. Same envelope and
+// endpoint — only the payload differs.
+func (i *Injector) InjectWatchboardDigest(ctx context.Context, sessionID string, payload WatchboardDigestPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
+// InjectWatchboardRotated POSTs the final kind=watchboard.rotated
+// lineage record into a watchboard session that size-based rotation
+// (§15 Q2) is closing.
+func (i *Injector) InjectWatchboardRotated(ctx context.Context, sessionID string, payload WatchboardRotatedPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
 // injectJSON is the shared body of the Inject* methods: marshal the
 // payload, wrap it in the inject-message envelope, POST it.
 func (i *Injector) injectJSON(ctx context.Context, sessionID string, payload any) error {

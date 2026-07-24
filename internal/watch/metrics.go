@@ -46,6 +46,11 @@ type metrics struct {
 	stormsResolved      prometheus.Counter
 	stormsActive        prometheus.Gauge
 	stormMembers        *prometheus.CounterVec
+	watchboardEntries   *prometheus.CounterVec
+	watchboardDigests   prometheus.Counter
+	watchboardRotations prometheus.Counter
+	watchboardBuffered  prometheus.Gauge
+	infoDropped         *prometheus.CounterVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -111,6 +116,26 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_storm_members_total",
 			Help: "Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival).",
 		}, []string{"kind"}),
+		watchboardEntries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_watchboard_entries_total",
+			Help: "Total warning-class signals buffered onto the shared watchboard digest (§7.7), by signal kind.",
+		}, []string{"kind"}),
+		watchboardDigests: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_watchboard_digests_total",
+			Help: "Total kind=watchboard.digest injects flushed to the watchboard session.",
+		}),
+		watchboardRotations: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_watchboard_rotations_total",
+			Help: "Total size-based watchboard session rotations (§15 Q2): a fresh session opened after --watchboard-rotate digest injects.",
+		}),
+		watchboardBuffered: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8s_event_watcher_watchboard_buffered",
+			Help: "Warning-class signals currently buffered awaiting the next watchboard digest flush.",
+		}),
+		infoDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_info_dropped_total",
+			Help: "Total info-severity signals counted and dropped by §7.7 routing (stored-only class; the raw store lands in M3), by signal kind.",
+		}, []string{"kind"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -127,6 +152,11 @@ func newMetrics() *metrics {
 		m.stormsResolved,
 		m.stormsActive,
 		m.stormMembers,
+		m.watchboardEntries,
+		m.watchboardDigests,
+		m.watchboardRotations,
+		m.watchboardBuffered,
+		m.infoDropped,
 	)
 	return m
 }

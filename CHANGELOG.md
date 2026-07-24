@@ -122,6 +122,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   M2-exit decision), `--storm-window` (60s; 0 disables), `--storm-min`
   (3). New metrics: `storms_formed_total`, `storms_resolved_total`,
   `storms_active`, `storm_members_total{kind}`.
+- Severity routing + the shared watchboard session (M2, DESIGN.md §7.7;
+  §15 Q2 decided — see
+  [docs/watchboard-rotation-design.md](docs/watchboard-rotation-design.md)):
+  in per-incident mode the dispatcher now routes each NEW incident by its
+  effective severity — `critical` opens a per-incident session exactly as
+  before (full §7.6 enrichment lands next), `warning` batches into a
+  managed shared watchboard session as a rolling
+  `kind=watchboard.digest` inject (flushed at `--watchboard-batch`
+  entries, default 5, or `--watchboard-flush` age, default 60s, whichever
+  first; entries carry kind, fingerprint, object ref, count, first/last
+  seen; byte-exact wire pin), and `info` is counted
+  (`info_dropped_total{kind}`) and dropped with a debug log — never
+  silently — until the M3 raw store (§9.1) persists it. Severity defaults
+  stay stamped by the sources; the new repeatable `--severity`
+  flag (`kind=level[,kind=level...]`, validated) overrides any kind. The
+  watchboard session is created lazily (POST /sessions, owner =
+  `--owner`) at the first digest flush and rotates SIZE-BASED per the Q2
+  decision: after `--watchboard-rotate` digest injects (default 200) the
+  next flush opens a fresh session and closes the old one with a
+  schema-stable `kind=watchboard.rotated` lineage record
+  (`successor_session_id`, `injects_count`, `rotated_at`; byte-exact wire
+  pin). Dedup bindings survive rotation unchanged — followups and §7.4
+  outcomes keep routing to the watchboard generation their incident is
+  bound to; only NEW warnings flow to the successor. Storms bypass
+  warning routing (§7.5 always opens ONE aggregate session, even for a
+  warning-class storm), and a storm claims the bindings of members
+  sitting in the watchboard buffer. `--mode=shared` is untouched: ALL
+  severities keep routing to `--target-session` and the watchboard
+  machinery is disabled (the watchboard is the per-incident-mode answer
+  to warning noise). All new flags ADDITIVE with behavior-preserving
+  defaults for the M0 surface (k8s-events are critical). New metrics:
+  `watchboard_entries_total{kind}`, `watchboard_digests_total`,
+  `watchboard_rotations_total`, `watchboard_buffered`,
+  `info_dropped_total{kind}`.
 
 ## [0.2.0] - 2026-07-24
 
