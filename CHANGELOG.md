@@ -5,6 +5,25 @@ All notable, user-visible changes to k8s-lookout.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pkg/emit` — the §4.2 output envelope: findings as flat ordered key=value
+  records (logfmt default, `--format=json` for one JSON object per line),
+  the mandatory `scanned=<n> findings=<n> elapsed=<d>` summary line, exit
+  codes 0 data / 1 runtime / 2 usage with stderr-only diagnostics, common
+  flags (`--namespace|-A`, `--workload`, `--since`, `--format`, `--timeout`)
+  parsed once into a typed Scope, and the sanitizer seam every finding
+  passes through (identity for now; the §6.5 sanitizer lands next).
+- `pkg/checks` — the command-metadata registry (§4.4.3, one source of truth
+  generated outward): name/MCP-name/when-to-use/flag-spec/output-glossary
+  declarations that generate agent-readable `--help` today and the MCP JSON
+  schemas next; `pkg/checks/checktest` is the §13 contract-test scaffold
+  that round-trips every command's emitted fields against its declared
+  glossary. `cmd/lookout` mounts registered command groups automatically;
+  no read-path commands are registered yet.
+
 ## [0.1.0] - 2026-07-24
 
 M0 — bootstrap (DESIGN.md §14). Exit criterion verified in

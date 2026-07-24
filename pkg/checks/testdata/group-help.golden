@@ -1,0 +1,9 @@
+Usage: lookout triage <command> [flags]
+
+triage — incident reads: everything abnormal, condensed logs/events, blast radius, what changed
+
+Commands:
+  demo  Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.
+  logs  Condense a workload's logs by template fingerprint; kubectl logs, but ~350 tokens.
+
+Run 'lookout triage <command> --help' for flags, output fields, and examples.
