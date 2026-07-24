@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that round-trips every command's emitted fields against its declared
   glossary. `cmd/lookout` mounts registered command groups automatically;
   no read-path commands are registered yet.
+- `pkg/graph` — the topology index (M1, DESIGN.md §6): map-backed,
+  copy-on-write, live-only pod-nexus graph with a single-writer batched
+  ingest path (`FromObjects` initial sync + neutral `Delta` type shaped for
+  informer wiring in M2/M3) and the §6.4 query surface (`Radius`,
+  `OwnerChain`, `CommonAncestors`, `WorkloadEdges`, `PodsUnder`). Secret
+  values are never stored — Secret ingestion reads `ObjectMeta` only.
+  Benchmarks set the §15 Q5 compaction gate, recorded in
+  `docs/graph-q5-gate.md`.
 
 ## [0.1.0] - 2026-07-24
 
