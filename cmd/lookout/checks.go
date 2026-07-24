@@ -27,6 +27,7 @@ import (
 	// the default registry from their init functions.
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
 )
 
 // Read-path commands resolve through the pkg/checks registry: each

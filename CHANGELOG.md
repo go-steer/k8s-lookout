@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (interspersed with flags, kubectl-style) and check-raised usage errors
   (`emit.UsageErrorf` → exit 2), and `pkg/kube` gained
   `BuildConfig`/`BuildDynamicClient`.
+- `lookout state edges` (M1, DESIGN.md §5) — dependency-graph verification
+  for one workload, the first pkg/graph consumer: one-shot paged Lists
+  build a topology snapshot, the graph resolves the workload's dependency
+  edges (§6.4), and each edge is validity-checked — ConfigMap/Secret
+  existence *and* key-level references (env, envFrom, volume items),
+  Service selectors (empty-selection and unready pods),
+  Service→EndpointSlice→Pod health (missing slices, orphaned endpoints,
+  ready-count mismatches), Ingress backends (service and port), RBAC
+  reference integrity (ServiceAccount, dangling (Cluster)RoleBindings), and
+  TLS certificate expiry for reachable `kubernetes.io/tls` Secrets
+  (`--cert-warn`, default 720h; findings carry only subject/notAfter/days
+  left — never certificate or key bytes). Healthy edges emit nothing.
+  Registered as MCP tool `k8s_state_edges`.
 
 ## [0.1.0] - 2026-07-24
 
