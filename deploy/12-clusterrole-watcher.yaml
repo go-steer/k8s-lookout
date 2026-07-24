@@ -19,6 +19,12 @@
 #
 # What the sentinel needs:
 #   - list/watch events — the primary informer target
+#   - list/watch pods — the recovery clearance observer (DESIGN.md
+#                       §7.4): watches bound incidents' pods for
+#                       Ready + restart-stable, so fixed incidents
+#                       get a kind=resolved inject. Without this
+#                       grant the sentinel still runs, but recovery
+#                       tracking is disabled (logged loudly).
 #   - get pods       — status enrichment for inject payloads (owner
 #                       ref, container statuses)
 #
@@ -35,4 +41,4 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]

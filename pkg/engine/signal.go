@@ -30,6 +30,17 @@ const (
 	KindK8sEventFollowup = "k8s-event-followup"
 )
 
+// Cross-cutting kinds (§7.3): resolved / resolved.reverted are the
+// §7.4 recovery-inject outcome records. They are not namespaced by a
+// source — any source that observed a symptom can observe its
+// absence, and the outcome schema is shared. Mirrored by pkg/inject's
+// wire constants; the internal/watch contract test pins the pairs to
+// the same values.
+const (
+	KindResolved         = "resolved"
+	KindResolvedReverted = "resolved.reverted"
+)
+
 // Values for Signal.Source (the §8 "source" field): which path
 // produced the signal. Not to be confused with a signal *source*
 // implementation (pkg/sources.Source), whose Name() namespaces new
@@ -139,4 +150,7 @@ type Signal struct {
 	// Enrichment is the §7.6 attachment; nil until the enrichment
 	// stage lands.
 	Enrichment *Enrichment
+	// Recovery is the §7.4 outcome attachment, set only on
+	// Kind=resolved / Kind=resolved.reverted Signals; nil otherwise.
+	Recovery *Recovery
 }

@@ -51,3 +51,60 @@ const (
 	KindEvent    = "k8s-event"
 	KindFollowup = "k8s-event-followup"
 )
+
+// KindResolved / KindResolvedReverted are the §7.4 outcome-record
+// kinds. Like KindEvent/KindFollowup they are wire contract: playbook
+// skills and the §9.3 corpus harvester match these exact strings.
+const (
+	KindResolved         = "resolved"
+	KindResolvedReverted = "resolved.reverted"
+)
+
+// ResolvedPayload is the JSON body injected for kind=resolved and
+// kind=resolved.reverted (DESIGN.md §7.4) — the ground-truth outcome
+// record of an incident session. SCHEMA-STABLE per §9.3: outcome
+// records are structured injects, never prose, so the corpus
+// harvester can extract labeled trajectories from the eventlog
+// without NLP. The frozen k8s-event Payload is untouched — new kinds
+// get their own payload struct, serialized in the same
+// /sessions/<sid>/inject envelope.
+//
+// Identity fields (reason … cluster, context) repeat the ORIGINAL
+// incident's identity; in particular Fingerprint is the original
+// incident's fingerprint, so AX and `lookout health` join outcome to
+// incident on one key. Reason carries the canonical reason-class
+// (the dedup/binding key — e.g. "ImagePullBackOff" even if the wire
+// event said "ErrImagePull"), because the outcome closes the incident
+// CLASS the session was opened for.
+//
+// Durations (cleared_after, observed_stable_for, reverted_after) are
+// Go time.Duration strings ("2m30s") — fixed-grammar, parseable
+// without NLP, and human-readable in a session transcript.
+type ResolvedPayload struct {
+	Kind         string `json:"kind"`
+	Reason       string `json:"reason"`
+	Namespace    string `json:"namespace"`
+	KindOfObject string `json:"kind_of_object"`
+	Name         string `json:"name"`
+	Container    string `json:"container,omitempty"`
+	UID          string `json:"uid"`
+	Fingerprint  string `json:"fingerprint"`
+	Cluster      string `json:"cluster"`
+	// FirstSeen is the original incident's first_seen — the anchor
+	// cleared_after is measured from.
+	FirstSeen  time.Time `json:"first_seen"`
+	ResolvedAt time.Time `json:"resolved_at"`
+	// ClearedAfter is first_seen → symptom cleared.
+	ClearedAfter string `json:"cleared_after"`
+	// ObservedStableFor is how long the symptom stayed clear before
+	// the sentinel called it resolved (>= --recovery-stable-for).
+	ObservedStableFor string `json:"observed_stable_for"`
+	// Resolution is "recovered" or "object_deleted" — the agent MUST
+	// be able to distinguish fixed from deleted, so this is its own
+	// field, never encoded in prose.
+	Resolution string `json:"resolution"`
+	// RevertedAfter is set only on kind=resolved.reverted: how long
+	// after resolved_at the symptom recurred.
+	RevertedAfter string         `json:"reverted_after,omitempty"`
+	Context       PayloadContext `json:"context"`
+}

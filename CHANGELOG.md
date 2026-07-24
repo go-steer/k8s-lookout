@@ -27,6 +27,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `k8s-event` inject payload remain byte-identical (the frozen wire-shape
   and flag-surface tests pass unchanged, plus a new pin proving the
   Signal path emits the same bytes).
+- Recovery injects — the fix-verify closed loop (M2, DESIGN.md §7.4/§9.3):
+  the sentinel now watches every bound incident for the *absence* of its
+  symptom. A new `engine.RecoveryTracker` runs the per-incident state
+  machine (symptomatic → clearing → resolved → reverted) against
+  clearance predicates provided by observers, with a stability window
+  set by the new `--recovery-stable-for` flag (default 5m; 0 disables).
+  This PR's observer covers pod-scoped incidents via a minimal pod
+  informer: cleared when the pod is Ready and restart-stable for the
+  window; a deleted pod whose controller has a Ready replacement counts
+  as recovered (owner-based); deleted with the owner gone closes the
+  incident as `resolution=object_deleted` — explicitly distinct from
+  fixed. Outcomes are injected into the incident's own session as
+  schema-stable structured payloads (`kind=resolved` /
+  `resolved.reverted` with `cleared_after`, `observed_stable_for`,
+  `resolution`, `reverted_after`, and the ORIGINAL incident's
+  fingerprint; byte-exact wire pin), never prose — the §9.3 corpus
+  contract. Session bindings now persist incident identity through
+  `--dedup-persist` (version-tolerant: old snapshots load unchanged), so
+  recovery tracking survives a sentinel restart; a resolved signal whose
+  binding is lost is logged, counted, and dropped. New metrics:
+  `recoveries_observed_total{resolution}`, `recoveries_reverted_total`,
+  `recovery_tracking`, `recovery_drops_total{cause}`. The shipped
+  ClusterRole gains pods `list`/`watch`; deployments still running the
+  M0 role keep working with recovery disabled (loud startup log, no
+  crash-loop).
 
 ## [0.2.0] - 2026-07-24
 

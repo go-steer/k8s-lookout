@@ -54,6 +54,15 @@ type dedupEntry struct {
 	// in the current window (the first event that created the
 	// session counts as 1). Reset when the window rolls.
 	Count int `json:"count"`
+	// Incident, when non-nil, is the identity of the incident bound
+	// to SessionID — enough for the RecoveryTracker (§7.4) to resume
+	// clearance watching and compose the resolved payload after a
+	// sentinel restart. Set by BindIncident. Version tolerance both
+	// ways: snapshots written before this field existed simply load
+	// with a nil Incident (the binding still routes followups; only
+	// recovery tracking is lost), and older binaries reading a newer
+	// snapshot ignore the unknown key per encoding/json.
+	Incident *IncidentRef `json:"incident,omitempty"`
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -273,6 +282,70 @@ func (c *DedupCache) BindSession(key EventKey, sessionID string) {
 	if entry, ok := c.entries[key]; ok {
 		entry.SessionID = sessionID
 	}
+}
+
+// BindIncident is BindSession plus the incident identity the §7.4
+// recovery tracker needs to survive a restart: the ref rides on the
+// entry through Snapshot/restore, so a rebooted sentinel can resume
+// watching for clearance and still route the outcome to the original
+// session. Same no-op-on-evicted-entry semantics as BindSession.
+func (c *DedupCache) BindIncident(key EventKey, sessionID string, ref IncidentRef) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok {
+		entry.SessionID = sessionID
+		r := ref
+		entry.Incident = &r
+	}
+}
+
+// LookupSession returns the session currently bound to key, if any.
+// The §7.4 routing primitive: a resolved signal is a followup into
+// the incident's own session, and this lookup — not tracker-local
+// state — is authoritative, so a re-fired incident (dedup retry
+// safety net) routes its outcome to the NEWEST session for the key.
+func (c *DedupCache) LookupSession(key EventKey) (string, bool) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || entry.SessionID == "" {
+		return "", false
+	}
+	return entry.SessionID, true
+}
+
+// BoundIncident is one session binding with full incident identity,
+// as returned by Bindings for restart seeding of the recovery
+// tracker.
+type BoundIncident struct {
+	Key       EventKey
+	SessionID string
+	FirstSeen time.Time
+	Ref       IncidentRef
+}
+
+// Bindings returns every entry that is bound to a session AND carries
+// an incident ref — i.e. everything the recovery tracker can resume
+// after a restart. Entries bound by the pre-recovery BindSession (or
+// restored from an older snapshot) lack the ref and are skipped.
+func (c *DedupCache) Bindings() []BoundIncident {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]BoundIncident, 0, len(c.entries))
+	for key, entry := range c.entries {
+		if entry.SessionID == "" || entry.Incident == nil {
+			continue
+		}
+		out = append(out, BoundIncident{
+			Key:       key,
+			SessionID: entry.SessionID,
+			FirstSeen: entry.FirstSeen,
+			Ref:       *entry.Incident,
+		})
+	}
+	return out
 }
 
 // evictIfFull is called under lock. If the cache is at capacity,

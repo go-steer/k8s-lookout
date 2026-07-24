@@ -34,6 +34,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -58,6 +60,7 @@ type flags struct {
 	dedupWindow       time.Duration
 	dedupPersist      string
 	unhealthyMinCount int
+	recoveryStableFor time.Duration
 	inCluster         bool
 	kubeconfig        string
 	clusterName       string
@@ -93,6 +96,9 @@ func parseFlags(args []string) (*flags, error) {
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
 	fs.StringVar(&f.dedupPersist, "dedup-persist", "", "Optional path to persist dedup cache across sidecar restart.")
 	fs.IntVar(&f.unhealthyMinCount, "unhealthy-min-count", 3, "Require this many consecutive Unhealthy events before firing.")
+
+	// Recovery injects (§7.4).
+	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -149,6 +155,9 @@ func (f *flags) validate() error {
 	if f.dedupWindow <= 0 {
 		return errors.New("--dedup-window must be > 0")
 	}
+	if f.recoveryStableFor < 0 {
+		return errors.New("--recovery-stable-for must be >= 0 (0 disables recovery tracking)")
+	}
 	if f.snapshotInterval < 0 {
 		return errors.New("--snapshot-interval must be >= 0")
 	}
@@ -185,6 +194,12 @@ type dispatcher struct {
 	mode      string // "per-incident" or "shared"
 	targetSid string // for shared mode
 	dryRun    bool
+	// tracker, when non-nil, is the §7.4 recovery tracker: every new
+	// incident this dispatcher binds is handed to it for clearance
+	// watching, and the resolved signals it emits come back through
+	// DispatchSignal. Nil when recovery is disabled
+	// (--recovery-stable-for=0, dry-run, or missing pods RBAC).
+	tracker *engine.RecoveryTracker
 	// injectLock serializes per-(app, sid) session creation +
 	// injects so two rapid-fire events for the same key don't
 	// both call CreateSession. Coarse-grained; a per-key map of
@@ -227,6 +242,15 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Source == "" {
 		sig.Source = engine.SourceSentinel
 	}
+	// Resolved / resolved.reverted (§7.4) are outcome records for an
+	// EXISTING incident: they bypass filter + dedup (they are not new
+	// incidents) and route as followups into the incident's bound
+	// session. Their fingerprint is the original incident's — never
+	// re-stamped here.
+	if sig.Kind == engine.KindResolved || sig.Kind == engine.KindResolvedReverted {
+		d.dispatchResolved(ctx, sig)
+		return
+	}
 	if sig.Fingerprint == "" {
 		sig.Fingerprint = engine.Fingerprint(sig.Kind, engine.CanonicalReason(sig.Key.Reason), sig.KindOfObject, sig.Zone)
 	}
@@ -264,7 +288,20 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		}
 		sid = newSid
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
-		d.dedup.BindSession(sig.Key, sid)
+		// BindIncident = BindSession + the identity the recovery
+		// tracker needs to survive a restart (rides on dedup-persist).
+		d.dedup.BindIncident(sig.Key, sid, sig.IncidentRef())
+	}
+	// Hand the bound incident to the recovery tracker (§7.4) so the
+	// fix-verify loop closes into this session. Shared mode tracks
+	// too — the outcome routes to the shared session.
+	if d.tracker != nil {
+		d.tracker.Track(engine.Incident{
+			Key:       sig.Key,
+			SessionID: sid,
+			FirstSeen: sig.FirstSeen,
+			Ref:       sig.IncidentRef(),
+		})
 	}
 	payload := inject.Payload{
 		Kind:         sig.Kind,
@@ -308,6 +345,88 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// an incident is a single traceID-style filter.
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+}
+
+// dispatchResolved routes a §7.4 outcome record into the incident's
+// bound session as a followup. The dedup cache's binding — not
+// tracker-local state — is authoritative: if the binding is unknown
+// (sentinel restarted without --dedup-persist, or the entry was LRU-
+// evicted), the record is logged, counted, and dropped; we never
+// open a fresh session just to say something is fixed.
+func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
+	if sig.Recovery == nil {
+		log.Printf("recovery: %s signal for %s/%s missing Recovery attachment — dropping (programming error)",
+			sig.Kind, sig.Namespace, sig.Name)
+		return
+	}
+	sid := d.targetSid
+	if d.mode == "per-incident" {
+		bound, ok := d.dedup.LookupSession(sig.Key)
+		if !ok {
+			d.metrics.recoveryDrops.WithLabelValues("unknown_session").Inc()
+			log.Printf("recovery: no bound session for %s %s/%s (uid=%s) — dropping %s (restart without --dedup-persist, or entry evicted)",
+				sig.Key.Reason, sig.Namespace, sig.Name, sig.Key.UID, sig.Kind)
+			return
+		}
+		sid = bound
+	}
+	payload := resolvedPayload(sig)
+	if d.dryRun {
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+		d.countResolved(sig)
+		return
+	}
+	if err := d.injector.InjectResolved(ctx, sid, payload); err != nil {
+		log.Printf("recovery: inject %s for %s/%s (sid=%s): %v", sig.Kind, sig.Namespace, sig.Name, sid, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		return
+	}
+	d.countResolved(sig)
+	log.Printf("%s %s pod=%s/%s → sid=%s (resolution=%s, cleared_after=%s, stable_for=%s)",
+		sig.Kind, sig.Key.Reason, sig.Namespace, sig.Name, sid,
+		sig.Recovery.Resolution, sig.Recovery.ClearedAfter, sig.Recovery.ObservedStableFor)
+}
+
+func (d *dispatcher) countResolved(sig engine.Signal) {
+	if sig.Kind == engine.KindResolvedReverted {
+		d.metrics.recoveriesReverted.Inc()
+		return
+	}
+	d.metrics.recoveriesObserved.WithLabelValues(string(sig.Recovery.Resolution)).Inc()
+}
+
+// resolvedPayload composes the §9.3 schema-stable outcome record from
+// a resolved Signal. The frozen k8s-event payload is untouched — this
+// is its own struct, serialized in the same inject envelope, pinned
+// byte-exact by TestDispatchResolved_ExactWireShape.
+func resolvedPayload(sig engine.Signal) inject.ResolvedPayload {
+	rec := sig.Recovery
+	p := inject.ResolvedPayload{
+		Kind:              sig.Kind,
+		Reason:            sig.Key.Reason,
+		Namespace:         sig.Namespace,
+		KindOfObject:      sig.KindOfObject,
+		Name:              sig.Name,
+		Container:         sig.Container,
+		UID:               sig.Key.UID,
+		Fingerprint:       sig.Fingerprint,
+		Cluster:           sig.Cluster,
+		FirstSeen:         sig.FirstSeen,
+		ResolvedAt:        rec.ResolvedAt,
+		ClearedAfter:      rec.ClearedAfter.String(),
+		ObservedStableFor: rec.ObservedStableFor.String(),
+		Resolution:        string(rec.Resolution),
+		Context: inject.PayloadContext{
+			ControllerRef: sig.ControllerRef,
+			Node:          sig.Node,
+			Labels:        sig.Labels,
+		},
+	}
+	if sig.Kind == engine.KindResolvedReverted {
+		p.RevertedAfter = rec.RevertedAfter.String()
+	}
+	return p
 }
 
 // Main is the `lookout watch` entry point; argv is the argument list
@@ -440,6 +559,14 @@ func realMain(argv []string) error {
 		return err
 	}
 
+	// Recovery injects (§7.4): watch bound incidents for symptom
+	// clearance and inject the outcome into the same session.
+	if f.recoveryStableFor > 0 {
+		if err := setupRecovery(ctx, f, client, dedup, disp, m); err != nil {
+			return err
+		}
+	}
+
 	log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 		f.clusterName, f.daemonURL, f.mode, f.owner)
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
@@ -451,6 +578,79 @@ func realMain(argv []string) error {
 		log.Printf("dedup snapshot on shutdown: %v", snapErr)
 	}
 	return err
+}
+
+// recoveryTickInterval is how often the recovery tracker re-evaluates
+// clearance predicates. Deliberately not a flag: any value well below
+// --recovery-stable-for behaves identically, and 15s keeps worst-case
+// resolution latency negligible against a 5m stability window.
+const recoveryTickInterval = 15 * time.Second
+
+// recoveryAccess is the RBAC the pod clearance observer needs beyond
+// the M0 ClusterRole (which granted only pods get).
+var recoveryAccess = []sources.Requirement{
+	{Resource: "pods", Verb: "list"},
+	{Resource: "pods", Verb: "watch"},
+}
+
+// setupRecovery wires the §7.4 closed loop: pod clearance observer →
+// RecoveryTracker → dispatcher, plus restart seeding from the dedup
+// snapshot's persisted bindings.
+//
+// RBAC posture differs from the §11 source probe on purpose: an M0
+// deployment upgraded by image swap may still run the old ClusterRole
+// without pods list/watch, and — unlike a signal source — a disabled
+// recovery observer means a missing outcome record, never a missed
+// incident. So insufficient RBAC disables recovery with a loud log
+// naming the grant, instead of crash-looping existing deployments.
+func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics) error {
+	reviewer := sources.NewAccessReviewer(client)
+	for _, req := range recoveryAccess {
+		allowed, err := reviewer.Allowed(ctx, req)
+		if err != nil {
+			return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+		}
+		if !allowed {
+			log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
+			return nil
+		}
+	}
+	obs := newPodClearanceObserver(client)
+	if err := obs.Start(ctx); err != nil {
+		return err
+	}
+	tracker := engine.NewRecoveryTracker(f.recoveryStableFor, func(sig engine.Signal) {
+		disp.DispatchSignal(ctx, sig)
+	})
+	tracker.AddObserver(obs)
+	disp.tracker = tracker
+	// Resume clearance watching for bindings restored from
+	// --dedup-persist so the fix-verify loop survives a restart.
+	if bindings := dedup.Bindings(); len(bindings) > 0 {
+		for _, b := range bindings {
+			tracker.Track(engine.Incident(b))
+		}
+		log.Printf("recovery: resumed tracking %d bound incident(s) from dedup snapshot", len(bindings))
+	}
+	go runRecoveryLoop(ctx, tracker, m)
+	log.Printf("recovery: tracking enabled (stable-for=%s, tick=%s)", f.recoveryStableFor, recoveryTickInterval)
+	return nil
+}
+
+// runRecoveryLoop drives the tracker on an interval and keeps the
+// recovery_tracking gauge current. Exits when ctx is cancelled.
+func runRecoveryLoop(ctx context.Context, tracker *engine.RecoveryTracker, m *metrics) {
+	t := time.NewTicker(recoveryTickInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tracker.Tick()
+			m.recoveryTracking.Set(float64(tracker.Len()))
+		}
+	}
 }
 
 // runSnapshotLoop persists the dedup cache to disk on an interval

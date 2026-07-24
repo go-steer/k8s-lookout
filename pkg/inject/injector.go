@@ -157,6 +157,19 @@ type injectMessageRequest struct {
 // JSON-encoded and wrapped in the inject-message envelope. On
 // non-2xx response returns an error carrying the daemon's body.
 func (i *Injector) Inject(ctx context.Context, sessionID string, payload Payload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
+// InjectResolved POSTs a §7.4 outcome record (kind=resolved /
+// resolved.reverted) to the incident's bound session. Same envelope
+// and endpoint as Inject — only the payload struct differs.
+func (i *Injector) InjectResolved(ctx context.Context, sessionID string, payload ResolvedPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
+// injectJSON is the shared body of the Inject* methods: marshal the
+// payload, wrap it in the inject-message envelope, POST it.
+func (i *Injector) injectJSON(ctx context.Context, sessionID string, payload any) error {
 	if sessionID == "" {
 		return errors.New("injector: Inject: sessionID is required")
 	}
