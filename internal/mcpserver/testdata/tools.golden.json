@@ -1,0 +1,118 @@
+[
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message): target — the positional argument as received; grace — the parsed --grace value.",
+    "inputSchema": {
+      "properties": {
+        "all_namespaces": {
+          "description": "scan all namespaces",
+          "type": "boolean"
+        },
+        "container": {
+          "description": "limit to one container",
+          "type": "string"
+        },
+        "diff": {
+          "description": "diff against the previous revision",
+          "type": "boolean"
+        },
+        "format": {
+          "default": "logfmt",
+          "description": "output format: logfmt|json (one record per line either way)",
+          "type": "string"
+        },
+        "grace": {
+          "default": "30s",
+          "description": "grace window (Go duration, e.g. \"90s\", \"5m\")",
+          "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "limit the scan to one namespace",
+          "type": "string"
+        },
+        "since": {
+          "description": "how far back to look (0 = command default) (Go duration, e.g. \"90s\", \"5m\")",
+          "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "type": "string"
+        },
+        "tail": {
+          "default": 400,
+          "description": "lines per container",
+          "type": "integer"
+        },
+        "target": {
+          "description": "\u003cKind\u003e/[\u003cnamespace\u003e/]\u003cname\u003e — the one resource to read; namespace defaults to --namespace",
+          "type": "string"
+        },
+        "timeout": {
+          "default": "10s",
+          "description": "abort the invocation after this long (exit 1) (Go duration, e.g. \"90s\", \"5m\")",
+          "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "type": "string"
+        },
+        "workload": {
+          "description": "target one workload as \u003cKind\u003e/\u003cnamespace\u003e/\u003cname\u003e, e.g. Deployment/prod/api",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "k8s_fake_spec"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message): index — 1-based ordinal of the synthetic finding.",
+    "inputSchema": {
+      "properties": {
+        "all_namespaces": {
+          "description": "scan all namespaces",
+          "type": "boolean"
+        },
+        "count": {
+          "default": 2,
+          "description": "number of synthetic findings to emit",
+          "type": "integer"
+        },
+        "fail": {
+          "description": "return a runtime error after emitting",
+          "type": "boolean"
+        },
+        "format": {
+          "default": "logfmt",
+          "description": "output format: logfmt|json (one record per line either way)",
+          "type": "string"
+        },
+        "hang": {
+          "description": "block until the --timeout context fires",
+          "type": "boolean"
+        },
+        "namespace": {
+          "description": "limit the scan to one namespace",
+          "type": "string"
+        },
+        "since": {
+          "description": "how far back to look (0 = command default) (Go duration, e.g. \"90s\", \"5m\")",
+          "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "type": "string"
+        },
+        "timeout": {
+          "default": "10s",
+          "description": "abort the invocation after this long (exit 1) (Go duration, e.g. \"90s\", \"5m\")",
+          "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "type": "string"
+        },
+        "workload": {
+          "description": "target one workload as \u003cKind\u003e/\u003cnamespace\u003e/\u003cname\u003e, e.g. Deployment/prod/api",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "k8s_triage_demo"
+  }
+]

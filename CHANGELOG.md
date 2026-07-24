@@ -104,6 +104,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--cert-warn`, default 720h; findings carry only subject/notAfter/days
   left — never certificate or key bytes). Healthy edges emit nothing.
   Registered as MCP tool `k8s_state_edges`.
+- `lookout mcp` (M1, §4.3) — every registered read-path check served as an
+  MCP tool, picked up automatically from the `pkg/checks` registry: tool
+  name = the command's MCP name (`triage delta` → `k8s_triage_delta`),
+  description = the §4.4.1 when-to-use line + output contract + field
+  glossary, and the input schema derived mechanically from the same
+  FlagSpecs that generate `--help` (string/bool/integer; durations as
+  strings with a Go-duration pattern; `-A` surfaces as `all_namespaces`;
+  positional arguments as a `target` property). Tool calls run the command
+  in-process through the same `emit.Run` envelope as the CLI — identical
+  flag parsing, `--timeout`, summary line, and §6.5 sanitizer — with exit
+  codes mapped per §4.2: 0 → payload text, 1 → MCP tool error carrying the
+  stderr diagnostics, 2 → JSON-RPC invalid-params. Transports: stdio by
+  default; `--listen=<host:port>` for streamable HTTP restricted to
+  loopback addresses (no auth story yet, so non-loopback binds are refused
+  loudly). New dependency: `modelcontextprotocol/go-sdk` v1.4.1 (pinned to
+  core-agent's version).
 
 ## [0.1.0] - 2026-07-24
 
