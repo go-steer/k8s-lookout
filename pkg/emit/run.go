@@ -34,13 +34,15 @@ const (
 )
 
 // Invocation is everything a check receives: the parsed common-flag
-// Scope, its own typed flags, and the output Writer. Checks emit
-// findings as they discover them (streaming — payloads can be large)
-// and return only the scanned count; the runner owns the summary
-// line and the exit code.
+// Scope, its own typed flags, the positional arguments (only for
+// commands that declare RunConfig.MaxArgs > 0), and the output
+// Writer. Checks emit findings as they discover them (streaming —
+// payloads can be large) and return only the scanned count; the
+// runner owns the summary line and the exit code.
 type Invocation struct {
 	Scope Scope
 	Flags FlagValues
+	Args  []string
 	Out   *Writer
 }
 
@@ -68,6 +70,13 @@ type RunConfig struct {
 	// command metadata). If empty, a minimal flag listing is
 	// printed instead.
 	Help string
+	// MaxArgs is how many positional arguments the command accepts
+	// (0, the default, rejects any positional as a usage error —
+	// the historical behavior). Positionals may be interspersed
+	// with flags, kubectl-style, and reach the check via
+	// Invocation.Args; validating their content is the check's
+	// job (return a UsageErrorf error for exit 2).
+	MaxArgs int
 	// Stdout and Stderr default to the process streams.
 	Stdout io.Writer
 	Stderr io.Writer
@@ -108,15 +117,28 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime
 	}
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprint(stdout, cfg.helpText(fs))
-			return ExitData
+	// Parse in a loop so positionals may be interspersed with
+	// flags (kubectl-style: `triage spec Pod/x --namespace=prod`):
+	// the flag package stops at the first non-flag token, so each
+	// pass peels one positional off and re-parses the remainder.
+	var positionals []string
+	rest := args
+	for {
+		if err := fs.Parse(rest); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				fmt.Fprint(stdout, cfg.helpText(fs))
+				return ExitData
+			}
+			return usageError(stderr, cfg.Name, err)
 		}
-		return usageError(stderr, cfg.Name, err)
+		if fs.NArg() == 0 {
+			break
+		}
+		positionals = append(positionals, fs.Arg(0))
+		rest = fs.Args()[1:]
 	}
-	if fs.NArg() > 0 {
-		return usageError(stderr, cfg.Name, fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	if len(positionals) > cfg.MaxArgs {
+		return usageError(stderr, cfg.Name, fmt.Errorf("unexpected argument %q", positionals[cfg.MaxArgs]))
 	}
 
 	values := FlagValues{fs: fs}
@@ -143,8 +165,11 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	defer cancel()
 
 	start := now()
-	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Out: writer})
+	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, Out: writer})
 	if err != nil {
+		if IsUsageError(err) {
+			return usageError(stderr, cfg.Name, err)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintf(stderr, "%s: timed out after %s\n", cfg.Name, timeout)
 		} else {
@@ -187,6 +212,29 @@ func scopeFromValues(v FlagValues) (Scope, error) {
 func usageError(stderr io.Writer, name string, err error) int {
 	fmt.Fprintf(stderr, "%s: %v\nRun '%s --help' for usage.\n", name, err, name)
 	return ExitUsage
+}
+
+// usageErr marks an error the check itself classifies as user error:
+// bad positional syntax, contradictory argument+flag combinations the
+// parser cannot see, or a flag that is a visible-but-unavailable
+// surface (e.g. `triage spec --diff` before M3). Run routes it to the
+// §4.2 usage path: stderr diagnostic, exit 2, stdout untouched.
+type usageErr struct{ err error }
+
+func (e usageErr) Error() string { return e.err.Error() }
+func (e usageErr) Unwrap() error { return e.err }
+
+// UsageErrorf returns an error that Run reports as a usage error
+// (exit 2) instead of a runtime error (exit 1).
+func UsageErrorf(format string, args ...any) error {
+	return usageErr{fmt.Errorf(format, args...)}
+}
+
+// IsUsageError reports whether err was built by UsageErrorf (directly
+// or wrapped).
+func IsUsageError(err error) bool {
+	var u usageErr
+	return errors.As(err, &u)
 }
 
 // helpText returns cfg.Help, or a minimal flag listing when no

@@ -1,0 +1,4 @@
+kind=spec.resource severity=info namespace=prod kind_of_object=Deployment name=api labels="app=payments" replicas=3 strategy="RollingUpdate maxSurge=25% maxUnavailable=1" selector="app=payments"
+kind=spec.container severity=info namespace=prod kind_of_object=Deployment name=api container=api image=registry.example.com/payments:v1.4.2 env="SIGNING_KEY=[REDACTED]"
+kind=spec.condition severity=warning namespace=prod kind_of_object=Deployment name=api reason=MinimumReplicasUnavailable message="Deployment does not have minimum availability." condition="Available=False" since=2026-07-24T09:30:00Z
+scanned=1 findings=3 elapsed=100ms

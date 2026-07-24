@@ -37,7 +37,12 @@ on stderr only), 2 usage.`
 // reference stubs (§4.4.3), so the surfaces cannot drift.
 func (c Command) Help() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Usage: lookout %s [flags]\n\n%s\n", c.Name, c.Summary)
+	if c.Positional != nil {
+		fmt.Fprintf(&b, "Usage: lookout %s %s [flags]\n\n%s\n", c.Name, c.Positional.Meta, c.Summary)
+		fmt.Fprintf(&b, "\nArgument:\n  %s  %s\n", c.Positional.Meta, c.Positional.Doc)
+	} else {
+		fmt.Fprintf(&b, "Usage: lookout %s [flags]\n\n%s\n", c.Name, c.Summary)
+	}
 
 	if len(c.Flags) > 0 {
 		b.WriteString("\nFlags:\n")

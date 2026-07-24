@@ -115,6 +115,15 @@ func TestCommandValidate(t *testing.T) {
 		{"empty summary", func(c *Command) { c.Summary = "" }},
 		{"multi-line summary", func(c *Command) { c.Summary = "a\nb" }},
 		{"nil Run", func(c *Command) { c.Run = nil }},
+		{"positional with empty meta", func(c *Command) {
+			c.Positional = &Positional{Meta: "", Doc: "d"}
+		}},
+		{"positional with spaced meta", func(c *Command) {
+			c.Positional = &Positional{Meta: "<a> <b>", Doc: "d"}
+		}},
+		{"positional without doc", func(c *Command) {
+			c.Positional = &Positional{Meta: "<ref>", Doc: ""}
+		}},
 		{"flag shadows common flag", func(c *Command) {
 			c.Flags = []emit.FlagSpec{{Name: "format", Type: emit.FlagString, Help: "h"}}
 		}},

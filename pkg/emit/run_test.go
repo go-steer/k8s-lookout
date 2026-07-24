@@ -233,3 +233,78 @@ func TestRunCommandSpecificFlags(t *testing.T) {
 		t.Errorf("default limit = %d, want 5", limit)
 	}
 }
+
+// runOnceArgs is runOnce with a MaxArgs allowance.
+func runOnceArgs(t *testing.T, check CheckFunc, maxArgs int, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	var out, errBuf bytes.Buffer
+	code = Run(context.Background(), RunConfig{
+		Name:    "lookout test check",
+		Check:   check,
+		MaxArgs: maxArgs,
+		Stdout:  &out,
+		Stderr:  &errBuf,
+		Now:     fixedClock(),
+	}, args)
+	return code, out.String(), errBuf.String()
+}
+
+// TestRunPositionalArgs covers MaxArgs: positionals reach the check
+// via Invocation.Args, may be interspersed with flags kubectl-style,
+// and one past the allowance is a usage error naming the excess.
+func TestRunPositionalArgs(t *testing.T) {
+	var gotArgs []string
+	var gotNS string
+	capture := func(ctx context.Context, inv Invocation) (int, error) {
+		gotArgs = inv.Args
+		gotNS = inv.Scope.Namespace
+		return 0, nil
+	}
+
+	code, _, stderr := runOnceArgs(t, capture, 1, "Pod/prod/api", "--namespace=prod")
+	if code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != "Pod/prod/api" {
+		t.Errorf("Args = %v, want [Pod/prod/api]", gotArgs)
+	}
+	if gotNS != "prod" {
+		t.Errorf("flag after the positional was not parsed: namespace = %q", gotNS)
+	}
+
+	code, stdout, stderr := runOnceArgs(t, capture, 1, "one", "--namespace=prod", "two")
+	if code != ExitUsage {
+		t.Fatalf("exit = %d, want %d", code, ExitUsage)
+	}
+	if stdout != "" {
+		t.Errorf("stdout must stay clean, got %q", stdout)
+	}
+	if !strings.Contains(stderr, `unexpected argument "two"`) {
+		t.Errorf("stderr should name the excess positional, got %q", stderr)
+	}
+}
+
+// TestRunUsageErrorFromCheck: a check may classify its own failure as
+// user error (UsageErrorf) and get the §4.2 usage path — exit 2,
+// stderr diagnostic with the --help pointer, no summary line.
+func TestRunUsageErrorFromCheck(t *testing.T) {
+	boom := func(ctx context.Context, inv Invocation) (int, error) {
+		return 0, UsageErrorf("--diff requires a sentinel store; lands in M3 (§6.6)")
+	}
+	code, stdout, stderr := runOnce(t, boom, nil)
+	if code != ExitUsage {
+		t.Fatalf("exit = %d, want %d", code, ExitUsage)
+	}
+	if stdout != "" {
+		t.Errorf("stdout must carry no summary, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "lands in M3") || !strings.Contains(stderr, "--help") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if !IsUsageError(UsageErrorf("x")) {
+		t.Error("IsUsageError(UsageErrorf(...)) = false")
+	}
+	if IsUsageError(errors.New("x")) {
+		t.Error("IsUsageError(plain error) = true")
+	}
+}

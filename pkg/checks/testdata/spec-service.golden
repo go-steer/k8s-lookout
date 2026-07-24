@@ -1,0 +1,2 @@
+kind=spec.resource severity=info namespace=prod kind_of_object=Service name=payments labels="app=payments" selector="app=payments" ports=http:80->8080/TCP,https:443->tls/TCP
+scanned=1 findings=1 elapsed=100ms

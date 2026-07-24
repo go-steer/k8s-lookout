@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -33,13 +34,42 @@ type Options struct {
 	Kubeconfig string
 }
 
-// BuildClient constructs a kubernetes.Interface from the options.
+// BuildClient constructs a kubernetes.Interface from the options
+// (see BuildConfig for resolution precedence).
+func BuildClient(opts Options) (kubernetes.Interface, error) {
+	cfg, err := BuildConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	return client, nil
+}
+
+// BuildDynamicClient constructs a dynamic.Interface from the same
+// options, for reads of kinds outside the typed client surface
+// (CRDs, aggregated APIs).
+func BuildDynamicClient(opts Options) (dynamic.Interface, error) {
+	cfg, err := BuildConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	client, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic client: %w", err)
+	}
+	return client, nil
+}
+
+// BuildConfig resolves the rest.Config the clients share.
 // Precedence:
 //  1. Explicit Kubeconfig always wins (out-of-cluster ops).
 //  2. InCluster or auto-detected (KUBERNETES_SERVICE_HOST env
 //     var is set inside a pod).
 //  3. $KUBECONFIG env var → fallback to ~/.kube/config.
-func BuildClient(opts Options) (kubernetes.Interface, error) {
+func BuildConfig(opts Options) (*rest.Config, error) {
 	var (
 		cfg *rest.Config
 		err error
@@ -65,9 +95,5 @@ func BuildClient(opts Options) (kubernetes.Interface, error) {
 			return nil, fmt.Errorf("default kubeconfig: %w", err)
 		}
 	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-	return client, nil
+	return cfg, nil
 }
