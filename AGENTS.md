@@ -54,8 +54,17 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-Design complete (DESIGN.md v3.5). Implementation not started. Next milestone:
-**M0** (DESIGN.md §14) — move `cmd/k8s-event-watcher` from `core-agent`
-verbatim as `lookout watch` (flags preserved, behavior-identical), extract
-`pkg/{kube,engine,inject,emit}`. The core-agent side (deleting the watcher,
-dropping `k8s.io/*` deps) is a separate PR in that repo.
+**M0 complete** (see `docs/milestones/M0.md` for the exit-check evidence):
+the `lookout` multicall binary exists, `lookout watch` is the moved
+`k8s-event-watcher` (flags frozen by `internal/watch/flags_contract_test.go`,
+inject wire shape pinned byte-for-byte by
+`TestDispatcher_ExactInjectPayloadWireShape`), `pkg/{kube,engine,inject}` are
+extracted, and `ghcr.io/go-steer/lookout` images publish on `v*` tags with
+`deploy/` manifests that are drop-in for existing watcher deployments.
+`pkg/emit` (the output sanitizer) arrives with the first read-path commands.
+The core-agent side (deleting the watcher, dropping `k8s.io/*` deps) is a
+separate PR in that repo.
+
+Next milestone: **M1 — read-path core** (DESIGN.md §14): `pkg/graph` v1,
+`triage logs|delta|spec`, `state edges`, `bundle`, `health`, the §4.2 output
+contract, `pkg/emit` sanitizer + golden tests, `lookout mcp`, first skills.
