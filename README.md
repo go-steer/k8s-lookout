@@ -14,9 +14,13 @@ Two halves, one multicall binary (`lookout`):
   per-incident agent sessions with warm context — detecting issues before, or
   as, they happen rather than after.
 
-**Status: design phase.** The complete specification is
-[`docs/DESIGN.md`](./docs/DESIGN.md); implementation follows its §14 phase
-plan, starting with the move of `k8s-event-watcher` out of `core-agent` (M0).
+**Status: M0 complete.** `lookout watch` has shipped: the `k8s-event-watcher`
+sidecar moved here from `core-agent` verbatim — flags, wire payloads, and exit
+codes are behavior-identical, so existing watcher deployments swap images with
+zero config change (see [`docs/milestones/M0.md`](./docs/milestones/M0.md) for
+the exit-check evidence). Images are published at `ghcr.io/go-steer/lookout`
+starting with `v0.1.0`. The complete specification is
+[`docs/DESIGN.md`](./docs/DESIGN.md); next up is the read-path core (M1, §14).
 
 Roughly 80% of the suite is pure `client-go` and runs on any conformant
 Kubernetes cluster; GKE/GCP-specific capability lives behind a cloud-provider
