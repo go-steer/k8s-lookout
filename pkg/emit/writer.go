@@ -45,16 +45,14 @@ func ParseFormat(s string) (Format, error) {
 
 // Sanitizer rewrites a finding before it is encoded. Every Writer
 // passes every finding through exactly one Sanitizer — this is the
-// §6.5 seam: no output path exists that bypasses it. Today the
-// default is the identity function; the real sanitizer (secret
-// masking, system-metadata stripping) replaces DefaultSanitizer in a
-// follow-up change without touching any check.
+// §6.5 seam: no output path exists that bypasses it.
 type Sanitizer func(Finding) Finding
 
 // DefaultSanitizer is applied by every Writer unless overridden with
 // WithSanitizer (tests only — production surfaces must not weaken
-// it).
-var DefaultSanitizer Sanitizer = func(f Finding) Finding { return f }
+// it). It is the real §6.5 finding sanitizer: secret masking on
+// every Emit, on every surface, not opt-in per check.
+var DefaultSanitizer Sanitizer = SanitizeFinding
 
 // Writer encodes sanitized findings to one output stream and counts
 // them for the summary line. Not safe for concurrent use; checks are
@@ -70,8 +68,7 @@ type Writer struct {
 type WriterOption func(*Writer)
 
 // WithSanitizer overrides the sanitizer. Only tests should relax it;
-// the next stacked change points DefaultSanitizer at the §6.5
-// implementation for every production surface at once.
+// every production surface runs DefaultSanitizer (SanitizeFinding).
 func WithSanitizer(s Sanitizer) WriterOption {
 	return func(w *Writer) { w.sanitize = s }
 }

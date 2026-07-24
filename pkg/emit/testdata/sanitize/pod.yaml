@@ -1,0 +1,120 @@
+# Kitchen-sink Pod: a credential fixture in every position the §13
+# test matrix names for pods. Every planted secret carries a unique
+# SUPERSECRETVALUE_* marker; TestNoFixtureCredentialLeaks fails CI if
+# any marker survives sanitization, naming the position.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: payments-api-7d9c4b-x2n8p
+  namespace: prod
+  uid: 6b6f6c6f-6b6f-4c6f-8b6f-6b6f6c6f6b6f
+  resourceVersion: "123456789"
+  generation: 3
+  creationTimestamp: "2026-07-20T10:00:00Z"
+  selfLink: /api/v1/namespaces/prod/pods/payments-api-7d9c4b-x2n8p
+  labels:
+    app: payments
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: payments-api-7d9c4b
+      uid: 0e600e60-0e60-4e60-8e60-0e600e600e60
+      controller: true
+      blockOwnerDeletion: true
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: '{"apiVersion":"v1","kind":"Pod","spec":{"containers":[{"env":[{"name":"DB_PASSWORD","value":"SUPERSECRETVALUE_LASTAPPLIED"}]}]}}'
+    example.com/api-token: SUPERSECRETVALUE_ANNOTATION
+    example.com/build-info: built by ci, aws key AKIASUPERSECRETVALUE rotated 2026-07-01
+    prometheus.io/path: /metrics
+  managedFields:
+    - manager: kubectl-client-side-apply
+      operation: Update
+      apiVersion: v1
+spec:
+  serviceAccountName: payments
+  initContainers:
+    - name: migrate
+      image: registry.example.com/migrate@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+      args:
+        - --vault-token
+        - SUPERSECRETVALUE_PAIRARG
+        - --config=/etc/migrate.yaml
+      env:
+        - name: MIGRATE_DB_TOKEN
+          value: SUPERSECRETVALUE_INIT
+  containers:
+    - name: api
+      image: registry.example.com/payments@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+      args:
+        - --listen=:8443
+        - --db-password=SUPERSECRETVALUE_ARGS
+        - --tls-cert-file=/etc/tls/tls.crt
+        - --log-level=debug
+      env:
+        - name: DB_PASSWORD
+          value: SUPERSECRETVALUE_ENV
+        - name: BOOTSTRAP_ASSERTION
+          value: eyJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ.SUPERSECRETVALUE_JWTpayload.c2lnbmF0dXJlc2lnbmF0dXJl
+        - name: DATABASE_URL
+          value: postgres://payments:SUPERSECRETVALUE_URL@db.prod.svc:5432/payments?sslmode=require
+        - name: API_ENDPOINT
+          value: https://api.example.com/v1
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: username
+      envFrom:
+        - secretRef:
+            name: payments-env
+        - configMapRef:
+            name: payments-config
+      volumeMounts:
+        - name: tls
+          mountPath: /etc/tls
+        - name: cache
+          mountPath: /var/cache
+      resources: {}
+  ephemeralContainers:
+    - name: debugger
+      image: busybox
+      env:
+        - name: DEBUG_AUTH
+          value: SUPERSECRETVALUE_EPHEMERAL
+  volumes:
+    - name: tls
+      secret:
+        secretName: payments-tls
+    - name: bundle
+      projected:
+        sources:
+          - secret:
+              name: payments-ca
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+    - name: store
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: payments-kv
+        nodePublishSecretRef:
+          name: csi-creds
+    - name: cache
+      emptyDir: {}
+status:
+  phase: Running
+  observedGeneration: 3
+  conditions:
+    - type: Ready
+      status: "True"
+      lastTransitionTime: "2026-07-24T10:00:00Z"
+      lastProbeTime: null
+  containerStatuses:
+    - name: api
+      ready: true
+      restartCount: 17
+      image: registry.example.com/payments@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+      imageID: registry.example.com/payments@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+      containerID: containerd://8a6c1f0e9d2b7a4c5e6f8a6c1f0e9d2b7a4c5e6f8a6c1f0e9d2b7a4c5e6f8a6c

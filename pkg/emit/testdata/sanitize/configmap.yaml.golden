@@ -1,0 +1,13 @@
+apiVersion: v1
+data:
+  api_key: '[REDACTED]'
+  auth_header: Bearer [REDACTED]
+  checksum: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+  endpoint: https://api.example.com/v1
+  gcp-sa.json: |
+    {"type":"service_account","project_id":"prod-123","private_key":"[REDACTED]","client_email":"svc@prod-123.iam.gserviceaccount.com"}
+  session_secret: '[REDACTED]'
+kind: ConfigMap
+metadata:
+  name: payments-config
+  namespace: prod

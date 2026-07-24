@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "12"
+  name: payments-api
+  namespace: prod
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      annotations:
+        example.com/vault-secret: '[REDACTED]'
+      labels:
+        app: payments
+    spec:
+      containers:
+      - env:
+        - name: SIGNING_KEY
+          value: '[REDACTED]'
+        - name: LEGACY_CONFIG
+          value: |
+            # exported bundle, do not edit
+            [REDACTED]
+            # end of bundle
+        image: registry.example.com/payments:v1.2.3
+        name: api
+status:
+  conditions:
+  - lastTransitionTime: "2026-07-24T09:00:00Z"
+    lastUpdateTime: "2026-07-24T09:00:00Z"
+    status: "True"
+    type: Available
+  readyReplicas: 3
+  replicas: 3

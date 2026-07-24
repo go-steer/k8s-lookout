@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    example.com/api-token: '[REDACTED]'
+    example.com/build-info: built by ci, aws key [REDACTED] rotated 2026-07-01
+    prometheus.io/path: /metrics
+  labels:
+    app: payments
+  name: payments-api-7d9c4b-x2n8p
+  namespace: prod
+  ownerReferences:
+  - apiVersion: apps/v1
+    blockOwnerDeletion: true
+    controller: true
+    kind: ReplicaSet
+    name: payments-api-7d9c4b
+spec:
+  containers:
+  - args:
+    - --listen=:8443
+    - --db-password=[REDACTED]
+    - --tls-cert-file=/etc/tls/tls.crt
+    - --log-level=debug
+    env:
+    - name: DB_PASSWORD
+      value: '[REDACTED]'
+    - name: BOOTSTRAP_ASSERTION
+      value: '[REDACTED]'
+    - name: DATABASE_URL
+      value: postgres://payments:[REDACTED]@db.prod.svc:5432/payments?sslmode=require
+    - name: API_ENDPOINT
+      value: https://api.example.com/v1
+    - name: DB_USER
+      valueFrom:
+        secretKeyRef:
+          key: username
+          name: db-credentials
+    envFrom:
+    - secretRef:
+        name: payments-env
+    - configMapRef:
+        name: payments-config
+    image: registry.example.com/payments@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+    name: api
+    volumeMounts:
+    - mountPath: /etc/tls
+      name: tls
+    - mountPath: /var/cache
+      name: cache
+  ephemeralContainers:
+  - env:
+    - name: DEBUG_AUTH
+      value: '[REDACTED]'
+    image: busybox
+    name: debugger
+  initContainers:
+  - args:
+    - --vault-token
+    - '[REDACTED]'
+    - --config=/etc/migrate.yaml
+    env:
+    - name: MIGRATE_DB_TOKEN
+      value: '[REDACTED]'
+    image: registry.example.com/migrate@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    name: migrate
+  serviceAccountName: payments
+  volumes:
+  - name: tls
+    secret:
+      secretName: payments-tls
+  - name: bundle
+    projected:
+      sources:
+      - secret:
+          name: payments-ca
+      - serviceAccountToken:
+          expirationSeconds: 3600
+          path: token
+  - csi:
+      driver: secrets-store.csi.k8s.io
+      nodePublishSecretRef:
+        name: csi-creds
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: payments-kv
+    name: store
+  - emptyDir: {}
+    name: cache
+status:
+  conditions:
+  - lastTransitionTime: "2026-07-24T10:00:00Z"
+    status: "True"
+    type: Ready
+  containerStatuses:
+  - image: registry.example.com/payments@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+    name: api
+    ready: true
+    restartCount: 17
+  phase: Running
