@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package engine
 
 import "testing"
 
@@ -26,7 +26,7 @@ func makeEvent(reason, namespace string, count int) TriageEvent {
 
 func TestFilter_Accept_DefaultReasons(t *testing.T) {
 	t.Parallel()
-	f := newFilter(newFilterConfig(nil, nil, nil, 0))
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 0))
 	// Every default reason should accept a plain event (count=1
 	// suffices unless it's Unhealthy, which needs count>=3).
 	for _, reason := range defaultReasons {
@@ -45,7 +45,7 @@ func TestFilter_Accept_DefaultReasons(t *testing.T) {
 
 func TestFilter_Accept_CustomAllowList(t *testing.T) {
 	t.Parallel()
-	f := newFilter(newFilterConfig([]string{"CustomReason"}, nil, nil, 0))
+	f := NewFilter(NewFilterConfig([]string{"CustomReason"}, nil, nil, 0))
 	if !f.Accept(makeEvent("CustomReason", "default", 1)) {
 		t.Error("custom-listed reason should accept")
 	}
@@ -61,7 +61,7 @@ func TestFilter_Accept_ExcludedNamespaceWins(t *testing.T) {
 	// Exclude takes precedence over include (operator can express
 	// "everything except kube-system" without listing every
 	// included namespace).
-	f := newFilter(newFilterConfig(nil, []string{"default", "kube-system"}, []string{"kube-system"}, 0))
+	f := NewFilter(NewFilterConfig(nil, []string{"default", "kube-system"}, []string{"kube-system"}, 0))
 	if f.Accept(makeEvent("CrashLoopBackOff", "kube-system", 1)) {
 		t.Error("excluded namespace should reject even when listed as allowed")
 	}
@@ -72,7 +72,7 @@ func TestFilter_Accept_ExcludedNamespaceWins(t *testing.T) {
 
 func TestFilter_Accept_AllowNamespacesLimitsScope(t *testing.T) {
 	t.Parallel()
-	f := newFilter(newFilterConfig(nil, []string{"prod"}, nil, 0))
+	f := NewFilter(NewFilterConfig(nil, []string{"prod"}, nil, 0))
 	if !f.Accept(makeEvent("CrashLoopBackOff", "prod", 1)) {
 		t.Error("prod namespace should accept when allow-listed")
 	}
@@ -84,7 +84,7 @@ func TestFilter_Accept_AllowNamespacesLimitsScope(t *testing.T) {
 func TestFilter_Accept_UnhealthyRequiresMinCount(t *testing.T) {
 	t.Parallel()
 	// Default unhealthy-min-count is 3.
-	f := newFilter(newFilterConfig(nil, nil, nil, 0))
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 0))
 	if f.Accept(makeEvent("Unhealthy", "default", 1)) {
 		t.Error("Unhealthy count=1 should reject (below threshold 3)")
 	}
@@ -102,7 +102,7 @@ func TestFilter_Accept_UnhealthyRequiresMinCount(t *testing.T) {
 func TestFilter_Accept_UnhealthyThresholdOverridable(t *testing.T) {
 	t.Parallel()
 	// Custom threshold of 10 — probe-flap tolerance turned up.
-	f := newFilter(newFilterConfig(nil, nil, nil, 10))
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 10))
 	if f.Accept(makeEvent("Unhealthy", "default", 5)) {
 		t.Error("Unhealthy count=5 should reject with threshold 10")
 	}
@@ -115,7 +115,7 @@ func TestFilter_Accept_UnhealthyThresholdDoesntAffectOtherReasons(t *testing.T) 
 	t.Parallel()
 	// The count-threshold rule is Unhealthy-specific; other
 	// reasons fire on count=1.
-	f := newFilter(newFilterConfig(nil, nil, nil, 100))
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 100))
 	if !f.Accept(makeEvent("CrashLoopBackOff", "default", 1)) {
 		t.Error("CrashLoopBackOff count=1 should always accept")
 	}

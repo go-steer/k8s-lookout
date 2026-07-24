@@ -17,11 +17,50 @@ package watch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
+
+// newFakeDaemon returns an httptest server that impersonates the
+// core-agent daemon's POST /sessions + POST /sessions/<sid>/inject
+// endpoints. Returns the URL to point --daemon-url at, plus a
+// pointer to a slice of received inject bodies for assertion.
+func newFakeDaemon(t *testing.T) (baseURL string, capturedInjects *[]string, capturedAuth *[]string) {
+	t.Helper()
+	injects := make([]string, 0, 4)
+	auths := make([]string, 0, 4)
+	var sessionCounter int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization")+"|"+r.Header.Get("X-Asserted-Caller"))
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sessions":
+			id := atomic.AddInt32(&sessionCounter, 1)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"app":"core-agent","user":"alice","sessionID":"sess-%s","url":"http://x"}`, strings.Repeat("x", int(id)))
+			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/sessions/") && strings.HasSuffix(r.URL.Path, "/inject"):
+			body, _ := io.ReadAll(r.Body)
+			injects = append(injects, string(body))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &injects, &auths
+}
 
 // TestDispatcher_EndToEnd wires filter + dedup + injector against
 // the fake daemon and verifies the whole pipeline. Two events for
@@ -29,17 +68,17 @@ import (
 func TestDispatcher_EndToEnd_DuplicateSuppressed(t *testing.T) {
 	t.Parallel()
 	base, injects, _ := newFakeDaemon(t)
-	inj, err := newInjector(injectorConfig{
-		daemonURL:      base,
-		bearerToken:    "tok_test",
-		assertedCaller: "sre@example.com",
+	inj, err := inject.NewInjector(inject.Config{
+		DaemonURL:      base,
+		BearerToken:    "tok_test",
+		AssertedCaller: "sre@example.com",
 	})
 	if err != nil {
-		t.Fatalf("newInjector: %v", err)
+		t.Fatalf("NewInjector: %v", err)
 	}
-	dedup, _ := newDedupCache(5*time.Minute, "")
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    newFilter(newFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -48,8 +87,8 @@ func TestDispatcher_EndToEnd_DuplicateSuppressed(t *testing.T) {
 		targetSid: "",
 		dryRun:    false,
 	}
-	ev := TriageEvent{
-		Key:       EventKey{UID: "u1", Reason: "CrashLoopBackOff"},
+	ev := engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u1", Reason: "CrashLoopBackOff"},
 		Namespace: "default",
 		Name:      "pod-1",
 		Message:   "flapping",
@@ -66,10 +105,10 @@ func TestDispatcher_EndToEnd_DuplicateSuppressed(t *testing.T) {
 func TestDispatcher_EndToEnd_FilterRejects(t *testing.T) {
 	t.Parallel()
 	base, injects, _ := newFakeDaemon(t)
-	inj, _ := newInjector(injectorConfig{daemonURL: base, bearerToken: "t", assertedCaller: "a@b"})
-	dedup, _ := newDedupCache(5*time.Minute, "")
+	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   newFilter(newFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -77,8 +116,8 @@ func TestDispatcher_EndToEnd_FilterRejects(t *testing.T) {
 		mode:     "per-incident",
 	}
 	// Reason not in allow-list → dispatcher must silently drop.
-	disp.Dispatch(context.Background(), TriageEvent{
-		Key:       EventKey{UID: "u1", Reason: "SomeOtherReason"},
+	disp.Dispatch(context.Background(), engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u1", Reason: "SomeOtherReason"},
 		Namespace: "default",
 	})
 	if len(*injects) != 0 {
@@ -91,10 +130,10 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 	// Shared mode: no per-incident CreateSession call; every
 	// event injects to the pre-configured target session.
 	base, injects, _ := newFakeDaemon(t)
-	inj, _ := newInjector(injectorConfig{daemonURL: base, bearerToken: "t", assertedCaller: "a@b"})
-	dedup, _ := newDedupCache(5*time.Minute, "")
+	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    newFilter(newFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -102,8 +141,8 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 		mode:      "shared",
 		targetSid: "sess-shared",
 	}
-	disp.Dispatch(context.Background(), TriageEvent{
-		Key:       EventKey{UID: "u1", Reason: "CrashLoopBackOff"},
+	disp.Dispatch(context.Background(), engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u1", Reason: "CrashLoopBackOff"},
 		Namespace: "default",
 		Name:      "pod-1",
 	})
@@ -113,6 +152,59 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 	// Inject URL should have carried the target SessionID.
 	if !strings.Contains((*injects)[0], "k8s-event") {
 		t.Errorf("captured body missing kind marker: %q", (*injects)[0])
+	}
+}
+
+// TestDispatcher_ExactInjectPayloadWireShape pins the exact JSON the
+// dispatcher puts on the wire. The payload's field names, JSON tags,
+// and the "k8s-event" kind constant are frozen — playbook skills
+// pattern-match them — so any byte-level drift here is a breaking
+// change to deployed skills, not an internal detail.
+func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
+	t.Parallel()
+	base, injects, _ := newFakeDaemon(t)
+	inj, err := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
+	if err != nil {
+		t.Fatalf("NewInjector: %v", err)
+	}
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
+	disp := &dispatcher{
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		dedup:     dedup,
+		injector:  inj,
+		metrics:   newMetrics(),
+		cluster:   "prod-us-central1",
+		mode:      "shared",
+		targetSid: "sess-shared",
+	}
+	disp.Dispatch(context.Background(), engine.TriageEvent{
+		Key:           engine.EventKey{UID: "abc-123", Reason: "CrashLoopBackOff"},
+		Namespace:     "checkout",
+		KindOfObject:  "Pod",
+		Name:          "checkout-svc-7b9d-x4kzq",
+		Container:     "spec.containers{server}",
+		Message:       "Back-off restarting failed container",
+		FirstSeen:     time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC),
+		LastSeen:      time.Date(2026, 7, 24, 10, 5, 0, 0, time.UTC),
+		ControllerRef: "ReplicaSet/checkout-svc-7b9d",
+		Node:          "node-1",
+		Labels:        map[string]string{"team": "checkout"},
+		Count:         1,
+	})
+	if len(*injects) != 1 {
+		t.Fatalf("expected 1 inject; got %d", len(*injects))
+	}
+	// Wrapped envelope: {"message": "<serialized payload>"} — the
+	// inner string is the frozen payload, byte for byte.
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte((*injects)[0]), &envelope); err != nil {
+		t.Fatalf("captured body isn't the inject envelope: %v (body=%q)", err, (*injects)[0])
+	}
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}}}`
+	if envelope.Message != want {
+		t.Errorf("inject payload wire shape drifted:\n got: %s\nwant: %s", envelope.Message, want)
 	}
 }
 
@@ -128,21 +220,21 @@ func TestDispatcher_LogsFireOnSuccess(t *testing.T) {
 	defer restoreLog()
 
 	base, injects, _ := newFakeDaemon(t)
-	inj, err := newInjector(injectorConfig{daemonURL: base, bearerToken: "tok", assertedCaller: "sre@example.com"})
+	inj, err := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
 	if err != nil {
-		t.Fatalf("newInjector: %v", err)
+		t.Fatalf("NewInjector: %v", err)
 	}
-	dedup, _ := newDedupCache(5*time.Minute, "")
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   newFilter(newFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
 		cluster:  "test-cluster",
 		mode:     "per-incident",
 	}
-	disp.Dispatch(context.Background(), TriageEvent{
-		Key:       EventKey{UID: "u42", Reason: "ImagePullBackOff"},
+	disp.Dispatch(context.Background(), engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u42", Reason: "ImagePullBackOff"},
 		Namespace: "online-boutique",
 		Name:      "paymentservice-abc123",
 	})
@@ -171,18 +263,18 @@ func TestDispatcher_LogsDedupOnSuppress(t *testing.T) {
 	defer restoreLog()
 
 	base, injects, _ := newFakeDaemon(t)
-	inj, _ := newInjector(injectorConfig{daemonURL: base, bearerToken: "tok", assertedCaller: "sre@example.com"})
-	dedup, _ := newDedupCache(5*time.Minute, "")
+	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   newFilter(newFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
 		cluster:  "test-cluster",
 		mode:     "per-incident",
 	}
-	ev := TriageEvent{
-		Key:       EventKey{UID: "u7", Reason: "CrashLoopBackOff"},
+	ev := engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u7", Reason: "CrashLoopBackOff"},
 		Namespace: "default",
 		Name:      "flappy-pod",
 	}

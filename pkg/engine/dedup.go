@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package engine
 
 import (
 	"encoding/json"
@@ -56,31 +56,31 @@ type dedupEntry struct {
 	Count int `json:"count"`
 }
 
-// dedupResult tells the caller what to do with the event that just
+// DedupResult tells the caller what to do with the event that just
 // came in: kind==firstInWindow means create a session + inject;
 // kind==duplicate means suppress; kind==newIncident means the prior
 // window expired and this is a fresh incident (create new session).
-type dedupResult struct {
-	Kind      dedupResultKind
+type DedupResult struct {
+	Kind      DedupResultKind
 	SessionID string // only set when Kind==duplicate; the existing session
 	Count     int    // window count (1 for first, N for duplicates)
 }
 
-type dedupResultKind int
+type DedupResultKind int
 
 const (
-	// dedupNewIncident: no prior entry (or the prior window
+	// DedupNewIncident: no prior entry (or the prior window
 	// expired). Caller must create a new session and inject.
-	dedupNewIncident dedupResultKind = iota
-	// dedupDuplicate: an entry exists within the window. Caller
+	DedupNewIncident DedupResultKind = iota
+	// DedupDuplicate: an entry exists within the window. Caller
 	// suppresses this event; the count is bumped and available
-	// via dedupResult.Count.
-	dedupDuplicate
+	// via DedupResult.Count.
+	DedupDuplicate
 )
 
-// dedupCache is the rolling-window dedup store. Backed by a map +
+// DedupCache is the rolling-window dedup store. Backed by a map +
 // a mutex; bounded by LRU eviction at maxDedupEntries.
-type dedupCache struct {
+type DedupCache struct {
 	mu      sync.Mutex
 	entries map[EventKey]*dedupEntry
 	window  time.Duration
@@ -98,14 +98,14 @@ type dedupCache struct {
 // window). LRU eviction beyond this bound.
 const maxDedupEntries = 10_000
 
-// newDedupCache constructs a cache with the supplied rolling window
+// NewDedupCache constructs a cache with the supplied rolling window
 // duration. window must be > 0. persistPath is optional; empty
 // disables the on-disk cache.
-func newDedupCache(window time.Duration, persistPath string) (*dedupCache, error) {
+func NewDedupCache(window time.Duration, persistPath string) (*DedupCache, error) {
 	if window <= 0 {
 		return nil, fmt.Errorf("dedup: window must be > 0 (got %s)", window)
 	}
-	c := &dedupCache{
+	c := &DedupCache{
 		entries:     make(map[EventKey]*dedupEntry),
 		window:      window,
 		max:         maxDedupEntries,
@@ -120,7 +120,7 @@ func newDedupCache(window time.Duration, persistPath string) (*dedupCache, error
 }
 
 // clock returns the current time. Overridable for tests.
-func (c *dedupCache) clock() time.Time {
+func (c *DedupCache) clock() time.Time {
 	if c.now != nil {
 		return c.now()
 	}
@@ -209,7 +209,7 @@ func canonicalizeReason(reason string) string {
 // Contract: the caller MUST call BindSession after a successful
 // CreateSession call to attach the SessionID to the newly-created
 // entry, so subsequent duplicates can route to the same session.
-func (c *dedupCache) Observe(key EventKey, eventLastTS time.Time) dedupResult {
+func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
 	key.Reason = canonicalizeReason(key.Reason)
 	now := c.clock()
 	c.mu.Lock()
@@ -224,13 +224,13 @@ func (c *dedupCache) Observe(key EventKey, eventLastTS time.Time) dedupResult {
 			EventLastTS: eventLastTS,
 			Count:       1,
 		}
-		return dedupResult{Kind: dedupNewIncident, Count: 1}
+		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
 	if !eventLastTS.After(entry.EventLastTS) {
 		// Case 1: replay. Same activity we already processed;
 		// don't advance LastSeen (retry cooldown untouched).
 		entry.Count++
-		return dedupResult{Kind: dedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
+		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
 	}
 	if now.Sub(entry.LastSeen) > c.window {
 		// Case 2: retry safety net. Prior session's cooldown
@@ -244,13 +244,13 @@ func (c *dedupCache) Observe(key EventKey, eventLastTS time.Time) dedupResult {
 			EventLastTS: eventLastTS,
 			Count:       1,
 		}
-		return dedupResult{Kind: dedupNewIncident, Count: 1}
+		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
 	// Case 3: new activity within cooldown → dedup + advance.
 	entry.Count++
 	entry.LastSeen = now
 	entry.EventLastTS = eventLastTS
-	return dedupResult{Kind: dedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
+	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
 }
 
 // BindSession attaches the SessionID from a successful CreateSession
@@ -262,7 +262,7 @@ func (c *dedupCache) Observe(key EventKey, eventLastTS time.Time) dedupResult {
 // that saw a `dedupNewIncident` result on one reason variant can
 // bind the session using the wire-level reason without having to
 // know about the family mapping.
-func (c *dedupCache) BindSession(key EventKey, sessionID string) {
+func (c *DedupCache) BindSession(key EventKey, sessionID string) {
 	key.Reason = canonicalizeReason(key.Reason)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -274,7 +274,7 @@ func (c *dedupCache) BindSession(key EventKey, sessionID string) {
 // evictIfFull is called under lock. If the cache is at capacity,
 // evicts the LRU entry (lowest LastSeen). Bounded O(N) scan; called
 // only on new-incident cache-miss paths so amortized cost is fine.
-func (c *dedupCache) evictIfFull() {
+func (c *DedupCache) evictIfFull() {
 	if len(c.entries) < c.max {
 		return
 	}
@@ -292,7 +292,7 @@ func (c *dedupCache) evictIfFull() {
 }
 
 // Len returns the current cache size. Test / metrics helper.
-func (c *dedupCache) Len() int {
+func (c *DedupCache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
@@ -307,7 +307,7 @@ func (c *dedupCache) Len() int {
 // Format: pretty-printed JSON — small enough that a human can
 // inspect it during incident debugging, and simple enough that the
 // on-disk shape doesn't need its own migration story.
-func (c *dedupCache) Snapshot() error {
+func (c *DedupCache) Snapshot() error {
 	if c.persistPath == "" {
 		return nil
 	}
@@ -337,8 +337,8 @@ func (c *dedupCache) Snapshot() error {
 
 // restore reads persistPath (if it exists) and hydrates the cache.
 // Missing file is not an error — first-time startup has nothing to
-// restore. Called by newDedupCache during construction.
-func (c *dedupCache) restore() error {
+// restore. Called by NewDedupCache during construction.
+func (c *DedupCache) restore() error {
 	data, err := os.ReadFile(c.persistPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

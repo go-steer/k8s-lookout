@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package engine
 
 // defaultReasons is the shipped set of Event.Reason values that
 // trigger investigations. Chosen to cover the top-frequency real
@@ -32,10 +32,10 @@ var defaultReasons = []string{
 	"Evicted",
 }
 
-// filterConfig captures the sidecar's per-event decision logic.
+// FilterConfig captures the sidecar's per-event decision logic.
 // Constructed from CLI flags in main.go; injected into the filter
 // so tests can override each knob independently.
-type filterConfig struct {
+type FilterConfig struct {
 	// allowedReasons is the set of Event.Reason values that pass
 	// the filter. Case-sensitive match against Event.Reason
 	// (k8s uses CamelCase; case-insensitivity would only hide
@@ -58,17 +58,17 @@ type filterConfig struct {
 	unhealthyMinCount int
 }
 
-// newFilterConfig builds a filterConfig from CLI-shaped inputs.
+// NewFilterConfig builds a FilterConfig from CLI-shaped inputs.
 // Empty slices default to the shipped values; positive counts
 // default to their shipped defaults.
-func newFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount int) filterConfig {
+func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount int) FilterConfig {
 	if len(reasons) == 0 {
 		reasons = defaultReasons
 	}
 	if unhealthyMinCount <= 0 {
 		unhealthyMinCount = 3
 	}
-	fc := filterConfig{
+	fc := FilterConfig{
 		allowedReasons:     stringSet(reasons),
 		allowedNamespaces:  stringSet(allowNamespaces),
 		excludedNamespaces: stringSet(excludeNamespaces),
@@ -92,14 +92,14 @@ func stringSet(xs []string) map[string]struct{} {
 	return out
 }
 
-// filter decides whether a triage event should proceed to dedup +
+// Filter decides whether a triage event should proceed to dedup +
 // inject. Pure function — same input, same output; no I/O.
-type filter struct {
-	cfg filterConfig
+type Filter struct {
+	cfg FilterConfig
 }
 
-func newFilter(cfg filterConfig) *filter {
-	return &filter{cfg: cfg}
+func NewFilter(cfg FilterConfig) *Filter {
+	return &Filter{cfg: cfg}
 }
 
 // Accept returns true if the event passes every filter rule. The
@@ -110,7 +110,7 @@ func newFilter(cfg filterConfig) *filter {
 //  2. Namespace must not be in excluded (exclude wins).
 //  3. Namespace must be in allowed (or allowed is empty = all).
 //  4. Unhealthy special case: repeat count must reach threshold.
-func (f *filter) Accept(ev TriageEvent) bool {
+func (f *Filter) Accept(ev TriageEvent) bool {
 	if f.cfg.allowedReasons != nil {
 		if _, ok := f.cfg.allowedReasons[ev.Key.Reason]; !ok {
 			return false
