@@ -15,7 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   codes 0 data / 1 runtime / 2 usage with stderr-only diagnostics, common
   flags (`--namespace|-A`, `--workload`, `--since`, `--format`, `--timeout`)
   parsed once into a typed Scope, and the sanitizer seam every finding
-  passes through (identity for now; the §6.5 sanitizer lands next).
+  passes through.
+- The §6.5 sanitizer in `pkg/emit`, wired in as the default on every emit
+  surface (not opt-in): finding-level masking of credential-shaped strings
+  in messages, reasons, and detail values, plus `SanitizeObject` /
+  `SanitizeUnstructured` for Kubernetes specs — system metadata stripped
+  (`managedFields`, `resourceVersion`, `uid`, `creationTimestamp`,
+  `ownerReferences[].uid`, the last-applied annotation, noisy status),
+  `Secret.data`/`stringData` values masked to length-only redactions,
+  credential env vars and annotations masked by name, and value-shape
+  heuristics (JWTs, PEM private keys, AWS key IDs, GCP service-account
+  `private_key`, Bearer/Basic tokens, URL userinfo passwords, `--password=`
+  flags, key-anchored base64/hex) applied to every string. Golden-file
+  tests plant a unique marker in every known secret position; a CI
+  tripwire fails naming the position if any marker survives.
 - `pkg/checks` — the command-metadata registry (§4.4.3, one source of truth
   generated outward): name/MCP-name/when-to-use/flag-spec/output-glossary
   declarations that generate agent-readable `--help` today and the MCP JSON

@@ -1,0 +1,20 @@
+# ConfigMap: credential material smuggled into config data — the
+# key-anchored shape heuristics (credential-named key + base64/hex
+# shape) and the position-independent shapes (bearer header, GCP
+# service-account private_key) must catch it, while the negative
+# controls (endpoint URL, content checksum under a benign key) must
+# survive untouched.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-config
+  namespace: prod
+  resourceVersion: "777"
+data:
+  api_key: x9QzSUPERSECRETVALUEb64K2pq
+  session_secret: 5ec4e7abad1dea5ec4e7abad1dea5ec4e7
+  auth_header: Bearer SUPERSECRETVALUE_BEARER_x1
+  gcp-sa.json: |
+    {"type":"service_account","project_id":"prod-123","private_key":"-----BEGIN PRIVATE KEY-----\nSUPERSECRETVALUE_GCPSA\n-----END PRIVATE KEY-----\n","client_email":"svc@prod-123.iam.gserviceaccount.com"}
+  endpoint: https://api.example.com/v1
+  checksum: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae

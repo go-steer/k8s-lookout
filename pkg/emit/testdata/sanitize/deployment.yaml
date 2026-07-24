@@ -1,0 +1,49 @@
+# Deployment: proves the walk reaches pod-template positions (env and
+# annotations under spec.template) and that a PEM private key under a
+# credential-free env name is masked by shape alone — surgically, the
+# surrounding prose survives.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: prod
+  generation: 12
+  resourceVersion: "987654"
+  uid: 11112222-3333-4444-5555-666677778888
+  annotations:
+    deployment.kubernetes.io/revision: "12"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: payments
+      annotations:
+        example.com/vault-secret: SUPERSECRETVALUE_TPL_ANNOTATION
+    spec:
+      containers:
+        - name: api
+          image: registry.example.com/payments:v1.2.3
+          env:
+            - name: SIGNING_KEY
+              value: SUPERSECRETVALUE_TPL
+            - name: LEGACY_CONFIG
+              value: |
+                # exported bundle, do not edit
+                -----BEGIN RSA PRIVATE KEY-----
+                SUPERSECRETVALUE_PEM
+                -----END RSA PRIVATE KEY-----
+                # end of bundle
+status:
+  observedGeneration: 12
+  replicas: 3
+  readyReplicas: 3
+  conditions:
+    - type: Available
+      status: "True"
+      lastTransitionTime: "2026-07-24T09:00:00Z"
+      lastUpdateTime: "2026-07-24T09:00:00Z"
