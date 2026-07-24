@@ -21,6 +21,8 @@ package delta
 // every consumer from it.
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/emit"
@@ -29,6 +31,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Config carries the abnormality thresholds. The zero value means
@@ -76,6 +79,36 @@ type Objects struct {
 	// objects get the plain workload treatment. `bundle` scopes to
 	// one workload and leaves this off; `health` turns it on.
 	SystemAddons bool
+}
+
+// ScanCluster runs the full `triage delta` pass — the same paged
+// Lists, the same derivations — over ns ("" = all namespaces) for
+// the given finding classes (any subset of pods, nodes, pdb, system,
+// quota; empty = all). `health` (§5) delegates its delta-backed
+// scorecard categories here. Returns the scanned count for the
+// caller's summary line and the findings, sorted critical-first.
+func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (int, []emit.Finding, error) {
+	sel := map[string]bool{}
+	if len(classes) == 0 {
+		classes = allClasses
+	}
+	known := map[string]bool{}
+	for _, c := range allClasses {
+		known[c] = true
+	}
+	for _, c := range classes {
+		if !known[c] {
+			return 0, nil, fmt.Errorf("unknown delta class %q", c)
+		}
+		sel[c] = true
+	}
+	s := &scanner{client: client, ns: ns, now: now, th: cfg.thresholds(), classes: sel}
+	scanned, findings, err := s.scan(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	sortFindings(findings)
+	return scanned, findings, nil
 }
 
 // ScanObjects derives the delta findings from objs at time now,

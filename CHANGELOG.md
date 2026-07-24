@@ -135,6 +135,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   List pass now also ingests Nodes into the graph so placement neighbors
   resolve as observed instead of dangling. Registered as MCP tool
   `k8s_triage_workload`.
+- `lookout health` (M1, DESIGN.md §5) — the "any issues with this
+  cluster?" scorecard: ten categories (control-plane latency, node
+  conditions, crash loops, aged Pending, rollout stalls, PVC/storage
+  health, system add-ons, ResourceQuotas, cert expiry, webhook backend
+  health), each answering `healthy|degraded|unavailable` via one
+  `health.category` finding — the scorecard always answers, healthy
+  included — with degraded categories naming their worst findings inline
+  (`--top`) and emitting full details after the scorecard block. Six
+  categories delegate to the `triage delta` scan; storage (Pending/Lost
+  PVCs), certs (cluster-wide `kubernetes.io/tls` expiry, `--cert-warn`),
+  and webhooks (validating/mutating configurations whose service backend
+  does not resolve — the minimal subset of M5's `state webhooks`) are new
+  lightweight checks; control-plane latency reports
+  `unavailable ("requires cloud provider metrics (M4)")` through the
+  pkg/cloud provider boundary. M1 is live checks only: the merge with
+  open sentinel findings (§9.1) and triage-status records (§9.4) lands in
+  M4. Registered as MCP tool `k8s_cluster_health`.
 
 ## [0.1.0] - 2026-07-24
 
