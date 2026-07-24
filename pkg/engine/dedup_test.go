@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -292,6 +293,106 @@ func TestDedup_Snapshot_RoundTrip(t *testing.T) {
 	}
 	if got.SessionID != "sess-persist" {
 		t.Errorf("restored key: SessionID = %q, want sess-persist", got.SessionID)
+	}
+}
+
+// TestDedup_Snapshot_RoundTripWithBindings verifies the §7.4
+// persistence contract: BindIncident's identity ref rides the
+// existing snapshot path, so a rebooted sentinel can resume recovery
+// tracking (Bindings) AND still route outcomes (LookupSession).
+func TestDedup_Snapshot_RoundTripWithBindings(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "dedup.json")
+	c1 := newTestDedup(t, 5*time.Minute, path)
+	key := EventKey{UID: "u-rec", Reason: "ErrImagePull"} // canonicalizes
+	c1.Observe(key, time.Now())
+	ref := IncidentRef{
+		Namespace:     "checkout",
+		KindOfObject:  "Pod",
+		Name:          "checkout-7b9d-x4kzq",
+		ControllerRef: "ReplicaSet/checkout-7b9d",
+		Fingerprint:   "sha256:orig",
+		Cluster:       "prod",
+	}
+	c1.BindIncident(key, "sess-rec", ref)
+	if err := c1.Snapshot(); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	c2 := newTestDedup(t, 5*time.Minute, path)
+	sid, ok := c2.LookupSession(key)
+	if !ok || sid != "sess-rec" {
+		t.Errorf("LookupSession after restore = (%q, %v), want (sess-rec, true)", sid, ok)
+	}
+	bindings := c2.Bindings()
+	if len(bindings) != 1 {
+		t.Fatalf("Bindings after restore: got %d, want 1", len(bindings))
+	}
+	b := bindings[0]
+	if b.SessionID != "sess-rec" {
+		t.Errorf("binding SessionID = %q", b.SessionID)
+	}
+	if b.Key.Reason != "ImagePullBackOff" {
+		t.Errorf("binding key reason = %q, want canonical ImagePullBackOff", b.Key.Reason)
+	}
+	if b.Ref != ref {
+		t.Errorf("binding ref drifted through persistence:\n got %+v\nwant %+v", b.Ref, ref)
+	}
+	if b.FirstSeen.IsZero() {
+		t.Errorf("binding FirstSeen must survive persistence")
+	}
+}
+
+// TestDedup_Restore_VersionTolerant pins the loader against the
+// PRE-recovery snapshot format: entries without the "incident" key
+// (written by older sentinels) must load cleanly — the binding still
+// routes followups; only recovery tracking is unavailable for them.
+func TestDedup_Restore_VersionTolerant(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "dedup.json")
+	old := `{
+  "u-old|CrashLoopBackOff": {
+    "session_id": "sess-old",
+    "first_seen": "2026-07-24T10:00:00Z",
+    "last_seen": "2026-07-24T10:05:00Z",
+    "event_last_ts": "2026-07-24T10:05:00Z",
+    "count": 3
+  }
+}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatalf("write old-format snapshot: %v", err)
+	}
+	c := newTestDedup(t, 5*time.Minute, path)
+	key := EventKey{UID: "u-old", Reason: "CrashLoopBackOff"}
+	sid, ok := c.LookupSession(key)
+	if !ok || sid != "sess-old" {
+		t.Errorf("LookupSession on old-format entry = (%q, %v), want (sess-old, true)", sid, ok)
+	}
+	if got := c.Bindings(); len(got) != 0 {
+		t.Errorf("old-format entry has no incident ref; Bindings must skip it, got %+v", got)
+	}
+	// And the new format must not choke an entry that has BOTH.
+	c.Observe(EventKey{UID: "u-new", Reason: "FailedMount"}, time.Now())
+	c.BindIncident(EventKey{UID: "u-new", Reason: "FailedMount"}, "sess-new", IncidentRef{Namespace: "ns", KindOfObject: "Pod", Name: "p"})
+	if err := c.Snapshot(); err != nil {
+		t.Fatalf("Snapshot mixed formats: %v", err)
+	}
+	c2 := newTestDedup(t, 5*time.Minute, path)
+	if got := c2.Bindings(); len(got) != 1 {
+		t.Errorf("mixed snapshot: want 1 resumable binding, got %d", len(got))
+	}
+}
+
+func TestDedup_LookupSession_UnknownKey(t *testing.T) {
+	t.Parallel()
+	c := newTestDedup(t, 5*time.Minute, "")
+	if sid, ok := c.LookupSession(EventKey{UID: "nope", Reason: "R"}); ok || sid != "" {
+		t.Errorf("LookupSession on unknown key = (%q, %v), want empty/false", sid, ok)
+	}
+	// Entry without a bound session is also "unknown".
+	c.Observe(EventKey{UID: "u1", Reason: "R"}, time.Now())
+	if _, ok := c.LookupSession(EventKey{UID: "u1", Reason: "R"}); ok {
+		t.Error("LookupSession must report false for an unbound entry")
 	}
 }
 

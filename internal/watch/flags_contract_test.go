@@ -32,6 +32,7 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 		"mode", "target-session", "owner",
 		"reason", "namespace", "exclude-namespace",
 		"dedup-window", "dedup-persist", "unhealthy-min-count",
+		"recovery-stable-for",
 		"in-cluster", "kubeconfig", "cluster-name",
 		"log-level", "dry-run", "metrics-addr", "snapshot-interval",
 		"otel-exporter",
@@ -39,7 +40,7 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 	args := make([]string, 0, len(frozen))
 	for _, name := range frozen {
 		switch name {
-		case "dedup-window":
+		case "dedup-window", "recovery-stable-for":
 			args = append(args, "--"+name+"=5m")
 		case "snapshot-interval":
 			args = append(args, "--"+name+"=30s")
@@ -78,5 +79,8 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 	}
 	if f.snapshotInterval != 30*time.Second {
 		t.Errorf("default snapshot-interval = %v, want 30s", f.snapshotInterval)
+	}
+	if f.recoveryStableFor != 5*time.Minute {
+		t.Errorf("default recovery-stable-for = %v, want 5m", f.recoveryStableFor)
 	}
 }

@@ -38,6 +38,10 @@ type metrics struct {
 	injectErrors        *prometheus.CounterVec
 	sessionCreates      *prometheus.CounterVec
 	activeIncidents     prometheus.Gauge
+	recoveriesObserved  *prometheus.CounterVec
+	recoveriesReverted  prometheus.Counter
+	recoveryTracking    prometheus.Gauge
+	recoveryDrops       *prometheus.CounterVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -71,6 +75,22 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_active_incidents",
 			Help: "Current number of incidents in the sidecar's dedup cache.",
 		}),
+		recoveriesObserved: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_recoveries_observed_total",
+			Help: "Total kind=resolved outcome records emitted (§7.4), by resolution (recovered|object_deleted).",
+		}, []string{"resolution"}),
+		recoveriesReverted: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_recoveries_reverted_total",
+			Help: "Total kind=resolved.reverted records emitted: symptom recurred within the revert window after a resolve.",
+		}),
+		recoveryTracking: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8s_event_watcher_recovery_tracking",
+			Help: "Current number of bound incidents the recovery tracker is watching for clearance.",
+		}),
+		recoveryDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_recovery_drops_total",
+			Help: "Total resolved signals dropped instead of injected, by cause (unknown_session: binding lost, e.g. restart without --dedup-persist).",
+		}, []string{"cause"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -79,6 +99,10 @@ func newMetrics() *metrics {
 		m.injectErrors,
 		m.sessionCreates,
 		m.activeIncidents,
+		m.recoveriesObserved,
+		m.recoveriesReverted,
+		m.recoveryTracking,
+		m.recoveryDrops,
 	)
 	return m
 }
