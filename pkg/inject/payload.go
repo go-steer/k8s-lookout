@@ -141,6 +141,74 @@ type StormMemberPayload struct {
 	Incident          StormIncidentRef `json:"incident"`
 }
 
+// Watchboard wire kinds (DESIGN.md §7.7 + §15 Q2). Wire contract like
+// the storm kinds: playbook skills and AX match the exact strings.
+const (
+	// KindWatchboardDigest is the rolling digest of warning-class
+	// signals batched into the shared watchboard session.
+	KindWatchboardDigest = "watchboard.digest"
+	// KindWatchboardRotated is the final inject into a watchboard
+	// session when size-based rotation closes it, pointing at the
+	// successor session.
+	KindWatchboardRotated = "watchboard.rotated"
+)
+
+// WatchboardEntry is one warning-class signal on a watchboard digest:
+// its kind + fingerprint, the object reference, and the dedup
+// counters. Compact by design — the digest is a board, not an
+// incident record; the agent runs `lookout` reads if an entry needs
+// investigation.
+type WatchboardEntry struct {
+	Kind         string    `json:"kind"`
+	Fingerprint  string    `json:"fingerprint"`
+	Reason       string    `json:"reason"`
+	Namespace    string    `json:"namespace,omitempty"`
+	KindOfObject string    `json:"kind_of_object"`
+	Name         string    `json:"name"`
+	UID          string    `json:"uid"`
+	Count        int       `json:"count"`
+	FirstSeen    time.Time `json:"first_seen"`
+	LastSeen     time.Time `json:"last_seen"`
+}
+
+// WatchboardDigestPayload is the JSON body injected for
+// kind=watchboard.digest (§7.7: warning severity routes to the shared
+// watchboard session as a batched rolling digest). SCHEMA-STABLE:
+// pinned byte-exact by TestWatchboardDigest_ExactWireShape.
+//
+// BoardGeneration + Sequence are the session's in-band identity
+// marker: POST /sessions has no name parameter, so a watchboard
+// session is recognized by its content — every inject into it is
+// kind=watchboard.* — and by the (generation, sequence) lineage
+// coordinates on each digest. Generation counts watchboard sessions
+// this sentinel has opened (1-based; rotation increments it);
+// Sequence counts digests within the current session (1-based).
+type WatchboardDigestPayload struct {
+	Kind            string            `json:"kind"`
+	Cluster         string            `json:"cluster"`
+	BoardGeneration int               `json:"board_generation"`
+	Sequence        int               `json:"sequence"`
+	WindowStart     time.Time         `json:"window_start"`
+	WindowEnd       time.Time         `json:"window_end"`
+	Entries         []WatchboardEntry `json:"entries"`
+}
+
+// WatchboardRotatedPayload is the JSON body of the FINAL inject into
+// a watchboard session when size-based rotation (§15 Q2) closes it:
+// the successor pointer that keeps the lineage walkable from either
+// end. SCHEMA-STABLE: pinned byte-exact by
+// TestWatchboardRotated_ExactWireShape. Existing dedup bindings into
+// the closed session stay valid — only NEW warnings flow to the
+// successor.
+type WatchboardRotatedPayload struct {
+	Kind               string    `json:"kind"`
+	Cluster            string    `json:"cluster"`
+	BoardGeneration    int       `json:"board_generation"`
+	SuccessorSessionID string    `json:"successor_session_id"`
+	InjectsCount       int       `json:"injects_count"`
+	RotatedAt          time.Time `json:"rotated_at"`
+}
+
 // ResolvedPayload is the JSON body injected for kind=resolved and
 // kind=resolved.reverted (DESIGN.md §7.4) — the ground-truth outcome
 // record of an incident session. SCHEMA-STABLE per §9.3: outcome

@@ -67,6 +67,13 @@ type flags struct {
 	storm             bool
 	stormWindow       time.Duration
 	stormMin          int
+	severity          severityFlag
+	watchboardBatch   int
+	watchboardFlush   time.Duration
+	watchboardRotate  int
+	// severityOverrides is the parsed --severity map, populated by
+	// validate().
+	severityOverrides map[string]engine.Severity
 	inCluster         bool
 	kubeconfig        string
 	clusterName       string
@@ -122,6 +129,17 @@ func parseFlags(args []string) (*flags, error) {
 	fs.BoolVar(&f.storm, "storm", false, "Enable storm correlation (§7.5): group new incidents sharing a blast-radius key (nearest common topology ancestor) into one kind=storm session. Requires pods/nodes/replicasets list+watch RBAC for the graph informers (verified loudly at startup).")
 	fs.DurationVar(&f.stormWindow, "storm-window", engine.DefaultStormWindow, "Second-level correlation window for storm formation. 0 disables correlation even with --storm.")
 	fs.IntVar(&f.stormMin, "storm-min", engine.DefaultStormMin, "Minimum incidents sharing a blast-radius key within --storm-window to form a storm. Must be >= 2.")
+
+	// Severity routing (§7.7). ADDITIVE flags: with no --severity
+	// overrides the routes follow the source-stamped defaults, and the
+	// M0 surface (k8s-events only, all critical) behaves identically.
+	// The watchboard flags only matter in per-incident mode — in
+	// --mode=shared ALL severities keep routing to --target-session
+	// (frozen contract) and the watchboard machinery is disabled.
+	fs.Var(&f.severity, "severity", "Per-kind severity override(s): kind=level[,kind=level...] with level one of critical|warning|info. Repeatable and additive; overrides the source-stamped §7.7 default for that kind. Each kind may appear at most once.")
+	fs.IntVar(&f.watchboardBatch, "watchboard-batch", 5, "Buffered warning-class signals that trigger a watchboard digest flush (per-incident mode; §7.7). Must be >= 1.")
+	fs.DurationVar(&f.watchboardFlush, "watchboard-flush", 60*time.Second, "Maximum age of a buffered warning before the watchboard digest flushes regardless of batch size. Must be > 0.")
+	fs.IntVar(&f.watchboardRotate, "watchboard-rotate", 200, "Digest injects per watchboard session before size-based rotation (§15 Q2) opens a fresh session. Must be >= 1.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -182,6 +200,23 @@ func (f *flags) validate() error {
 	if f.stormMin < 2 {
 		return errors.New("--storm-min must be >= 2 (a storm of one is an incident)")
 	}
+	// Severity routing (§7.7): overrides and watchboard bounds are
+	// config errors in every mode, like --sources and the storm
+	// bounds. (The watchboard itself only runs in per-incident mode.)
+	overrides, err := engine.ParseSeverityOverrides(f.severity.values)
+	if err != nil {
+		return fmt.Errorf("--severity: %w", err)
+	}
+	f.severityOverrides = overrides
+	if f.watchboardBatch < 1 {
+		return errors.New("--watchboard-batch must be >= 1")
+	}
+	if f.watchboardFlush <= 0 {
+		return errors.New("--watchboard-flush must be > 0")
+	}
+	if f.watchboardRotate < 1 {
+		return errors.New("--watchboard-rotate must be >= 1")
+	}
 	switch f.mode {
 	case "per-incident":
 		if f.dryRun {
@@ -212,6 +247,20 @@ func (f *flags) validate() error {
 // stormEnabled reports whether §7.5 storm correlation is on: the
 // explicit --storm opt-in AND a non-zero correlation window.
 func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
+
+// severityFlag is the repeatable --severity flag: each occurrence is
+// kept verbatim and parsed (additively) by
+// engine.ParseSeverityOverrides in validate().
+type severityFlag struct {
+	values []string
+}
+
+func (v *severityFlag) String() string { return strings.Join(v.values, ",") }
+
+func (v *severityFlag) Set(s string) error {
+	v.values = append(v.values, s)
+	return nil
+}
 
 // splitCSV parses a comma-separated flag value. Empty strings after
 // split are dropped; whitespace around values trimmed.
@@ -249,6 +298,18 @@ type dispatcher struct {
 	// DispatchSignal. Nil when recovery is disabled
 	// (--recovery-stable-for=0, dry-run, or missing pods RBAC).
 	tracker *engine.RecoveryTracker
+	// routing, when non-nil, is the §7.7 severity-routing policy:
+	// per-kind severity defaults come stamped by the sources; config
+	// overrides them via --severity. Nil in unit tests that predate
+	// severity routing — a nil policy skips the routing stage
+	// entirely, preserving the pre-§7.7 pipeline byte-for-byte.
+	routing *engine.RoutingPolicy
+	// board, when non-nil, is the §7.7 shared watchboard the warning
+	// class batches into. Only ever set in per-incident mode: in
+	// --mode=shared ALL severities keep routing to --target-session
+	// (the frozen shared-mode contract) and the watchboard machinery
+	// is disabled.
+	board *watchboard
 	// storm, when non-nil, is the §7.5 correlation stage sitting
 	// between dedup and session creation: new incidents pass through
 	// it and may be folded into a kind=storm session instead of
@@ -309,6 +370,14 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Fingerprint == "" {
 		sig.Fingerprint = engine.Fingerprint(sig.Kind, engine.CanonicalReason(sig.Key.Reason), sig.KindOfObject, sig.Zone)
 	}
+	// Effective severity (§7.7): the source-stamped per-kind default,
+	// unless config overrides the kind via --severity. Stamped before
+	// the storm stage so a storm's max-member severity honors the
+	// override too. A nil policy (pre-§7.7 unit tests) leaves the
+	// source's stamp untouched.
+	if d.routing != nil {
+		sig.Severity = d.routing.Classify(sig)
+	}
 	d.metrics.eventsSeen.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 	if !d.filter.Accept(sig) {
 		return
@@ -329,6 +398,20 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
 		return
 	}
+	// Severity routing, info class (§7.7): stored only per §9.1.
+	// TODO(M3 store): persist the signal in the raw store instead of
+	// dropping it. Until then it is counted + debug-logged — never
+	// silently ignored. Placed after dedup (so the metric counts
+	// would-be-stored incident records, not raw event volume) and
+	// before storm correlation (info is the store-only class; it
+	// neither opens nor joins sessions, storms included). Shared mode
+	// skips routing entirely: ALL severities go to --target-session.
+	if d.mode == "per-incident" && d.routing != nil && engine.RouteFor(sig.Severity) == engine.RouteStore {
+		d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
+		log.Printf("info-drop %s %s/%s (severity=info: stored-only class; raw store lands in M3 — counted and dropped)",
+			sig.Kind, sig.Namespace, sig.Name)
+		return
+	}
 	// New incident: correlate, then create or reuse a session and
 	// inject. The lock serializes storm formation with session
 	// creation so two racing incidents cannot both open the storm.
@@ -346,6 +429,19 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			d.stormAttached(ctx, sig, v)
 			return
 		}
+	}
+	// Severity routing, warning class (§7.7): batch into the shared
+	// watchboard's rolling digest instead of opening a per-incident
+	// session. AFTER the storm stage on purpose: a correlated burst
+	// always opens a storm session regardless of member severity —
+	// §7.5's whole point is ONE aggregate incident an agent works,
+	// which a digest entry is not — so storm formation/attachment
+	// bypasses warning routing (the returns above). Only in
+	// per-incident mode: shared mode routes ALL severities to
+	// --target-session unchanged.
+	if d.mode == "per-incident" && d.board != nil && engine.RouteFor(sig.Severity) == engine.RouteWatchboard {
+		d.board.Add(ctx, sig, result.Count)
+		return
 	}
 	sid := d.targetSid
 	if d.mode == "per-incident" && !d.dryRun {
@@ -606,6 +702,29 @@ func realMain(argv []string) error {
 		dryRun:    f.dryRun,
 	}
 
+	// Severity routing (§7.7): the policy (source defaults +
+	// --severity overrides) is always on; the shared watchboard only
+	// exists in per-incident mode — in --mode=shared ALL severities
+	// keep routing to --target-session exactly as before (frozen
+	// contract; the watchboard is the per-incident-mode answer to
+	// warning noise).
+	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
+	if f.mode == "per-incident" {
+		board := newWatchboard(watchboardConfig{
+			injector:      inj,
+			metrics:       m,
+			cluster:       f.clusterName,
+			dryRun:        f.dryRun,
+			batch:         f.watchboardBatch,
+			flushInterval: f.watchboardFlush,
+			rotateAfter:   f.watchboardRotate,
+		})
+		board.bind = disp.bindWatchboardIncident
+		disp.board = board
+	} else {
+		log.Printf("severity routing: --mode=shared — all severities route to --target-session (watchboard disabled)")
+	}
+
 	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -620,6 +739,15 @@ func realMain(argv []string) error {
 	// Start the periodic dedup-snapshot ticker if configured.
 	if f.dedupPersist != "" && f.snapshotInterval > 0 {
 		go runSnapshotLoop(ctx, dedup, f.snapshotInterval)
+	}
+
+	// Watchboard interval-flush loop (§7.7): flushes buffered
+	// warnings at --watchboard-flush age, plus a final best-effort
+	// flush on shutdown so a terminating sentinel keeps its buffer.
+	if disp.board != nil {
+		go disp.board.run(ctx)
+		log.Printf("watchboard: enabled (batch=%d, flush=%s, rotate after %d digest injects — §15 Q2 size-based)",
+			f.watchboardBatch, f.watchboardFlush, f.watchboardRotate)
 	}
 
 	// Build the kube client (skip in dry-run to avoid needing a
