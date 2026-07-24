@@ -52,6 +52,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ClusterRole gains pods `list`/`watch`; deployments still running the
   M0 role keep working with recovery disabled (loud startup log, no
   crash-loop).
+- The `object-state` source (M2, DESIGN.md §7.2 row 2) — leading
+  indicators from state transitions, watched by shared informers on
+  Pods, Nodes, Deployments, EndpointSlices, and PodDisruptionBudgets.
+  New source-namespaced signal kinds (append-only; the dedup reason is
+  the kind suffix): `objectstate.node_notready` (Ready True→False,
+  Unknown counts as down; critical), `objectstate.node_flapping` (N
+  Ready transitions within a window, default 3/10m; warning),
+  `objectstate.progress_deadline` (rollout stalled past 80% of
+  `progressDeadlineSeconds` with unready replicas — fired BEFORE the
+  control plane's ProgressDeadlineExceeded event; warning),
+  `objectstate.endpoints_empty` (a Service's ready-endpoint count
+  across its EndpointSlices transitions >0 → 0; created-empty never
+  fires; critical), `objectstate.pdb_gridlocked` (`disruptionsAllowed`
+  transitions >0 → 0 while pods exist behind the PDB — the transition
+  counterpart of `triage delta`'s scan; warning), and
+  `objectstate.restart_burst` (restart-count growth ≥3 within 10m —
+  the leading edge of a crash loop, ahead of kubelet's BackOff;
+  warning). Transition memory is in-memory with TTL, rebuilt from the
+  informer cache on restart; the source arms only after every cache
+  syncs, so an initial LIST never fires transition signals.
+  `node_notready` and `restart_burst` join their reactive k8s-event
+  dedup families (`NodeNotReady`, `CrashLoopBackOff`) via append-only
+  `CanonicalReason` entries, so the leading signal opens the session
+  and the later event attaches as a followup. Enabled by the new
+  ADDITIVE `--sources` flag (default `k8s-events` — existing
+  deployments unchanged; `--sources=k8s-events,object-state` opts in);
+  the source declares its RBAC (nodes, deployments, endpointslices,
+  poddisruptionbudgets list/watch — ClusterRole updated) and the §11
+  probe fails loudly when it's missing. The source's pod informer
+  absorbs the recovery pod observer: when enabled, §7.4 clearance
+  tracking runs off the source's informer (one pod watch total); the
+  standalone observer remains the zero-config fallback with behavior
+  unchanged.
 
 ## [0.2.0] - 2026-07-24
 

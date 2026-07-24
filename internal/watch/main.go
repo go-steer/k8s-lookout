@@ -43,6 +43,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
+	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 )
 
 // flags is the CLI-shaped config, parsed once in main and threaded
@@ -57,6 +58,7 @@ type flags struct {
 	reasons           string
 	namespaces        string
 	excludeNamespaces string
+	sources           string
 	dedupWindow       time.Duration
 	dedupPersist      string
 	unhealthyMinCount int
@@ -91,6 +93,12 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.reasons, "reason", "", "Comma-separated allow-list of Event.Reason values. Empty = shipped default set.")
 	fs.StringVar(&f.namespaces, "namespace", "", "Comma-separated allow-list of namespaces. Empty = all namespaces.")
 	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces.")
+
+	// Signal sources (§7.2: sources are individually enabled).
+	// ADDITIVE flag: the default is exactly the M0 surface, so
+	// existing deployments keep byte-identical behavior without
+	// touching their config.
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state. Default preserves the M0 watcher surface (k8s-events only).")
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
@@ -136,6 +144,19 @@ func (f *flags) validate() error {
 	}
 	if strings.HasSuffix(f.daemonURL, "/") {
 		return fmt.Errorf("--daemon-url must not end with '/' (got %q)", f.daemonURL)
+	}
+	// Sources are validated before the mode switch's dry-run early
+	// return: a typo'd source name is a config error in every mode.
+	names := splitCSV(f.sources)
+	if len(names) == 0 {
+		return fmt.Errorf("--sources must enable at least one source (known: %s, %s)", k8sevents.Name, objectstate.Name)
+	}
+	for _, name := range names {
+		switch name {
+		case k8sevents.Name, objectstate.Name:
+		default:
+			return fmt.Errorf("--sources: unknown source %q (known: %s, %s)", name, k8sevents.Name, objectstate.Name)
+		}
 	}
 	switch f.mode {
 	case "per-incident":
@@ -541,13 +562,10 @@ func realMain(argv []string) error {
 		return err
 	}
 
-	// Signal sources (§7.2). One source today — the M0 event watcher
-	// refactored into pkg/sources/k8sevents — but registered, probed,
-	// and run through the generic interface the rest of M2 plugs into.
-	// The flag surface deliberately gains nothing here: source
-	// enablement config lands with the second source.
-	registry := sources.NewRegistry()
-	if err := registry.Register(k8sevents.New(client, 0)); err != nil {
+	// Signal sources (§7.2), individually enabled via --sources
+	// (default: k8s-events only — the frozen M0 surface).
+	registry, objState, err := buildSources(f, client)
+	if err != nil {
 		return err
 	}
 
@@ -562,7 +580,7 @@ func realMain(argv []string) error {
 	// Recovery injects (§7.4): watch bound incidents for symptom
 	// clearance and inject the outcome into the same session.
 	if f.recoveryStableFor > 0 {
-		if err := setupRecovery(ctx, f, client, dedup, disp, m); err != nil {
+		if err := setupRecovery(ctx, f, client, dedup, disp, m, objState); err != nil {
 			return err
 		}
 	}
@@ -593,36 +611,78 @@ var recoveryAccess = []sources.Requirement{
 	{Resource: "pods", Verb: "watch"},
 }
 
+// buildSources registers the sources named by --sources (§7.2:
+// sources are individually enabled in config). The object-state
+// source is returned separately when enabled so setupRecovery can
+// reuse its pod informer as the §7.4 clearance observer instead of
+// starting a second one.
+func buildSources(f *flags, client kubernetes.Interface) (*sources.Registry, *objectstate.Source, error) {
+	registry := sources.NewRegistry()
+	var objState *objectstate.Source
+	for _, name := range splitCSV(f.sources) {
+		var src sources.Source
+		switch name {
+		case k8sevents.Name:
+			src = k8sevents.New(client, 0)
+		case objectstate.Name:
+			objState = objectstate.New(client, objectstate.DefaultConfig())
+			src = objState
+		default:
+			// validate() rejects unknown names before we get here.
+			return nil, nil, fmt.Errorf("--sources: unknown source %q", name)
+		}
+		if err := registry.Register(src); err != nil {
+			return nil, nil, err
+		}
+	}
+	return registry, objState, nil
+}
+
 // setupRecovery wires the §7.4 closed loop: pod clearance observer →
 // RecoveryTracker → dispatcher, plus restart seeding from the dedup
 // snapshot's persisted bindings.
 //
-// RBAC posture differs from the §11 source probe on purpose: an M0
-// deployment upgraded by image swap may still run the old ClusterRole
-// without pods list/watch, and — unlike a signal source — a disabled
-// recovery observer means a missing outcome record, never a missed
-// incident. So insufficient RBAC disables recovery with a loud log
-// naming the grant, instead of crash-looping existing deployments.
-func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics) error {
-	reviewer := sources.NewAccessReviewer(client)
-	for _, req := range recoveryAccess {
-		allowed, err := reviewer.Allowed(ctx, req)
-		if err != nil {
-			return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+// Observer selection: when the object-state source is enabled its pod
+// informer doubles as the clearance observer (the source absorbed the
+// minimal pod observer — one informer, same judging behavior, and its
+// RBAC was already verified by the §11 source probe). Otherwise the
+// standalone fallback observer keeps the default deployment's
+// zero-config behavior identical to the shipped M2 PR.
+//
+// Fallback RBAC posture differs from the §11 source probe on purpose:
+// an M0 deployment upgraded by image swap may still run the old
+// ClusterRole without pods list/watch, and — unlike a signal source —
+// a disabled recovery observer means a missing outcome record, never
+// a missed incident. So insufficient RBAC disables recovery with a
+// loud log naming the grant, instead of crash-looping existing
+// deployments.
+func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, objState *objectstate.Source) error {
+	var observer engine.ClearanceObserver
+	if objState != nil {
+		observer = objState.ClearanceObserver()
+		log.Printf("recovery: clearance observer backed by the object-state source's pod informer")
+	} else {
+		reviewer := sources.NewAccessReviewer(client)
+		for _, req := range recoveryAccess {
+			allowed, err := reviewer.Allowed(ctx, req)
+			if err != nil {
+				return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+			}
+			if !allowed {
+				log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
+				return nil
+			}
 		}
-		if !allowed {
-			log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
-			return nil
+		obs := newPodClearanceObserver(client)
+		if err := obs.Start(ctx); err != nil {
+			return err
 		}
-	}
-	obs := newPodClearanceObserver(client)
-	if err := obs.Start(ctx); err != nil {
-		return err
+		observer = obs
 	}
 	tracker := engine.NewRecoveryTracker(f.recoveryStableFor, func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
-	tracker.AddObserver(obs)
+	tracker.AddObserver(observer)
 	disp.tracker = tracker
 	// Resume clearance watching for bindings restored from
 	// --dedup-persist so the fix-verify loop survives a restart.

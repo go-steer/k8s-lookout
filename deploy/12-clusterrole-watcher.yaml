@@ -27,6 +27,17 @@
 #                       tracking is disabled (logged loudly).
 #   - get pods       — status enrichment for inject payloads (owner
 #                       ref, container statuses)
+#   - list/watch nodes, deployments, endpointslices,
+#     poddisruptionbudgets — the object-state source (DESIGN.md §7.2,
+#                       enabled via --sources=k8s-events,object-state):
+#                       leading indicators from state transitions.
+#                       Harmless when the source is disabled (the
+#                       default); required when enabled — the §11
+#                       startup probe fails loudly naming the missing
+#                       grant. A namespace-scoped deployment (Role,
+#                       not ClusterRole) cannot satisfy these and gets
+#                       the same loud per-source failure instead of a
+#                       silently empty watch.
 #
 # What the sentinel deliberately does NOT get:
 #   - patch/update/delete on anything — the sentinel is read-only
@@ -42,3 +53,15 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list", "watch"]
