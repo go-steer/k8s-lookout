@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lookout triage delta` (§5) — one scan, every abnormal object; the first
+  read-path command. Five finding classes, toggled with
+  `--only=pods,nodes,pdb,system,quota`: broken workloads (crashloop /
+  image-pull / OOM history / restart churn / aged-Pending with the
+  scheduler's verdict / not-ready containers / failed pods and Jobs /
+  rollout mismatch with stalled-progress detection), node problems
+  (NotReady, Memory/Disk/PID pressure, NPD-style conditions, cordons still
+  holding pods, spot/autoscaler reclaim taints), gridlocked
+  PodDisruptionBudgets, degraded kube-system add-ons (CoreDNS / kube-proxy /
+  CNI / CSI by well-known names and labels), and ResourceQuotas at or near
+  their hard limits. Thresholds: `--restarts=5`, `--pending-age=5m`,
+  `--quota-warn=90`. One paged List pass per resource kind; findings
+  ordered critical-first; healthy objects emit nothing. Registered as MCP
+  tool `k8s_triage_delta`.
 - `pkg/emit` — the §4.2 output envelope: findings as flat ordered key=value
   records (logfmt default, `--format=json` for one JSON object per line),
   the mandatory `scanned=<n> findings=<n> elapsed=<d>` summary line, exit
