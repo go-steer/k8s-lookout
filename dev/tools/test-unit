@@ -22,6 +22,15 @@ set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
 
-exec go test -race -timeout 5m \
+go test -race -timeout 5m \
   -coverprofile=coverage.out -covermode=atomic \
   ./...
+
+# Cloud-provider tests are build-tag gated (DESIGN.md §2); the default
+# run above proves no provider links into the vanilla build, this run
+# executes the tagged provider tests. Scoped to the provider boundary
+# + the multicall wiring to keep CI fast (dev/tools/build already
+# compiles every package under all three tag variants).
+echo "▸ go test -tags allproviders ./pkg/cloud/... ./cmd/lookout"
+exec go test -race -timeout 5m -tags allproviders \
+  ./pkg/cloud/... ./cmd/lookout
