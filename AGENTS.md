@@ -54,17 +54,27 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**M0 complete** (see `docs/milestones/M0.md` for the exit-check evidence):
-the `lookout` multicall binary exists, `lookout watch` is the moved
-`k8s-event-watcher` (flags frozen by `internal/watch/flags_contract_test.go`,
-inject wire shape pinned byte-for-byte by
-`TestDispatcher_ExactInjectPayloadWireShape`), `pkg/{kube,engine,inject}` are
-extracted, and `ghcr.io/go-steer/lookout` images publish on `v*` tags with
-`deploy/` manifests that are drop-in for existing watcher deployments.
-`pkg/emit` (the output sanitizer) arrives with the first read-path commands.
-The core-agent side (deleting the watcher, dropping `k8s.io/*` deps) is a
-separate PR in that repo.
+**M1 complete** (see `docs/milestones/M1.md` for the exit-check evidence;
+`docs/milestones/M0.md` for M0's): the read-path core is in — `triage
+delta|logs|spec`, `state edges`, `bundle`, `health`, all registered through
+the `pkg/checks` metadata registry (one declaration generates `--help`, the
+MCP schema, and the skill reference stubs), executed under the §4.2
+envelope with the §6.5 sanitizer on every surface, served over MCP by
+`lookout mcp`, and consuming the `pkg/graph` COW topology index (Q5
+compaction gate recorded in `docs/graph-q5-gate.md`). The first skills ship
+in `skills/` (`k8s-triage`, `cluster-health`, `playbooks/`); their
+`references/` are generated — run `dev/tools/gen-skill-refs` after touching
+command metadata, and keep `internal/skilldoc`'s contract tests green (they
+parse-validate every documented `lookout` command line). From M0: `lookout
+watch` is the moved `k8s-event-watcher` (flags frozen by
+`internal/watch/flags_contract_test.go`, inject wire shape pinned
+byte-for-byte by `TestDispatcher_ExactInjectPayloadWireShape`), and
+`ghcr.io/go-steer/lookout` images publish on `v*` tags.
 
-Next milestone: **M1 — read-path core** (DESIGN.md §14): `pkg/graph` v1,
-`triage logs|delta|spec`, `state edges`, `bundle`, `health`, the §4.2 output
-contract, `pkg/emit` sanitizer + golden tests, `lookout mcp`, first skills.
+Next milestone: **M2 — closed loop** (DESIGN.md §14): recovery injects
+(§7.4), storm correlation via graph blast-radius keys (§7.5), severity
+routing (§7.7), enrichment via the in-process bundle (§7.6), and the
+`object-state` source. Deferred from M1 scope: `triage
+events|radius|changes`, `net probe` (M3); the control-plane health
+category and the store/memory-merged `health` (M4); `--incident`
+enrichment pre-warming (M2).
