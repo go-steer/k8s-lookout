@@ -120,6 +120,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback addresses (no auth story yet, so non-loopback binds are refused
   loudly). New dependency: `modelcontextprotocol/go-sdk` v1.4.1 (pinned to
   core-agent's version).
+- `lookout bundle` (M1, DESIGN.md §5) — the correlated incident snapshot
+  and the first composition command: given `--workload=<Kind>/<ns>/<name>`
+  (or `--incident=<inject payload JSON>`, whose object reference resolves
+  to the owning workload via the graph's owner chain, falling back to the
+  payload's `controller_ref` when the object is already gone), one List
+  pass feeds every section of a single payload — sanitized `spec`,
+  target-scoped `delta`, dependency-edge validity (`edges`), blast
+  `radius` (upstream/lateral/downstream neighbors with `relation`/`hop`
+  fields, dangling references flagged), and Drain-distilled `logs` for
+  the workload's pods (tighter `--max-templates=15` budget). Findings
+  carry a `section` field so the stream reads as one document; a `triage
+  events` section joins in M3 when that command lands. The `state edges`
+  List pass now also ingests Nodes into the graph so placement neighbors
+  resolve as observed instead of dangling. Registered as MCP tool
+  `k8s_triage_workload`.
 
 ## [0.1.0] - 2026-07-24
 

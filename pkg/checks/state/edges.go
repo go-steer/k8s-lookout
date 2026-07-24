@@ -23,7 +23,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,8 +149,7 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if wl.IsZero() {
 		return 0, errors.New("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>)")
 	}
-	kind, ok := workloadKinds[wl.Kind]
-	if !ok {
+	if _, ok := workloadKinds[wl.Kind]; !ok {
 		return 0, fmt.Errorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
 	}
 	if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
@@ -166,54 +164,22 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
 	}
-	ix, err := listCluster(ctx, client, listNS)
+	// One List pass + one-shot graph build (§6.3 initial-sync path),
+	// via the same Cluster seam `bundle` composes over.
+	cluster, err := LoadCluster(ctx, client, listNS)
 	if err != nil {
 		return 0, err
 	}
-
-	// One-shot graph build (§6.3 initial-sync path): everything the
-	// paged Lists returned, one FromObjects, one swap. Snapshot would
-	// return ErrNotReady before this publish.
-	g := graph.New(graph.Options{SwapInterval: -1})
-	if err := g.Writer().FromObjects(slices.Values(ix.graphObjs)); err != nil {
-		return 0, err
-	}
-	snap, err := g.Snapshot()
+	findings, err := cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
 	if err != nil {
 		return 0, err
 	}
-
-	id, ok := snap.Lookup(kind, wl.Namespace, wl.Name)
-	if ok {
-		ref, resolved := snap.Resolve(id)
-		ok = resolved && ref.Observed
-	}
-	if !ok {
-		return 0, fmt.Errorf("workload %s not found (%d objects listed in %s)",
-			wl, ix.scanned, scopeName(listNS))
-	}
-
-	scan := &edgeScan{
-		wl:       wl,
-		ix:       ix,
-		snap:     snap,
-		id:       id,
-		now:      deps.now().UTC(),
-		certWarn: inv.Flags.Duration("cert-warn"),
-	}
-	for _, f := range scan.run() {
+	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
 		}
 	}
-	return ix.scanned, nil
-}
-
-func scopeName(ns string) string {
-	if ns == metav1.NamespaceAll {
-		return "all namespaces"
-	}
-	return "namespace " + ns
+	return cluster.Scanned(), nil
 }
 
 // index holds the typed objects from the List pass. The graph stores
@@ -310,6 +276,19 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string) (*
 				}
 				return l.Items, l.Continue, nil
 			}, func(p *corev1.Pod) { ix.pods[key(p.Namespace, p.Name)] = p; graphObj(p) })
+		},
+		func() error {
+			// Nodes are cluster-scoped and ingested for the graph
+			// only: they resolve pods' RunsOn edges so blast-radius
+			// consumers (`bundle`) see placement neighbors as
+			// observed nodes, not dangling references.
+			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
+				l, err := client.CoreV1().Nodes().List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(n *corev1.Node) { graphObj(n) })
 		},
 		func() error {
 			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
