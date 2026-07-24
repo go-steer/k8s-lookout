@@ -23,13 +23,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
 // recordingDispatcher captures every event the watcher dispatches
 // for later assertion. Thread-safe.
 type recordingDispatcher struct {
 	mu     sync.Mutex
-	events []TriageEvent
+	events []engine.TriageEvent
 	// notify is closed after the first Dispatch — tests wait on
 	// it to avoid racing the informer's async delivery.
 	firstOnce sync.Once
@@ -40,17 +42,17 @@ func newRecordingDispatcher() *recordingDispatcher {
 	return &recordingDispatcher{first: make(chan struct{})}
 }
 
-func (r *recordingDispatcher) Dispatch(_ context.Context, ev TriageEvent) {
+func (r *recordingDispatcher) Dispatch(_ context.Context, ev engine.TriageEvent) {
 	r.mu.Lock()
 	r.events = append(r.events, ev)
 	r.mu.Unlock()
 	r.firstOnce.Do(func() { close(r.first) })
 }
 
-func (r *recordingDispatcher) snapshot() []TriageEvent {
+func (r *recordingDispatcher) snapshot() []engine.TriageEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]TriageEvent, len(r.events))
+	out := make([]engine.TriageEvent, len(r.events))
 	copy(out, r.events)
 	return out
 }

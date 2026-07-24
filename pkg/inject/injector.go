@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+// Package inject implements the thin HTTP client the watch sentinel
+// uses to speak to a core-agent daemon, plus the frozen wire types it
+// POSTs (see payload.go).
+package inject
 
 import (
 	"bytes"
@@ -28,58 +31,58 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// injectorConfig captures the daemon-side surface the sidecar posts
+// Config captures the daemon-side surface the sidecar posts
 // against. Constructed from CLI flags in main.go; injected into the
 // injector so tests can substitute their own httptest server.
-type injectorConfig struct {
-	// daemonURL is the base URL (scheme + host + port) — e.g.
+type Config struct {
+	// DaemonURL is the base URL (scheme + host + port) — e.g.
 	// "http://127.0.0.1:7777" or "https://core-agent.example:7777".
 	// The injector appends the path components; callers pass a
 	// URL WITHOUT a trailing slash.
-	daemonURL string
+	DaemonURL string
 
-	// bearerToken authenticates the sidecar to the daemon. Loaded
+	// BearerToken authenticates the sidecar to the daemon. Loaded
 	// from an env var by main.go (`--token-env NAME`).
-	bearerToken string
+	BearerToken string
 
-	// assertedCaller is the identity the daemon stamps as session
+	// AssertedCaller is the identity the daemon stamps as session
 	// Owner on POST /sessions. The sidecar must be listed in
 	// attach.multi_session.proxy_identities in the daemon config
 	// for this to be honored.
-	assertedCaller string
+	AssertedCaller string
 
-	// httpClient lets tests swap in a *http.Client that talks to
+	// HTTPClient lets tests swap in a *http.Client that talks to
 	// httptest.NewServer. Nil in production; main.go leaves it nil.
-	httpClient *http.Client
+	HTTPClient *http.Client
 }
 
-// injector wraps a small HTTP client that speaks the two daemon
+// Injector wraps a small HTTP client that speaks the two daemon
 // endpoints the sidecar needs: POST /sessions (creates a new
 // per-incident session and returns the SessionID) and
 // POST /sessions/<sid>/inject (queues a message on that session's
 // inbox). No SSE, no auth introspection, no session-list — this is
 // intentionally the thinnest wire client.
-type injector struct {
-	cfg    injectorConfig
+type Injector struct {
+	cfg    Config
 	client *http.Client
 }
 
-// newInjector constructs an injector from the config. Validates the
+// NewInjector constructs an Injector from the config. Validates the
 // required fields early so misconfig fails fast.
-func newInjector(cfg injectorConfig) (*injector, error) {
-	if cfg.daemonURL == "" {
+func NewInjector(cfg Config) (*Injector, error) {
+	if cfg.DaemonURL == "" {
 		return nil, errors.New("injector: daemonURL is required")
 	}
-	if strings.HasSuffix(cfg.daemonURL, "/") {
-		return nil, fmt.Errorf("injector: daemonURL must not end with '/' (got %q)", cfg.daemonURL)
+	if strings.HasSuffix(cfg.DaemonURL, "/") {
+		return nil, fmt.Errorf("injector: daemonURL must not end with '/' (got %q)", cfg.DaemonURL)
 	}
-	if cfg.bearerToken == "" {
+	if cfg.BearerToken == "" {
 		return nil, errors.New("injector: bearerToken is required")
 	}
-	// assertedCaller can be empty for daemons that don't run
+	// AssertedCaller can be empty for daemons that don't run
 	// multi-session (rare for this sidecar's use case but not the
 	// injector's responsibility to enforce).
-	client := cfg.httpClient
+	client := cfg.HTTPClient
 	if client == nil {
 		// Real production client with a modest timeout —
 		// POST /sessions + POST /inject are both cheap. If the
@@ -97,7 +100,7 @@ func newInjector(cfg injectorConfig) (*injector, error) {
 			Transport: otelhttp.NewTransport(http.DefaultTransport),
 		}
 	}
-	return &injector{cfg: cfg, client: client}, nil
+	return &Injector{cfg: cfg, client: client}, nil
 }
 
 // createSessionResponse mirrors pkg/attach.createSessionResponse's
@@ -114,14 +117,14 @@ type createSessionResponse struct {
 // cfg.assertedCaller. Returns the new SessionID on success.
 // Non-201 responses surface as an error carrying the daemon's
 // response body for diagnostic clarity.
-func (i *injector) CreateSession(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, i.cfg.daemonURL+"/sessions", nil)
+func (i *Injector) CreateSession(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, i.cfg.DaemonURL+"/sessions", nil)
 	if err != nil {
 		return "", fmt.Errorf("injector: build POST /sessions: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+i.cfg.bearerToken)
-	if i.cfg.assertedCaller != "" {
-		req.Header.Set("X-Asserted-Caller", i.cfg.assertedCaller)
+	req.Header.Set("Authorization", "Bearer "+i.cfg.BearerToken)
+	if i.cfg.AssertedCaller != "" {
+		req.Header.Set("X-Asserted-Caller", i.cfg.AssertedCaller)
 	}
 	resp, err := i.client.Do(req)
 	if err != nil {
@@ -153,7 +156,7 @@ type injectMessageRequest struct {
 // Inject POSTs a payload to /sessions/<sid>/inject. The payload is
 // JSON-encoded and wrapped in the inject-message envelope. On
 // non-2xx response returns an error carrying the daemon's body.
-func (i *injector) Inject(ctx context.Context, sessionID string, payload InjectPayload) error {
+func (i *Injector) Inject(ctx context.Context, sessionID string, payload Payload) error {
 	if sessionID == "" {
 		return errors.New("injector: Inject: sessionID is required")
 	}
@@ -169,15 +172,15 @@ func (i *injector) Inject(ctx context.Context, sessionID string, payload InjectP
 	// works when the SessionID is unambiguous across registered
 	// apps, which it always is in the sidecar's single-daemon
 	// deployment model.
-	url := i.cfg.daemonURL + "/sessions/" + sessionID + "/inject"
+	url := i.cfg.DaemonURL + "/sessions/" + sessionID + "/inject"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wrapped))
 	if err != nil {
 		return fmt.Errorf("injector: build POST inject: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+i.cfg.bearerToken)
+	req.Header.Set("Authorization", "Bearer "+i.cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
-	if i.cfg.assertedCaller != "" {
-		req.Header.Set("X-Asserted-Caller", i.cfg.assertedCaller)
+	if i.cfg.AssertedCaller != "" {
+		req.Header.Set("X-Asserted-Caller", i.cfg.AssertedCaller)
 	}
 	resp, err := i.client.Do(req)
 	if err != nil {

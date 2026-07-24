@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package inject
 
 import (
 	"context"
@@ -65,13 +65,13 @@ func newFakeDaemon(t *testing.T) (baseURL string, capturedInjects *[]string, cap
 func TestInjector_CreateSession_ReturnsSessionID(t *testing.T) {
 	t.Parallel()
 	base, _, _ := newFakeDaemon(t)
-	inj, err := newInjector(injectorConfig{
-		daemonURL:      base,
-		bearerToken:    "tok_test",
-		assertedCaller: "alice@example.com",
+	inj, err := NewInjector(Config{
+		DaemonURL:      base,
+		BearerToken:    "tok_test",
+		AssertedCaller: "alice@example.com",
 	})
 	if err != nil {
-		t.Fatalf("newInjector: %v", err)
+		t.Fatalf("NewInjector: %v", err)
 	}
 	sid, err := inj.CreateSession(context.Background())
 	if err != nil {
@@ -85,13 +85,13 @@ func TestInjector_CreateSession_ReturnsSessionID(t *testing.T) {
 func TestInjector_CreateSession_SendsAssertedCaller(t *testing.T) {
 	t.Parallel()
 	base, _, auths := newFakeDaemon(t)
-	inj, err := newInjector(injectorConfig{
-		daemonURL:      base,
-		bearerToken:    "tok_test",
-		assertedCaller: "alice@example.com",
+	inj, err := NewInjector(Config{
+		DaemonURL:      base,
+		BearerToken:    "tok_test",
+		AssertedCaller: "alice@example.com",
 	})
 	if err != nil {
-		t.Fatalf("newInjector: %v", err)
+		t.Fatalf("NewInjector: %v", err)
 	}
 	if _, err := inj.CreateSession(context.Background()); err != nil {
 		t.Fatalf("CreateSession: %v", err)
@@ -107,16 +107,16 @@ func TestInjector_CreateSession_SendsAssertedCaller(t *testing.T) {
 func TestInjector_Inject_PostsWrappedPayload(t *testing.T) {
 	t.Parallel()
 	base, injects, _ := newFakeDaemon(t)
-	inj, err := newInjector(injectorConfig{
-		daemonURL:      base,
-		bearerToken:    "tok_test",
-		assertedCaller: "alice@example.com",
+	inj, err := NewInjector(Config{
+		DaemonURL:      base,
+		BearerToken:    "tok_test",
+		AssertedCaller: "alice@example.com",
 	})
 	if err != nil {
-		t.Fatalf("newInjector: %v", err)
+		t.Fatalf("NewInjector: %v", err)
 	}
-	payload := InjectPayload{
-		Kind:      injectKindEvent,
+	payload := Payload{
+		Kind:      KindEvent,
 		Reason:    "CrashLoopBackOff",
 		Namespace: "checkout",
 		Name:      "checkout-svc-7b9d-x4kzq",
@@ -152,7 +152,7 @@ func TestInjector_CreateSession_NonCreatedIsError(t *testing.T) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
 	t.Cleanup(srv.Close)
-	inj, _ := newInjector(injectorConfig{daemonURL: srv.URL, bearerToken: "t", assertedCaller: "a@b"})
+	inj, _ := NewInjector(Config{DaemonURL: srv.URL, BearerToken: "t", AssertedCaller: "a@b"})
 	_, err := inj.CreateSession(context.Background())
 	if err == nil {
 		t.Fatal("expected error for non-201 response")
@@ -172,10 +172,10 @@ func TestInjector_Inject_ContextCancellationHonored(t *testing.T) {
 		<-block
 	}))
 	t.Cleanup(srv.Close)
-	inj, _ := newInjector(injectorConfig{daemonURL: srv.URL, bearerToken: "t", assertedCaller: "a@b"})
+	inj, _ := NewInjector(Config{DaemonURL: srv.URL, BearerToken: "t", AssertedCaller: "a@b"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	err := inj.Inject(ctx, "sess-x", InjectPayload{Kind: "k8s-event", Reason: "X"})
+	err := inj.Inject(ctx, "sess-x", Payload{Kind: "k8s-event", Reason: "X"})
 	if err == nil {
 		t.Error("expected error on cancelled context")
 	}
@@ -183,7 +183,7 @@ func TestInjector_Inject_ContextCancellationHonored(t *testing.T) {
 
 func TestInjector_TrailingSlashRejected(t *testing.T) {
 	t.Parallel()
-	_, err := newInjector(injectorConfig{daemonURL: "http://x/", bearerToken: "t"})
+	_, err := NewInjector(Config{DaemonURL: "http://x/", BearerToken: "t"})
 	if err == nil {
 		t.Error("trailing slash in daemonURL should be rejected")
 	}
@@ -191,7 +191,7 @@ func TestInjector_TrailingSlashRejected(t *testing.T) {
 
 func TestInjector_MissingTokenRejected(t *testing.T) {
 	t.Parallel()
-	_, err := newInjector(injectorConfig{daemonURL: "http://x", bearerToken: ""})
+	_, err := NewInjector(Config{DaemonURL: "http://x", BearerToken: ""})
 	if err == nil {
 		t.Error("empty bearerToken should be rejected")
 	}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package engine
 
 import (
 	"path/filepath"
@@ -20,11 +20,11 @@ import (
 	"time"
 )
 
-func newTestDedup(t *testing.T, window time.Duration, persistPath string) *dedupCache {
+func newTestDedup(t *testing.T, window time.Duration, persistPath string) *DedupCache {
 	t.Helper()
-	c, err := newDedupCache(window, persistPath)
+	c, err := NewDedupCache(window, persistPath)
 	if err != nil {
-		t.Fatalf("newDedupCache: %v", err)
+		t.Fatalf("NewDedupCache: %v", err)
 	}
 	return c
 }
@@ -45,8 +45,8 @@ func TestDedup_FirstEvent_IsNewIncident(t *testing.T) {
 	t.Parallel()
 	c := newTestDedup(t, 5*time.Minute, "")
 	got := c.Observe(EventKey{UID: "u1", Reason: "CrashLoopBackOff"}, time.Now())
-	if got.Kind != dedupNewIncident {
-		t.Errorf("first sighting: kind = %v, want dedupNewIncident", got.Kind)
+	if got.Kind != DedupNewIncident {
+		t.Errorf("first sighting: kind = %v, want DedupNewIncident", got.Kind)
 	}
 	if got.Count != 1 {
 		t.Errorf("first sighting: count = %d, want 1", got.Count)
@@ -60,8 +60,8 @@ func TestDedup_SecondEventWithinWindow_IsDuplicate(t *testing.T) {
 	next := tsGen(time.Now(), 1*time.Second)
 	c.Observe(key, next())
 	got := c.Observe(key, next())
-	if got.Kind != dedupDuplicate {
-		t.Errorf("second sighting: kind = %v, want dedupDuplicate", got.Kind)
+	if got.Kind != DedupDuplicate {
+		t.Errorf("second sighting: kind = %v, want DedupDuplicate", got.Kind)
 	}
 	if got.Count != 2 {
 		t.Errorf("second sighting: count = %d, want 2", got.Count)
@@ -83,8 +83,8 @@ func TestDedup_EventAfterWindow_IsNewIncident(t *testing.T) {
 	// the shape that triggers the retry-safety-net path.
 	now = now.Add(10 * time.Minute)
 	got := c.Observe(key, now)
-	if got.Kind != dedupNewIncident {
-		t.Errorf("post-window sighting: kind = %v, want dedupNewIncident (window should have expired)", got.Kind)
+	if got.Kind != DedupNewIncident {
+		t.Errorf("post-window sighting: kind = %v, want DedupNewIncident (window should have expired)", got.Kind)
 	}
 	if got.Count != 1 {
 		t.Errorf("post-window sighting: count = %d, want 1 (fresh window)", got.Count)
@@ -156,16 +156,16 @@ func TestDedup_ReasonFamilyCollapsesIntoOneSlot(t *testing.T) {
 	// First: ErrImagePull (the earlier event kubelet emits when a
 	// pull attempt fails). Canonicalizes to ImagePullBackOff.
 	first := c.Observe(EventKey{UID: "u-payment", Reason: "ErrImagePull"}, next())
-	if first.Kind != dedupNewIncident {
-		t.Fatalf("ErrImagePull first: want dedupNewIncident, got %v", first.Kind)
+	if first.Kind != DedupNewIncident {
+		t.Fatalf("ErrImagePull first: want DedupNewIncident, got %v", first.Kind)
 	}
 
 	// Second: ImagePullBackOff (the settled kubelet backoff state,
 	// same underlying failure, arrives seconds later). Must be
 	// treated as a duplicate of the first event, not a new incident.
 	second := c.Observe(EventKey{UID: "u-payment", Reason: "ImagePullBackOff"}, next())
-	if second.Kind != dedupDuplicate {
-		t.Errorf("ImagePullBackOff after ErrImagePull for same UID: want dedupDuplicate (family collision), got %v", second.Kind)
+	if second.Kind != DedupDuplicate {
+		t.Errorf("ImagePullBackOff after ErrImagePull for same UID: want DedupDuplicate (family collision), got %v", second.Kind)
 	}
 	if second.Count != 2 {
 		t.Errorf("family-collision count: want 2 (first + second), got %d", second.Count)
@@ -182,8 +182,8 @@ func TestDedup_BackOff_CanonicalizesTo_CrashLoopBackOff(t *testing.T) {
 
 	c.Observe(EventKey{UID: "u-flappy", Reason: "CrashLoopBackOff"}, next())
 	second := c.Observe(EventKey{UID: "u-flappy", Reason: "BackOff"}, next())
-	if second.Kind != dedupDuplicate {
-		t.Errorf("BackOff after CrashLoopBackOff same UID: want dedupDuplicate, got %v", second.Kind)
+	if second.Kind != DedupDuplicate {
+		t.Errorf("BackOff after CrashLoopBackOff same UID: want DedupDuplicate, got %v", second.Kind)
 	}
 }
 
@@ -198,11 +198,11 @@ func TestDedup_DifferentPodsDontCollide(t *testing.T) {
 	a := c.Observe(EventKey{UID: "u-pod-a", Reason: "ImagePullBackOff"}, next())
 	b := c.Observe(EventKey{UID: "u-pod-b", Reason: "ImagePullBackOff"}, next())
 
-	if a.Kind != dedupNewIncident {
-		t.Errorf("pod-a: want dedupNewIncident, got %v", a.Kind)
+	if a.Kind != DedupNewIncident {
+		t.Errorf("pod-a: want DedupNewIncident, got %v", a.Kind)
 	}
-	if b.Kind != dedupNewIncident {
-		t.Errorf("pod-b (different UID): want dedupNewIncident, got %v", b.Kind)
+	if b.Kind != DedupNewIncident {
+		t.Errorf("pod-b (different UID): want DedupNewIncident, got %v", b.Kind)
 	}
 }
 
@@ -235,7 +235,7 @@ func TestDedup_DifferentKeys_AreIndependent(t *testing.T) {
 	next := tsGen(time.Now(), 1*time.Second)
 	a := c.Observe(EventKey{UID: "u1", Reason: "CrashLoopBackOff"}, next())
 	b := c.Observe(EventKey{UID: "u2", Reason: "CrashLoopBackOff"}, next())
-	if a.Kind != dedupNewIncident || b.Kind != dedupNewIncident {
+	if a.Kind != DedupNewIncident || b.Kind != DedupNewIncident {
 		t.Errorf("distinct UIDs should both be new incidents (a=%v, b=%v)", a.Kind, b.Kind)
 	}
 }
@@ -266,8 +266,8 @@ func TestDedup_LRUEvictionAtCapacity(t *testing.T) {
 	}
 	// u1 should now be evicted; observing it again is a fresh incident.
 	got := c.Observe(EventKey{UID: "u1", Reason: "R"}, now)
-	if got.Kind != dedupNewIncident {
-		t.Errorf("evicted key re-observed: kind = %v, want dedupNewIncident", got.Kind)
+	if got.Kind != DedupNewIncident {
+		t.Errorf("evicted key re-observed: kind = %v, want DedupNewIncident", got.Kind)
 	}
 }
 
@@ -287,8 +287,8 @@ func TestDedup_Snapshot_RoundTrip(t *testing.T) {
 
 	c2 := newTestDedup(t, 5*time.Minute, path)
 	got := c2.Observe(key, next())
-	if got.Kind != dedupDuplicate {
-		t.Errorf("restored key: kind = %v, want dedupDuplicate (should be within window from restored state)", got.Kind)
+	if got.Kind != DedupDuplicate {
+		t.Errorf("restored key: kind = %v, want DedupDuplicate (should be within window from restored state)", got.Kind)
 	}
 	if got.SessionID != "sess-persist" {
 		t.Errorf("restored key: SessionID = %q, want sess-persist", got.SessionID)
@@ -306,10 +306,10 @@ func TestDedup_Snapshot_NoPersistPathIsNoOp(t *testing.T) {
 
 func TestDedup_NegativeWindow_Rejected(t *testing.T) {
 	t.Parallel()
-	if _, err := newDedupCache(0, ""); err == nil {
+	if _, err := NewDedupCache(0, ""); err == nil {
 		t.Error("zero window should be rejected")
 	}
-	if _, err := newDedupCache(-1*time.Second, ""); err == nil {
+	if _, err := NewDedupCache(-1*time.Second, ""); err == nil {
 		t.Error("negative window should be rejected")
 	}
 }
@@ -344,8 +344,8 @@ func TestDedup_ReplayOfSameEventTimestampDedups(t *testing.T) {
 	eventTS := now // k8s Event.LastTimestamp for this incident
 
 	first := c.Observe(key, eventTS)
-	if first.Kind != dedupNewIncident {
-		t.Fatalf("first sighting: want dedupNewIncident, got %v", first.Kind)
+	if first.Kind != DedupNewIncident {
+		t.Fatalf("first sighting: want DedupNewIncident, got %v", first.Kind)
 	}
 
 	// Simulate informer re-List after wall clock advances past the
@@ -354,8 +354,8 @@ func TestDedup_ReplayOfSameEventTimestampDedups(t *testing.T) {
 	// SAME LastTimestamp — this must NOT fire a new session.
 	now = now.Add(20 * time.Minute) // past the 5m dedup window
 	replay := c.Observe(key, eventTS)
-	if replay.Kind != dedupDuplicate {
-		t.Errorf("replay past wall-clock window: kind = %v, want dedupDuplicate (same eventLastTS = replay, not new activity)", replay.Kind)
+	if replay.Kind != DedupDuplicate {
+		t.Errorf("replay past wall-clock window: kind = %v, want DedupDuplicate (same eventLastTS = replay, not new activity)", replay.Kind)
 	}
 	if replay.Count != 2 {
 		t.Errorf("replay count = %d, want 2 (initial + replay)", replay.Count)
@@ -418,8 +418,8 @@ func TestDedup_NewActivityPastCooldownFiresRetrySafetyNet(t *testing.T) {
 	now = now.Add(10 * time.Minute)
 	newEventTS := now // k8s bumped LastTimestamp for this Event
 	got := c.Observe(key, newEventTS)
-	if got.Kind != dedupNewIncident {
-		t.Errorf("real new activity past cooldown: kind = %v, want dedupNewIncident (retry safety net)", got.Kind)
+	if got.Kind != DedupNewIncident {
+		t.Errorf("real new activity past cooldown: kind = %v, want DedupNewIncident (retry safety net)", got.Kind)
 	}
 	if got.Count != 1 {
 		t.Errorf("retry fresh window count = %d, want 1", got.Count)
@@ -445,8 +445,8 @@ func TestDedup_NewActivityWithinCooldownDedups(t *testing.T) {
 	// (real new activity). Well within cooldown → dedup to same session.
 	now = now.Add(2 * time.Minute)
 	got := c.Observe(key, now)
-	if got.Kind != dedupDuplicate {
-		t.Errorf("real new activity within cooldown: kind = %v, want dedupDuplicate", got.Kind)
+	if got.Kind != DedupDuplicate {
+		t.Errorf("real new activity within cooldown: kind = %v, want DedupDuplicate", got.Kind)
 	}
 	if got.SessionID != "sess-first" {
 		t.Errorf("SessionID = %q, want sess-first (routed to existing session)", got.SessionID)
@@ -469,7 +469,7 @@ func TestDedup_BackwardsEventTimestampTreatedAsReplay(t *testing.T) {
 	c.Observe(key, base)
 	got := c.Observe(key, base.Add(-1*time.Minute)) // earlier ts
 
-	if got.Kind != dedupDuplicate {
-		t.Errorf("backwards eventLastTS: kind = %v, want dedupDuplicate (treat as replay)", got.Kind)
+	if got.Kind != DedupDuplicate {
+		t.Errorf("backwards eventLastTS: kind = %v, want DedupDuplicate (treat as replay)", got.Kind)
 	}
 }

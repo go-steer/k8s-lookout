@@ -26,6 +26,8 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
 // eventDispatcher is the callback the watcher invokes for every k8s
@@ -33,7 +35,7 @@ import (
 // from watcher.go) so tests can wire a stub that just records what
 // was dispatched.
 type eventDispatcher interface {
-	Dispatch(ctx context.Context, ev TriageEvent)
+	Dispatch(ctx context.Context, ev engine.TriageEvent)
 }
 
 // watcher wires a client-go informer for core/v1.Events into an
@@ -138,7 +140,7 @@ func (w *watcher) dispatch(ctx context.Context, ev *corev1.Event) {
 // toTriageEvent flattens a *corev1.Event to the internal payload
 // shape. Timestamps prefer LastTimestamp (kubelet-set); fall back
 // to EventTime / CreationTimestamp per k8s API convention.
-func toTriageEvent(ev *corev1.Event) TriageEvent {
+func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 	first := ev.FirstTimestamp.Time
 	if first.IsZero() {
 		first = ev.EventTime.Time
@@ -165,8 +167,8 @@ func toTriageEvent(ev *corev1.Event) TriageEvent {
 	// pod GET so the agent can enrich via MCP if needed.
 	controllerRef := ""
 
-	return TriageEvent{
-		Key: EventKey{
+	return engine.TriageEvent{
+		Key: engine.EventKey{
 			UID:    uid,
 			Reason: ev.Reason,
 		},

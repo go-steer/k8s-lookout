@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Command k8s-event-watcher is the v2.6 semi-autonomous-triage sidecar.
+// It watches Kubernetes Events via a client-go informer, filters to a
+// configured allow-list of Event.Reason values, dedupes duplicates
+// within a rolling window, and POSTs matched events to a core-agent
+// daemon's per-incident session endpoint. See
+// docs/k8s-event-agent-design.md for the full design.
 package watch
 
 import (
@@ -28,11 +34,11 @@ import (
 	"syscall"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
+
+	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // flags is the CLI-shaped config, parsed once in main and threaded
@@ -164,52 +170,13 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// buildKubeClient constructs a kubernetes.Interface from the flags.
-// Precedence:
-//  1. Explicit --kubeconfig always wins (out-of-cluster ops).
-//  2. --in-cluster or auto-detected (KUBERNETES_SERVICE_HOST env
-//     var is set inside a pod).
-//  3. $KUBECONFIG env var → fallback to ~/.kube/config.
-func buildKubeClient(f *flags) (kubernetes.Interface, error) {
-	var (
-		cfg *rest.Config
-		err error
-	)
-	switch {
-	case f.kubeconfig != "":
-		cfg, err = clientcmd.BuildConfigFromFlags("", f.kubeconfig)
-		if err != nil {
-			return nil, fmt.Errorf("kubeconfig %s: %w", f.kubeconfig, err)
-		}
-	case f.inCluster || os.Getenv("KUBERNETES_SERVICE_HOST") != "":
-		cfg, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, fmt.Errorf("in-cluster config: %w", err)
-		}
-	default:
-		// Fallback to default kubeconfig search (KUBECONFIG env,
-		// then $HOME/.kube/config). Fine for local dev; a real
-		// deployment always sets --in-cluster or --kubeconfig.
-		loader := clientcmd.NewDefaultClientConfigLoadingRules()
-		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("default kubeconfig: %w", err)
-		}
-	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-	return client, nil
-}
-
 // dispatcher is the pipeline that ties filter → dedup → injector +
 // metrics for one event. Implements eventDispatcher so watcher.go
 // can call Dispatch on it.
 type dispatcher struct {
-	filter    *filter
-	dedup     *dedupCache
-	injector  *injector
+	filter    *engine.Filter
+	dedup     *engine.DedupCache
+	injector  *inject.Injector
 	metrics   *metrics
 	cluster   string
 	mode      string // "per-incident" or "shared"
@@ -224,14 +191,14 @@ type dispatcher struct {
 }
 
 // Dispatch is the eventDispatcher entry point.
-func (d *dispatcher) Dispatch(ctx context.Context, ev TriageEvent) {
+func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
 	d.metrics.eventsSeen.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
 	if !d.filter.Accept(ev) {
 		return
 	}
 	result := d.dedup.Observe(ev.Key, ev.LastSeen)
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
-	if result.Kind == dedupDuplicate {
+	if result.Kind == engine.DedupDuplicate {
 		d.metrics.eventsDedupSuppress.WithLabelValues(ev.Key.Reason, ev.Namespace).Inc()
 		// Info-level log: the operator asked "is the watcher seeing
 		// events?" and today the answer was "yes when things break,
@@ -261,8 +228,8 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev TriageEvent) {
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 		d.dedup.BindSession(ev.Key, sid)
 	}
-	payload := InjectPayload{
-		Kind:         injectKindEvent,
+	payload := inject.Payload{
+		Kind:         inject.KindEvent,
 		Reason:       ev.Key.Reason,
 		Namespace:    ev.Namespace,
 		KindOfObject: ev.KindOfObject,
@@ -274,7 +241,7 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev TriageEvent) {
 		FirstSeen:    ev.FirstSeen,
 		LastSeen:     ev.LastSeen,
 		Cluster:      d.cluster,
-		Context: PayloadContext{
+		Context: inject.PayloadContext{
 			ControllerRef: ev.ControllerRef,
 			Node:          ev.Node,
 			Labels:        ev.Labels,
@@ -353,22 +320,22 @@ func realMain(argv []string) error {
 	}
 
 	// Build components.
-	filterCfg := newFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount)
-	filter := newFilter(filterCfg)
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount)
+	filter := engine.NewFilter(filterCfg)
 
-	dedup, err := newDedupCache(f.dedupWindow, f.dedupPersist)
+	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
 	if err != nil {
 		return fmt.Errorf("dedup cache: %w", err)
 	}
 
 	m := newMetrics()
 
-	var inj *injector
+	var inj *inject.Injector
 	if !f.dryRun {
-		inj, err = newInjector(injectorConfig{
-			daemonURL:      f.daemonURL,
-			bearerToken:    token,
-			assertedCaller: f.owner,
+		inj, err = inject.NewInjector(inject.Config{
+			DaemonURL:      f.daemonURL,
+			BearerToken:    token,
+			AssertedCaller: f.owner,
 		})
 		if err != nil {
 			return fmt.Errorf("injector: %w", err)
@@ -412,7 +379,7 @@ func realMain(argv []string) error {
 		}
 		return nil
 	}
-	client, err := buildKubeClient(f)
+	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 	if err != nil {
 		return err
 	}
@@ -432,7 +399,7 @@ func realMain(argv []string) error {
 // runSnapshotLoop persists the dedup cache to disk on an interval
 // so a sidecar crash doesn't lose more than interval seconds of
 // state. Exits when ctx is cancelled.
-func runSnapshotLoop(ctx context.Context, cache *dedupCache, interval time.Duration) {
+func runSnapshotLoop(ctx context.Context, cache *engine.DedupCache, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
