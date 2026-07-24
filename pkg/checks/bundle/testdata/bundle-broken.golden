@@ -1,0 +1,17 @@
+kind=bundle.target severity=info namespace=prod kind_of_object=Deployment name=api workload=Deployment/prod/api pods=2 sections=spec,delta,edges,radius,logs
+kind=spec.resource severity=info namespace=prod kind_of_object=Deployment name=api section=spec labels="app=api" replicas=2 selector="app=api"
+kind=spec.container severity=info namespace=prod kind_of_object=Deployment name=api section=spec container=api image=registry.example.com/api:v2
+kind=pod.imagepull severity=critical namespace=prod kind_of_object=Pod name=api-7c9d8-bbbbb reason=ImagePullBackOff message="Back-off pulling image \"registry.example.com/api:v3-typo\"" section=delta container=api image=registry.example.com/api:v3-typo
+kind=workload.rollout severity=warning namespace=prod kind_of_object=Deployment name=api reason=RolloutIncomplete section=delta desired=2 ready=1 updated=2 available=1
+kind=edge.missing_key severity=critical namespace=prod kind_of_object=ConfigMap name=app-config reason=CreateContainerConfigError message="key log.level not found in configmap app-config (env LOG_LEVEL in container api)" section=edges workload=Deployment/prod/api container=api env=LOG_LEVEL key=log.level pods=2
+kind=edge.selector_unready severity=warning namespace=prod kind_of_object=Service name=api reason=PodsNotReady message="service selects 2 pod(s), 1 ready" section=edges workload=Deployment/prod/api selector="app=api" selected=2 ready=1
+kind=edge.endpoints_unready severity=warning namespace=prod kind_of_object=Service name=api reason=EndpointMismatch message="1/1 endpoints ready across 1 slice(s); selector selects 2 pod(s), 1 ready" section=edges workload=Deployment/prod/api endpoints=1 ready=1 slices=1 selected=2
+kind=radius.neighbor severity=info namespace=prod kind_of_object=ReplicaSet name=api-7c9d8 section=radius relation=upstream hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Service name=api section=radius relation=upstream hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=EndpointSlice name=api-abc12 section=radius relation=upstream hop=1
+kind=radius.neighbor severity=info kind_of_object=Node name=node-1 section=radius relation=downstream hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=ConfigMap name=app-config section=radius relation=downstream hop=1
+kind=log.fetch_error severity=warning namespace=prod kind_of_object=Pod name=api-7c9d8-bbbbb reason=LogFetchFailed message="container \"api\" in pod \"api-7c9d8-bbbbb\" is waiting to start: trying and failing to pull image" section=logs container=api
+kind=log.template severity=warning namespace=prod kind_of_object=Pod name=api-7c9d8-aaaaa section=logs template="ERROR config key log.level missing, using default" count=1 level=error first_seen=2026-07-01T08:00:02Z last_seen=2026-07-01T08:00:02Z
+kind=log.template severity=info namespace=prod kind_of_object=Pod name=api-7c9d8-aaaaa section=logs template="INFO handled request path=<*> status=<*> dur=<*>" count=2 level=info first_seen=2026-07-01T08:00:00Z last_seen=2026-07-01T08:00:01Z sample="INFO handled request path=/api/cart/123 status=200 dur=15ms"
+scanned=12 findings=16 elapsed=100ms

@@ -224,6 +224,22 @@ func SpecCommand(deps SpecDeps) Command {
 	}
 }
 
+// SpecFindings renders one already-fetched object into the `triage
+// spec` finding stream: sanitize (§6.5), then flatten — no API
+// calls. It is the seam `bundle` (§5) composes its spec section
+// over. kind must be the canonical kind name (it keys the
+// sanitizer's Secret masking); obj is a typed API object or an
+// unstructured map.
+func SpecFindings(kind, namespace, name string, obj any) ([]emit.Finding, error) {
+	u, err := toUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	u["kind"] = kind
+	t := specTarget{kindToken: kind, typed: lookupSpecKind(kind), namespace: namespace, name: name}
+	return specFindings(kind, t, emit.SanitizeUnstructured(u)), nil
+}
+
 // specTarget is the resolved resource reference.
 type specTarget struct {
 	kindToken string    // as given (dynamic resolution needs it)

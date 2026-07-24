@@ -37,6 +37,19 @@ import (
 // sanitized spec flattened to path=value pairs, plus abnormal
 // conditions.
 func renderSpec(out *emit.Writer, kind string, t specTarget, u map[string]any) error {
+	for _, f := range specFindings(kind, t, u) {
+		if err := out.Emit(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// specFindings is renderSpec's pure core: the ordered finding stream
+// for one sanitized object. It exists as a seam so `bundle` (§5) can
+// include a spec section without re-rendering — SpecFindings is the
+// exported wrapper.
+func specFindings(kind string, t specTarget, u map[string]any) []emit.Finding {
 	head := emit.Finding{
 		Kind:         "spec.resource",
 		Severity:     emit.SeverityInfo,
@@ -66,15 +79,8 @@ func renderSpec(out *emit.Writer, kind string, t specTarget, u map[string]any) e
 	}
 	appendPhase(&head, u, t.typed)
 
-	if err := out.Emit(head); err != nil {
-		return err
-	}
-	for _, f := range containers {
-		if err := out.Emit(f); err != nil {
-			return err
-		}
-	}
-	return emitAbnormalConditions(out, head, u)
+	out := append([]emit.Finding{head}, containers...)
+	return append(out, abnormalConditionFindings(head, u)...)
 }
 
 // appendPhase adds status.phase only when it is not one of the
@@ -509,10 +515,11 @@ func secretDetails(u map[string]any) []emit.Field {
 
 // --- Conditions ----------------------------------------------------------
 
-// emitAbnormalConditions renders status.conditions whose state is
+// abnormalConditionFindings renders status.conditions whose state is
 // not the healthy one, as warnings. Healthy conditions emit nothing
 // (zero nominal state).
-func emitAbnormalConditions(out *emit.Writer, head emit.Finding, u map[string]any) error {
+func abnormalConditionFindings(head emit.Finding, u map[string]any) []emit.Finding {
+	var out []emit.Finding
 	for _, c := range subSlice(subMap(u, "status"), "conditions") {
 		cm, ok := c.(map[string]any)
 		if !ok {
@@ -535,11 +542,9 @@ func emitAbnormalConditions(out *emit.Writer, head emit.Finding, u map[string]an
 		if since := str(cm, "lastTransitionTime"); since != "" {
 			f.Details = append(f.Details, emit.Field{Key: "since", Value: since})
 		}
-		if err := out.Emit(f); err != nil {
-			return err
-		}
+		out = append(out, f)
 	}
-	return nil
+	return out
 }
 
 // conditionAbnormal encodes condition polarity: most types are

@@ -155,7 +155,12 @@ func runCheck(deps Deps) emit.CheckFunc {
 			return 0, fmt.Errorf("all %d log streams failed; first: %v", len(targets), failures[0].err)
 		}
 
-		return eng.lines, emitFindings(inv.Out, eng, failures, maxTemplates)
+		for _, f := range collectFindings(eng, failures, maxTemplates) {
+			if err := inv.Out.Emit(f); err != nil {
+				return 0, err
+			}
+		}
+		return eng.lines, nil
 	}
 }
 
@@ -202,13 +207,14 @@ func fetchOne(ctx context.Context, getter PodLogGetter, eng *engine, t target, s
 	return sc.Err()
 }
 
-// emitFindings renders the engine's clusters under the §4.2
+// collectFindings renders the engine's clusters under the §4.2
 // envelope: fetch errors first (the agent must know its view is
 // partial), then clusters error-ish-first/count-desc capped at
 // maxTemplates, then the explicit overflow and probe-noise records.
-func emitFindings(out *emit.Writer, eng *engine, failures []fetchFailure, maxTemplates int) error {
+func collectFindings(eng *engine, failures []fetchFailure, maxTemplates int) []emit.Finding {
+	var out []emit.Finding
 	for _, f := range failures {
-		if err := out.Emit(emit.Finding{
+		out = append(out, emit.Finding{
 			Kind:         "log.fetch_error",
 			Severity:     emit.SeverityWarning,
 			Namespace:    f.target.namespace,
@@ -217,9 +223,7 @@ func emitFindings(out *emit.Writer, eng *engine, failures []fetchFailure, maxTem
 			Reason:       "LogFetchFailed",
 			Message:      f.err.Error(),
 			Details:      []emit.Field{{Key: "container", Value: f.target.container}},
-		}); err != nil {
-			return err
-		}
+		})
 	}
 
 	results := eng.results()
@@ -228,16 +232,14 @@ func emitFindings(out *emit.Writer, eng *engine, failures []fetchFailure, maxTem
 		emitted = results[:maxTemplates]
 	}
 	for _, r := range emitted {
-		if err := out.Emit(resultFinding(r)); err != nil {
-			return err
-		}
+		out = append(out, resultFinding(r))
 	}
 	if n := len(results) - len(emitted); n > 0 {
 		lines := 0
 		for _, r := range results[len(emitted):] {
 			lines += r.count
 		}
-		if err := out.Emit(emit.Finding{
+		out = append(out, emit.Finding{
 			Kind:     "log.overflow",
 			Severity: emit.SeverityInfo,
 			Message:  "template cap reached; the omitted clusters are the low-count, non-error tail (raise --max-templates to see them)",
@@ -245,21 +247,17 @@ func emitFindings(out *emit.Writer, eng *engine, failures []fetchFailure, maxTem
 				{Key: "omitted_templates", Value: strconv.Itoa(n)},
 				{Key: "omitted_lines", Value: strconv.Itoa(lines)},
 			},
-		}); err != nil {
-			return err
-		}
+		})
 	}
 	if eng.probes > 0 {
-		if err := out.Emit(emit.Finding{
+		out = append(out, emit.Finding{
 			Kind:     "log.probe_noise",
 			Severity: emit.SeverityInfo,
 			Message:  "health/readiness probe request lines stripped (--keep-probes to keep them)",
 			Details:  []emit.Field{{Key: "count", Value: strconv.Itoa(eng.probes)}},
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return out
 }
 
 // resultFinding renders one cluster. The subject envelope fields are
