@@ -32,6 +32,11 @@ findings=0 with a summary present means "scanned and healthy"; a stream
 without a summary line is void. Exit 0 data, 1 runtime error (diagnostics
 on stderr only), 2 usage.`
 
+// EnvelopeContract returns the shared §4.2 output-contract paragraph
+// verbatim, for surfaces generated outside this package (the skill
+// reference stubs, §4.4.3) so the wording never forks from --help.
+func EnvelopeContract() string { return envelopeHelp }
+
 // Help generates the command's full --help text from its metadata —
 // the same declaration that produces the MCP schema and skill
 // reference stubs (§4.4.3), so the surfaces cannot drift.

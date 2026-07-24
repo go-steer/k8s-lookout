@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-24
+
+M1 — read-path core (DESIGN.md §14). Exit criterion verified in
+`docs/milestones/M1.md`: an incident session can be fully investigated with
+lookout tools alone; `lookout health` answers "any issues in this cluster?"
+in one call; no secret value reached any output surface.
+
 ### Added
 
+- First skills (DESIGN.md §4.4): `skills/k8s-triage` (incident
+  investigation — bundle first, then the decision tree across triage
+  logs/delta, state edges, and triage spec) and `skills/cluster-health`
+  (scorecard assessment and per-category drill-down), each with
+  three-level progressive disclosure; `skills/playbooks/` seeds the
+  per-symptom convention with `crashloopbackoff.md` and `failedmount.md`
+  keyed to the frozen `k8s-event` inject payloads. Per-command
+  `references/*.md` are **generated** from the pkg/checks metadata by
+  `dev/tools/gen-skill-refs` (internal/skilldoc); §4.4.3 contract tests
+  enforce freshness, parse-validate every documented `lookout` command
+  line against the registry, and pin quoted output snippets to the
+  checktest golden fixtures. `skills/README.md` carries the
+  `.agents/skills/` install recipe.
 - `lookout triage delta` (§5) — one scan, every abnormal object; the first
   read-path command. Five finding classes, toggled with
   `--only=pods,nodes,pdb,system,quota`: broken workloads (crashloop /
