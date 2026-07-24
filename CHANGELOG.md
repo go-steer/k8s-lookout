@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--quota-warn=90`. One paged List pass per resource kind; findings
   ordered critical-first; healthy objects emit nothing. Registered as MCP
   tool `k8s_triage_delta`.
+- `lookout triage logs` (`k8s_triage_logs`) — the first read-path command
+  (§5, "highest-value tool in the suite"): distills raw container logs into
+  Drain-clustered templates. Hand-rolled fixed-depth parse tree over
+  tokenized lines with variable-token pre-masking (numbers, hex, uuids,
+  IPs, timestamps, durations); health/readiness probe noise stripped and
+  reported (`log.probe_noise`, `--keep-probes` to disable); Go/Java/Python
+  stack traces collapsed to their top-5 frames and clustered by frames
+  (`log.stacktrace`); per-cluster count, pod spread, level guess,
+  first/last seen, and one sanitized representative line. Scope by
+  `--workload` (selector-resolved pods for Deployment/StatefulSet/
+  DaemonSet/ReplicaSet/Job), `--namespace`/`-A`, or `--pod`; `--since`,
+  `--previous`, `--container`, `--tail`, `--max-templates` (explicit
+  `log.overflow` record when capped). Measured on the synthetic 10k-line
+  corpus: ~900 KB of raw logs distill to ~7.5 KB (≈120x).
+
 - `pkg/emit` — the §4.2 output envelope: findings as flat ordered key=value
   records (logfmt default, `--format=json` for one JSON object per line),
   the mandatory `scanned=<n> findings=<n> elapsed=<d>` summary line, exit
