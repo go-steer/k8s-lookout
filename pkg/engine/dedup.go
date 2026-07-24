@@ -163,10 +163,14 @@ var reasonCanonical = map[string]string{
 	"BackOff":      "CrashLoopBackOff",
 }
 
-// canonicalizeReason returns the dedup-key reason for a given
-// Event.Reason value. Reasons not in reasonCanonical map to
-// themselves (no change).
-func canonicalizeReason(reason string) string {
+// CanonicalReason returns the canonical reason for a given
+// Event.Reason value — the dedup-key reason, and the "reason-class"
+// input to Fingerprint (§8): fingerprints must collapse the same
+// reason families dedup does, or the same underlying failure would
+// carry different fingerprints across clusters depending on which
+// kubelet retry-cycle variant each sentinel saw first. Reasons not in
+// reasonCanonical map to themselves (no change).
+func CanonicalReason(reason string) string {
 	if canonical, ok := reasonCanonical[reason]; ok {
 		return canonical
 	}
@@ -210,7 +214,7 @@ func canonicalizeReason(reason string) string {
 // CreateSession call to attach the SessionID to the newly-created
 // entry, so subsequent duplicates can route to the same session.
 func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
-	key.Reason = canonicalizeReason(key.Reason)
+	key.Reason = CanonicalReason(key.Reason)
 	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -263,7 +267,7 @@ func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
 // bind the session using the wire-level reason without having to
 // know about the family mapping.
 func (c *DedupCache) BindSession(key EventKey, sessionID string) {
-	key.Reason = canonicalizeReason(key.Reason)
+	key.Reason = CanonicalReason(key.Reason)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if entry, ok := c.entries[key]; ok {

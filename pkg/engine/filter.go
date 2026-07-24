@@ -92,8 +92,8 @@ func stringSet(xs []string) map[string]struct{} {
 	return out
 }
 
-// Filter decides whether a triage event should proceed to dedup +
-// inject. Pure function — same input, same output; no I/O.
+// Filter decides whether a signal should proceed to dedup + inject.
+// Pure function — same input, same output; no I/O.
 type Filter struct {
 	cfg FilterConfig
 }
@@ -102,7 +102,7 @@ func NewFilter(cfg FilterConfig) *Filter {
 	return &Filter{cfg: cfg}
 }
 
-// Accept returns true if the event passes every filter rule. The
+// Accept returns true if the signal passes every filter rule. The
 // decision order is deliberate:
 //
 //  1. Reason must be in the allow-list (or the allow-list is empty
@@ -110,23 +110,27 @@ func NewFilter(cfg FilterConfig) *Filter {
 //  2. Namespace must not be in excluded (exclude wins).
 //  3. Namespace must be in allowed (or allowed is empty = all).
 //  4. Unhealthy special case: repeat count must reach threshold.
-func (f *Filter) Accept(ev TriageEvent) bool {
+//
+// The rules read the embedded TriageEvent core only, so they apply
+// uniformly to every source's signals (a rollout source's namespace
+// scoping works exactly like the event source's).
+func (f *Filter) Accept(sig Signal) bool {
 	if f.cfg.allowedReasons != nil {
-		if _, ok := f.cfg.allowedReasons[ev.Key.Reason]; !ok {
+		if _, ok := f.cfg.allowedReasons[sig.Key.Reason]; !ok {
 			return false
 		}
 	}
 	if len(f.cfg.excludedNamespaces) > 0 {
-		if _, excluded := f.cfg.excludedNamespaces[ev.Namespace]; excluded {
+		if _, excluded := f.cfg.excludedNamespaces[sig.Namespace]; excluded {
 			return false
 		}
 	}
 	if len(f.cfg.allowedNamespaces) > 0 {
-		if _, allowed := f.cfg.allowedNamespaces[ev.Namespace]; !allowed {
+		if _, allowed := f.cfg.allowedNamespaces[sig.Namespace]; !allowed {
 			return false
 		}
 	}
-	if ev.Key.Reason == "Unhealthy" && ev.Count < f.cfg.unhealthyMinCount {
+	if sig.Key.Reason == "Unhealthy" && sig.Count < f.cfg.unhealthyMinCount {
 		return false
 	}
 	return true

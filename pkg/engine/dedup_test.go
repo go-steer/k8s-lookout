@@ -134,9 +134,9 @@ func TestCanonicalizeReason(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
 			t.Parallel()
-			got := canonicalizeReason(tc.in)
+			got := CanonicalReason(tc.in)
 			if got != tc.want {
-				t.Errorf("canonicalizeReason(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("CanonicalReason(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

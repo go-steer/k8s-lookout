@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package engine implements the watch-path signal pipeline: the
-// Event.Reason / namespace filter and the rolling-window dedup cache
-// that decide which observed Kubernetes events become incidents.
+// Package engine implements the watch-path signal pipeline (DESIGN.md
+// §7): the Signal type carried between stages (§8 schema), the frozen
+// cross-cluster Fingerprint, and the reason/namespace filter and
+// rolling-window dedup cache that decide which observed signals
+// become incidents. Signal sources live in pkg/sources; this package
+// deliberately carries no k8s.io/api types.
 package engine
 
 import "time"
@@ -28,10 +31,13 @@ type EventKey struct {
 	Reason string
 }
 
-// TriageEvent is the internal representation the filter + dedup +
-// injector layers pass around. Derived from *corev1.Event by watcher.go
-// but carries no k8s.io/api types itself so unit tests can construct
-// it without a fake clientset.
+// TriageEvent is the per-object core every Signal shares, embedded in
+// Signal (see signal.go): the object reference, reason/message,
+// counters, and context. Derived from *corev1.Event by the k8s-events
+// source (pkg/sources/k8sevents) but carries no k8s.io/api types
+// itself so unit tests can construct it without a fake clientset. The
+// name is kept from M0 — it is the frozen field set behind the
+// shipped k8s-event inject payload.
 type TriageEvent struct {
 	Key           EventKey
 	Namespace     string

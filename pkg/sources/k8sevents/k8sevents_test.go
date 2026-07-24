@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package k8sevents
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,42 +26,45 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
 
-// recordingDispatcher captures every event the watcher dispatches
-// for later assertion. Thread-safe.
-type recordingDispatcher struct {
-	mu     sync.Mutex
-	events []engine.TriageEvent
-	// notify is closed after the first Dispatch — tests wait on
-	// it to avoid racing the informer's async delivery.
+// signalRecorder collects everything the source emits. Thread-safe;
+// the informer delivers asynchronously.
+type signalRecorder struct {
+	mu      sync.Mutex
+	signals []sources.Signal
+	// first is closed after the first emit — tests wait on it to
+	// avoid racing the informer's async delivery.
 	firstOnce sync.Once
 	first     chan struct{}
 }
 
-func newRecordingDispatcher() *recordingDispatcher {
-	return &recordingDispatcher{first: make(chan struct{})}
+func newSignalRecorder() *signalRecorder {
+	return &signalRecorder{first: make(chan struct{})}
 }
 
-func (r *recordingDispatcher) Dispatch(_ context.Context, ev engine.TriageEvent) {
+func (r *signalRecorder) emit(sig sources.Signal) {
 	r.mu.Lock()
-	r.events = append(r.events, ev)
+	r.signals = append(r.signals, sig)
 	r.mu.Unlock()
 	r.firstOnce.Do(func() { close(r.first) })
 }
 
-func (r *recordingDispatcher) snapshot() []engine.TriageEvent {
+func (r *signalRecorder) snapshot() []sources.Signal {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]engine.TriageEvent, len(r.events))
-	copy(out, r.events)
+	out := make([]sources.Signal, len(r.signals))
+	copy(out, r.signals)
 	return out
 }
 
-func TestWatcher_DispatchesEventsFromInformer(t *testing.T) {
+// TestSource_EmitsSignalsFromInformer is the M0 watcher harness
+// (fake clientset seeded with an Event; informer initial list
+// surfaces it) retargeted at the Source interface: the same event
+// must now come out as a kind=k8s-event Signal.
+func TestSource_EmitsSignalsFromInformer(t *testing.T) {
 	t.Parallel()
-	// Seed the fake clientset with an existing Event; the informer's
-	// initial list will surface it via AddFunc.
 	seed := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "checkout-svc.evt",
@@ -80,29 +84,42 @@ func TestWatcher_DispatchesEventsFromInformer(t *testing.T) {
 	}
 	client := fake.NewClientset(seed)
 
-	disp := newRecordingDispatcher()
-	w := newWatcher(client, disp, "prod-us-central1", 0)
+	rec := newSignalRecorder()
+	src := New(client, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+	go func() { done <- src.Run(ctx, rec.emit) }()
 
-	// Wait for the informer's cache to sync + first dispatch.
+	// Wait for the informer's cache to sync + first emit.
 	select {
-	case <-disp.first:
+	case <-rec.first:
 	case <-ctx.Done():
-		t.Fatal("no dispatch within timeout")
+		t.Fatal("no signal within timeout")
 	}
+	// Let Run finish. Its error is deliberately not asserted: the
+	// first emit can arrive while WaitForCacheSync is still polling,
+	// so this cancel may interrupt the sync and surface as a startup
+	// error — same race the M0 watcher harness ignored.
 	cancel()
-	<-done // let Run finish cleanly
+	<-done
 
-	events := disp.snapshot()
-	if len(events) == 0 {
-		t.Fatal("expected at least one dispatched event")
+	signals := rec.snapshot()
+	if len(signals) == 0 {
+		t.Fatal("expected at least one emitted signal")
 	}
-	got := events[0]
+	got := signals[0]
+	if got.Kind != engine.KindK8sEvent {
+		t.Errorf("Kind = %q, want %q", got.Kind, engine.KindK8sEvent)
+	}
+	if got.Source != engine.SourceSentinel {
+		t.Errorf("Source = %q, want %q", got.Source, engine.SourceSentinel)
+	}
+	if got.Severity != engine.SeverityCritical {
+		t.Errorf("Severity = %q, want critical (§7.7 default for k8s-event)", got.Severity)
+	}
 	if got.Key.Reason != "CrashLoopBackOff" {
 		t.Errorf("Reason = %q, want CrashLoopBackOff", got.Key.Reason)
 	}
@@ -114,6 +131,45 @@ func TestWatcher_DispatchesEventsFromInformer(t *testing.T) {
 	}
 	if got.Count != 3 {
 		t.Errorf("Count = %d, want 3", got.Count)
+	}
+	// Deployment identity + fingerprint are the pipeline's to stamp,
+	// never the source's (§7.2).
+	if got.Cluster != "" || got.Zone != "" || got.Fingerprint != "" {
+		t.Errorf("source must leave Cluster/Zone/Fingerprint empty; got %q/%q/%q",
+			got.Cluster, got.Zone, got.Fingerprint)
+	}
+}
+
+// TestSource_InterfaceMetadata pins the §7.2/§11 declarations: the
+// stable name from the design's source table, cluster scope, and the
+// RBAC the startup probe checks (which must stay in sync with
+// deploy/12-clusterrole-watcher.yaml).
+func TestSource_InterfaceMetadata(t *testing.T) {
+	t.Parallel()
+	src := New(fake.NewClientset(), 0)
+	// Compile-time: Source satisfies the interface + declares access.
+	var _ sources.Source = src
+	var _ sources.AccessDeclarer = src
+
+	if src.Name() != "k8s-events" {
+		t.Errorf("Name() = %q, want k8s-events (stable, used in schema + config)", src.Name())
+	}
+	if src.Scope() != sources.ScopeCluster {
+		t.Errorf("Scope() = %v, want cluster", src.Scope())
+	}
+	reqs := src.RequiredAccess()
+	want := map[string]bool{"list events cluster-wide": false, "watch events cluster-wide": false}
+	for _, r := range reqs {
+		if _, ok := want[r.String()]; !ok {
+			t.Errorf("unexpected requirement %q", r)
+			continue
+		}
+		want[r.String()] = true
+	}
+	for req, seen := range want {
+		if !seen {
+			t.Errorf("missing requirement %q", req)
+		}
 	}
 }
 
@@ -175,15 +231,14 @@ func TestToTriageEvent_PopulatesAllFields(t *testing.T) {
 
 func TestTruncateMessage_LongPayload(t *testing.T) {
 	t.Parallel()
-	long := make([]byte, 3000)
-	for i := range long {
-		long[i] = 'x'
-	}
-	got := truncateMessage(string(long))
+	long := strings.Repeat("x", 3000)
+	got := truncateMessage(long)
 	if len(got) > 2200 { // 2048 + " [truncated by ...]" suffix ~ 30 chars
 		t.Errorf("truncated len = %d, expected <= ~2100", len(got))
 	}
-	if !containsSubstr(got, "truncated by k8s-event-watcher") {
+	// The marker text is frozen wire-message content from the M0
+	// watcher — it must survive the source refactor unchanged.
+	if !strings.Contains(got, "truncated by k8s-event-watcher") {
 		t.Errorf("truncation marker missing from truncated output")
 	}
 }
@@ -191,24 +246,7 @@ func TestTruncateMessage_LongPayload(t *testing.T) {
 func TestTruncateMessage_ShortPayloadUnchanged(t *testing.T) {
 	t.Parallel()
 	msg := "small message"
-	got := truncateMessage(msg)
-	if got != msg {
+	if got := truncateMessage(msg); got != msg {
 		t.Errorf("short message should pass through unchanged; got %q", got)
 	}
-}
-
-func containsSubstr(s, sub string) bool {
-	return len(s) >= len(sub) && findSubstr(s, sub) >= 0
-}
-
-func findSubstr(s, sub string) int {
-	if len(sub) == 0 {
-		return 0
-	}
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

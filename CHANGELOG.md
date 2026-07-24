@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The Signal engine foundation (M2, DESIGN.md §7.2/§7.3/§8): `TriageEvent`
+  generalizes to `engine.Signal` — kind, source (`sentinel`|`scan`),
+  severity (`critical`|`warning`|`info`), cluster/project/zone, optional
+  forecast, and the frozen cross-cluster `fingerprint`
+  (`sha256(kind ⊕ reason-class ⊕ object-class ⊕ zone)`, NUL-separated —
+  the failure *class*, never the object name — pinned by contract-test
+  vectors so AX fleet rollup joins stay stable across versions).
+  `pkg/sources` carries the §7.2 `Source` interface
+  (`Name`/`Scope`/`Run(ctx, emit)`), a source registry, and the §11
+  startup capability probe: sources declare required RBAC and the
+  sentinel SelfSubjectAccessReview-checks each one, failing loudly with
+  the source name and missing permission instead of running a silently
+  empty watch. The M0 event watcher is refactored into
+  `pkg/sources/k8sevents`, the first Source, and `lookout watch` consumes
+  it through the interface — flags, defaults, metrics names, and the
+  `k8s-event` inject payload remain byte-identical (the frozen wire-shape
+  and flag-surface tests pass unchanged, plus a new pin proving the
+  Signal path emits the same bytes).
+
 ## [0.2.0] - 2026-07-24
 
 M1 — read-path core (DESIGN.md §14). Exit criterion verified in
