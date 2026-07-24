@@ -107,15 +107,24 @@ func NewFilter(cfg FilterConfig) *Filter {
 //
 //  1. Reason must be in the allow-list (or the allow-list is empty
 //     meaning "everything" — but that's not a shipped default).
-//  2. Namespace must not be in excluded (exclude wins).
+//     k8s-event kinds ONLY: `--reason` is the allow-list over the
+//     open-ended Event.Reason space. Source-namespaced kinds
+//     (`objectstate.*`, `rollout.*`, …) are a curated, finite set —
+//     the operator control for them is source enablement
+//     (`--sources`, §7.2), so the event allow-list does not apply.
+//  2. Namespace must not be in excluded (exclude wins). Applies to
+//     every source's signals uniformly.
 //  3. Namespace must be in allowed (or allowed is empty = all).
-//  4. Unhealthy special case: repeat count must reach threshold.
-//
-// The rules read the embedded TriageEvent core only, so they apply
-// uniformly to every source's signals (a rollout source's namespace
-// scoping works exactly like the event source's).
+//     Cluster-scoped signals from source-namespaced kinds (e.g. an
+//     objectstate node signal, Namespace == "") pass: a namespace
+//     allow-list scopes workload attention, and a node serves every
+//     namespace. k8s-event kinds keep the frozen M0 behavior exactly
+//     (an empty-namespace event is rejected by a set allow-list).
+//  4. Unhealthy special case (k8s-event kinds): repeat count must
+//     reach threshold.
 func (f *Filter) Accept(sig Signal) bool {
-	if f.cfg.allowedReasons != nil {
+	eventKind := isK8sEventKind(sig.Kind)
+	if eventKind && f.cfg.allowedReasons != nil {
 		if _, ok := f.cfg.allowedReasons[sig.Key.Reason]; !ok {
 			return false
 		}
@@ -127,11 +136,25 @@ func (f *Filter) Accept(sig Signal) bool {
 	}
 	if len(f.cfg.allowedNamespaces) > 0 {
 		if _, allowed := f.cfg.allowedNamespaces[sig.Namespace]; !allowed {
-			return false
+			if eventKind || sig.Namespace != "" {
+				return false
+			}
 		}
 	}
-	if sig.Key.Reason == "Unhealthy" && sig.Count < f.cfg.unhealthyMinCount {
+	if eventKind && sig.Key.Reason == "Unhealthy" && sig.Count < f.cfg.unhealthyMinCount {
 		return false
 	}
 	return true
+}
+
+// isK8sEventKind reports whether the signal is the frozen k8s-event
+// wire kind (or its followup, or a legacy caller that set no kind) —
+// the kinds the `--reason` allow-list and the Unhealthy threshold
+// were designed for.
+func isK8sEventKind(kind string) bool {
+	switch kind {
+	case KindK8sEvent, KindK8sEventFollowup, "":
+		return true
+	}
+	return false
 }

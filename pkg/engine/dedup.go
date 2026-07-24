@@ -170,6 +170,25 @@ func (c *DedupCache) clock() time.Time {
 var reasonCanonical = map[string]string{
 	"ErrImagePull": "ImagePullBackOff",
 	"BackOff":      "CrashLoopBackOff",
+
+	// APPEND-ONLY additions for the object-state source (M2): a
+	// leading transition signal and its reactive k8s-event
+	// counterpart describe the same incident on the same object UID,
+	// so they share a dedup family — whichever fires first (usually
+	// the leading one; that's the point) opens the session, and the
+	// other attaches as a followup. The dedup collapse IS the
+	// claim-and-attach flow; no extra machinery.
+	//
+	//   - node_notready (objectstate.node_notready, Node UID) joins
+	//     the node controller's NodeNotReady events on the Node.
+	//   - restart_burst (objectstate.restart_burst, Pod UID) joins
+	//     the kubelet's BackOff → CrashLoopBackOff family on the Pod.
+	//
+	// The remaining object-state reasons (node_flapping,
+	// progress_deadline, endpoints_empty, pdb_gridlocked) have no
+	// k8s-event counterpart on the same UID and map to themselves.
+	"node_notready": "NodeNotReady",
+	"restart_burst": "CrashLoopBackOff",
 }
 
 // CanonicalReason returns the canonical reason for a given

@@ -125,3 +125,69 @@ func TestFilter_Accept_UnhealthyThresholdDoesntAffectOtherReasons(t *testing.T) 
 		t.Error("CrashLoopBackOff count=1 should always accept")
 	}
 }
+
+// makeSourceSignal builds a source-namespaced-kind signal (an
+// object-state style transition signal).
+func makeSourceSignal(kind, reason, namespace string) Signal {
+	return Signal{
+		Kind:     kind,
+		Source:   SourceSentinel,
+		Severity: SeverityWarning,
+		TriageEvent: TriageEvent{
+			Key:       EventKey{UID: "u1", Reason: reason},
+			Namespace: namespace,
+			Count:     1,
+		},
+	}
+}
+
+func TestFilter_Accept_SourceNamespacedKindsSkipReasonAllowList(t *testing.T) {
+	t.Parallel()
+	// The --reason allow-list is the operator control over the
+	// open-ended Event.Reason space; source-namespaced kinds are a
+	// curated set whose operator control is --sources. The default
+	// filter (shipped reason list) must pass them.
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 0))
+	if !f.Accept(makeSourceSignal("objectstate.pdb_gridlocked", "pdb_gridlocked", "prod")) {
+		t.Error("source-namespaced kind rejected by the k8s-event reason allow-list")
+	}
+	// Even a custom --reason list doesn't gate them.
+	f = NewFilter(NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0))
+	if !f.Accept(makeSourceSignal("objectstate.endpoints_empty", "endpoints_empty", "prod")) {
+		t.Error("custom --reason list must not gate source-namespaced kinds")
+	}
+}
+
+func TestFilter_Accept_NamespaceRulesApplyToSourceNamespacedKinds(t *testing.T) {
+	t.Parallel()
+	// Exclude wins for every source's signals.
+	f := NewFilter(NewFilterConfig(nil, nil, []string{"kube-system"}, 0))
+	if f.Accept(makeSourceSignal("objectstate.restart_burst", "restart_burst", "kube-system")) {
+		t.Error("excluded namespace must reject source-namespaced kinds too")
+	}
+	// Allow-list scopes namespaced signals of any kind...
+	f = NewFilter(NewFilterConfig(nil, []string{"prod"}, nil, 0))
+	if f.Accept(makeSourceSignal("objectstate.restart_burst", "restart_burst", "dev")) {
+		t.Error("namespace allow-list must scope source-namespaced kinds")
+	}
+	if !f.Accept(makeSourceSignal("objectstate.restart_burst", "restart_burst", "prod")) {
+		t.Error("allow-listed namespace must accept")
+	}
+	// ...but a CLUSTER-scoped signal (empty namespace — e.g. a node
+	// transition) passes: the allow-list scopes workload attention
+	// and a node serves every namespace.
+	if !f.Accept(makeSourceSignal("objectstate.node_notready", "node_notready", "")) {
+		t.Error("cluster-scoped source signal must pass a namespace allow-list")
+	}
+}
+
+func TestFilter_Accept_EmptyNamespaceK8sEventKeepsFrozenBehavior(t *testing.T) {
+	t.Parallel()
+	// FROZEN M0 behavior: a kind=k8s-event with an empty namespace is
+	// still rejected by a set namespace allow-list. The cluster-scope
+	// exemption above is for source-namespaced kinds only.
+	f := NewFilter(NewFilterConfig(nil, []string{"prod"}, nil, 0))
+	if f.Accept(makeEvent("CrashLoopBackOff", "", 1)) {
+		t.Error("empty-namespace k8s-event must keep being rejected by a namespace allow-list (frozen behavior)")
+	}
+}

@@ -16,6 +16,7 @@ package watch
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,17 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
+
+// splitControllerRef parses the payload-shaped "Kind/name" controller
+// ref for fixtures (the production copy lives with the shared state
+// machine in pkg/sources/objectstate).
+func splitControllerRef(s string) (kind, name string, ok bool) {
+	i := strings.IndexByte(s, '/')
+	if i <= 0 || i == len(s)-1 {
+		return "", "", false
+	}
+	return s[:i], s[i+1:], true
+}
 
 // podFixture builds a pod for the observer tests.
 type podFixture struct {
@@ -173,10 +185,7 @@ func TestPodObserver_GonePodWithReadyReplacement(t *testing.T) {
 		t.Fatalf("delete pod: %v", err)
 	}
 	waitFor(t, "delete to reach the observer", func() bool {
-		obs.mu.Lock()
-		defer obs.mu.Unlock()
-		_, live := obs.pods["u-crash"]
-		return !live
+		return !obs.state.HasLive("u-crash")
 	})
 
 	verdict, ok := obs.Clearance(podIncident("u-crash", "ns", "web-7b9d-aaaa", "ReplicaSet/web-7b9d"))
@@ -201,10 +210,7 @@ func TestPodObserver_GonePodWithCrashingReplacement(t *testing.T) {
 		t.Fatalf("delete pod: %v", err)
 	}
 	waitFor(t, "delete to reach the observer", func() bool {
-		obs.mu.Lock()
-		defer obs.mu.Unlock()
-		_, live := obs.pods["u-crash"]
-		return !live
+		return !obs.state.HasLive("u-crash")
 	})
 
 	verdict, ok := obs.Clearance(podIncident("u-crash", "ns", "web-7b9d-aaaa", "ReplicaSet/web-7b9d"))
@@ -225,10 +231,7 @@ func TestPodObserver_GonePodOwnerGone(t *testing.T) {
 		t.Fatalf("delete pod: %v", err)
 	}
 	waitFor(t, "delete to reach the observer", func() bool {
-		obs.mu.Lock()
-		defer obs.mu.Unlock()
-		_, live := obs.pods["u-crash"]
-		return !live
+		return !obs.state.HasLive("u-crash")
 	})
 
 	verdict, ok := obs.Clearance(podIncident("u-crash", "ns", "web-7b9d-aaaa", "ReplicaSet/web-7b9d"))
@@ -249,10 +252,7 @@ func TestPodObserver_BarePodDeleted(t *testing.T) {
 		t.Fatalf("delete pod: %v", err)
 	}
 	waitFor(t, "delete to reach the observer", func() bool {
-		obs.mu.Lock()
-		defer obs.mu.Unlock()
-		_, live := obs.pods["u-bare"]
-		return !live
+		return !obs.state.HasLive("u-bare")
 	})
 
 	verdict, ok := obs.Clearance(podIncident("u-bare", "ns", "oneoff", ""))

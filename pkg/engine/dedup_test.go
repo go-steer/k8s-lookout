@@ -574,3 +574,50 @@ func TestDedup_BackwardsEventTimestampTreatedAsReplay(t *testing.T) {
 		t.Errorf("backwards eventLastTS: kind = %v, want DedupDuplicate (treat as replay)", got.Kind)
 	}
 }
+
+// TestCanonicalReason_ObjectStateFamilies pins the APPEND-ONLY M2
+// additions: object-state's leading reasons collapse into the same
+// dedup family as their reactive k8s-event counterparts (same object
+// UID), so whichever fires first opens the session and the other
+// attaches as a followup — the claim-and-attach flow.
+func TestCanonicalReason_ObjectStateFamilies(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"node_notready": "NodeNotReady",     // joins the node controller's events on the Node
+		"restart_burst": "CrashLoopBackOff", // joins kubelet's BackOff family on the Pod
+		// No k8s-event counterpart on the same UID → map to themselves.
+		"node_flapping":     "node_flapping",
+		"progress_deadline": "progress_deadline",
+		"endpoints_empty":   "endpoints_empty",
+		"pdb_gridlocked":    "pdb_gridlocked",
+	}
+	for in, want := range cases {
+		if got := CanonicalReason(in); got != want {
+			t.Errorf("CanonicalReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestDedup_LeadingSignalClaimsThenEventAttaches proves the collapse
+// end to end at the cache: a restart_burst observation opens the
+// incident; the later BackOff event for the same pod is a duplicate
+// routed to the bound session.
+func TestDedup_LeadingSignalClaimsThenEventAttaches(t *testing.T) {
+	t.Parallel()
+	c, err := NewDedupCache(5*time.Minute, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now()
+	if r := c.Observe(EventKey{UID: "pod-1", Reason: "restart_burst"}, t0); r.Kind != DedupNewIncident {
+		t.Fatalf("leading signal: got %v, want new incident", r.Kind)
+	}
+	c.BindSession(EventKey{UID: "pod-1", Reason: "restart_burst"}, "sess-lead")
+	r := c.Observe(EventKey{UID: "pod-1", Reason: "BackOff"}, t0.Add(time.Minute))
+	if r.Kind != DedupDuplicate {
+		t.Fatalf("later BackOff event: got %v, want duplicate (claim-and-attach)", r.Kind)
+	}
+	if r.SessionID != "sess-lead" {
+		t.Errorf("followup routes to %q, want the leading signal's session sess-lead", r.SessionID)
+	}
+}
