@@ -1,0 +1,10 @@
+kind=radius.neighbor severity=info namespace=prod kind_of_object=ReplicaSet name=web-rs direction=upstream relation=Owns hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Service name=web direction=upstream relation=Selects hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=EndpointSlice name=web-abc direction=upstream relation=RoutesTo hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Ingress name=edge direction=upstream relation=RoutesTo hop=2
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Pod name=lone direction=lateral relation=shared-node hop=2 shared=Node/n1 ready=true
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Pod name=other-1 direction=lateral relation=shared-config hop=2 shared=ConfigMap/cm-app ready=true
+kind=radius.neighbor severity=info kind_of_object=Node name=n1 direction=downstream relation=RunsOn hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=ConfigMap name=cm-app direction=downstream relation=Mounts hop=1
+kind=radius.missing severity=warning namespace=prod kind_of_object=Secret name=ghost reason=ReferencedNotFound message="referenced by the neighborhood but not observed" direction=downstream relation=Mounts hop=1
+scanned=14 findings=9 elapsed=100ms source=live

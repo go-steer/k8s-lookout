@@ -31,6 +31,18 @@ import (
 type Hit struct {
 	ID    NodeID
 	Depth int
+	// Via is the kind of the edge that first reached this node: how
+	// the hit attaches to the chain (`triage radius` renders it as the
+	// neighbor's relation). For Up hits it is the edge from the hit
+	// toward the origin's chain (Ingress --RoutesTo--> Service); for
+	// Down hits the edge from the chain toward the hit (Pod
+	// --Mounts--> ConfigMap); for Lateral hits the co-tenant's own
+	// edge to the shared node (RunsOn or Mounts).
+	Via EdgeKind
+	// Anchor is set on Lateral hits only: the shared-infrastructure
+	// node (Node, Zone, ConfigMap, Secret, PVC) that makes the hit a
+	// co-tenant. NoNode on Up/Down hits.
+	Anchor NodeID
 }
 
 // RadiusResult is the blast-radius neighborhood of an origin node
@@ -96,7 +108,7 @@ func (s *Snapshot) Radius(origin NodeID, maxDepth int) RadiusResult {
 				continue
 			}
 			seen[e.To] = struct{}{}
-			res.Lateral = append(res.Lateral, Hit{ID: e.To, Depth: h.Depth + 1})
+			res.Lateral = append(res.Lateral, Hit{ID: e.To, Depth: h.Depth + 1, Via: e.Kind, Anchor: h.ID})
 		}
 	}
 	sortHits(res.Up)
@@ -119,7 +131,7 @@ func (s *Snapshot) directedBFS(origin NodeID, maxDepth int, adj map[NodeID][]Edg
 					continue
 				}
 				visited[e.To] = struct{}{}
-				hits = append(hits, Hit{ID: e.To, Depth: depth})
+				hits = append(hits, Hit{ID: e.To, Depth: depth, Via: e.Kind})
 				next = append(next, e.To)
 			}
 		}

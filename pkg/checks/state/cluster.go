@@ -70,6 +70,21 @@ func (c *Cluster) Scanned() int { return c.ix.scanned }
 // Snapshot is the topology index built from the List pass.
 func (c *Cluster) Snapshot() *graph.Snapshot { return c.snap }
 
+// Pod returns the typed pod from the List pass (nil when not
+// listed) — the same pointer the graph ingested, read-only by
+// convention. `triage radius` uses it to report neighbor readiness,
+// which the graph itself deliberately does not store (§6.5).
+func (c *Cluster) Pod(namespace, name string) *corev1.Pod {
+	return c.ix.pods[key(namespace, name)]
+}
+
+// Objects returns every object the List pass handed to the graph, in
+// list order — the typed side of the topology for consumers that
+// need fields the graph does not keep (e.g. `triage changes`' live
+// approximation reading ReplicaSet revision annotations). Read-only
+// by convention; the slice is shared, not copied.
+func (c *Cluster) Objects() []any { return c.ix.graphObjs }
+
 // WorkloadNode resolves wl to its graph node, requiring the object
 // to have actually been observed (a merely-referenced identity is
 // not a valid target).

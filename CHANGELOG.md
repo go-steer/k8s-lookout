@@ -169,6 +169,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (timeout — could be policy, load, or vantage; 4xx — reachable and
   serving, request turned away) are warning. MCP: `k8s_net_probe`.
 
+- `triage radius` and `triage changes` (M3, DESIGN.md §5) — the two
+  history-consuming read-path commands, MCP tools `k8s_blast_radius`
+  and `k8s_recent_changes` (§4.3). `triage radius <Kind>/[<ns>/]<name>`
+  enumerates *impact* (complementing `state edges`, which verifies
+  *correctness*): every neighbor of a pod/workload with
+  `direction=upstream|lateral|downstream`, `relation` (the attaching
+  edge kind — RoutesTo, Owns, Selects, Governs, RunsOn, Mounts — or
+  `shared-node|zone|config|secret|pvc` with a `shared=<Kind>/<name>`
+  anchor for co-tenants), `hop` count, pod `ready` where the live List
+  pass knows it, and `radius.missing` warnings for dangling references;
+  `--depth` defaults to 3. Live mode reuses the `state.LoadCluster` one
+  List pass; `--at=<t> --store=<path>` answers "what was the blast
+  radius at onset" entirely from the sentinel store (`store.GraphAt`,
+  no cluster access — post-mortems work offline), and readiness is
+  deliberately not claimed from history (topology is stored, status is
+  not). `triage changes` answers "what changed in the N minutes before
+  onset" (`--since`, default 30m), scoped to the target's graph
+  neighborhood (`--depth`, default 2): chronological
+  `change.rollout|config|secret|scale|label|node|topology` findings
+  with field changes rendered compactly (`path=from→to`, hashes
+  shortened, never values), each tagged with its neighborhood
+  `relation` and provenance `origin=log|event|api`. With `--store` the
+  §6.6 delta log is the source; `--at` shifts the window to end at
+  onset and takes the neighborhood from the point-in-time graph. HPA
+  `SuccessfulRescale` events join from the live timeline (the HPA
+  keeps no replica history, §5). WITHOUT a store the command degrades
+  honestly to what the API can still tell now — ReplicaSet revision
+  annotations + creation timestamps for rollouts, recent scaling
+  events — and cannot see un-timestamped updates (ConfigMap/Secret
+  edits, label flips, old cordons); the summary says
+  `source=live-approximation`. Which topology answered is always on
+  the summary line: `emit.Writer` gains `Note(key, value)` — ordered
+  annotations after the mandatory `scanned=/findings=/elapsed=` keys
+  (`source=live|history|live-approximation`, resolved `at=`,
+  `window=`), byte-identical output when unused, note keys
+  contract-checked against the command glossary like any Details key.
+  Plumbing shared, not duplicated: `bundle`'s radius merge is exported
+  as `bundle.RadiusNeighbors` (bundle output unchanged), the
+  `graph.Hit` traversal result now carries `Via` (first-reaching edge
+  kind) and `Anchor` (lateral shared node), and `state.Cluster` gains
+  `Pod`/`Objects` accessors for readiness and typed-object reads.
+  Delta-log records skipped on purpose in `triage changes`:
+  EndpointSlice churn (pure pod-IP noise — the pod-level change is the
+  signal) and updates whose tracked fields did not change (zero
+  nominal state).
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in
