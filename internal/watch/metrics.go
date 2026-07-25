@@ -51,6 +51,10 @@ type metrics struct {
 	watchboardRotations prometheus.Counter
 	watchboardBuffered  prometheus.Gauge
 	infoDropped         *prometheus.CounterVec
+	enrichments         *prometheus.CounterVec
+	enrichmentBytes     prometheus.Histogram
+	enrichmentTruncated prometheus.Counter
+	enrichmentFailures  *prometheus.CounterVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -136,6 +140,24 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_info_dropped_total",
 			Help: "Total info-severity signals counted and dropped by §7.7 routing (stored-only class; the raw store lands in M3), by signal kind.",
 		}, []string{"kind"}),
+		enrichments: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_enrichments_total",
+			Help: "Total §7.6 enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers).",
+		}, []string{"outcome"}),
+		enrichmentBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "k8s_event_watcher_enrichment_bytes",
+			Help: "Size of the attached enrichment bundle in bytes, after the --enrich-cap prefix cut (the §15 Q3 telemetry that will inform the fixed-vs-model-aware cap revisit).",
+			// 512B .. 64KiB: brackets the 16KiB default cap from both sides.
+			Buckets: prometheus.ExponentialBuckets(512, 2, 8),
+		}),
+		enrichmentTruncated: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_enrichment_truncated_total",
+			Help: "Total enrichment bundles the --enrich-cap byte budget truncated at a section boundary (dropped sections become overflow trailers naming the follow-up command).",
+		}),
+		enrichmentFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_enrichment_failures_total",
+			Help: "Total enrichment stage failures, by stage (resolve|spec|delta|edges|radius|logs). Failures never block the inject; they surface as enrichment_error trailers in the attached bundle.",
+		}, []string{"stage"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -157,6 +179,10 @@ func newMetrics() *metrics {
 		m.watchboardRotations,
 		m.watchboardBuffered,
 		m.infoDropped,
+		m.enrichments,
+		m.enrichmentBytes,
+		m.enrichmentTruncated,
+		m.enrichmentFailures,
 	)
 	return m
 }

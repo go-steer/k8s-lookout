@@ -34,6 +34,26 @@ type Payload struct {
 	LastSeen     time.Time      `json:"last_seen"`
 	Cluster      string         `json:"cluster"`
 	Context      PayloadContext `json:"context"`
+	// Enrichment is the §7.6 warm-session attachment, present only on
+	// the INITIAL inject of a per-incident session when the enrichment
+	// stage ran. ADDITIVE to the frozen k8s-event shape: omitempty
+	// keeps un-enriched payloads byte-identical to M0 (the frozen wire
+	// pins pass unchanged); playbooks that predate §7.6 simply ignore
+	// the extra key.
+	Enrichment *PayloadEnrichment `json:"enrichment,omitempty"`
+}
+
+// PayloadEnrichment is the §8 "enrichment" envelope field: the
+// size-capped, sanitized in-process bundle (§7.6) that pre-warms the
+// incident session. Bundle is `lookout bundle`-shaped logfmt — one
+// finding per line, each carrying a `section` key
+// (spec|delta|edges|radius|logs), terminated by schema-stable trailer
+// lines: `overflow section=<s> cmd="lookout …"` for sections the cap
+// dropped (the named command reproduces them, §4.4.4) and
+// `enrichment_error stage=<s> error="…"` for stages that failed
+// (enrichment is best-effort; errors never block the inject).
+type PayloadEnrichment struct {
+	Bundle string `json:"bundle"`
 }
 
 // PayloadContext is the nested "context" object on Payload.
@@ -120,6 +140,12 @@ type StormPayload struct {
 	Representatives    []StormIncidentRef `json:"representative_incidents"`
 	MemberFingerprints []string           `json:"member_fingerprints"`
 	Context            PayloadContext     `json:"context"`
+	// Enrichment is the §7.6 attachment for the storm's ancestor
+	// object — deliberately radius-only (a storm's first question is
+	// "what hangs off this ancestor?", and N member log fetches would
+	// multiply the cost §7.5 exists to collapse). Additive + omitempty
+	// like Payload.Enrichment; the storm wire pin passes unchanged.
+	Enrichment *PayloadEnrichment `json:"enrichment,omitempty"`
 }
 
 // StormMemberPayload is the JSON body for kind=storm.member (a late

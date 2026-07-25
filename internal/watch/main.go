@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 
@@ -71,6 +72,10 @@ type flags struct {
 	watchboardBatch   int
 	watchboardFlush   time.Duration
 	watchboardRotate  int
+	enrich            string
+	enrichCap         int
+	enrichLogLines    int
+	enrichTimeout     time.Duration
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
 	severityOverrides map[string]engine.Severity
@@ -140,6 +145,16 @@ func parseFlags(args []string) (*flags, error) {
 	fs.IntVar(&f.watchboardBatch, "watchboard-batch", 5, "Buffered warning-class signals that trigger a watchboard digest flush (per-incident mode; §7.7). Must be >= 1.")
 	fs.DurationVar(&f.watchboardFlush, "watchboard-flush", 60*time.Second, "Maximum age of a buffered warning before the watchboard digest flushes regardless of batch size. Must be > 0.")
 	fs.IntVar(&f.watchboardRotate, "watchboard-rotate", 200, "Digest injects per watchboard session before size-based rotation (§15 Q2) opens a fresh session. Must be >= 1.")
+
+	// Enrichment (§7.6). ADDITIVE flags with the design's normative
+	// defaults: critical incidents get the in-process bundle attached
+	// to their initial inject; the enrichment field is omitempty, so
+	// deployments that set --enrich=off (or run --mode=shared) keep
+	// byte-identical payloads.
+	fs.StringVar(&f.enrich, "enrich", "critical", "Which severities get §7.6 enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off.")
+	fs.IntVar(&f.enrichCap, "enrich-cap", 16384, "Byte budget for the attached enrichment bundle (§15 Q3: fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them.")
+	fs.IntVar(&f.enrichLogLines, "enrich-log-lines", 200, "Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1.")
+	fs.DurationVar(&f.enrichTimeout, "enrich-timeout", 5*time.Second, "Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -216,6 +231,21 @@ func (f *flags) validate() error {
 	}
 	if f.watchboardRotate < 1 {
 		return errors.New("--watchboard-rotate must be >= 1")
+	}
+	// Enrichment (§7.6): config errors in every mode, like the storm
+	// and watchboard bounds. (The stage itself only runs in
+	// per-incident mode.)
+	if !enrichPolicies[f.enrich] {
+		return fmt.Errorf("--enrich must be critical, warning, or off (got %q)", f.enrich)
+	}
+	if f.enrichCap < 1 {
+		return errors.New("--enrich-cap must be >= 1")
+	}
+	if f.enrichLogLines < 1 {
+		return errors.New("--enrich-log-lines must be >= 1")
+	}
+	if f.enrichTimeout <= 0 {
+		return errors.New("--enrich-timeout must be > 0")
 	}
 	switch f.mode {
 	case "per-incident":
@@ -316,6 +346,12 @@ type dispatcher struct {
 	// opening their own. Nil when storm correlation is disabled
 	// (--storm absent — the default).
 	storm *engine.StormCorrelator
+	// enrich, when non-nil, is the §7.6 enrichment stage: new
+	// per-incident (and storm) sessions get the in-process bundle
+	// attached to their initial inject. Nil when disabled
+	// (--enrich=off, --mode=shared, dry-run, or unit tests predating
+	// §7.6 — a nil enricher keeps every payload byte-identical).
+	enrich *enricher
 	// injectLock serializes per-(app, sid) session creation +
 	// injects so two rapid-fire events for the same key don't
 	// both call CreateSession. Coarse-grained; a per-key map of
@@ -475,6 +511,20 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			Ref:       sig.IncidentRef(),
 		})
 	}
+	// Enrichment (§7.6): pre-warm the session by attaching the
+	// in-process bundle to the INITIAL inject. Per-incident mode only
+	// (shared mode has no session creation to warm and keeps its
+	// frozen contract); severity-gated by --enrich; hard-capped by
+	// --enrich-timeout. Runs under injectLock deliberately — critical
+	// incidents are rare, the budget is seconds, and enriching after
+	// unlock would let a followup for the same key race ahead of the
+	// session's first message. Errors never block the inject: they
+	// ride inside the bundle as enrichment_error trailers.
+	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(sig.Severity) {
+		if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+			sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+		}
+	}
 	payload := inject.Payload{
 		Kind:         sig.Kind,
 		Reason:       sig.Key.Reason,
@@ -493,6 +543,9 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			Node:          sig.Node,
 			Labels:        sig.Labels,
 		},
+	}
+	if sig.Enrichment != nil {
+		payload.Enrichment = &inject.PayloadEnrichment{Bundle: sig.Enrichment.Bundle}
 	}
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
@@ -786,6 +839,41 @@ func realMain(argv []string) error {
 		feed = newGraphFeed(sharedFactory)
 	} else if f.storm {
 		log.Printf("storm: disabled (--storm-window=0)")
+	}
+
+	// Enrichment (§7.6): per-incident mode only — shared mode routes
+	// everything to --target-session and keeps its frozen payload
+	// contract. When the graph feed runs, enrichment reuses its live
+	// topology snapshot and the shared informer caches (§4.3 surface
+	// 3); otherwise every run takes the scoped LoadCluster fallback.
+	// No startup RBAC probe on purpose: enrichment is best-effort by
+	// definition (§7.6 failure honesty) — a missing grant surfaces as
+	// enrichment_error trailers + enrichment_failures_total, never as
+	// a crash-loop or a silent degrade.
+	if f.mode == "per-incident" && f.enrich != "off" {
+		e := &enricher{
+			client:   client,
+			now:      time.Now,
+			metrics:  m,
+			policy:   f.enrich,
+			cap:      f.enrichCap,
+			logLines: f.enrichLogLines,
+			timeout:  f.enrichTimeout,
+		}
+		path := "scoped-list"
+		if feed != nil {
+			e.snapshot = feed.snapshot
+			podLister := sharedFactory.Core().V1().Pods().Lister()
+			e.livePod = func(ns, name string) (*corev1.Pod, error) {
+				return podLister.Pods(ns).Get(name)
+			}
+			path = "live-graph (scoped-list fallback)"
+		}
+		disp.enrich = e
+		log.Printf("enrichment: enabled (severities=%s, cap=%dB, log-lines=%d, timeout=%s, read path: %s)",
+			f.enrich, f.enrichCap, f.enrichLogLines, f.enrichTimeout, path)
+	} else if f.enrich != "off" {
+		log.Printf("enrichment: --mode=shared — disabled (the shared session's payload contract is frozen; enrichment warms per-incident sessions)")
 	}
 
 	// §11: verify each source's declared RBAC before watching

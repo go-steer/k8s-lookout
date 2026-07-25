@@ -86,6 +86,16 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 
 	payload := stormPayload(info, d.cluster)
+	// Enrichment (§7.6), storm flavor: the ancestor's blast radius
+	// from the live graph, radius-only by design — a storm exists to
+	// collapse N incidents into one session, so its enrichment must
+	// not fan back out into N log fetches. Severity-gated like the
+	// per-incident stage; errors ride inside the bundle.
+	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(info.Severity) {
+		if bundleStr := d.enrich.Storm(ctx, info); bundleStr != "" {
+			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
+		}
+	}
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))

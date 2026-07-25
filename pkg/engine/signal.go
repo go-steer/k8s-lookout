@@ -111,8 +111,9 @@ type Forecast struct {
 
 // Enrichment is the §7.6 warm-session attachment: the pre-computed
 // incident bundle the sentinel gathers in-process before injecting so
-// the session starts warm. Placeholder in this PR — populated by the
-// enrichment stage (later M2 change); nil until then.
+// the session starts warm. Populated by the enrichment stage
+// (internal/watch/enrich.go) on the initial inject of per-incident
+// sessions; nil when enrichment is off for the signal's severity.
 type Enrichment struct {
 	// Bundle is the size-capped, sanitized `lookout bundle` output
 	// for the affected object.
@@ -133,9 +134,12 @@ type Enrichment struct {
 //
 // Wire shape: for Kind=k8s-event / k8s-event-followup the inject
 // payload remains the frozen pkg/inject.Payload byte-for-byte — the
-// Signal-only fields (severity, fingerprint, source, zone, forecast,
-// enrichment) are deliberately NOT serialized for those kinds. The
-// full §8 JSON serialization ships with the new kinds that need it.
+// Signal-only fields (severity, fingerprint, source, zone, forecast)
+// are deliberately NOT serialized for those kinds. The one additive
+// exception is Enrichment (§7.6): when the enrichment stage ran, the
+// payload carries the extra "enrichment" key via omitempty — absent,
+// the bytes are still the frozen M0 shape. The full §8 JSON
+// serialization ships with the new kinds that need it.
 type Signal struct {
 	// Kind names the signal type (§7.3): "k8s-event",
 	// "k8s-event-followup" (frozen), or a source-namespaced kind

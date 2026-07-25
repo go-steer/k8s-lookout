@@ -178,6 +178,14 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	return nil
 }
 
+// snapshot exposes the live topology snapshot for the enrichment
+// stage (§7.6: "sharing the live topology index"). ErrNotReady until
+// the initial sync published — enrichment falls back to its scoped
+// read path rather than wait (same posture as Ancestors below).
+func (g *graphFeed) snapshot() (*graph.Snapshot, error) {
+	return g.graph.Snapshot()
+}
+
 // tombstoneObj unwraps cache.DeletedFinalStateUnknown tombstones —
 // pkg/graph deliberately has no client-go dependency, so the unwrap
 // happens on the informer side (Writer contract).
