@@ -405,7 +405,34 @@ func deltaObjectsFor(obj any, pods []*corev1.Pod) delta.Objects {
 // relation precedence for merging and for emission order.
 var relations = []string{"upstream", "lateral", "downstream"}
 
-// radiusFindings renders the §6.4 blast-radius neighborhood:
+// Neighbor is one merged blast-radius neighbor of a target: the
+// resolved node plus how it relates to the target. It is the shared
+// §6.4 radius answer behind the bundle's radius section, the §7.6
+// enrichment, and `triage radius` — one traversal-and-merge
+// implementation, several renderers.
+type Neighbor struct {
+	// Ref is the resolved neighbor (Observed=false means it exists
+	// only as a dangling reference — triage signal in itself).
+	Ref graph.Ref
+	// Direction is upstream (routes to / owns / governs the target),
+	// lateral (shares a node, volume, or config), or downstream (the
+	// target points at it).
+	Direction string
+	// Hop is the smallest BFS depth at which any of the target's pods
+	// reached the neighbor (1 = direct edge).
+	Hop int
+	// Via is the edge kind that first reached the neighbor at that
+	// hop — RoutesTo, Owns, Selects, Governs, RunsOn, Mounts. For
+	// lateral neighbors it is the co-tenant's own edge to the shared
+	// node (RunsOn or Mounts).
+	Via graph.EdgeKind
+	// Anchor is the shared-infrastructure node behind a lateral
+	// neighbor (resolved: the Node, Zone, ConfigMap, Secret, or PVC
+	// both parties touch). Zero for upstream/downstream neighbors.
+	Anchor graph.Ref
+}
+
+// radiusNeighbors computes the merged §6.4 blast-radius neighborhood:
 // upstream (everything that routes to, owns, or governs the target —
 // the owner chain and the traffic chain), lateral (co-tenants of its
 // nodes/volumes/configs), downstream (everything it points at). The
@@ -413,11 +440,11 @@ var relations = []string{"upstream", "lateral", "downstream"}
 // inbound edges of its own; Services, EndpointSlices, Ingresses, and
 // policies all attach at the pod — falling back to the workload node
 // when it currently has none. Hits are merged across pods on the
-// smallest hop count. Container nodes are elided (spec detail, not
-// neighbors), the target's own pods are not their own neighborhood,
-// and a neighbor that exists only as a dangling reference is a
-// warning, not an info line.
-func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Finding {
+// smallest hop count (direction precedence upstream < lateral <
+// downstream on ties). Container nodes are elided (spec detail, not
+// neighbors) and the target's own pods are not their own
+// neighborhood. Deterministically sorted by (direction, hop, node).
+func radiusNeighbors(snap *graph.Snapshot, id graph.NodeID, depth int) []Neighbor {
 	origins := snap.PodsUnder(id)
 	if len(origins) == 0 {
 		origins = []graph.NodeID{id}
@@ -430,6 +457,8 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 	type hit struct {
 		relation int // index into relations
 		hop      int
+		via      graph.EdgeKind
+		anchor   graph.NodeID
 	}
 	merged := map[graph.NodeID]hit{}
 	absorb := func(relation int, hits []graph.Hit) {
@@ -439,7 +468,7 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 			}
 			cur, seen := merged[h.ID]
 			if !seen || h.Depth < cur.hop || (h.Depth == cur.hop && relation < cur.relation) {
-				merged[h.ID] = hit{relation: relation, hop: h.Depth}
+				merged[h.ID] = hit{relation: relation, hop: h.Depth, via: h.Via, anchor: h.Anchor}
 			}
 		}
 	}
@@ -465,25 +494,43 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 		return int(a) - int(b)
 	})
 
-	var out []emit.Finding
+	var out []Neighbor
 	for _, n := range ids {
 		ref, ok := snap.Resolve(n)
 		if !ok || ref.Kind == graph.KindContainer {
 			continue
 		}
 		h := merged[n]
+		nb := Neighbor{Ref: ref, Direction: relations[h.relation], Hop: h.hop, Via: h.via}
+		if h.anchor != graph.NoNode {
+			if aref, ok := snap.Resolve(h.anchor); ok {
+				nb.Anchor = aref
+			}
+		}
+		out = append(out, nb)
+	}
+	return out
+}
+
+// radiusFindings renders the neighborhood as the bundle's radius
+// section: relation (= direction) + hop, one line per neighbor; a
+// neighbor that exists only as a dangling reference is a warning, not
+// an info line.
+func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Finding {
+	var out []emit.Finding
+	for _, nb := range radiusNeighbors(snap, id, depth) {
 		f := emit.Finding{
 			Kind:         "radius.neighbor",
 			Severity:     emit.SeverityInfo,
-			Namespace:    ref.Namespace,
-			KindOfObject: ref.Kind.String(),
-			Name:         ref.Name,
+			Namespace:    nb.Ref.Namespace,
+			KindOfObject: nb.Ref.Kind.String(),
+			Name:         nb.Ref.Name,
 			Details: []emit.Field{
-				{Key: "relation", Value: relations[h.relation]},
-				{Key: "hop", Value: strconv.Itoa(h.hop)},
+				{Key: "relation", Value: nb.Direction},
+				{Key: "hop", Value: strconv.Itoa(nb.Hop)},
 			},
 		}
-		if !ref.Observed {
+		if !nb.Ref.Observed {
 			f.Kind = "radius.missing"
 			f.Severity = emit.SeverityWarning
 			f.Reason = "ReferencedNotFound"

@@ -1,0 +1,5 @@
+kind=change.rollout severity=info namespace=prod kind_of_object=Pod name=web-1 reason=Updated at=2026-07-25T10:05:00Z relation=self origin=log fields="container/app/image=img:v1→img:v2"
+kind=change.config severity=info namespace=prod kind_of_object=ConfigMap name=cm-app reason=Updated at=2026-07-25T10:10:00Z relation=downstream origin=log fields="data=ccaa58d2→3bd6ba58"
+kind=change.scale severity=info namespace=prod kind_of_object=ReplicaSet name=web-rs reason=Updated at=2026-07-25T10:15:00Z relation=upstream origin=log fields="replicas=2→3"
+kind=change.label severity=info namespace=prod kind_of_object=Pod name=web-1 reason=Updated at=2026-07-25T10:20:00Z relation=self origin=log fields="label/track=→82fbf5cd"
+scanned=15 findings=4 elapsed=100ms source=history at=2026-07-25T10:30:00Z window=2026-07-25T10:00:00Z..2026-07-25T10:30:00Z

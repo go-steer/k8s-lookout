@@ -1,0 +1,4 @@
+kind=change.rollout severity=info namespace=prod kind_of_object=ReplicaSet name=web-rs-2 reason=NewReplicaSet message="new template revision created inside the window" at=2026-07-25T10:20:00Z relation=upstream origin=api revision=2 image=img:v2
+kind=change.scale severity=info namespace=prod kind_of_object=Deployment name=web reason=ScalingReplicaSet message="Scaled up replica set web-rs-2 to 3" at=2026-07-25T10:22:00Z relation=self origin=event
+kind=change.scale severity=info namespace=prod kind_of_object=Deployment name=web reason=SuccessfulRescale message="New size: 3; reason: cpu resource utilization above target" at=2026-07-25T10:25:00Z relation=self origin=event
+scanned=8 findings=3 elapsed=100ms source=live-approximation window=2026-07-25T10:00:00Z..2026-07-25T10:30:00Z

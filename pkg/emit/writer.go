@@ -62,6 +62,7 @@ type Writer struct {
 	format   Format
 	sanitize Sanitizer
 	findings int
+	notes    []Field
 }
 
 // WriterOption customizes a Writer.
@@ -108,23 +109,72 @@ func (w *Writer) Emit(f Finding) error {
 // Findings reports how many findings have been emitted so far.
 func (w *Writer) Findings() int { return w.findings }
 
+// Note records one summary-line annotation, appended after the
+// mandatory scanned/findings/elapsed keys in the order first set
+// (setting a key again replaces its value in place). This is the
+// §6.6 "say so in the summary line" seam: graph-backed commands
+// stamp source=live|history (and the resolved at=) so a consumer
+// always knows WHICH topology answered — the line every stream ends
+// with is the one place that cannot be missed. Keys follow the same
+// charset contract as finding keys and must not shadow the summary's
+// own keys; note keys a command emits belong in its output glossary
+// like any Details key (the §13 contract tests enforce both).
+func (w *Writer) Note(key, value string) error {
+	if !keyPattern.MatchString(key) {
+		return fmt.Errorf("summary note key %q does not match %s", key, keyPattern)
+	}
+	switch key {
+	case "scanned", "findings", "elapsed":
+		return fmt.Errorf("summary note key %q shadows a mandatory summary key", key)
+	}
+	for i := range w.notes {
+		if w.notes[i].Key == key {
+			w.notes[i].Value = value
+			return nil
+		}
+	}
+	w.notes = append(w.notes, Field{Key: key, Value: value})
+	return nil
+}
+
 // Summary writes the mandatory terminating line of every successful
-// invocation: `scanned=<n> findings=<n> elapsed=<d>` (§4.2). In JSON
-// format it is a JSON object with exactly those keys, so a
+// invocation: `scanned=<n> findings=<n> elapsed=<d>` (§4.2), plus any
+// recorded Note annotations after those three keys. In JSON format it
+// is a JSON object with the same keys in the same order, so a
 // line-oriented consumer handles both formats identically. The
 // findings count comes from the Writer itself — it cannot drift from
 // what was actually emitted.
 func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
-	var err error
+	pairs := make([]Field, 0, 3+len(w.notes))
+	pairs = append(pairs,
+		Field{Key: "scanned", Value: strconv.Itoa(scanned)},
+		Field{Key: "findings", Value: strconv.Itoa(w.findings)},
+		Field{Key: "elapsed", Value: elapsed.String()},
+	)
+	pairs = append(pairs, w.notes...)
+	var line []byte
 	switch w.format {
 	case FormatJSON:
-		_, err = fmt.Fprintf(w.out, "{\"scanned\":%d,\"findings\":%d,\"elapsed\":%q}\n",
-			scanned, w.findings, elapsed.String())
+		line = encodeJSONSummary(pairs, scanned, w.findings)
 	default:
-		_, err = fmt.Fprintf(w.out, "scanned=%d findings=%d elapsed=%s\n",
-			scanned, w.findings, elapsed.String())
+		line = encodeLogfmt(pairs)
 	}
+	_, err := w.out.Write(line)
 	return err
+}
+
+// encodeJSONSummary renders the summary pairs as one JSON object,
+// keeping scanned/findings numeric (they always were) and everything
+// else a string.
+func encodeJSONSummary(pairs []Field, scanned, findings int) []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "{\"scanned\":%d,\"findings\":%d", scanned, findings)
+	for _, p := range pairs[2:] {
+		v, _ := json.Marshal(p.Value) // string marshaling cannot fail
+		fmt.Fprintf(&b, ",%q:%s", p.Key, v)
+	}
+	b.WriteString("}\n")
+	return b.Bytes()
 }
 
 // encodeLogfmt renders ordered pairs as one logfmt line. Values are

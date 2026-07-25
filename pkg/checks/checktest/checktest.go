@@ -90,8 +90,10 @@ func VerifyContract(t *testing.T, c checks.Command, args ...string) {
 // Verify checks one successful stdout stream against the command's
 // declared schema:
 //
-//   - the last line is the mandatory summary, with exactly the keys
-//     scanned/findings/elapsed;
+//   - the last line is the mandatory summary, leading with exactly
+//     the keys scanned/findings/elapsed; any §6.6-style note keys
+//     after them (emit.Writer.Note) must be declared in the output
+//     glossary like Details keys;
 //   - the summary's findings count equals the number of finding
 //     lines;
 //   - every finding key is either an envelope field or declared in
@@ -114,9 +116,14 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 		declared[f.Name] = true
 	}
 
-	reported, err := parseSummary(summary, format)
+	reported, notes, err := parseSummary(summary, format)
 	if err != nil {
 		return fmt.Errorf("summary line %q: %w", summary, err)
+	}
+	for _, k := range notes {
+		if !declared[k] {
+			return fmt.Errorf("summary line %q: note key %q is not declared in the output glossary", summary, k)
+		}
 	}
 	if reported != len(findings) {
 		return fmt.Errorf("summary reports findings=%d but %d finding lines precede it", reported, len(findings))
@@ -139,31 +146,40 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 }
 
 // parseSummary validates the summary line's shape and returns its
-// findings count.
-func parseSummary(line string, format emit.Format) (findings int, err error) {
+// findings count plus any note keys following the mandatory three.
+func parseSummary(line string, format emit.Format) (findings int, notes []string, err error) {
 	switch format {
 	case emit.FormatJSON:
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
-		if len(m) != 3 || m["scanned"] == nil || m["findings"] == nil || m["elapsed"] == nil {
-			return 0, fmt.Errorf("want exactly the keys scanned/findings/elapsed, got %v", m)
+		if m["scanned"] == nil || m["findings"] == nil || m["elapsed"] == nil {
+			return 0, nil, fmt.Errorf("want the keys scanned/findings/elapsed, got %v", m)
 		}
 		f, ok := m["findings"].(float64)
 		if !ok {
-			return 0, fmt.Errorf("findings is not a number: %v", m["findings"])
+			return 0, nil, fmt.Errorf("findings is not a number: %v", m["findings"])
 		}
-		return int(f), nil
+		for k := range m {
+			if k != "scanned" && k != "findings" && k != "elapsed" {
+				notes = append(notes, k)
+			}
+		}
+		return int(f), notes, nil
 	default:
 		pairs, err := parseLogfmt(line)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
-		if len(pairs) != 3 || pairs[0].Key != "scanned" || pairs[1].Key != "findings" || pairs[2].Key != "elapsed" {
-			return 0, fmt.Errorf("want scanned=<n> findings=<n> elapsed=<d>, got %q", line)
+		if len(pairs) < 3 || pairs[0].Key != "scanned" || pairs[1].Key != "findings" || pairs[2].Key != "elapsed" {
+			return 0, nil, fmt.Errorf("want scanned=<n> findings=<n> elapsed=<d>, got %q", line)
 		}
-		return strconv.Atoi(pairs[1].Value)
+		for _, p := range pairs[3:] {
+			notes = append(notes, p.Key)
+		}
+		findings, err = strconv.Atoi(pairs[1].Value)
+		return findings, notes, err
 	}
 }
 

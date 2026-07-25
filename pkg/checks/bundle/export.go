@@ -50,6 +50,16 @@ func RadiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 	return radiusFindings(snap, id, depth)
 }
 
+// RadiusNeighbors is the traversal-and-merge core behind
+// RadiusFindings, exposed for renderers that need the full relation
+// detail (`triage radius`: direction + via edge kind + lateral
+// anchor) rather than the bundle section's compact form. Snapshot-
+// only, like RadiusFindings — it serves live and §6.6 point-in-time
+// snapshots identically.
+func RadiusNeighbors(snap *graph.Snapshot, id graph.NodeID, depth int) []Neighbor {
+	return radiusNeighbors(snap, id, depth)
+}
+
 // DeltaObjectsFor scopes the delta derivations to one workload: its
 // pods plus the workload object itself (any of the apps/batch kinds
 // the bundle targets; other types contribute only the pods).
