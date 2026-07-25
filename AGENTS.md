@@ -54,27 +54,35 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**M1 complete** (see `docs/milestones/M1.md` for the exit-check evidence;
-`docs/milestones/M0.md` for M0's): the read-path core is in — `triage
-delta|logs|spec`, `state edges`, `bundle`, `health`, all registered through
-the `pkg/checks` metadata registry (one declaration generates `--help`, the
-MCP schema, and the skill reference stubs), executed under the §4.2
-envelope with the §6.5 sanitizer on every surface, served over MCP by
-`lookout mcp`, and consuming the `pkg/graph` COW topology index (Q5
-compaction gate recorded in `docs/graph-q5-gate.md`). The first skills ship
-in `skills/` (`k8s-triage`, `cluster-health`, `playbooks/`); their
-`references/` are generated — run `dev/tools/gen-skill-refs` after touching
-command metadata, and keep `internal/skilldoc`'s contract tests green (they
-parse-validate every documented `lookout` command line). From M0: `lookout
-watch` is the moved `k8s-event-watcher` (flags frozen by
-`internal/watch/flags_contract_test.go`, inject wire shape pinned
-byte-for-byte by `TestDispatcher_ExactInjectPayloadWireShape`), and
-`ghcr.io/go-steer/lookout` images publish on `v*` tags.
+**M2 complete** (see `docs/milestones/M2.md` for the drill evidence; M1/M0
+records sit alongside): `lookout watch` is the full §7.1 pipeline —
+`pkg/sources` (`k8s-events` + `object-state`, §11 loud RBAC probes),
+dedup with leading/reactive reason families, storm correlation over the
+live `pkg/graph` feed (`--storm`, one shared informer set), severity
+routing with `--severity` overrides and the size-rotated watchboard
+session, §7.6 enrichment via the in-process bundle, and §7.4 recovery
+injects (`kind=resolved`/`resolved.reverted`, §9.3 schema-stable). All new
+inject kinds are wire-pinned byte-exact (storm/watchboard/resolved tests in
+`internal/watch` + `pkg/inject`); the M0 `k8s-event` payload and flag
+surface stay frozen (`flags_contract_test.go`,
+`TestDispatcher_ExactInjectPayloadWireShape`). From M1: the read-path core
+(`triage delta|logs|spec`, `state edges`, `bundle`, `health`) under the
+§4.2 envelope + §6.5 sanitizer, `lookout mcp`, `pkg/graph` (Q5 gate in
+`docs/graph-q5-gate.md`), and the generated skills (`dev/tools/
+gen-skill-refs` after touching command metadata; keep `internal/skilldoc`
+contract tests green). Known M2 gaps to pick up (recorded with evidence in
+`docs/milestones/M2.md` §Observations): ClusterRole lacks
+`deployments get` + `pods/log get` for two enrichment sections; no
+node-scoped clearance observer (node-anchored storms never emit their own
+resolved record); live-graph radius mislabels existing-but-unwatched
+ConfigMaps as `radius.missing`; `--storm` default stays OFF until the RBAC
+fix lands. GKE replay runbook: `dev/drills/node-failure.md`.
 
-Next milestone: **M2 — closed loop** (DESIGN.md §14): recovery injects
-(§7.4), storm correlation via graph blast-radius keys (§7.5), severity
-routing (§7.7), enrichment via the in-process bundle (§7.6), and the
-`object-state` source. Deferred from M1 scope: `triage
-events|radius|changes`, `net probe` (M3); the control-plane health
-category and the store/memory-merged `health` (M4); `--incident`
-enrichment pre-warming (M2).
+Next milestone: **M3 — leading indicators + history** (DESIGN.md §14):
+`rollout`, `saturation`, `degradation`, `expiry` sources; the §9.1 raw
+store (info-class signals stop being counted-and-dropped) including graph
+snapshots + the delta log; `triage events`, `triage top`, `triage radius
+--at`, `triage changes`, `triage spec --diff`, `net probe`. Deferred
+further out: control-plane health category and store/memory-merged
+`health` (M4); `state wi|webhooks|volumes`, `stab drift|drain`,
+`perf probe`, `token-burn`, corpus harvester (M5).

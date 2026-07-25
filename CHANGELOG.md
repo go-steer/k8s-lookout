@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-25
+
+M2 — closed loop (DESIGN.md §14). Exit criterion verified in
+`docs/milestones/M2.md`: the node-failure drill produced 1 storm session
+(3 session creates for 33 affected objects), not 30; fix-verify
+round-tripped without agent polling — a config fix became a `kind=resolved`
+record in the incident's own session 76 seconds later.
+
 ### Added
 
 - The Signal engine foundation (M2, DESIGN.md §7.2/§7.3/§8): `TriageEvent`
