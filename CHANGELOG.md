@@ -156,6 +156,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watchboard_entries_total{kind}`, `watchboard_digests_total`,
   `watchboard_rotations_total`, `watchboard_buffered`,
   `info_dropped_total{kind}`.
+- Enrichment — warm incident sessions via the in-process bundle (M2,
+  DESIGN.md §7.6; §15 Q3 decided: fixed byte budget now, revisit with
+  this PR's telemetry): before the INITIAL inject of a per-incident
+  session, the sentinel runs the `lookout bundle` composition
+  in-process (§4.3 surface 3 — the same `pkg/checks` code as the CLI,
+  no fork/exec) scoped to the affected object, and attaches the result
+  to the payload as the additive `enrichment: {bundle: "…"}` field
+  (omitempty — un-enriched payloads stay byte-identical to M0; the
+  frozen wire pins pass unchanged, a new pin covers the enriched
+  shape). The bundle is `bundle`-shaped logfmt: a `bundle.target`
+  head, then spec / delta / edges / radius / logs sections, every line
+  emitted through the §6.5 sanitizer. Two read paths: with `--storm`
+  on, enrichment reuses the LIVE topology snapshot + shared informer
+  caches (owner chain, pods, radius) and pays one API GET for the
+  workload object — the edges section, whose checks need the
+  Service/RBAC index the live informer set doesn't carry, ships as an
+  overflow trailer naming `lookout state edges` instead; with the feed
+  off (or the object not in the topology yet) a namespace-scoped
+  `state.LoadCluster` pass feeds all five sections. Size cap
+  `--enrich-cap` (default 16384 bytes) truncates ONLY at section
+  boundaries (prefix cut, never mid-line); every dropped or uncomputed
+  section becomes a schema-stable `overflow section=<s> cmd="lookout
+  …"` trailer with real arguments, so the inject itself teaches the
+  next move (§4.4.4). Failure honesty: errors never block the inject —
+  each failed stage attaches an `enrichment_error stage=<s>
+  error="…"` trailer, whatever succeeded still ships, and the whole
+  run is hard-capped by `--enrich-timeout` (default 5s) via context.
+  Severity-gated by `--enrich=critical|warning|off` (default critical,
+  per §7.6/§7.7); `--enrich-log-lines` (default 200) tail-limits the
+  logs section per container stream (template cap 10, fixed). Storm
+  sessions are enriched too — the storm ancestor's blast radius only
+  (no logs, no per-member reads: a storm exists to collapse cost,
+  §7.5). Shared mode is untouched (frozen contract; no session to
+  warm). Exported seams added to `pkg/checks/bundle` for the sentinel
+  (thin veneers over the CLI internals, no second implementation):
+  `ResolveIncidentTarget`, `RadiusFindings`, `DeltaObjectsFor`. New
+  metrics: `enrichments_total{outcome}`, `enrichment_bytes` histogram,
+  `enrichment_truncated_total`, `enrichment_failures_total{stage}`.
 
 ## [0.2.0] - 2026-07-24
 

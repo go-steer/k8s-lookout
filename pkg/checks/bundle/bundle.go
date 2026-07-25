@@ -225,7 +225,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	// delta: abnormal state of the target's own objects.
-	if err := out(sectionDelta, delta.ScanObjects(deps.now(), delta.Config{}, deltaObjects(cluster, wl, pods))); err != nil {
+	if err := out(sectionDelta, delta.ScanObjects(deps.now(), delta.Config{}, deltaObjectsFor(cluster.WorkloadObject(wl), pods))); err != nil {
 		return 0, err
 	}
 
@@ -379,16 +379,17 @@ func topmostOwner(snap *graph.Snapshot, id graph.NodeID, fallback emit.WorkloadR
 	return fallback, nil
 }
 
-// deltaObjects scopes the delta derivations to the target: its pods
-// plus the workload object itself. Cluster-scoped delta classes
+// deltaObjectsFor scopes the delta derivations to the target: its
+// pods plus the workload object itself. Cluster-scoped delta classes
 // (nodes, PDBs, quotas, system add-ons) belong to `triage delta` and
-// `health`, not to a single-workload bundle.
-func deltaObjects(cluster *state.Cluster, wl emit.WorkloadRef, pods []*corev1.Pod) delta.Objects {
+// `health`, not to a single-workload bundle. Exported via
+// DeltaObjectsFor for the §7.6 enrichment stage.
+func deltaObjectsFor(obj any, pods []*corev1.Pod) delta.Objects {
 	objs := delta.Objects{}
 	for _, p := range pods {
 		objs.Pods = append(objs.Pods, *p)
 	}
-	switch o := cluster.WorkloadObject(wl).(type) {
+	switch o := obj.(type) {
 	case *appsv1.Deployment:
 		objs.Deployments = []appsv1.Deployment{*o}
 	case *appsv1.StatefulSet:
