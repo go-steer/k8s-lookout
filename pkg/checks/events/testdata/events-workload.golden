@@ -1,0 +1,5 @@
+kind=event.normal severity=info namespace=prod kind_of_object=Deployment name=web reason=ScalingReplicaSet message="Scaled up replica set web-abc to 2" count=1 first_seen=2026-07-25T11:20:00Z last_seen=2026-07-25T11:20:00Z source=kubelet
+kind=event.normal severity=info namespace=prod kind_of_object=HorizontalPodAutoscaler name=web-hpa reason=SuccessfulRescale message="New size: 3; reason: cpu resource utilization (percentage of request) above target" count=4 first_seen=2026-07-25T11:35:00Z last_seen=2026-07-25T11:50:00Z source=horizontal-pod-autoscaler
+kind=event.warning severity=warning namespace=prod kind_of_object=Pod name=web-abc-1 reason=ImagePullBackOff message="Back-off pulling image \"registry.example/web:v9\"" count=5 first_seen=2026-07-25T11:30:00Z last_seen=2026-07-25T11:55:00Z variants=ErrImagePull,ImagePullBackOff source=kubelet
+kind=event.hpa_thrash severity=warning namespace=prod kind_of_object=HorizontalPodAutoscaler name=web-hpa reason=HPAThrash message="replica count changed direction 2 times within 30m0s — the HPA is oscillating, not converging" replicas=6->3->7->3 flips=2 window=30m0s target=Deployment/web
+scanned=9 findings=4 elapsed=100ms

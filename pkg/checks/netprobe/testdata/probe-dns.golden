@@ -1,0 +1,4 @@
+kind=probe.dns severity=info name=api.prod.svc.cluster.local message="resolved to 2 address(es)" ips=10.8.0.12,10.8.0.7 latency=100ms
+kind=probe.dns severity=critical name=missing.prod.svc message="lookup missing.prod.svc: no such host" error_class=nxdomain latency=100ms
+kind=probe.dns severity=warning name=slow.example message="lookup slow.example: i/o timeout" error_class=timeout latency=100ms
+scanned=3 findings=3 elapsed=100ms
