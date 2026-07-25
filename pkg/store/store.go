@@ -34,10 +34,10 @@
 // ordinary, fully compatible SQLite files.
 //
 // Schema versioning is forward-only: schema_version carries the
-// applied version and migrations append. Graph snapshots and the
-// topology delta log (§6.6) land in a LATER change as SEPARATE tables
-// via new migrations — nothing in the occurrences schema is shared
-// with them beyond the file.
+// applied version and migrations append. Migration v2 added the §6.6
+// graph-history tables (graph_snapshots + graph_changes; see
+// history.go) — separate tables sharing the file, the TTL policy,
+// and the buffered writer, nothing else.
 //
 // The store path is always an explicit flag (`--store=`); there is no
 // default location, and in particular never one under $HOME — a
@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -111,6 +112,41 @@ var migrations = []string{
 	CREATE INDEX occurrences_fingerprint_emitted ON occurrences (fingerprint, emitted_at);
 	CREATE INDEX occurrences_uid_emitted ON occurrences (uid, emitted_at);
 	CREATE INDEX occurrences_severity_emitted ON occurrences (severity, emitted_at);`,
+
+	// v2: §6.6 graph history — periodic topology snapshots + the
+	// per-delta change log (see history.go). resource_version holds
+	// the graph's monotonic snapshot generation (there is no single
+	// cluster-wide k8s resourceVersion across informers; the column
+	// keeps the §6.6 name). graph_changes.changes is the JSON
+	// FieldChanges summary (names/hashes/counts only — the `triage
+	// changes` feed); effect is the opaque compact replay blob GraphAt
+	// applies on top of the nearest snapshot; generation is the swap
+	// counter of the first snapshot containing the change (the replay
+	// cursor — beyond the doc'd column set, required for exact
+	// snapshot-boundary replay).
+	`CREATE TABLE graph_snapshots (
+		id               INTEGER PRIMARY KEY,
+		taken_at         INTEGER NOT NULL,
+		resource_version INTEGER NOT NULL,
+		format_version   INTEGER NOT NULL,
+		size_bytes       INTEGER NOT NULL,
+		data             BLOB NOT NULL
+	);
+	CREATE INDEX graph_snapshots_taken_at ON graph_snapshots (taken_at);
+	CREATE TABLE graph_changes (
+		id         INTEGER PRIMARY KEY,
+		at         INTEGER NOT NULL,
+		generation INTEGER NOT NULL,
+		op         TEXT NOT NULL,
+		kind       TEXT NOT NULL,
+		namespace  TEXT NOT NULL DEFAULT '',
+		name       TEXT NOT NULL DEFAULT '',
+		uid        TEXT NOT NULL DEFAULT '',
+		changes    TEXT NOT NULL DEFAULT '[]',
+		effect     BLOB
+	);
+	CREATE INDEX graph_changes_at ON graph_changes (at);
+	CREATE INDEX graph_changes_generation ON graph_changes (generation);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no
@@ -178,6 +214,14 @@ type Store struct {
 	hooks Hooks
 	logf  func(format string, args ...any)
 
+	// schemaVersion is the version found/applied at open time; the
+	// graph-history query surface checks it so a read-only open of an
+	// older sentinel's store answers "no history" instead of "no such
+	// table". readOnly marks OpenRead handles: no writer goroutine, all
+	// write paths refuse or no-op.
+	schemaVersion int
+	readOnly      bool
+
 	mu     sync.RWMutex // guards closed vs. concurrent Record/Flush
 	closed bool
 	ch     chan writeReq
@@ -233,17 +277,63 @@ func Open(path string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("store: migrate %s: %w", path, err)
 	}
 	s := &Store{
-		db:    db,
-		ttl:   o.ttl,
-		max:   o.maxBytes,
-		clock: o.clock,
-		hooks: o.hooks,
-		logf:  o.logf,
-		ch:    make(chan writeReq, o.bufLen),
-		done:  make(chan struct{}),
+		db:            db,
+		ttl:           o.ttl,
+		max:           o.maxBytes,
+		clock:         o.clock,
+		hooks:         o.hooks,
+		logf:          o.logf,
+		schemaVersion: len(migrations),
+		ch:            make(chan writeReq, o.bufLen),
+		done:          make(chan struct{}),
 	}
 	go s.writer()
 	return s, nil
+}
+
+// OpenRead opens an EXISTING store read-only — the one-shot CLI path
+// (§6.6: history is a watch-path feature; a CLI invocation serves
+// --at only when pointed at a sentinel's store via --store=). No
+// migrations run (the file may belong to a live sentinel of a
+// different version), no writer goroutine starts, and every write
+// method refuses or no-ops. A store written by a NEWER lookout is
+// refused, same posture as Open; an OLDER store opens fine and the
+// history queries simply answer "no history".
+func OpenRead(path string, opts ...Option) (*Store, error) {
+	if path == "" {
+		return nil, errors.New("store: path is required")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("store: %w (is this a sentinel's --store path?)", err)
+	}
+	o := &options{clock: time.Now, logf: log.Printf}
+	for _, opt := range opts {
+		opt(o)
+	}
+	dsn := "file:" + url.PathEscape(path) +
+		"?mode=ro" +
+		"&_pragma=query_only(1)" +
+		"&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %s read-only: %w", path, err)
+	}
+	version, err := readVersion(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: read schema version of %s: %w", path, err)
+	}
+	if version > len(migrations) {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: database schema version %d is newer than this binary understands (max %d)", version, len(migrations))
+	}
+	return &Store{
+		db:            db,
+		clock:         o.clock,
+		logf:          o.logf,
+		schemaVersion: version,
+		readOnly:      true,
+	}, nil
 }
 
 // migrate creates schema_version if needed and applies every pending
@@ -312,7 +402,7 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 // committed (or dropped). Nil-safe no-op. Used by shutdown and tests;
 // the hot path never waits.
 func (s *Store) Flush() {
-	if s == nil {
+	if s == nil || s.readOnly {
 		return
 	}
 	s.mu.RLock()
@@ -339,8 +429,12 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	close(s.ch)
-	s.mu.Unlock()
-	<-s.done
+	if s.ch != nil {
+		close(s.ch)
+		s.mu.Unlock()
+		<-s.done
+	} else {
+		s.mu.Unlock() // read-only open: no writer goroutine to drain
+	}
 	return s.db.Close()
 }

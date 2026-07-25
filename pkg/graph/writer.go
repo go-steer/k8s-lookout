@@ -82,6 +82,8 @@ type selEntry struct {
 type Writer struct {
 	g        *Graph
 	interval time.Duration
+	onChange func(ChangeRecord)
+	now      func() time.Time
 
 	mu      sync.Mutex
 	closed  bool
@@ -97,18 +99,32 @@ type Writer struct {
 	refcnt    map[NodeID]int                   // edges incident per node, for GC
 	podLabels map[string]map[NodeID]labels.Set // namespace → pod → labels
 	selectors map[string]map[NodeID]selEntry   // namespace → source → selector
+
+	// §6.6 delta-log state, populated only when onChange is set:
+	// tracked holds the per-object fingerprints FieldChanges diff
+	// against (changes.go); rec is armed around one applyDelta to
+	// capture its primitive mutations as the replay effect
+	// (replay.go).
+	tracked map[NodeID]*trackedState
+	rec     *effectLog
 }
 
-func newWriter(g *Graph, interval time.Duration) *Writer {
-	return &Writer{
+func newWriter(g *Graph, interval time.Duration, onChange func(ChangeRecord), now func() time.Time) *Writer {
+	w := &Writer{
 		g:         g,
 		interval:  interval,
+		onChange:  onChange,
+		now:       now,
 		intern:    &interner{},
 		declared:  make(map[NodeID][]halfEdge),
 		refcnt:    make(map[NodeID]int),
 		podLabels: make(map[string]map[NodeID]labels.Set),
 		selectors: make(map[string]map[NodeID]selEntry),
 	}
+	if onChange != nil {
+		w.tracked = make(map[NodeID]*trackedState)
+	}
+	return w
 }
 
 // batch is the next snapshot under construction: full map clones of
@@ -145,6 +161,11 @@ func (w *Writer) FromObjects(objs iter.Seq[any]) error {
 	}
 	b := w.newBatch()
 	for _, o := range list {
+		if w.onChange != nil {
+			// Seed change tracking without emitting records: initial
+			// sync is covered by the first stored snapshot (§6.6).
+			w.trackSeed(o)
+		}
 		w.applyDelta(b, Delta{Op: OpAdd, Object: o})
 	}
 	w.publish(b)
@@ -223,11 +244,31 @@ func (w *Writer) flushLocked() {
 		return
 	}
 	b := w.newBatch()
+	var recs []ChangeRecord
 	for _, d := range w.pending {
+		if w.onChange == nil {
+			w.applyDelta(b, d)
+			continue
+		}
+		// §6.6 delta log: derive the changed-field summary from the
+		// typed object (only place it is visible), then capture the
+		// apply's primitive mutations as the replay effect.
+		rec := w.trackChange(d)
+		w.rec = &effectLog{}
 		w.applyDelta(b, d)
+		rec.Effect = w.rec.encode()
+		w.rec = nil
+		recs = append(recs, rec)
 	}
 	w.pending = nil
 	w.publish(b)
+	// Deliver after publish so Generation is the swap counter of the
+	// snapshot that first contains each change — the store's replay
+	// cursor. Still under mu: records reach the hook in apply order.
+	for i := range recs {
+		recs[i].Generation = w.gen
+		w.onChange(recs[i])
+	}
 }
 
 // newBatch clones the current snapshot's maps (or starts empty).
@@ -270,7 +311,8 @@ func (w *Writer) publish(b *batch) {
 // record exists in the batch. Namespaced identities also ensure
 // their Namespace node.
 func (w *Writer) node(b *batch, kind NodeKind, namespace, name string) NodeID {
-	id := w.intern.intern(nodeKey(kind, namespace, name))
+	key := nodeKey(kind, namespace, name)
+	id := w.intern.intern(key)
 	if _, ok := b.nodes[id]; !ok {
 		var nsID NodeID
 		if namespace != "" {
@@ -280,6 +322,9 @@ func (w *Writer) node(b *batch, kind NodeKind, namespace, name string) NodeID {
 		// Namespace nodes are observed from the start; everything
 		// else starts unobserved until its object is actually seen.
 		b.nodes[id] = nodeInfo{kind: kind, observed: kind == KindNamespace, ns: nsID}
+		if w.rec != nil {
+			w.rec.nodeNew(id, kind, key)
+		}
 	}
 	return id
 }
@@ -291,6 +336,9 @@ func (w *Writer) observe(b *batch, id NodeID, kind NodeKind) {
 	info.kind = kind
 	info.observed = true
 	b.nodes[id] = info
+	if w.rec != nil {
+		w.rec.observe(id, kind)
+	}
 }
 
 // markDeleted flips a node back to unobserved and garbage-collects
@@ -304,6 +352,9 @@ func (w *Writer) markDeleted(b *batch, id NodeID) {
 	}
 	info.observed = false
 	b.nodes[id] = info
+	if w.rec != nil {
+		w.rec.unobserve(id)
+	}
 	w.maybeGC(b, id)
 }
 
@@ -326,6 +377,9 @@ func (w *Writer) maybeGC(b *batch, id NodeID) {
 	}
 	delete(b.nodes, id)
 	delete(w.refcnt, id)
+	if w.rec != nil {
+		w.rec.gc(id)
+	}
 }
 
 // setDeclared reconciles the full set of edges declared by src:
@@ -406,6 +460,9 @@ func (w *Writer) addEdge(b *batch, e halfEdge) {
 	w.refcnt[e.From]++
 	w.refcnt[e.To]++
 	b.edges++
+	if w.rec != nil {
+		w.rec.edge(effEdgeAdd, e)
+	}
 }
 
 // removeEdge deletes e from the batch adjacency (idempotent) and
@@ -421,6 +478,9 @@ func (w *Writer) removeEdge(b *batch, e halfEdge) {
 	w.refcnt[e.From]--
 	w.refcnt[e.To]--
 	b.edges--
+	if w.rec != nil {
+		w.rec.edge(effEdgeRemove, e)
+	}
 	w.maybeGC(b, e.From)
 	w.maybeGC(b, e.To)
 }

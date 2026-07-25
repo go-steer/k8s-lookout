@@ -53,7 +53,7 @@ type FlagSpec struct {
 
 // CommonFlags returns the §4.2 flags every command accepts. They are
 // parsed once by Run into a Scope; checks never see them as raw
-// flags. (--at joins this set with graph history in M3, §6.6.)
+// flags.
 func CommonFlags() []FlagSpec {
 	return []FlagSpec{
 		{Name: "namespace", Type: FlagString, Default: "", Help: "limit the scan to one namespace"},
@@ -63,6 +63,42 @@ func CommonFlags() []FlagSpec {
 		{Name: "format", Type: FlagString, Default: "logfmt", Help: "output format: logfmt|json (one record per line either way)"},
 		{Name: "timeout", Type: FlagDuration, Default: "10s", Help: "abort the invocation after this long (exit 1)"},
 	}
+}
+
+// GraphHistoryFlags returns the §4.2/§6.6 point-in-time flags,
+// registered ONLY for commands that declare themselves graph-backed
+// (RunConfig.GraphBacked / checks.Command.GraphBacked): live-only
+// commands reject --at as an unknown flag rather than silently
+// ignoring a time the caller cares about. --at without --store is a
+// usage error: history is a watch-path feature, and a one-shot CLI
+// invocation can only serve point-in-time queries from a sentinel's
+// store (§6.6) — otherwise commands answer live-only and say so in
+// their summary line.
+func GraphHistoryFlags() []FlagSpec {
+	return []FlagSpec{
+		{Name: "at", Type: FlagString, Default: "", Help: "answer as of this instant instead of live: RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m). Requires --store."},
+		{Name: "store", Type: FlagString, Default: "", Help: "path to a sentinel's SQLite store (its --store file); source for --at point-in-time topology"},
+	}
+}
+
+// ParseAt parses the --at flag value: empty means live (zero time),
+// a Go duration means that long BEFORE now ("20m" = 20 minutes ago),
+// anything else must be RFC3339.
+func ParseAt(s string, now time.Time) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		if d < 0 {
+			return time.Time{}, fmt.Errorf("--at duration must not be negative (%q means %q ago)", s, s)
+		}
+		return now.Add(-d), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("--at must be RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m), got %q", s)
+	}
+	return t, nil
 }
 
 // registerSpecs adds specs to fs, parsing each declared default.
@@ -133,6 +169,20 @@ func ValidateSpecs(specs []FlagSpec) error {
 	return registerSpecs(fs, specs)
 }
 
+// ValidateGraphBackedSpecs is ValidateSpecs for graph-backed
+// commands: the §6.6 history flags are reserved too, so a command
+// cannot shadow --at or --store.
+func ValidateGraphBackedSpecs(specs []FlagSpec) error {
+	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	if err := registerSpecs(fs, CommonFlags()); err != nil {
+		return err
+	}
+	if err := registerSpecs(fs, GraphHistoryFlags()); err != nil {
+		return err
+	}
+	return registerSpecs(fs, specs)
+}
+
 // FlagValues gives checks typed access to their command-specific
 // flags after parsing. Lookups of undeclared names or with the wrong
 // type panic: both are programmer errors a command's own unit test
@@ -173,8 +223,15 @@ type Scope struct {
 	// default.
 	Since time.Duration
 
-	// --at (point-in-time graph queries, §6.6) is deliberately
-	// absent until graph history lands in M3.
+	// At is the resolved --at instant for graph-backed commands
+	// (§6.6): answer as of this time instead of live. Zero means
+	// live. Only ever non-zero together with Store — Run rejects
+	// --at without --store as a usage error.
+	At time.Time
+	// Store is the --store path (a sentinel's SQLite store) backing
+	// At. May be set without At (the command then answers live and
+	// may use the store for other reads).
+	Store string
 }
 
 // WorkloadRef identifies one workload, parsed from

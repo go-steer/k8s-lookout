@@ -49,11 +49,16 @@ func propertyName(flag string) string {
 	return strings.ReplaceAll(flag, "-", "_")
 }
 
-// schemaSpecs returns the §4.2 common flags followed by the command's
-// own flags: the complete flag surface behind a tool's schema, in the
+// schemaSpecs returns the §4.2 common flags (plus, for graph-backed
+// commands, the §6.6 history flags) followed by the command's own
+// flags: the complete flag surface behind a tool's schema, in the
 // order the surfaces document them.
 func schemaSpecs(c checks.Command) []emit.FlagSpec {
-	return append(emit.CommonFlags(), c.Flags...)
+	specs := emit.CommonFlags()
+	if c.GraphBacked {
+		specs = append(specs, emit.GraphHistoryFlags()...)
+	}
+	return append(specs, c.Flags...)
 }
 
 // inputSchema derives a tool's JSON schema mechanically from the

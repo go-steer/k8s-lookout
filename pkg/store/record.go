@@ -122,11 +122,12 @@ type row struct {
 	raw         []byte
 }
 
-// writeReq is one writer-queue element: a row to insert, or a Flush
-// barrier (row nil) the writer acknowledges after committing
-// everything queued before it.
+// writeReq is one writer-queue element: an occurrence row or a §6.6
+// graph-change row to insert, or a Flush barrier (both nil) the
+// writer acknowledges after committing everything queued before it.
 type writeReq struct {
 	row     *row
+	change  *changeRow
 	barrier chan struct{}
 }
 
@@ -136,7 +137,7 @@ type writeReq struct {
 // telemetry, and the inject pipeline must not stall on it (§9.1).
 // Nil-safe: a disabled store discards silently.
 func (s *Store) Record(sig engine.Signal, out Outcome) {
-	if s == nil {
+	if s == nil || s.readOnly {
 		return
 	}
 	r := newRow(sig, out, s.clock())
@@ -208,40 +209,44 @@ func (s *Store) writer() {
 	const maxBatch = 128
 	for req := range s.ch {
 		batch := make([]*row, 0, maxBatch)
+		var changes []*changeRow
 		var barriers []chan struct{}
-		if req.row != nil {
-			batch = append(batch, req.row)
-		} else if req.barrier != nil {
-			barriers = append(barriers, req.barrier)
+		take := func(r writeReq) {
+			switch {
+			case r.row != nil:
+				batch = append(batch, r.row)
+			case r.change != nil:
+				changes = append(changes, r.change)
+			case r.barrier != nil:
+				barriers = append(barriers, r.barrier)
+			}
 		}
+		take(req)
 	drain:
-		for len(batch) < maxBatch {
+		for len(batch)+len(changes) < maxBatch {
 			select {
 			case more, ok := <-s.ch:
 				if !ok {
 					break drain
 				}
-				if more.row != nil {
-					batch = append(batch, more.row)
-				} else if more.barrier != nil {
-					barriers = append(barriers, more.barrier)
-				}
+				take(more)
 			default:
 				break drain
 			}
 		}
-		s.insert(batch)
+		s.insert(batch, changes)
 		for _, b := range barriers {
 			close(b)
 		}
 	}
 }
 
-// insert commits one batch. A failed batch is LOST (telemetry, not
-// system of record): logged loudly and counted via
-// OnDrop("write_error") per record.
-func (s *Store) insert(batch []*row) {
-	if len(batch) == 0 {
+// insert commits one batch of occurrence + graph-change rows in one
+// transaction. A failed batch is LOST (telemetry, not system of
+// record): logged loudly and counted via OnDrop("write_error") per
+// record.
+func (s *Store) insert(batch []*row, changes []*changeRow) {
+	if len(batch) == 0 && len(changes) == 0 {
 		return
 	}
 	err := func() error {
@@ -249,36 +254,57 @@ func (s *Store) insert(batch []*row) {
 		if err != nil {
 			return err
 		}
-		stmt, err := tx.Prepare(`INSERT INTO occurrences (
-			emitted_at, kind, source, severity, fingerprint, route,
-			cluster, namespace, kind_of_object, name, uid,
-			reason, canonical_reason, message, count,
-			first_seen, last_seen, session_id, storm_fingerprint,
-			forecast_eta, raw
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-		if err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		for _, r := range batch {
-			if _, err := stmt.Exec(
-				r.emittedAt, r.kind, r.source, r.severity, r.fingerprint, r.route,
-				r.cluster, r.namespace, r.kindOfObj, r.name, r.uid,
-				r.reason, r.canonical, r.message, r.count,
-				r.firstSeen, r.lastSeen, r.sessionID, r.stormFP,
-				r.forecastETA, r.raw,
-			); err != nil {
-				_ = stmt.Close()
+		if len(batch) > 0 {
+			stmt, err := tx.Prepare(`INSERT INTO occurrences (
+				emitted_at, kind, source, severity, fingerprint, route,
+				cluster, namespace, kind_of_object, name, uid,
+				reason, canonical_reason, message, count,
+				first_seen, last_seen, session_id, storm_fingerprint,
+				forecast_eta, raw
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			if err != nil {
 				_ = tx.Rollback()
 				return err
 			}
+			for _, r := range batch {
+				if _, err := stmt.Exec(
+					r.emittedAt, r.kind, r.source, r.severity, r.fingerprint, r.route,
+					r.cluster, r.namespace, r.kindOfObj, r.name, r.uid,
+					r.reason, r.canonical, r.message, r.count,
+					r.firstSeen, r.lastSeen, r.sessionID, r.stormFP,
+					r.forecastETA, r.raw,
+				); err != nil {
+					_ = stmt.Close()
+					_ = tx.Rollback()
+					return err
+				}
+			}
+			_ = stmt.Close()
 		}
-		_ = stmt.Close()
+		if len(changes) > 0 {
+			stmt, err := tx.Prepare(`INSERT INTO graph_changes (
+				at, generation, op, kind, namespace, name, uid, changes, effect
+			) VALUES (?,?,?,?,?,?,?,?,?)`)
+			if err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			for _, c := range changes {
+				if _, err := stmt.Exec(
+					c.at, c.generation, c.op, c.kind, c.namespace, c.name, c.uid, c.changes, c.effect,
+				); err != nil {
+					_ = stmt.Close()
+					_ = tx.Rollback()
+					return err
+				}
+			}
+			_ = stmt.Close()
+		}
 		return tx.Commit()
 	}()
 	if err != nil {
-		s.logf("store: batch insert of %d occurrence(s) failed — records lost (telemetry only): %v", len(batch), err)
-		for range batch {
+		s.logf("store: batch insert of %d occurrence(s) + %d graph change(s) failed — records lost (telemetry only): %v", len(batch), len(changes), err)
+		for range len(batch) + len(changes) {
 			s.drop("write_error")
 		}
 		return

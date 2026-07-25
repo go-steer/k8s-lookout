@@ -77,12 +77,19 @@ type RunConfig struct {
 	// Invocation.Args; validating their content is the check's
 	// job (return a UsageErrorf error for exit 2).
 	MaxArgs int
+	// GraphBacked registers the §6.6 point-in-time flags (--at,
+	// --store) and parses them into Scope.At / Scope.Store. Live-only
+	// commands leave it false and reject --at as an unknown flag
+	// (§4.2: graph-backed commands ADDITIONALLY accept --at).
+	GraphBacked bool
 	// Stdout and Stderr default to the process streams.
 	Stdout io.Writer
 	Stderr io.Writer
 	// Now defaults to time.Now. It is called exactly twice (start
 	// and finish), so a fake clock makes the summary's elapsed
-	// value deterministic for golden tests.
+	// value deterministic for golden tests. (Graph-backed commands
+	// add one earlier call when --at is given a duration, to anchor
+	// "20m ago".)
 	Now func() time.Time
 }
 
@@ -113,6 +120,12 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime // broken command definition, not user error
 	}
+	if cfg.GraphBacked {
+		if err := registerSpecs(fs, GraphHistoryFlags()); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+			return ExitRuntime
+		}
+	}
 	if err := registerSpecs(fs, cfg.Flags); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime
@@ -142,7 +155,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	}
 
 	values := FlagValues{fs: fs}
-	scope, err := scopeFromValues(values)
+	scope, err := scopeFromValues(values, cfg.GraphBacked, now)
 	if err != nil {
 		return usageError(stderr, cfg.Name, err)
 	}
@@ -188,8 +201,10 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 }
 
 // scopeFromValues builds the Scope from parsed common flags,
-// rejecting contradictory combinations.
-func scopeFromValues(v FlagValues) (Scope, error) {
+// rejecting contradictory combinations. For graph-backed commands it
+// additionally resolves the §6.6 history flags; now anchors a
+// duration-shaped --at and is only consulted then.
+func scopeFromValues(v FlagValues, graphBacked bool, now func() time.Time) (Scope, error) {
 	s := Scope{
 		Namespace:     v.String("namespace"),
 		AllNamespaces: v.Bool("A"),
@@ -205,6 +220,22 @@ func scopeFromValues(v FlagValues) (Scope, error) {
 	s.Workload = w
 	if s.Since < 0 {
 		return Scope{}, fmt.Errorf("--since must not be negative, got %s", s.Since)
+	}
+	if graphBacked {
+		s.Store = v.String("store")
+		atRaw := v.String("at")
+		if atRaw != "" {
+			at, err := ParseAt(atRaw, now())
+			if err != nil {
+				return Scope{}, err
+			}
+			if s.Store == "" {
+				// §6.6: history is a watch-path feature — one-shot
+				// invocations serve --at only from a sentinel's store.
+				return Scope{}, errors.New("--at requires --store=<path to a sentinel's SQLite store> (point-in-time topology is served from the store a `lookout watch` sentinel writes; without one, commands answer live-only)")
+			}
+			s.At = at
+		}
 	}
 	return s, nil
 }

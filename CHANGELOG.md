@@ -53,6 +53,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New metrics: `store_records_total{route}`,
   `store_write_drops_total{cause}`, `store_pruned_rows_total{cause}`.
 
+- Graph history (M3, DESIGN.md §6.6) — point-in-time topology:
+  persistence for time-travel, not crash recovery. `pkg/graph` snapshots
+  now serialize to a versioned compressed binary (`Snapshot.Encode` /
+  `graph.Restore`: 4-byte `LKGH` magic + format-version byte +
+  gzip-compressed node/edge/interner arrays, stdlib gzip — no new
+  dependency at a 5-minute cadence; every structural invariant is
+  re-validated on Restore, so corrupt or truncated blobs error, never
+  panic or misread). With the new `graph.Options.OnChange` hook armed,
+  every applied `Writer.Apply` delta emits one `ChangeRecord{At,
+  Generation, Op, Kind/Namespace/Name/UID, FieldChanges, Effect}` — one
+  log, two consumers (§6.6): `FieldChanges` is the `triage changes`
+  summary, derived in the graph ingest where the typed objects are
+  visible, carrying NAMES/HASHES/COUNTS only, never values — container
+  image changes (`container/<name>/image`), `replicas`, label changes as
+  CHANGED KEYS with 8-hex value hashes (`label/<key>`),
+  ConfigMap/Secret mount-reference changes (`mount/<Kind>/<name>`),
+  Node `unschedulable`, and ConfigMap/Secret CONTENT hashes (`data`,
+  16-hex sha256 over sorted keys+values — the §6.5 "names, keys, and
+  content hashes" half; secret values pass through the hash and are
+  dropped, and the shipped sentinel's informers don't watch
+  ConfigMaps/Secrets yet, so content-hash tracking stays dormant until
+  the informer set grows — it lights up automatically for objects
+  routed through `Writer.Apply`). `Effect` is the delta's graph
+  mutations recorded at the primitive level (node new/observed/
+  unobserved/collected, edge add/remove — a decision beyond the doc's
+  record sketch: a names/hashes summary alone cannot rebuild edges), so
+  `graph.NewReplayer(base).Apply(...)` reproduces the live graph BY
+  CONSTRUCTION — the §13 round-trip invariant (snapshot + replayed
+  deltas ≡ live graph at the same generation, NodeIDs included) holds
+  as deep equality over a synthetic-cluster churn test.
+  `pkg/store` migration v2 adds `graph_snapshots` (taken_at,
+  resource_version — carrying the graph's monotonic snapshot
+  generation, since no single cluster-wide k8s resourceVersion exists
+  across informers — format_version, size_bytes, compressed blob) and
+  `graph_changes` (at, generation, op, identity, `changes` JSON
+  summary, `effect` replay blob) to the SAME sentinel SQLite file:
+  change rows ride the existing non-blocking buffered writer (a
+  dropped row degrades `--at` precision inside one snapshot interval,
+  never later correctness); snapshots insert synchronously from the
+  5-minute loop. Same TTL/size pruning, with one carve-out: the NEWEST
+  snapshot survives both bounds even past TTL (zero snapshots would
+  make every logged change unreplayable; a snapshot describes current
+  state, so keeping it leaks no expired history). `store.GraphAt(t)`
+  resolves nearest snapshot ≤ t + replays logged changes forward
+  (boundaries inclusive: a change stamped exactly at t is part of the
+  answer), `store.GraphChanges(from, to]` is the `triage changes`
+  feed, and `store.OpenRead` opens a sentinel's store read-only for
+  one-shot CLI use. `lookout watch` wires it up when BOTH `--store`
+  and the graph feed (`--storm`) are on: per-delta change logging plus
+  a snapshot loop — new ADDITIVE flag `--graph-snapshot-interval`
+  (default 5m, §6.6), with a fast-poll bootstrap so the baseline
+  snapshot lands right after initial sync and generation-deduped ticks
+  when topology hasn't changed. CLI contract (§4.2): `checks.Command`
+  gains `GraphBacked`; graph-backed commands (and only they — live-only
+  commands reject the flag as unknown) accept `--at=<RFC3339|dur-ago>`
+  + `--store=<path>` on every surface (--help, MCP schema, and flag
+  parsing all generate from the one declaration); `--at` without
+  `--store` is a usage error naming the requirement, because history
+  is a watch-path feature and one-shot invocations answer live-only
+  without a sentinel's store. No production command consumes `--at`
+  yet — `triage radius --at` and `triage changes` come next; a hidden
+  graph-backed probe (`checktest.GraphAtCommand`) pins the plumbing
+  end-to-end (flag gating → Scope → read-only open → GraphAt).
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in

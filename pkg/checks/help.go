@@ -55,6 +55,10 @@ func (c Command) Help() string {
 	}
 	b.WriteString("\nCommon flags (every lookout command):\n")
 	writeFlagTable(&b, emit.CommonFlags())
+	if c.GraphBacked {
+		b.WriteString("\nGraph history flags (graph-backed commands, §6.6):\n")
+		writeFlagTable(&b, emit.GraphHistoryFlags())
+	}
 
 	if len(c.Output) > 0 {
 		b.WriteString("\nOutput fields (beyond the shared envelope fields " +
