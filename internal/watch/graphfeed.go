@@ -75,11 +75,15 @@ type graphFeed struct {
 
 // newGraphFeed constructs the feed over an externally owned shared
 // informer factory (the same one the object-state source registers
-// on when both are enabled).
-func newGraphFeed(factory informers.SharedInformerFactory) *graphFeed {
+// on when both are enabled). onChange, when non-nil, arms the §6.6
+// delta log: every applied informer delta emits a ChangeRecord the
+// sentinel routes into the store's buffered writer (nil when no
+// --store is configured — the graph then skips change tracking
+// entirely).
+func newGraphFeed(factory informers.SharedInformerFactory, onChange func(graph.ChangeRecord)) *graphFeed {
 	return &graphFeed{
 		factory: factory,
-		graph:   graph.New(graph.Options{}),
+		graph:   graph.New(graph.Options{OnChange: onChange}),
 	}
 }
 

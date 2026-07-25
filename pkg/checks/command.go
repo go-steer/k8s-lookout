@@ -63,6 +63,11 @@ type Command struct {
 	Examples []string
 	// Run is the implementation, executed under emit.Run.
 	Run emit.CheckFunc
+	// GraphBacked marks commands that answer from the topology graph
+	// and therefore accept the §6.6 point-in-time flags (--at,
+	// --store) in addition to the §4.2 common set. Live-only
+	// commands reject --at as an unknown flag.
+	GraphBacked bool
 	// Hidden commands resolve and run but are omitted from every
 	// listing (used for test scaffolding).
 	Hidden bool
@@ -155,7 +160,13 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command %q: positional doc must be one non-empty line", c.Name)
 		}
 	}
-	if err := emit.ValidateSpecs(c.Flags); err != nil {
+	validateSpecs := emit.ValidateSpecs
+	if c.GraphBacked {
+		// Graph-backed commands also reserve the §6.6 --at/--store
+		// flag names.
+		validateSpecs = emit.ValidateGraphBackedSpecs
+	}
+	if err := validateSpecs(c.Flags); err != nil {
 		return fmt.Errorf("command %q: %w", c.Name, err)
 	}
 	seen := map[string]bool{}
@@ -187,12 +198,13 @@ func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
 		maxArgs = 1
 	}
 	return emit.RunConfig{
-		Name:    "lookout " + c.Name,
-		Flags:   c.Flags,
-		Check:   c.Run,
-		Help:    c.Help(),
-		MaxArgs: maxArgs,
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Name:        "lookout " + c.Name,
+		Flags:       c.Flags,
+		Check:       c.Run,
+		Help:        c.Help(),
+		MaxArgs:     maxArgs,
+		GraphBacked: c.GraphBacked,
+		Stdout:      stdout,
+		Stderr:      stderr,
 	}
 }

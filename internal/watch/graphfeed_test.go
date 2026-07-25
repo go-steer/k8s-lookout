@@ -180,7 +180,7 @@ func TestGraphFeed_InformerIngest(t *testing.T) {
 		testPod("shop", "pay-1", "gke-a", "pay-7b9d", ""),
 	)
 	factory := informers.NewSharedInformerFactory(client, 0)
-	feed := newGraphFeed(factory)
+	feed := newGraphFeed(factory, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

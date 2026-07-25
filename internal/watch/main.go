@@ -41,6 +41,7 @@ import (
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
@@ -53,33 +54,34 @@ import (
 // to the components. All fields match --flag-name in the design
 // doc's "Sidecar CLI" section.
 type flags struct {
-	daemonURL         string
-	tokenEnv          string
-	mode              string
-	targetSession     string
-	owner             string
-	reasons           string
-	namespaces        string
-	excludeNamespaces string
-	sources           string
-	dedupWindow       time.Duration
-	dedupPersist      string
-	unhealthyMinCount int
-	recoveryStableFor time.Duration
-	storm             bool
-	stormWindow       time.Duration
-	stormMin          int
-	severity          severityFlag
-	watchboardBatch   int
-	watchboardFlush   time.Duration
-	watchboardRotate  int
-	enrich            string
-	enrichCap         int
-	enrichLogLines    int
-	enrichTimeout     time.Duration
-	store             string
-	storeTTL          time.Duration
-	storeMaxMB        int
+	daemonURL             string
+	tokenEnv              string
+	mode                  string
+	targetSession         string
+	owner                 string
+	reasons               string
+	namespaces            string
+	excludeNamespaces     string
+	sources               string
+	dedupWindow           time.Duration
+	dedupPersist          string
+	unhealthyMinCount     int
+	recoveryStableFor     time.Duration
+	storm                 bool
+	stormWindow           time.Duration
+	stormMin              int
+	severity              severityFlag
+	watchboardBatch       int
+	watchboardFlush       time.Duration
+	watchboardRotate      int
+	enrich                string
+	enrichCap             int
+	enrichLogLines        int
+	enrichTimeout         time.Duration
+	store                 string
+	storeTTL              time.Duration
+	storeMaxMB            int
+	graphSnapshotInterval time.Duration
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
 	severityOverrides map[string]engine.Severity
@@ -168,6 +170,13 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. Empty (default) disables the store.")
 	fs.DurationVar(&f.storeTTL, "store-ttl", 720*time.Hour, "Retention for stored occurrences (§9.1 default 30 days); the prune loop deletes older rows. Must be > 0.")
 	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Must be >= 1.")
+
+	// Graph history (§6.6). ADDITIVE flag: history turns on only when
+	// BOTH --store and the graph feed (--storm) are active — without a
+	// resident graph there is nothing to snapshot, and without a store
+	// there is nowhere to put it. Point-in-time queries (--at) and
+	// `triage changes` read what this writes.
+	fs.DurationVar(&f.graphSnapshotInterval, "graph-snapshot-interval", 5*time.Minute, "How often to persist a compressed topology snapshot to --store (§6.6; the per-delta change log is written continuously). Effective only with --store AND --storm (the graph feed). Must be > 0.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -268,6 +277,9 @@ func (f *flags) validate() error {
 	}
 	if f.storeMaxMB < 1 {
 		return errors.New("--store-max-mb must be >= 1")
+	}
+	if f.graphSnapshotInterval <= 0 {
+		return errors.New("--graph-snapshot-interval must be > 0")
 	}
 	switch f.mode {
 	case "per-incident":
@@ -929,7 +941,15 @@ func realMain(argv []string) error {
 		if objState != nil {
 			objState.WithFactory(sharedFactory)
 		}
-		feed = newGraphFeed(sharedFactory)
+		// Graph history (§6.6): with a store configured, every applied
+		// graph delta also logs a ChangeRecord through the store's
+		// buffered writer. Without one, onChange stays nil and the
+		// graph skips change tracking entirely.
+		var onChange func(graph.ChangeRecord)
+		if occStore != nil {
+			onChange = occStore.RecordGraphChange
+		}
+		feed = newGraphFeed(sharedFactory, onChange)
 	} else if f.storm {
 		log.Printf("storm: disabled (--storm-window=0)")
 	}
@@ -1013,6 +1033,15 @@ func realMain(argv []string) error {
 			}
 		}()
 		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
+		// Graph history (§6.6): periodic compressed snapshots into the
+		// store, alongside the continuously logged deltas above. Only
+		// when BOTH the graph feed and the store run — one-shot CLI
+		// invocations read this history via --at + --store.
+		if occStore != nil {
+			go runGraphHistoryLoop(ctx, feed.snapshot, occStore, f.graphSnapshotInterval)
+			log.Printf("graph history: enabled (snapshot every %s + per-delta change log → %s; serves --at point-in-time queries and triage changes)",
+				f.graphSnapshotInterval, f.store)
+		}
 	}
 
 	log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",

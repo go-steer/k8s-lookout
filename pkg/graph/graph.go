@@ -42,8 +42,15 @@
 // particular — secret *values* are never stored: ingesting a
 // *corev1.Secret reads nothing but ObjectMeta (§6.5).
 //
-// This package is live-only: history/persistence is a §6.6 M3
-// feature and deliberately absent here.
+// # History (§6.6)
+//
+// The live graph carries no persistence of its own, but it produces
+// everything history needs: snapshots serialize to a versioned
+// compressed binary (history.go) and — when Options.OnChange is set —
+// every applied delta emits a ChangeRecord carrying a changed-field
+// summary for `triage changes` plus a replayable effect for `--at`
+// point-in-time reconstruction (changes.go, replay.go). Storing and
+// querying those artifacts is pkg/store's job.
 package graph
 
 import (
@@ -72,6 +79,21 @@ type Options struct {
 	// Writer.FromObjects calls (used by tests and benchmarks for
 	// deterministic swaps).
 	SwapInterval time.Duration
+
+	// OnChange, when set, turns on the §6.6 delta log: every delta
+	// applied via Writer.Apply produces one ChangeRecord (identity,
+	// changed-field summary, replay effect), delivered here right
+	// after the snapshot containing it is published. Called on the
+	// writer goroutine under the writer mutex — the hook must be
+	// fast and non-blocking (the sentinel hands records to the
+	// store's buffered writer). Initial sync (FromObjects) seeds
+	// change tracking but emits no records: the first stored
+	// snapshot covers that state.
+	OnChange func(ChangeRecord)
+
+	// Now is the clock stamped into ChangeRecord.At. Nil means
+	// time.Now; tests inject a fake for deterministic history.
+	Now func() time.Time
 }
 
 // Graph is the shared handle: the writer publishes snapshots into
@@ -90,8 +112,12 @@ func New(opts Options) *Graph {
 	if interval == 0 {
 		interval = DefaultSwapInterval
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	g := &Graph{}
-	g.writer = newWriter(g, interval)
+	g.writer = newWriter(g, interval, opts.OnChange, now)
 	return g
 }
 
