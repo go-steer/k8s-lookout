@@ -14,6 +14,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec and logs sections failing in-cluster without them (5 of 8 runs
   `outcome=partial`; see `docs/milestones/M2.md` §Observations).
 
+### Added
+
+- The sentinel-local raw-occurrence store (M3, DESIGN.md §9.1) —
+  `pkg/store`, ONE bounded, TTL'd embedded SQLite database holding every
+  emitted signal (info severity included) together with the routing
+  outcome it received: the lookback substrate for storm correlation,
+  §7.4 resolved stability windows, digests, and recommendation history.
+  Opt-in via the new ADDITIVE `--store=<path>` flag on `lookout watch`
+  (default empty = disabled, M2 behavior byte-for-byte; the path is
+  always explicit — put it on the `--dedup-persist` volume). The
+  dispatcher records EVERY post-dedup signal with its outcome
+  (`injected`|`suppressed`|`storm`|`storm-member`|`watchboard`|
+  `info-stored`|`resolved`), and the §7.7 info class is now PERSISTED
+  instead of counted-and-dropped when the store is enabled (the frozen
+  `info_dropped_total` metric keeps counting the class either way).
+  Each `occurrences` row carries kind/source/severity, the §8
+  fingerprint, object identity, raw + canonical reason, a size-capped
+  message, count and first/last seen, nullable session / storm
+  fingerprint / forecast ETA, and the compact raw Signal JSON
+  (enrichment stripped) for later distillation (§9.2) — indexed on
+  (fingerprint, emitted_at), (uid, emitted_at), (severity, emitted_at),
+  behind forward-only `schema_version` migrations (§6.6 graph snapshots
+  + the delta log land later as separate tables). The store is
+  telemetry, not a system of record: writes go through a non-blocking
+  buffered writer goroutine that drops loudly on overflow
+  (`store_write_drops_total{cause}`) rather than ever stalling the
+  inject pipeline; WAL mode + busy timeout keep concurrent reads safe.
+  Retention: `--store-ttl` (default 720h — the §9.1 30 days) and
+  `--store-max-mb` (default 512) with a prune loop every
+  min(1h, ttl/24) deleting expired rows first, then oldest-first when
+  the size bound is exceeded — both loud in logs and
+  `store_pruned_rows_total{cause}`. Minimal M3 query surface:
+  `RecentByFingerprint`, `RecentByObject`, `CountsBySeverity`, and a
+  limit-bounded newest-first iterator for digests. New dependency:
+  `modernc.org/sqlite` v1.54.0 — the pure-Go, CGO-free SQLite required
+  by the distroless static release image (built with `CGO_ENABLED=0`).
+  New metrics: `store_records_total{route}`,
+  `store_write_drops_total{cause}`, `store_pruned_rows_total{cause}`.
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in

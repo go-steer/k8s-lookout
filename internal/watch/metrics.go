@@ -51,6 +51,9 @@ type metrics struct {
 	watchboardRotations prometheus.Counter
 	watchboardBuffered  prometheus.Gauge
 	infoDropped         *prometheus.CounterVec
+	storeRecords        *prometheus.CounterVec
+	storeDrops          *prometheus.CounterVec
+	storePruned         *prometheus.CounterVec
 	enrichments         *prometheus.CounterVec
 	enrichmentBytes     prometheus.Histogram
 	enrichmentTruncated prometheus.Counter
@@ -138,8 +141,20 @@ func newMetrics() *metrics {
 		}),
 		infoDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_info_dropped_total",
-			Help: "Total info-severity signals counted and dropped by §7.7 routing (stored-only class; the raw store lands in M3), by signal kind.",
+			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting. Frozen name from M2.",
 		}, []string{"kind"}),
+		storeRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_store_records_total",
+			Help: "Total occurrences committed to the §9.1 store, by routing outcome (injected|suppressed|storm|storm-member|watchboard|info-stored|resolved).",
+		}, []string{"route"}),
+		storeDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_store_write_drops_total",
+			Help: "Total occurrence records LOST by the §9.1 store's write path, by cause (buffer_full: the non-blocking writer buffer overflowed; write_error: a batch insert failed). The store is telemetry, not a system of record — drops are loud, never blocking.",
+		}, []string{"cause"}),
+		storePruned: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_store_pruned_rows_total",
+			Help: "Total occurrence rows deleted by the §9.1 prune loop, by cause (ttl: older than --store-ttl; size: oldest-first eviction after --store-max-mb was exceeded).",
+		}, []string{"cause"}),
 		enrichments: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_enrichments_total",
 			Help: "Total §7.6 enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers).",
@@ -179,6 +194,9 @@ func newMetrics() *metrics {
 		m.watchboardRotations,
 		m.watchboardBuffered,
 		m.infoDropped,
+		m.storeRecords,
+		m.storeDrops,
+		m.storePruned,
 		m.enrichments,
 		m.enrichmentBytes,
 		m.enrichmentTruncated,

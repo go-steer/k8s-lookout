@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
 // Dispatcher side of storm correlation (DESIGN.md §7.5): the
@@ -55,6 +56,10 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	d.storm.BindStormSession(v.Storm.ID, sid)
 	info := v.Storm
 	info.SessionID = sid
+	// §9.1: the triggering signal's outcome is "my arrival formed the
+	// storm" — earlier members were already recorded when they routed
+	// (injected or watchboard) before the storm claimed them.
+	d.store.Record(sig, store.Outcome{Route: store.RouteStorm, SessionID: sid, StormFingerprint: info.Fingerprint})
 
 	// Rebind + retrack every member to the storm session: dedup
 	// followups and recovery outcomes now route there (the extended
@@ -134,6 +139,9 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 		sid = d.targetSid
 	}
 	ref := sig.IncidentRef()
+	// §9.1: a late arrival's outcome is membership, not a session of
+	// its own.
+	d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, SessionID: sid, StormFingerprint: v.Storm.Fingerprint})
 	d.dedup.AttachToStorm(sig.Key, sid, v.Storm.Fingerprint, ref)
 	if d.tracker != nil {
 		d.tracker.Track(engine.Incident{Key: sig.Key, SessionID: sid, FirstSeen: v.Member.FirstSeen, Ref: ref})

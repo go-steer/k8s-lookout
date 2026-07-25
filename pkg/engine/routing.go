@@ -36,11 +36,11 @@ const (
 	// session's rolling digest (§7.7 default for `warning`).
 	RouteWatchboard
 	// RouteStore is the §7.7 `info` policy: stored only (§9.1),
-	// surfaced by read-path queries and digests. The raw store lands
-	// in M3 — until then the dispatcher counts the signal in metrics
-	// and drops it with a debug log (TODO(M3 store): persist instead
-	// of dropping). Info signals are NEVER silently ignored: the
-	// metric + log make the drop observable.
+	// surfaced by read-path queries and digests. With --store set the
+	// dispatcher persists the signal in the raw-occurrence store
+	// (pkg/store, route=info-stored); without it the signal is
+	// counted in metrics and dropped with a log. Info signals are
+	// NEVER silently ignored either way.
 	RouteStore
 )
 
@@ -60,7 +60,7 @@ func (r Route) String() string {
 //
 //	critical → per-incident session (today's behavior), full enrichment
 //	warning  → shared watchboard session, batched (rolling digest inject)
-//	info     → stored only (§9.1; metric + drop until the M3 store lands)
+//	info     → stored only (§9.1; persisted when --store is set, else counted + dropped)
 //
 // Anything else (including the zero value) routes per-incident — see
 // RoutePerIncident's fail-toward-paging rationale.
