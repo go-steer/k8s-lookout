@@ -63,14 +63,22 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    # Enrichment (§7.6) distills the target pods' logs into the warm
+    # bundle attached to the initial inject.
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list", "watch"]
   - apiGroups: ["apps"]
+    # "get" beyond list/watch: the enrichment live path GETs the
+    # workload object behind an incident (§7.6) rather than caching
+    # every Deployment in the informer set.
     resources: ["deployments"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "watch"]
