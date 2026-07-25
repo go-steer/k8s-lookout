@@ -29,6 +29,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
@@ -50,6 +52,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
+	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
+	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
@@ -66,6 +70,10 @@ type flags struct {
 	namespaces            string
 	excludeNamespaces     string
 	sources               string
+	rolloutObserve        time.Duration
+	saturationInterval    time.Duration
+	saturationWindow      time.Duration
+	saturationWarn        time.Duration
 	degradationWindow     time.Duration
 	degradationDrop       float64
 	expiryInterval        time.Duration
@@ -128,7 +136,17 @@ func parseFlags(args []string) (*flags, error) {
 	// ADDITIVE flag: the default is exactly the M0 surface, so
 	// existing deployments keep byte-identical behavior without
 	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, degradation, expiry. Default preserves the M0 watcher surface (k8s-events only).")
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry. Default preserves the M0 watcher surface (k8s-events only).")
+
+	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
+	// meaningful with --sources=...,rollout.
+	fs.DurationVar(&f.rolloutObserve, "rollout-observe", 3*time.Minute, "How long a new revision must make zero ready-count progress (while the old revision stays healthy) before rollout.stall fires. Fired well before progressDeadlineSeconds.")
+
+	// Saturation source knobs (§7.2 row 4). ADDITIVE flags; only
+	// meaningful with --sources=...,saturation.
+	fs.DurationVar(&f.saturationInterval, "saturation-interval", 30*time.Second, "Sampling interval for the saturation source (metrics.k8s.io + kubelet volume stats).")
+	fs.DurationVar(&f.saturationWindow, "saturation-window", 90*time.Minute, "Regression window for saturation forecasts; a forecast needs samples spanning at least half of it (the §8 linear-<window>-window confidence basis).")
+	fs.DurationVar(&f.saturationWarn, "saturation-warn", 60*time.Minute, "Forecast ETA below which saturation.forecast fires at severity warning (critical fires below 15m); clearance requires the ETA to recede beyond 2x this threshold.")
 
 	// Degradation source thresholds (§7.2 row 5). ADDITIVE flags; only
 	// meaningful with --sources=…,degradation.
@@ -238,16 +256,28 @@ func (f *flags) validate() error {
 	// Sources are validated before the mode switch's dry-run early
 	// return: a typo'd source name is a config error in every mode.
 	names := splitCSV(f.sources)
-	knownSources := strings.Join([]string{k8sevents.Name, objectstate.Name, degradation.Name, expiry.Name}, ", ")
 	if len(names) == 0 {
-		return fmt.Errorf("--sources must enable at least one source (known: %s)", knownSources)
+		return fmt.Errorf("--sources must enable at least one source (known: %s)", strings.Join(knownSources, ", "))
 	}
 	for _, name := range names {
-		switch name {
-		case k8sevents.Name, objectstate.Name, degradation.Name, expiry.Name:
-		default:
-			return fmt.Errorf("--sources: unknown source %q (known: %s)", name, knownSources)
+		if !slices.Contains(knownSources, name) {
+			return fmt.Errorf("--sources: unknown source %q (known: %s)", name, strings.Join(knownSources, ", "))
 		}
+	}
+	// Rollout / saturation bounds (§7.2 rows 3–4): config errors in
+	// every mode, like --sources itself, even when the sources are
+	// disabled — a nonsensical value is a typo worth failing.
+	if f.rolloutObserve <= 0 {
+		return errors.New("--rollout-observe must be > 0")
+	}
+	if f.saturationInterval <= 0 {
+		return errors.New("--saturation-interval must be > 0")
+	}
+	if f.saturationWindow <= f.saturationInterval {
+		return errors.New("--saturation-window must be > --saturation-interval (the regression needs a window of samples)")
+	}
+	if f.saturationWarn <= 0 {
+		return errors.New("--saturation-warn must be > 0")
 	}
 	// Degradation / expiry thresholds (§7.2 rows 5–6): config errors in
 	// every mode, like the storm bounds, even when the sources are
@@ -347,6 +377,14 @@ func (f *flags) validate() error {
 // stormEnabled reports whether §7.5 storm correlation is on: the
 // explicit --storm opt-in AND a non-zero correlation window.
 func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
+
+// knownSources are the --sources names, in the §7.2 table order.
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name}
+
+// sourceEnabled reports whether --sources names the given source.
+func (f *flags) sourceEnabled(name string) bool {
+	return slices.Contains(splitCSV(f.sources), name)
+}
 
 // severityFlag is the repeatable --severity flag: each occurrence is
 // kept verbatim and parsed (additively) by
@@ -967,23 +1005,32 @@ func realMain(argv []string) error {
 	// Signal sources (§7.2), individually enabled via --sources
 	// (default: k8s-events only — the frozen M0 surface). The dynamic
 	// client exists only for the expiry source's discovery-gated
-	// cert-manager reads — built from the same kube options, only when
-	// that source is enabled.
+	// cert-manager reads, and the saturation source's metrics.k8s.io
+	// dimension needs its own clientset — each built from the same
+	// kube options, only when its source is enabled.
 	var dyn dynamic.Interface
-	for _, name := range splitCSV(f.sources) {
-		if name == expiry.Name {
-			dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
-			if err != nil {
-				return err
-			}
-			break
+	if f.sourceEnabled(expiry.Name) {
+		dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		if err != nil {
+			return err
 		}
 	}
-	built, err := buildSources(f, client, dyn)
+	var metricsClient metricsv.Interface
+	if f.sourceEnabled(saturation.Name) {
+		restCfg, cfgErr := kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		if cfgErr != nil {
+			return cfgErr
+		}
+		metricsClient, err = metricsv.NewForConfig(restCfg)
+		if err != nil {
+			return fmt.Errorf("metrics.k8s.io client: %w", err)
+		}
+	}
+	bs, err := buildSources(f, client, dyn, metricsClient)
 	if err != nil {
 		return err
 	}
-	registry, objState := built.registry, built.objState
+	registry, objState := bs.registry, bs.objState
 
 	// Storm correlation (§7.5): ONE shared informer factory serves
 	// the sources and the graph (§6.3) — when enabled, the
@@ -996,8 +1043,13 @@ func realMain(argv []string) error {
 		if objState != nil {
 			objState.WithFactory(sharedFactory)
 		}
-		if built.degradation != nil {
-			built.degradation.WithFactory(sharedFactory)
+		if bs.rollout != nil {
+			// §6.3 again: the rollout source's pods/replicasets
+			// informers ride the same factory as the graph feed.
+			bs.rollout.WithFactory(sharedFactory)
+		}
+		if bs.degradation != nil {
+			bs.degradation.WithFactory(sharedFactory)
 		}
 		// Graph history (§6.6): with a store configured, every applied
 		// graph delta also logs a ChangeRecord through the store's
@@ -1070,14 +1122,7 @@ func realMain(argv []string) error {
 	// where "pod is Ready" is true between the flaps the incident is
 	// about.
 	if f.recoveryStableFor > 0 {
-		var extra []engine.ClearanceObserver
-		if built.degradation != nil {
-			extra = append(extra, built.degradation.ClearanceObserver())
-		}
-		if built.expiry != nil {
-			extra = append(extra, built.expiry.ClearanceObserver())
-		}
-		if err := setupRecovery(ctx, f, client, dedup, disp, m, objState, extra...); err != nil {
+		if err := setupRecovery(ctx, f, client, dedup, disp, m, bs); err != nil {
 			return err
 		}
 	}
@@ -1146,11 +1191,14 @@ var recoveryAccess = []sources.Requirement{
 }
 
 // builtSources is buildSources' result: the registry plus the typed
-// handles the wiring below needs — object-state and degradation for
-// shared-factory + §7.4 observer reuse, expiry for its observer.
+// handles the rest of startup needs — objectstate/rollout/degradation
+// for shared-factory wiring (§6.3) and all of them for §7.4 clearance
+// observers.
 type builtSources struct {
 	registry    *sources.Registry
 	objState    *objectstate.Source
+	rollout     *rollout.Source
+	saturation  *saturation.Source
 	degradation *degradation.Source
 	expiry      *expiry.Source
 }
@@ -1162,39 +1210,58 @@ type builtSources struct {
 // starting duplicates, and so storm mode can move them onto the
 // shared informer factory (§6.3). dyn may be nil unless the expiry
 // source is enabled (it reads cert-manager Certificates unstructured;
-// the caller builds it only when needed).
-func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface) (*builtSources, error) {
-	b := &builtSources{registry: sources.NewRegistry()}
+// the caller builds it only when needed); metricsClient is only
+// required (non-nil) when the saturation source is enabled — its
+// metrics.k8s.io dimension rides a separate clientset.
+func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface) (*builtSources, error) {
+	bs := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
 		var src sources.Source
 		switch name {
 		case k8sevents.Name:
 			src = k8sevents.New(client, 0)
 		case objectstate.Name:
-			b.objState = objectstate.New(client, objectstate.DefaultConfig())
-			src = b.objState
+			bs.objState = objectstate.New(client, objectstate.DefaultConfig())
+			src = bs.objState
+		case rollout.Name:
+			cfg := rollout.DefaultConfig()
+			cfg.Observe = f.rolloutObserve
+			bs.rollout = rollout.New(client, cfg)
+			src = bs.rollout
+		case saturation.Name:
+			if metricsClient == nil {
+				return nil, fmt.Errorf("--sources: %s requires a metrics.k8s.io client (programming error: buildSources called without one)", saturation.Name)
+			}
+			cfg := saturation.DefaultConfig()
+			cfg.Interval = f.saturationInterval
+			cfg.Window = f.saturationWindow
+			cfg.WarnETA = f.saturationWarn
+			bs.saturation = saturation.New(cfg,
+				saturation.NewMetricsPodFetcher(metricsClient, client),
+				saturation.NewKubeletVolumeFetcher(client))
+			src = bs.saturation
 		case degradation.Name:
 			cfg := degradation.DefaultConfig()
 			cfg.Window = f.degradationWindow
 			cfg.Drop = f.degradationDrop
-			b.degradation = degradation.New(client, cfg)
-			src = b.degradation
+			bs.degradation = degradation.New(client, cfg)
+			src = bs.degradation
 		case expiry.Name:
 			cfg := expiry.DefaultConfig()
 			cfg.Interval = f.expiryInterval
 			cfg.WarnWindow = f.expiryWarn
 			cfg.Namespaces = splitCSV(f.expiryNamespaces)
-			b.expiry = expiry.New(client, dyn, cfg)
-			src = b.expiry
+			bs.expiry = expiry.New(client, dyn, cfg)
+			src = bs.expiry
 		default:
 			// validate() rejects unknown names before we get here.
 			return nil, fmt.Errorf("--sources: unknown source %q", name)
 		}
-		if err := b.registry.Register(src); err != nil {
+		if err := bs.registry.Register(src); err != nil {
 			return nil, err
 		}
 	}
-	return b, nil
+	return bs, nil
 }
 
 // setupRecovery wires the §7.4 closed loop: pod clearance observer →
@@ -1215,44 +1282,73 @@ func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface) 
 // a missed incident. So insufficient RBAC disables recovery with a
 // loud log naming the grant, instead of crash-looping existing
 // deployments.
-//
-// extra observers are source-specific clearance predicates (§7.4 —
-// degradation's ratio-recovered, expiry's cert-renewed). They are
-// registered BEFORE the pod observer: the tracker asks observers in
-// order, and a kind-specific predicate must outrank the generic
-// "pod is Ready" one for the incidents it owns (a probe-flapping pod
-// reads Ready between flaps). Each judges only its own kinds, so
-// registration is safe regardless of which sources are enabled.
-func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, objState *objectstate.Source, extra ...engine.ClearanceObserver) error {
-	var observer engine.ClearanceObserver
-	if objState != nil {
-		observer = objState.ClearanceObserver()
+func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, bs *builtSources) error {
+	// Observer order is load-bearing (the tracker asks in order and
+	// the FIRST claim wins): every source-specific observer precedes
+	// any pod-scoped one, in source registration (§7.2) order. In
+	// particular the saturation observer must outrank the generic
+	// pod-readiness judge, because saturation.forecast incidents
+	// carry KindOfObject=Pod and a readiness judge would wrongly
+	// clear a leaking-but-Ready pod (same trap as degradation's
+	// probe_flap, where "pod is Ready" is true between the flaps the
+	// incident is about). Each observer judges only its own kinds, so
+	// registration is safe regardless of which sources are enabled.
+	var observers []engine.ClearanceObserver
+	if bs.rollout != nil {
+		observers = append(observers, bs.rollout.ClearanceObserver())
+		log.Printf("recovery: rollout clearance observer registered (rollout completed or rolled back → cleared)")
+	}
+	if bs.saturation != nil {
+		observers = append(observers, bs.saturation.ClearanceObserver())
+		log.Printf("recovery: saturation clearance observer registered (forecast recede / non-positive-slope re-observation)")
+	}
+	if bs.degradation != nil {
+		observers = append(observers, bs.degradation.ClearanceObserver())
+		log.Printf("recovery: degradation clearance observer registered (ready-ratio recovered / flapping settled → cleared)")
+	}
+	if bs.expiry != nil {
+		observers = append(observers, bs.expiry.ClearanceObserver())
+		log.Printf("recovery: expiry clearance observer registered (certificate renewed → cleared)")
+	}
+	if bs.objState != nil {
+		observers = append(observers, bs.objState.ClearanceObserver())
 		log.Printf("recovery: clearance observer backed by the object-state source's pod informer")
 	} else {
 		reviewer := sources.NewAccessReviewer(client)
+		podRBAC := true
 		for _, req := range recoveryAccess {
 			allowed, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
 			}
 			if !allowed {
-				log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
-				return nil
+				if len(observers) == 0 {
+					log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
+					return nil
+				}
+				// The M2 fallback posture, source-aware: incidents
+				// owned by source-specific observers still get
+				// outcome records; only pod-scoped clearance is
+				// missing.
+				log.Printf("recovery: pod clearance DISABLED — ServiceAccount lacks %q; source-specific clearance observers stay active", req)
+				podRBAC = false
+				break
 			}
 		}
-		obs := newPodClearanceObserver(client)
-		if err := obs.Start(ctx); err != nil {
-			return err
+		if podRBAC {
+			obs := newPodClearanceObserver(client)
+			if err := obs.Start(ctx); err != nil {
+				return err
+			}
+			observers = append(observers, obs)
 		}
-		observer = obs
 	}
 	tracker := engine.NewRecoveryTracker(f.recoveryStableFor, func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
-	for _, o := range extra {
+	for _, o := range observers {
 		tracker.AddObserver(o)
 	}
-	tracker.AddObserver(observer)
 	disp.tracker = tracker
 	// Resume clearance watching for bindings restored from
 	// --dedup-persist so the fix-verify loop survives a restart.
