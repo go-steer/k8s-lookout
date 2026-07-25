@@ -46,6 +46,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
+	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
 // flags is the CLI-shaped config, parsed once in main and threaded
@@ -76,6 +77,9 @@ type flags struct {
 	enrichCap         int
 	enrichLogLines    int
 	enrichTimeout     time.Duration
+	store             string
+	storeTTL          time.Duration
+	storeMaxMB        int
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
 	severityOverrides map[string]engine.Severity
@@ -155,6 +159,15 @@ func parseFlags(args []string) (*flags, error) {
 	fs.IntVar(&f.enrichCap, "enrich-cap", 16384, "Byte budget for the attached enrichment bundle (§15 Q3: fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them.")
 	fs.IntVar(&f.enrichLogLines, "enrich-log-lines", 200, "Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1.")
 	fs.DurationVar(&f.enrichTimeout, "enrich-timeout", 5*time.Second, "Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0.")
+
+	// Occurrence store (§9.1). ADDITIVE flags, default OFF: with no
+	// --store the sentinel behaves exactly as before (info-severity
+	// signals are counted and dropped). The path is ALWAYS explicit —
+	// there is no default location (and never one under $HOME; the
+	// store belongs on the same volume as --dedup-persist).
+	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. Empty (default) disables the store.")
+	fs.DurationVar(&f.storeTTL, "store-ttl", 720*time.Hour, "Retention for stored occurrences (§9.1 default 30 days); the prune loop deletes older rows. Must be > 0.")
+	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Must be >= 1.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -246,6 +259,15 @@ func (f *flags) validate() error {
 	}
 	if f.enrichTimeout <= 0 {
 		return errors.New("--enrich-timeout must be > 0")
+	}
+	// Occurrence store (§9.1): bounds are config errors in every mode,
+	// like the storm / watchboard / enrichment bounds, even when
+	// --store is unset — a nonsensical value is a typo worth failing.
+	if f.storeTTL <= 0 {
+		return errors.New("--store-ttl must be > 0")
+	}
+	if f.storeMaxMB < 1 {
+		return errors.New("--store-max-mb must be >= 1")
 	}
 	switch f.mode {
 	case "per-incident":
@@ -346,6 +368,13 @@ type dispatcher struct {
 	// opening their own. Nil when storm correlation is disabled
 	// (--storm absent — the default).
 	storm *engine.StormCorrelator
+	// store, when non-nil, is the §9.1 raw-occurrence store: every
+	// signal that survives the filter is recorded post-dedup with the
+	// routing outcome it received. Nil when --store is unset — all
+	// Store methods are nil-safe no-ops, so no call site branches.
+	// The store is telemetry, never control flow: nothing in this
+	// dispatcher reads it back.
+	store *store.Store
 	// enrich, when non-nil, is the §7.6 enrichment stage: new
 	// per-incident (and storm) sessions get the in-process bundle
 	// attached to their initial inject. Nil when disabled
@@ -432,20 +461,32 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// hit count for this key within the current window.
 		log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
 			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
+		// §9.1: suppressed duplicates are still emitted signals — the
+		// store keeps them (with the session the incident is bound to)
+		// so lookback sees the true occurrence rate, not the deduped one.
+		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: result.SessionID})
 		return
 	}
-	// Severity routing, info class (§7.7): stored only per §9.1.
-	// TODO(M3 store): persist the signal in the raw store instead of
-	// dropping it. Until then it is counted + debug-logged — never
-	// silently ignored. Placed after dedup (so the metric counts
-	// would-be-stored incident records, not raw event volume) and
-	// before storm correlation (info is the store-only class; it
-	// neither opens nor joins sessions, storms included). Shared mode
-	// skips routing entirely: ALL severities go to --target-session.
+	// Severity routing, info class (§7.7): stored only per §9.1 —
+	// with --store set the signal is persisted (route=info-stored) and
+	// surfaced by read-path queries and digests; without it, counted +
+	// logged and dropped, never silently ignored. The info_dropped
+	// metric counts the class in BOTH cases (frozen name; it is the
+	// "did not inject" count, store or no store). Placed after dedup
+	// (so it counts incident records, not raw event volume) and before
+	// storm correlation (info neither opens nor joins sessions, storms
+	// included). Shared mode skips routing entirely: ALL severities go
+	// to --target-session.
 	if d.mode == "per-incident" && d.routing != nil && engine.RouteFor(sig.Severity) == engine.RouteStore {
 		d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
-		log.Printf("info-drop %s %s/%s (severity=info: stored-only class; raw store lands in M3 — counted and dropped)",
-			sig.Kind, sig.Namespace, sig.Name)
+		if d.store != nil {
+			d.store.Record(sig, store.Outcome{Route: store.RouteInfoStored})
+			log.Printf("info-store %s %s/%s (severity=info: stored-only class; persisted to --store)",
+				sig.Kind, sig.Namespace, sig.Name)
+		} else {
+			log.Printf("info-drop %s %s/%s (severity=info: stored-only class; set --store to persist — counted and dropped)",
+				sig.Kind, sig.Namespace, sig.Name)
+		}
 		return
 	}
 	// New incident: correlate, then create or reuse a session and
@@ -476,6 +517,11 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// per-incident mode: shared mode routes ALL severities to
 	// --target-session unchanged.
 	if d.mode == "per-incident" && d.board != nil && engine.RouteFor(sig.Severity) == engine.RouteWatchboard {
+		// Recorded without a session on purpose: the watchboard's
+		// session is created lazily at flush time and rotates — the
+		// digest inject, not this occurrence row, is the session-bound
+		// artifact.
+		d.store.Record(sig, store.Outcome{Route: store.RouteWatchboard})
 		d.board.Add(ctx, sig, result.Count)
 		return
 	}
@@ -547,6 +593,11 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Enrichment != nil {
 		payload.Enrichment = &inject.PayloadEnrichment{Bundle: sig.Enrichment.Bundle}
 	}
+	// §9.1: record the routing DECISION (route=injected, with the
+	// session it targets), not delivery success — inject transport
+	// errors stay the injector's telemetry (inject_errors_total).
+	// The recorded signal carries no enrichment (the store strips it).
+	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
@@ -611,10 +662,17 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 			d.metrics.recoveryDrops.WithLabelValues("unknown_session").Inc()
 			log.Printf("recovery: no bound session for %s %s/%s (uid=%s) — dropping %s (restart without --dedup-persist, or entry evicted)",
 				sig.Key.Reason, sig.Namespace, sig.Name, sig.Key.UID, sig.Kind)
+			// The OUTCOME still happened even though the inject has
+			// nowhere to go — keep it (NULL session) so §7.4 stability
+			// windows and recommendation history stay complete.
+			d.store.Record(sig, store.Outcome{Route: store.RouteResolved})
 			return
 		}
 		sid = bound
 	}
+	// §9.1: resolved / resolved.reverted rows are what the stability-
+	// window and recommendation-history queries join against.
+	d.store.Record(sig, store.Outcome{Route: store.RouteResolved, SessionID: sid})
 	payload := resolvedPayload(sig)
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
@@ -755,6 +813,37 @@ func realMain(argv []string) error {
 		dryRun:    f.dryRun,
 	}
 
+	// Occurrence store (§9.1): opt-in via --store. When unset, disp
+	// keeps a nil *store.Store whose methods are all no-ops — the M2
+	// behavior, byte for byte. Hooks wire the store's drop/prune/write
+	// visibility into this process's Prometheus registry; the deferred
+	// Close flushes the writer buffer on every return path (dry-run
+	// included — the store works in dry-run: routing decisions are
+	// real even when injects are printed).
+	var occStore *store.Store
+	if f.store != "" {
+		occStore, err = store.Open(f.store,
+			store.WithTTL(f.storeTTL),
+			store.WithMaxBytes(int64(f.storeMaxMB)<<20),
+			store.WithHooks(store.Hooks{
+				OnWrite: func(route store.RouteOutcome) { m.storeRecords.WithLabelValues(string(route)).Inc() },
+				OnDrop:  func(cause string) { m.storeDrops.WithLabelValues(cause).Inc() },
+				OnPrune: func(cause string, rows int64) { m.storePruned.WithLabelValues(cause).Add(float64(rows)) },
+			}),
+		)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cerr := occStore.Close(); cerr != nil {
+				log.Printf("store: close: %v", cerr)
+			}
+		}()
+		disp.store = occStore
+		log.Printf("store: enabled (path=%s, ttl=%s, max=%dMiB, prune every %s)",
+			f.store, f.storeTTL, f.storeMaxMB, store.PruneInterval(f.storeTTL))
+	}
+
 	// Severity routing (§7.7): the policy (source defaults +
 	// --severity overrides) is always on; the shared watchboard only
 	// exists in per-incident mode — in --mode=shared ALL severities
@@ -793,6 +882,10 @@ func realMain(argv []string) error {
 	if f.dedupPersist != "" && f.snapshotInterval > 0 {
 		go runSnapshotLoop(ctx, dedup, f.snapshotInterval)
 	}
+
+	// §9.1 TTL + size-bound prune loop (interval min(1h, ttl/24)).
+	// Nil-safe: returns immediately when the store is disabled.
+	go occStore.RunPrune(ctx)
 
 	// Watchboard interval-flush loop (§7.7): flushes buffered
 	// warnings at --watchboard-flush age, plus a final best-effort
