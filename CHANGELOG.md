@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The shipped ClusterRole now grants `get` on `apps/deployments`,
+  `apps/replicasets`, and `pods/log` — the M2 drill showed enrichment's
+  spec and logs sections failing in-cluster without them (5 of 8 runs
+  `outcome=partial`; see `docs/milestones/M2.md` §Observations).
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in
