@@ -35,6 +35,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 
@@ -45,6 +46,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
+	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/store"
@@ -63,6 +66,11 @@ type flags struct {
 	namespaces            string
 	excludeNamespaces     string
 	sources               string
+	degradationWindow     time.Duration
+	degradationDrop       float64
+	expiryInterval        time.Duration
+	expiryWarn            time.Duration
+	expiryNamespaces      string
 	dedupWindow           time.Duration
 	dedupPersist          string
 	unhealthyMinCount     int
@@ -120,7 +128,19 @@ func parseFlags(args []string) (*flags, error) {
 	// ADDITIVE flag: the default is exactly the M0 surface, so
 	// existing deployments keep byte-identical behavior without
 	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state. Default preserves the M0 watcher surface (k8s-events only).")
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, degradation, expiry. Default preserves the M0 watcher surface (k8s-events only).")
+
+	// Degradation source thresholds (§7.2 row 5). ADDITIVE flags; only
+	// meaningful with --sources=…,degradation.
+	fs.DurationVar(&f.degradationWindow, "degradation-window", 15*time.Minute, "Trend window for the degradation source's ready-ratio series and probe-flap counting. Must be > 0.")
+	fs.Float64Var(&f.degradationDrop, "degradation-drop", 0.3, "Minimum ready-ratio decline from window start (with >= 2 distinct downward steps) that fires degradation.capacity. Must be in (0, 1].")
+
+	// Expiry source thresholds (§7.2 row 6). ADDITIVE flags; only
+	// meaningful with --sources=…,expiry. The critical threshold (72h)
+	// is design-fixed, not a flag.
+	fs.DurationVar(&f.expiryInterval, "expiry-interval", time.Hour, "Interval between expiry scans (periodic paged LISTs — deliberately no Secret informer). Must be > 0.")
+	fs.DurationVar(&f.expiryWarn, "expiry-warn", 336*time.Hour, "Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h.")
+	fs.StringVar(&f.expiryNamespaces, "expiry-namespaces", "", "Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces. Scopes the sensitive secrets-list grant (§11) — the startup RBAC probe verifies exactly this scope.")
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
@@ -218,15 +238,31 @@ func (f *flags) validate() error {
 	// Sources are validated before the mode switch's dry-run early
 	// return: a typo'd source name is a config error in every mode.
 	names := splitCSV(f.sources)
+	knownSources := strings.Join([]string{k8sevents.Name, objectstate.Name, degradation.Name, expiry.Name}, ", ")
 	if len(names) == 0 {
-		return fmt.Errorf("--sources must enable at least one source (known: %s, %s)", k8sevents.Name, objectstate.Name)
+		return fmt.Errorf("--sources must enable at least one source (known: %s)", knownSources)
 	}
 	for _, name := range names {
 		switch name {
-		case k8sevents.Name, objectstate.Name:
+		case k8sevents.Name, objectstate.Name, degradation.Name, expiry.Name:
 		default:
-			return fmt.Errorf("--sources: unknown source %q (known: %s, %s)", name, k8sevents.Name, objectstate.Name)
+			return fmt.Errorf("--sources: unknown source %q (known: %s)", name, knownSources)
 		}
+	}
+	// Degradation / expiry thresholds (§7.2 rows 5–6): config errors in
+	// every mode, like the storm bounds, even when the sources are
+	// disabled — a nonsensical value is a typo worth failing.
+	if f.degradationWindow <= 0 {
+		return errors.New("--degradation-window must be > 0")
+	}
+	if f.degradationDrop <= 0 || f.degradationDrop > 1 {
+		return errors.New("--degradation-drop must be in (0, 1]")
+	}
+	if f.expiryInterval <= 0 {
+		return errors.New("--expiry-interval must be > 0")
+	}
+	if f.expiryWarn < expiry.CriticalWindow {
+		return fmt.Errorf("--expiry-warn must be >= the design-fixed critical threshold (%s)", expiry.CriticalWindow)
 	}
 	// Storm bounds are validated before the mode switch's dry-run
 	// early return, like --sources: a nonsensical value is a config
@@ -605,6 +641,11 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Enrichment != nil {
 		payload.Enrichment = &inject.PayloadEnrichment{Bundle: sig.Enrichment.Bundle}
 	}
+	// §8 forecast: trend/countdown sources only; omitempty keeps every
+	// reactive payload byte-identical (frozen wire pins unchanged).
+	if sig.Forecast != nil {
+		payload.Forecast = &inject.PayloadForecast{ETA: sig.Forecast.ETA, ConfidenceBasis: sig.Forecast.ConfidenceBasis}
+	}
 	// §9.1: record the routing DECISION (route=injected, with the
 	// session it targets), not delivery success — inject transport
 	// errors stay the injector's telemetry (inject_errors_total).
@@ -924,11 +965,25 @@ func realMain(argv []string) error {
 	}
 
 	// Signal sources (§7.2), individually enabled via --sources
-	// (default: k8s-events only — the frozen M0 surface).
-	registry, objState, err := buildSources(f, client)
+	// (default: k8s-events only — the frozen M0 surface). The dynamic
+	// client exists only for the expiry source's discovery-gated
+	// cert-manager reads — built from the same kube options, only when
+	// that source is enabled.
+	var dyn dynamic.Interface
+	for _, name := range splitCSV(f.sources) {
+		if name == expiry.Name {
+			dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+			if err != nil {
+				return err
+			}
+			break
+		}
+	}
+	built, err := buildSources(f, client, dyn)
 	if err != nil {
 		return err
 	}
+	registry, objState := built.registry, built.objState
 
 	// Storm correlation (§7.5): ONE shared informer factory serves
 	// the sources and the graph (§6.3) — when enabled, the
@@ -940,6 +995,9 @@ func realMain(argv []string) error {
 		sharedFactory = informers.NewSharedInformerFactory(client, 0)
 		if objState != nil {
 			objState.WithFactory(sharedFactory)
+		}
+		if built.degradation != nil {
+			built.degradation.WithFactory(sharedFactory)
 		}
 		// Graph history (§6.6): with a store configured, every applied
 		// graph delta also logs a ChangeRecord through the store's
@@ -1005,9 +1063,21 @@ func realMain(argv []string) error {
 	}
 
 	// Recovery injects (§7.4): watch bound incidents for symptom
-	// clearance and inject the outcome into the same session.
+	// clearance and inject the outcome into the same session. Sources
+	// with their own clearance predicates register them ahead of the
+	// generic pod observer (§7.4: each source that can observe a
+	// symptom can observe its absence) — order matters for probe_flap,
+	// where "pod is Ready" is true between the flaps the incident is
+	// about.
 	if f.recoveryStableFor > 0 {
-		if err := setupRecovery(ctx, f, client, dedup, disp, m, objState); err != nil {
+		var extra []engine.ClearanceObserver
+		if built.degradation != nil {
+			extra = append(extra, built.degradation.ClearanceObserver())
+		}
+		if built.expiry != nil {
+			extra = append(extra, built.expiry.ClearanceObserver())
+		}
+		if err := setupRecovery(ctx, f, client, dedup, disp, m, objState, extra...); err != nil {
 			return err
 		}
 	}
@@ -1075,31 +1145,56 @@ var recoveryAccess = []sources.Requirement{
 	{Resource: "pods", Verb: "watch"},
 }
 
+// builtSources is buildSources' result: the registry plus the typed
+// handles the wiring below needs — object-state and degradation for
+// shared-factory + §7.4 observer reuse, expiry for its observer.
+type builtSources struct {
+	registry    *sources.Registry
+	objState    *objectstate.Source
+	degradation *degradation.Source
+	expiry      *expiry.Source
+}
+
 // buildSources registers the sources named by --sources (§7.2:
-// sources are individually enabled in config). The object-state
-// source is returned separately when enabled so setupRecovery can
-// reuse its pod informer as the §7.4 clearance observer instead of
-// starting a second one.
-func buildSources(f *flags, client kubernetes.Interface) (*sources.Registry, *objectstate.Source, error) {
-	registry := sources.NewRegistry()
-	var objState *objectstate.Source
+// sources are individually enabled in config). Informer-backed
+// sources are returned as typed handles so setupRecovery can reuse
+// their informers/state as §7.4 clearance observers instead of
+// starting duplicates, and so storm mode can move them onto the
+// shared informer factory (§6.3). dyn may be nil unless the expiry
+// source is enabled (it reads cert-manager Certificates unstructured;
+// the caller builds it only when needed).
+func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface) (*builtSources, error) {
+	b := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
 		var src sources.Source
 		switch name {
 		case k8sevents.Name:
 			src = k8sevents.New(client, 0)
 		case objectstate.Name:
-			objState = objectstate.New(client, objectstate.DefaultConfig())
-			src = objState
+			b.objState = objectstate.New(client, objectstate.DefaultConfig())
+			src = b.objState
+		case degradation.Name:
+			cfg := degradation.DefaultConfig()
+			cfg.Window = f.degradationWindow
+			cfg.Drop = f.degradationDrop
+			b.degradation = degradation.New(client, cfg)
+			src = b.degradation
+		case expiry.Name:
+			cfg := expiry.DefaultConfig()
+			cfg.Interval = f.expiryInterval
+			cfg.WarnWindow = f.expiryWarn
+			cfg.Namespaces = splitCSV(f.expiryNamespaces)
+			b.expiry = expiry.New(client, dyn, cfg)
+			src = b.expiry
 		default:
 			// validate() rejects unknown names before we get here.
-			return nil, nil, fmt.Errorf("--sources: unknown source %q", name)
+			return nil, fmt.Errorf("--sources: unknown source %q", name)
 		}
-		if err := registry.Register(src); err != nil {
-			return nil, nil, err
+		if err := b.registry.Register(src); err != nil {
+			return nil, err
 		}
 	}
-	return registry, objState, nil
+	return b, nil
 }
 
 // setupRecovery wires the §7.4 closed loop: pod clearance observer →
@@ -1120,7 +1215,15 @@ func buildSources(f *flags, client kubernetes.Interface) (*sources.Registry, *ob
 // a missed incident. So insufficient RBAC disables recovery with a
 // loud log naming the grant, instead of crash-looping existing
 // deployments.
-func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, objState *objectstate.Source) error {
+//
+// extra observers are source-specific clearance predicates (§7.4 —
+// degradation's ratio-recovered, expiry's cert-renewed). They are
+// registered BEFORE the pod observer: the tracker asks observers in
+// order, and a kind-specific predicate must outrank the generic
+// "pod is Ready" one for the incidents it owns (a probe-flapping pod
+// reads Ready between flaps). Each judges only its own kinds, so
+// registration is safe regardless of which sources are enabled.
+func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, objState *objectstate.Source, extra ...engine.ClearanceObserver) error {
 	var observer engine.ClearanceObserver
 	if objState != nil {
 		observer = objState.ClearanceObserver()
@@ -1146,6 +1249,9 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	tracker := engine.NewRecoveryTracker(f.recoveryStableFor, func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
+	for _, o := range extra {
+		tracker.AddObserver(o)
+	}
 	tracker.AddObserver(observer)
 	disp.tracker = tracker
 	// Resume clearance watching for bindings restored from

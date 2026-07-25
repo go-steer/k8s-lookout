@@ -16,6 +16,7 @@ package watch
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
+	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 )
@@ -40,14 +44,17 @@ func TestSourcesFlag_DefaultIsK8sEventsOnly(t *testing.T) {
 	if f.sources != k8sevents.Name {
 		t.Fatalf("default --sources = %q, want %q", f.sources, k8sevents.Name)
 	}
-	registry, objState, err := buildSources(f, fake.NewSimpleClientset())
+	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	if objState != nil {
+	if built.objState != nil {
 		t.Error("object-state must NOT be constructed by default")
 	}
-	all := registry.All()
+	if built.degradation != nil || built.expiry != nil {
+		t.Error("degradation/expiry must NOT be constructed by default")
+	}
+	all := built.registry.All()
 	if len(all) != 1 || all[0].Name() != k8sevents.Name {
 		t.Errorf("default registry = %d sources, want just k8s-events", len(all))
 	}
@@ -62,18 +69,140 @@ func TestSourcesFlag_ObjectStateEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	registry, objState, err := buildSources(f, fake.NewSimpleClientset())
+	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	if objState == nil {
+	if built.objState == nil {
 		t.Fatal("object-state enabled but not returned for recovery wiring")
 	}
-	if _, ok := registry.Lookup(objectstate.Name); !ok {
+	if _, ok := built.registry.Lookup(objectstate.Name); !ok {
 		t.Error("object-state not registered")
 	}
-	if _, ok := registry.Lookup(k8sevents.Name); !ok {
+	if _, ok := built.registry.Lookup(k8sevents.Name); !ok {
 		t.Error("k8s-events not registered")
+	}
+}
+
+// TestSourcesFlag_DegradationAndExpiryEnabled: the two M3 leading-
+// indicator sources register additively and come back as typed
+// handles for §7.4 observer + shared-factory wiring.
+func TestSourcesFlag_DegradationAndExpiryEnabled(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=k8s-events,degradation,expiry", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
+	if err != nil {
+		t.Fatalf("buildSources: %v", err)
+	}
+	if built.degradation == nil {
+		t.Fatal("degradation enabled but not returned for observer wiring")
+	}
+	if built.expiry == nil {
+		t.Fatal("expiry enabled but not returned for observer wiring")
+	}
+	if _, ok := built.registry.Lookup(degradation.Name); !ok {
+		t.Error("degradation not registered")
+	}
+	if _, ok := built.registry.Lookup(expiry.Name); !ok {
+		t.Error("expiry not registered")
+	}
+}
+
+// TestSourcesFlag_DegradationExpiryDefaults pins the new ADDITIVE
+// flags' defaults (§7.2 rows 5–6 normative values) and their bounds.
+func TestSourcesFlag_DegradationExpiryDefaults(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if f.degradationWindow != 15*time.Minute {
+		t.Errorf("default degradation-window = %v, want 15m", f.degradationWindow)
+	}
+	if f.degradationDrop != 0.3 {
+		t.Errorf("default degradation-drop = %v, want 0.3", f.degradationDrop)
+	}
+	if f.expiryInterval != time.Hour {
+		t.Errorf("default expiry-interval = %v, want 1h", f.expiryInterval)
+	}
+	if f.expiryWarn != 336*time.Hour {
+		t.Errorf("default expiry-warn = %v, want 336h (14d)", f.expiryWarn)
+	}
+	if f.expiryNamespaces != "" {
+		t.Errorf("default expiry-namespaces = %q, want empty (all)", f.expiryNamespaces)
+	}
+
+	for _, bad := range [][]string{
+		{"--degradation-window=0s", "--dry-run"},
+		{"--degradation-drop=0", "--dry-run"},
+		{"--degradation-drop=1.5", "--dry-run"},
+		{"--expiry-interval=0s", "--dry-run"},
+		{"--expiry-warn=71h", "--dry-run"}, // below the design-fixed 72h critical
+	} {
+		f, err := parseFlags(bad)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", bad, err)
+		}
+		if err := f.validate(); err == nil {
+			t.Errorf("validate(%v) accepted a nonsensical value", bad)
+		}
+	}
+}
+
+// TestDispatchSignal_ForecastSerialized: a Signal carrying the §8
+// Forecast (trend/countdown sources) surfaces it as the ADDITIVE
+// "forecast" payload field; signals without one keep the frozen shape
+// (pinned byte-exact by TestDispatchSignal_SourcePathWireShapeFrozen).
+func TestDispatchSignal_ForecastSerialized(t *testing.T) {
+	t.Parallel()
+	base, injects, _ := newFakeDaemon(t)
+	inj, err := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
+	if err != nil {
+		t.Fatalf("NewInjector: %v", err)
+	}
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
+	disp := &dispatcher{
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		dedup:     dedup,
+		injector:  inj,
+		metrics:   newMetrics(),
+		cluster:   "prod-us-central1",
+		mode:      "shared",
+		targetSid: "sess-shared",
+	}
+	disp.DispatchSignal(context.Background(), engine.Signal{
+		Kind:     expiry.KindWarning,
+		Source:   engine.SourceSentinel,
+		Severity: engine.SeverityCritical,
+		TriageEvent: engine.TriageEvent{
+			Key:          engine.EventKey{UID: "sec-1", Reason: "warning"},
+			Namespace:    "prod",
+			KindOfObject: "Secret",
+			Name:         "api-tls",
+			Message:      "certificate expires in 72h",
+			FirstSeen:    time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC),
+			LastSeen:     time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC),
+			Count:        1,
+		},
+		Forecast: &engine.Forecast{ETA: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC), ConfidenceBasis: expiry.ConfidenceBasis},
+	})
+	if len(*injects) != 1 {
+		t.Fatalf("expected 1 inject; got %d", len(*injects))
+	}
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte((*injects)[0]), &envelope); err != nil {
+		t.Fatalf("captured body isn't the inject envelope: %v", err)
+	}
+	if !strings.Contains(envelope.Message, `"forecast":{"eta":"2026-08-08T12:00:00Z","confidence_basis":"certificate-notAfter"}`) {
+		t.Errorf("payload missing the §8 forecast field:\n%s", envelope.Message)
 	}
 }
 

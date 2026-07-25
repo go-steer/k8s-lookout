@@ -16,6 +16,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `degradation` and `expiry` sources (M3, DESIGN.md §7.2 rows 5–6)
+  — two leading indicators, enabled via `--sources=…,degradation,expiry`
+  (ADDITIVE; the default stays k8s-events only).
+  `degradation.capacity` (§7.3) is a TREND on per-Service
+  EndpointSlice ready RATIOS — "payment-backend capacity 5/5 → 3/5
+  over 10 min" — distinct from `objectstate.endpoints_empty` (the
+  >0→0 transition) by construction: it NEVER fires at ratio 0. Exact
+  predicate (documented in the package): ratio samples per Service
+  (coalesced to 10s so one sharded controller write is one step, plus
+  a low-frequency tick), fire iff the ratio dropped ≥
+  `--degradation-drop` (default 0.3) from the window start
+  (`--degradation-window`, default 15m) AND ≥ 2 distinct downward
+  steps — no single blip fires, however deep. Warning; critical at
+  surviving ratio ≤ 0.5; single-fire per decline episode with
+  evidence carrying from/to/desired counts, window, and the compact
+  step timeline. `degradation.probe_flap` catches pods whose
+  readiness gate flipped ≥ 4 times in-window but never sustained
+  failure long enough for the reactive `Unhealthy` path (flip
+  counting encodes "below the threshold" structurally: down-and-
+  stays-down is one transition). Pod + EndpointSlice informers are
+  shared with the §6.3 factory under `--storm`; arm-after-sync
+  restart discipline as object-state; both kinds carry §7.4
+  clearance (ratio back at the fire-time baseline or 1.0; pod Ready
+  with no in-window flips), registered AHEAD of the generic pod
+  observer so flap incidents aren't resolved by "pod reads Ready
+  between flaps".
+  `expiry.warning` (§7.3) is the leading COUNTDOWN over TLS secret
+  certs, Validating/MutatingWebhookConfiguration caBundles,
+  ServiceAccount token JWT `exp` claims where detectable, and —
+  discovery-gated — cert-manager Certificate CRs (absent CRD = one
+  loud startup log line, never a silent skip; present CRD attributes
+  cert-manager-owned Secrets to their Certificate so one failing
+  renewal is one incident). Warning at `--expiry-warn` (default
+  336h/14d), critical at the design-fixed 72h or when the last
+  renewal FAILED (regardless of window, per the §7.2 example); fires
+  once per (object, threshold crossing), re-checked every
+  `--expiry-interval` (default 1h) scan; renewal (notAfter moved back
+  out) resets the latch and is the §7.4 clearance. Every signal
+  carries the §8 `Forecast{ETA: notAfter,
+  "certificate-notAfter"}`, now serialized as the ADDITIVE
+  `forecast` payload field (omitempty — reactive payloads stay
+  byte-identical). Scan model: periodic PAGED LISTs, deliberately NO
+  Secret informer — an informer would hold every Secret in scope
+  resident in the sentinel's heap; the scan holds one page
+  transiently and retains only (identity, notAfter, subject CN,
+  issuer CN). RBAC: the secrets `list` is the sentinel's first
+  secret-value read and is declared + probed (§11) and flagged as
+  the tradeoff in `deploy/12-clusterrole-watcher.yaml`; scope it
+  with `--expiry-namespaces` (default all — the declared probe
+  requirements narrow with the flag). New grants: secrets/
+  serviceaccounts list, webhook configurations list, cert-manager
+  certificates list (inert without the CRD). The degradation source
+  adds NO new RBAC.
+
 - The sentinel-local raw-occurrence store (M3, DESIGN.md §9.1) —
   `pkg/store`, ONE bounded, TTL'd embedded SQLite database holding every
   emitted signal (info severity included) together with the routing
