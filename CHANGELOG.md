@@ -117,6 +117,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph-backed probe (`checktest.GraphAtCommand`) pins the plumbing
   end-to-end (flag gating → Scope → read-only open → GraphAt).
 
+- `lookout triage events` (M3, DESIGN.md §5 — absorbs v2's ev-sifter +
+  hpa-loop-catcher): the deduped chronological event timeline. One
+  paged List of core/v1 Events, collapsed by the SAME identity the
+  `lookout watch` sentinel dedups on — (involvedObject.uid, canonical
+  reason via `engine.CanonicalReason`), so ErrImagePull/ImagePullBackOff
+  and BackOff/CrashLoopBackOff families merge here exactly as they
+  merge into one incident session (pull mode of the same filter/dedup;
+  `engine.DedupCache` itself is deliberately NOT reused — its rolling
+  window/TTL, LRU, and session bindings are session-routing semantics,
+  wrong for a one-shot bounded window, documented in the package).
+  Targeting: `--workload=<Kind>/<ns>/<name>` scopes to the target's
+  whole owner-reference tree — climb to the root owner, include every
+  descendant, siblings too — resolved from the same one-List-pass
+  `pkg/graph` snapshot `state edges`/`bundle` build; `--namespace`/`-A`
+  give the untreed namespace timeline. Entries order by newest activity
+  (`lastTimestamp`), Warning events emit `kind=event.warning`
+  severity=warning, Normal emit `kind=event.normal` severity=info, each
+  with summed repeat counts, first/last seen, collapsed reason
+  `variants`, and the reporting `source`; `--since` honored (default
+  1h) and the summary line counts events scanned. HPA thrash detection
+  is an analysis mode here because the HPA object keeps NO replica
+  history: the replica sequence is recovered from SuccessfulRescale
+  events ("New size: N", including each aggregated event's first/last
+  envelope), and ≥`--hpa-flips` (default 2, i.e. up→down→up)
+  scale-direction changes inside one `--hpa-window` (default 30m) emit
+  `kind=event.hpa_thrash` (warning) with the replica sequence, flip
+  count, window, and — in workload mode, where HPAs targeting into the
+  tree are resolved via an autoscaling/v2 List — the scaleTargetRef; a
+  monotonic ramp never fires (zero direction changes). MCP:
+  `k8s_event_timeline`.
+
+- `lookout net probe` (M3, DESIGN.md §5): active DNS/TCP/HTTP checks
+  for hypothesis CONFIRMATION — `--dns=<name,...>`, `--tcp=<host:port,...>`,
+  `--http=<url,...>` (at least one required), `--probe-timeout` (default
+  5s per probe). Zero cluster mutation and zero Kubernetes API use; the
+  vantage point is WHEREVER lookout runs — in a pod you get the
+  in-cluster view (cluster DNS, Service VIPs, NetworkPolicies as that
+  pod experiences them), on a laptop you get the laptop's network; no
+  pod is ever spawned. Because targets are not Kubernetes objects, the
+  §4.2 scoping flags (`--workload`, `--namespace`/`-A`, `--since`) are
+  REJECTED as usage errors instead of silently ignored. Findings:
+  `probe.dns` (sorted resolved IPs + latency), `probe.tcp` (connect
+  latency), `probe.http` (GET only, redirects reported as their 3xx and
+  not followed, bodies never read — status + latency + declared
+  Content-Length). Failures carry a machine-matchable `error_class`
+  (`nxdomain|timeout|refused|unreachable|reset|cert|http_4xx|http_5xx|
+  error`; TLS verification failures are their own `cert` class) with a
+  uniform severity policy: definitive negatives (nxdomain, refused,
+  unreachable, reset, cert, 5xx) are critical; indeterminate outcomes
+  (timeout — could be policy, load, or vantage; 4xx — reachable and
+  serving, request turned away) are warning. MCP: `k8s_net_probe`.
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in
