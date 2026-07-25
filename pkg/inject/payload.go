@@ -41,6 +41,22 @@ type Payload struct {
 	// pins pass unchanged); playbooks that predate §7.6 simply ignore
 	// the extra key.
 	Enrichment *PayloadEnrichment `json:"enrichment,omitempty"`
+	// Forecast is the §8 "forecast" field, set by trend/countdown
+	// sources only ("cert expires in 72h", "pod hits memory limit in
+	// ~14 min"). ADDITIVE like Enrichment: omitempty keeps every
+	// reactive payload — the frozen k8s-event shape included —
+	// byte-identical to before.
+	Forecast *PayloadForecast `json:"forecast,omitempty"`
+}
+
+// PayloadForecast mirrors DESIGN.md §8's forecast object: ETA is the
+// projected (or, for countdowns, exact) exhaustion time and
+// ConfidenceBasis names the model that produced it — e.g.
+// "linear-90m-window" for a regression, "certificate-notAfter" for a
+// countdown — so the agent and AX can judge how much to trust it.
+type PayloadForecast struct {
+	ETA             time.Time `json:"eta"`
+	ConfidenceBasis string    `json:"confidence_basis"`
 }
 
 // PayloadEnrichment is the §8 "enrichment" envelope field: the

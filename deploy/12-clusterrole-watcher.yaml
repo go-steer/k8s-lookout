@@ -47,10 +47,21 @@
 #                       (one shared informer set). Harmless when
 #                       --storm is off (the default); required when on
 #                       — verified loudly at startup like a source.
+#   - list secrets, serviceaccounts; list webhook configurations;
+#     list cert-manager certificates — the expiry source (DESIGN.md
+#                       §7.2 row 6, enabled via --sources=…,expiry):
+#                       expiry countdowns over TLS certs, webhook CA
+#                       bundles, SA token expiries, and cert-manager
+#                       renewal state. Harmless when the source is
+#                       disabled (the default); verified loudly at
+#                       startup when enabled. See the §11 tradeoff
+#                       note on the secrets rule below.
 #
 # What the sentinel deliberately does NOT get:
 #   - patch/update/delete on anything — the sentinel is read-only
-#   - secrets — the sentinel never reads workload secrets
+#   - watch/get on secrets — the expiry source's `list` (below) is the
+#     ONLY secret access, periodic and paged, never an informer cache
+#     of secret material resident in memory
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -85,3 +96,31 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
+  # ---- expiry source (--sources=…,expiry) ----
+  # §11 TRADEOFF — this is the sentinel's one read of Secret VALUES
+  # (tls.crt to parse notAfter; the token JWT for its exp claim), and
+  # it is deliberately `list` only: no watch, no get, no informer —
+  # a periodic paged scan that retains nothing but (identity,
+  # notAfter, subject CN, issuer CN). No secret byte can reach a
+  # signal, and the §6.5 sanitizer remains the second net, not the
+  # mechanism. Deployments that cannot accept a cluster-wide secrets
+  # list scope it with --expiry-namespaces (the startup probe then
+  # verifies exactly the scoped namespaces) or bind a namespaced Role
+  # instead. Remove this rule entirely when the expiry source is
+  # disabled.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["list"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+    verbs: ["list"]
+  # cert-manager Certificates: discovery-gated at runtime — the rule
+  # is inert on clusters without the CRD (RBAC rules for absent groups
+  # are legal and ignored), and the expiry source logs one startup
+  # line when it skips the target.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["list"]
