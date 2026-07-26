@@ -1,0 +1,22 @@
+{
+  "//": "Recorded-shape fixtures: compute/v1 projects.get and regions.get response bodies (quota fields). Authored from the Compute Engine Projects:get / Regions:get API references — not captured from a live project (§13).",
+  "project": {
+    "kind": "compute#project",
+    "name": "proj-1",
+    "quotas": [
+      { "metric": "NETWORKS", "limit": 15.0, "usage": 3.0 },
+      { "metric": "CPUS_ALL_REGIONS", "limit": 1200.0, "usage": 620.0 },
+      { "metric": "STATIC_ADDRESSES", "limit": 8.0, "usage": 8.0 }
+    ]
+  },
+  "region": {
+    "kind": "compute#region",
+    "name": "us-east1",
+    "status": "UP",
+    "quotas": [
+      { "metric": "CPUS", "limit": 600.0, "usage": 588.0 },
+      { "metric": "SSD_TOTAL_GB", "limit": 4000.0, "usage": 3500.0 },
+      { "metric": "NVIDIA_H100_GPUS", "limit": 0.0, "usage": 0.0 }
+    ]
+  }
+}

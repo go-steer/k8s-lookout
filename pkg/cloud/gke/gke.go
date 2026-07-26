@@ -19,14 +19,15 @@
 // `allproviders` build tags — the default lookout build has zero GCP
 // linkage — and self-registers as "gke" in init().
 //
-// M1 established the boundary: identity detection (project /
-// location / cluster from config, well-known env vars, or the GCE
-// metadata server — plain HTTP). M4 added the first SDK-backed
-// capability: Capacity, the cluster-autoscaler visibility log reader
-// (capacity.go / logadmin.go — the package's only GCP SDK import).
-// The remaining capabilities report unavailable until their
-// implementations land (quota in M4, cloud group / state wi /
-// perf probe in M5).
+// From M1: identity detection (project / location / cluster from
+// config, well-known env vars, or the GCE metadata server). From M4:
+// Capacity — the cluster-autoscaler visibility log reader
+// (capacity.go / logadmin.go) — and the `cloud` command group's
+// capabilities: stockout (Cloud Logging audit entries), orphans +
+// quota (Compute), ipspace (GKE + Compute), SDK-backed behind §13
+// small client interfaces (stockout.go, orphans.go, ipspace.go,
+// quota.go; REST-client choice documented in compute.go). Metrics
+// and workload identity report unavailable until M5.
 package gke
 
 import (
@@ -43,10 +44,14 @@ const Name = "gke"
 // whose SDK-backed implementations have not landed yet.
 const reasonDeferred = "not implemented until M4/M5"
 
-// reasonNoProject is CapabilityCapacity's unavailability reason when
-// identity detection found no GCP project — the Cloud Logging query
-// has no project to scope to.
-const reasonNoProject = "GCP project undetectable (pin it in provider config or run on GCE)"
+// reasonNoProject / reasonNoClusterIdentity are the §2 fail-loudly
+// reasons when a capability's implementation exists but the resolved
+// identity is missing what it needs.
+const (
+	reasonNoProject = "GCP project undetectable (pin it in provider config or run on GCE)"
+
+	reasonNoClusterIdentity = "GKE cluster identity undetectable (project, location, and cluster name are all required — pin them or run on GKE)"
+)
 
 func init() {
 	cloud.Register(Name, New)
@@ -105,34 +110,52 @@ func (p *Provider) Location() string { return p.location }
 func (p *Provider) Cluster() string { return p.cluster }
 
 // Capabilities implements cloud.Provider. Everything is declared —
-// this provider will implement the full §2 surface. Capacity (§10.1
-// source 3, M4) is live when a project was resolved; the rest stay
-// deferred until their milestones.
+// this provider will implement the full §2 surface — and each
+// capability reports per-capability availability (implemented AND
+// identity sufficient) with the §2 explicit reason otherwise.
 func (p *Provider) Capabilities() []cloud.CapabilityStatus {
 	all := cloud.AllCapabilities()
 	statuses := make([]cloud.CapabilityStatus, 0, len(all))
 	for _, c := range all {
-		status := cloud.CapabilityStatus{Capability: c, Reason: reasonDeferred}
-		if c == cloud.CapabilityCapacity {
-			if p.project != "" {
-				status = cloud.CapabilityStatus{Capability: c, Available: true}
-			} else {
-				status.Reason = reasonNoProject
-			}
-		}
-		statuses = append(statuses, status)
+		statuses = append(statuses, p.capabilityStatus(c))
 	}
 	return statuses
+}
+
+// capabilityStatus is the single availability judgment the
+// capability getters below mirror: a getter returns ok exactly when
+// this reports Available.
+func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
+	switch c {
+	case cloud.CapabilityCapacity, cloud.CapabilityQuota, cloud.CapabilityOrphans, cloud.CapabilityStockout:
+		// Project-scoped reads (M4): need the project identity.
+		if p.project == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoProject}
+		}
+	case cloud.CapabilityIPSpace:
+		// Cluster-scoped read (M4): needs the full GKE identity for
+		// clusters.get.
+		if p.project == "" || p.location == "" || p.cluster == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
+		}
+	default:
+		return cloud.CapabilityStatus{Capability: c, Reason: reasonDeferred}
+	}
+	return cloud.CapabilityStatus{Capability: c, Available: true}
+}
+
+// available is the getter-side check against capabilityStatus.
+func (p *Provider) available(c cloud.Capability) bool {
+	return p.capabilityStatus(c).Available
 }
 
 func (p *Provider) Metrics() (cloud.MetricsBackend, bool) { return nil, false }
 
 // Capacity implements cloud.Provider: the cluster-autoscaler
-// visibility log reader (capacity.go). Available whenever a project
-// is known; the Logging client itself is dialed lazily on first
-// ScaleDecisions call.
+// visibility log reader (M4, capacity.go). The Logging client itself
+// is dialed lazily on first ScaleDecisions call.
 func (p *Provider) Capacity() (cloud.CapacityAPI, bool) {
-	if p.project == "" {
+	if !p.available(cloud.CapabilityCapacity) {
 		return nil, false
 	}
 	return &capacityAPI{
@@ -142,10 +165,39 @@ func (p *Provider) Capacity() (cloud.CapacityAPI, bool) {
 		newLister: newLogadminLister,
 	}, true
 }
-func (p *Provider) Quota() (cloud.QuotaAPI, bool)                       { return nil, false }
-func (p *Provider) Orphans() (cloud.OrphanAPI, bool)                    { return nil, false }
-func (p *Provider) IPSpace() (cloud.IPSpaceAPI, bool)                   { return nil, false }
-func (p *Provider) Stockouts() (cloud.StockoutAPI, bool)                { return nil, false }
+
+// Quota implements cloud.Provider (M4, quota.go).
+func (p *Provider) Quota() (cloud.QuotaAPI, bool) {
+	if !p.available(cloud.CapabilityQuota) {
+		return nil, false
+	}
+	return newQuotaAPI(p), true
+}
+
+// Orphans implements cloud.Provider (M4, orphans.go).
+func (p *Provider) Orphans() (cloud.OrphanAPI, bool) {
+	if !p.available(cloud.CapabilityOrphans) {
+		return nil, false
+	}
+	return newOrphanAPI(p), true
+}
+
+// IPSpace implements cloud.Provider (M4, ipspace.go).
+func (p *Provider) IPSpace() (cloud.IPSpaceAPI, bool) {
+	if !p.available(cloud.CapabilityIPSpace) {
+		return nil, false
+	}
+	return newIPSpaceAPI(p), true
+}
+
+// Stockouts implements cloud.Provider (M4, stockout.go).
+func (p *Provider) Stockouts() (cloud.StockoutAPI, bool) {
+	if !p.available(cloud.CapabilityStockout) {
+		return nil, false
+	}
+	return newStockoutAPI(p), true
+}
+
 func (p *Provider) WorkloadIdentity() (cloud.WorkloadIdentityAPI, bool) { return nil, false }
 
 // firstEnv returns the first non-empty value among the named

@@ -1,0 +1,47 @@
+{
+  "//": "Recorded-shape fixture: compute/v1 forwardingRules aggregatedList response. Authored from the Compute Engine ForwardingRules:aggregatedList API reference; rule shapes cover the three judged targets (backendService, targetPool, target HTTP proxy) plus an unjudged SSL-proxy rule (§13).",
+  "kind": "compute#forwardingRuleAggregatedList",
+  "items": {
+    "regions/us-east1": {
+      "forwardingRules": [
+        {
+          "kind": "compute#forwardingRule",
+          "name": "ilb-empty",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "loadBalancingScheme": "INTERNAL",
+          "backendService": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/backendServices/empty-bs"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "netlb-ghost",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "loadBalancingScheme": "EXTERNAL",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/targetPools/ghost-pool"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "netlb-live",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "loadBalancingScheme": "EXTERNAL",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/targetPools/live-pool"
+        }
+      ]
+    },
+    "global": {
+      "forwardingRules": [
+        {
+          "kind": "compute#forwardingRule",
+          "name": "ingress-live",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/web-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "ssl-unjudged",
+          "loadBalancingScheme": "EXTERNAL",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetSslProxies/ssl-proxy"
+        }
+      ]
+    }
+  }
+}

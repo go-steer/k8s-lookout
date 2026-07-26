@@ -124,6 +124,15 @@ type OrphanDisk struct {
 	Name   string
 	Zone   string
 	SizeGB int64
+	// Type is the disk type short name (e.g. "pd-ssd") — cost
+	// relevance: an idle pd-ssd bills ~4x an idle pd-standard.
+	Type string
+	// UnusedSince is when the disk stopped being used: the last
+	// detach time when the provider records one, else the creation
+	// time (never attached). Zero when the provider cannot date it —
+	// callers treat that as "age unknown" and must not silently
+	// drop the disk.
+	UnusedSince time.Time
 }
 
 // OrphanLoadBalancer is a load balancer / forwarding rule targeting
@@ -136,6 +145,12 @@ type OrphanLoadBalancer struct {
 }
 
 // OrphanAPI sweeps for orphaned cloud resources (`cloud orphans`).
+//
+// OrphanDisks returns EVERY unattached billing-active disk with its
+// UnusedSince timestamp; age thresholds are the caller's policy
+// (`cloud orphans --min-age`), so the command's summary line can
+// honestly count what was examined. OrphanLoadBalancers returns only
+// the rules the provider already judged orphaned.
 type OrphanAPI interface {
 	OrphanDisks(ctx context.Context) ([]OrphanDisk, error)
 	OrphanLoadBalancers(ctx context.Context) ([]OrphanLoadBalancer, error)
@@ -146,7 +161,14 @@ type SubnetUtilization struct {
 	Subnet string
 	CIDR   string
 	// Purpose is what the range allocates: "pods", "services", "nodes".
-	Purpose  string
+	Purpose string
+	// Used is the number of allocated addresses. For ranges the
+	// provider carves out in per-node blocks (GKE pod ranges), Used
+	// counts the ALLOCATED blocks' addresses — that is where the
+	// range actually exhausts, not at individual pod IPs. Used < 0
+	// means the usage is not visible to the cloud APIs (GKE service
+	// ClusterIP allocation is a Kubernetes-side counter); consumers
+	// must render that explicitly, never as 0%.
 	Used     int64
 	Capacity int64
 }

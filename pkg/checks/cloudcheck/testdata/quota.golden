@@ -1,0 +1,4 @@
+kind=quota.pressure severity=critical kind_of_object=Quota name=IN_USE_ADDRESSES reason=QuotaExhausted message="IN_USE_ADDRESSES exhausted in us-east1 (8/8) — scale-ups fail with GCE_QUOTA_EXCEEDED until an increase lands" scope=us-east1 usage=8 limit=8 pct=100
+kind=quota.pressure severity=critical kind_of_object=Quota name=CPUS reason=QuotaNearLimit message="CPUS at 98% of limit in us-east1 — scale-ups fail at 100%; increases need lead time, file now (§10.3)" scope=us-east1 usage=588 limit=600 pct=98
+kind=quota.pressure severity=warning kind_of_object=Quota name=SSD_TOTAL_GB reason=QuotaNearLimit message="SSD_TOTAL_GB at 87.5% of limit in us-east1 — critical from 95%" scope=us-east1 usage=3500 limit=4000 pct=87.5
+scanned=6 findings=3 elapsed=100ms

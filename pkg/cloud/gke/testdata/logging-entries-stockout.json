@@ -1,0 +1,81 @@
+{
+  "//": "Recorded-shape fixture: logging.googleapis.com/v2 entries:list response. Authored from the Cloud Logging LogEntry / AuditLog API reference and the documented ZONE_RESOURCE_POOL_EXHAUSTED audit-entry shape for failed v1.compute.instances.insert — not captured from a live project (§13: no live-project tests in CI).",
+  "entries": [
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T11:30:12.345678Z",
+      "severity": "ERROR",
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-b",
+          "instance_id": "1234567890123456789"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "v1.compute.instances.insert",
+        "resourceName": "projects/proj-1/zones/us-east1-b/instances/gke-prod-pool-a1b2",
+        "status": {
+          "code": 8,
+          "message": "ZONE_RESOURCE_POOL_EXHAUSTED"
+        },
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert",
+          "machineType": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b/machineTypes/n2-standard-16"
+        }
+      }
+    },
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T10:02:03.111222Z",
+      "severity": "ERROR",
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-c",
+          "instance_id": "987654321098765432"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "beta.compute.instances.insert",
+        "resourceName": "projects/proj-1/zones/us-east1-c/instances/gke-prod-pool-c3d4",
+        "status": {
+          "code": 8,
+          "message": "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS: The zone 'projects/proj-1/zones/us-east1-c' does not have enough resources available to fulfill the request."
+        },
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert",
+          "machineType": "zones/us-east1-c/machineTypes/a2-highgpu-1g"
+        }
+      }
+    },
+    {
+      "//": "Belt-and-suspenders row: an entry the filter would not normally pass (different failure) must be dropped by the parser, not surfaced.",
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T09:00:00Z",
+      "severity": "ERROR",
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-b"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "v1.compute.instances.insert",
+        "status": {
+          "code": 8,
+          "message": "QUOTA_EXCEEDED"
+        },
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert"
+        }
+      }
+    }
+  ]
+}
