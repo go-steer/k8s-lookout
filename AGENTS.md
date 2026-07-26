@@ -54,35 +54,44 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**M3 complete** (see `docs/milestones/M3.md` for the drill evidence;
-M2/M1/M0 records sit alongside): the sentinel runs all six §7.2 sources
-(`k8s-events`, `object-state`, `rollout`, `saturation`, `degradation`,
-`expiry` — each behind a §11 loud RBAC probe), writes every post-dedup
-signal to the §9.1 store (`pkg/store`, `--store`, pure-Go SQLite) and the
-§6.6 graph history (snapshots + delta log, `--graph-snapshot-interval`),
-and the read path answers history: `triage events|top|radius|changes` +
-`net probe`, with `--at`/`--store` on every graph-backed command
-(`checks.Command.GraphBacked`). Trend payloads carry the §8 `forecast`
-attachment (ADDITIVE, wire-pinned); all M2 invariants stay frozen (storm/
-watchboard/resolved pins, the M0 `k8s-event` payload and flag surface,
-`flags_contract_test.go`). From M1: the read-path core (`triage
-delta|logs|spec`, `state edges`, `bundle`, `health`) under the §4.2
-envelope + §6.5 sanitizer, `lookout mcp`, `pkg/graph`, and the generated
-skills (`dev/tools/gen-skill-refs` after touching command metadata; keep
-`internal/skilldoc` contract tests green). Known M3 gaps to pick up
-(recorded with evidence in `docs/milestones/M3.md` §Observations):
-`store.GraphAt` cannot replay across a sentinel restart; store-restored
-snapshots lose the unknown-vs-missing radius fix (`Snapshot.Watches` not
-serialized); historical queries cannot target a Deployment (graph holds
-them identity-only); `rollout_stall` resolved records bypass the
-stability window with inverted duration fields; informer-sync Adds
-masquerade as changes. `--storm` default stays OFF pending the restart
-fix. GKE replay runbooks: `dev/drills/node-failure.md`,
-`dev/drills/bad-deploy.md`, `dev/drills/memory-leak.md`.
+**M4 complete** (see `docs/milestones/M4.md` for the drill evidence;
+M3/M2/M1/M0 records sit alongside): all eight §7.2 sources ship —
+M3's six plus `capacity` (§10.1: CA events / status-ConfigMap gap /
+provider scale decisions, portable halves degrade LOUDLY without a
+provider) and the per-PROJECT `quota` source (§10.2: slope-fitted
+`quota.forecast` with the §10.3 `quota_increase_draft` attached —
+lookout drafts, the agent files through core-agent's permission gate;
+a quota-capable provider is a hard startup requirement). §10.3
+correlation is APPEND-ONLY dedup family `QuotaExhausted` keyed on
+`quota:<NAME>/<SCOPE>` (leading `quota_forecast` + reactive
+`quota_blocked` = one session; `capacity.pending`/`pending-aged` join
+`FailedScheduling` the same way). Read path adds `cloud
+stockout|orphans|ipspace|quota` behind `pkg/cloud` capabilities (the
+default build is GCP-free, nm-conformance-tested; gke lives behind
+`-tags gke/allproviders`). §9.2 distilled memories and §9.4
+triage-status records live in the sentinel store via `pkg/memory`
+(migrations v3/v4): routing honors `severity_override`/`escalated`,
+recovery flips records to resolved, `health`/`bundle --store` merge
+open records into findings. All prior invariants stay frozen (M2
+storm/watchboard/resolved pins, M0 payload + flags, §8 additive
+attachments). Known M4 gaps (evidence in `docs/milestones/M4.md`
+§Observations): NO agent-facing write path for triage-status records
+yet (`dev/drills/write-triage-status` is the drill stand-in; the real
+surface is a §4.1 design-doc change first); the shipped ClusterRole
+breaks enrichment's scoped-list path (no daemonsets/jobs list — only
+`--storm`'s live-graph path enriches cleanly); cross-source dedup
+joins are store-visible but inject-invisible (no `storm.member`-style
+followup); no published GKE-tagged image for project-tier quota
+deployments. M3 observations remain open (`GraphAt` restart replay,
+`Snapshot.Watches` round-trip, Deployment-targeted history,
+`rollout_stall` resolved fields, sync-Adds); `--storm` default stays
+OFF pending the restart fix. GKE replay runbooks:
+`dev/drills/node-failure.md`, `dev/drills/bad-deploy.md`,
+`dev/drills/memory-leak.md`, `dev/drills/quota-exhaustion.md`.
 
-Next milestone: **M4 — capacity & quota** (DESIGN.md §14): `capacity` +
-`quota` sources (§10); `cloud stockout|orphans|ipspace|quota`; distilled
-memories (§9.2); triage-status records (§9.4) + store/memory-merged
-`health`; the quota write path behind the §12 permission gate. Deferred
-further out: `state wi|webhooks|volumes`, `stab drift|drain`,
-`perf probe`, `token-burn`, corpus harvester (M5).
+Next milestone: **M5 — fleet & corpus** (DESIGN.md §14): remaining
+reads (`state wi|webhooks|volumes`, `stab drift|drain`, `perf probe`);
+fingerprint schema finalized with AX; `token-burn` source; corpus
+harvester contract validated end-to-end (§9.3). Exit: AX can rollup a
+multi-cluster staged stockout; one harvested labeled trajectory from a
+real incident.

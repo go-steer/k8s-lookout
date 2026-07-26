@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-26
+
+M4 — capacity & quota (DESIGN.md §14). Exit criterion verified in
+`docs/milestones/M4.md`: staged quota exhaustion (scripted cloud APIs per
+the §13 fixture policy; the Kubernetes-visible half live in kind)
+produced ONE correlated incident — warning forecast to the watchboard,
+critical escalation opening the session with the formula-exact
+`quota_increase_draft` attached, the reactive `GCE_QUOTA_EXCEEDED`
+scaleup failure folded into the same session by the `QuotaExhausted`
+dedup family — and a `lookout health --store` scan run mid-crashloop
+reported `triage_status=triaged` with the agent's root cause, action,
+session pointer, and downgraded severity instead of a fresh critical
+unknown, while the sentinel routed the incident's next dedup cycle to
+the watchboard instead of re-paging. The v0.4.0 tag predates PRs #50–#51,
+so the distilled-memories and triage-status entries below record features
+first released in THIS version (they were filed under 0.4.0 in error
+until this release cut).
+
 ### Added
 
 - The `token-burn` source (M5, DESIGN.md §7.2 row 9, §12) — token
@@ -86,6 +104,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not admit the scheduled pod's node zone), and
   `volume.orphaned_attachment` (info — attachment referencing a
   deleted PV or node).
+- Milestone drill surfaces (M4 close-out): the dispatcher-level
+  quota-exhaustion drill test
+  (`internal/watch/quota_drill_test.go`) pinning the correlated
+  incident + draft end-to-end (real sources, real pipeline, scripted
+  cloud seams); `dev/drills/write-triage-status` — the documented
+  STAND-IN for the not-yet-existent agent write path for §9.4
+  records (drill fixture, not a product surface; see
+  `docs/milestones/M4.md` observation 1); and the real-GCP replay
+  runbook `dev/drills/quota-exhaustion.md`.
+- Triage-status records (M4, DESIGN.md §9.4) — scans report triaged
+  reality. `pkg/memory` gains `TriageStatusRecord` exactly per the
+  §9.4 schema (fingerprint, resource_key, session,
+  status=investigating|triaged|actioned|escalated, plus the
+  sentinel-written lifecycle terminal `resolved`;
+  root_cause_hypothesis, severity_override, action, updated;
+  wire shape golden-pinned), keyed by the (fingerprint,
+  resource_key) pair and stored in the sentinel store (migration
+  v4; same in-tree binding decision as §9.2 — core-agent v2.7.0
+  ships no Memory interface, `pkg/memory` documents the TODO).
+  Consumers: (1) the sentinel's severity routing honors open
+  records — an agent's `severity_override` re-routes followups and
+  re-pages (downgraded → watchboard/store), `status=escalated` pins
+  critical and bypasses the watchboard; matching requires the
+  resource pin (object or ControllerRef key) because the §8
+  fingerprint is class-level; cached, refreshed every 30s, metrics
+  `k8s_event_watcher_triage_overrides_total{action}` /
+  `…_triage_resolved_flips_total`. (2) Lifecycle is automatic: a
+  §7.4 `kind=resolved` recovery inject flips the record to resolved
+  (write-through — routing stops honoring it immediately; reverted
+  does NOT restore it, a failed fix pages again). (3) Memory-merged
+  `health` and `bundle`: with `--store=<sentinel store>`, findings
+  join open records — matched findings gain
+  `triage_status/root_cause/action/session/age` and severity
+  reflects the agent's judgment (the §14 M4 exit: a health scan run
+  mid-incident reports the triage state, not a fresh unknown);
+  unmatched findings and runs without `--store` are unchanged.
+- Distilled memories (M4, DESIGN.md §9.2): a scheduled distiller pass
+  in the sentinel (`--distill-interval`, default 6h, requires
+  `--store`) converts recurring raw occurrences into durable,
+  agent-queryable `DistilledFact` records (schema-stable JSON:
+  class, scope keys, statement, evidence window, occurrence counts,
+  source fingerprints). Three predicates ship first, each documented
+  in `pkg/memory/distill`: repeated `capacity.stockout` per
+  (cluster, zone, nodegroup) — the design's "us-east1-b n2d pool: 3
+  stockouts this week"; repeated crashloop/OOM incidents per
+  workload (≥2 fresh incidents and ≥5 occurrences in 7d); repeated
+  cert-renewal failures per issuer (≥3 failures across ≥2
+  certificates). Facts dedupe on (class, scope): re-distilling
+  updates the existing fact's window/counts instead of duplicating.
+  BINDING NOTE: DESIGN.md §9.2 routes these records through
+  core-agent's shared Memory interface, but core-agent v2.7.0 (the
+  pinned dep) does not ship it — `pkg/memory` defines lookout's own
+  minimal FactWriter/FactReader interface, implemented in-tree over
+  the sentinel store (migration v3, `memory_facts`; exempt from the
+  §9.1 TTL/size prune), with a documented TODO naming exactly what
+  core-agent must expose for the adapter swap. New metrics:
+  `k8s_event_watcher_memory_facts_total` (by class),
+  `k8s_event_watcher_distill_errors_total`.
 - The `quota` source (M4, DESIGN.md §7.2 row 8, §10.2/§10.3) — the
   per-PROJECT leading countdown over cloud quota exhaustion, enabled
   via `--sources=…,quota` on exactly ONE sentinel per GCP project
@@ -338,55 +414,11 @@ rollout as the last change before onset.
   and a new `go tool nm`-based conformance test in cmd/lookout fails
   if the default binary ever links a GCP symbol.
 
-- Triage-status records (M4, DESIGN.md §9.4) — scans report triaged
-  reality. `pkg/memory` gains `TriageStatusRecord` exactly per the
-  §9.4 schema (fingerprint, resource_key, session,
-  status=investigating|triaged|actioned|escalated, plus the
-  sentinel-written lifecycle terminal `resolved`;
-  root_cause_hypothesis, severity_override, action, updated;
-  wire shape golden-pinned), keyed by the (fingerprint,
-  resource_key) pair and stored in the sentinel store (migration
-  v4; same in-tree binding decision as §9.2 — core-agent v2.7.0
-  ships no Memory interface, `pkg/memory` documents the TODO).
-  Consumers: (1) the sentinel's severity routing honors open
-  records — an agent's `severity_override` re-routes followups and
-  re-pages (downgraded → watchboard/store), `status=escalated` pins
-  critical and bypasses the watchboard; matching requires the
-  resource pin (object or ControllerRef key) because the §8
-  fingerprint is class-level; cached, refreshed every 30s, metrics
-  `k8s_event_watcher_triage_overrides_total{action}` /
-  `…_triage_resolved_flips_total`. (2) Lifecycle is automatic: a
-  §7.4 `kind=resolved` recovery inject flips the record to resolved
-  (write-through — routing stops honoring it immediately; reverted
-  does NOT restore it, a failed fix pages again). (3) Memory-merged
-  `health` and `bundle`: with `--store=<sentinel store>`, findings
-  join open records — matched findings gain
-  `triage_status/root_cause/action/session/age` and severity
-  reflects the agent's judgment (the §14 M4 exit: a health scan run
-  mid-incident reports the triage state, not a fresh unknown);
-  unmatched findings and runs without `--store` are unchanged.
-- Distilled memories (M4, DESIGN.md §9.2): a scheduled distiller pass
-  in the sentinel (`--distill-interval`, default 6h, requires
-  `--store`) converts recurring raw occurrences into durable,
-  agent-queryable `DistilledFact` records (schema-stable JSON:
-  class, scope keys, statement, evidence window, occurrence counts,
-  source fingerprints). Three predicates ship first, each documented
-  in `pkg/memory/distill`: repeated `capacity.stockout` per
-  (cluster, zone, nodegroup) — the design's "us-east1-b n2d pool: 3
-  stockouts this week"; repeated crashloop/OOM incidents per
-  workload (≥2 fresh incidents and ≥5 occurrences in 7d); repeated
-  cert-renewal failures per issuer (≥3 failures across ≥2
-  certificates). Facts dedupe on (class, scope): re-distilling
-  updates the existing fact's window/counts instead of duplicating.
-  BINDING NOTE: DESIGN.md §9.2 routes these records through
-  core-agent's shared Memory interface, but core-agent v2.7.0 (the
-  pinned dep) does not ship it — `pkg/memory` defines lookout's own
-  minimal FactWriter/FactReader interface, implemented in-tree over
-  the sentinel store (migration v3, `memory_facts`; exempt from the
-  §9.1 TTL/size prune), with a documented TODO naming exactly what
-  core-agent must expose for the adapter swap. New metrics:
-  `k8s_event_watcher_memory_facts_total` (by class),
-  `k8s_event_watcher_distill_errors_total`.
+- MOVED TO 0.5.0 (release-cut correction): the triage-status records
+  (#51) and distilled memories (#50) entries originally appended here
+  landed after the v0.4.0 tag was cut at #49; they are recorded under
+  0.5.0, their first released version.
+
 - The `degradation` and `expiry` sources (M3, DESIGN.md §7.2 rows 5–6)
   — two leading indicators, enabled via `--sources=…,degradation,expiry`
   (ADDITIVE; the default stays k8s-events only).
