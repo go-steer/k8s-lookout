@@ -64,23 +64,54 @@ type triageOverrides struct {
 	store   *store.Store
 	metrics *metrics
 	now     func() time.Time
+	// regressFactor is the M4-observation-3 multiplier: a downgraded
+	// incident whose dedup-window count reaches factor × the count at
+	// downgrade time gets a kind=triage.regressed evidence followup
+	// into its bound session. 0 disables the check.
+	regressFactor int
 
 	mu      sync.Mutex
 	loaded  time.Time
 	records []memory.TriageStatusRecord
+	// regress tracks per-incident downgrade baselines within the
+	// CURRENT dedup window (the dispatcher resets a key when its
+	// window rolls). Keyed like the dedup cache: canonical reason.
+	regress map[engine.EventKey]*regressState
 }
 
-func newTriageOverrides(st *store.Store, m *metrics) *triageOverrides {
-	return &triageOverrides{store: st, metrics: m, now: time.Now}
+// regressState is one downgraded incident's rate bookkeeping.
+type regressState struct {
+	// baseline is the dedup-window count when the downgrade first
+	// applied — the "rate at downgrade time" the factor multiplies.
+	baseline int
+	// fired marks the once-per-window evidence emission.
+	fired bool
+}
+
+// maxRegressEntries bounds the regression map like the dedup cache
+// bounds its entries; overflow drops an arbitrary entry (the map is
+// per-window bookkeeping, not a system of record).
+const maxRegressEntries = 4096
+
+func newTriageOverrides(st *store.Store, m *metrics, regressFactor int) *triageOverrides {
+	return &triageOverrides{
+		store:         st,
+		metrics:       m,
+		now:           time.Now,
+		regressFactor: regressFactor,
+		regress:       map[engine.EventKey]*regressState{},
+	}
 }
 
 // Apply returns the signal's effective severity after honoring any
-// open triage-status record for its incident. Unmatched signals keep
-// their class unchanged.
-func (t *triageOverrides) Apply(ctx context.Context, sig engine.Signal) engine.Severity {
+// open triage-status record for its incident, plus the matched record
+// when the honored effect was a DOWNGRADE (the input to the M4
+// observation-3 regression check — nil otherwise). Unmatched signals
+// keep their class unchanged.
+func (t *triageOverrides) Apply(ctx context.Context, sig engine.Signal) (engine.Severity, *memory.TriageStatusRecord) {
 	rec, ok := t.match(ctx, sig)
 	if !ok {
-		return sig.Severity
+		return sig.Severity, nil
 	}
 	next := sig.Severity
 	action := ""
@@ -91,7 +122,7 @@ func (t *triageOverrides) Apply(ctx context.Context, sig engine.Signal) engine.S
 	case rec.SeverityOverride != "":
 		next = engine.Severity(rec.SeverityOverride)
 		if !next.Valid() { // defensive: store validates on write
-			return sig.Severity
+			return sig.Severity, nil
 		}
 		switch {
 		case severityWeight(next) < severityWeight(sig.Severity):
@@ -101,12 +132,61 @@ func (t *triageOverrides) Apply(ctx context.Context, sig engine.Signal) engine.S
 		}
 	}
 	if next == sig.Severity || action == "" {
-		return sig.Severity
+		return sig.Severity, nil
 	}
 	t.metrics.triageOverrides.WithLabelValues(action).Inc()
 	log.Printf("triage-status: %s %s %s/%s %s → %s (status=%s, session=%s)",
 		action, sig.Kind, sig.Namespace, sig.Name, sig.Severity, next, rec.Status, rec.Session)
-	return next
+	if action == "downgraded" {
+		r := rec
+		return next, &r
+	}
+	return next, nil
+}
+
+// noteRegression records the current dedup-window count for a
+// downgraded incident and reports whether the kind=triage.regressed
+// evidence followup is due: the first downgraded observation in a
+// window sets the baseline; the followup fires once per window when
+// count reaches regressFactor × baseline. Deliberately evidence-only
+// — no route change, no record rewrite, no re-page
+// (docs/triage-status-write-design.md §out-of-scope).
+func (t *triageOverrides) noteRegression(key engine.EventKey, count int) (baseline int, due bool) {
+	if t.regressFactor <= 0 {
+		return 0, false
+	}
+	key.Reason = engine.CanonicalReason(key.Reason)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st, ok := t.regress[key]
+	if !ok {
+		if len(t.regress) >= maxRegressEntries {
+			for k := range t.regress { // bounded bookkeeping, arbitrary victim
+				delete(t.regress, k)
+				break
+			}
+		}
+		if count < 1 {
+			count = 1
+		}
+		t.regress[key] = &regressState{baseline: count}
+		return count, false
+	}
+	if st.fired || count < st.baseline*t.regressFactor {
+		return st.baseline, false
+	}
+	st.fired = true
+	return st.baseline, true
+}
+
+// windowRolled resets the regression bookkeeping for key: the dedup
+// window expired and a fresh incident window began, so the next
+// downgrade sets a fresh baseline.
+func (t *triageOverrides) windowRolled(key engine.EventKey) {
+	key.Reason = engine.CanonicalReason(key.Reason)
+	t.mu.Lock()
+	delete(t.regress, key)
+	t.mu.Unlock()
 }
 
 // resolve is the §9.4 automatic lifecycle: a §7.4 kind=resolved

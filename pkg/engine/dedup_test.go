@@ -621,3 +621,68 @@ func TestDedup_LeadingSignalClaimsThenEventAttaches(t *testing.T) {
 		t.Errorf("followup routes to %q, want the leading signal's session sess-lead", r.SessionID)
 	}
 }
+
+// TestSourceFamily pins the kind→family bucketing the cross-source
+// join followups key on (M4 drill observation 4).
+func TestSourceFamily(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"k8s-event":                 "k8s-event",
+		"k8s-event-followup":        "k8s-event-followup",
+		"capacity.quota_blocked":    "capacity",
+		"capacity.pending":          "capacity",
+		"quota.forecast":            "quota",
+		"objectstate.restart_burst": "objectstate",
+	}
+	for in, want := range cases {
+		if got := SourceFamily(in); got != want {
+			t.Errorf("SourceFamily(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCrossSourceJoin_OncePerFamilyPerWindow covers the M4
+// observation-4 mechanics at the cache: the opening kind is stamped,
+// a different-family duplicate answers positive exactly once, the
+// same family never does, and a rolled window resets everything.
+func TestCrossSourceJoin_OncePerFamilyPerWindow(t *testing.T) {
+	t.Parallel()
+	c, err := NewDedupCache(50*time.Millisecond, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := EventKey{UID: "quota:CPUS/us-east1", Reason: "quota_forecast"}
+	t0 := time.Now()
+	if r := c.Observe(key, t0); r.Kind != DedupNewIncident {
+		t.Fatalf("opener: got %v, want new incident", r.Kind)
+	}
+	c.NoteIncidentKind(key, "quota.forecast")
+
+	// Same family: plain suppression.
+	if _, join := c.CrossSourceJoin(key, "quota.forecast"); join {
+		t.Error("same-family duplicate reported as cross-source join")
+	}
+	// Different family (the drill's exact join): once.
+	blocked := EventKey{UID: key.UID, Reason: "quota_blocked"} // same canonical family → same entry
+	openedBy, join := c.CrossSourceJoin(blocked, "capacity.quota_blocked")
+	if !join || openedBy != "quota" {
+		t.Fatalf("cross-source join = (%q, %v), want (quota, true)", openedBy, join)
+	}
+	if _, join := c.CrossSourceJoin(blocked, "capacity.quota_blocked"); join {
+		t.Error("second join from the same family answered positive (want max 1 per family per window)")
+	}
+	// A third family gets its own single announcement.
+	if _, join := c.CrossSourceJoin(key, "objectstate.thing"); !join {
+		t.Error("a different source family should get its own followup slot")
+	}
+
+	// Window rolls → fresh entry, unstamped until NoteIncidentKind:
+	// joins stay suppressed (pre-M4 posture for unstamped entries).
+	time.Sleep(60 * time.Millisecond)
+	if r := c.Observe(key, t0.Add(time.Minute)); r.Kind != DedupNewIncident {
+		t.Fatalf("post-window observe: got %v, want new incident", r.Kind)
+	}
+	if _, join := c.CrossSourceJoin(key, "capacity.quota_blocked"); join {
+		t.Error("unstamped fresh entry reported a cross-source join")
+	}
+}

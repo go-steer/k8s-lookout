@@ -89,7 +89,21 @@ scanned=9 findings=4 elapsed=100ms
      re-asserts a fixed `spec.replicas` — remove `spec.replicas` from
      the manifest; that conflict thrashes forever.
 
-6. **Verify.** After the fix has had one full window to settle:
+6. **Write your triage status.** Thrash fixes settle over a full
+   stabilization window, and other scans (and the sentinel's followup
+   routing) must not treat the still-oscillating HPA as an untriaged
+   incident meanwhile (§9.4). Record the diagnosis against the HPA's
+   scale target, with the `fingerprint` from the triggering inject:
+
+   ```lookout
+   lookout triage status --store=/var/lib/lookout/lookout.db --fingerprint=sha256:5641487571b8 --resource=Deployment/prod/api --session=sess-0012 --status=actioned --severity-override=info --root-cause="CPU target computed off stale requests; utilization swings around 60% target" --action="stabilizationWindowSeconds 300->600 + requests fixed in GitOps PR; settling"
+   ```
+
+   A `triage.regressed` followup arriving in your session afterwards
+   means the flip rate accelerated past the downgrade-time rate —
+   re-read the sequence before assuming the fix took.
+
+7. **Verify.** After the fix has had one full window to settle:
 
    ```lookout
    lookout triage events --workload=Deployment/prod/api --since=1h
@@ -97,4 +111,5 @@ scanned=9 findings=4 elapsed=100ms
 
    No new `event.hpa_thrash` and a converging (monotonic, then flat)
    replica sequence in the remaining `SuccessfulRescale` entries is the
-   all-clear.
+   all-clear. The sentinel's `resolved` inject then flips your
+   triage-status record automatically.

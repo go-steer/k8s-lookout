@@ -48,6 +48,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/memory"
 	"github.com/go-steer/k8s-lookout/pkg/memory/distill"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
@@ -112,6 +113,7 @@ type flags struct {
 	store                 string
 	storeTTL              time.Duration
 	storeMaxMB            int
+	triageRegressFactor   int
 	distillInterval       time.Duration
 	graphSnapshotInterval time.Duration
 	// severityOverrides is the parsed --severity map, populated by
@@ -254,6 +256,12 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. Empty (default) disables the store.")
 	fs.DurationVar(&f.storeTTL, "store-ttl", 720*time.Hour, "Retention for stored occurrences (§9.1 default 30 days); the prune loop deletes older rows. Must be > 0.")
 	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Must be >= 1.")
+
+	// §9.4 regression evidence (M4 observation 3). ADDITIVE flag;
+	// only meaningful with --store (the triage-status records live
+	// there). The threshold is a simple multiplier over the window
+	// count at downgrade time — deliberately not a rate model.
+	fs.IntVar(&f.triageRegressFactor, "triage-regress-factor", 3, "A downgraded incident (§9.4 severity_override) whose dedup-window count reaches this multiple of its count at downgrade time gets ONE kind=triage.regressed evidence followup into its bound session — never an automatic re-page (docs/triage-status-write-design.md). Must be >= 2; 0 disables.")
 
 	// Distilled memories (§9.2). ADDITIVE flag: the distiller runs
 	// only with --store — the occurrence window it reads AND the
@@ -441,6 +449,9 @@ func (f *flags) validate() error {
 	}
 	if f.storeMaxMB < 1 {
 		return errors.New("--store-max-mb must be >= 1")
+	}
+	if f.triageRegressFactor != 0 && f.triageRegressFactor < 2 {
+		return errors.New("--triage-regress-factor must be >= 2 (a factor of 1 would fire on the first duplicate; 0 disables)")
 	}
 	if f.distillInterval < 0 {
 		return errors.New("--distill-interval must be >= 0 (0 disables distillation)")
@@ -643,9 +654,12 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// default. Downgraded incidents stop re-paging (they route to
 	// the watchboard/store); escalated pins critical and thereby
 	// bypasses the watchboard. Per-incident mode only, like the
-	// routing stages below.
+	// routing stages below. A returned record means THIS signal was
+	// downgraded — the input to the regression evidence check in the
+	// duplicate branch (M4 observation 3).
+	var downgraded *memory.TriageStatusRecord
 	if d.triage != nil && d.mode == "per-incident" {
-		sig.Severity = d.triage.Apply(ctx, sig)
+		sig.Severity, downgraded = d.triage.Apply(ctx, sig)
 	}
 	d.metrics.eventsSeen.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 	if !d.filter.Accept(sig) {
@@ -665,11 +679,47 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// hit count for this key within the current window.
 		log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
 			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
+		// §9.4 regression evidence (M4 observation 3): a steady
+		// symptom stream never exits the dedup window, so a
+		// downgraded incident could regress hard without any visible
+		// routing change until the loop pauses. When the window count
+		// reaches --triage-regress-factor × the count at downgrade
+		// time, ONE schema-stable kind=triage.regressed followup goes
+		// into the bound session. Evidence only — no re-page, no
+		// record rewrite: the agent/human decides
+		// (docs/triage-status-write-design.md §out-of-scope).
+		if downgraded != nil && result.SessionID != "" {
+			if baseline, due := d.triage.noteRegression(sig.Key, result.Count); due {
+				d.injectTriageRegressed(ctx, sig, *downgraded, baseline, result)
+			}
+		}
+		// Cross-source join visibility (M4 observation 4): when the
+		// duplicate comes from a DIFFERENT source family than the
+		// signal that opened the incident (leading↔reactive — e.g.
+		// capacity's quota_blocked folding into the quota source's
+		// forecast session), the join must be audible inside the
+		// session, not only store-visible: route it as a compact
+		// followup instead of suppressing it. Bounded to one per
+		// source family per incident per window by CrossSourceJoin.
+		// Per-incident mode only, like every routing stage.
+		if d.mode == "per-incident" && result.SessionID != "" {
+			if openedBy, join := d.dedup.CrossSourceJoin(sig.Key, sig.Kind); join {
+				d.injectJoinFollowup(ctx, sig, result, openedBy)
+				return
+			}
+		}
 		// §9.1: suppressed duplicates are still emitted signals — the
 		// store keeps them (with the session the incident is bound to)
 		// so lookback sees the true occurrence rate, not the deduped one.
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: result.SessionID})
 		return
+	}
+	// A fresh incident window: stamp which source family opened it
+	// (the reference point for cross-source join followups above) and
+	// reset any regression baseline from the previous window.
+	d.dedup.NoteIncidentKind(sig.Key, sig.Kind)
+	if d.triage != nil {
+		d.triage.windowRolled(sig.Key)
 	}
 	// Severity routing, info class (§7.7): stored only per §9.1 —
 	// with --store set the signal is persisted (route=info-stored) and
@@ -845,6 +895,104 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// an incident is a single traceID-style filter.
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+}
+
+// injectTriageRegressed emits the §9.4 regression-evidence followup
+// (M4 observation 3) into the downgraded incident's bound session:
+// the symptom's dedup-window count reached the regression factor over
+// its rate at downgrade time. SCHEMA-STABLE payload, evidence only —
+// the routing decision stays with the open record (and therefore with
+// the agent who wrote it).
+func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signal, rec memory.TriageStatusRecord, baseline int, result engine.DedupResult) {
+	payload := inject.TriageRegressedPayload{
+		Kind:             inject.KindTriageRegressed,
+		Reason:           sig.Key.Reason,
+		Namespace:        sig.Namespace,
+		KindOfObject:     sig.KindOfObject,
+		Name:             sig.Name,
+		Container:        sig.Container,
+		UID:              sig.Key.UID,
+		Fingerprint:      sig.Fingerprint,
+		Cluster:          sig.Cluster,
+		TriageStatus:     string(rec.Status),
+		SeverityOverride: rec.SeverityOverride,
+		TriageSession:    rec.Session,
+		BaselineCount:    baseline,
+		Count:            result.Count,
+		Factor:           d.triage.regressFactor,
+		FirstSeen:        sig.FirstSeen,
+		LastSeen:         sig.LastSeen,
+		Message: fmt.Sprintf(
+			"downgraded incident regressed: %d occurrences this dedup window vs %d when the %s override was written (%dx or more) — override still routing; re-triage via `lookout triage status` or escalate",
+			result.Count, baseline, rec.SeverityOverride, d.triage.regressFactor),
+		Context: inject.PayloadContext{
+			ControllerRef: sig.ControllerRef,
+			Node:          sig.Node,
+			Labels:        sig.Labels,
+		},
+	}
+	d.metrics.triageRegressed.Inc()
+	if d.dryRun {
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
+		return
+	}
+	if err := d.injector.InjectTriageRegressed(ctx, result.SessionID, payload); err != nil {
+		log.Printf("triage-status: regression followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		return
+	}
+	log.Printf("triage-status: regressed %s %s/%s count=%d baseline=%d factor=%d → sid=%s (evidence only — no re-page)",
+		sig.Kind, sig.Namespace, sig.Name, result.Count, baseline, d.triage.regressFactor, result.SessionID)
+}
+
+// injectJoinFollowup makes a cross-source dedup join visible inside
+// the bound session (M4 observation 4): the frozen followup payload,
+// kind k8s-event-followup for k8s-event signals (frozen contract) and
+// the signal's own source kind otherwise, recorded as route=followup
+// instead of route=suppressed.
+func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, result engine.DedupResult, openedBy string) {
+	kind := sig.Kind
+	if kind == engine.KindK8sEvent {
+		kind = engine.KindK8sEventFollowup
+	}
+	payload := inject.Payload{
+		Kind:         kind,
+		Reason:       sig.Key.Reason,
+		Namespace:    sig.Namespace,
+		KindOfObject: sig.KindOfObject,
+		Name:         sig.Name,
+		Container:    sig.Container,
+		UID:          sig.Key.UID,
+		Message:      sig.Message,
+		Count:        result.Count,
+		FirstSeen:    sig.FirstSeen,
+		LastSeen:     sig.LastSeen,
+		Cluster:      sig.Cluster,
+		Context: inject.PayloadContext{
+			ControllerRef: sig.ControllerRef,
+			Node:          sig.Node,
+			Labels:        sig.Labels,
+		},
+	}
+	// §9.1: the occurrence row records the JOIN routing decision with
+	// the session it targeted, so lookback distinguishes "suppressed"
+	// from "announced into the session".
+	d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+	d.metrics.crossSourceFollowups.WithLabelValues(engine.SourceFamily(sig.Kind)).Inc()
+	if d.dryRun {
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
+		return
+	}
+	if err := d.injector.Inject(ctx, result.SessionID, payload); err != nil {
+		log.Printf("dispatcher: cross-source followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		return
+	}
+	log.Printf("followup %s %s/%s → sid=%s (cross-source join: %s joined a %s-opened incident)",
+		sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID,
+		engine.SourceFamily(sig.Kind), openedBy)
 }
 
 // dispatchResolved routes a §7.4 outcome record into the incident's
@@ -1078,9 +1226,9 @@ func realMain(argv []string) error {
 		// §9.4 triage-status records ride the same store: severity
 		// routing honors agent overrides (per-incident mode), and
 		// recovery flips records to resolved in every mode.
-		disp.triage = newTriageOverrides(occStore, m)
-		log.Printf("triage-status: enabled (open records refine routing every signal, cache refresh %s; recovery flips records to resolved)",
-			triageRefreshInterval)
+		disp.triage = newTriageOverrides(occStore, m, f.triageRegressFactor)
+		log.Printf("triage-status: enabled (open records refine routing every signal, cache refresh %s; recovery flips records to resolved; regression evidence at %dx the downgrade-time rate)",
+			triageRefreshInterval, f.triageRegressFactor)
 	}
 
 	// Severity routing (§7.7): the policy (source defaults +

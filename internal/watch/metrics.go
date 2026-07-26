@@ -31,38 +31,40 @@ import (
 // registry, wire metrics into it, and assert values without
 // stringifying Prometheus output.
 type metrics struct {
-	registry            *prometheus.Registry
-	eventsSeen          *prometheus.CounterVec
-	eventsInjected      *prometheus.CounterVec
-	eventsDedupSuppress *prometheus.CounterVec
-	injectErrors        *prometheus.CounterVec
-	sessionCreates      *prometheus.CounterVec
-	activeIncidents     prometheus.Gauge
-	recoveriesObserved  *prometheus.CounterVec
-	recoveriesReverted  prometheus.Counter
-	recoveryTracking    prometheus.Gauge
-	recoveryDrops       *prometheus.CounterVec
-	stormsFormed        prometheus.Counter
-	stormsResolved      prometheus.Counter
-	stormsActive        prometheus.Gauge
-	stormMembers        *prometheus.CounterVec
-	stormUpdates        prometheus.Counter
-	watchboardEntries   *prometheus.CounterVec
-	watchboardDigests   prometheus.Counter
-	watchboardRotations prometheus.Counter
-	watchboardBuffered  prometheus.Gauge
-	infoDropped         *prometheus.CounterVec
-	storeRecords        *prometheus.CounterVec
-	storeDrops          *prometheus.CounterVec
-	storePruned         *prometheus.CounterVec
-	enrichments         *prometheus.CounterVec
-	enrichmentBytes     prometheus.Histogram
-	enrichmentTruncated prometheus.Counter
-	enrichmentFailures  *prometheus.CounterVec
-	memoryFacts         *prometheus.CounterVec
-	distillErrors       prometheus.Counter
-	triageOverrides     *prometheus.CounterVec
-	triageFlips         prometheus.Counter
+	registry             *prometheus.Registry
+	eventsSeen           *prometheus.CounterVec
+	eventsInjected       *prometheus.CounterVec
+	eventsDedupSuppress  *prometheus.CounterVec
+	injectErrors         *prometheus.CounterVec
+	sessionCreates       *prometheus.CounterVec
+	activeIncidents      prometheus.Gauge
+	recoveriesObserved   *prometheus.CounterVec
+	recoveriesReverted   prometheus.Counter
+	recoveryTracking     prometheus.Gauge
+	recoveryDrops        *prometheus.CounterVec
+	stormsFormed         prometheus.Counter
+	stormsResolved       prometheus.Counter
+	stormsActive         prometheus.Gauge
+	stormMembers         *prometheus.CounterVec
+	stormUpdates         prometheus.Counter
+	watchboardEntries    *prometheus.CounterVec
+	watchboardDigests    prometheus.Counter
+	watchboardRotations  prometheus.Counter
+	watchboardBuffered   prometheus.Gauge
+	infoDropped          *prometheus.CounterVec
+	storeRecords         *prometheus.CounterVec
+	storeDrops           *prometheus.CounterVec
+	storePruned          *prometheus.CounterVec
+	enrichments          *prometheus.CounterVec
+	enrichmentBytes      prometheus.Histogram
+	enrichmentTruncated  prometheus.Counter
+	enrichmentFailures   *prometheus.CounterVec
+	memoryFacts          *prometheus.CounterVec
+	distillErrors        prometheus.Counter
+	triageOverrides      *prometheus.CounterVec
+	triageFlips          prometheus.Counter
+	triageRegressed      prometheus.Counter
+	crossSourceFollowups *prometheus.CounterVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -198,6 +200,14 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_triage_resolved_flips_total",
 			Help: "Total §9.4 triage-status records flipped to resolved by §7.4 recovery injects (the automatic lifecycle — resolved records join the §9.3 corpus).",
 		}),
+		triageRegressed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_triage_regressed_total",
+			Help: "Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time (M4 observation 3). Evidence only, never a re-page.",
+		}),
+		crossSourceFollowups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_cross_source_followups_total",
+			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (M4 observation 4 — leading/reactive joins made session-visible), by joining source family.",
+		}, []string{"source"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -231,6 +241,8 @@ func newMetrics() *metrics {
 		m.distillErrors,
 		m.triageOverrides,
 		m.triageFlips,
+		m.triageRegressed,
+		m.crossSourceFollowups,
 	)
 	return m
 }

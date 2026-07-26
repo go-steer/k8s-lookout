@@ -237,11 +237,15 @@ const triageSchemaVersion = 4
 // store: the §9.4 record for (fingerprint, resource_key) is REPLACED
 // — it is current state, not a journal. Updated is assigned here.
 //
-// Note the writer today is in-process (the sentinel's recovery flip;
-// tests): incident AGENTS get a write path when core-agent exposes
+// Writers: the sentinel in-process (the §7.4 recovery flip) and —
+// since the M4-drill design change recorded in
+// docs/triage-status-write-design.md — incident agents through
+// `lookout triage status` (MCP: k8s_triage_status), the §9.4
+// producer surface. Both go through this one upsert; WAL +
+// busy-timeout absorb the CLI writer next to the resident sentinel.
+// Daemon-mediated writes remain deferred until core-agent exposes
 // the shared Memory surface this store stands in for (pkg/memory's
-// TODO) — adding a lookout CLI write command would need a new §4.1
-// command group, a design-doc change first.
+// TODO).
 func (s *Store) UpsertTriageStatus(ctx context.Context, rec memory.TriageStatusRecord) (memory.TriageStatusRecord, error) {
 	if s == nil {
 		return memory.TriageStatusRecord{}, errors.New("store: triage-status records need an open store (--store)")

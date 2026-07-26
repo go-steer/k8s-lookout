@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -69,6 +71,20 @@ type dedupEntry struct {
 	// outcomes route there instead of a per-incident session. Same
 	// version tolerance as Incident (older snapshots simply lack it).
 	Storm string `json:"storm,omitempty"`
+	// SourceKind is the signal kind that opened the current window
+	// entry (stamped via NoteIncidentKind), the reference point for
+	// cross-source join visibility (M4 drill observation 4): a
+	// duplicate whose kind comes from a DIFFERENT source family is a
+	// leading↔reactive join the bound session should hear about.
+	// Version tolerance both ways like Incident/Storm: older
+	// snapshots load with it empty (joins simply stay suppressed for
+	// that window — the pre-M4 behavior).
+	SourceKind string `json:"source_kind,omitempty"`
+	// FollowupSources are the source families that already emitted a
+	// cross-source join followup in this window — the "max 1 per
+	// source per incident per window" bound. Reset when the window
+	// rolls (a fresh entry is created).
+	FollowupSources []string `json:"followup_sources,omitempty"`
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -413,6 +429,64 @@ func (c *DedupCache) LookupSession(key EventKey) (string, bool) {
 		return "", false
 	}
 	return entry.SessionID, true
+}
+
+// SourceFamily buckets a signal kind by the source implementation
+// that emits it — the prefix before the first "." for the
+// source-namespaced kinds ("capacity.quota_blocked" → "capacity",
+// "quota.forecast" → "quota", "objectstate.restart_burst" →
+// "objectstate"), the whole kind for the frozen un-namespaced ones
+// ("k8s-event"). This is the granularity of the §7.2 source table,
+// which is what "a different observation angle" means for the
+// cross-source join followups (M4 observation 4).
+func SourceFamily(kind string) string {
+	if i := strings.IndexByte(kind, '.'); i > 0 {
+		return kind[:i]
+	}
+	return kind
+}
+
+// NoteIncidentKind stamps the signal kind that opened the current
+// window entry for key. Called by the dispatcher on every
+// DedupNewIncident result, before any routing branch, so the entry
+// knows which source family the incident's ORIGINAL observation came
+// from. No-op when the entry is missing (evicted — harmless race,
+// like BindSession).
+func (c *DedupCache) NoteIncidentKind(key EventKey, kind string) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok {
+		entry.SourceKind = kind
+		entry.FollowupSources = nil
+	}
+}
+
+// CrossSourceJoin reports whether a duplicate signal of the given
+// kind is a cross-SOURCE join of the current window entry — a signal
+// from a different source family than the one that opened the
+// incident (leading↔reactive: quota_blocked joining a quota.forecast
+// session, capacity.pending joining a FailedScheduling session) —
+// and, when it is, marks the family as announced so the answer is
+// positive AT MOST ONCE per source family per incident per window
+// (M4 observation 4's bound). openedBy is the source family that
+// opened the incident. Same-family duplicates, unstamped entries
+// (pre-M4 snapshots), and repeat joins all answer false: plain
+// dedup suppression.
+func (c *DedupCache) CrossSourceJoin(key EventKey, kind string) (openedBy string, ok bool) {
+	key.Reason = CanonicalReason(key.Reason)
+	family := SourceFamily(kind)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, found := c.entries[key]
+	if !found || entry.SourceKind == "" || SourceFamily(entry.SourceKind) == family {
+		return "", false
+	}
+	if slices.Contains(entry.FollowupSources, family) {
+		return "", false
+	}
+	entry.FollowupSources = append(entry.FollowupSources, family)
+	return SourceFamily(entry.SourceKind), true
 }
 
 // BoundIncident is one session binding with full incident identity,

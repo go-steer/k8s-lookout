@@ -243,6 +243,50 @@ type StormUpdatePayload struct {
 	NewMembersSinceLast int `json:"new_members_since_last"`
 }
 
+// KindTriageRegressed is the §9.4 regression-evidence followup (M4
+// drill observation 3): a downgraded incident whose symptom RATE
+// escalated past the regression factor gets this schema-stable record
+// injected into its bound session. Wire contract like the resolved
+// kinds — the sentinel supplies EVIDENCE only and never auto-re-pages
+// (docs/triage-status-write-design.md §out-of-scope): the agent or a
+// human reading the session decides whether to re-triage or escalate.
+const KindTriageRegressed = "triage.regressed"
+
+// TriageRegressedPayload is the JSON body for kind=triage.regressed.
+// SCHEMA-STABLE: pinned byte-exact by
+// TestTriageRegressed_ExactWireShape in internal/watch; playbooks and
+// the §9.3 corpus harvester parse it structurally.
+//
+// Identity fields repeat the ORIGINAL incident's identity (reason is
+// the wire reason of the triggering signal; fingerprint the §8
+// class hash the triage-status record matched on). BaselineCount is
+// the dedup-window count when the downgrade first applied; Count the
+// window count when the factor threshold was crossed. TriageStatus /
+// SeverityOverride / TriageSession echo the open §9.4 record still
+// steering routing, so the reader sees exactly which judgment the
+// evidence challenges.
+type TriageRegressedPayload struct {
+	Kind             string         `json:"kind"`
+	Reason           string         `json:"reason"`
+	Namespace        string         `json:"namespace"`
+	KindOfObject     string         `json:"kind_of_object"`
+	Name             string         `json:"name"`
+	Container        string         `json:"container,omitempty"`
+	UID              string         `json:"uid"`
+	Fingerprint      string         `json:"fingerprint"`
+	Cluster          string         `json:"cluster"`
+	TriageStatus     string         `json:"triage_status"`
+	SeverityOverride string         `json:"severity_override,omitempty"`
+	TriageSession    string         `json:"triage_session,omitempty"`
+	BaselineCount    int            `json:"baseline_count"`
+	Count            int            `json:"count"`
+	Factor           int            `json:"factor"`
+	FirstSeen        time.Time      `json:"first_seen"`
+	LastSeen         time.Time      `json:"last_seen"`
+	Message          string         `json:"message"`
+	Context          PayloadContext `json:"context"`
+}
+
 // Watchboard wire kinds (DESIGN.md §7.7 + §15 Q2). Wire contract like
 // the storm kinds: playbook skills and AX match the exact strings.
 const (

@@ -35,6 +35,20 @@
 # Talks to the local daemon via the core-agent Service on port 7777.
 # For remote clusters, override --daemon-url to
 # https://<external-daemon-endpoint>:7777.
+#
+# IMAGE FLAVORS (M4 drill observation 5): the default
+# ghcr.io/go-steer/lookout:<version> image is GCP-FREE by design
+# (DESIGN.md §2 — no cloud SDK linked; conformance-tested), so
+# `--sources=…,quota` in it REFUSES at startup, loudly and correctly,
+# and the capacity source runs without the provider scale-decision
+# sub-source. Project-tier deployments (§11: the ONE sentinel per GCP
+# project that enables the quota source, §10.2) must pin the
+# `-tags allproviders` flavor instead:
+#
+#   image: ghcr.io/go-steer/lookout:<version>-gke   # or :latest-gke
+#
+# Same binary, same flags, same signing (cosign verify works
+# identically); only the compiled-in cloud provider differs.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

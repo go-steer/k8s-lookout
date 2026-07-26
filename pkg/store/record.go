@@ -50,6 +50,13 @@ const (
 	// the store because resolved rows are what the stability-window
 	// and recommendation-history queries join against.
 	RouteResolved RouteOutcome = "resolved"
+	// RouteFollowup: a dedup-window duplicate whose SOURCE differs
+	// from the incident's opening source (leading↔reactive join, M4
+	// observation 4) — instead of silent suppression, a compact
+	// followup was injected into the bound session so the agent
+	// working it hears the new observation angle. Bounded: at most
+	// one per source family per incident per window.
+	RouteFollowup RouteOutcome = "followup"
 )
 
 // Outcome is the routing verdict recorded with a signal.

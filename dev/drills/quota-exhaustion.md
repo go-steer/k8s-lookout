@@ -166,11 +166,13 @@ surface for the whole drill must show reads only.
 While an incident from step 3 is open, replay the triage-state check:
 
 ```
-# stand-in for the agent's Memory write — see the M4 gap note
-go build -o write-triage-status ./dev/drills/write-triage-status
-./write-triage-status --store=<node copy of /data/lookout.db> \
-  --reason=FailedScheduling --object=Pod \
-  --namespace=quotalab --name=<a pending pod> \
+# the real §9.4 producer surface (docs/triage-status-write-design.md;
+# it replaced the M4 drill's write-triage-status stand-in fixture).
+# The fingerprint is on the incident's inject payload and on its
+# store occurrence row.
+lookout triage status --store=<node copy of /data/lookout.db> \
+  --fingerprint=<the incident's sha256:… fingerprint> \
+  --resource=Pod/quotalab/<a pending pod> \
   --status=triaged --severity-override=warning \
   --root-cause="N2D_CPUS quota exhausted; increase filed" \
   --action="QuotaPreference submitted" --session=<its sid>
