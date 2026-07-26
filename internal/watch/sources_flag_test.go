@@ -49,7 +49,7 @@ func TestSourcesFlag_DefaultIsK8sEventsOnly(t *testing.T) {
 	if f.sources != k8sevents.Name {
 		t.Fatalf("default --sources = %q, want %q", f.sources, k8sevents.Name)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestSourcesFlag_ObjectStateEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSourcesFlag_DegradationAndExpiryEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	built, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	built, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestSourcesFlag_RolloutAndSaturationEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, metricsfake.NewSimpleClientset(), nil)
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, metricsfake.NewSimpleClientset(), nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestSourcesFlag_SaturationWithoutMetricsClient(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if _, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil); err == nil {
+	if _, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil); err == nil {
 		t.Fatal("buildSources must fail when saturation is enabled without a metrics client")
 	}
 }
@@ -401,7 +401,7 @@ func TestSourcesFlag_CapacityEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestSourcesFlag_CapacityEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	bsDefault, err := buildSources(fDefault, fake.NewSimpleClientset(), nil, nil, nil)
+	bsDefault, err := buildSources(fDefault, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources(default): %v", err)
 	}

@@ -124,7 +124,7 @@ func TestSourcesFlag_QuotaRequiresProvider(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	_, err = buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	_, err = buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("buildSources must fail loudly when the quota source has no quota-capable provider")
 	}
@@ -135,7 +135,7 @@ func TestSourcesFlag_QuotaRequiresProvider(t *testing.T) {
 	}
 	// NoProvider explicitly (what cloud.New yields on an untagged
 	// build): same refusal.
-	_, err = buildSources(f, fake.NewSimpleClientset(), nil, nil, cloud.NoProvider)
+	_, err = buildSources(f, "", fake.NewSimpleClientset(), nil, nil, cloud.NoProvider)
 	if err == nil || !strings.Contains(err.Error(), `source "quota"`) {
 		t.Fatalf("buildSources with NoProvider = %v, want the loud quota error", err)
 	}
@@ -152,7 +152,7 @@ func TestSourcesFlag_QuotaEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, wireQuotaProvider{Provider: cloud.NoProvider})
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, wireQuotaProvider{Provider: cloud.NoProvider})
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}

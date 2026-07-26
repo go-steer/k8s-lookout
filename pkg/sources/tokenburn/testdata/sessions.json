@@ -1,0 +1,28 @@
+{
+  "sessions": [
+    {
+      "app": "core-agent",
+      "user": "sre@example.com",
+      "sessionID": "incident-7f3a",
+      "has_event_log": true,
+      "status": "active",
+      "last_touched_at": "2026-07-26T09:58:12Z"
+    },
+    {
+      "app": "core-agent",
+      "user": "sre@example.com",
+      "sessionID": "watchboard-1",
+      "has_event_log": true,
+      "status": "active",
+      "last_touched_at": "2026-07-26T09:57:40Z"
+    },
+    {
+      "app": "core-agent",
+      "user": "sre@example.com",
+      "sessionID": "incident-old-91c2",
+      "has_event_log": true,
+      "status": "idle",
+      "last_touched_at": "2026-07-25T22:10:03Z"
+    }
+  ]
+}
