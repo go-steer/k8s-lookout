@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `docs/repo-map.md` — contributor/maintainer architecture map: repo
+  layout with per-directory responsibilities, the read-path and
+  watch-path data flows, the frozen-contract → guardian-test table,
+  the provider-boundary/build-tag scheme, the generated-outward doc
+  machinery, the §13 testing-conventions map, and the known
+  design-vs-implementation divergences in one place. Linked from
+  AGENTS.md "Start here" (read DESIGN.md for the spec, repo-map.md
+  for the tree) alongside a trim of the AGENTS.md milestone
+  archaeology now covered by `docs/milestones/`.
+
+### Changed
+
+- README rewritten user-facing: quickstart for both halves (a real
+  abridged `lookout health` run against a kind cluster with only a
+  kubeconfig; `kubectl apply -f deploy/` for the sentinel), the full
+  per-command surface table with provider-gated entries marked and
+  the vanilla-Kubernetes degradation shown verbatim, image flavors +
+  cosign verification, and documentation pointers — milestone
+  narration moved out to `docs/milestones/`.
+
 ## [0.6.0] - 2026-07-26
 
 M5 — fleet & corpus — closes out the §14 milestone plan (all six
