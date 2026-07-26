@@ -1,0 +1,36 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: a Monitoring v3 projects.timeSeries.list response for prometheus.googleapis.com/apiserver_request_duration_seconds/histogram (GKE control-plane API server metrics: cloud.google.com/kubernetes-engine/docs/how-to/control-plane-metrics — prometheus_target resource, OSS label names as metric labels) under REDUCE_PERCENTILE_99 grouped by metric.labels.verb/resource: percentile reductions return DOUBLE points regardless of the source distribution, retained group labels only, points NEWEST FIRST per the ListTimeSeries reference.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_request_duration_seconds/histogram",
+        "labels": { "verb": "LIST", "resource": "pods" }
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 4.5 } },
+        { "interval": { "endTime": "2026-07-25T11:55:00Z" }, "value": { "doubleValue": 2.25 } },
+        { "interval": { "endTime": "2026-07-25T11:50:00Z" }, "value": { "doubleValue": 0.75 } }
+      ]
+    },
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_request_duration_seconds/histogram",
+        "labels": { "verb": "GET", "resource": "configmaps" }
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 0.04 } },
+        { "interval": { "endTime": "2026-07-25T11:55:00Z" }, "value": { "doubleValue": 0.05 } }
+      ]
+    }
+  ]
+}

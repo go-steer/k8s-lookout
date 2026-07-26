@@ -115,10 +115,12 @@ func TestOffGCEDetectionIsBestEffort(t *testing.T) {
 }
 
 // TestCapabilityAvailability pins the per-capability availability
-// judgment as of M4: the cloud-group capabilities and capacity are
-// available exactly when the identity they need is resolved, with
-// the §2 explicit reason otherwise; the rest stay deferred. Getters
-// must mirror Capabilities() exactly.
+// judgment as of M5: every implemented capability (metrics joined
+// the project-scoped set with the M5 backend) is available exactly
+// when the identity it needs is resolved, with the §2 explicit
+// reason otherwise; only workload identity stays deferred (its M5
+// track lands separately). Getters must mirror Capabilities()
+// exactly.
 func TestCapabilityAvailability(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
@@ -179,7 +181,7 @@ func TestCapabilityAvailability(t *testing.T) {
 		projReason  string
 		emptyReason string
 	}{
-		{cloud.CapabilityMetrics, false, false, reasonDeferred, reasonDeferred},
+		{cloud.CapabilityMetrics, true, true, "", reasonNoProject},
 		{cloud.CapabilityCapacity, true, true, "", reasonNoProject},
 		{cloud.CapabilityQuota, true, true, "", reasonNoProject},
 		{cloud.CapabilityOrphans, true, true, "", reasonNoProject},

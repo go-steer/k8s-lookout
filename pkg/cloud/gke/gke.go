@@ -28,7 +28,9 @@
 // small client interfaces (stockout.go, orphans.go, ipspace.go,
 // quota.go; REST-client choice documented in compute.go). From M5:
 // workload identity — IAM-backed KSA↔GSA binding verification behind
-// `state wi` (wi.go). Metrics stays deferred and reports unavailable.
+// `state wi` (wi.go) — and Metrics, the Cloud-Monitoring-backed query
+// engine behind `perf probe` packs and `triage top --history`
+// (metrics.go / metricsclient.go).
 package gke
 
 import (
@@ -128,8 +130,10 @@ func (p *Provider) Capabilities() []cloud.CapabilityStatus {
 // this reports Available.
 func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
 	switch c {
-	case cloud.CapabilityCapacity, cloud.CapabilityQuota, cloud.CapabilityOrphans, cloud.CapabilityStockout:
-		// Project-scoped reads (M4): need the project identity.
+	case cloud.CapabilityMetrics,
+		cloud.CapabilityCapacity, cloud.CapabilityQuota, cloud.CapabilityOrphans, cloud.CapabilityStockout:
+		// Project-scoped reads (M4; Metrics from M5): need the
+		// project identity — Monitoring series live per project.
 		if p.project == "" {
 			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoProject}
 		}
@@ -156,7 +160,15 @@ func (p *Provider) available(c cloud.Capability) bool {
 	return p.capabilityStatus(c).Available
 }
 
-func (p *Provider) Metrics() (cloud.MetricsBackend, bool) { return nil, false }
+// Metrics implements cloud.Provider: the Cloud-Monitoring-backed
+// query engine (M5, metrics.go). The Monitoring client is dialed
+// lazily on first QuerySeries call.
+func (p *Provider) Metrics() (cloud.MetricsBackend, bool) {
+	if !p.available(cloud.CapabilityMetrics) {
+		return nil, false
+	}
+	return newMetricsBackend(p), true
+}
 
 // Capacity implements cloud.Provider: the cluster-autoscaler
 // visibility log reader (M4, capacity.go). The Logging client itself
