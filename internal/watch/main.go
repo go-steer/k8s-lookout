@@ -133,6 +133,18 @@ type flags struct {
 // exits 0). Any other parse error surfaces as an error so main can
 // report + exit 2 (POSIX convention for CLI misuse).
 func parseFlags(args []string) (*flags, error) {
+	fs, f := newFlagSet()
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// newFlagSet declares the full `lookout watch` flag surface onto a
+// fresh FlagSet. Split from parseFlags so FlagInventory (flagdocs.go)
+// can walk the SAME declarations the sentinel parses — the docs-site
+// flag table is derived from this set, never maintained by hand.
+func newFlagSet() (*flag.FlagSet, *flags) {
 	fs := flag.NewFlagSet("k8s-event-watcher", flag.ContinueOnError)
 	f := &flags{}
 
@@ -296,10 +308,7 @@ func parseFlags(args []string) (*flags, error) {
 	// exporting spans locally (rare but useful during phased rollouts).
 	fs.StringVar(&f.otelExporter, "otel-exporter", "none", "OpenTelemetry span exporter: none | console | otlp. See docs/otel.md.")
 
-	if err := fs.Parse(args); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return fs, f
 }
 
 // validate checks flag combinations after parse. Called once from
@@ -511,6 +520,10 @@ func (v *severityFlag) Set(s string) error {
 	v.values = append(v.values, s)
 	return nil
 }
+
+// Get makes severityFlag a flag.Getter so FlagInventory can type the
+// flag ([]string → "repeatable") without special-casing its name.
+func (v *severityFlag) Get() any { return v.values }
 
 // splitCSV parses a comma-separated flag value. Empty strings after
 // split are dropped; whitespace around values trimmed.

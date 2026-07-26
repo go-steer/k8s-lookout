@@ -1,0 +1,50 @@
+---
+title: k8s-lookout
+description: Data-plane intelligence for core-agent — deterministic, token-dense eyes on Kubernetes/GKE clusters for LLM-driven troubleshooting agents.
+template: doc
+tableOfContents: false
+---
+
+`k8s-lookout` gives [`core-agent`](https://github.com/go-steer/core-agent)-driven
+troubleshooting agents deterministic, token-dense reads of Kubernetes/GKE
+clusters. It emits compressed, secret-safe findings instead of raw telemetry
+dumps, and it opens agent incident sessions from leading indicators instead of
+waiting for pages.
+
+## Two halves, one multicall binary
+
+Everything ships as one binary, `lookout`:
+
+- **Read-path** — one-shot diagnostic commands an agent runs mid-investigation
+  (`lookout triage|state|stab|perf|cloud|net|bundle|health`), each emitting
+  logfmt/JSON findings under a fixed output contract (pure payload on stdout,
+  diagnostics on stderr, a final `scanned= findings= elapsed=` summary line).
+  Every read command is also exposed 1:1 as an MCP tool via `lookout mcp`.
+- **Watch-path** — `lookout watch`, a resident per-cluster sentinel that turns
+  leading indicators (state transitions, trend slopes, expiry countdowns) into
+  per-incident agent sessions with warm context — detecting issues before, or
+  as, they happen rather than after.
+
+```sh
+# First call of an investigation: everything abnormal, in one scan.
+lookout triage delta -A
+```
+
+Most of the suite is pure `client-go` and runs on any conformant Kubernetes
+cluster; GKE/GCP-specific capability lives behind a cloud-provider boundary
+and reports itself as `unavailable` when absent. Images are published at
+`ghcr.io/go-steer/lookout`.
+
+## Where to go
+
+- [Getting started](/getting-started/) — install and first commands.
+- [Concepts](/concepts/) — the output contract, signal engine, fingerprints.
+- [Guides](/guides/) — workflow walkthroughs.
+- [Reference](/reference/) — generated: every command, the sentinel's flags,
+  the signal-kind catalog, Prometheus metrics.
+- [Operations](/operations/) — deploying and running the sentinel.
+
+The complete specification is
+[`docs/DESIGN.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/DESIGN.md)
+in the repository; agent education (skills and playbooks) ships in
+[`skills/`](https://github.com/go-steer/k8s-lookout/tree/main/skills).

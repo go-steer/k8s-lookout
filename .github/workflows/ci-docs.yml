@@ -16,6 +16,12 @@
 # those paths, but the branch-protection required checks (test, lint,
 # tidy, vuln) must still report success or the PR can never merge.
 # Job names here MUST match ci.yml exactly.
+#
+# Keep the `paths:` list here in lockstep with the `paths-ignore:`
+# list in ci.yml; a mismatch means either checks never run (PR
+# blocked forever) or both workflows run and duplicate work. For
+# mixed PRs (Go code + docs) ci.yml alone runs; paths-ignore only
+# skips when EVERY changed path is in the ignore list.
 
 name: CI (non-Go)
 
@@ -27,6 +33,8 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - '.github/workflows/release*.yml'
+      - '.github/workflows/docs*.yml'
+      - 'docs/site/**'
       - 'LICENSE'
   pull_request:
     branches: [main]
@@ -35,6 +43,8 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - '.github/workflows/release*.yml'
+      - '.github/workflows/docs*.yml'
+      - 'docs/site/**'
       - 'LICENSE'
 
 concurrency:

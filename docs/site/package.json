@@ -1,0 +1,23 @@
+{
+  "name": "k8s-lookout-docs",
+  "version": "0.0.1",
+  "description": "k8s-lookout documentation site — Astro Starlight.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.0",
+    "@fontsource-variable/inter": "^5.1.0",
+    "@fontsource-variable/jetbrains-mono": "^5.1.0",
+    "astro": "^7.1.0",
+    "sharp": "^0.33.5",
+    "unist-util-visit": "^5.1.0"
+  }
+}
