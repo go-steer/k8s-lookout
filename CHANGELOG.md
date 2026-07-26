@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-26
+
+End-user documentation site (Astro Starlight, mirroring core-agent's
+stack) with a generated command reference, scenario guides authored
+from the milestone drill evidence, and operations documentation; plus
+two post-M5 fixes surfaced by the repo-map verification pass.
+
 ### Added
 
 - Docs site: Getting started and Operations sections (replacing the
