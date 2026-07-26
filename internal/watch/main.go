@@ -478,6 +478,14 @@ type dispatcher struct {
 	// (the frozen shared-mode contract) and the watchboard machinery
 	// is disabled.
 	board *watchboard
+	// triage, when non-nil, is the §9.4 severity-routing consumer:
+	// after Classify, open triage-status records may override a
+	// signal's class (agent downgrade honored, escalated pins
+	// critical). Consulted in per-incident mode only — shared mode
+	// routes ALL severities to --target-session (frozen contract).
+	// The resolve flip (§9.4 automatic lifecycle) runs in every
+	// mode. Nil when --store is unset.
+	triage *triageOverrides
 	// storm, when non-nil, is the §7.5 correlation stage sitting
 	// between dedup and session creation: new incidents pass through
 	// it and may be folded into a kind=storm session instead of
@@ -558,6 +566,15 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// source's stamp untouched.
 	if d.routing != nil {
 		sig.Severity = d.routing.Classify(sig)
+	}
+	// §9.4: triage-status records refine the class AFTER config —
+	// the agent that diagnosed the incident outranks the per-kind
+	// default. Downgraded incidents stop re-paging (they route to
+	// the watchboard/store); escalated pins critical and thereby
+	// bypasses the watchboard. Per-incident mode only, like the
+	// routing stages below.
+	if d.triage != nil && d.mode == "per-incident" {
+		sig.Severity = d.triage.Apply(ctx, sig)
 	}
 	d.metrics.eventsSeen.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
 	if !d.filter.Accept(sig) {
@@ -755,6 +772,15 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 		log.Printf("recovery: %s signal for %s/%s missing Recovery attachment — dropping (programming error)",
 			sig.Kind, sig.Namespace, sig.Name)
 		return
+	}
+	// §9.4 automatic lifecycle: the symptom cleared, so the
+	// incident's triage-status record flips to resolved and joins
+	// the §9.3 corpus (write-through — routing stops honoring it
+	// immediately). resolved.reverted deliberately does NOT restore
+	// it: a fix that failed to stick should page at its own class
+	// until the agent re-triages.
+	if d.triage != nil && sig.Kind == engine.KindResolved {
+		d.triage.resolve(ctx, sig)
 	}
 	// Storm bookkeeping first (§7.5): member clearance feeds the
 	// storm's recovery — the LAST member to clear resolves the storm.
@@ -963,6 +989,12 @@ func realMain(argv []string) error {
 		disp.store = occStore
 		log.Printf("store: enabled (path=%s, ttl=%s, max=%dMiB, prune every %s)",
 			f.store, f.storeTTL, f.storeMaxMB, store.PruneInterval(f.storeTTL))
+		// §9.4 triage-status records ride the same store: severity
+		// routing honors agent overrides (per-incident mode), and
+		// recovery flips records to resolved in every mode.
+		disp.triage = newTriageOverrides(occStore, m)
+		log.Printf("triage-status: enabled (open records refine routing every signal, cache refresh %s; recovery flips records to resolved)",
+			triageRefreshInterval)
 	}
 
 	// Severity routing (§7.7): the policy (source defaults +

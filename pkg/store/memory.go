@@ -228,6 +228,142 @@ func fingerprintsJSON(fps []string) string {
 	return string(b)
 }
 
+// triageSchemaVersion is the first schema version carrying the
+// triage_status table (migration v4). Reads of older stores answer
+// "no records"; writes refuse.
+const triageSchemaVersion = 4
+
+// UpsertTriageStatus implements memory.TriageWriter on the sentinel
+// store: the §9.4 record for (fingerprint, resource_key) is REPLACED
+// — it is current state, not a journal. Updated is assigned here.
+//
+// Note the writer today is in-process (the sentinel's recovery flip;
+// tests): incident AGENTS get a write path when core-agent exposes
+// the shared Memory surface this store stands in for (pkg/memory's
+// TODO) — adding a lookout CLI write command would need a new §4.1
+// command group, a design-doc change first.
+func (s *Store) UpsertTriageStatus(ctx context.Context, rec memory.TriageStatusRecord) (memory.TriageStatusRecord, error) {
+	if s == nil {
+		return memory.TriageStatusRecord{}, errors.New("store: triage-status records need an open store (--store)")
+	}
+	if s.readOnly {
+		return memory.TriageStatusRecord{}, ErrReadOnlyStore
+	}
+	if err := rec.Validate(); err != nil {
+		return memory.TriageStatusRecord{}, err
+	}
+	rec.Updated = s.clock().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO triage_status (
+		fingerprint, resource_key, session, status,
+		root_cause_hypothesis, severity_override, action, updated
+	) VALUES (?,?,?,?,?,?,?,?)
+	ON CONFLICT (fingerprint, resource_key) DO UPDATE SET
+		session = excluded.session,
+		status = excluded.status,
+		root_cause_hypothesis = excluded.root_cause_hypothesis,
+		severity_override = excluded.severity_override,
+		action = excluded.action,
+		updated = excluded.updated`,
+		rec.Fingerprint, rec.ResourceKey, rec.Session, string(rec.Status),
+		rec.RootCauseHypothesis, rec.SeverityOverride, rec.Action, rec.Updated.UnixNano(),
+	)
+	if err != nil {
+		return memory.TriageStatusRecord{}, fmt.Errorf("store: upsert triage status (%s, %s): %w", rec.Fingerprint, rec.ResourceKey, err)
+	}
+	return rec, nil
+}
+
+// ResolveTriageStatus implements the §9.4 automatic lifecycle: when
+// a §7.4 recovery inject says the symptom cleared, the open
+// record(s) for the incident flip to resolved and join the §9.3
+// corpus. Matching is (fingerprint, resource_key ∈ resourceKeys) —
+// the fingerprint alone is class-level and would flip unrelated
+// same-class incidents. Flipping an already-resolved (or absent)
+// record is a no-op, never an error.
+func (s *Store) ResolveTriageStatus(ctx context.Context, fingerprint string, resourceKeys ...string) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	if s.readOnly {
+		return 0, ErrReadOnlyStore
+	}
+	if fingerprint == "" || len(resourceKeys) == 0 {
+		return 0, nil
+	}
+	now := s.clock().UTC().UnixNano()
+	flipped := 0
+	// One statement per key keeps the SQL static (no IN-list
+	// assembly); the list is 1–2 entries (object key + controller
+	// key).
+	for _, key := range resourceKeys {
+		if key == "" {
+			continue
+		}
+		res, err := s.db.ExecContext(ctx, `UPDATE triage_status
+			SET status = ?, updated = ?
+			WHERE fingerprint = ? AND resource_key = ? AND status != ?`,
+			string(memory.StatusResolved), now, fingerprint, key, string(memory.StatusResolved))
+		if err != nil {
+			return flipped, fmt.Errorf("store: resolve triage status (%s, %s): %w", fingerprint, key, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			flipped += int(n)
+		}
+	}
+	return flipped, nil
+}
+
+// TriageStatuses implements memory.TriageReader. Nil-safe and
+// version-gated like Facts: disabled stores and pre-v4 stores answer
+// "no records".
+func (s *Store) TriageStatuses(ctx context.Context, q memory.TriageQuery) ([]memory.TriageStatusRecord, error) {
+	if s == nil || s.schemaVersion < triageSchemaVersion {
+		return nil, nil
+	}
+	// Static SQL, optional filters folded in (zero value disables).
+	const query = `SELECT fingerprint, resource_key, session, status,
+		root_cause_hypothesis, severity_override, action, updated
+		FROM triage_status
+		WHERE (?1 = '' OR fingerprint = ?1)
+		  AND (?2 = 0 OR status != 'resolved')
+		  AND (?3 = 0 OR updated >= ?3)
+		ORDER BY updated DESC, fingerprint, resource_key`
+	openOnly := 0
+	if q.OpenOnly {
+		openOnly = 1
+	}
+	var sinceNs int64
+	if !q.UpdatedSince.IsZero() {
+		sinceNs = q.UpdatedSince.UTC().UnixNano()
+	}
+	rows, err := s.db.QueryContext(ctx, query, q.Fingerprint, openOnly, sinceNs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []memory.TriageStatusRecord
+	for rows.Next() {
+		var (
+			rec     memory.TriageStatusRecord
+			status  string
+			updated int64
+		)
+		if err := rows.Scan(
+			&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
+			&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action, &updated,
+		); err != nil {
+			return nil, err
+		}
+		rec.Status = memory.TriageStatus(status)
+		rec.Updated = time.Unix(0, updated).UTC()
+		out = append(out, rec)
+		if q.Limit > 0 && len(out) == q.Limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
 func mergeFingerprints(prev, next []string) []string {
 	merged := slices.Clone(prev)
 	merged = append(merged, next...)

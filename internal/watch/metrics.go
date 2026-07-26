@@ -61,6 +61,8 @@ type metrics struct {
 	enrichmentFailures  *prometheus.CounterVec
 	memoryFacts         *prometheus.CounterVec
 	distillErrors       prometheus.Counter
+	triageOverrides     *prometheus.CounterVec
+	triageFlips         prometheus.Counter
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -188,6 +190,14 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_distill_errors_total",
 			Help: "Total failed §9.2 distiller passes. A failed pass loses freshness only — the next pass re-derives every fact from the occurrence window.",
 		}),
+		triageOverrides: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_triage_overrides_total",
+			Help: "Total §9.4 severity-routing decisions refined by an open triage-status record, by action (downgraded: agent's severity_override lowered the class; upgraded: it raised it; escalated: status=escalated pinned critical).",
+		}, []string{"action"}),
+		triageFlips: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_triage_resolved_flips_total",
+			Help: "Total §9.4 triage-status records flipped to resolved by §7.4 recovery injects (the automatic lifecycle — resolved records join the §9.3 corpus).",
+		}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -219,6 +229,8 @@ func newMetrics() *metrics {
 		m.enrichmentFailures,
 		m.memoryFacts,
 		m.distillErrors,
+		m.triageOverrides,
+		m.triageFlips,
 	)
 	return m
 }

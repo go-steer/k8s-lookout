@@ -269,6 +269,250 @@ func TestFacts_PreMemorySchemaStore(t *testing.T) {
 	}
 }
 
+func testTriageRecord() memory.TriageStatusRecord {
+	return memory.TriageStatusRecord{
+		Fingerprint:         "sha256:crash",
+		ResourceKey:         "Pod/prod/payment-7d5b9c6f4-x2k9q",
+		Session:             "sid-42",
+		Status:              memory.StatusTriaged,
+		RootCauseHypothesis: "bad connection string",
+		SeverityOverride:    "warning",
+		Action:              "PR #402 opened",
+	}
+}
+
+// TestTriageStatus_RoundTripAndUpsert: the §9.4 record round-trips;
+// a rewrite for the same (fingerprint, resource_key) REPLACES it —
+// the record is current state, not a journal.
+func TestTriageStatus_RoundTripAndUpsert(t *testing.T) {
+	t.Parallel()
+	s, clock := openTest(t)
+	ctx := context.Background()
+
+	stored, err := s.UpsertTriageStatus(ctx, testTriageRecord())
+	if err != nil {
+		t.Fatalf("UpsertTriageStatus: %v", err)
+	}
+	if !stored.Updated.Equal(t0) {
+		t.Errorf("Updated = %s, want store-assigned %s", stored.Updated, t0)
+	}
+	got, err := s.TriageStatuses(ctx, memory.TriageQuery{})
+	if err != nil {
+		t.Fatalf("TriageStatuses: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("records = %d, want 1", len(got))
+	}
+	if got[0] != stored {
+		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", got[0], stored)
+	}
+
+	clock.Advance(time.Hour)
+	next := testTriageRecord()
+	next.Status = memory.StatusActioned
+	next.Action = "PR #402 merged"
+	if _, err := s.UpsertTriageStatus(ctx, next); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	got, _ = s.TriageStatuses(ctx, memory.TriageQuery{})
+	if len(got) != 1 {
+		t.Fatalf("upsert duplicated: %d rows", len(got))
+	}
+	if got[0].Status != memory.StatusActioned || got[0].Action != "PR #402 merged" || !got[0].Updated.Equal(t0.Add(time.Hour)) {
+		t.Errorf("upsert did not replace: %+v", got[0])
+	}
+
+	// A different resource under the same fingerprint is its own
+	// record (the key is the §9.4 pair).
+	other := testTriageRecord()
+	other.ResourceKey = "Pod/prod/payment-7d5b9c6f4-m8t2z"
+	if _, err := s.UpsertTriageStatus(ctx, other); err != nil {
+		t.Fatalf("third upsert: %v", err)
+	}
+	if got, _ := s.TriageStatuses(ctx, memory.TriageQuery{}); len(got) != 2 {
+		t.Errorf("distinct resource_key should insert: %d rows", len(got))
+	}
+}
+
+// TestTriageStatus_QueryFilters: fingerprint, OpenOnly, and
+// UpdatedSince are AND-combined.
+func TestTriageStatus_QueryFilters(t *testing.T) {
+	t.Parallel()
+	s, clock := openTest(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertTriageStatus(ctx, testTriageRecord()); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	clock.Advance(time.Hour)
+	resolved := testTriageRecord()
+	resolved.Fingerprint = "sha256:other"
+	resolved.Status = memory.StatusResolved
+	if _, err := s.UpsertTriageStatus(ctx, resolved); err != nil {
+		t.Fatalf("upsert resolved: %v", err)
+	}
+
+	if got, _ := s.TriageStatuses(ctx, memory.TriageQuery{Fingerprint: "sha256:crash"}); len(got) != 1 || got[0].Fingerprint != "sha256:crash" {
+		t.Errorf("fingerprint filter: %+v", got)
+	}
+	if got, _ := s.TriageStatuses(ctx, memory.TriageQuery{OpenOnly: true}); len(got) != 1 || got[0].Status != memory.StatusTriaged {
+		t.Errorf("OpenOnly filter: %+v", got)
+	}
+	if got, _ := s.TriageStatuses(ctx, memory.TriageQuery{UpdatedSince: t0.Add(30 * time.Minute)}); len(got) != 1 || got[0].Status != memory.StatusResolved {
+		t.Errorf("UpdatedSince filter: %+v", got)
+	}
+	if got, _ := s.TriageStatuses(ctx, memory.TriageQuery{Limit: 1}); len(got) != 1 || got[0].Status != memory.StatusResolved {
+		t.Errorf("Limit keeps newest-updated first: %+v", got)
+	}
+}
+
+// TestResolveTriageStatus: the §9.4 automatic lifecycle — the flip
+// targets (fingerprint, resource_key ∈ keys) only, is idempotent,
+// and never touches other resources sharing the class fingerprint.
+func TestResolveTriageStatus(t *testing.T) {
+	t.Parallel()
+	s, clock := openTest(t)
+	ctx := context.Background()
+
+	mine := testTriageRecord()
+	sibling := testTriageRecord()
+	sibling.ResourceKey = "Pod/prod/other-pod" // same class fingerprint, different incident
+	for _, rec := range []memory.TriageStatusRecord{mine, sibling} {
+		if _, err := s.UpsertTriageStatus(ctx, rec); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+	}
+	clock.Advance(time.Hour)
+
+	flipped, err := s.ResolveTriageStatus(ctx, "sha256:crash",
+		"Pod/prod/payment-7d5b9c6f4-x2k9q", "ReplicaSet/prod/payment-7d5b9c6f4")
+	if err != nil {
+		t.Fatalf("ResolveTriageStatus: %v", err)
+	}
+	if flipped != 1 {
+		t.Fatalf("flipped = %d, want exactly the incident's record", flipped)
+	}
+	open, _ := s.TriageStatuses(ctx, memory.TriageQuery{OpenOnly: true})
+	if len(open) != 1 || open[0].ResourceKey != sibling.ResourceKey {
+		t.Errorf("open records after flip = %+v, want only the sibling", open)
+	}
+	all, _ := s.TriageStatuses(ctx, memory.TriageQuery{Fingerprint: "sha256:crash"})
+	for _, rec := range all {
+		if rec.ResourceKey == mine.ResourceKey {
+			if rec.Status != memory.StatusResolved || !rec.Updated.Equal(t0.Add(time.Hour)) {
+				t.Errorf("flipped record = %+v", rec)
+			}
+		}
+	}
+
+	// Idempotent: a second recovery observation flips nothing.
+	if flipped, err := s.ResolveTriageStatus(ctx, "sha256:crash", mine.ResourceKey); err != nil || flipped != 0 {
+		t.Errorf("second flip = %d, %v; want 0, nil", flipped, err)
+	}
+	// Absent incident: no-op, no error.
+	if flipped, err := s.ResolveTriageStatus(ctx, "sha256:unknown", "Pod/x/y"); err != nil || flipped != 0 {
+		t.Errorf("unknown flip = %d, %v; want 0, nil", flipped, err)
+	}
+}
+
+// TestTriageStatus_NilReadOnlyAndValidation mirrors the fact-side
+// postures for the triage surface.
+func TestTriageStatus_NilReadOnlyAndValidation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var nilStore *Store
+	if got, err := nilStore.TriageStatuses(ctx, memory.TriageQuery{}); err != nil || got != nil {
+		t.Errorf("nil store TriageStatuses = %v, %v", got, err)
+	}
+	if _, err := nilStore.UpsertTriageStatus(ctx, testTriageRecord()); err == nil {
+		t.Error("nil store UpsertTriageStatus should error")
+	}
+	if n, err := nilStore.ResolveTriageStatus(ctx, "sha256:x", "Pod/a/b"); err != nil || n != 0 {
+		t.Errorf("nil store ResolveTriageStatus = %d, %v", n, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "lookout.db")
+	w, err := Open(path, WithLogf(t.Logf), WithClock((&testClock{now: t0}).Now))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := w.UpsertTriageStatus(ctx, testTriageRecord()); err != nil {
+		t.Fatalf("UpsertTriageStatus: %v", err)
+	}
+	if _, err := w.UpsertTriageStatus(ctx, memory.TriageStatusRecord{Fingerprint: "sha256:x"}); err == nil {
+		t.Error("invalid record accepted")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := OpenRead(path, WithLogf(t.Logf))
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if got, err := r.TriageStatuses(ctx, memory.TriageQuery{}); err != nil || len(got) != 1 {
+		t.Errorf("read-only TriageStatuses = %d, %v; want 1, nil", len(got), err)
+	}
+	if _, err := r.UpsertTriageStatus(ctx, testTriageRecord()); !errors.Is(err, ErrReadOnlyStore) {
+		t.Errorf("read-only UpsertTriageStatus = %v, want ErrReadOnlyStore", err)
+	}
+	if _, err := r.ResolveTriageStatus(ctx, "sha256:crash", "Pod/prod/x"); !errors.Is(err, ErrReadOnlyStore) {
+		t.Errorf("read-only ResolveTriageStatus = %v, want ErrReadOnlyStore", err)
+	}
+}
+
+// TestTriageStatus_PreTriageSchemaStore: pre-v4 stores answer "no
+// records" on the read path.
+func TestTriageStatus_PreTriageSchemaStore(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", "file:"+url.PathEscape(path))
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create version table: %v", err)
+	}
+	for _, m := range migrations[:triageSchemaVersion-1] {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatalf("apply old migration: %v", err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, triageSchemaVersion-1); err != nil {
+		t.Fatalf("set version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+	r, err := OpenRead(path, WithLogf(t.Logf))
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if got, err := r.TriageStatuses(context.Background(), memory.TriageQuery{}); err != nil || got != nil {
+		t.Errorf("pre-triage store TriageStatuses = %v, %v; want nil, nil", got, err)
+	}
+}
+
+// TestPrune_ExemptsTriageStatus: records live until their lifecycle
+// resolves them — the §9.1 prune never deletes them.
+func TestPrune_ExemptsTriageStatus(t *testing.T) {
+	t.Parallel()
+	s, clock := openTest(t, WithTTL(time.Hour))
+	ctx := context.Background()
+	if _, err := s.UpsertTriageStatus(ctx, testTriageRecord()); err != nil {
+		t.Fatalf("UpsertTriageStatus: %v", err)
+	}
+	clock.Advance(48 * time.Hour)
+	if _, err := s.PruneOnce(ctx); err != nil {
+		t.Fatalf("PruneOnce: %v", err)
+	}
+	if got, err := s.TriageStatuses(ctx, memory.TriageQuery{}); err != nil || len(got) != 1 {
+		t.Errorf("record pruned by TTL: %d records, %v; want 1 survivor", len(got), err)
+	}
+}
+
 // TestPrune_ExemptsMemoryFacts: facts are durable memories, not
 // telemetry — the §9.1 TTL prune must never delete them.
 func TestPrune_ExemptsMemoryFacts(t *testing.T) {

@@ -81,6 +81,33 @@ rollout as the last change before onset.
   and a new `go tool nm`-based conformance test in cmd/lookout fails
   if the default binary ever links a GCP symbol.
 
+- Triage-status records (M4, DESIGN.md §9.4) — scans report triaged
+  reality. `pkg/memory` gains `TriageStatusRecord` exactly per the
+  §9.4 schema (fingerprint, resource_key, session,
+  status=investigating|triaged|actioned|escalated, plus the
+  sentinel-written lifecycle terminal `resolved`;
+  root_cause_hypothesis, severity_override, action, updated;
+  wire shape golden-pinned), keyed by the (fingerprint,
+  resource_key) pair and stored in the sentinel store (migration
+  v4; same in-tree binding decision as §9.2 — core-agent v2.7.0
+  ships no Memory interface, `pkg/memory` documents the TODO).
+  Consumers: (1) the sentinel's severity routing honors open
+  records — an agent's `severity_override` re-routes followups and
+  re-pages (downgraded → watchboard/store), `status=escalated` pins
+  critical and bypasses the watchboard; matching requires the
+  resource pin (object or ControllerRef key) because the §8
+  fingerprint is class-level; cached, refreshed every 30s, metrics
+  `k8s_event_watcher_triage_overrides_total{action}` /
+  `…_triage_resolved_flips_total`. (2) Lifecycle is automatic: a
+  §7.4 `kind=resolved` recovery inject flips the record to resolved
+  (write-through — routing stops honoring it immediately; reverted
+  does NOT restore it, a failed fix pages again). (3) Memory-merged
+  `health` and `bundle`: with `--store=<sentinel store>`, findings
+  join open records — matched findings gain
+  `triage_status/root_cause/action/session/age` and severity
+  reflects the agent's judgment (the §14 M4 exit: a health scan run
+  mid-incident reports the triage state, not a fresh unknown);
+  unmatched findings and runs without `--store` are unchanged.
 - Distilled memories (M4, DESIGN.md §9.2): a scheduled distiller pass
   in the sentinel (`--distill-interval`, default 6h, requires
   `--store`) converts recurring raw occurrences into durable,

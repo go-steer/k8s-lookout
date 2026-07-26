@@ -2,7 +2,7 @@
 
 # lookout health
 
-"Any issues with this cluster?" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. Live checks only until M4, when open sentinel findings and triage-status records merge in.
+"Any issues with this cluster?" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
 MCP tool: `k8s_cluster_health`
 
@@ -16,6 +16,7 @@ MCP tool: `k8s_cluster_health`
 | --- | --- | --- |
 | `--top` | 3 | how many findings to name inline on a degraded category's scorecard line |
 | `--cert-warn` | 720h | report TLS certificates expiring within this window (certs category) |
+| `--store` | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override |
 
 ## Common flags (every lookout command)
 
@@ -44,6 +45,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `phase` | PersistentVolumeClaim phase on storage findings (Pending or Lost) |
 | `webhook` | admission webhook as <configuration>/<webhook name> |
 | `service` | service backend a webhook points at, as <namespace>/<name> |
+| `triage_status` | triage state from the matched §9.4 record (investigating\|triaged\|actioned\|escalated) — present only with --store on merged findings |
+| `triage_root_cause` | the incident agent's root-cause hypothesis, from the matched triage-status record |
+| `triage_action` | the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record |
+| `triage_session` | incident session that wrote the matched triage-status record |
+| `triage_age` | how long ago the matched triage-status record was last updated |
 | `container` | container the finding is about (init containers prefixed init:) |
 | `image` | image reference that failed to pull |
 | `restarts` | container restart count |

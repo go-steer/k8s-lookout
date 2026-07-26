@@ -174,6 +174,24 @@ var migrations = []string{
 	);
 	CREATE UNIQUE INDEX memory_facts_identity ON memory_facts (class, scope_key);
 	CREATE INDEX memory_facts_updated ON memory_facts (updated_at);`,
+
+	// v4: §9.4 triage-status records (see memory.go and
+	// pkg/memory/triage.go). Keyed (fingerprint, resource_key) — the
+	// record is CURRENT state, upserts replace; the eventlog/§9.3
+	// corpus is the journal. Like memory_facts: durable records, no
+	// buffered writer, exempt from the §9.1 prune.
+	`CREATE TABLE triage_status (
+		fingerprint           TEXT NOT NULL,
+		resource_key          TEXT NOT NULL,
+		session               TEXT NOT NULL DEFAULT '',
+		status                TEXT NOT NULL,
+		root_cause_hypothesis TEXT NOT NULL DEFAULT '',
+		severity_override     TEXT NOT NULL DEFAULT '',
+		action                TEXT NOT NULL DEFAULT '',
+		updated               INTEGER NOT NULL,
+		PRIMARY KEY (fingerprint, resource_key)
+	);
+	CREATE INDEX triage_status_updated ON triage_status (updated);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no
