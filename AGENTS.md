@@ -54,35 +54,35 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**M2 complete** (see `docs/milestones/M2.md` for the drill evidence; M1/M0
-records sit alongside): `lookout watch` is the full §7.1 pipeline —
-`pkg/sources` (`k8s-events` + `object-state`, §11 loud RBAC probes),
-dedup with leading/reactive reason families, storm correlation over the
-live `pkg/graph` feed (`--storm`, one shared informer set), severity
-routing with `--severity` overrides and the size-rotated watchboard
-session, §7.6 enrichment via the in-process bundle, and §7.4 recovery
-injects (`kind=resolved`/`resolved.reverted`, §9.3 schema-stable). All new
-inject kinds are wire-pinned byte-exact (storm/watchboard/resolved tests in
-`internal/watch` + `pkg/inject`); the M0 `k8s-event` payload and flag
-surface stay frozen (`flags_contract_test.go`,
-`TestDispatcher_ExactInjectPayloadWireShape`). From M1: the read-path core
-(`triage delta|logs|spec`, `state edges`, `bundle`, `health`) under the
-§4.2 envelope + §6.5 sanitizer, `lookout mcp`, `pkg/graph` (Q5 gate in
-`docs/graph-q5-gate.md`), and the generated skills (`dev/tools/
-gen-skill-refs` after touching command metadata; keep `internal/skilldoc`
-contract tests green). Known M2 gaps to pick up (recorded with evidence in
-`docs/milestones/M2.md` §Observations): ClusterRole lacks
-`deployments get` + `pods/log get` for two enrichment sections; no
-node-scoped clearance observer (node-anchored storms never emit their own
-resolved record); live-graph radius mislabels existing-but-unwatched
-ConfigMaps as `radius.missing`; `--storm` default stays OFF until the RBAC
-fix lands. GKE replay runbook: `dev/drills/node-failure.md`.
+**M3 complete** (see `docs/milestones/M3.md` for the drill evidence;
+M2/M1/M0 records sit alongside): the sentinel runs all six §7.2 sources
+(`k8s-events`, `object-state`, `rollout`, `saturation`, `degradation`,
+`expiry` — each behind a §11 loud RBAC probe), writes every post-dedup
+signal to the §9.1 store (`pkg/store`, `--store`, pure-Go SQLite) and the
+§6.6 graph history (snapshots + delta log, `--graph-snapshot-interval`),
+and the read path answers history: `triage events|top|radius|changes` +
+`net probe`, with `--at`/`--store` on every graph-backed command
+(`checks.Command.GraphBacked`). Trend payloads carry the §8 `forecast`
+attachment (ADDITIVE, wire-pinned); all M2 invariants stay frozen (storm/
+watchboard/resolved pins, the M0 `k8s-event` payload and flag surface,
+`flags_contract_test.go`). From M1: the read-path core (`triage
+delta|logs|spec`, `state edges`, `bundle`, `health`) under the §4.2
+envelope + §6.5 sanitizer, `lookout mcp`, `pkg/graph`, and the generated
+skills (`dev/tools/gen-skill-refs` after touching command metadata; keep
+`internal/skilldoc` contract tests green). Known M3 gaps to pick up
+(recorded with evidence in `docs/milestones/M3.md` §Observations):
+`store.GraphAt` cannot replay across a sentinel restart; store-restored
+snapshots lose the unknown-vs-missing radius fix (`Snapshot.Watches` not
+serialized); historical queries cannot target a Deployment (graph holds
+them identity-only); `rollout_stall` resolved records bypass the
+stability window with inverted duration fields; informer-sync Adds
+masquerade as changes. `--storm` default stays OFF pending the restart
+fix. GKE replay runbooks: `dev/drills/node-failure.md`,
+`dev/drills/bad-deploy.md`, `dev/drills/memory-leak.md`.
 
-Next milestone: **M3 — leading indicators + history** (DESIGN.md §14):
-`rollout`, `saturation`, `degradation`, `expiry` sources; the §9.1 raw
-store (info-class signals stop being counted-and-dropped) including graph
-snapshots + the delta log; `triage events`, `triage top`, `triage radius
---at`, `triage changes`, `triage spec --diff`, `net probe`. Deferred
-further out: control-plane health category and store/memory-merged
-`health` (M4); `state wi|webhooks|volumes`, `stab drift|drain`,
+Next milestone: **M4 — capacity & quota** (DESIGN.md §14): `capacity` +
+`quota` sources (§10); `cloud stockout|orphans|ipspace|quota`; distilled
+memories (§9.2); triage-status records (§9.4) + store/memory-merged
+`health`; the quota write path behind the §12 permission gate. Deferred
+further out: `state wi|webhooks|volumes`, `stab drift|drain`,
 `perf probe`, `token-burn`, corpus harvester (M5).
