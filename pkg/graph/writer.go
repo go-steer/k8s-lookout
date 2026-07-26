@@ -87,7 +87,7 @@ type Writer struct {
 
 	mu      sync.Mutex
 	closed  bool
-	pending []Delta
+	pending []pendingDelta
 	timer   *time.Timer
 
 	intern *interner
@@ -128,6 +128,14 @@ func newWriter(g *Graph, interval time.Duration, onChange func(ChangeRecord), no
 		w.tracked = make(map[NodeID]*trackedState)
 	}
 	return w
+}
+
+// pendingDelta is one queued delta plus whether it belongs to initial
+// sync (ApplyInitial): sync deltas fold into topology and change
+// tracking but emit no §6.6 ChangeRecords.
+type pendingDelta struct {
+	Delta
+	sync bool
 }
 
 // batch is the next snapshot under construction: full map clones of
@@ -180,6 +188,22 @@ func (w *Writer) FromObjects(objs iter.Seq[any]) error {
 // The batch is swapped in when the swap interval elapses, or on
 // Flush.
 func (w *Writer) Apply(deltas ...Delta) error {
+	return w.queue(deltas, false)
+}
+
+// ApplyInitial queues deltas that are part of INITIAL SYNC rather
+// than live change: they fold into the topology and seed change
+// tracking exactly like Apply, but emit no §6.6 ChangeRecords. This
+// is the informer-side companion of FromObjects' no-record seeding
+// (M3 drill observation 5): handler deltas replayed from the initial
+// LIST window are state the first stored snapshot covers, not
+// changes, and logging them would report every pre-existing object
+// as "Added" at the sync instant.
+func (w *Writer) ApplyInitial(deltas ...Delta) error {
+	return w.queue(deltas, true)
+}
+
+func (w *Writer) queue(deltas []Delta, sync bool) error {
 	for i := range deltas {
 		if deltas[i].Op <= opInvalid || deltas[i].Op > OpDelete {
 			return fmt.Errorf("graph: delta %d: invalid op %d", i, deltas[i].Op)
@@ -193,7 +217,9 @@ func (w *Writer) Apply(deltas ...Delta) error {
 	if w.closed {
 		return ErrClosed
 	}
-	w.pending = append(w.pending, deltas...)
+	for _, d := range deltas {
+		w.pending = append(w.pending, pendingDelta{Delta: d, sync: sync})
+	}
 	if w.timer == nil && w.interval > 0 {
 		w.timer = time.AfterFunc(w.interval, w.timedFlush)
 	}
@@ -248,17 +274,25 @@ func (w *Writer) flushLocked() {
 	}
 	b := w.newBatch()
 	var recs []ChangeRecord
-	for _, d := range w.pending {
+	for _, pd := range w.pending {
 		if w.onChange == nil {
-			w.applyDelta(b, d)
+			w.applyDelta(b, pd.Delta)
+			continue
+		}
+		if pd.sync {
+			// Initial-sync delta (ApplyInitial): fold state and keep
+			// change tracking current, but record nothing — the first
+			// stored snapshot is the baseline (§6.6).
+			_ = w.trackChange(pd.Delta)
+			w.applyDelta(b, pd.Delta)
 			continue
 		}
 		// §6.6 delta log: derive the changed-field summary from the
 		// typed object (only place it is visible), then capture the
 		// apply's primitive mutations as the replay effect.
-		rec := w.trackChange(d)
+		rec := w.trackChange(pd.Delta)
 		w.rec = &effectLog{}
-		w.applyDelta(b, d)
+		w.applyDelta(b, pd.Delta)
 		rec.Effect = w.rec.encode()
 		w.rec = nil
 		recs = append(recs, rec)

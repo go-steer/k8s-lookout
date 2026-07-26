@@ -24,9 +24,9 @@ import (
 
 // TestSnapshot_Watches pins the watched-kind honesty predicate:
 // without Options.WatchedKinds every kind reads as watched (the
-// full-List one-shot posture, and the posture of history-restored
-// snapshots); with it, only the declared kinds do — the input the
-// radius unknown-vs-missing distinction is built on.
+// full-List one-shot posture, and the posture of snapshots restored
+// from LKGH v1 files); with it, only the declared kinds do — the
+// input the radius unknown-vs-missing distinction is built on.
 func TestSnapshot_Watches(t *testing.T) {
 	t.Parallel()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p1"}}

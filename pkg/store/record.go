@@ -283,15 +283,15 @@ func (s *Store) insert(batch []*row, changes []*changeRow) {
 		}
 		if len(changes) > 0 {
 			stmt, err := tx.Prepare(`INSERT INTO graph_changes (
-				at, generation, op, kind, namespace, name, uid, changes, effect
-			) VALUES (?,?,?,?,?,?,?,?,?)`)
+				at, generation, epoch, op, kind, namespace, name, uid, changes, effect
+			) VALUES (?,?,?,?,?,?,?,?,?,?)`)
 			if err != nil {
 				_ = tx.Rollback()
 				return err
 			}
 			for _, c := range changes {
 				if _, err := stmt.Exec(
-					c.at, c.generation, c.op, c.kind, c.namespace, c.name, c.uid, c.changes, c.effect,
+					c.at, c.generation, c.epoch, c.op, c.kind, c.namespace, c.name, c.uid, c.changes, c.effect,
 				); err != nil {
 					_ = stmt.Close()
 					_ = tx.Rollback()

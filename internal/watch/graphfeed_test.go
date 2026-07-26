@@ -17,6 +17,7 @@ package watch
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,6 +221,88 @@ func TestGraphFeed_InformerIngest(t *testing.T) {
 		a := feed.Ancestors(engine.ObjectRef{Kind: "Pod", Namespace: "shop", Name: "pay-2"})
 		return len(a) > 0 && a[0] == (engine.Ancestor{Kind: "Node", Name: "gke-a"})
 	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("feed.Run returned %v on clean shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("feed.Run did not return after cancel")
+	}
+}
+
+// TestGraphFeed_InitialSyncEmitsNoChangeRecords is the M3 drill
+// observation 5 regression: the informer initial LIST fires an Add
+// handler per pre-existing object, and those buffered deltas replay
+// after sync — through the REAL Run path they must not reach the §6.6
+// delta log as "Added" changes (a `triage changes` window spanning a
+// sentinel restart would report every pre-existing object as a
+// change). Change logging arms after initial sync, like the sources.
+func TestGraphFeed_InitialSyncEmitsNoChangeRecords(t *testing.T) {
+	t.Parallel()
+	client := fake.NewSimpleClientset(
+		testNode("gke-a"),
+		testRS("shop", "pay-7b9d", "pay"),
+		testPod("shop", "pay-1", "gke-a", "pay-7b9d", ""),
+	)
+	factory := informers.NewSharedInformerFactory(client, 0)
+	var mu sync.Mutex
+	var recs []graph.ChangeRecord
+	feed := newGraphFeed(factory, func(r graph.ChangeRecord) {
+		mu.Lock()
+		defer mu.Unlock()
+		recs = append(recs, r)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- feed.Run(ctx) }()
+
+	waitFor := func(desc string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+	}
+	waitFor("initial snapshot", func() bool {
+		_, err := feed.graph.Snapshot()
+		return err == nil
+	})
+	// Give the buffered-replay batch time to flush through the swap
+	// timer, then assert the log stayed empty.
+	time.Sleep(3 * graph.DefaultSwapInterval)
+	mu.Lock()
+	synced := len(recs)
+	mu.Unlock()
+	if synced != 0 {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("initial sync leaked %d change record(s) (pre-existing objects masquerading as Added): %+v", synced, recs)
+	}
+
+	// A pod created AFTER arming is a real change and must be logged.
+	if _, err := client.CoreV1().Pods("shop").Create(ctx, testPod("shop", "pay-2", "gke-a", "pay-7b9d", ""), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	waitFor("post-sync change record for pay-2", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(recs) > 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range recs {
+		if r.Name != "pay-2" {
+			t.Errorf("unexpected change record for %s/%s (op=%s) — only the live delta may log", r.Namespace, r.Name, r.Op)
+		}
+	}
 
 	cancel()
 	select {

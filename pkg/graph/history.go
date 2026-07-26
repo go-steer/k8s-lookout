@@ -29,12 +29,22 @@ package graph
 //	    id, kind byte, observed byte, namespace-node id
 //	numSources, then per source sorted by NodeID:
 //	    id, numEdges, per edge: kind byte, to id
+//	v2 only, appended after the v1 body:
+//	    watched flag byte: 0 = nil watched set (watch everything),
+//	    1 = explicit set, followed by numWatched then one kind byte
+//	    per watched kind, ascending
 //
 // Only the OUT adjacency is serialized; Restore rebuilds the reverse
 // index. The interner keys are serialized in full (identities of
 // GC'd nodes included) so NodeIDs in a restored snapshot are
 // IDENTICAL to the live graph's at encode time — which is what lets
 // the §6.6 delta log reference nodes by compact ID (see replay.go).
+//
+// v2 (M3 drill observation 2) appends the snapshot's watched-kind
+// set so the honesty predicate behind the radius unknown-vs-missing
+// distinction (Snapshot.Watches, #46) survives Encode/Restore. v1
+// files remain restorable forever — they simply predate the field
+// and come back with a nil watched set (watch-everything posture).
 //
 // Compression is stdlib compress/gzip on purpose: snapshots are cut
 // every ~5 minutes (§6.6), so encoder throughput is irrelevant next
@@ -55,8 +65,14 @@ import (
 // SnapshotFormatVersion is the current serialization format. Bump on
 // any body change; Restore refuses versions it does not understand
 // (a snapshot written by a newer lookout is unreadable, never
-// misread).
-const SnapshotFormatVersion = 1
+// misread) but keeps reading every version it ever wrote — LKGH v1
+// files are a frozen contract.
+const SnapshotFormatVersion = 2
+
+// snapshotFormatV1 is the original format: identical to v2 minus the
+// trailing watched-kind section. Restore accepts it for compatibility
+// with stores written by pre-v2 sentinels.
+const snapshotFormatV1 = 1
 
 // snapshotMagic brands the header: LooKout Graph History.
 var snapshotMagic = [4]byte{'L', 'K', 'G', 'H'}
@@ -112,6 +128,23 @@ func (s *Snapshot) Encode() ([]byte, error) {
 		}
 	}
 
+	// v2: the watched-kind set (nil = watch everything).
+	if s.watched == nil {
+		body = append(body, 0)
+	} else {
+		body = append(body, 1)
+		var kinds []NodeKind
+		for k := NodeKind(0); k < numNodeKinds; k++ {
+			if s.watched[k] {
+				kinds = append(kinds, k)
+			}
+		}
+		body = binary.AppendUvarint(body, uint64(len(kinds)))
+		for _, k := range kinds {
+			body = append(body, byte(k))
+		}
+	}
+
 	var out bytes.Buffer
 	out.Write(snapshotMagic[:])
 	out.WriteByte(SnapshotFormatVersion)
@@ -133,8 +166,9 @@ func Restore(data []byte) (*Snapshot, error) {
 	if len(data) < len(snapshotMagic)+1 || !bytes.Equal(data[:4], snapshotMagic[:]) {
 		return nil, fmt.Errorf("%w: missing LKGH header", ErrBadSnapshot)
 	}
-	if v := data[4]; v != SnapshotFormatVersion {
-		return nil, fmt.Errorf("%w: format version %d (this binary reads %d)", ErrBadSnapshot, v, SnapshotFormatVersion)
+	version := data[4]
+	if version != snapshotFormatV1 && version != SnapshotFormatVersion {
+		return nil, fmt.Errorf("%w: format version %d (this binary reads %d and older)", ErrBadSnapshot, version, SnapshotFormatVersion)
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(data[5:]))
 	if err != nil {
@@ -218,6 +252,37 @@ func Restore(data []byte) (*Snapshot, error) {
 		}
 		if d.err == nil {
 			s.out[src] = edges
+		}
+	}
+
+	// v2 trailer: the watched-kind set. v1 files predate it and read
+	// as nil — the watch-everything posture #46's consumers assume
+	// only when it is true (one-shot full-List graphs).
+	if version >= SnapshotFormatVersion && d.err == nil {
+		switch flag := d.byte(); flag {
+		case 0:
+			// nil watched set: watch everything.
+		case 1:
+			n := d.uvarint()
+			if d.err == nil && n > uint64(numNodeKinds) {
+				return nil, fmt.Errorf("%w: watched-kind count %d exceeds kind space", ErrBadSnapshot, n)
+			}
+			watched := make(map[NodeKind]bool, n)
+			for range n {
+				k := NodeKind(d.byte())
+				if d.err != nil {
+					break
+				}
+				if k >= numNodeKinds {
+					return nil, fmt.Errorf("%w: watched kind %d unknown", ErrBadSnapshot, k)
+				}
+				watched[k] = true
+			}
+			s.watched = watched
+		default:
+			if d.err == nil {
+				return nil, fmt.Errorf("%w: watched flag %d unknown", ErrBadSnapshot, flag)
+			}
 		}
 	}
 	if d.err != nil {

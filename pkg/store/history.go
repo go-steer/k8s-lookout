@@ -54,6 +54,13 @@ import (
 // "no such table".
 const graphHistorySchemaVersion = 2
 
+// graphEpochSchemaVersion is the first schema version whose history
+// rows carry the per-process epoch column (migration v5). Read-only
+// opens of v2–v4 stores fall back to the pre-epoch queries: all their
+// rows are treated as one epoch, exactly the empty-string backfill
+// default the migration applies.
+const graphEpochSchemaVersion = 5
+
 // ErrNoHistory is returned by GraphAt when the store holds no
 // snapshot at or before the requested time — the store predates
 // graph history, the sentinel ran without the graph feed, or the
@@ -83,6 +90,7 @@ type GraphChange struct {
 type changeRow struct {
 	at         int64
 	generation int64
+	epoch      string
 	op         string
 	kind       string
 	namespace  string
@@ -109,6 +117,7 @@ func (s *Store) RecordGraphChange(rec graph.ChangeRecord) {
 	r := &changeRow{
 		at:         rec.At.UTC().UnixNano(),
 		generation: int64(rec.Generation), // #nosec G115 -- swap counter, nowhere near overflow
+		epoch:      s.epoch,
 		op:         rec.Op.String(),
 		kind:       rec.Kind.String(),
 		namespace:  rec.Namespace,
@@ -131,12 +140,13 @@ func (s *Store) RecordGraphChange(rec graph.ChangeRecord) {
 }
 
 // PutGraphSnapshot serializes and stores one topology snapshot,
-// stamped with the store clock and the snapshot's generation (the
-// graph's own monotonic swap counter — there is no such thing as one
-// cluster-wide Kubernetes resourceVersion across informers, so the
-// generation is the honest replay cursor; the column keeps the §6.6
-// name). Synchronous by design (see the package comment above).
-// Nil-safe no-op when disabled; an error when read-only.
+// stamped with the store clock, this process's epoch, and the
+// snapshot's generation (the graph's own monotonic swap counter —
+// there is no such thing as one cluster-wide Kubernetes
+// resourceVersion across informers, so the generation is the honest
+// replay cursor; the column keeps the §6.6 name). Synchronous by
+// design (see the package comment above). Nil-safe no-op when
+// disabled; an error when read-only.
 func (s *Store) PutGraphSnapshot(ctx context.Context, snap *graph.Snapshot) error {
 	if s == nil {
 		return nil
@@ -149,13 +159,14 @@ func (s *Store) PutGraphSnapshot(ctx context.Context, snap *graph.Snapshot) erro
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO graph_snapshots
-		(taken_at, resource_version, format_version, size_bytes, data)
-		VALUES (?,?,?,?,?)`,
+		(taken_at, resource_version, format_version, size_bytes, data, epoch)
+		VALUES (?,?,?,?,?,?)`,
 		s.clock().UTC().UnixNano(),
 		int64(snap.Generation()), // #nosec G115 -- swap counter
 		graph.SnapshotFormatVersion,
 		len(data),
 		data,
+		s.epoch,
 	)
 	if err != nil {
 		return fmt.Errorf("store: put graph snapshot (generation %d): %w", snap.Generation(), err)
@@ -164,12 +175,35 @@ func (s *Store) PutGraphSnapshot(ctx context.Context, snap *graph.Snapshot) erro
 }
 
 // GraphAt reconstructs the topology as of time at (§6.6): nearest
-// snapshot with taken_at <= at, then every logged change with a
-// LATER generation and at' <= at replayed forward, in log order. The
-// boundary is inclusive on both cursors: a change stamped exactly at
-// the requested time is part of the answer, and asking for exactly a
-// snapshot's own time returns that snapshot verbatim. Nil-safe:
-// a disabled store (and any store without history) answers
+// snapshot with taken_at <= at — any epoch — then every logged change
+// FROM THAT SNAPSHOT'S EPOCH with a later generation and at' <= at
+// replayed forward, in log order. The boundary is inclusive on both
+// cursors: a change stamped exactly at the requested time is part of
+// the answer, and asking for exactly a snapshot's own time returns
+// that snapshot verbatim.
+//
+// Epochs (M3 drill observation 1): every sentinel process writes
+// snapshots and change rows under a fresh epoch id, because its graph
+// re-interns NodeIDs and restarts the generation counter — replay is
+// only meaningful within one process's rows. The epoch scoping gives
+// restart boundaries these documented semantics:
+//
+//   - at inside an epoch's coverage → that epoch's state, exactly as
+//     before.
+//   - at in the GAP between epochs (after the old sentinel's last
+//     write, before the new one's first snapshot — including the new
+//     process's pre-baseline window, whose change rows are
+//     unreplayable without their own snapshot) → the PRIOR epoch's
+//     last known state: the nearest snapshot <= at belongs to the
+//     prior epoch and its whole change tail replays. That is the
+//     honest answer — nothing was observing the cluster in the gap,
+//     so the last observed state is everything the store knows.
+//   - at before the first snapshot of the first epoch → ErrNoHistory.
+//
+// Rows written before the epoch migration all carry epoch ” and are
+// treated as one epoch (see migration v5); stores older than the
+// migration (read-only opens) take the same single-epoch query path.
+// Nil-safe: a disabled store (and any store without history) answers
 // ErrNoHistory.
 func (s *Store) GraphAt(ctx context.Context, at time.Time) (*graph.Snapshot, error) {
 	if s == nil {
@@ -181,29 +215,46 @@ func (s *Store) GraphAt(ctx context.Context, at time.Time) (*graph.Snapshot, err
 	var (
 		generation    int64
 		formatVersion int
+		epoch         string
 		data          []byte
+		err           error
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT resource_version, format_version, data
-		FROM graph_snapshots WHERE taken_at <= ?
-		ORDER BY taken_at DESC, id DESC LIMIT 1`, at.UTC().UnixNano()).
-		Scan(&generation, &formatVersion, &data)
+	if s.schemaVersion >= graphEpochSchemaVersion {
+		err = s.db.QueryRowContext(ctx, `SELECT resource_version, format_version, epoch, data
+			FROM graph_snapshots WHERE taken_at <= ?
+			ORDER BY taken_at DESC, id DESC LIMIT 1`, at.UTC().UnixNano()).
+			Scan(&generation, &formatVersion, &epoch, &data)
+	} else {
+		// Pre-epoch store: no epoch column; all rows are one epoch.
+		err = s.db.QueryRowContext(ctx, `SELECT resource_version, format_version, data
+			FROM graph_snapshots WHERE taken_at <= ?
+			ORDER BY taken_at DESC, id DESC LIMIT 1`, at.UTC().UnixNano()).
+			Scan(&generation, &formatVersion, &data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w (asked for %s)", ErrNoHistory, at.UTC().Format(time.RFC3339))
 	}
 	if err != nil {
 		return nil, err
 	}
-	if formatVersion != graph.SnapshotFormatVersion {
-		return nil, fmt.Errorf("store: graph snapshot format v%d not readable by this binary (reads v%d) — written by a different lookout version", formatVersion, graph.SnapshotFormatVersion)
+	if formatVersion > graph.SnapshotFormatVersion {
+		return nil, fmt.Errorf("store: graph snapshot format v%d not readable by this binary (reads up to v%d) — written by a newer lookout version", formatVersion, graph.SnapshotFormatVersion)
 	}
 	base, err := graph.Restore(data)
 	if err != nil {
 		return nil, fmt.Errorf("store: restore graph snapshot (generation %d): %w", generation, err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT generation, effect FROM graph_changes
-		WHERE generation > ? AND at <= ?
-		ORDER BY generation ASC, id ASC`, generation, at.UTC().UnixNano())
+	var rows *sql.Rows
+	if s.schemaVersion >= graphEpochSchemaVersion {
+		rows, err = s.db.QueryContext(ctx, `SELECT generation, effect FROM graph_changes
+			WHERE epoch = ? AND generation > ? AND at <= ?
+			ORDER BY generation ASC, id ASC`, epoch, generation, at.UTC().UnixNano())
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT generation, effect FROM graph_changes
+			WHERE generation > ? AND at <= ?
+			ORDER BY generation ASC, id ASC`, generation, at.UTC().UnixNano())
+	}
 	if err != nil {
 		return nil, err
 	}

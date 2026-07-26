@@ -403,3 +403,118 @@ func TestRadiusRegistered(t *testing.T) {
 		t.Error("triage radius must be graph-backed (--at/--store)")
 	}
 }
+
+// seedSentinelHistory writes a store the way the SENTINEL does: the
+// graph feed's partial watched set (pods/nodes/replicasets), a
+// Deployment present only as an owner-reference identity, and a
+// ConfigMap present only as a mount reference. Returns the store path
+// and the snapshot instant.
+func seedSentinelHistory(t *testing.T) (path string, t0 time.Time) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "lookout.db")
+	t0 = time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return t0 }
+
+	st, err := store.Open(path, store.WithClock(clock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := graph.New(graph.Options{
+		SwapInterval: -1,
+		OnChange:     st.RecordGraphChange,
+		Now:          clock,
+		WatchedKinds: []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet},
+	})
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "pay", Name: "web-7b9d",
+		OwnerReferences: ownedBy("Deployment", "web"),
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "pay", Name: "web-7b9d-x1",
+			OwnerReferences: ownedBy("ReplicaSet", "web-7b9d"),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   "n1",
+			Containers: []corev1.Container{{Name: "app", Image: "img:v1"}},
+			Volumes: []corev1.Volume{{
+				Name:         "cfg",
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm-web"}}},
+			}},
+		},
+	}
+	if err := g.Writer().FromObjects(slices.Values([]any{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}, rs, pod,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := g.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutGraphSnapshot(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path, t0
+}
+
+// TestRadius_At_DeploymentTarget is the M3 drill observation 3
+// regression: the sentinel's graph holds Deployments identity-only
+// (via ReplicaSet ownerRefs), and a historical radius centered on the
+// Deployment must resolve through that owner chain instead of failing
+// at every instant. It also pins observation 2 at the CLI surface:
+// the restored snapshot keeps the feed's watched set, so the mounted
+// ConfigMap (unwatched kind, identity-only) renders observed=unknown,
+// never the pre-#46 radius.missing claim.
+func TestRadius_At_DeploymentTarget(t *testing.T) {
+	path, t0 := seedSentinelHistory(t)
+	cmd := RadiusCommand(noClusterDeps(t))
+
+	res := checktest.Run(t, cmd, "Deployment/pay/web",
+		"--at="+t0.Format(time.RFC3339), "--store="+path)
+	if res.Code != emit.ExitData {
+		t.Fatalf("Deployment target must resolve through the owner chain: exit %d, stderr %q", res.Code, res.Stderr)
+	}
+	for _, want := range []string{"name=web-7b9d", "name=n1", "source=history"} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, res.Stdout)
+		}
+	}
+	// Observation 2 at the surface: the unwatched ConfigMap is
+	// unknown, not "missing".
+	if !strings.Contains(res.Stdout, "name=cm-web") || !strings.Contains(res.Stdout, "observed=unknown") {
+		t.Errorf("unwatched ConfigMap must render observed=unknown:\n%s", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "radius.missing") {
+		t.Errorf("restored watched set lost — ReferencedNotFound claimed for an unwatched kind:\n%s", res.Stdout)
+	}
+
+	// A workload genuinely absent at t errors with the actionable
+	// watched-topology message naming the instant.
+	missing := checktest.Run(t, cmd, "Deployment/pay/ghost",
+		"--at="+t0.Format(time.RFC3339), "--store="+path)
+	if missing.Code != emit.ExitRuntime {
+		t.Fatalf("absent target: exit %d (stdout %q)", missing.Code, missing.Stdout)
+	}
+	if !strings.Contains(missing.Stderr, "watched topology") ||
+		!strings.Contains(missing.Stderr, "as of "+t0.Format(time.RFC3339)) {
+		t.Errorf("error must say the object was not in the watched topology at t: %q", missing.Stderr)
+	}
+}
+
+// TestChanges_At_DeploymentTarget: the same owner-chain fallback
+// serves `triage changes --at` — the drill's other blocked surface.
+func TestChanges_At_DeploymentTarget(t *testing.T) {
+	path, t0 := seedSentinelHistory(t)
+	res := checktest.Run(t, ChangesCommand(noClusterDeps(t)), "Deployment/pay/web",
+		"--at="+t0.Format(time.RFC3339), "--store="+path, "--since=10m")
+	if res.Code != emit.ExitData {
+		t.Fatalf("Deployment target must resolve: exit %d, stderr %q", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "source=history") {
+		t.Errorf("summary must say source=history:\n%s", res.Stdout)
+	}
+}

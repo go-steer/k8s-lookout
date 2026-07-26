@@ -168,7 +168,7 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 				return 0, err
 			}
 		}
-		id, err := lookupTarget(snap, wl)
+		id, err := lookupTarget(snap, wl, inv.Scope.At)
 		if err != nil {
 			return 0, err
 		}
@@ -194,7 +194,7 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		// PURE live mode: no delta log to read — approximate from
 		// what the API still shows: ReplicaSet rollout revisions and
 		// recent scaling events (§6.6: answer live-only and say so).
-		id, err := lookupTarget(snap, wl)
+		id, err := lookupTarget(snap, wl, time.Time{})
 		if err != nil {
 			return 0, err
 		}

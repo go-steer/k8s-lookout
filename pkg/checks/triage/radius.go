@@ -16,7 +16,6 @@ package triage
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -123,11 +122,8 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 		}
 	}
 
-	id, err := lookupTarget(snap, wl)
+	id, err := lookupTarget(snap, wl, inv.Scope.At)
 	if err != nil {
-		if !inv.Scope.At.IsZero() {
-			return 0, fmt.Errorf("%v as of %s (was it created later?)", err, inv.Scope.At.UTC().Format(time.RFC3339))
-		}
 		return 0, err
 	}
 	for _, nb := range bundle.RadiusNeighbors(snap, id, depth) {
@@ -153,9 +149,10 @@ var lateralRelations = map[graph.NodeKind]string{
 // claim is made only for kinds the snapshot's ingest actually observes
 // — an unobserved neighbor of an unwatched kind is reported with
 // observed=unknown instead (same rule as the bundle's radius section).
-// Both of this command's snapshot sources (one-shot List, history)
-// watch everything today, so behavior here is unchanged until a
-// partial-ingest snapshot is served.
+// The live one-shot List watches everything; history snapshots carry
+// the sentinel feed's partial watched set through the store (LKGH v2),
+// so identity-only neighbors of unwatched kinds keep the #46
+// unknown-vs-missing honesty in --at answers too.
 func neighborFinding(nb bundle.Neighbor, snap *graph.Snapshot, cluster *state.Cluster) emit.Finding {
 	relation := nb.Via.String()
 	details := []emit.Field{

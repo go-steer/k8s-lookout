@@ -149,6 +149,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client, and the GAPIC speaks to the same
   `cloudquotas.googleapis.com` surface §10.2 names.
 
+### Fixed
+
+- The five M3-drill observations (`docs/milestones/M3.md`
+  §Observations):
+  1. `store.GraphAt` now replays across sentinel restarts. Every
+     graph snapshot and change-log row is stamped with a per-process
+     EPOCH id (store migration v5, additive columns; pre-migration
+     rows backfill to `''` and are treated as one epoch), and
+     resolution is epoch-scoped: nearest snapshot ≤ t (any epoch),
+     then only THAT epoch's changes replay — one process's delta log
+     is never decoded against another process's interner (the drill's
+     `graph: bad change effect` failure is gone). Boundary semantics,
+     documented on `GraphAt`: a `--at` falling in the gap between
+     epochs (sentinel down, or the new process's pre-baseline window)
+     resolves to the prior epoch's last known state — nothing was
+     observing the cluster then, so the last observed state is the
+     honest answer; times from the new epoch's first snapshot onward
+     resolve within the new epoch.
+  2. `Snapshot.Watches` survives serialization: LKGH format v2
+     appends the watched-kind set, and restore/replay carry it
+     through the store — history-mode `triage radius` keeps the #46
+     unknown-vs-missing honesty (`observed=unknown` for identity-only
+     neighbors of unwatched kinds, never `ReferencedNotFound`). v1
+     files remain restorable forever (frozen contract, pinned by a
+     golden-blob test) and read as watch-everything, exactly the
+     posture they were written under.
+  3. Historical queries can target Deployments: `triage radius` and
+     `triage changes` with `--at` resolve identity-only targets of
+     unwatched kinds through the owner chain present in the
+     historical graph (Deployment identity node → Owns edges → its
+     RS/pods). A target genuinely absent at t now errors with "was
+     not in the watched topology as of <t>" plus what to try — not a
+     bare "not found".
+  4. `rollout_stall` resolved records honor the §7.4 stability window
+     and carry correct durations: the clearance observer stamps
+     `StableSince` at the sweep that OBSERVES the not-complete →
+     complete transition (never a completion from before the
+     incident), so a rollback debounces `--recovery-stable-for` like
+     every other observer and the §9.3 corpus fields come out right
+     (`cleared_after` = fire → clearance, `observed_stable_for` ≥ the
+     window; no longer inverted or zeroed). Clearance for every other
+     kind is untouched.
+  5. Informer-sync Adds no longer masquerade as changes: the graph
+     feed's initial-LIST replay applies through the new
+     `graph.Writer.ApplyInitial` (folds state and seeds change
+     tracking, emits no ChangeRecords) and the §6.6 delta log arms
+     only after initial sync — the signal sources' arm-after-sync
+     discipline — so a `triage changes` window spanning a sentinel
+     restart no longer reports every pre-existing object as `Added`
+     at the sync instant.
+
 ## [0.4.0] - 2026-07-26
 
 M3 — leading indicators + history (DESIGN.md §14). Exit criterion verified
