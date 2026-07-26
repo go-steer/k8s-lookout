@@ -40,6 +40,7 @@ import (
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -120,6 +121,9 @@ func quota(ns, name string, used, hard int64) *corev1.ResourceQuota {
 	}
 }
 
+// webhook keeps timeoutSeconds below the delegated check's 10s
+// slow-risk threshold so a live backend stays silent; failurePolicy
+// is left nil (the v1 default, Fail).
 func webhook(name, svcNS, svcName string) *admissionv1.ValidatingWebhookConfiguration {
 	return &admissionv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -128,12 +132,33 @@ func webhook(name, svcNS, svcName string) *admissionv1.ValidatingWebhookConfigur
 			ClientConfig: admissionv1.WebhookClientConfig{
 				Service: &admissionv1.ServiceReference{Namespace: svcNS, Name: svcName},
 			},
+			TimeoutSeconds: ptr(int32(5)),
 		}},
 	}
 }
 
+// service exposes 443, the webhook ServiceReference port default.
 func service(ns, name string) *corev1.Service {
-	return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 443}}},
+	}
+}
+
+// readySlice backs a service with one ready endpoint so the
+// delegated webhook backend check sees it alive.
+func readySlice(ns, svcName string) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns, Name: svcName + "-abc12",
+			Labels: map[string]string{discoveryv1.LabelServiceName: svcName},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses:  []string{"10.0.0.9"},
+			Conditions: discoveryv1.EndpointConditions{Ready: ptr(true)},
+		}},
+	}
 }
 
 // newTestCert returns a PEM self-signed certificate expiring at
@@ -182,6 +207,7 @@ func healthyObjects(t *testing.T) []runtime.Object {
 		tlsSecret(t, "prod", "api-tls", "api.example.com", fixedNow.Add(92*24*time.Hour)),
 		webhook("policy", "infra", "policy-webhook"),
 		service("infra", "policy-webhook"),
+		readySlice("infra", "policy-webhook"),
 	}
 }
 
@@ -382,7 +408,7 @@ func TestBrokenClusterPerCategory(t *testing.T) {
 		"addons":     {"addon.degraded"},
 		"quota":      {"quota.exhausted"},
 		"certs":      {"cert.expired"},
-		"webhooks":   {"webhook.backend_missing"},
+		"webhooks":   {"webhook.failing_closed"},
 	}
 	for cat, kinds := range wantKinds {
 		if status[cat] != "degraded" {
@@ -421,6 +447,29 @@ func TestBrokenClusterGolden(t *testing.T) {
 	if res.Stdout != string(want) {
 		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", res.Stdout, want)
 	}
+}
+
+// TestWebhooksCategoryLineStable pins the scorecard shape across the
+// delegation to state.CheckWebhooks: one ghost-service webhook must
+// yield exactly the same category line format as before —
+// status/total/top rendering untouched, only the finding kind
+// changed (webhook.backend_missing → webhook.failing_closed).
+func TestWebhooksCategoryLineStable(t *testing.T) {
+	res := checktest.Run(t, testCommand(webhook("policy", "infra", "ghost")))
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	want := `kind=health.category severity=critical category=webhooks status=degraded total=1 top="webhook.failing_closed policy"`
+	for _, line := range strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n") {
+		rec := parseLine(t, line)
+		if rec["kind"] == "health.category" && rec["category"] == "webhooks" {
+			if line != want {
+				t.Errorf("webhooks category line changed shape:\n got: %s\nwant: %s", line, want)
+			}
+			return
+		}
+	}
+	t.Fatal("webhooks category line not found")
 }
 
 // TestNamespaceScopedMarksClusterCategoriesUnavailable: a namespaced

@@ -1,0 +1,19 @@
+{
+  "//": "Recorded-shape fixture: iam.googleapis.com/v1 projects.serviceAccounts.getIamPolicy response for a GSA used via GKE Workload Identity. Authored from the IAM REST reference (Policy/Binding) and the documented workload-identity member form serviceAccount:<project>.svc.id.goog[<ns>/<ksa>] — not captured from a live project (§13: no live-project tests in CI).",
+  "version": 1,
+  "etag": "BwYi9aZm1v4=",
+  "bindings": [
+    {
+      "role": "roles/iam.serviceAccountTokenCreator",
+      "members": [
+        "serviceAccount:ci-builder@my-project.iam.gserviceaccount.com"
+      ]
+    },
+    {
+      "role": "roles/iam.workloadIdentityUser",
+      "members": [
+        "serviceAccount:my-project.svc.id.goog[prod/api-sa]"
+      ]
+    }
+  ]
+}

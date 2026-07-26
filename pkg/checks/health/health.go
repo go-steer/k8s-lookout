@@ -23,10 +23,10 @@
 // detailed findings of the degraded categories.
 //
 // Composition, not new checks: the delta-backed categories delegate
-// to pkg/checks/delta's scan; storage, certs, and webhooks are the
-// three lightweight checks that have no standalone command yet
-// (webhooks is the minimal service-backend subset of M5's `state
-// webhooks`). Control-plane latency needs cloud provider metrics and
+// to pkg/checks/delta's scan; the webhooks category delegates to
+// `state webhooks`' exported core (state.CheckWebhooks); storage and
+// certs are the two lightweight checks that have no standalone
+// command yet. Control-plane latency needs cloud provider metrics and
 // reports unavailable until M4 (§14), through the pkg/cloud
 // provider boundary. M1 is LIVE CHECKS ONLY: the merge with open
 // sentinel findings (§9.1) and triage-status records (§9.4) — a
@@ -44,13 +44,13 @@ import (
 	"strings"
 	"time"
 
-	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/delta"
+	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -144,6 +144,11 @@ func New(deps Deps) checks.Command {
 			{Name: "phase", Doc: "PersistentVolumeClaim phase on storage findings (Pending or Lost)"},
 			{Name: "webhook", Doc: "admission webhook as <configuration>/<webhook name>"},
 			{Name: "service", Doc: "service backend a webhook points at, as <namespace>/<name>"},
+			{Name: "backend", Doc: "why a webhook backend is dead: service missing, no ready endpoints, or port <p> not on service"},
+			{Name: "gates", Doc: "namespaces a webhook gates, from namespaceSelector: all namespaces, or <matched>/<total> namespaces with up to 5 names"},
+			{Name: "rules", Doc: "compact operations/resources summary of a webhook's rules, e.g. \"CREATE,UPDATE pods,deployments.apps\""},
+			{Name: "object_selector", Doc: "a webhook's objectSelector, when one is set"},
+			{Name: "timeout", Doc: "webhook timeoutSeconds as <n>s (nil defaults to the API's 10s)"},
 			{Name: memory.DetailTriageStatus, Doc: "triage state from the matched §9.4 record (investigating|triaged|actioned|escalated) — present only with --store on merged findings"},
 			{Name: memory.DetailTriageRootCause, Doc: "the incident agent's root-cause hypothesis, from the matched triage-status record"},
 			{Name: memory.DetailTriageAction, Doc: "the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record"},
@@ -168,6 +173,8 @@ func deltaOutput() []checks.OutputField {
 		"category": true, "status": true, "total": true, "top": true,
 		"subject": true, "not_after": true, "days_left": true,
 		"phase": true, "webhook": true, "service": true,
+		"backend": true, "gates": true, "rules": true,
+		"object_selector": true, "timeout": true,
 	}
 	c, ok := checks.Lookup("triage delta")
 	if !ok {
@@ -252,14 +259,19 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	scanned += n
 
-	// webhooks: cluster-scoped configurations with a service backend
-	// that does not resolve.
+	// webhooks: delegated to `state webhooks`' exported core — the
+	// full audit (dead backends × failurePolicy, blast-radius scope,
+	// timeout risk, CA-bundle expiry), not a subset. Scanned counts
+	// the configurations, matching the lister's contract.
 	if ns == "" {
-		n, err = checkWebhooks(ctx, client, card)
+		in, n, err := state.LoadWebhookInputs(ctx, client)
 		if err != nil {
 			return 0, err
 		}
 		scanned += n
+		for _, f := range state.CheckWebhooks(in, certWarn, now) {
+			card.add("webhooks", f)
+		}
 	} else {
 		card.unavailable["webhooks"] = "webhook configurations are cluster-scoped; run without --namespace"
 	}
@@ -550,99 +562,4 @@ func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now
 		}
 	})
 	return count, err
-}
-
-// checkWebhooks is the minimal service-backend subset of M5's
-// `state webhooks` (§5): a validating/mutating webhook whose
-// ClientConfig names a Service that does not exist will fail (or
-// silently pass, per failurePolicy) every admission it matches —
-// cluster-wide breakage invisible from any workload's status.
-// URL-backed webhooks are skipped: an external endpoint cannot be
-// verified from a List pass.
-func checkWebhooks(ctx context.Context, client kubernetes.Interface, card *scorecard) (int, error) {
-	// Auxiliary input, deliberately not counted as scanned: services
-	// are listed only to resolve webhook backends.
-	services := map[string]bool{}
-	err := listPages("services", func(o metav1.ListOptions) ([]corev1.Service, string, error) {
-		l, err := client.CoreV1().Services(metav1.NamespaceAll).List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(s *corev1.Service) { services[s.Namespace+"/"+s.Name] = true })
-	if err != nil {
-		return 0, err
-	}
-
-	count := 0
-	check := func(configKind, configName, webhookName string, svc *admissionv1.ServiceReference) {
-		if svc == nil { // URL-backed
-			return
-		}
-		if services[svc.Namespace+"/"+svc.Name] {
-			return
-		}
-		card.add("webhooks", emit.Finding{
-			Kind:         "webhook.backend_missing",
-			Severity:     emit.SeverityCritical,
-			KindOfObject: configKind,
-			Name:         configName,
-			Reason:       "BackendServiceMissing",
-			Message:      fmt.Sprintf("webhook backend service %s/%s not found", svc.Namespace, svc.Name),
-			Details: []emit.Field{
-				{Key: "webhook", Value: configName + "/" + webhookName},
-				{Key: "service", Value: svc.Namespace + "/" + svc.Name},
-			},
-		})
-	}
-
-	err = listPages("validatingwebhookconfigurations", func(o metav1.ListOptions) ([]admissionv1.ValidatingWebhookConfiguration, string, error) {
-		l, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(c *admissionv1.ValidatingWebhookConfiguration) {
-		count++
-		for i := range c.Webhooks {
-			check("ValidatingWebhookConfiguration", c.Name, c.Webhooks[i].Name, c.Webhooks[i].ClientConfig.Service)
-		}
-	})
-	if err != nil {
-		return 0, err
-	}
-	err = listPages("mutatingwebhookconfigurations", func(o metav1.ListOptions) ([]admissionv1.MutatingWebhookConfiguration, string, error) {
-		l, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(c *admissionv1.MutatingWebhookConfiguration) {
-		count++
-		for i := range c.Webhooks {
-			check("MutatingWebhookConfiguration", c.Name, c.Webhooks[i].Name, c.Webhooks[i].ClientConfig.Service)
-		}
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Deterministic order regardless of list interleaving.
-	fs := card.findings["webhooks"]
-	sort.Slice(fs, func(i, j int) bool {
-		if fs[i].Name != fs[j].Name {
-			return fs[i].Name < fs[j].Name
-		}
-		return detailValue(fs[i], "webhook") < detailValue(fs[j], "webhook")
-	})
-	return count, nil
-}
-
-func detailValue(f emit.Finding, key string) string {
-	for _, d := range f.Details {
-		if d.Key == key {
-			return d.Value
-		}
-	}
-	return ""
 }

@@ -45,6 +45,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `phase` | PersistentVolumeClaim phase on storage findings (Pending or Lost) |
 | `webhook` | admission webhook as <configuration>/<webhook name> |
 | `service` | service backend a webhook points at, as <namespace>/<name> |
+| `backend` | why a webhook backend is dead: service missing, no ready endpoints, or port <p> not on service |
+| `gates` | namespaces a webhook gates, from namespaceSelector: all namespaces, or <matched>/<total> namespaces with up to 5 names |
+| `rules` | compact operations/resources summary of a webhook's rules, e.g. "CREATE,UPDATE pods,deployments.apps" |
+| `object_selector` | a webhook's objectSelector, when one is set |
+| `timeout` | webhook timeoutSeconds as <n>s (nil defaults to the API's 10s) |
 | `triage_status` | triage state from the matched §9.4 record (investigating\|triaged\|actioned\|escalated) — present only with --store on merged findings |
 | `triage_root_cause` | the incident agent's root-cause hypothesis, from the matched triage-status record |
 | `triage_action` | the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record |

@@ -7,7 +7,7 @@ kind=health.category severity=critical category=storage status=degraded total=2 
 kind=health.category severity=warning category=addons status=degraded total=1 top="addon.degraded kube-system/coredns"
 kind=health.category severity=critical category=quota status=degraded total=1 top="quota.exhausted prod/compute"
 kind=health.category severity=critical category=certs status=degraded total=1 top="cert.expired prod/old-tls"
-kind=health.category severity=critical category=webhooks status=degraded total=1 top="webhook.backend_missing policy"
+kind=health.category severity=critical category=webhooks status=degraded total=1 top="webhook.failing_closed policy"
 kind=node.notready severity=critical kind_of_object=Node name=node-1 reason=KubeletNotReady category=nodes age=10m0s
 kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff category=crashloops container=app restarts=12 last_state=Error exit_code=1
 kind=pod.pending severity=critical namespace=prod kind_of_object=Pod name=batch-7 reason=Unschedulable message="0/3 nodes are available: 3 Insufficient cpu." category=pending age=30m0s
@@ -17,5 +17,5 @@ kind=pvc.pending severity=warning namespace=prod kind_of_object=PersistentVolume
 kind=addon.degraded severity=warning namespace=kube-system kind_of_object=Deployment name=coredns reason=AddonDegraded category=addons addon=dns desired=2 ready=1
 kind=quota.exhausted severity=critical namespace=prod kind_of_object=ResourceQuota name=compute reason=QuotaExhausted category=quota resource=pods used=10 hard=10 pct=100
 kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
-kind=webhook.backend_missing severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=BackendServiceMissing message="webhook backend service infra/ghost not found" category=webhooks webhook=policy/validate.example.com service=infra/ghost
+kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/ghost not found — matching admissions are REJECTED (failurePolicy Fail)" category=webhooks webhook=policy/validate.example.com service=infra/ghost backend="service missing" gates="all namespaces"
 scanned=10 findings=20 elapsed=100ms
