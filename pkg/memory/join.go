@@ -87,7 +87,7 @@ func (j *Joiner) Match(kindOfObject, namespace, name, reason string) (TriageStat
 	key := ResourceKey(kindOfObject, namespace, name)
 	var candidate string
 	if reason != "" {
-		candidate = engine.Fingerprint(engine.KindK8sEvent, engine.CanonicalReason(reason), kindOfObject, "")
+		candidate = engine.ScanFingerprint(reason, kindOfObject, "")
 	}
 	best := -1
 	for i, r := range j.records {

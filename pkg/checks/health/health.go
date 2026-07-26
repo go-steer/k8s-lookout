@@ -53,6 +53,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/memory"
 	"github.com/go-steer/k8s-lookout/pkg/store"
@@ -343,6 +344,16 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	for _, cat := range categoryOrder {
 		for _, f := range card.findings[cat] {
 			f.Details = append([]emit.Field{{Key: "category", Value: cat}}, f.Details...)
+			// §8 push/pull dedup key (docs/signal-schema-v1.md): a
+			// category detail describes a symptom class the sentinel
+			// could also push, so it carries the scan fingerprint the
+			// push path would stamp — how "the sentinel paged on this
+			// 20 minutes ago" and "the scan still sees it" merge into
+			// one finding instead of two. Scorecard lines have no
+			// incident-class identity and stay fingerprint-free.
+			if f.Reason != "" && f.KindOfObject != "" {
+				f.Fingerprint = engine.ScanFingerprint(f.Reason, f.KindOfObject, "")
+			}
 			if err := inv.Out.Emit(f); err != nil {
 				return 0, err
 			}

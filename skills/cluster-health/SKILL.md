@@ -28,8 +28,8 @@ kind=health.category severity=info reason=Unavailable message="requires cloud pr
 kind=health.category severity=critical category=crashloops status=degraded total=1 top="pod.crashloop prod/api-0"
 kind=health.category severity=warning category=addons status=degraded total=1 top="addon.degraded kube-system/coredns"
 kind=health.category severity=critical category=certs status=degraded total=1 top="cert.expired prod/old-tls"
-kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff category=crashloops container=app restarts=12 last_state=Error exit_code=1
-kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
+kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff fingerprint=sha256:e2957792a0b3ad9e29db2051dbc69ff01dfe3a52da8dbb6d1331aa44fe946f8b category=crashloops container=app restarts=12 last_state=Error exit_code=1
+kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" fingerprint=sha256:dd1c9738112cd7229a73b1920b06122bccee7bb0e7867c93752fa0b0e522557d category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
 …
 scanned=10 findings=20 elapsed=100ms
 ```

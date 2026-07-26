@@ -7,10 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-All five M4-drill observations fixed (`docs/milestones/M4.md`
-§Observations).
+M5 — fleet & corpus — closes out the milestone plan: the signal
+schema is FROZEN as v1 (`docs/signal-schema-v1.md`), the §9.3 corpus
+harvester contract is validated end-to-end, and the multi-cluster
+rollup is demonstrated as the AX-side fingerprint join. Plus all five
+M4-drill observations fixed (`docs/milestones/M4.md` §Observations).
 
 ### Added
+
+- **Signal-schema v1 freeze** (`docs/signal-schema-v1.md`, DESIGN.md
+  §8/§14 M5): the fleet-rollup wire contract AX consumes as-is,
+  frozen in-repo per the standing decision (no ax-repo filing).
+  Machine-readable ledger in `pkg/inject/schema_freeze_test.go`: all
+  32 shipped kinds enumerated and mapped to their wire structs, every
+  struct's ordered json field list pinned (removal/rename fails the
+  ledger — a v2 negotiation with AX, never a test update; additions
+  are additive-only and must extend the ledger consciously), and
+  every payload round-trips marshal→unmarshal→marshal byte-exact so
+  schema-walking consumers re-serialize losslessly.
+- **§8 identity fields on source-namespaced payloads**: kinds other
+  than the frozen `k8s-event`/`k8s-event-followup` pair now carry
+  `source`, `severity`, `fingerprint`, and (when known) `project`/
+  `zone` on the wire — fleet rollup becomes an AX join on
+  (fingerprint, cluster/project/zone) instead of a parsing project.
+  The M0 pair stays byte-identical (frozen wire pins unchanged); the
+  `quota.forecast`/`saturation.forecast` pins were extended to the
+  completed v1 shape in the same change.
+- **Scan-side fingerprints** (§8 "one schema for push and pull"):
+  `lookout health` and `lookout triage delta` stamp every
+  symptom-class finding with the new `fingerprint` envelope field,
+  computed by the frozen scan-source mapping
+  `engine.ScanFingerprint(reason, objectClass, zone)` ≡
+  `Fingerprint("k8s-event", CanonicalReason(reason), …)` — the exact
+  recipe the §9.4 join has used since M4 (the joiner now calls the
+  shared helper). `lookout triage status` moved the record key to the
+  same envelope field. Push/pull parity is pinned by
+  `TestFingerprintParity_PushAndScan`: the dispatcher-stamped
+  occurrence is found in the §9.1 store under the scan-computed key.
+- **§9.3 corpus harvester** (`pkg/corpus`; CLI
+  `go run ./dev/tools/harvest-corpus`): extracts labeled trajectories
+  — symptom → diagnosis (enrichment bundle, §9.4 records) → action
+  (`status=actioned|escalated`) → externally verified outcome
+  (`resolved`/`resolved.reverted` with its structured `resolution`) —
+  from a captured inject stream in `dev/drills/stub-daemon.py`'s log
+  format (optionally interleaved with exported triage-status record
+  JSON lines), by PURE schema walks over the frozen payloads: no NLP,
+  which is the §9.3 contract this validates. Labels come only from
+  structured fields (`recovered`/`object_deleted`/`reverted`; a
+  reverted resolve wins over the resolve it reverts). End-to-end exit
+  check `TestDrill_CorpusHarvest_EndToEnd`: a scripted full lifecycle
+  through the REAL dispatcher against a stub-format capture yields
+  exactly one COMPLETE labeled trajectory; the sibling
+  `TestDrill_MultiClusterRollup_Stockout` runs TWO dispatcher
+  instances (prod-east/prod-west) over the same staged zonal stockout
+  (+ `quota_blocked`, + storm-fingerprint kind coverage) and asserts
+  the fleet-level join: identical fingerprints, differing cluster
+  identity, one group per failure class.
 
 - `lookout triage status` (MCP `k8s_triage_status`) — the §9.4
   triage-status PRODUCER surface (M4 observation 1), the §4.1

@@ -21,19 +21,34 @@ import "time"
 // design doc's "Inject payload shape" section verbatim so playbook
 // skills can pattern-match against them.
 type Payload struct {
-	Kind         string         `json:"kind"`
-	Reason       string         `json:"reason"`
-	Namespace    string         `json:"namespace"`
-	KindOfObject string         `json:"kind_of_object"`
-	Name         string         `json:"name"`
-	Container    string         `json:"container,omitempty"`
-	UID          string         `json:"uid"`
-	Message      string         `json:"message"`
-	Count        int            `json:"count"`
-	FirstSeen    time.Time      `json:"first_seen"`
-	LastSeen     time.Time      `json:"last_seen"`
-	Cluster      string         `json:"cluster"`
-	Context      PayloadContext `json:"context"`
+	Kind         string    `json:"kind"`
+	Reason       string    `json:"reason"`
+	Namespace    string    `json:"namespace"`
+	KindOfObject string    `json:"kind_of_object"`
+	Name         string    `json:"name"`
+	Container    string    `json:"container,omitempty"`
+	UID          string    `json:"uid"`
+	Message      string    `json:"message"`
+	Count        int       `json:"count"`
+	FirstSeen    time.Time `json:"first_seen"`
+	LastSeen     time.Time `json:"last_seen"`
+	Cluster      string    `json:"cluster"`
+	// Project / Zone / Source / Severity / Fingerprint complete the
+	// §8 schema on SOURCE-NAMESPACED kinds (docs/signal-schema-v1.md,
+	// the M5 v1 freeze): fingerprint + cluster/project/zone are what
+	// make fleet rollup an AX join instead of an AX parsing project.
+	// ADDITIVE via omitempty, and the dispatcher stamps them ONLY on
+	// kinds other than the frozen k8s-event / k8s-event-followup pair
+	// — those payloads stay byte-identical to M0 (the frozen wire
+	// pins pass unchanged). Zone/Project are empty until a
+	// deployment's cluster-metadata wiring supplies them; Zone also
+	// participates in the fingerprint hash when set.
+	Project     string         `json:"project,omitempty"`
+	Zone        string         `json:"zone,omitempty"`
+	Source      string         `json:"source,omitempty"`
+	Severity    string         `json:"severity,omitempty"`
+	Fingerprint string         `json:"fingerprint,omitempty"`
+	Context     PayloadContext `json:"context"`
 	// Enrichment is the §7.6 warm-session attachment, present only on
 	// the INITIAL inject of a per-incident session when the enrichment
 	// stage ran. ADDITIVE to the frozen k8s-event shape: omitempty

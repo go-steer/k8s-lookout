@@ -36,11 +36,10 @@ MCP tool: `k8s_triage_status`
 
 ## Output fields
 
-Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`):
+Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`):
 
 | Field | Meaning |
 | --- | --- |
-| `fingerprint` | the record's §8 incident-class fingerprint |
 | `resource_key` | the record's resource pin, as stored (<KindOfObject>/<namespace>/<name>) |
 | `triage_status` | the record's triage state (investigating\|triaged\|actioned\|escalated\|resolved) |
 | `triage_root_cause` | the recorded root-cause hypothesis |

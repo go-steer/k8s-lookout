@@ -32,7 +32,7 @@ MCP tool: `k8s_net_probe`
 
 ## Output fields
 
-Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`):
+Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`):
 
 | Field | Meaning |
 | --- | --- |
