@@ -24,7 +24,7 @@ tagged `category=`.
 Abridged real output of a degraded cluster:
 
 ```lookout-golden
-kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics (M4); no cloud provider configured" category=control-plane status=unavailable
+kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics; no cloud provider configured" category=control-plane status=unavailable
 kind=health.category severity=critical category=crashloops status=degraded total=1 top="pod.crashloop prod/api-0"
 kind=health.category severity=warning category=addons status=degraded total=1 top="addon.degraded kube-system/coredns"
 kind=health.category severity=critical category=certs status=degraded total=1 top="cert.expired prod/old-tls"
@@ -38,9 +38,13 @@ scanned=10 findings=20 elapsed=100ms
   lines and a summary — nothing else.
 - `status=unavailable` is *not* degraded: the category could not be
   assessed and the `message` says why. `control-plane unavailable
-  ("requires cloud provider metrics (M4)")` is expected on vanilla
-  (non-GKE) clusters and clusters without a cloud provider configured —
-  report it as "not assessable here", not as a problem.
+  ("requires cloud provider metrics")` is expected on vanilla (non-GKE)
+  clusters and clusters without a cloud provider configured — report it
+  as "not assessable here", not as a problem. With a metrics-capable
+  provider the category instead runs the `perf probe` apiserver pack
+  (p99 by verb/resource) and scores `healthy`/`degraded` like any
+  other; `unavailable` there means the workspace lacks the metric
+  (enable GKE control-plane metrics).
 - Severity of a degraded category line is the worst severity inside it.
 - Exit code is `0` whenever the scan ran — degraded is data, not an error.
   `findings=0` cannot happen for `health` (the scorecard always emits);

@@ -100,6 +100,11 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 	return p, nil
 }
 
+// The resolved identity doubles as the cloud.Identity surface the
+// sentinel stamps §8 zone/project from (precedence: explicit
+// --project/--zone flag > this metadata > empty).
+var _ cloud.Identity = (*Provider)(nil)
+
 // Name implements cloud.Provider.
 func (p *Provider) Name() string { return Name }
 

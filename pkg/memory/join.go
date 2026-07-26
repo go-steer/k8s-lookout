@@ -76,10 +76,11 @@ func (j *Joiner) Len() int { return len(j.records) }
 //   - fingerprint disambiguates several open records on ONE
 //     resource: the finding's §8 scan candidate — the M0-frozen
 //     reactive kind ("k8s-event") + canonicalized reason + object
-//     class, zone empty on both sides until cluster-metadata wiring
-//     lands — is preferred over recency. Records whose fingerprints
-//     a scan cannot reproduce (leading-indicator kinds) still join
-//     via the resource pin, freshest first.
+//     class, zone empty (a point-in-time scan carries no deployment
+//     identity) — is preferred over recency. Records whose
+//     fingerprints a scan cannot reproduce (leading-indicator kinds,
+//     or zone-hashed fingerprints from a sentinel with zone stamping
+//     wired) still join via the resource pin, freshest first.
 func (j *Joiner) Match(kindOfObject, namespace, name, reason string) (TriageStatusRecord, bool) {
 	if j == nil || len(j.records) == 0 {
 		return TriageStatusRecord{}, false

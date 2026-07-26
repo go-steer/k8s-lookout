@@ -1,4 +1,4 @@
-kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics (M4); no cloud provider configured" category=control-plane status=unavailable
+kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics; no cloud provider configured" category=control-plane status=unavailable
 kind=health.category severity=critical category=nodes status=degraded total=1 top="node.notready node-1"
 kind=health.category severity=critical category=crashloops status=degraded total=1 top="pod.crashloop prod/api-0"
 kind=health.category severity=critical category=pending status=degraded total=1 top="pod.pending prod/batch-7"

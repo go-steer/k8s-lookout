@@ -59,6 +59,7 @@ breaking change to running deployments, never a refactor.
 | `--otel-exporter` | string | `none` | OpenTelemetry span exporter: none \| console \| otlp. See docs/otel.md. |
 | `--owner` | string | — | X-Asserted-Caller value for POST /sessions in per-incident mode. Sidecar must be in daemon's proxy_identities. |
 | `--pending-age` | duration | `5m0s` | How long a pod must be Pending+Unschedulable before capacity.pending-aged fires at warning (critical at the design-fixed 15m, or at this value when set higher). Must be > 0. |
+| `--project` | string | — | Cloud project/account the cluster runs in, stamped into §8 payloads. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly. |
 | `--quota-poll` | duration | `15m0s` | Poll interval for the quota source's inventory read and per-watched-quota history query. Must be > 0. |
 | `--quota-warn` | float | `0.8` | Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1). |
 | `--quota-window` | duration | `168h0m0s` | History window the quota usage slope is fitted over (the §8 linear-\<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0. |
@@ -87,5 +88,6 @@ breaking change to running deployments, never a refactor.
 | `--watchboard-batch` | int | `5` | Buffered warning-class signals that trigger a watchboard digest flush (per-incident mode; §7.7). Must be >= 1. |
 | `--watchboard-flush` | duration | `1m0s` | Maximum age of a buffered warning before the watchboard digest flushes regardless of batch size. Must be > 0. |
 | `--watchboard-rotate` | int | `200` | Digest injects per watchboard session before size-based rotation (§15 Q2) opens a fresh session. Must be >= 1. |
+| `--zone` | string | — | Failure domain (zone, or region for regional clusters) stamped into §8 payloads and the signal fingerprint hash. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly (e.g. from a topology label). Unset zones produce zone-less fingerprints — stable, but cross-cluster joins within a zone need it stamped. |
 
 See also: [Signal kinds](/reference/signal-kinds/) — everything the sentinel can inject; [Prometheus metrics](/reference/metrics/) — the `--metrics-addr` surface.

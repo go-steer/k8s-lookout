@@ -170,8 +170,12 @@ type Signal struct {
 
 	// Deployment identity (§8): where this signal was observed.
 	// Stamped by the pipeline from sentinel configuration, not by
-	// sources. Zone/Project are empty until cluster-metadata wiring
-	// lands (no flag surface change in this PR).
+	// sources: Cluster from --cluster-name, Zone/Project by the
+	// documented precedence (explicit --zone/--project flag >
+	// provider metadata via cloud.Identity > empty). Zone
+	// participates in the fingerprint hash; deployments that stamp
+	// nothing keep zone-less fingerprints — stable, but cross-cluster
+	// joins within a failure domain need zones stamped.
 	Cluster string
 	Project string
 	Zone    string

@@ -81,6 +81,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `used` | quota usage from status |
 | `hard` | quota hard limit from status |
 | `pct` | quota usage as percent of the hard limit |
+| `pack` | the pack this finding belongs to; also the summary-line note naming the pack that ran |
+| `metric` | the backend-neutral metric the query measured (pack_unavailable: the absent metric) |
+| `verb` | apiserver request verb for this series (apiserver pack) |
+| `observed` | the worst (maximum) aligned value in the window, in the query's unit — the breach basis |
+| `latest` | the newest aligned value in the window |
+| `threshold` | the crossed threshold: the critical one when severity=critical, else the warning one |
+| `window` | the lookback the series cover (--since, or the pack default); also a summary-line note |
 
 ## Output contract
 

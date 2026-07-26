@@ -179,8 +179,6 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`triage-status-write-design.md`](./triage-status-write-design.md),
   not in the original command table; still awaiting maintainer
   sign-off.
-- **`health` control-plane category** reports `unavailable` instead of
-  delegating to the shipped `perf` packs (post-M5 backlog item).
 - **`--storm` defaults OFF** (design ships storm correlation in M2 as
   standard behavior) pending the M3 `GraphAt` restart-replay fix —
   see `docs/milestones/M3.md` observations.
@@ -190,9 +188,14 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`watchboard-rotation-design.md`](./watchboard-rotation-design.md).
 - **`perf probe` portability** (§15 Q4): only the Cloud Monitoring
   backend exists, so the packs are GKE-only in practice.
-- **Zone stamping** is schema-complete but partial at runtime: the
-  k8s-events path hashes `zone=""` until cluster-metadata wiring
-  lands (self-consistent across push and scan).
+- **Scan-side fingerprints are zone-less by design**: the sentinel
+  stamps §8 zone/project (explicit `--zone`/`--project` flag >
+  provider metadata via `cloud.Identity` > empty) and hashes the
+  zone into fingerprints, but a point-in-time scan carries no
+  deployment identity, so `ScanFingerprint` callers pass `zone=""`.
+  Deployments that stamp nothing keep zone-less fingerprints — still
+  stable, and push/scan self-consistent; the §9.4 join tolerates the
+  mismatch via its resource-key pin (`pkg/memory/join.go`).
 
 ## Further pointers
 

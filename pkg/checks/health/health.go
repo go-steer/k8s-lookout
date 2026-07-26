@@ -26,11 +26,14 @@
 // to pkg/checks/delta's scan; the webhooks category delegates to
 // `state webhooks`' exported core (state.CheckWebhooks); storage and
 // certs are the two lightweight checks that have no standalone
-// command yet. Control-plane latency needs cloud provider metrics and
-// reports unavailable until M4 (§14), through the pkg/cloud
-// provider boundary. M1 is LIVE CHECKS ONLY: the merge with open
-// sentinel findings (§9.1) and triage-status records (§9.4) — a
-// scan mid-incident reporting triaged reality — lands in M4.
+// command yet. Control-plane latency delegates to the shipped
+// `perf probe` packs (perf.ControlPlaneProbe, the apiserver pack)
+// when the provider serves Metrics, and reports the honest
+// unavailable reason through the pkg/cloud boundary only when the
+// capability is genuinely absent (no provider / no metrics
+// capability / metric positively missing from the workspace — never
+// silence, §2). The §9.4 merge with open triage-status records rides
+// --store (M4 exit shape).
 package health
 
 import (
@@ -50,6 +53,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/delta"
+	"github.com/go-steer/k8s-lookout/pkg/checks/perf"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
@@ -70,9 +74,10 @@ type Deps struct {
 	// with default config resolution.
 	Client kube.ClientSource
 	// Provider yields the cloud provider. Nil means cloud.New with
-	// default detection (NoProvider on vanilla builds — the
-	// control-plane category then reports unavailable, never
-	// silence, §2).
+	// default detection. With a Metrics-capable provider the
+	// control-plane category runs the perf apiserver pack; on
+	// NoProvider (vanilla builds) it reports unavailable, never
+	// silence (§2).
 	Provider func(ctx context.Context) (cloud.Provider, error)
 	// Now is the scan clock. Nil means time.Now.
 	Now func() time.Time
@@ -155,7 +160,7 @@ func New(deps Deps) checks.Command {
 			{Name: memory.DetailTriageAction, Doc: "the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record"},
 			{Name: memory.DetailTriageSession, Doc: "incident session that wrote the matched triage-status record"},
 			{Name: memory.DetailTriageAge, Doc: "how long ago the matched triage-status record was last updated"},
-		}, deltaOutput()...),
+		}, delegatedOutput()...),
 		Examples: []string{
 			"lookout health",
 			"lookout health --format=json --top=5",
@@ -167,9 +172,21 @@ func New(deps Deps) checks.Command {
 	}
 }
 
-// deltaOutput pulls the delta command's glossary for the delegated
-// categories, minus the keys health declares itself.
-func deltaOutput() []checks.OutputField {
+// perfFields is the subset of `perf probe`'s glossary the
+// control-plane category's delegated apiserver-pack findings can
+// carry — the other packs' fields (priority_level, code, trend) and
+// the standalone command's unavailable-marker keys never appear on a
+// health scorecard and stay out of its glossary.
+var perfFields = map[string]bool{
+	"pack": true, "metric": true, "verb": true, "resource": true,
+	"observed": true, "latest": true, "threshold": true, "window": true,
+}
+
+// delegatedOutput pulls the delegated commands' glossaries — `triage
+// delta` for the delta-backed categories and `perf probe` (apiserver
+// pack fields only) for the control-plane category — minus the keys
+// health declares itself and any overlap between the two.
+func delegatedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"category": true, "status": true, "total": true, "top": true,
 		"subject": true, "not_after": true, "days_left": true,
@@ -177,17 +194,19 @@ func deltaOutput() []checks.OutputField {
 		"backend": true, "gates": true, "rules": true,
 		"object_selector": true, "timeout": true,
 	}
-	c, ok := checks.Lookup("triage delta")
-	if !ok {
-		return nil // isolated test registry; contract test asserts presence
-	}
 	var out []checks.OutputField
-	for _, f := range c.Output {
-		if seen[f.Name] {
-			continue
+	for _, name := range []string{"triage delta", "perf probe"} {
+		c, ok := checks.Lookup(name)
+		if !ok {
+			continue // isolated test registry; contract test asserts presence
 		}
-		seen[f.Name] = true
-		out = append(out, f)
+		for _, f := range c.Output {
+			if seen[f.Name] || (name == "perf probe" && !perfFields[f.Name]) {
+				continue
+			}
+			seen[f.Name] = true
+			out = append(out, f)
+		}
 	}
 	return out
 }
@@ -277,18 +296,39 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		card.unavailable["webhooks"] = "webhook configurations are cluster-scoped; run without --namespace"
 	}
 
-	// control-plane: latency packs need cloud provider metrics; the
-	// query packs themselves land in M4 (§14). Explicit unavailable
-	// through the provider boundary, never silence (§2).
+	// control-plane: the §5 "control-plane latency (perf probe
+	// packs)" category, delegated to the shipped perf apiserver pack
+	// (p99 by verb/resource — the cheapest meaningful control-plane
+	// read) when the provider serves Metrics. Breaches degrade the
+	// category in `perf probe`'s exact finding shape; clean queries
+	// score healthy. The honest unavailable reason survives ONLY when
+	// the capability is genuinely absent (§2): no provider / no
+	// metrics capability, or the metric positively missing from the
+	// workspace (the pack_unavailable case — on GKE, control-plane
+	// metrics not enabled). A real backend failure fails the scan
+	// like any other category's read error.
 	provider, err := deps.provider(ctx)
 	if err != nil {
 		return 0, err
 	}
-	reason := "requires cloud provider metrics (M4)"
-	if _, ok := provider.Metrics(); !ok {
-		reason += "; " + cloud.Unavailable(provider, cloud.CapabilityMetrics).Reason
+	if backend, ok := provider.Metrics(); ok {
+		findings, n, absent, err := perf.ControlPlaneProbe(ctx, backend, now)
+		if err != nil {
+			return 0, err
+		}
+		if absent != "" {
+			card.unavailable["control-plane"] = fmt.Sprintf(
+				"metric %s is not in the project's metrics workspace — enable GKE control-plane metrics for the API server (perf probe --pack=apiserver)", absent)
+		} else {
+			scanned += n
+			for _, f := range findings {
+				card.add("control-plane", f)
+			}
+		}
+	} else {
+		card.unavailable["control-plane"] = "requires cloud provider metrics; " +
+			cloud.Unavailable(provider, cloud.CapabilityMetrics).Reason
 	}
-	card.unavailable["control-plane"] = reason
 
 	// Memory merge (§9.4, the M4 exit shape): with --store, join
 	// every finding against the sentinel's OPEN triage-status
