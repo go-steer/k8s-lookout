@@ -81,7 +81,6 @@ func StatusCommand() checks.Command {
 				Help: "action taken / paper trail (\"fix PR opened; config rollout pending\")"},
 		},
 		Output: []checks.OutputField{
-			{Name: "fingerprint", Doc: "the record's §8 incident-class fingerprint"},
 			{Name: "resource_key", Doc: "the record's resource pin, as stored (<KindOfObject>/<namespace>/<name>)"},
 			{Name: memory.DetailTriageStatus, Doc: "the record's triage state (investigating|triaged|actioned|escalated|resolved)"},
 			{Name: memory.DetailTriageRootCause, Doc: "the recorded root-cause hypothesis"},
@@ -194,8 +193,10 @@ func statusFinding(rec memory.TriageStatusRecord) emit.Finding {
 		Namespace:    namespace,
 		KindOfObject: kindOfObject,
 		Name:         name,
+		// The record's key rides the envelope's own fingerprint
+		// field (schema freeze: one spelling on every surface).
+		Fingerprint: rec.Fingerprint,
 		Details: []emit.Field{
-			{Key: "fingerprint", Value: rec.Fingerprint},
 			{Key: "resource_key", Value: rec.ResourceKey},
 			{Key: memory.DetailTriageStatus, Value: string(rec.Status)},
 		},

@@ -66,3 +66,25 @@ func Fingerprint(kind, reasonClass, objectClass, zone string) string {
 	h.Write([]byte(zone))
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
+
+// ScanFingerprint is the FROZEN scan-source mapping of the §8
+// contract (docs/signal-schema-v1.md): the fingerprint a read-path
+// finding carries so push (sentinel) and pull (scan) dedupe on one
+// key. A point-in-time scan observes a SYMPTOM — the reactive
+// incident class the sentinel's k8s-events source would push for the
+// same breakage — so scan findings always fingerprint under the
+// frozen reactive kind "k8s-event", never under a scan-local or
+// source-namespaced kind:
+//
+//	ScanFingerprint(reason, objectClass, zone)
+//	  = Fingerprint("k8s-event", CanonicalReason(reason), objectClass, zone)
+//
+// The reason passes through CanonicalReason exactly like the push
+// path's dispatcher stamp, so `lookout health`'s pod.crashloop
+// finding and the sentinel's CrashLoopBackOff inject carry identical
+// fingerprints (the §8 merge, and the AX cross-path dedup). This is
+// the one recipe the §9.4 join has used since it shipped; changing it
+// desynchronizes every open triage-status record.
+func ScanFingerprint(reason, objectClass, zone string) string {
+	return Fingerprint(KindK8sEvent, CanonicalReason(reason), objectClass, zone)
+}

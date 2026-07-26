@@ -43,10 +43,8 @@ const (
 // Finding is one abnormal observation: a flat, ordered key=value
 // record. The named fields mirror the §8 Signal schema
 // (kind_of_object, reason, message, …) because read-path findings
-// later become Signals with source:"scan" — keeping the names
-// aligned makes that conversion a field copy, not a mapping table.
-// Fingerprinting (§8) is deliberately absent here; it lands with the
-// Signal conversion, not the envelope.
+// are Signals with source:"scan" — keeping the names aligned makes
+// that conversion a field copy, not a mapping table.
 //
 // Empty fields are omitted on every surface (zero nominal state);
 // Kind is the only required field.
@@ -67,6 +65,14 @@ type Finding struct {
 	// human/agent-readable one-liner.
 	Reason  string
 	Message string
+	// Fingerprint is the §8 incident-class hash
+	// (docs/signal-schema-v1.md): set on scan findings that describe
+	// a symptom class the sentinel could also push, via
+	// engine.ScanFingerprint, so the push and pull paths dedupe on
+	// one key. Empty (and omitted — zero nominal state) on findings
+	// with no incident-class identity: scorecard lines, inventory
+	// records, probe results.
+	Fingerprint string
 	// Details carries check-specific fields, emitted after the
 	// named fields in declared order. Keys must match keyPattern
 	// and be declared in the owning command's output glossary
@@ -93,13 +99,13 @@ var keyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // implicitly declared for every command; only Details keys must
 // appear in a command's output glossary.
 func EnvelopeFields() []string {
-	return []string{"kind", "severity", "namespace", "kind_of_object", "name", "reason", "message"}
+	return []string{"kind", "severity", "namespace", "kind_of_object", "name", "reason", "message", "fingerprint"}
 }
 
 // pairs flattens the finding into its ordered key=value records,
 // omitting empty values (zero nominal state applies to fields too).
 func (f Finding) pairs() []Field {
-	out := make([]Field, 0, 7+len(f.Details))
+	out := make([]Field, 0, 8+len(f.Details))
 	add := func(k, v string) {
 		if v != "" {
 			out = append(out, Field{Key: k, Value: v})
@@ -112,6 +118,7 @@ func (f Finding) pairs() []Field {
 	add("name", f.Name)
 	add("reason", f.Reason)
 	add("message", f.Message)
+	add("fingerprint", f.Fingerprint)
 	for _, d := range f.Details {
 		add(d.Key, d.Value)
 	}

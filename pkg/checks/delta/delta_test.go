@@ -396,15 +396,15 @@ func TestGoldenMixedCluster(t *testing.T) {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
 	want := strings.Join([]string{
-		`kind=node.notready severity=critical kind_of_object=Node name=node-1 reason=NodeStatusUnknown message="Kubelet stopped posting node status." age=15m0s`,
-		`kind=node.preempt severity=critical kind_of_object=Node name=node-2 reason=PreemptionImminent taint=cloud.google.com/impending-node-termination pods=0`,
-		`kind=addon.degraded severity=critical namespace=kube-system kind_of_object=Deployment name=coredns reason=AddonUnavailable addon=dns desired=2 ready=0`,
-		`kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff container=app restarts=12 last_state=Error exit_code=1`,
-		`kind=pod.pending severity=critical namespace=prod kind_of_object=Pod name=batch-1 reason=Unschedulable message="0/3 nodes are available: 3 Insufficient cpu." age=30m0s`,
-		`kind=pdb.gridlocked severity=warning namespace=prod kind_of_object=PodDisruptionBudget name=api-pdb reason=DisruptionsBlocked healthy=3 required=3 pods=3`,
-		`kind=quota.near severity=warning namespace=prod kind_of_object=ResourceQuota name=compute-quota reason=QuotaNearLimit resource=limits.cpu used=9 hard=10 pct=90`,
-		`kind=job.failed severity=warning namespace=prod kind_of_object=Job name=etl reason=BackoffLimitExceeded message="Job has reached the specified backoff limit" failed=4`,
-		`kind=workload.rollout severity=warning namespace=prod kind_of_object=Deployment name=web reason=RolloutIncomplete desired=3 ready=1 updated=1 available=1`,
+		`kind=node.notready severity=critical kind_of_object=Node name=node-1 reason=NodeStatusUnknown message="Kubelet stopped posting node status." fingerprint=sha256:be601776f35d8a7fc0ac9193a373943343591d23b484fb0c8d51874d1f5d9016 age=15m0s`,
+		`kind=node.preempt severity=critical kind_of_object=Node name=node-2 reason=PreemptionImminent fingerprint=sha256:9050d0355c5a728c7070cdb689c82165d545d5277e425e71ff848037aaf9a3fc taint=cloud.google.com/impending-node-termination pods=0`,
+		`kind=addon.degraded severity=critical namespace=kube-system kind_of_object=Deployment name=coredns reason=AddonUnavailable fingerprint=sha256:117aeff7168fb83b202de87343f6ab48a534e464e05be128dbdabdd7bd6ba0b8 addon=dns desired=2 ready=0`,
+		`kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff fingerprint=sha256:e2957792a0b3ad9e29db2051dbc69ff01dfe3a52da8dbb6d1331aa44fe946f8b container=app restarts=12 last_state=Error exit_code=1`,
+		`kind=pod.pending severity=critical namespace=prod kind_of_object=Pod name=batch-1 reason=Unschedulable message="0/3 nodes are available: 3 Insufficient cpu." fingerprint=sha256:bfe155c0a308d61bd8cf9701619a8859d28b2c9d7c05e458fa9b58dcd2cc7eae age=30m0s`,
+		`kind=pdb.gridlocked severity=warning namespace=prod kind_of_object=PodDisruptionBudget name=api-pdb reason=DisruptionsBlocked fingerprint=sha256:53d8a361b10c0011af21b07a5da885d2d76d3b1cc8027e3a8929a2db22429d0e healthy=3 required=3 pods=3`,
+		`kind=quota.near severity=warning namespace=prod kind_of_object=ResourceQuota name=compute-quota reason=QuotaNearLimit fingerprint=sha256:12321d595a6773a7b80678b967e8b7968056c361954652cbf25a10b8e7cbdc12 resource=limits.cpu used=9 hard=10 pct=90`,
+		`kind=job.failed severity=warning namespace=prod kind_of_object=Job name=etl reason=BackoffLimitExceeded message="Job has reached the specified backoff limit" fingerprint=sha256:45a13f2c2b0345dd176dbd913f958634ef940a94aa8e64dcb3b36a71bddf9d47 failed=4`,
+		`kind=workload.rollout severity=warning namespace=prod kind_of_object=Deployment name=web reason=RolloutIncomplete fingerprint=sha256:f954cac01a76847aa7e59722fb0e7f2f85cfe25d1c8dfd610432742cb1b0fc43 desired=3 ready=1 updated=1 available=1`,
 		`scanned=11 findings=9 elapsed=100ms`,
 	}, "\n") + "\n"
 	if res.Stdout != want {

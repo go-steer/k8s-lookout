@@ -35,6 +35,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -164,6 +165,15 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 
 	sortFindings(findings)
 	for _, f := range findings {
+		// §8 push/pull dedup key (docs/signal-schema-v1.md): every
+		// symptom-class finding carries the same fingerprint the
+		// sentinel would stamp on a push for this breakage, so AX and
+		// the §9.4 join never double-count a symptom reported by both
+		// paths. Findings without an incident-class identity
+		// (reason+object) stay fingerprint-free — zero nominal state.
+		if f.Reason != "" && f.KindOfObject != "" {
+			f.Fingerprint = engine.ScanFingerprint(f.Reason, f.KindOfObject, "")
+		}
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
 		}
