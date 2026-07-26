@@ -34,6 +34,7 @@ import (
 	// the default registry from their init functions — the same
 	// set cmd/lookout mounts.
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"

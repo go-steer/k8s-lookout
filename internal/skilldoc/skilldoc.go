@@ -50,6 +50,8 @@ var SkillCommands = map[string][]string{
 		"perf probe"},
 	"gitops-drift": {"stab drift", "triage changes", "triage spec",
 		"triage status"},
+	"k8s-capacity": {"cloud stockout", "cloud quota", "cloud ipspace",
+		"triage delta", "triage status"},
 }
 
 // RefFileName returns the reference-stub file name for a command
