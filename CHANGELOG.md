@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `quota` source (M4, DESIGN.md §7.2 row 8, §10.2/§10.3) — the
+  per-PROJECT leading countdown over cloud quota exhaustion, enabled
+  via `--sources=…,quota` on exactly ONE sentinel per GCP project
+  (§11 Project tier; fifty clusters must not each poll the quota
+  APIs; `Scope()=Project`). Each poll (`--quota-poll`, default 15m)
+  reads the provider quota inventory and, for the watched set only
+  (top-10 nearest exhaustion by usage/limit ratio plus everything at
+  or above `--quota-warn`, default 0.80), fetches usage-vs-limit
+  history over `--quota-window` (default 7d) and applies the
+  saturation source's regression (exported as
+  `saturation.LeastSquaresSlope` — the §10.2 "slope math applies
+  directly" seam): the signal says "exhausted in ~6d at current
+  slope", never just "at 87%". Emits `quota.forecast` (§7.3,
+  APPEND-ONLY) with `Forecast{ETA, "linear-7d-window"}` when a
+  positive-slope projection exists; severities are design-fixed
+  (warning at ETA < 7d or usage ≥ 90%; critical at ETA < 48h or
+  ≥ 98%), with a per-quota hysteresis latch (same severity never
+  re-fires across 15m polls; escalation fires once; release only
+  after receding below 85% with no urgent ETA). A provider without
+  the quota capability is a LOUD startup error naming the source —
+  a project-tier deployment without a cloud makes no sense (§11);
+  there is no degraded quota mode.
+- The §10.3 quota write path, lookout's half: every `quota.forecast`
+  carries a DRAFTED `QuotaPreference`-shaped increase request in the
+  new additive `quota_increase_draft` payload field (omitempty — all
+  other payloads stay byte-identical): canonical quota id
+  (`<service>/<quotaId>` from Cloud Quotas metadata, name fallback),
+  region, current usage/limit, `suggested_limit =
+  ceil(max(limit×1.5, usage + 2×slope/day×7d leadtime))` (formula
+  documented at `pkg/sources/quota.Draft`), the fitted slope, and a
+  slope-derived justification string — human-grade paperwork the
+  agent files through core-agent's PERMISSION GATE. lookout only
+  drafts: no `QuotaPreference` create (or any quota mutation) exists
+  anywhere in this repository. CLI exposure of the draft (`cloud
+  quota --draft`) is a possible follow-up; the §4.1 command surface
+  is unchanged here.
+- §10.3 correlation: "scaleup failed (`GCE_QUOTA_EXCEEDED`)" +
+  "CPUS at 98%, exhausted in ~6 days" is now ONE diagnosed incident.
+  APPEND-ONLY `reasonCanonical` additions collapse `quota_forecast`
+  (leading) and `quota_blocked` (reactive) into the `QuotaExhausted`
+  dedup family, keyed by the canonical quota UID
+  `quota:<NAME>/<SCOPE>` — the quota, not the nodegroup, is the
+  incident at project scope. The capacity source re-keys
+  `capacity.quota_blocked` decisions to that UID when the provider's
+  decision message names the quota and its scope (GCE "Quota 'CPUS'
+  exceeded … in region us-east1" grammar; conservative
+  nodegroup-key fallback otherwise — no false joins), so whichever
+  side fires first opens the session and the other attaches as a
+  followup via the existing dedup collapse.
+- GKE provider: `Quota().History` is live — Cloud Monitoring
+  `serviceruntime.googleapis.com/quota/allocation/usage` vs
+  `…/quota/limit` series behind a §13 small client interface with
+  recorded doc-authored fixtures — and the inventory rows gain a
+  canonical increase-request ID (`<service>/<quotaId>`) joined
+  best-effort from Cloud Quotas metadata (read-only
+  `ListQuotaInfos`; a metadata outage degrades IDs to empty, never
+  fails the inventory). New dependency
+  `cloud.google.com/go/cloudquotas` (tag-guarded like all GCP SDKs;
+  the default build stays GCP-free — nm-verified): the pinned
+  `google.golang.org/api` release ships no cloudquotas discovery
+  client, and the GAPIC speaks to the same
+  `cloudquotas.googleapis.com` surface §10.2 names.
+
 ## [0.4.0] - 2026-07-26
 
 M3 — leading indicators + history (DESIGN.md §14). Exit criterion verified

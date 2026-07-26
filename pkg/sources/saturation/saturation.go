@@ -585,24 +585,16 @@ func severityRank(sev engine.Severity) int {
 }
 
 // leastSquaresSlope fits value = a + b*t over the samples and returns
-// b in units per second. Time is centered on the first sample for
-// numeric stability.
+// b in units per second. The fit itself lives in the exported
+// LeastSquaresSlope (regression.go) — the §10.2 seam the quota
+// source reuses.
 func leastSquaresSlope(pts []sample) float64 {
-	n := float64(len(pts))
-	t0 := pts[0].t
-	var sumT, sumV, sumTT, sumTV float64
-	for _, p := range pts {
-		t := p.t.Sub(t0).Seconds()
-		sumT += t
-		sumV += p.v
-		sumTT += t * t
-		sumTV += t * p.v
+	times := make([]time.Time, len(pts))
+	values := make([]float64, len(pts))
+	for i, p := range pts {
+		times[i], values[i] = p.t, p.v
 	}
-	den := n*sumTT - sumT*sumT
-	if den == 0 {
-		return 0
-	}
-	return (n*sumTV - sumT*sumV) / den
+	return LeastSquaresSlope(times, values)
 }
 
 // newForecast composes the saturation.forecast Signal with the §8

@@ -204,10 +204,28 @@ var reasonCanonical = map[string]string{
 	// the scheduler's FailedScheduling events on the same pod —
 	// whichever fires first opens the session, the rest attach as
 	// followups. The nodegroup-keyed capacity reasons (scaleup_gap,
-	// stockout, quota_blocked, ip_exhausted) have no k8s-event
-	// counterpart on their synthetic UID and map to themselves.
+	// stockout, ip_exhausted) have no k8s-event counterpart on their
+	// synthetic UID and map to themselves; quota_blocked joined the
+	// QuotaExhausted family below when the quota source landed.
 	"pending":      "FailedScheduling",
 	"pending-aged": "FailedScheduling",
+
+	// APPEND-ONLY additions for the quota source (M4, §10.3), same
+	// leading/reactive pattern one tier up: "scaleup failed
+	// (GCE_QUOTA_EXCEEDED)" and "CPUS at 98%, exhausted in ~6 days"
+	// are ONE diagnosed incident, not two alerts a human joins. The
+	// quota source's quota_forecast (leading) and the capacity
+	// source's quota_blocked (reactive) collapse into the
+	// QuotaExhausted family; the join lands when the two signals
+	// also share a UID, which is the canonical quota identity
+	// "quota:<NAME>/<SCOPE>" (pkg/sources/quota.UID — the quota, not
+	// the nodegroup, is the incident at project scope). The capacity
+	// source re-keys quota_blocked decisions to that UID when the
+	// provider's decision message names the quota; when it does not,
+	// the signal stays nodegroup-keyed and only the reason family is
+	// shared (documented limitation — no false joins).
+	"quota_blocked":  "QuotaExhausted",
+	"quota_forecast": "QuotaExhausted",
 }
 
 // CanonicalReason returns the canonical reason for a given

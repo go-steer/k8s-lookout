@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 )
 
 // Sub-source 3 (§10.1): provider scale-decision records — on GKE, the
@@ -94,13 +95,28 @@ func decisionSignal(kind string, d cloud.ScaleDecision) engine.Signal {
 	if at.IsZero() {
 		at = time.Now()
 	}
+	// UID: nodegroup-keyed by default. quota_blocked decisions whose
+	// message names the exceeded quota re-key to the canonical quota
+	// UID (§10.3): (uid, canonical-reason) then collides with the
+	// quota source's quota.forecast in the QuotaExhausted dedup
+	// family, so the scaleup failure attaches to the OPEN quota
+	// session as a followup — one diagnosed incident, not two. When
+	// the provider message does not name quota AND scope, the
+	// conservative nodegroup key stands (no false joins); the object
+	// fields keep naming the failing nodegroup either way.
+	uid := "nodegroup:" + d.NodeGroup
+	if kind == KindQuotaBlocked {
+		if quotaUID, ok := quota.UIDFromDecisionMessage(d.Message); ok {
+			uid = quotaUID
+		}
+	}
 	return engine.Signal{
 		Kind:     kind,
 		Source:   engine.SourceSentinel,
 		Severity: engine.SeverityCritical,
 		TriageEvent: engine.TriageEvent{
 			Key: engine.EventKey{
-				UID:    "nodegroup:" + d.NodeGroup,
+				UID:    uid,
 				Reason: strings.TrimPrefix(kind, kindPrefix),
 			},
 			KindOfObject: "NodeGroup",
