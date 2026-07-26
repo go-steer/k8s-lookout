@@ -82,7 +82,31 @@ The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
    `--at=<onset> --store=<sentinel db>` to get the radius as it was at
    onset, not as it is now.
 
-7. **Close the loop.** Fixes route through GitOps, never raw writes. After
+7. **Write your triage status.** The moment you have a diagnosis (and
+   again when you take action), record it — this is what stops the next
+   health scan from reporting the same crashloop as a fresh unknown and
+   stops the sentinel re-paging followups (§9.4). Use the `fingerprint`
+   from the inject payload, key the record to the pod (or the owning
+   workload from `context.controller_ref`), and pass your session id:
+
+   ```lookout
+   lookout triage status --store=/var/lib/lookout/lookout.db --fingerprint=sha256:e2957792a0b3 --resource=Pod/prod/api-6d5f8c-x2v9k --session=sess-0004 --status=triaged --severity-override=warning --root-cause="DB connection string invalid in api-config; secret rotated, deploy not restarted" --action="fix PR opened; config rollout pending — traffic on old revision unaffected"
+   ```
+
+   Set `--severity-override=warning` only when the symptom is genuinely
+   not page-worthy anymore (traffic on a healthy revision, fix in
+   flight); use `--status=escalated` to keep it hot instead. Update the
+   record at each transition (`--status=actioned` when the fix lands).
+   If the loop later accelerates, the sentinel injects a
+   `triage.regressed` evidence followup into this session — re-check
+   your hypothesis and rewrite the record rather than ignoring it. To
+   see what a previous session already concluded:
+
+   ```lookout
+   lookout triage status --store=/var/lib/lookout/lookout.db --resource=Pod/prod/api-6d5f8c-x2v9k
+   ```
+
+8. **Close the loop.** Fixes route through GitOps, never raw writes. After
    the fix rolls out, re-run:
 
    ```lookout
@@ -91,4 +115,7 @@ The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
 
    `findings=0` on the summary line (for this workload) is the verified
    all-clear; the sentinel's followup inject (`k8s-event-followup`)
-   confirms the loop stopped from the watch side.
+   confirms the loop stopped from the watch side — and its `resolved`
+   inject flips your triage-status record to resolved automatically
+   (never write `--status=resolved` yourself; the sentinel owns that
+   transition).

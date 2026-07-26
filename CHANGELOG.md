@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+All five M4-drill observations fixed (`docs/milestones/M4.md`
+§Observations).
+
+### Added
+
+- `lookout triage status` (MCP `k8s_triage_status`) — the §9.4
+  triage-status PRODUCER surface (M4 observation 1), the §4.1
+  addition decided in `docs/triage-status-write-design.md` (new).
+  Incident playbooks write the record at each material transition:
+  `--fingerprint` + `--resource` + `--status
+  investigating|triaged|actioned|escalated` with `--root-cause`,
+  `--severity-override`, `--action`, `--session`; without `--status`
+  the same command reads the current record(s) back. Writes go
+  through `pkg/memory`'s `TriageWriter` against `--store` (required —
+  the usage error names the design note), validated per the §9.4
+  schema; `--status=resolved` is refused (the sentinel's §7.4
+  recovery flip owns that transition). The `crashloopbackoff` and
+  `hpa-thrash` playbooks gained the "write your triage status" step
+  with real command lines; the `dev/drills/write-triage-status`
+  drill stand-in is deleted as its header promised, and the
+  quota-exhaustion runbook now uses the real command. Daemon-mediated
+  writes stay out of scope until core-agent ships the shared Memory
+  surface (`pkg/memory`'s TODO).
+- `kind=triage.regressed` evidence followups (M4 observation 3): a
+  steady symptom stream never exits the dedup window, so a
+  §9.4-downgraded incident could regress hard with no visible routing
+  change until the loop paused. When a downgraded incident's window
+  count reaches `--triage-regress-factor` (default 3, >= 2, 0
+  disables) times its count at downgrade time, ONE schema-stable
+  followup (payload pinned byte-exact; kind APPEND-ONLY in
+  engine/inject) lands in the bound session with baseline_count /
+  count / factor and the open record's status, override, and session.
+  Deliberately evidence-only — no auto-re-page and no record rewrite
+  (rationale in `docs/triage-status-write-design.md` §out-of-scope);
+  metric `k8s_event_watcher_triage_regressed_total`.
+- Cross-source dedup joins are now session-visible (M4
+  observation 4): a dedup-window duplicate whose SOURCE family
+  differs from the one that opened the incident (leading↔reactive —
+  the drill's exact case: capacity's `quota_blocked` folding into the
+  quota source's forecast session) injects a compact followup into
+  the bound session instead of vanishing as `route=suppressed`.
+  Frozen contract respected: k8s-event joiners carry
+  `k8s-event-followup`; other kinds keep their own source kind.
+  Bounded to ONE per source family per incident per window
+  (`followup_sources` on the persisted dedup entry); recorded as the
+  new APPEND-ONLY `route=followup` outcome; metric
+  `k8s_event_watcher_cross_source_followups_total{source}`. Shared
+  mode keeps its frozen suppress-everything contract.
+- GHCR publishes a GKE-flavored image (M4 observation 5):
+  `release-images.yml` builds `ghcr.io/go-steer/lookout:<version>-gke`
+  (plus the `-gke`-suffixed tag pyramid and `latest-gke`) with
+  `-tags allproviders` via the Dockerfile's new `BUILD_TAGS` arg —
+  same Dockerfile, same Sigstore signing. The default `:<version>`
+  image stays GCP-free per §2 (conformance-tested);
+  `deploy/51-deployment-watcher.yaml` documents that project-tier
+  quota deployments (`--sources=…,quota`, §11) must pin the `-gke`
+  flavor.
+
+### Fixed
+
+- The shipped ClusterRole now covers BOTH §7.6 enrichment read paths
+  (M4 observation 2 — every enrichment in the drill failed at
+  resolve on the scoped-list path): `deploy/12-clusterrole-watcher.yaml`
+  gains `list` on daemonsets, jobs, cronjobs, services, configmaps,
+  ingresses, and the RBAC kinds the namespace-scoped
+  `state.LoadCluster` pass reads, plus `get` on the workload kinds
+  the live path's top-owner GET can target. The requirement list is
+  now exported (`state.LoadClusterListRequirements`) and a test in
+  `pkg/checks/state` parses the shipped YAML against it — the role
+  and the code cannot drift again, and a second test pins the role
+  read-only (no write verbs; secrets stay `list`-only).
+
 ## [0.5.0] - 2026-07-26
 
 M4 — capacity & quota (DESIGN.md §14). Exit criterion verified in

@@ -23,7 +23,17 @@ name: Release images
 # on every `v*.*.*` tag push. Structure mirrors core-agent's
 # release-images.yml (metadata-action tag pyramid, buildx + QEMU,
 # Sigstore keyless signing) minus the variant matrix — one repo,
-# one binary, one image.
+# one binary, TWO image flavors:
+#
+#   :<v>       — the default, GCP-FREE build (DESIGN.md §2: no cloud
+#                SDK linked; the nm-based conformance test pins it).
+#                `--sources=…,quota` in it refuses loudly at startup.
+#   :<v>-gke   — the same binary built with `-tags allproviders`
+#                (+ :latest-gke), for project-tier quota deployments
+#                (§11 Project tier / §10.2). M4 drill observation 5:
+#                without a published flavor every quota deployment
+#                had to build its own image. Same Dockerfile, same
+#                signing — only BUILD_TAGS differs.
 #
 # Images are signed via Sigstore keyless (GitHub Actions OIDC →
 # Fulcio short-lived cert). Verify with:
@@ -204,4 +214,107 @@ jobs:
           # Sign by digest, not by tag — tags can move; digests are
           # immutable. cosign signs once and the signature covers
           # every tag that points at the same digest.
+          echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
+
+  # The GKE flavor (M4 drill observation 5): identical pipeline, one
+  # extra build-arg (BUILD_TAGS=allproviders → the gke cloud provider
+  # links in), every tag suffixed -gke. The default image stays
+  # GCP-free; project-tier quota deployments (`--sources=…,quota`)
+  # pin this flavor instead of building their own.
+  build-and-push-gke:
+    name: lookout-gke
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract Go version from go.mod
+        id: go-version
+        run: |
+          GO_VERSION=$(grep -E '^go [0-9]+\.[0-9]+(\.[0-9]+)?$' go.mod | awk '{print $2}')
+          if [[ -z "$GO_VERSION" ]]; then
+            echo "::error::Could not extract Go version from go.mod" >&2
+            exit 1
+          fi
+          echo "version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building against Go ${GO_VERSION}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The -gke tag pyramid: same shape as the default flavor's,
+      # every entry explicitly suffixed (including the raw latest-gke
+      # — spelled out rather than flavor-suffixed so this job can
+      # NEVER publish a bare :latest and shadow the GCP-free default).
+      - name: Compute image tags + labels + annotations
+        id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{raw}},suffix=-gke
+            type=semver,pattern={{version}},suffix=-gke
+            type=semver,pattern={{major}}.{{minor}},suffix=-gke
+            type=semver,pattern={{major}},suffix=-gke
+            type=raw,value=latest-gke,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=raw,value=${{ inputs.tag }}-gke,enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+          labels: |
+            org.opencontainers.image.title=lookout (gke)
+            org.opencontainers.image.description=k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).
+            org.opencontainers.image.vendor=go-steer
+          annotations: |
+            org.opencontainers.image.title=lookout (gke)
+            org.opencontainers.image.description=k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).
+            org.opencontainers.image.vendor=go-steer
+
+      - name: Compute build version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${{ github.ref_name }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="main-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            GO_VERSION=${{ steps.go-version.outputs.version }}
+            VERSION=${{ steps.version.outputs.version }}
+            BUILD_TAGS=allproviders
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign images
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
           echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"

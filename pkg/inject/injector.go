@@ -186,6 +186,13 @@ func (i *Injector) InjectStormUpdate(ctx context.Context, sessionID string, payl
 	return i.injectJSON(ctx, sessionID, payload)
 }
 
+// InjectTriageRegressed POSTs the §9.4 regression-evidence record
+// (kind=triage.regressed, M4 observation 3) into the downgraded
+// incident's bound session. Evidence only — never a page.
+func (i *Injector) InjectTriageRegressed(ctx context.Context, sessionID string, payload TriageRegressedPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
 // InjectWatchboardDigest POSTs a §7.7 rolling digest of warning-class
 // signals into the shared watchboard session. Same envelope and
 // endpoint — only the payload differs.

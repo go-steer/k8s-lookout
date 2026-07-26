@@ -63,6 +63,14 @@ const (
 	KindStormUpdate = "storm.update"
 )
 
+// KindTriageRegressed is the §9.4 regression-evidence followup (M4
+// drill observation 3): a downgraded incident whose symptom rate
+// escalated past the regression factor while the dedup window stayed
+// open. Cross-cutting like resolved — any source's signals can carry
+// the rate. Mirrored by pkg/inject's wire constant; the internal/watch
+// contract test pins the pair to the same value.
+const KindTriageRegressed = "triage.regressed"
+
 // Values for Signal.Source (the §8 "source" field): which path
 // produced the signal. Not to be confused with a signal *source*
 // implementation (pkg/sources.Source), whose Name() namespaces new

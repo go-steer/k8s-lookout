@@ -55,6 +55,13 @@ COPY . .
 # release-images.yml GitHub Action overrides them all.
 ARG VERSION=v0.0.0-dev
 
+# Go build tags. Empty (default) produces the GCP-free binary the §2
+# conformance test pins — no cloud SDK linked, `--sources=…,quota`
+# refuses loudly at startup. Release builds also publish a
+# BUILD_TAGS=allproviders flavor (ghcr.io/go-steer/lookout:<v>-gke)
+# for project-tier quota deployments (M4 drill observation 5).
+ARG BUILD_TAGS=""
+
 # Cross-compile target. Set by `docker buildx build --platform`
 # when building multi-arch images. Without buildx these default to
 # the host's GOOS/GOARCH.
@@ -72,6 +79,7 @@ ENV CGO_ENABLED=0 \
 # otherwise leak the build host's filesystem layout).
 # -X main.version stamps the release identity `lookout version` reports.
 RUN go build \
+    -tags "${BUILD_TAGS}" \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -trimpath \
     -o /out/lookout \

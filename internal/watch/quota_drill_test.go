@@ -61,9 +61,10 @@ import (
 //     message names the same quota+region → decisionSignal re-keys
 //     it to quota:CPUS/us-east1 → the QuotaExhausted dedup family
 //     collapses it INTO the open critical session (§10.3: one
-//     diagnosed incident, not two) — no new session, the store
-//     records the join (route=suppressed, the critical session's
-//     sid).
+//     diagnosed incident, not two) — no new session, and (M4
+//     observation 4, fixed) the cross-SOURCE join is announced into
+//     the bound session as ONE compact followup (route=followup, the
+//     critical session's sid); repeats stay suppressed.
 //  4. Quota poll 3 (same critical state): the latch holds — nothing
 //     re-fires.
 type quotaDrillAPI struct {
@@ -377,8 +378,13 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 	if len(joined) == 0 {
 		t.Fatal("capacity.quota_blocked never recorded against the quota UID")
 	}
-	if joined[0].Route != store.RouteSuppressed {
-		t.Errorf("quota_blocked route = %q, want %q (folded into the open incident, §10.3)", joined[0].Route, store.RouteSuppressed)
+	// M4 drill observation 4, fixed: the cross-source join (capacity's
+	// reactive quota_blocked folding into the quota source's leading
+	// forecast session) is no longer silent — the FIRST join routes as
+	// a compact followup into the bound session; further duplicates
+	// stay suppressed (max 1 per source per incident per window).
+	if joined[0].Route != store.RouteFollowup {
+		t.Errorf("quota_blocked route = %q, want %q (cross-source join announced into the open incident, M4 observation 4)", joined[0].Route, store.RouteFollowup)
 	}
 	if joined[0].SessionID != criticalSid {
 		t.Errorf("quota_blocked recorded against session %q, want the open quota session %q", joined[0].SessionID, criticalSid)
@@ -393,12 +399,25 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 		joined[0].SessionID, joined[0].Route, joined[0].CanonicalReason, joined[0].Message)
 
 	// --- Step 4: hysteresis — the next critical poll (same state)
-	// must not re-fire; the reactive join must not have injected. ---
+	// must not re-fire. Exactly THREE injects: the warning digest,
+	// the critical incident, and the ONE cross-source join followup
+	// (M4 observation 4) — however many times the capacity source's
+	// decision poll re-fires quota_blocked inside the window, the
+	// per-source-per-window bound keeps it to a single followup.
 	time.Sleep(2500 * time.Millisecond) // covers quota poll 3
 	finalInjects := daemon.snapshot()
-	if len(finalInjects) != 2 {
-		t.Fatalf("drill produced %d injects, want exactly 2 (warning digest + critical incident):\n%s",
+	if len(finalInjects) != 3 {
+		t.Fatalf("drill produced %d injects, want exactly 3 (warning digest + critical incident + one cross-source followup):\n%s",
 			len(finalInjects), strings.Join(finalInjects, "\n"))
+	}
+	followup := finalInjects[2]
+	for _, want := range []string{
+		`\"kind\":\"` + capacity.KindQuotaBlocked + `\"`,
+		`\"uid\":\"quota:CPUS/us-east1\"`,
+	} {
+		if !strings.Contains(followup, want) {
+			t.Errorf("cross-source followup inject missing %s:\n%s", want, followup)
+		}
 	}
 
 	cancel()

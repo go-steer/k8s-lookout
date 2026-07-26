@@ -84,6 +84,25 @@
 # Role instead (14-role-watcher-capacity.yaml), pinned by
 # resourceNames rather than widening this ClusterRole.
 #
+#   - the enrichment read paths (DESIGN.md §7.6) — enrichment is
+#                       best-effort by design (failures become
+#                       enrichment_error trailers, never crashes),
+#                       but the SHIPPED role must let it succeed on
+#                       both paths (M4 drill observation 2 — the
+#                       scoped-list path failed on every incident):
+#                       * scoped-list fallback (--storm off, or the
+#                         object not in the live topology): one
+#                         namespace-scoped state.LoadCluster pass —
+#                         `list` on every kind that pass pages
+#                         through. The requirement list is
+#                         state.LoadClusterListRequirements(), and
+#                         pkg/checks/state's RBAC test parses THIS
+#                         file against it so the two cannot drift.
+#                       * live path (--storm on): one API `get` of
+#                         the incident's top owner — any of the
+#                         workload kinds (deployments, replicasets,
+#                         statefulsets, daemonsets, jobs, cronjobs).
+#
 # What the sentinel deliberately does NOT get:
 #   - patch/update/delete on anything — the sentinel is read-only
 #   - watch/get on secrets — the expiry source's `list` (below) is the
@@ -118,8 +137,36 @@ rules:
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
+    # "get" for the enrichment live path's workload GET, like
+    # deployments above.
     resources: ["statefulsets"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    # Enrichment (§7.6, M4 observation 2): the scoped-list fallback
+    # LISTs every workload kind in the incident namespace (it is one
+    # state.LoadCluster pass — the same read `lookout bundle` does),
+    # and the live path GETs the top owner whatever its kind. No
+    # watch: these are one-shot reads per enrichment, not informers.
+    resources: ["daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    # Enrichment scoped-list continued: services + configmaps feed
+    # the bundle's edges section (reference-integrity checks). List
+    # only — ConfigMap VALUES never leave pkg/emit unsanitized, and
+    # the graph ingests metadata + content hashes only (§6.5).
+    resources: ["services", "configmaps"]
+    verbs: ["list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    # Enrichment scoped-list continued: the edges section's RBAC
+    # reference checks (subject/roleRef existence — names only).
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["list"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]

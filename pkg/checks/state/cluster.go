@@ -44,6 +44,48 @@ type Cluster struct {
 	snap *graph.Snapshot
 }
 
+// ListRequirement is one (apiGroup, resource) LoadCluster's List pass
+// reads with the `list` verb. Exported so RBAC surfaces that must
+// support LoadCluster can be tested against the REAL requirement list
+// instead of a hand-copied one: the sentinel's shipped ClusterRole
+// (deploy/12-clusterrole-watcher.yaml) serves enrichment's scoped-list
+// fallback (§7.6), which is exactly one LoadCluster pass — the M4
+// drill found the role missing several of these and every enrichment
+// failing at resolve (docs/milestones/M4.md §Observations, finding 2).
+// A test parses the shipped YAML against this list so the two cannot
+// drift again.
+type ListRequirement struct {
+	Group    string // "" for core
+	Resource string // lowercase plural, e.g. "daemonsets"
+}
+
+// LoadClusterListRequirements returns every group/resource
+// listCluster pages through, in list order. Keep in lockstep with the
+// steps in listCluster — the deploy/12 RBAC test enforces the role
+// side, and the §13 fake-clientset tests enforce the code side.
+func LoadClusterListRequirements() []ListRequirement {
+	return []ListRequirement{
+		{"", "pods"},
+		{"", "nodes"},
+		{"apps", "deployments"},
+		{"apps", "replicasets"},
+		{"apps", "statefulsets"},
+		{"apps", "daemonsets"},
+		{"batch", "jobs"},
+		{"batch", "cronjobs"},
+		{"", "services"},
+		{"discovery.k8s.io", "endpointslices"},
+		{"networking.k8s.io", "ingresses"},
+		{"", "configmaps"},
+		{"", "secrets"},
+		{"", "serviceaccounts"},
+		{"rbac.authorization.k8s.io", "rolebindings"},
+		{"rbac.authorization.k8s.io", "roles"},
+		{"rbac.authorization.k8s.io", "clusterrolebindings"},
+		{"rbac.authorization.k8s.io", "clusterroles"},
+	}
+}
+
 // LoadCluster runs the paged List pass over ns (metav1.NamespaceAll
 // for the whole cluster) and builds the graph snapshot (§6.3 one-shot
 // path).

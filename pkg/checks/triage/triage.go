@@ -43,6 +43,7 @@ import (
 func init() {
 	checks.Register(RadiusCommand(Deps{}))
 	checks.Register(ChangesCommand(Deps{}))
+	checks.Register(StatusCommand())
 }
 
 // Deps are the injectable dependencies of the triage graph commands.

@@ -42,7 +42,7 @@ func triageDispatcher(t *testing.T, base string) (*dispatcher, *store.Store) {
 	t.Helper()
 	d, _ := newBoardDispatcher(t, base, 100, time.Minute, 200)
 	s := openDispatchStore(t, d)
-	d.triage = newTriageOverrides(s, d.metrics)
+	d.triage = newTriageOverrides(s, d.metrics, 3)
 	return d, s
 }
 

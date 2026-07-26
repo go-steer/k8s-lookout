@@ -74,14 +74,22 @@ triage-status records live in the sentinel store via `pkg/memory`
 recovery flips records to resolved, `health`/`bundle --store` merge
 open records into findings. All prior invariants stay frozen (M2
 storm/watchboard/resolved pins, M0 payload + flags, §8 additive
-attachments). Known M4 gaps (evidence in `docs/milestones/M4.md`
-§Observations): NO agent-facing write path for triage-status records
-yet (`dev/drills/write-triage-status` is the drill stand-in; the real
-surface is a §4.1 design-doc change first); the shipped ClusterRole
-breaks enrichment's scoped-list path (no daemonsets/jobs list — only
-`--storm`'s live-graph path enriches cleanly); cross-source dedup
-joins are store-visible but inject-invisible (no `storm.member`-style
-followup); no published GKE-tagged image for project-tier quota
+attachments). The five M4 drill observations (evidence in
+`docs/milestones/M4.md` §Observations) are FIXED post-M4: the §9.4
+producer surface is `lookout triage status` / MCP `k8s_triage_status`
+(the §4.1 addition decided in `docs/triage-status-write-design.md`;
+the `dev/drills/write-triage-status` stand-in is deleted); the
+shipped ClusterRole now covers BOTH enrichment read paths (a test in
+`pkg/checks/state` parses `deploy/12` against
+`LoadClusterListRequirements()`); downgraded incidents that regress
+inside a never-expiring dedup window get ONE pinned
+`kind=triage.regressed` evidence followup (`--triage-regress-factor`,
+default 3x — evidence only, never an auto-re-page); cross-source
+dedup joins inject a compact followup into the bound session
+(route=followup, max 1 per source family per incident per window;
+k8s-event joiners keep the frozen `k8s-event-followup` kind); GHCR
+publishes the `-tags allproviders` flavor as
+`lookout:<version>-gke` / `latest-gke` for project-tier quota
 deployments. M3 observations remain open (`GraphAt` restart replay,
 `Snapshot.Watches` round-trip, Deployment-targeted history,
 `rollout_stall` resolved fields, sync-Adds); `--storm` default stays
