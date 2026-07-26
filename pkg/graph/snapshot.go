@@ -39,8 +39,10 @@ type Snapshot struct {
 	// watched is the ingest's Options.WatchedKinds as a set (shared,
 	// never mutated after construction). Nil means every supported
 	// kind is observed — the full-List one-shot posture, and the
-	// posture of snapshots restored from the §6.6 history encoding
-	// (which predates this field and carries no watched set).
+	// posture of snapshots restored from LKGH v1 files (which predate
+	// the field). The v2 history encoding persists it, so snapshots
+	// restored from a sentinel store keep the partial-ingest honesty
+	// their #46 consumers depend on.
 	watched map[NodeKind]bool
 
 	generation uint64
@@ -102,7 +104,9 @@ func (s *Snapshot) Resolve(id NodeID) (Ref, bool) {
 //     nothing may be claimed about the object's existence.
 //
 // A snapshot built without WatchedKinds (one-shot full-List graphs,
-// history-restored snapshots) watches everything.
+// snapshots restored from LKGH v1 files) watches everything;
+// snapshots restored from the current history encoding carry their
+// ingest's declaration.
 func (s *Snapshot) Watches(kind NodeKind) bool {
 	if s.watched == nil {
 		return true

@@ -16,6 +16,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -413,10 +414,11 @@ func TestGraphSnapshot_RowMetadata(t *testing.T) {
 	snap := f.putSnapshot()
 
 	var rv, fv, size int64
+	var epoch string
 	var data []byte
 	if err := f.store.db.QueryRow(
-		`SELECT resource_version, format_version, size_bytes, data FROM graph_snapshots`).
-		Scan(&rv, &fv, &size, &data); err != nil {
+		`SELECT resource_version, format_version, size_bytes, epoch, data FROM graph_snapshots`).
+		Scan(&rv, &fv, &size, &epoch, &data); err != nil {
 		t.Fatal(err)
 	}
 	if uint64(rv) != snap.Generation() {
@@ -427,5 +429,317 @@ func TestGraphSnapshot_RowMetadata(t *testing.T) {
 	}
 	if size != int64(len(data)) || size == 0 {
 		t.Errorf("size_bytes %d != len(data) %d", size, len(data))
+	}
+	if epoch == "" || epoch != f.store.epoch {
+		t.Errorf("epoch: got %q, want the writer process's id %q ('' is reserved for pre-migration rows)", epoch, f.store.epoch)
+	}
+}
+
+// TestGraphAt_AcrossSentinelRestart is the M3 drill observation 1
+// regression: epoch A writes a snapshot and changes, the sentinel
+// "restarts" (store reopened, FRESH graph — new interner, generation
+// counter back at 1), epoch B writes its own snapshot and changes.
+// GraphAt must resolve inside each epoch without ever replaying one
+// epoch's delta log onto the other's snapshots, and a t in the gap
+// between epochs resolves to the prior epoch's last state (the
+// documented boundary semantics).
+func TestGraphAt_AcrossSentinelRestart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "lookout.db")
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	// ---- Epoch A ----
+	stA, err := Open(path, WithClock(clock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gA := graph.New(graph.Options{SwapInterval: -1, OnChange: stA.RecordGraphChange, Now: clock})
+	wA := gA.Writer()
+	if err := wA.FromObjects(slices.Values([]any{histNode("n1"), histPod("a-1", "n1", "img:v1")})); err != nil {
+		t.Fatal(err)
+	}
+	t0 := now
+	snapA, err := gA.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stA.PutGraphSnapshot(ctx, snapA); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	t1 := now // epoch A change: pod a-2 appears (generation 2 > B's snapshot generation)
+	if err := wA.Apply(graph.Delta{Op: graph.OpAdd, Object: histPod("a-2", "n1", "img:v1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wA.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	stA.Flush()
+	if err := stA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- The restart gap: nothing observes the cluster here. ----
+	now = now.Add(time.Minute)
+	tGap := now
+
+	// ---- Epoch B: fresh process, fresh graph, DIFFERENT interning
+	// order and object set, generation reset — the shape that made
+	// pre-epoch replay fail with "bad change effect". ----
+	now = now.Add(time.Minute)
+	stB, err := Open(path, WithClock(clock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stB.Close() }()
+	gB := graph.New(graph.Options{SwapInterval: -1, OnChange: stB.RecordGraphChange, Now: clock})
+	wB := gB.Writer()
+	if err := wB.FromObjects(slices.Values([]any{histPod("b-1", "n1", "img:v2"), histNode("n1")})); err != nil {
+		t.Fatal(err)
+	}
+	t3 := now
+	snapB, err := gB.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stB.PutGraphSnapshot(ctx, snapB); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	t4 := now
+	if err := wB.Apply(graph.Delta{Op: graph.OpAdd, Object: histPod("b-2", "n1", "img:v2")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wB.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	stB.Flush()
+
+	lookup := func(s *graph.Snapshot, name string) bool {
+		id, ok := s.Lookup(graph.KindPod, "shop", name)
+		if !ok {
+			return false
+		}
+		ref, _ := s.Resolve(id)
+		return ref.Observed
+	}
+	for _, tc := range []struct {
+		name    string
+		at      time.Time
+		present []string
+		absent  []string
+	}{
+		{"epoch A baseline", t0, []string{"a-1"}, []string{"a-2", "b-1", "b-2"}},
+		{"epoch A + replay", t1, []string{"a-1", "a-2"}, []string{"b-1", "b-2"}},
+		{"gap resolves to prior epoch's last state", tGap, []string{"a-1", "a-2"}, []string{"b-1", "b-2"}},
+		{"epoch B baseline", t3, []string{"b-1"}, []string{"a-1", "a-2", "b-2"}},
+		{"epoch B + replay", t4, []string{"b-1", "b-2"}, []string{"a-1", "a-2"}},
+	} {
+		got, err := stB.GraphAt(ctx, tc.at)
+		if err != nil {
+			t.Fatalf("%s: GraphAt(%s): %v (pre-epoch stores failed here with 'bad change effect')", tc.name, tc.at, err)
+		}
+		for _, name := range tc.present {
+			if !lookup(got, name) {
+				t.Errorf("%s: pod %s must be present", tc.name, name)
+			}
+		}
+		for _, name := range tc.absent {
+			if lookup(got, name) {
+				t.Errorf("%s: pod %s from the other epoch leaked in", tc.name, name)
+			}
+		}
+	}
+
+	// The two processes really wrote two distinct, non-empty epochs.
+	var epochs int
+	if err := stB.db.QueryRow(`SELECT COUNT(DISTINCT epoch) FROM graph_snapshots WHERE epoch != ''`).Scan(&epochs); err != nil {
+		t.Fatal(err)
+	}
+	if epochs != 2 {
+		t.Errorf("want 2 distinct non-empty snapshot epochs, got %d", epochs)
+	}
+}
+
+// TestGraphAt_LegacyEpochBackfill pins the migration's backfill
+// semantics: rows carrying the pre-migration default epoch ” are ONE
+// epoch, and GraphAt resolves them exactly as before the epoch
+// columns existed.
+func TestGraphAt_LegacyEpochBackfill(t *testing.T) {
+	t.Parallel()
+	f := newHistoryFixture(t)
+	ctx := context.Background()
+	f.seed(histNode("n1"), histPod("pay-1", "n1", "img:v1"))
+	f.putSnapshot()
+	f.advance(time.Minute)
+	want := f.apply(graph.OpAdd, histPod("pay-2", "n1", "img:v1"))
+
+	// Blank the epoch stamps: this is what rows written before
+	// migration v5 look like after ALTER TABLE's DEFAULT '' backfill.
+	if _, err := f.store.db.Exec(`UPDATE graph_snapshots SET epoch = ''`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`UPDATE graph_changes SET epoch = ''`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.store.GraphAt(ctx, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSameTopology(t, got, want)
+	if id, ok := got.Lookup(graph.KindPod, "shop", "pay-2"); !ok {
+		t.Error("pay-2 missing: legacy '' rows must replay as one epoch")
+	} else if ref, _ := got.Resolve(id); !ref.Observed {
+		t.Errorf("pay-2 not observed: %+v", ref)
+	}
+}
+
+// TestGraphAt_PreEpochSchemaReadOnly: a store from a sentinel older
+// than migration v5 (graph-history tables, no epoch columns) opened
+// read-only takes the single-epoch legacy query path.
+func TestGraphAt_PreEpochSchemaReadOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations[:graphHistorySchemaVersion] {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, graphHistorySchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	// One snapshot + one change, produced by the real graph writer and
+	// inserted through the OLD column set.
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	var recs []graph.ChangeRecord
+	g := graph.New(graph.Options{
+		SwapInterval: -1,
+		OnChange:     func(r graph.ChangeRecord) { recs = append(recs, r) },
+		Now:          func() time.Time { return now },
+	})
+	w := g.Writer()
+	if err := w.FromObjects(slices.Values([]any{histNode("n1"), histPod("pay-1", "n1", "img:v1")})); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := g.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := snap.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := now
+	if _, err := db.Exec(`INSERT INTO graph_snapshots (taken_at, resource_version, format_version, size_bytes, data)
+		VALUES (?,?,?,?,?)`, t0.UnixNano(), int64(snap.Generation()), graph.SnapshotFormatVersion, len(enc), enc); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if err := w.Apply(graph.Delta{Op: graph.OpAdd, Object: histPod("pay-2", "n1", "img:v1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("want 1 change record, got %d", len(recs))
+	}
+	if _, err := db.Exec(`INSERT INTO graph_changes (at, generation, op, kind, namespace, name, uid, changes, effect)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		recs[0].At.UnixNano(), int64(recs[0].Generation), recs[0].Op.String(), recs[0].Kind.String(),
+		recs[0].Namespace, recs[0].Name, recs[0].UID, "[]", recs[0].Effect); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenRead(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	if ro.schemaVersion >= graphEpochSchemaVersion {
+		t.Fatalf("fixture is not pre-epoch (schema v%d)", ro.schemaVersion)
+	}
+	got, err := ro.GraphAt(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := got.Lookup(graph.KindPod, "shop", "pay-2"); !ok {
+		t.Error("pay-2 missing from pre-epoch store resolution")
+	} else if ref, _ := got.Resolve(id); !ref.Observed {
+		t.Errorf("pay-2 not observed: %+v", ref)
+	}
+}
+
+// TestGraphAt_PreservesWatches (M3 drill observation 2): the sentinel
+// feed's partial watched set survives the store round-trip — both off
+// the bare snapshot and through change replay — so history-mode
+// radius keeps the #46 unknown-vs-missing honesty.
+func TestGraphAt_PreservesWatches(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "lookout.db")
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	st, err := Open(path, WithClock(clock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	g := graph.New(graph.Options{
+		SwapInterval: -1,
+		OnChange:     st.RecordGraphChange,
+		Now:          clock,
+		WatchedKinds: []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet},
+	})
+	w := g.Writer()
+	if err := w.FromObjects(slices.Values([]any{histNode("n1"), histPod("pay-1", "n1", "img:v1")})); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := g.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutGraphSnapshot(ctx, snap); err != nil {
+		t.Fatal(err)
+	}
+	tSnap := now
+	now = now.Add(time.Minute)
+	if err := w.Apply(graph.Delta{Op: graph.OpAdd, Object: histPod("pay-2", "n1", "img:v1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	st.Flush()
+
+	for name, at := range map[string]time.Time{"snapshot verbatim": tSnap, "after replay": now} {
+		got, err := st.GraphAt(ctx, at)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, k := range []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet} {
+			if !got.Watches(k) {
+				t.Errorf("%s: watched kind %v lost through the store", name, k)
+			}
+		}
+		for _, k := range []graph.NodeKind{graph.KindDeployment, graph.KindConfigMap, graph.KindSecret} {
+			if got.Watches(k) {
+				t.Errorf("%s: unwatched kind %v reads watched — history answers regress to pre-#46 mislabeling", name, k)
+			}
+		}
 	}
 }

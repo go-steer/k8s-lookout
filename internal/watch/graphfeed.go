@@ -76,10 +76,12 @@ type graphFeed struct {
 // newGraphFeed constructs the feed over an externally owned shared
 // informer factory (the same one the object-state source registers
 // on when both are enabled). onChange, when non-nil, arms the §6.6
-// delta log: every applied informer delta emits a ChangeRecord the
-// sentinel routes into the store's buffered writer (nil when no
-// --store is configured — the graph then skips change tracking
-// entirely).
+// delta log: every informer delta applied AFTER initial sync emits a
+// ChangeRecord the sentinel routes into the store's buffered writer
+// (nil when no --store is configured — the graph then skips change
+// tracking entirely). Initial-sync deltas — the objects listed at
+// startup, including the handler Adds that race the listing — emit
+// nothing: they are baseline, covered by the first stored snapshot.
 func newGraphFeed(factory informers.SharedInformerFactory, onChange func(graph.ChangeRecord)) *graphFeed {
 	return &graphFeed{
 		factory: factory,
@@ -161,9 +163,15 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	// Initial sync (§6.3): build from the freshly synced informer
 	// stores off to the side, publish with one swap. Handler deltas
 	// that raced the store listing were buffered by enqueue and are
-	// replayed on top — Apply is an idempotent upsert, so an object
-	// present in both is harmless and a delete observed during the
-	// listing wins on replay.
+	// replayed on top — the apply is an idempotent upsert, so an
+	// object present in both is harmless and a delete observed during
+	// the listing wins on replay. The replay uses ApplyInitial: those
+	// buffered deltas are overwhelmingly the initial LIST's Adds, and
+	// change logging arms only for deltas applied AFTER this point —
+	// the same discipline the signal sources use (arm-after-sync), so
+	// pre-existing objects never masquerade as "Added" changes in the
+	// §6.6 delta log. The first snapshot stored after arming captures
+	// the baseline.
 	var objs []any
 	for _, inf := range []cache.SharedIndexInformer{podInf, nodeInf, rsInf} {
 		objs = append(objs, inf.GetStore().List()...)
@@ -178,7 +186,7 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	g.armed = true
 	g.mu.Unlock()
 	if len(buffered) > 0 {
-		if err := w.Apply(buffered...); err != nil {
+		if err := w.ApplyInitial(buffered...); err != nil {
 			return fmt.Errorf("storm: replay buffered graph deltas: %w", err)
 		}
 	}

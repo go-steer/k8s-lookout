@@ -179,8 +179,16 @@ type track struct {
 	lastProgressAt time.Time
 	// fired gates KindStall to once per revision.
 	fired map[string]bool
-	// completedAt is when the rollout was last observed complete —
-	// the clearance StableSince.
+	// complete is whether the LAST evaluation observed the workload
+	// rollout-complete; completedAt stamps the not-complete→complete
+	// TRANSITION and is the clearance StableSince. The transition
+	// gate matters (M3 drill observation 4): a deployment that was
+	// complete long before an incident must not lend that old
+	// timestamp to the incident's clearance — the §7.4 stability
+	// window has to count from when completion was OBSERVED after
+	// the stall, or resolved records fire instantly with inverted
+	// cleared_after/observed_stable_for durations.
+	complete    bool
 	completedAt time.Time
 	lastSeen    time.Time
 }
@@ -535,6 +543,19 @@ func (s *Source) sweep(now time.Time) []engine.Signal {
 	return out
 }
 
+// markComplete records one completion observation: the FIRST sweep
+// that sees the rollout complete after a not-complete period stamps
+// completedAt (the clearance StableSince); repeated complete sweeps
+// leave it alone so the §7.4 stability window keeps counting from
+// the transition. Called under s.mu.
+func (tr *track) markComplete(now time.Time) {
+	if !tr.complete {
+		tr.complete = true
+		tr.completedAt = now
+	}
+	tr.revision = ""
+}
+
 // trackFor returns (creating if needed) the workload's progress
 // memory. Called under s.mu.
 func (s *Source) trackFor(uid types.UID, now time.Time) *track {
@@ -627,12 +648,10 @@ func (s *Source) evalDeployment(d *appsv1.Deployment, now time.Time) *engine.Sig
 	}
 	tr := s.trackFor(d.UID, now)
 	if deploymentComplete(d) {
-		if tr.revision != "" || tr.completedAt.IsZero() {
-			tr.revision = ""
-			tr.completedAt = now
-		}
+		tr.markComplete(now)
 		return nil
 	}
+	tr.complete = false
 	if d.Spec.Paused || newest == nil {
 		tr.revision = ""
 		return nil
@@ -681,12 +700,10 @@ func (s *Source) evalDeployment(d *appsv1.Deployment, now time.Time) *engine.Sig
 func (s *Source) evalStatefulSet(sts *appsv1.StatefulSet, now time.Time) *engine.Signal {
 	tr := s.trackFor(sts.UID, now)
 	if stsComplete(sts) {
-		if tr.revision != "" || tr.completedAt.IsZero() {
-			tr.revision = ""
-			tr.completedAt = now
-		}
+		tr.markComplete(now)
 		return nil
 	}
+	tr.complete = false
 	update, current := sts.Status.UpdateRevision, sts.Status.CurrentRevision
 	if update == "" || update == current {
 		tr.revision = ""
@@ -814,6 +831,13 @@ func (s *Source) newStall(objKind, namespace, name, uid, revDesc string, newRead
 // the workload itself is gone — resolution object_deleted. ok=false
 // for incidents that are not rollout stalls, or before the informer
 // caches synced (cannot judge against an empty mirror).
+//
+// StableSince is the sweep that OBSERVED the completion transition
+// (track.markComplete), never an earlier completion from before the
+// stall: the recovery tracker counts the §7.4 stability window from
+// it, so a rollback debounces --recovery-stable-for like every other
+// observer's clearance, and the resolved record's cleared_after /
+// observed_stable_for split at clearance time, not fire time.
 func (s *Source) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 	if engine.CanonicalReason(inc.Key.Reason) != ReasonStall {
 		return engine.Clearance{}, false

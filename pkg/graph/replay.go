@@ -135,21 +135,26 @@ type Replayer struct {
 	edges int
 	keys  []string
 	ids   map[string]NodeID
-	gen   uint64
-	done  bool
+	// watched carries the base snapshot's watched-kind set through
+	// replay unchanged: effects mutate topology, never the ingest's
+	// honesty declaration.
+	watched map[NodeKind]bool
+	gen     uint64
+	done    bool
 }
 
 // NewReplayer starts replay from base (typically graph.Restore of a
 // stored snapshot). The base snapshot is not modified.
 func NewReplayer(base *Snapshot) *Replayer {
 	r := &Replayer{
-		nodes: maps.Clone(base.nodes),
-		out:   maps.Clone(base.out),
-		in:    maps.Clone(base.in),
-		edges: base.edges,
-		keys:  slices.Clone(base.keys),
-		ids:   make(map[string]NodeID, len(base.keys)),
-		gen:   base.generation,
+		nodes:   maps.Clone(base.nodes),
+		out:     maps.Clone(base.out),
+		in:      maps.Clone(base.in),
+		edges:   base.edges,
+		keys:    slices.Clone(base.keys),
+		ids:     make(map[string]NodeID, len(base.keys)),
+		watched: base.watched,
+		gen:     base.generation,
 	}
 	for i, k := range r.keys {
 		r.ids[k] = NodeID(i + 1) // #nosec G115 -- bounded by interner invariant
@@ -343,6 +348,7 @@ func (r *Replayer) Snapshot() *Snapshot {
 		edges:      r.edges,
 		keys:       r.keys,
 		ids:        ids,
+		watched:    r.watched,
 		generation: r.gen,
 	}
 }

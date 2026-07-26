@@ -181,18 +181,39 @@ func parsePositional(arg, namespace string) (emit.WorkloadRef, error) {
 }
 
 // lookupTarget resolves the target on any snapshot — live or
-// point-in-time — requiring the object to have actually been
-// observed (a merely-referenced identity is not a valid target).
-func lookupTarget(snap *graph.Snapshot, wl emit.WorkloadRef) (graph.NodeID, error) {
-	id, ok := snap.Lookup(graphKinds[wl.Kind], wl.Namespace, wl.Name)
-	if ok {
-		ref, resolved := snap.Resolve(id)
-		ok = resolved && ref.Observed
+// point-in-time (at is the resolved --at instant, zero for live).
+// Observed objects always resolve. For kinds the snapshot's ingest
+// never watches, an identity-only node still resolves when its owner
+// chain connects it into the topology: the sentinel graph feed holds
+// Deployments only through ReplicaSet ownerReferences, so a
+// historical Deployment target is answerable via its Owns edges to
+// the observed RS/pods (M3 drill observation 3) — refusing it would
+// force every post-mortem to re-derive the owner chain by hand. A
+// disconnected identity (or one of a watched kind that is genuinely
+// absent) is not a valid target; the historical error says the
+// object was not in the WATCHED topology at the asked instant, which
+// is the actionable statement (try the ReplicaSet/Pod, or a time the
+// object existed).
+func lookupTarget(snap *graph.Snapshot, wl emit.WorkloadRef, at time.Time) (graph.NodeID, error) {
+	kind := graphKinds[wl.Kind]
+	if id, ok := snap.Lookup(kind, wl.Namespace, wl.Name); ok {
+		if ref, resolved := snap.Resolve(id); resolved {
+			if ref.Observed {
+				return id, nil
+			}
+			// Identity-only fallback: unwatched kind, but the owner
+			// chain (or any other edge) places it in the topology.
+			if !snap.Watches(kind) && (len(snap.Out(id)) > 0 || len(snap.In(id)) > 0) {
+				return id, nil
+			}
+		}
 	}
-	if !ok {
-		return graph.NoNode, fmt.Errorf("workload %s not found in the topology", wl)
+	if !at.IsZero() {
+		return graph.NoNode, fmt.Errorf(
+			"workload %s was not in the watched topology as of %s — the sentinel's graph feed may hold this kind only through owner references; target the workload's ReplicaSet or a Pod, or pick an instant the object existed",
+			wl, at.UTC().Format(time.RFC3339))
 	}
-	return id, nil
+	return graph.NoNode, fmt.Errorf("workload %s not found in the topology", wl)
 }
 
 // historicalSnapshot opens the sentinel store read-only and resolves

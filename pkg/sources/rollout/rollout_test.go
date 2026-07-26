@@ -568,3 +568,69 @@ func TestArmAfterSync(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 }
+
+// TestDeployment_RollbackAfterPriorCompletion_StampsClearanceAtRollback
+// is the M3 drill observation 4 regression: a Deployment that was
+// COMPLETE long before the bad deploy (the steady state every
+// sentinel observes for hours) must not lend that old completion
+// timestamp to the incident's clearance. StableSince must be the
+// sweep that observed the post-rollback completion — the §7.4 tracker
+// counts the stability window from it, so anything earlier (the drill
+// saw fire-time after clamping) skips the debounce and produces
+// resolved records with cleared_after=0 and observed_stable_for
+// counted from fire time.
+func TestDeployment_RollbackAfterPriorCompletion_StampsClearanceAtRollback(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{Observe: 3 * time.Minute})
+
+	// Steady state: the deployment has been complete for hours.
+	s.onReplicaSet(replicaSet("rs-old", "prod", "web-5f6", "d1", "1", 3, 3))
+	s.onDeployment(deployment("d1", "prod", "web", 3, 3, 3, 3))
+	priorCompletion := *clock
+
+	// The bad deploy, two hours later; the stall fires after the
+	// observe window.
+	*clock = clock.Add(2 * time.Hour)
+	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 1, 0))
+	s.onPod(rolloutPod("p-new", "prod", "web-7b9-x1", "rs-new", "", false, "CrashLoopBackOff"))
+	s.onDeployment(deployment("d1", "prod", "web", 3, 1, 3, 4))
+	*clock = clock.Add(3 * time.Minute)
+	s.send(s.sweep(*clock))
+	if len(col.all()) != 1 {
+		t.Fatalf("fixture did not fire: %v", col.kinds())
+	}
+	inc := engine.Incident{
+		Key: engine.EventKey{UID: "d1", Reason: ReasonStall},
+		Ref: engine.IncidentRef{Namespace: "prod", KindOfObject: "Deployment", Name: "web"},
+	}
+	if verdict, ok := s.Clearance(inc); !ok || verdict.Cleared {
+		t.Fatalf("verdict = %+v ok=%v, want claimed + not cleared mid-stall", verdict, ok)
+	}
+
+	// Rollback 29s after the fire: bad RS scaled to 0, old RS
+	// re-promoted (revision 3), deployment completes.
+	*clock = clock.Add(29 * time.Second)
+	rollbackObserved := *clock
+	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 0, 0))
+	s.onReplicaSet(replicaSet("rs-old", "prod", "web-5f6", "d1", "3", 3, 3))
+	s.onDeployment(deployment("d1", "prod", "web", 3, 3, 3, 3))
+
+	verdict, ok := s.Clearance(inc)
+	if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionRecovered {
+		t.Fatalf("verdict = %+v ok=%v, want cleared/recovered after rollback", verdict, ok)
+	}
+	if !verdict.StableSince.Equal(rollbackObserved) {
+		t.Errorf("StableSince = %v, want the observed rollback completion %v — not the pre-incident completion %v (skips the stability window and zeroes cleared_after)",
+			verdict.StableSince, rollbackObserved, priorCompletion)
+	}
+
+	// Later sweeps that keep observing completion must NOT move the
+	// stamp forward: the stability window keeps counting from the
+	// transition.
+	*clock = clock.Add(45 * time.Second)
+	s.send(s.sweep(*clock))
+	verdict, ok = s.Clearance(inc)
+	if !ok || !verdict.Cleared || !verdict.StableSince.Equal(rollbackObserved) {
+		t.Errorf("StableSince drifted to %v on a repeat sweep, want stable %v (ok=%v)", verdict.StableSince, rollbackObserved, ok)
+	}
+}

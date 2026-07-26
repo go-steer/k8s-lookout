@@ -48,7 +48,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -192,6 +194,24 @@ var migrations = []string{
 		PRIMARY KEY (fingerprint, resource_key)
 	);
 	CREATE INDEX triage_status_updated ON triage_status (updated);`,
+
+	// v5: §6.6 graph-history EPOCHS (M3 drill observation 1). A
+	// restarted sentinel starts a FRESH graph — new interner, NodeIDs
+	// reassigned, generation counter back at 1 — while the store keeps
+	// the previous process's snapshots and change log, so a replay
+	// that mixes processes decodes effects against the wrong interner.
+	// Every graph_snapshots/graph_changes row is therefore stamped
+	// with the writing process's epoch id, and GraphAt resolves within
+	// exactly one epoch (see history.go). Additive columns with
+	// backfill-by-default semantics: rows written before this
+	// migration all get epoch '' — i.e. they are treated as ONE epoch,
+	// which is exactly as correct as the data ever was (a pre-epoch
+	// store that survived a restart was already unreplayable across
+	// the boundary; one that didn't is now labeled consistently).
+	`ALTER TABLE graph_snapshots ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
+	ALTER TABLE graph_changes ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
+	CREATE INDEX graph_snapshots_epoch_taken_at ON graph_snapshots (epoch, taken_at);
+	CREATE INDEX graph_changes_epoch_generation ON graph_changes (epoch, generation);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no
@@ -267,6 +287,13 @@ type Store struct {
 	schemaVersion int
 	readOnly      bool
 
+	// epoch is this writer process's graph-history incarnation id
+	// (§6.6, M3 drill observation 1): a fresh random id per Open,
+	// stamped on every graph snapshot and change row so GraphAt never
+	// replays one process's delta log onto another process's
+	// snapshots. Empty on read-only opens (they never write).
+	epoch string
+
 	mu     sync.RWMutex // guards closed vs. concurrent Record/Flush
 	closed bool
 	ch     chan writeReq
@@ -329,6 +356,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 		hooks:         o.hooks,
 		logf:          o.logf,
 		schemaVersion: len(migrations),
+		epoch:         newEpoch(),
 		ch:            make(chan writeReq, o.bufLen),
 		done:          make(chan struct{}),
 	}
@@ -418,6 +446,20 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// newEpoch mints the per-process graph-history incarnation id: 16 hex
+// characters of crypto/rand entropy (collision across the restarts of
+// one sentinel is what matters, and 64 bits is far beyond it). The
+// time-based fallback exists only for the theoretical failure of the
+// system entropy source — an epoch id must never be empty, because ”
+// is reserved for pre-migration rows.
+func newEpoch() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%015x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func readVersion(db *sql.DB) (int, error) {
