@@ -54,6 +54,38 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
+**Implementation complete through M5 (v0.6.0)** — the §14 phase plan
+is finished; post-M5 work is the review backlog in
+`docs/milestones/M5.md` §Remaining known gaps, not new milestones.
+M5 closed fleet & corpus: the signal schema is FROZEN as v1
+(`docs/signal-schema-v1.md`; ledger `pkg/inject/schema_freeze_test.go`
+— removing/renaming a frozen field or touching the fingerprint recipe
+is a v2 negotiation with AX, never a test update; additions are
+additive-only and extend the ledger + doc in the same change).
+Source-namespaced payloads carry the full §8 identity
+(`source`/`severity`/`fingerprint`/`project`/`zone`); the M0
+`k8s-event`/`k8s-event-followup` pair stays byte-frozen. Scan findings
+(`health`, `triage delta`) stamp the SAME fingerprints via
+`engine.ScanFingerprint` (the §9.4 join's recipe) on the new
+`fingerprint` envelope field. The §9.3 corpus is harvestable:
+`pkg/corpus` + `dev/tools/harvest-corpus` extract labeled trajectories
+(symptom → diagnosis → action → verified outcome) from stub-daemon
+captures by pure schema walks — end-to-end exit checks in
+`internal/watch/m5_corpus_rollup_test.go`, which also simulates the
+two-cluster stockout rollup as the AX-side fingerprint join. Remaining
+reads shipped in #54/#56 (`state wi|webhooks|volumes`, `stab
+drift|drain`, `perf probe`), `token-burn` in #53; skills cover the
+full surface (`k8s-triage`, `cluster-health`, `gitops-drift`,
+playbooks). Key open items (full list in M5.md): the real-incident
+trajectory + real AX integration + real-GCP drills (human steps),
+core-agent's shared Memory surface and CostCeiling-on-/usage TODOs,
+the `triage status` §4.1 extension awaiting review, `health`'s
+control-plane category not yet delegating to the perf packs, the
+`k8s-capacity` skill, and the M3 graph-history observations
+(`--storm` default stays OFF pending the restart fix).
+
+Milestone history below for archaeology.
+
 **M4 complete** (see `docs/milestones/M4.md` for the drill evidence;
 M3/M2/M1/M0 records sit alongside): all eight §7.2 sources ship —
 M3's six plus `capacity` (§10.1: CA events / status-ConfigMap gap /
@@ -96,10 +128,3 @@ deployments. M3 observations remain open (`GraphAt` restart replay,
 OFF pending the restart fix. GKE replay runbooks:
 `dev/drills/node-failure.md`, `dev/drills/bad-deploy.md`,
 `dev/drills/memory-leak.md`, `dev/drills/quota-exhaustion.md`.
-
-Next milestone: **M5 — fleet & corpus** (DESIGN.md §14): remaining
-reads (`state wi|webhooks|volumes`, `stab drift|drain`, `perf probe`);
-fingerprint schema finalized with AX; `token-burn` source; corpus
-harvester contract validated end-to-end (§9.3). Exit: AX can rollup a
-multi-cluster staged stockout; one harvested labeled trajectory from a
-real incident.

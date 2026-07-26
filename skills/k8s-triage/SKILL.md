@@ -70,6 +70,9 @@ MCP tool with the same payload:
 | what has the *system* done to it lately? | `lookout triage events --workload=Deployment/prod/api --since=1h` | deduped event timeline over the whole owner-reference tree, with HPA-thrash detection — see "Event timeline vs logs" |
 | who else is affected? | `lookout triage radius Deployment/prod/api` | upstream routes, lateral co-tenants, downstream dependencies, with hop counts — see "Impact" |
 | is DNS/TCP/HTTP to it actually broken? | `lookout net probe --dns=api.prod.svc.cluster.local` | active confirmation from wherever lookout runs — see "Confirming a network hypothesis" |
+| creates/updates hang or fail with "failed calling webhook"? | `lookout state webhooks` | audits every admission webhook: dead backends × failurePolicy (Fail + dead backend rejects everything that matches), blast radius, timeout stall risk, CA-bundle expiry |
+| pod stuck in ContainerCreating with Multi-Attach / FailedAttachVolume? | `lookout state volumes` | joins VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO wanted on two nodes, attach errors with age, cross-zone PV locks |
+| GKE pod gets 403s / metadata-server errors calling GCP APIs? | `lookout state wi` | verifies the Workload Identity chain (KSA annotation → workloadIdentityUser binding) and reports only the broken links; vanilla clusters report an explicit unavailable |
 
 Concrete `state edges` output when a referenced ConfigMap key is missing
 (the classic CreateContainerConfigError) and a Service has unready
@@ -105,6 +108,11 @@ lookout state edges --workload=Deployment/prod/api --format=json
   denser to read inline.
 - Findings are ordered critical-first. `severity` is one of
   critical/warning/info.
+- `fingerprint=` (on `health` / `triage delta` findings) is the §8
+  incident-class key — the SAME hash the sentinel stamps on its injects
+  for this failure class, so "the sentinel paged on this" and "the scan
+  still sees it" join on one key. Pass it to `lookout triage status`
+  when recording a diagnosis.
 - Secret values never appear on any surface: Secret data renders as keys +
   byte sizes, credential-shaped env values render as `[REDACTED]`, and every
   emitted string passes the sanitizer. If you need a secret's *value*,

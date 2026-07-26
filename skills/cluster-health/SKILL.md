@@ -58,7 +58,8 @@ scanned=10 findings=20 elapsed=100ms
 | quota | `lookout triage delta --only=quota` |
 | storage | `lookout triage spec pvc/prod/data-claim` for the named PVC |
 | certs | `lookout state edges --workload=Deployment/prod/api --cert-warn=720h` for the workload behind the cert, or `lookout triage spec Secret/prod/old-tls` (keys and expiry only — values never render) |
-| webhooks | `lookout triage spec ValidatingWebhookConfiguration/policy` (a dedicated `state webhooks` lands M5) |
+| webhooks | `lookout state webhooks` — the full audit: dead backends × failurePolicy, namespace/rule blast radius, timeout stall risk, CA-bundle expiry (health's webhooks category delegates to the same check) |
+| control-plane (GKE, provider configured) | `lookout perf probe --pack=apiserver` — p99 latency by verb/resource; also `--pack=apf`, `--pack=etcd`, `--pack=startup` |
 
 Once the drill-down names a specific broken workload, switch to the
 k8s-triage skill: `bundle` first, then narrow.
@@ -70,10 +71,17 @@ k8s-triage skill: `bundle` first, then narrow.
 - For a scheduled sweep, prefer `--format=json` and alert on any
   `health.category` record with `status=degraded`; `--top=5` widens the
   inline naming so most pages need no second call.
-- The scorecard is live checks only in M1: open sentinel findings and
-  triage-status records ("already triaged 10 min ago, PR open") merge into
-  it in M4. Until then, cross-check active incident sessions yourself
-  before re-triaging something the scorecard flags.
+- With `--store=/var/lib/lookout/lookout.db` (the sentinel's store), open
+  §9.4 triage-status records merge into the scorecard: findings an agent
+  already diagnosed carry `triage_status=`/`triage_root_cause=` and the
+  agent's severity judgment — report the triaged reality, do not re-derive
+  it. Every symptom finding also carries `fingerprint=`, the same §8 key
+  the sentinel stamps on its injects, so scan results and incident
+  sessions join without guessing.
+- Before node maintenance, add `lookout stab drain -A` (or
+  `--node=<name>`): everything that will block a drain (gridlocked PDBs)
+  or be destroyed by it (bare pods, emptyDir data, singletons), before
+  the eviction API hangs on it.
 
 Per-command references (all flags, output-field glossaries) are in
 `references/`, generated from the same metadata as `--help`.
