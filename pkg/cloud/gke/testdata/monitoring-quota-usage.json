@@ -1,0 +1,22 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: a Monitoring v3 projects.timeSeries.list response for the serviceruntime.googleapis.com/quota/allocation/usage metric on the consumer_quota resource (§10.2: usage vs limit series feed the slope math). Points arrive NEWEST FIRST per the ListTimeSeries reference; int64Value is a JSON string per the discovery encoding. The contract test validates this shape (and the boundary's ascending re-sort), not live output.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "serviceruntime.googleapis.com/quota/allocation/usage",
+        "labels": { "quota_metric": "compute.googleapis.com/cpus" }
+      },
+      "resource": {
+        "type": "consumer_quota",
+        "labels": { "project_id": "prod-project", "location": "us-east1" }
+      },
+      "metricKind": "GAUGE",
+      "valueType": "INT64",
+      "points": [
+        { "interval": { "endTime": "2026-07-26T00:00:00Z" }, "value": { "int64Value": "1824" } },
+        { "interval": { "endTime": "2026-07-25T00:00:00Z" }, "value": { "int64Value": "1774" } },
+        { "interval": { "endTime": "2026-07-24T00:00:00Z" }, "value": { "int64Value": "1724" } }
+      ]
+    }
+  ]
+}

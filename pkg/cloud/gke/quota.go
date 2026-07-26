@@ -16,16 +16,22 @@
 
 package gke
 
-// QuotaAPI implementation (`cloud quota`, DESIGN.md §10.2): the
-// "cheap 80%" — usage/limit pairs from compute projects.get (global
-// quotas) and regions.get (regional quotas for the provider's
-// region). Cloud Quotas API metadata and Monitoring series are the
-// resident quota source's inputs, deliberately not this snapshot's.
+// QuotaAPI implementation (`cloud quota` and the resident quota
+// source, DESIGN.md §10.2): the "cheap 80%" — usage/limit pairs from
+// compute projects.get (global quotas) and regions.get (regional
+// quotas for the provider's region) — plus, since the quota source
+// landed, Cloud Quotas metadata (canonical increase-request ids,
+// quotametadata.go) and the Monitoring usage-vs-limit series behind
+// History (quotahistory.go). Each surface stays behind its own §13
+// small client interface (production clients: gceQuotaClient below
+// and quotaclients.go), replayable from recorded fixtures.
 
 import (
 	"context"
 	"fmt"
+	"sync"
 
+	"cloud.google.com/go/cloudquotas/apiv1/cloudquotaspb"
 	compute "google.golang.org/api/compute/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -45,10 +51,29 @@ type quotaComputeAPI interface {
 type quotaAPI struct {
 	location string
 	gce      quotaComputeAPI
+	// metadata/series are the quota source's two further surfaces
+	// (§10.2): Cloud Quotas metadata for canonical increase-request
+	// ids and Monitoring for the usage-vs-limit history. nil-
+	// tolerated (metadata enrichment is best-effort; History without
+	// a series backend is a programming error it reports).
+	metadata pqMetadataAPI
+	series   pqSeriesAPI
+
+	// metaMu/metaByMetric cache the Cloud Quotas metadata after the
+	// first successful fetch — quota definitions change on release
+	// timescales, not poll timescales. A failed fetch is retried on
+	// the next Quotas call (see quotametadata.go).
+	metaMu       sync.Mutex
+	metaByMetric map[string]*cloudquotaspb.QuotaInfo
 }
 
 func newQuotaAPI(p *Provider) *quotaAPI {
-	return &quotaAPI{location: p.location, gce: newGCEQuotaClient(p.project)}
+	return &quotaAPI{
+		location: p.location,
+		gce:      newGCEQuotaClient(p.project),
+		metadata: newPQMetadataClient(p.project),
+		series:   newPQSeriesClient(p.project),
+	}
 }
 
 // Quotas implements cloud.QuotaAPI: global quotas always; the
@@ -69,16 +94,8 @@ func (a *quotaAPI) Quotas(ctx context.Context) ([]cloud.QuotaUsage, error) {
 		}
 		out = appendQuotas(out, reg.Quotas, region)
 	}
+	a.enrichIDs(ctx, out)
 	return out, nil
-}
-
-// History implements cloud.QuotaAPI. Deliberately unimplemented
-// here: usage/limit series come from Cloud Monitoring, which is the
-// resident quota source's job (§10.2) — the point-in-time command
-// never calls this, and saying so beats a half-built series path.
-func (a *quotaAPI) History(_ context.Context, name, scope string, _ cloud.TimeWindow) (cloud.QuotaHistory, error) {
-	return cloud.QuotaHistory{}, fmt.Errorf(
-		"quota history for %s/%s: not served by the compute inventory — usage/limit series are the Monitoring-backed quota source's job (§10.2)", scope, name)
 }
 
 func appendQuotas(dst []cloud.QuotaUsage, quotas []*compute.Quota, scope string) []cloud.QuotaUsage {

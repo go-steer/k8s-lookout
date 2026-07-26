@@ -98,6 +98,14 @@ type QuotaUsage struct {
 	Usage float64
 	Limit float64
 	Unit  string
+	// ID is the provider's canonical increase-request identifier
+	// when it maps one — on GCP the Cloud Quotas API
+	// "<service>/<quotaId>" pair a QuotaPreference names (e.g.
+	// "compute.googleapis.com/CPUS-per-project-region"). OPTIONAL
+	// best-effort enrichment: empty when the provider cannot (or did
+	// not) resolve it, and consumers fall back to Name. Feeds the
+	// §10.3 drafted increase request.
+	ID string
 }
 
 // QuotaHistory carries usage-vs-limit series for one quota, feeding

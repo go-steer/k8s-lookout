@@ -47,6 +47,11 @@ type Payload struct {
 	// reactive payload — the frozen k8s-event shape included —
 	// byte-identical to before.
 	Forecast *PayloadForecast `json:"forecast,omitempty"`
+	// QuotaIncreaseDraft is the §10.3 drafted increase request,
+	// present only on kind=quota.forecast payloads. ADDITIVE like
+	// Enrichment/Forecast: omitempty keeps every other payload
+	// byte-identical.
+	QuotaIncreaseDraft *PayloadQuotaDraft `json:"quota_increase_draft,omitempty"`
 }
 
 // PayloadForecast mirrors DESIGN.md §8's forecast object: ETA is the
@@ -70,6 +75,28 @@ type PayloadForecast struct {
 // (enrichment is best-effort; errors never block the inject).
 type PayloadEnrichment struct {
 	Bundle string `json:"bundle"`
+}
+
+// PayloadQuotaDraft is the wire shape of the §10.3 drafted quota
+// increase request riding a kind=quota.forecast inject. SCHEMA-
+// STABLE: the agent parses it structurally to file the request
+// through core-agent's PERMISSION GATE — lookout only ever drafts;
+// no code in this repository calls a QuotaPreference create (or any
+// other quota mutation). suggested_limit / justification come from
+// the quota source's slope math (pkg/sources/quota.Draft documents
+// the formula); quota_id is the provider's canonical increase-
+// request identifier when known (GCP: the Cloud Quotas
+// "<service>/<quotaId>" pair a QuotaPreference names), else the
+// inventory quota name.
+type PayloadQuotaDraft struct {
+	QuotaID        string  `json:"quota_id"`
+	Region         string  `json:"region"`
+	Unit           string  `json:"unit,omitempty"`
+	CurrentUsage   float64 `json:"current_usage"`
+	CurrentLimit   float64 `json:"current_limit"`
+	SuggestedLimit float64 `json:"suggested_limit"`
+	SlopePerDay    float64 `json:"slope_per_day"`
+	Justification  string  `json:"justification"`
 }
 
 // PayloadContext is the nested "context" object on Payload.

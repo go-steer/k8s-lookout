@@ -55,6 +55,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
+	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/store"
@@ -84,6 +85,9 @@ type flags struct {
 	expiryNamespaces      string
 	capacityPoll          time.Duration
 	pendingAge            time.Duration
+	quotaPoll             time.Duration
+	quotaWindow           time.Duration
+	quotaWarn             float64
 	dedupWindow           time.Duration
 	dedupPersist          string
 	unhealthyMinCount     int
@@ -142,7 +146,7 @@ func parseFlags(args []string) (*flags, error) {
 	// ADDITIVE flag: the default is exactly the M0 surface, so
 	// existing deployments keep byte-identical behavior without
 	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity. Default preserves the M0 watcher surface (k8s-events only).")
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota. Default preserves the M0 watcher surface (k8s-events only).")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -171,6 +175,17 @@ func parseFlags(args []string) (*flags, error) {
 	// escalation (15m) is design-fixed, not a flag.
 	fs.DurationVar(&f.capacityPoll, "capacity-poll", 60*time.Second, "Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0.")
 	fs.DurationVar(&f.pendingAge, "pending-age", 5*time.Minute, "How long a pod must be Pending+Unschedulable before capacity.pending-aged fires at warning (critical at the design-fixed 15m, or at this value when set higher). Must be > 0.")
+
+	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
+	// meaningful with --sources=…,quota — which is a PER-PROJECT
+	// opt-in: exactly one sentinel per GCP project enables it (§11
+	// Project tier), and it requires a quota-capable cloud provider
+	// (loud startup error otherwise). The severity thresholds
+	// (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%) are
+	// design-fixed, not flags.
+	fs.DurationVar(&f.quotaPoll, "quota-poll", 15*time.Minute, "Poll interval for the quota source's inventory read and per-watched-quota history query. Must be > 0.")
+	fs.DurationVar(&f.quotaWindow, "quota-window", 7*24*time.Hour, "History window the quota usage slope is fitted over (the §8 linear-<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0.")
+	fs.Float64Var(&f.quotaWarn, "quota-warn", 0.80, "Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1).")
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
@@ -321,6 +336,17 @@ func (f *flags) validate() error {
 	if f.pendingAge <= 0 {
 		return errors.New("--pending-age must be > 0")
 	}
+	// Quota knobs (§7.2 row 8): config errors in every mode, like the
+	// other source thresholds, even when the source is disabled.
+	if f.quotaPoll <= 0 {
+		return errors.New("--quota-poll must be > 0")
+	}
+	if f.quotaWindow <= 0 {
+		return errors.New("--quota-window must be > 0")
+	}
+	if f.quotaWarn <= 0 || f.quotaWarn >= 1 {
+		return errors.New("--quota-warn must be in (0, 1)")
+	}
 	// Storm bounds are validated before the mode switch's dry-run
 	// early return, like --sources: a nonsensical value is a config
 	// error in every mode.
@@ -409,7 +435,7 @@ func (f *flags) validate() error {
 func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {
@@ -730,6 +756,21 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// reactive payload byte-identical (frozen wire pins unchanged).
 	if sig.Forecast != nil {
 		payload.Forecast = &inject.PayloadForecast{ETA: sig.Forecast.ETA, ConfidenceBasis: sig.Forecast.ConfidenceBasis}
+	}
+	// §10.3 drafted increase request: quota.forecast only; additive
+	// via omitempty like Forecast. The agent files it through
+	// core-agent's permission gate — the sentinel only attaches.
+	if sig.QuotaDraft != nil {
+		payload.QuotaIncreaseDraft = &inject.PayloadQuotaDraft{
+			QuotaID:        sig.QuotaDraft.QuotaID,
+			Region:         sig.QuotaDraft.Region,
+			Unit:           sig.QuotaDraft.Unit,
+			CurrentUsage:   sig.QuotaDraft.CurrentUsage,
+			CurrentLimit:   sig.QuotaDraft.CurrentLimit,
+			SuggestedLimit: sig.QuotaDraft.SuggestedLimit,
+			SlopePerDay:    sig.QuotaDraft.SlopePerDay,
+			Justification:  sig.QuotaDraft.Justification,
+		}
 	}
 	// §9.1: record the routing DECISION (route=injected, with the
 	// session it targets), not delivery success — inject transport
@@ -1100,18 +1141,21 @@ func realMain(argv []string) error {
 			return fmt.Errorf("metrics.k8s.io client: %w", err)
 		}
 	}
-	// The cloud provider (§2 boundary) exists only for the capacity
-	// source's provider scale-decision sub-source (§10.1 source 3).
-	// On a default (untagged) build or off-cloud, cloud.New resolves
-	// to the NoProvider sentinel and the sub-source reports itself
-	// unavailable explicitly — never silently (§2).
+	// The cloud provider (§2 boundary) exists for the capacity
+	// source's provider scale-decision sub-source (§10.1 source 3)
+	// and the quota source (§10.2). On a default (untagged) build or
+	// off-cloud, cloud.New resolves to the NoProvider sentinel: the
+	// capacity sub-source then reports itself unavailable explicitly
+	// (never silently, §2), while the quota source REFUSES to start —
+	// quota.New's loud §11 error — because a project-tier deployment
+	// without a cloud makes no sense.
 	var provider cloud.Provider
-	if f.sourceEnabled(capacity.Name) {
+	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) {
 		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName})
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}
-		log.Printf("capacity: cloud provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
+		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
 	bs, err := buildSources(f, client, dyn, metricsClient, provider)
 	if err != nil {
@@ -1289,6 +1333,7 @@ type builtSources struct {
 	degradation *degradation.Source
 	expiry      *expiry.Source
 	capacity    *capacity.Source
+	quota       *quota.Source
 }
 
 // buildSources registers the sources named by --sources (§7.2:
@@ -1349,6 +1394,22 @@ func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, 
 			cfg.PendingAge = f.pendingAge
 			bs.capacity = capacity.New(client, provider, cfg)
 			src = bs.capacity
+		case quota.Name:
+			// §10.2/§11: the quota source is the Project-tier
+			// deployment — quota.New fails LOUDLY (naming the source
+			// and the missing capability) when the provider cannot
+			// serve quota, and that error stops startup here; there
+			// is no degraded quota mode.
+			cfg := quota.DefaultConfig()
+			cfg.Poll = f.quotaPoll
+			cfg.Window = f.quotaWindow
+			cfg.WarnPct = f.quotaWarn
+			q, err := quota.New(provider, cfg)
+			if err != nil {
+				return nil, err
+			}
+			bs.quota = q
+			src = bs.quota
 		default:
 			// validate() rejects unknown names before we get here.
 			return nil, fmt.Errorf("--sources: unknown source %q", name)

@@ -5,6 +5,7 @@ go 1.26.3
 toolchain go1.26.5
 
 require (
+	cloud.google.com/go/cloudquotas v1.12.0
 	cloud.google.com/go/logging v1.19.0
 	github.com/go-steer/core-agent/v2 v2.7.0
 	github.com/google/jsonschema-go v0.4.2

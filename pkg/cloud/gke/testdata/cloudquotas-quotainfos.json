@@ -1,0 +1,23 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: cloudquotas.googleapis.com v1 QuotaInfo records (protojson field names) as returned by quotaInfos.list for services/compute.googleapis.com — the metadata that maps a compute quota metric to the canonical <service>/<quotaId> pair a QuotaPreference increase request names (§10.2/§10.3; lookout only DRAFTS such requests, it never files them). The contract test validates this shape, not live output.",
+  "quotaInfos": [
+    {
+      "name": "projects/prod-project/locations/global/services/compute.googleapis.com/quotaInfos/CpusPerProjectPerRegion",
+      "quotaId": "CpusPerProjectPerRegion",
+      "metric": "compute.googleapis.com/cpus",
+      "service": "compute.googleapis.com",
+      "containerType": "PROJECT",
+      "dimensions": ["region"],
+      "metricUnit": "1",
+      "quotaIncreaseEligibility": { "isEligible": true }
+    },
+    {
+      "name": "projects/prod-project/locations/global/services/compute.googleapis.com/quotaInfos/CpusAllRegionsPerProject",
+      "quotaId": "CpusAllRegionsPerProject",
+      "metric": "compute.googleapis.com/cpus_all_regions",
+      "service": "compute.googleapis.com",
+      "containerType": "PROJECT",
+      "metricUnit": "1"
+    }
+  ]
+}

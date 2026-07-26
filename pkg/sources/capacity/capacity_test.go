@@ -279,6 +279,49 @@ func TestPollDecisions_ErrorKeepsWindow(t *testing.T) {
 	}
 }
 
+// TestPollDecisions_QuotaBlockedReKeysToQuotaUID pins the §10.3
+// correlation seam's reactive half: a GCE_QUOTA_EXCEEDED decision
+// whose message names the quota AND its scope is keyed by the
+// canonical quota UID (joining the quota source's open session via
+// the QuotaExhausted dedup family); a message that doesn't keeps the
+// conservative nodegroup key. Object identity names the failing
+// nodegroup either way.
+func TestPollDecisions_QuotaBlockedReKeysToQuotaUID(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 7, 26, 9, 59, 0, 0, time.UTC)
+	api := &scriptedDecisions{decisions: []cloud.ScaleDecision{
+		{Time: at, Decision: "scaleUp", NodeGroup: "mig-a", Reason: "GCE_QUOTA_EXCEEDED",
+			Message: "scale-up result error scale.up.error.quota.exceeded — Quota 'CPUS' exceeded. Limit: 2000.0 in region us-east1."},
+		{Time: at, Decision: "scaleUp", NodeGroup: "mig-b", Reason: "GCE_QUOTA_EXCEEDED",
+			Message: "scale-up result error scale.up.error.quota.exceeded (parameters: mig-b)"},
+		// Stockouts never re-key even if a quota is mentioned nearby.
+		{Time: at, Decision: "noScaleUp", NodeGroup: "mig-c", Reason: "GCE_STOCKOUT",
+			Message: "Quota 'CPUS' exceeded. Limit: 2000.0 in region us-east1."},
+	}}
+	s := New(fake.NewSimpleClientset(), newCapacityProvider(api), Config{})
+	var got []engine.Signal
+	s.emit = func(sig engine.Signal) { got = append(got, sig) }
+	if err := s.pollDecisions(context.Background(), at.Add(time.Minute)); err != nil {
+		t.Fatalf("pollDecisions: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("emitted %d signals, want 3", len(got))
+	}
+	wantUIDs := map[string]string{
+		"mig-a": "quota:CPUS/us-east1",
+		"mig-b": "nodegroup:mig-b",
+		"mig-c": "nodegroup:mig-c",
+	}
+	for _, sig := range got {
+		if sig.Key.UID != wantUIDs[sig.Name] {
+			t.Errorf("nodegroup %s → UID %q, want %q", sig.Name, sig.Key.UID, wantUIDs[sig.Name])
+		}
+		if sig.KindOfObject != "NodeGroup" || sig.Name == "" {
+			t.Errorf("object identity must keep naming the nodegroup, got %s/%s", sig.KindOfObject, sig.Name)
+		}
+	}
+}
+
 // TestKindsAreFrozenStrings pins the §7.3 kind names — playbooks and
 // AX match on these exact strings.
 func TestKindsAreFrozenStrings(t *testing.T) {

@@ -101,10 +101,14 @@ func TestQuotasWithoutLocationAreGlobalOnly(t *testing.T) {
 	}
 }
 
-func TestQuotaHistoryIsExplicitlyUnserved(t *testing.T) {
+// History is served by the Monitoring backend since the quota
+// source landed (quotahistory.go / quotaforecast_test.go); an
+// instance constructed without one — possible only by hand, never
+// via newQuotaAPI — reports the programming error explicitly.
+func TestQuotaHistoryWithoutSeriesBackendIsAnError(t *testing.T) {
 	api := &quotaAPI{location: "us-east1", gce: &fixtureQuotaGCE{t: t}}
 	_, err := api.History(context.Background(), "CPUS", "us-east1", cloud.TimeWindow{})
-	if err == nil || !strings.Contains(err.Error(), "quota source") {
-		t.Errorf("History error = %v, want the explicit §10.2 pointer", err)
+	if err == nil || !strings.Contains(err.Error(), "programming error") {
+		t.Errorf("History error = %v, want the explicit no-backend report", err)
 	}
 }

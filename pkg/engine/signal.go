@@ -179,4 +179,9 @@ type Signal struct {
 	// Recovery is the §7.4 outcome attachment, set only on
 	// Kind=resolved / Kind=resolved.reverted Signals; nil otherwise.
 	Recovery *Recovery
+	// QuotaDraft is the §10.3 drafted increase request, set only on
+	// Kind=quota.forecast Signals; nil otherwise. lookout drafts,
+	// the agent files — through core-agent's permission gate, never
+	// from here.
+	QuotaDraft *QuotaIncreaseDraft
 }

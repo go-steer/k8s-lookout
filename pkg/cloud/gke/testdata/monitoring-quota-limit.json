@@ -1,0 +1,21 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: a Monitoring v3 projects.timeSeries.list response for the serviceruntime.googleapis.com/quota/limit metric on the consumer_quota resource — the limit half of the §10.2 usage-vs-limit pair; it moves only when an increase lands, which is the event the §10.3 write path exists to cause. The contract test validates this shape, not live output.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "serviceruntime.googleapis.com/quota/limit",
+        "labels": { "quota_metric": "compute.googleapis.com/cpus", "limit_name": "CPUS-per-project-region" }
+      },
+      "resource": {
+        "type": "consumer_quota",
+        "labels": { "project_id": "prod-project", "location": "us-east1" }
+      },
+      "metricKind": "GAUGE",
+      "valueType": "INT64",
+      "points": [
+        { "interval": { "endTime": "2026-07-26T00:00:00Z" }, "value": { "int64Value": "2000" } },
+        { "interval": { "endTime": "2026-07-25T00:00:00Z" }, "value": { "int64Value": "2000" } }
+      ]
+    }
+  ]
+}
