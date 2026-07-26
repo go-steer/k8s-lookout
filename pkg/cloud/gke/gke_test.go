@@ -185,7 +185,7 @@ func TestCapabilityAvailability(t *testing.T) {
 		{cloud.CapabilityOrphans, true, true, "", reasonNoProject},
 		{cloud.CapabilityIPSpace, true, false, reasonNoClusterIdentity, reasonNoClusterIdentity},
 		{cloud.CapabilityStockout, true, true, "", reasonNoProject},
-		{cloud.CapabilityWorkloadIdentity, false, false, reasonDeferred, reasonDeferred},
+		{cloud.CapabilityWorkloadIdentity, true, true, "", reasonNoProject},
 	}
 	if len(cases) != len(cloud.AllCapabilities()) {
 		t.Fatalf("test table covers %d capabilities, boundary defines %d", len(cases), len(cloud.AllCapabilities()))

@@ -26,8 +26,9 @@
 // capabilities: stockout (Cloud Logging audit entries), orphans +
 // quota (Compute), ipspace (GKE + Compute), SDK-backed behind §13
 // small client interfaces (stockout.go, orphans.go, ipspace.go,
-// quota.go; REST-client choice documented in compute.go). Metrics
-// and workload identity report unavailable until M5.
+// quota.go; REST-client choice documented in compute.go). From M5:
+// workload identity — IAM-backed KSA↔GSA binding verification behind
+// `state wi` (wi.go). Metrics stays deferred and reports unavailable.
 package gke
 
 import (
@@ -132,6 +133,12 @@ func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
 		if p.project == "" {
 			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoProject}
 		}
+	case cloud.CapabilityWorkloadIdentity:
+		// Project-scoped read (M5): the expected IAM member embeds
+		// the project's workload identity pool.
+		if p.project == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoProject}
+		}
 	case cloud.CapabilityIPSpace:
 		// Cluster-scoped read (M4): needs the full GKE identity for
 		// clusters.get.
@@ -198,7 +205,14 @@ func (p *Provider) Stockouts() (cloud.StockoutAPI, bool) {
 	return newStockoutAPI(p), true
 }
 
-func (p *Provider) WorkloadIdentity() (cloud.WorkloadIdentityAPI, bool) { return nil, false }
+// WorkloadIdentity implements cloud.Provider (M5, wi.go). The IAM
+// client itself is dialed lazily on first VerifyBinding call.
+func (p *Provider) WorkloadIdentity() (cloud.WorkloadIdentityAPI, bool) {
+	if !p.available(cloud.CapabilityWorkloadIdentity) {
+		return nil, false
+	}
+	return newWIAPI(p), true
+}
 
 // firstEnv returns the first non-empty value among the named
 // environment variables.

@@ -204,21 +204,43 @@ type StockoutAPI interface {
 	Stockouts(ctx context.Context, w TimeWindow) ([]Stockout, error)
 }
 
+// WIProblem* are the machine-matchable problem codes a WIBinding
+// carries when !Bound. Checks branch on these codes, never on prose
+// (§8: no parsing of human wording).
+const (
+	// WIProblemIdentityMissing: the claimed cloud identity does not
+	// exist (GKE: the annotated GSA is deleted or never existed).
+	WIProblemIdentityMissing = "cloud-identity-missing"
+	// WIProblemNoBinding: the identity exists, but the cluster
+	// identity is not authorized to act as it (GKE: no
+	// roles/iam.workloadIdentityUser member for the KSA).
+	WIProblemNoBinding = "no-workload-identity-binding"
+)
+
 // WIBinding is the verification result for one service account's
 // workload-identity binding (`state wi`).
 type WIBinding struct {
 	Namespace      string
 	ServiceAccount string
-	// CloudIdentity is the bound cloud principal (GKE: GSA email;
-	// EKS analog: IAM role ARN).
+	// CloudIdentity is the cloud principal the cluster identity
+	// CLAIMS (GKE: the GSA email from the KSA annotation; EKS
+	// analog: the IAM role ARN) — echoed back whether or not the
+	// claim verifies.
 	CloudIdentity string
 	Bound         bool
-	// Problems enumerates what is broken when !Bound (missing
-	// annotation, missing IAM binding, …).
+	// Problems enumerates what is broken when !Bound. Each entry —
+	// Problems[0] in particular — leads with one of the WIProblem*
+	// codes, optionally followed by ": <detail>" for the operator.
 	Problems []string
 }
 
 // WorkloadIdentityAPI verifies KSA↔cloud-identity bindings.
 type WorkloadIdentityAPI interface {
-	VerifyBinding(ctx context.Context, namespace, serviceAccount string) (WIBinding, error)
+	// VerifyBinding verifies that the cluster identity
+	// namespace/serviceAccount is authorized to act as cloudIdentity
+	// (GKE: the GSA email from the KSA's iam.gke.io/gcp-service-account
+	// annotation; EKS analog: the IAM role ARN). The caller supplies
+	// the claimed identity — the provider verifies the claim, it
+	// cannot discover it.
+	VerifyBinding(ctx context.Context, namespace, serviceAccount, cloudIdentity string) (WIBinding, error)
 }

@@ -41,6 +41,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Scope()=Namespace`), and its client-interface fixtures record
   the v2.7.0 wire shapes so the adapter is pinned to the real
   contract.
+- `state wi` (M5, DESIGN.md §5; MCP `k8s_workload_identity`) — GKE
+  Workload Identity KSA↔GSA binding verification through the
+  `pkg/cloud` provider boundary (§2): for every ServiceAccount in
+  scope carrying the `iam.gke.io/gcp-service-account` annotation,
+  the provider verifies the claimed GSA via the IAM API
+  (`serviceAccounts.getIamPolicy`, `roles/iam.workloadIdentityUser`
+  membership for `serviceAccount:<project>.svc.id.goog[<ns>/<ksa>]`).
+  Findings: `wi.gsa_missing` (critical — the annotated GSA does not
+  exist), `wi.unbound` (critical — annotation present, IAM binding
+  absent), `wi.unannotated_use` (info — pod points
+  `GOOGLE_APPLICATION_CREDENTIALS` at a mounted key file instead of
+  WI); bound identities are silent. Scopes with `--namespace`/`-A`/
+  `--workload`. Vanilla clusters get the standard §2 explicit
+  degradation (`cloud.unavailable` finding + `unavailable reason=…`
+  summary marker). `cloud.WorkloadIdentityAPI.VerifyBinding` grew a
+  `cloudIdentity` parameter (the annotation's claim — verification
+  must be anchored on it) plus machine-matchable problem codes; the
+  GKE implementation is tag-guarded (`gke || allproviders`) behind a
+  small client interface with doc-authored IAM fixtures.
+- `state webhooks` (M5, DESIGN.md §5; MCP `k8s_admission_webhooks`)
+  — the FULL failing-closed admission-webhook audit over every
+  Validating/MutatingWebhookConfiguration: backend service exists /
+  has ready endpoints / serves the referenced port, judged against
+  the effective failurePolicy — `webhook.failing_closed` (critical:
+  Fail + dead backend, with compact blast-radius details `gates`
+  from namespaceSelector, `rules`, `object_selector`),
+  `webhook.dead_backend` (warning: Ignore + dead — the policy is
+  silently not enforced), `webhook.slow_risk` (info: timeout ≥ 10s
+  with Fail), and caBundle expiry as `webhook.ca_expired`/
+  `webhook.ca_expiring` (`--cert-warn`, default 720h). `health`'s
+  webhooks category now delegates to this check's core
+  (`state.LoadWebhookInputs` + `state.CheckWebhooks`) — the
+  scorecard line shape is unchanged; the minimal
+  `webhook.backend_missing` kind is superseded by the full
+  inventory above.
+- `state volumes` (M5, DESIGN.md §5; MCP `k8s_volume_conflicts`) —
+  VolumeAttachment + PV/PVC/pod join naming stuck-mount causes
+  before the Multi-Attach events do: `volume.multi_attach`
+  (critical — RWO/RWOP claim wanted by scheduled pods on ≥2 nodes,
+  with both pod and node sets), `volume.attach_error` (warning,
+  critical once the attach/detach error is ≥ 10m old),
+  `volume.zone_conflict` (critical — PV nodeAffinity zone set does
+  not admit the scheduled pod's node zone), and
+  `volume.orphaned_attachment` (info — attachment referencing a
+  deleted PV or node).
 - The `quota` source (M4, DESIGN.md §7.2 row 8, §10.2/§10.3) — the
   per-PROJECT leading countdown over cloud quota exhaustion, enabled
   via `--sources=…,quota` on exactly ONE sentinel per GCP project
