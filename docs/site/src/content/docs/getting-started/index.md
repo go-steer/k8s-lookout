@@ -1,14 +1,27 @@
 ---
 title: Getting started
-description: Install lookout and run the first commands. Placeholder — content lands in a follow-up PR.
+description: Install lookout, run the first read-path commands against a kubeconfig, deploy the sentinel, connect it to core-agent, and wire up MCP.
+sidebar:
+  order: 0
 ---
 
-Placeholder — the getting-started walkthrough (install, kubeconfig setup,
-first `triage delta` / `bundle` calls, MCP wiring) lands in a follow-up PR.
+Everything ships as one multicall binary, `lookout`, and the path in is
+incremental — each step works without the next:
 
-Until then:
+1. [Install](/getting-started/install/) — container images (including the
+   `-gke` flavor), signature verification, `go install`, and the
+   image-swap compatibility contract.
+2. [First reads](/getting-started/first-run/) — the read-path against your
+   current kubeconfig: `lookout health` and `lookout triage delta`, no
+   deployment needed.
+3. [Deploy the sentinel](/getting-started/deploy/) — `kubectl apply -f
+   deploy/`, what each manifest is, the RBAC tiers, and the flags that
+   matter.
+4. [Connect to core-agent](/getting-started/connect-core-agent/) — the
+   daemon contract: sessions, injects, per-incident vs shared routing.
+5. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
+   for daemons that cannot shell out.
 
-- The [repository README](https://github.com/go-steer/k8s-lookout#readme)
-  covers installation and the command surface.
-- The [Reference](/reference/) section (generated, current) documents every
-  command's flags, output fields, and examples.
+The [Reference](/reference/) section is generated from the same
+declarations that produce `--help` — when this section links a flag or a
+command, the reference page is the authoritative surface.

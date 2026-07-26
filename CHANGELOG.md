@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Docs site: Getting started and Operations sections (replacing the
+  scaffold placeholders). Getting started: install (image flavors +
+  cosign + `go install` + the entrypoint/image-swap contract), first
+  reads against a kubeconfig (`health` / `triage delta` with the
+  captured kind outputs), deploying the sentinel (per-manifest table,
+  §11 tier table, namespace-tier loud-failure semantics, the
+  capability flag walkthrough), connecting to core-agent (session/
+  inject contract, per-incident vs shared, the M0 wire capture), and
+  MCP setup (stdio + loopback HTTP, the non-loopback refusal, the full
+  tool↔command table). Operations: the occurrence store (contents,
+  bounds, distroless store-copy procedure, `--at` queries, epoch
+  semantics across restarts), the watchboard (digest cadence, size-
+  based rotation lifecycle, lineage), drills & verification (per-
+  runbook map into `dev/drills/`), observing lookout (alerting table
+  over the metrics surface, startup-log checklist), and
+  troubleshooting (RBAC probe failures, source-by-source requirements
+  table, startup errors verbatim with fixes, the `unavailable`
+  markers). All command/flag/metric detail links into the generated
+  Reference section; every quoted output is a captured one from the
+  milestone records or README.
 - `docs/repo-map.md` — contributor/maintainer architecture map: repo
   layout with per-directory responsibilities, the read-path and
   watch-path data flows, the frozen-contract → guardian-test table,
