@@ -122,6 +122,8 @@ type flags struct {
 	inCluster         bool
 	kubeconfig        string
 	clusterName       string
+	project           string
+	zone              string
 	logLevel          string
 	dryRun            bool
 	metricsAddr       string
@@ -293,6 +295,17 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "Explicit kubeconfig path. Used outside a pod.")
 	fs.StringVar(&f.clusterName, "cluster-name", "", "Human-readable cluster name included in every inject payload.")
+
+	// Deployment identity (§8). ADDITIVE flags: zone/project complete
+	// the (fingerprint, cluster/project/zone) fleet-rollup join on
+	// source-namespaced payloads, and zone participates in the
+	// fingerprint hash. Precedence: explicit flag > cloud-provider
+	// metadata (a provider implementing cloud.Identity, e.g. gke on
+	// tagged builds) > empty. Empty zone keeps the pre-wiring
+	// zone-less fingerprints byte-identical — deployments that set
+	// nothing behave exactly as before.
+	fs.StringVar(&f.project, "project", "", "Cloud project/account the cluster runs in, stamped into §8 payloads. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly.")
+	fs.StringVar(&f.zone, "zone", "", "Failure domain (zone, or region for regional clusters) stamped into §8 payloads and the signal fingerprint hash. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly (e.g. from a topology label). Unset zones produce zone-less fingerprints — stable, but cross-cluster joins within a zone need it stamped.")
 
 	// Operational.
 	fs.StringVar(&f.logLevel, "log-level", "info", "One of: debug, info, warn, error.")
@@ -547,11 +560,18 @@ func splitCSV(s string) []string {
 // DispatchSignal; storm correlation, severity routing, and
 // enrichment slot in here as they land (§7.1).
 type dispatcher struct {
-	filter    *engine.Filter
-	dedup     *engine.DedupCache
-	injector  *inject.Injector
-	metrics   *metrics
-	cluster   string
+	filter   *engine.Filter
+	dedup    *engine.DedupCache
+	injector *inject.Injector
+	metrics  *metrics
+	cluster  string
+	// project / zone are the resolved §8 deployment identity (see
+	// resolveIdentity: explicit flag > provider metadata > empty),
+	// stamped onto every signal whose source left them blank. Zone
+	// participates in the fingerprint hash; empty values reproduce
+	// the pre-wiring zone-less fingerprints exactly.
+	project   string
+	zone      string
 	mode      string // "per-incident" or "shared"
 	targetSid string // for shared mode
 	dryRun    bool
@@ -638,6 +658,12 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// + zone, so it is computed here, once, for every source.
 	if sig.Cluster == "" {
 		sig.Cluster = d.cluster
+	}
+	if sig.Project == "" {
+		sig.Project = d.project
+	}
+	if sig.Zone == "" {
+		sig.Zone = d.zone
 	}
 	if sig.Source == "" {
 		sig.Source = engine.SourceSentinel
@@ -1095,6 +1121,47 @@ func (d *dispatcher) countResolved(sig engine.Signal) {
 	d.metrics.recoveriesObserved.WithLabelValues(string(sig.Recovery.Resolution)).Inc()
 }
 
+// resolveIdentity resolves the §8 zone/project deployment identity:
+// explicit --project/--zone flags win; blanks are filled best-effort
+// from a compiled-in provider's metadata (cloud.Identity — the gke
+// provider resolves config pins, well-known env vars, then the GCE
+// metadata server); whatever remains stays empty. Never fatal: a
+// vanilla (untagged) build resolves the NoProvider sentinel — which
+// implements no Identity — instantly, and a provider error only
+// means empty fields, i.e. the zone-less fingerprints deployments
+// hashed before this wiring, byte-identical.
+func resolveIdentity(ctx context.Context, f *flags) (project, zone string) {
+	project, zone = f.project, f.zone
+	if project != "" && zone != "" {
+		return project, zone
+	}
+	p, err := cloud.New(ctx, cloud.Config{Project: f.project, Cluster: f.clusterName})
+	if err != nil {
+		log.Printf("identity: cloud provider unavailable for zone/project detection: %v (stamping flag values only)", err)
+		return project, zone
+	}
+	return identityFromProvider(p, project, zone)
+}
+
+// identityFromProvider applies the documented precedence — explicit
+// flag > provider metadata > empty — against an already-constructed
+// provider. Split from resolveIdentity so the precedence table is
+// unit-testable without the global provider registry.
+func identityFromProvider(p cloud.Provider, flagProject, flagZone string) (project, zone string) {
+	project, zone = flagProject, flagZone
+	id, ok := p.(cloud.Identity)
+	if !ok {
+		return project, zone
+	}
+	if project == "" {
+		project = id.Project()
+	}
+	if zone == "" {
+		zone = id.Location()
+	}
+	return project, zone
+}
+
 // stampIdentity completes the §8 schema on a source-namespaced
 // payload (docs/signal-schema-v1.md, the M5 v1 freeze): fingerprint +
 // source + severity + zone/project ride the wire so AX can roll up a
@@ -1217,12 +1284,25 @@ func realMain(argv []string) error {
 		}
 	}
 
+	// §8 deployment identity: cluster is --cluster-name (M0);
+	// zone/project resolve by precedence — explicit flag > provider
+	// metadata > empty (never fatal; empty fields reproduce the
+	// zone-less fingerprints deployments hashed before this wiring).
+	idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
+	project, zone := resolveIdentity(idCtx, f)
+	cancelID()
+	if project != "" || zone != "" {
+		log.Printf("identity: stamping project=%q zone=%q (precedence: explicit flag > provider metadata > empty; zone participates in the §8 fingerprint hash)", project, zone)
+	}
+
 	disp := &dispatcher{
 		filter:    filter,
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   m,
 		cluster:   f.clusterName,
+		project:   project,
+		zone:      zone,
 		mode:      f.mode,
 		targetSid: f.targetSession,
 		dryRun:    f.dryRun,

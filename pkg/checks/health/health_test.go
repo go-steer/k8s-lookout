@@ -29,6 +29,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -63,6 +64,59 @@ func testCommand(objs ...runtime.Object) checks.Command {
 		Provider: func(context.Context) (cloud.Provider, error) { return cloud.NoProvider, nil },
 		Now:      func() time.Time { return fixedNow },
 	})
+}
+
+// --- control-plane delegation fixtures (perf apiserver pack) ---------------
+
+// fakeBackend serves canned series (or an error) for the apiserver
+// pack's one metric, mirroring the perf suite's fake.
+type fakeBackend struct {
+	series []cloud.Series
+	err    error
+}
+
+func (b *fakeBackend) QuerySeries(context.Context, cloud.SeriesQuery) ([]cloud.Series, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	return b.series, nil
+}
+
+// metricsProvider is NoProvider plus a working Metrics capability
+// (the same embedding trick as the perf and `triage top` suites).
+type metricsProvider struct {
+	cloud.Provider
+	backend cloud.MetricsBackend
+}
+
+func (p metricsProvider) Metrics() (cloud.MetricsBackend, bool) { return p.backend, true }
+
+// testCommandWithMetrics is testCommand with a provider that serves
+// the fake metrics backend — the fixture shape of a GKE-tagged build
+// running in-project.
+func testCommandWithMetrics(b *fakeBackend, objs ...runtime.Object) checks.Command {
+	cs := fake.NewClientset(objs...)
+	return health.New(health.Deps{
+		Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+		Provider: func(context.Context) (cloud.Provider, error) {
+			return metricsProvider{Provider: cloud.NoProvider, backend: b}, nil
+		},
+		Now: func() time.Time { return fixedNow },
+	})
+}
+
+// apiserverSeries builds one verb/resource p99 series with points at
+// 1-minute spacing ending at fixedNow.
+func apiserverSeries(verb, resource string, vals ...float64) cloud.Series {
+	s := cloud.Series{
+		Metric: "apiserver_request_duration_seconds",
+		Labels: map[string]string{"verb": verb, "resource": resource},
+	}
+	start := fixedNow.Add(-time.Duration(len(vals)) * time.Minute)
+	for i, v := range vals {
+		s.Points = append(s.Points, cloud.Point{Time: start.Add(time.Duration(i) * time.Minute), Value: v})
+	}
+	return s
 }
 
 func ago(d time.Duration) metav1.Time { return metav1.Time{Time: fixedNow.Add(-d)} }
@@ -351,7 +405,8 @@ func parseLine(t *testing.T, line string) map[string]string {
 }
 
 // TestAllHealthyClusterAnswersExplicitly: ten category findings,
-// nine healthy plus the M1 control-plane unavailable marker — never
+// nine healthy plus the control-plane unavailable marker (the
+// default fixture provider has no metrics capability) — never
 // silence.
 func TestAllHealthyClusterAnswersExplicitly(t *testing.T) {
 	res := checktest.Run(t, testCommand(healthyObjects(t)...))
@@ -377,7 +432,7 @@ func TestAllHealthyClusterAnswersExplicitly(t *testing.T) {
 		}
 	}
 	if status["control-plane"] != "unavailable" {
-		t.Errorf("control-plane = %q, want unavailable (metrics land M4)", status["control-plane"])
+		t.Errorf("control-plane = %q, want unavailable (no metrics capability on the fixture provider)", status["control-plane"])
 	}
 }
 
@@ -472,6 +527,140 @@ func TestWebhooksCategoryLineStable(t *testing.T) {
 	t.Fatal("webhooks category line not found")
 }
 
+// --- control-plane delegation (perf apiserver pack) -------------------------
+
+// statusesAndKinds runs cmd and splits the output into per-category
+// scorecard statuses and detail finding kinds.
+func statusesAndKinds(t *testing.T, cmd checks.Command, args ...string) (status map[string]string, kinds map[string][]string, reasons map[string]string) {
+	t.Helper()
+	res := checktest.Run(t, cmd, args...)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	status, kinds, reasons = map[string]string{}, map[string][]string{}, map[string]string{}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	for _, line := range lines[:len(lines)-1] {
+		rec := parseLine(t, line)
+		if rec["kind"] == "health.category" {
+			status[rec["category"]] = rec["status"]
+			reasons[rec["category"]] = rec["message"]
+			continue
+		}
+		kinds[rec["category"]] = append(kinds[rec["category"]], rec["kind"])
+	}
+	return status, kinds, reasons
+}
+
+// TestControlPlaneHealthyWhenQueriesClean: with a metrics-capable
+// provider and every series under threshold, the category scores
+// healthy — the M4-era unavailable marker is gone.
+func TestControlPlaneHealthyWhenQueriesClean(t *testing.T) {
+	b := &fakeBackend{series: []cloud.Series{
+		apiserverSeries("GET", "pods", 0.12, 0.2, 0.18),
+		apiserverSeries("LIST", "deployments", 0.4, 0.35, 0.5),
+	}}
+	status, kinds, _ := statusesAndKinds(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if status["control-plane"] != "healthy" {
+		t.Errorf("control-plane = %q, want healthy (queries succeeded, no breach)", status["control-plane"])
+	}
+	if len(kinds["control-plane"]) != 0 {
+		t.Errorf("unexpected control-plane detail findings: %v", kinds["control-plane"])
+	}
+}
+
+// TestControlPlaneDegradedOnBreach: a breaching p99 series surfaces
+// as the category's finding in `perf probe --pack=apiserver`'s exact
+// shape, and the scorecard line keeps the #54 stability pattern.
+func TestControlPlaneDegradedOnBreach(t *testing.T) {
+	b := &fakeBackend{series: []cloud.Series{
+		apiserverSeries("GET", "pods", 0.2, 0.3),     // nominal
+		apiserverSeries("LIST", "secrets", 0.9, 2.5), // warning (max > 1s)
+		apiserverSeries("WATCH", "pods", 3600, 7200), // excluded verb, never evaluated
+	}}
+	res := checktest.Run(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	var categoryLine, detailLine string
+	for _, line := range strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n") {
+		rec := parseLine(t, line)
+		if rec["category"] != "control-plane" {
+			continue
+		}
+		if rec["kind"] == "health.category" {
+			categoryLine = line
+		} else {
+			detailLine = line
+		}
+	}
+	wantCategory := `kind=health.category severity=warning category=control-plane status=degraded total=1 top=perf.apiserver_p99`
+	if categoryLine != wantCategory {
+		t.Errorf("control-plane category line:\n got: %s\nwant: %s", categoryLine, wantCategory)
+	}
+	rec := parseLine(t, detailLine)
+	for key, want := range map[string]string{
+		"kind": "perf.apiserver_p99", "severity": "warning", "reason": "ApiserverLatencyHigh",
+		"pack": "apiserver", "metric": "apiserver_request_duration_seconds",
+		"verb": "LIST", "resource": "secrets",
+		"observed": "2.5s", "latest": "2.5s", "threshold": "1s", "window": "1h0m0s",
+	} {
+		if rec[key] != want {
+			t.Errorf("control-plane detail %s = %q, want %q (line: %s)", key, rec[key], want, detailLine)
+		}
+	}
+	if rec["fingerprint"] != "" {
+		t.Errorf("control-plane detail carries a scan fingerprint %q — latency is not an object symptom class", rec["fingerprint"])
+	}
+}
+
+// TestControlPlaneUnavailableWhenMetricAbsent: cloud.ErrMetricAbsent
+// (GKE control-plane metrics not enabled) keeps the honest
+// unavailable marker — the capability is genuinely absent.
+func TestControlPlaneUnavailableWhenMetricAbsent(t *testing.T) {
+	b := &fakeBackend{err: fmt.Errorf("apiserver_request_duration_seconds: %w", cloud.ErrMetricAbsent)}
+	status, _, reasons := statusesAndKinds(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if status["control-plane"] != "unavailable" {
+		t.Errorf("control-plane = %q, want unavailable (metric absent)", status["control-plane"])
+	}
+	reason := reasons["control-plane"]
+	if !strings.Contains(reason, "apiserver_request_duration_seconds") || !strings.Contains(reason, "control-plane metrics") {
+		t.Errorf("unavailable reason %q should name the absent metric and the remedy", reason)
+	}
+}
+
+// TestControlPlaneBackendErrorFailsScan: a real backend failure
+// (auth, transport) fails the scan like any other category's read
+// error — never a silent healthy or a lying unavailable.
+func TestControlPlaneBackendErrorFailsScan(t *testing.T) {
+	b := &fakeBackend{err: fmt.Errorf("monitoring API: permission denied")}
+	res := checktest.Run(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if res.Code == emit.ExitData {
+		t.Fatalf("scan succeeded despite a backend failure:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stderr, "permission denied") {
+		t.Errorf("stderr %q should carry the backend error", res.Stderr)
+	}
+}
+
+// TestPerfGlossaryReachedHealth mirrors the delta glossary test for
+// the control-plane delegation: the perf detail keys the category's
+// findings carry must be declared in health's glossary.
+func TestPerfGlossaryReachedHealth(t *testing.T) {
+	h, ok := checks.Lookup("health")
+	if !ok {
+		t.Fatal("health not registered")
+	}
+	declared := map[string]bool{}
+	for _, f := range h.Output {
+		declared[f.Name] = true
+	}
+	for _, key := range []string{"pack", "metric", "verb", "resource", "observed", "latest", "threshold", "window"} {
+		if !declared[key] {
+			t.Errorf("perf field %q missing from health's glossary", key)
+		}
+	}
+}
+
 // TestNamespaceScopedMarksClusterCategoriesUnavailable: a namespaced
 // scan cannot see nodes, kube-system add-ons, or cluster-scoped
 // webhook configurations — those categories say so instead of lying
@@ -553,4 +742,8 @@ func TestVerifyContract(t *testing.T) {
 	checktest.VerifyContract(t, testCommand(healthyObjects(t)...))
 	checktest.VerifyContract(t, testCommand(brokenObjects(t)...))
 	checktest.VerifyContract(t, testCommand(brokenObjects(t)...), "--namespace=prod")
+	// Control-plane delegation: the perf detail keys ride the
+	// declared glossary in both formats.
+	breaching := &fakeBackend{series: []cloud.Series{apiserverSeries("LIST", "secrets", 0.9, 2.5)}}
+	checktest.VerifyContract(t, testCommandWithMetrics(breaching, brokenObjects(t)...))
 }

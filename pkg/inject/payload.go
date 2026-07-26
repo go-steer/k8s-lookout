@@ -40,9 +40,10 @@ type Payload struct {
 	// ADDITIVE via omitempty, and the dispatcher stamps them ONLY on
 	// kinds other than the frozen k8s-event / k8s-event-followup pair
 	// — those payloads stay byte-identical to M0 (the frozen wire
-	// pins pass unchanged). Zone/Project are empty until a
-	// deployment's cluster-metadata wiring supplies them; Zone also
-	// participates in the fingerprint hash when set.
+	// pins pass unchanged). Zone/Project come from the sentinel's
+	// cluster-metadata wiring (explicit --zone/--project flag >
+	// provider metadata > empty) and ride the wire only when set;
+	// Zone also participates in the fingerprint hash when set.
 	Project     string         `json:"project,omitempty"`
 	Zone        string         `json:"zone,omitempty"`
 	Source      string         `json:"source,omitempty"`

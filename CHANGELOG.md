@@ -85,6 +85,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Docs lint` workflow; `ci.yml`/`ci-docs.yml` path lists now let
   docs-site-only changes skip Go CI with required checks staying green.
 
+### Fixed
+
+- `lookout health`'s control-plane category now delegates to the
+  shipped `perf probe` packs (the §5 "control-plane latency (perf
+  probe packs)" row) instead of always reporting the M4-era
+  `unavailable`: with a Metrics-capable provider it runs the
+  apiserver pack (p99 by verb/resource — the cheapest meaningful
+  control-plane read), scores `degraded` with the breaching series
+  in `perf probe`'s exact finding shape, and `healthy` when queries
+  succeed with no breach. The honest `unavailable reason="…"`
+  remains only when the capability is genuinely absent — no
+  provider / no metrics capability (reason text drops the stale
+  "(M4)"), or the metric positively missing from the workspace (the
+  pack_unavailable case: GKE control-plane metrics not enabled).
+  Scorecard line shape unchanged; a real backend failure fails the
+  scan like any other category's read error.
+- `lookout watch` now stamps the §8 zone/project deployment
+  identity: additive `--project`/`--zone` flags for vanilla
+  clusters, blanks filled from a compiled-in provider's metadata
+  (the new optional `cloud.Identity` surface — the gke provider
+  resolves config pins, well-known env vars, then the GCE metadata
+  server). Precedence: explicit flag > provider metadata > empty.
+  Source-namespaced payloads and signal fingerprints carry real
+  zones in-cluster, completing the (fingerprint,
+  cluster/project/zone) fleet-rollup join. Zone participates in the
+  fingerprint hash, so a deployment that starts stamping a zone
+  re-keys its incident classes once; deployments that stamp nothing
+  keep their zone-less fingerprints byte-identical (still stable —
+  but cross-cluster joins within a failure domain need zones
+  stamped, which is the point of the wiring). Frozen contracts
+  untouched: the fingerprint recipe's pinned vectors are inputs→hash
+  and unchanged, the M0 `k8s-event`/`k8s-event-followup` wire
+  payloads never carry identity fields, and `zone`/`project` ride
+  other kinds via the existing omitempty ledger entries.
+
 ## [0.6.0] - 2026-07-26
 
 M5 — fleet & corpus — closes out the §14 milestone plan (all six

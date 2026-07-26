@@ -104,6 +104,26 @@ type CapabilityStatus struct {
 	Reason string
 }
 
+// Identity is the OPTIONAL deployment-identity surface a Provider
+// additionally implements when it can resolve where it runs
+// (explicit config pins, well-known env vars, or an instance
+// metadata server — pkg/cloud/gke resolves all three). The sentinel
+// type-asserts it to stamp the §8 zone/project fields when no
+// explicit --project/--zone flag pins them (precedence: explicit
+// flag > provider metadata > empty; docs/signal-schema-v1.md).
+// NoProvider deliberately does not implement it: vanilla deployments
+// stamp only what flags supply.
+type Identity interface {
+	// Project is the resolved cloud project/account ID ("" if
+	// undetectable).
+	Project() string
+	// Location is the resolved cluster location — a zone for zonal
+	// clusters, a region for regional ones; "" if undetectable. It
+	// is the best failure-domain string the provider has, and what
+	// the sentinel stamps as the §8 zone.
+	Location() string
+}
+
 // Provider is one cloud environment (GKE first; EKS/AKS are future
 // pkg/cloud/<impl> packages — no engine, schema, or skill changes).
 //
