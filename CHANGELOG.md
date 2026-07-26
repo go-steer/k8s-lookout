@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `token-burn` source (M5, DESIGN.md §7.2 row 9, §12) — token
+  spend as a first-class saturation dimension: a runaway agent loop
+  is an OOM in the currency that matters. Enabled via
+  `--sources=…,token-burn`; each poll (`--token-poll`, default 60s)
+  reads the core-agent v2.7.0 cost stack — the REAL, shipped attach
+  surface (`GET /sessions` + `GET /sessions/{app}/{sid}/usage`, the
+  #222 UsageMetadata schema) on the SAME daemon the injector talks
+  to (same `--daemon-url`/`--token-env`; `--token-endpoint`
+  overrides for split deployments) — and applies the saturation
+  source's regression (`saturation.LeastSquaresSlope`) to each
+  active session's cumulative billed tokens over a 15m ring buffer.
+  Emits `token.burn` (§7.3, APPEND-ONLY) at warning when a session's
+  rate sustains ≥ `--burn-multiple` (default 4×) the cross-session
+  trailing-MEDIAN baseline for 2 polls, and at critical — with
+  `Forecast{ETA, "linear-15m-window"}` — when a known per-session
+  budget projects exhaustion inside `--burn-eta` (default 30m) or is
+  already exhausted; evidence carries session id, rate, baseline,
+  multiple, and budget fraction. Nothing ever fires on the first
+  poll (cold start), and the saturation-style hysteresis latch never
+  re-fires the same severity (escalation once; release after 2 calm
+  polls → §7.4 clearance reports recovered; a session the daemon
+  stops listing clears as object_deleted). Budget caveat, verified
+  against core-agent v2.7.0: the daemon tracks per-session spend
+  caps in-process (`agent.CostCeiling`) but exposes NO budget over
+  the attach API, so `--token-budget-usd` (default 0 = unknown →
+  budget trigger disarmed, loudly logged at startup) supplies it
+  lookout-side until core-agent ships the surface —
+  `TODO(core-agent)` in `pkg/sources/tokenburn`, same posture as
+  `pkg/memory`. The source needs no Kubernetes RBAC at all
+  (`Scope()=Namespace`), and its client-interface fixtures record
+  the v2.7.0 wire shapes so the adapter is pinned to the real
+  contract.
 - The `quota` source (M4, DESIGN.md §7.2 row 8, §10.2/§10.3) — the
   per-PROJECT leading countdown over cloud quota exhaustion, enabled
   via `--sources=…,quota` on exactly ONE sentinel per GCP project

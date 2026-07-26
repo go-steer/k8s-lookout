@@ -58,6 +58,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
+	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
@@ -88,6 +89,11 @@ type flags struct {
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
+	tokenPoll             time.Duration
+	burnMultiple          float64
+	burnETA               time.Duration
+	tokenBudgetUSD        float64
+	tokenEndpoint         string
 	dedupWindow           time.Duration
 	dedupPersist          string
 	unhealthyMinCount     int
@@ -146,7 +152,7 @@ func parseFlags(args []string) (*flags, error) {
 	// ADDITIVE flag: the default is exactly the M0 surface, so
 	// existing deployments keep byte-identical behavior without
 	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota. Default preserves the M0 watcher surface (k8s-events only).")
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn. Default preserves the M0 watcher surface (k8s-events only).")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -186,6 +192,19 @@ func parseFlags(args []string) (*flags, error) {
 	fs.DurationVar(&f.quotaPoll, "quota-poll", 15*time.Minute, "Poll interval for the quota source's inventory read and per-watched-quota history query. Must be > 0.")
 	fs.DurationVar(&f.quotaWindow, "quota-window", 7*24*time.Hour, "History window the quota usage slope is fitted over (the §8 linear-<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0.")
 	fs.Float64Var(&f.quotaWarn, "quota-warn", 0.80, "Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1).")
+
+	// Token-burn source knobs (§7.2 row 9, §12). ADDITIVE flags; only
+	// meaningful with --sources=…,token-burn. The cost stack rides
+	// the SAME daemon the injector talks to (core-agent v2.7.0's GET
+	// /sessions + GET /sessions/{app}/{sid}/usage), so the source
+	// reuses --daemon-url/--token-env; --token-endpoint overrides the
+	// base URL for split deployments. The sustain count (2 polls) and
+	// regression window (15m) are design-fixed, not flags.
+	fs.DurationVar(&f.tokenPoll, "token-poll", 60*time.Second, "Poll interval for the token-burn source's cost-stack reads (core-agent GET /sessions + per-session /usage). Must be > 0.")
+	fs.Float64Var(&f.burnMultiple, "burn-multiple", 4, "Session token rate at or above this multiple of the cross-session trailing-median baseline (sustained 2 polls) fires token.burn at warning. Must be > 1.")
+	fs.DurationVar(&f.burnETA, "burn-eta", 30*time.Minute, "Budget-exhaustion projection inside this window fires token.burn at critical (with the §8 linear forecast); clearance requires the ETA to recede beyond 2x this threshold. Must be > 0.")
+	fs.Float64Var(&f.tokenBudgetUSD, "token-budget-usd", 0, "Per-session spend budget in USD for the token-burn source's critical trigger; 0 (default) = unknown, budget trigger disarmed. Lookout-side config because core-agent v2.7.0 does not expose its CostCeiling over the attach API (TODO(core-agent) in pkg/sources/tokenburn). Must be >= 0.")
+	fs.StringVar(&f.tokenEndpoint, "token-endpoint", "", "Override base URL for the core-agent cost stack (default: --daemon-url — the §3 boundary rides the same daemon the injector talks to). No trailing slash.")
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
@@ -347,6 +366,32 @@ func (f *flags) validate() error {
 	if f.quotaWarn <= 0 || f.quotaWarn >= 1 {
 		return errors.New("--quota-warn must be in (0, 1)")
 	}
+	// Token-burn knobs (§7.2 row 9, §12): config errors in every
+	// mode, like the other source thresholds, even when the source
+	// is disabled.
+	if f.tokenPoll <= 0 {
+		return errors.New("--token-poll must be > 0")
+	}
+	if f.burnMultiple <= 1 {
+		return errors.New("--burn-multiple must be > 1 (a multiple at or below the baseline would fire on every session)")
+	}
+	if f.burnETA <= 0 {
+		return errors.New("--burn-eta must be > 0")
+	}
+	if f.tokenBudgetUSD < 0 {
+		return errors.New("--token-budget-usd must be >= 0 (0 = budget unknown)")
+	}
+	if strings.HasSuffix(f.tokenEndpoint, "/") {
+		return fmt.Errorf("--token-endpoint must not end with '/' (got %q)", f.tokenEndpoint)
+	}
+	// The token-burn source needs a cost-stack endpoint: normally
+	// --daemon-url (the §3 boundary rides the same daemon the
+	// injector talks to), so this only bites --dry-run runs, which
+	// skip --daemon-url — same loud-config posture as everything
+	// above.
+	if f.sourceEnabled(tokenburn.Name) && f.tokenEndpoint == "" && f.daemonURL == "" {
+		return fmt.Errorf("--sources: %s requires --daemon-url or --token-endpoint (the §12 cost stack is the core-agent daemon's attach API)", tokenburn.Name)
+	}
 	// Storm bounds are validated before the mode switch's dry-run
 	// early return, like --sources: a nonsensical value is a config
 	// error in every mode.
@@ -435,7 +480,7 @@ func (f *flags) validate() error {
 func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, tokenburn.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {
@@ -1157,7 +1202,7 @@ func realMain(argv []string) error {
 		}
 		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
-	bs, err := buildSources(f, client, dyn, metricsClient, provider)
+	bs, err := buildSources(f, token, client, dyn, metricsClient, provider)
 	if err != nil {
 		return err
 	}
@@ -1334,6 +1379,7 @@ type builtSources struct {
 	expiry      *expiry.Source
 	capacity    *capacity.Source
 	quota       *quota.Source
+	tokenBurn   *tokenburn.Source
 }
 
 // buildSources registers the sources named by --sources (§7.2:
@@ -1348,7 +1394,10 @@ type builtSources struct {
 // metrics.k8s.io dimension rides a separate clientset. provider is
 // the §2 cloud boundary for the capacity source; nil is tolerated
 // (treated as cloud.NoProvider — explicit unavailability, §2).
-func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface, provider cloud.Provider) (*builtSources, error) {
+// daemonToken is the resolved --token-env bearer token, reused by the
+// token-burn source's cost-stack client (§3: same daemon, same auth
+// as the inject path); empty means authless.
+func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface, provider cloud.Provider) (*builtSources, error) {
 	bs := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
 		var src sources.Source
@@ -1410,6 +1459,28 @@ func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, 
 			}
 			bs.quota = q
 			src = bs.quota
+		case tokenburn.Name:
+			// §12: the cost stack rides the same daemon the
+			// injector talks to; --token-endpoint overrides for
+			// split deployments. validate() already required one of
+			// the two, so this branch never sees both empty outside
+			// a programming error.
+			endpoint := f.tokenEndpoint
+			if endpoint == "" {
+				endpoint = f.daemonURL
+			}
+			if endpoint == "" {
+				return nil, fmt.Errorf("--sources: %s requires --daemon-url or --token-endpoint", tokenburn.Name)
+			}
+			cfg := tokenburn.DefaultConfig()
+			cfg.Poll = f.tokenPoll
+			cfg.BurnMultiple = f.burnMultiple
+			cfg.BurnETA = f.burnETA
+			cfg.BudgetUSD = f.tokenBudgetUSD
+			bs.tokenBurn = tokenburn.New(tokenburn.NewHTTPClient(endpoint, daemonToken), cfg)
+			src = bs.tokenBurn
+			log.Printf("token-burn: cost stack endpoint %s (core-agent v2.7.0 GET /sessions + per-session /usage; budget=%s)",
+				endpoint, budgetDesc(f.tokenBudgetUSD))
 		default:
 			// validate() rejects unknown names before we get here.
 			return nil, fmt.Errorf("--sources: unknown source %q", name)
@@ -1419,6 +1490,18 @@ func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, 
 		}
 	}
 	return bs, nil
+}
+
+// budgetDesc renders the --token-budget-usd startup-log value: the
+// budget trigger's arming state must be visible at startup, not
+// discovered from silence (§11 posture; the budget is lookout-side
+// config until core-agent exposes its CostCeiling — see
+// pkg/sources/tokenburn's TODO(core-agent)).
+func budgetDesc(usd float64) string {
+	if usd <= 0 {
+		return "unknown — budget trigger disarmed, rate trigger only"
+	}
+	return fmt.Sprintf("$%.2f/session", usd)
 }
 
 // setupRecovery wires the §7.4 closed loop: pod clearance observer →
@@ -1466,6 +1549,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	if bs.expiry != nil {
 		observers = append(observers, bs.expiry.ClearanceObserver())
 		log.Printf("recovery: expiry clearance observer registered (certificate renewed → cleared)")
+	}
+	if bs.tokenBurn != nil {
+		observers = append(observers, bs.tokenBurn.ClearanceObserver())
+		log.Printf("recovery: token-burn clearance observer registered (spend receded / session ended → cleared)")
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())
