@@ -38,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AGENTS.md "Start here" (read DESIGN.md for the spec, repo-map.md
   for the tree) alongside a trim of the AGENTS.md milestone
   archaeology now covered by `docs/milestones/`.
+- Docs site Concepts and Guides sections filled in (the scaffold PR's
+  placeholders): six concept pages authored from DESIGN.md and the
+  design notes (architecture, topology graph, signals & fingerprints,
+  the closed loop, sanitization guarantees, portability & providers)
+  and six problem-first scenario guides built from the milestone
+  exit-drill evidence with real captured output, abridged and never
+  invented (broken workload — M1; stuck rollout — M3 drill A; resource
+  exhaustion — M3 drill B; node failure — M2; what-changed post-mortem
+  — M3 drill C; capacity & quota — M4), each guide cross-pointing its
+  matching agent skill.
+- `skills/k8s-capacity` — the §4.4 capacity/quota workflow skill that
+  never shipped with M4/M5 (tracked as a repo-map divergence, now
+  closed): the cloud stockout/quota/ipspace sweep, the
+  stockout-vs-quota remedy split, pending-pod dedup families, reading
+  `quota.forecast` + the attached `quota_increase_draft`, filing
+  through the daemon's permission gate, and recording the conclusion
+  via `triage status`. References generated (`dev/tools/gen-skill-refs`
+  now registers the `cloudcheck` command group), skilldoc contract
+  tests cover the new doc's command lines and golden snippets.
 
 ### Changed
 

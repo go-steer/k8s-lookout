@@ -184,8 +184,9 @@ Where the tree deliberately differs from DESIGN.md, in one place:
 - **`--storm` defaults OFF** (design ships storm correlation in M2 as
   standard behavior) pending the M3 `GraphAt` restart-replay fix —
   see `docs/milestones/M3.md` observations.
-- **`k8s-capacity` skill** from the §4.4 tree never shipped; the
-  commands and sources it would teach are all live.
+- **`k8s-capacity` skill** (§4.4 tree): shipped post-M5 alongside the
+  docs-site Guides section — divergence closed (the M5 record's
+  "never shipped" note is point-in-time).
 - **Watchboard rotation** (§15 Q2) settled as size-based —
   [`watchboard-rotation-design.md`](./watchboard-rotation-design.md).
 - **`perf probe` portability** (§15 Q4): only the Cloud Monitoring

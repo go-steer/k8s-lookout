@@ -8,11 +8,8 @@ Task-triggered skills teaching the *decision tree across* lookout commands
 | `k8s-triage/` | incident investigation: changes-first on sudden regressions, bundle first otherwise; logs vs events vs radius; webhook/volume/identity verification; when to net-probe |
 | `cluster-health/` | on-demand & scheduled assessment: health, reading the scorecard, drilling down, pre-maintenance drain checks |
 | `gitops-drift/` | divergence auditing: stab drift ("who diverged") + triage changes ("what changed"), and when each answers |
+| `k8s-capacity/` | capacity & quota forecasting: the cloud stockout/quota/ipspace sweeps, capacity-source signals, reading quota.forecast + the drafted increase request, filing through the daemon's permission gate |
 | `playbooks/` | per-symptom command sequences (CrashLoopBackOff, FailedMount, HPA thrash), referenced by the skills |
-
-(`k8s-capacity/` — the stockout/quota/ipspace forecasting workflow over
-the shipped `cloud` group and capacity/quota sources — remains on the
-post-M5 review backlog; see `docs/milestones/M5.md`.)
 
 Each skill is three-level progressive disclosure: frontmatter (~50 tokens,
 always in context) answers "is lookout relevant now"; the SKILL.md body (on
@@ -32,11 +29,11 @@ repo and install into the consuming deployment — copy them next to the
 ```sh
 # project scope (one deployment/checkout)
 cp -r skills/k8s-triage skills/cluster-health skills/gitops-drift \
-      skills/playbooks /path/to/deployment/.agents/skills/
+      skills/k8s-capacity skills/playbooks /path/to/deployment/.agents/skills/
 
 # user scope (all sessions of one user)
 cp -r skills/k8s-triage skills/cluster-health skills/gitops-drift \
-      skills/playbooks "$HOME/.agents/skills/"
+      skills/k8s-capacity skills/playbooks "$HOME/.agents/skills/"
 ```
 
 `playbooks/` is not a skill itself (no frontmatter) — it is shared
