@@ -1,0 +1,20 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: Monitoring v3 timeSeries.list for kubernetes.io/pod/latencies/pod_first_ready (GKE system metrics: cloud.google.com/monitoring/api/metrics_kubernetes — GA, Gauge, Double, seconds, k8s_pod resource) under REDUCE_PERCENTILE_95 with empty groupByFields: one merged series of DOUBLE seconds, no retained labels, points newest first.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "kubernetes.io/pod/latencies/pod_first_ready"
+      },
+      "resource": {
+        "type": "k8s_pod",
+        "labels": { "project_id": "prod-project", "cluster_name": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 84.2 } },
+        { "interval": { "endTime": "2026-07-25T06:00:00Z" }, "value": { "doubleValue": 61.0 } },
+        { "interval": { "endTime": "2026-07-25T00:00:00Z" }, "value": { "doubleValue": 48.5 } }
+      ]
+    }
+  ]
+}

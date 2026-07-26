@@ -1,0 +1,19 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: Monitoring v3 timeSeries.list for prometheus.googleapis.com/apiserver_storage_size_bytes/gauge — the control-plane doc's realization of etcd DB size ('Size of the storage database file physically allocated in bytes', GA, Gauge, Int64, By; cloud.google.com/kubernetes-engine/docs/how-to/control-plane-metrics). Raw gauge (no reduction): INT64 points as JSON strings per the discovery encoding, newest first.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_storage_size_bytes/gauge"
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "INT64",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "int64Value": "4831838208" } },
+        { "interval": { "endTime": "2026-07-25T11:55:00Z" }, "value": { "int64Value": "4294967296" } }
+      ]
+    }
+  ]
+}

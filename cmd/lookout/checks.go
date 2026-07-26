@@ -32,6 +32,8 @@ import (
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/perf"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/stab"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/top"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"

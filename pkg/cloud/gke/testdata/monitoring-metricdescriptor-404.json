@@ -1,0 +1,8 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the Monitoring v3 error body for projects.metricDescriptors.get on a metric type the workspace has never ingested (google.golang.org/api's googleapi.Error decodes the 'error' envelope; the API reference documents code/message/status). This is the POSITIVE absence answer metrics.go maps to cloud.ErrMetricAbsent — on GKE, control-plane metrics not enabled for the component.",
+  "error": {
+    "code": 404,
+    "message": "Could not find descriptor for metric 'prometheus.googleapis.com/etcd_disk_wal_fsync_duration_seconds/histogram'.",
+    "status": "NOT_FOUND"
+  }
+}

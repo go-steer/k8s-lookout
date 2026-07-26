@@ -16,6 +16,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -56,7 +57,37 @@ type SeriesQuery struct {
 	Window   TimeWindow
 	// Step is the desired resolution; the backend may coarsen it.
 	Step time.Duration
+
+	// The aggregation fields below stay inside the §15 Q4 envelope:
+	// each names both its Cloud Monitoring and its PromQL
+	// realization, so no pack can express a Monitoring-only shape.
+
+	// GroupBy aggregates ACROSS series, keeping only these labels.
+	// nil means no cross-series aggregation (every stored series
+	// comes back raw); a non-nil GroupBy — including the empty list —
+	// reduces, an empty list collapsing everything into one series.
+	// Monitoring: crossSeriesReducer + groupByFields; PromQL:
+	// sum/avg by(...) (sum(...) for the empty list).
+	GroupBy []string
+	// Percentile selects the quantile of a distribution/histogram
+	// metric: 0 = raw values, otherwise 50, 95, or 99. Monitoring:
+	// REDUCE_PERCENTILE_NN over ALIGN_DELTA'd distributions; PromQL:
+	// histogram_quantile(0.NN, ...).
+	Percentile int
+	// Rate asks for the per-second rate of a cumulative counter.
+	// Monitoring: ALIGN_RATE; PromQL: rate().
+	Rate bool
 }
+
+// ErrMetricAbsent is returned (wrapped, naming the metric) by a
+// MetricsBackend that can POSITIVELY determine the queried metric
+// does not exist in the workspace — on GKE, a control-plane metric
+// whose collection is not enabled on the cluster. It is distinct
+// from "no data in the window" (empty result, no error) and from an
+// unknown neutral metric name (a programming/spec error). Consumers
+// (`perf probe`) turn it into an explicit pack_unavailable finding —
+// never silence (§2, §11).
+var ErrMetricAbsent = errors.New("metric absent from the metrics workspace")
 
 // MetricsBackend executes the metrics queries behind `perf probe`
 // packs and `triage top --history` (§5).

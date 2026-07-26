@@ -1,0 +1,34 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: Monitoring v3 timeSeries.list for prometheus.googleapis.com/apiserver_flowcontrol_current_inqueue_requests/gauge (GKE control-plane API server metrics, BETA row of cloud.google.com/kubernetes-engine/docs/how-to/control-plane-metrics; prometheus_target resource) under REDUCE_SUM grouped by metric.labels.priority_level: sums of gauges come back as DOUBLE, points newest first.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_flowcontrol_current_inqueue_requests/gauge",
+        "labels": { "priority_level": "workload-low" }
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 34 } },
+        { "interval": { "endTime": "2026-07-25T11:59:00Z" }, "value": { "doubleValue": 12 } }
+      ]
+    },
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_flowcontrol_current_inqueue_requests/gauge",
+        "labels": { "priority_level": "global-default" }
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 2 } }
+      ]
+    }
+  ]
+}

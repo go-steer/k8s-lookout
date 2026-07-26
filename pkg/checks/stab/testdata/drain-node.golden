@@ -1,0 +1,5 @@
+kind=drain.pdb_gridlock severity=critical namespace=prod kind_of_object=PodDisruptionBudget name=web-pdb reason=PDBGridlock message="PDB allows 0 disruptions and covers 1 pod on gke-a: the eviction API will refuse and the drain hangs" node=gke-a pods=1 pod_names=web-0 disruptions_allowed=0 current_healthy=1 desired_healthy=1
+kind=drain.local_storage severity=warning namespace=prod kind_of_object=Pod name=cache-0 reason=EmptyDirData message="pod has 2 emptyDir volumes: the drain needs --delete-emptydir-data and the data is lost" node=gke-a volumes="scratch,tmpfs(medium=Memory)"
+kind=drain.bare_pod severity=warning namespace=prod kind_of_object=Pod name=one-off reason=NoController message="pod has no owner: eviction deletes it permanently and nothing recreates it" node=gke-a
+kind=drain.singleton severity=warning namespace=prod kind_of_object=Pod name=single-0 reason=SingleReplica message="evicting this pod takes down the only replica of Deployment/prod/single" node=gke-a workload=Deployment/prod/single replicas=1
+scanned=5 findings=4 elapsed=100ms drainable=no blockers=4

@@ -148,6 +148,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `google.golang.org/api` release ships no cloudquotas discovery
   client, and the GAPIC speaks to the same
   `cloudquotas.googleapis.com` surface §10.2 names.
+- `stab drift` (M5, DESIGN.md §5; MCP `k8s_gitops_drift`): out-of-band
+  drift vs the GitOps manager via `managedFields`, over
+  Deployments/StatefulSets/DaemonSets scoped by `--namespace`/`-A`/
+  `--workload`. One `drift.manual_edit` finding per (object, foreign
+  manager) owning spec fields — warning, critical when a drifted path
+  is image/replicas/env — with the manager string, operation, compact
+  field paths (capped at 8), and the edit's age; `kubectl-edit`/
+  `kubectl-patch`/`kubectl-client-side-apply` managers are recognized
+  specially (`tool=kubectl`, reason `KubectlManualEdit`). The declared
+  manager comes from `--manager`, defaulting to auto-detect: the
+  manager owning the most spec leaf fields across the scope
+  (deterministic tie-break; `detection=declared|majority|none` summary
+  note). Per the §5 respec, this is MANAGER-level detection only —
+  `managedFields` never carries a user identity; identity enrichment
+  is a later Cloud Audit Logs query pack, and the command's help says
+  so.
+- `stab drain` (M5, DESIGN.md §5; MCP `k8s_drain_blockers`): everything
+  that will block a node drain or be destroyed by it. `--node` details
+  one node — `drain.pdb_gridlock` (critical, one per PDB at
+  `disruptionsAllowed=0` covering pods on the node: a gridlocked PDB
+  IS a drain blocker), `drain.bare_pod` (warning, no ownerReferences —
+  eviction deletes it permanently), `drain.local_storage` (warning,
+  emptyDir data a drain destroys), `drain.singleton` (warning,
+  single-replica Deployment/StatefulSet/ReplicaSet losing its only
+  replica) — plus `drainable=yes|no` and `blockers=<n>` summary notes;
+  `-A` is the all-nodes summary (one `drain.node` rollup per blocked
+  node, worst-class severity, per-class counts). Mirror pods,
+  DaemonSet pods, and completed pods are skipped like a standard
+  drain.
+- `perf probe --pack=apiserver|apf|etcd|startup` (M5, DESIGN.md §5;
+  MCP `k8s_perf_probe`): control-plane and startup performance as
+  data-driven metrics query packs executed through the provider
+  metrics backend (§2) — apiserver p99 by verb/resource
+  (`perf.apiserver_p99`, WATCH/CONNECT/PROXY excluded), APF queue
+  saturation + 429 rejects (`perf.apf_saturation`,
+  `perf.apf_rejects`), etcd WAL fsync p99 + storage DB size
+  (`perf.etcd_fsync`, `perf.etcd_db_size`), pod-first-ready p95 with
+  window trend (`perf.startup_p95`). Findings fire per threshold
+  breach (max point in the window vs data-declared warn/crit). Packs
+  needing GKE control-plane metrics degrade EXPLICITLY when the
+  workspace lacks the metric: a `perf.pack_unavailable` warning naming
+  the metric and the enable-control-plane-metrics remedy, never
+  silence; no provider → the standard `cloud.unavailable` finding +
+  summary marker.
+- `cloud.SeriesQuery` grows three backend-neutral fields for the packs
+  (§15 Q4: every construct has an obvious PromQL equivalent):
+  `GroupBy` (cross-series reduction keeping named labels),
+  `Percentile` (histogram/distribution quantile), `Rate` (per-second
+  counter rate) — plus the `cloud.ErrMetricAbsent` sentinel a backend
+  returns only when it can POSITIVELY determine the metric is absent.
+- GKE provider: the Cloud Monitoring `MetricsBackend` is live
+  (CapabilityMetrics now project-scoped, no longer deferred) — a §13
+  small client interface over `timeSeries.list` +
+  `metricDescriptors.get` with doc-authored recorded fixtures, and a
+  translation table from backend-neutral metric names to Monitoring
+  types (control-plane `prometheus.googleapis.com/...` metrics, GKE
+  system metrics, and `triage top --history`'s container CPU/memory
+  names, so `--history` now works on GKE). Absence detection probes
+  the metric descriptor after an empty control-plane read: 404 →
+  `ErrMetricAbsent`. Doc-driven mapping note recorded in `mtTable`:
+  GKE ships no etcd metrics package today — DB size maps to
+  `apiserver_storage_size_bytes` (what the ~6GiB etcd quota is
+  enforced against) and the fsync query reports `pack_unavailable`
+  until Google exposes the metric.
 
 ### Fixed
 

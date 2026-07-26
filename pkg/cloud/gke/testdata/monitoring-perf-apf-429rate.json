@@ -1,0 +1,19 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: Monitoring v3 timeSeries.list for prometheus.googleapis.com/apiserver_request_total/counter (GKE control-plane API server metrics: cloud.google.com/kubernetes-engine/docs/how-to/control-plane-metrics) filtered to metric.labels.code=429 under ALIGN_RATE + REDUCE_SUM with empty groupByFields: one merged series, per-second DOUBLE rates, no retained group labels, points newest first.",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/apiserver_request_total/counter"
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 1.8 } },
+        { "interval": { "endTime": "2026-07-25T11:55:00Z" }, "value": { "doubleValue": 0.4 } }
+      ]
+    }
+  ]
+}

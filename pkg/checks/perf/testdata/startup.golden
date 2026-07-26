@@ -1,0 +1,2 @@
+kind=perf.startup_p95 severity=warning reason=PodStartupSlow message="pod startup p95 (created to first ready) peaked at 74s in the last 24h0m0s — above the warning threshold 60s: slow image pulls, scheduling, or init containers delay every scale-up and rollout" pack=startup metric=pod/latencies/pod_first_ready observed=74s latest=74s threshold=60s window=24h0m0s trend=+34%
+scanned=1 findings=1 elapsed=100ms pack=startup window=24h0m0s

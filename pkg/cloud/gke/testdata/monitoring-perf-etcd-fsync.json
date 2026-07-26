@@ -1,0 +1,19 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: Monitoring v3 timeSeries.list for prometheus.googleapis.com/etcd_disk_wal_fsync_duration_seconds/histogram under REDUCE_PERCENTILE_99 (DOUBLE points, newest first). PROVENANCE CAVEAT recorded in metrics.go's mtTable: the GKE control-plane metrics doc (cloud.google.com/kubernetes-engine/docs/how-to/control-plane-metrics) ships NO etcd fsync metric today — this is the mechanical Managed-Prometheus name the OSS metric would ingest under; on current GKE the descriptor probe reports absence instead (monitoring-metricdescriptor-404.json).",
+  "timeSeries": [
+    {
+      "metric": {
+        "type": "prometheus.googleapis.com/etcd_disk_wal_fsync_duration_seconds/histogram"
+      },
+      "resource": {
+        "type": "prometheus_target",
+        "labels": { "project_id": "prod-project", "cluster": "prod" }
+      },
+      "valueType": "DOUBLE",
+      "points": [
+        { "interval": { "endTime": "2026-07-25T12:00:00Z" }, "value": { "doubleValue": 0.024 } },
+        { "interval": { "endTime": "2026-07-25T11:55:00Z" }, "value": { "doubleValue": 0.008 } }
+      ]
+    }
+  ]
+}
