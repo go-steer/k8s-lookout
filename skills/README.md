@@ -5,9 +5,9 @@ Task-triggered skills teaching the *decision tree across* lookout commands
 
 | Skill | Workflow |
 | --- | --- |
-| `k8s-triage/` | incident investigation: bundle first; when to go direct to logs / delta / edges / spec |
+| `k8s-triage/` | incident investigation: changes-first on sudden regressions, bundle first otherwise; logs vs events vs radius; when to net-probe |
 | `cluster-health/` | on-demand & scheduled assessment: health, reading the scorecard, drilling down |
-| `playbooks/` | per-symptom command sequences (CrashLoopBackOff, FailedMount), referenced by the skills |
+| `playbooks/` | per-symptom command sequences (CrashLoopBackOff, FailedMount, HPA thrash), referenced by the skills |
 
 (`k8s-capacity/` arrives with M4, `gitops-drift/` with M5.)
 

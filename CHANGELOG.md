@@ -320,6 +320,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds `apps/statefulsets` list/watch, `metrics.k8s.io pods` get/list,
   and `nodes/proxy` get — all harmless while the sources stay
   disabled (the `--sources` default is unchanged: `k8s-events` only).
+### Docs
+
+- Skills teach the M3 command surface (DESIGN.md §4.4): `k8s-triage`
+  replaces its "M3 gaps" fallback notes with the real workflow —
+  `triage changes` as the first question on sudden regressions,
+  event timeline vs logs, `triage radius` for impact, `net probe`
+  for hypothesis confirmation, and `--at` + `--store` post-hoc
+  analysis; `cluster-health` gains changes/radius drill-down rows;
+  the CrashLoopBackOff and FailedMount playbooks gain changes-first
+  and event-timeline steps, plus a new `playbooks/hpa-thrash.md`;
+  reference stubs regenerated for the four new commands.
 
 ## [0.3.0] - 2026-07-25
 

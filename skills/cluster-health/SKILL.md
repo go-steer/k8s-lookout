@@ -52,6 +52,8 @@ scanned=10 findings=20 elapsed=100ms
 | --- | --- |
 | nodes | `lookout triage delta --only=nodes` |
 | crashloops, pending, rollouts | `lookout triage delta --only=pods` then `lookout bundle --workload=Deployment/prod/api` for the named workload |
+| — any workload category that was healthy on the previous sweep | `lookout triage changes Deployment/prod/api --since=30m` for the named workload first — "what changed before onset" beats log spelunking on a sudden regression |
+| — before acting on a degraded workload | `lookout triage radius Deployment/prod/api` — upstream Services/Ingresses (user-facing impact) and lateral co-tenants the breakage or the fix reaches |
 | addons | `lookout triage delta --only=system` |
 | quota | `lookout triage delta --only=quota` |
 | storage | `lookout triage spec pvc/prod/data-claim` for the named PVC |

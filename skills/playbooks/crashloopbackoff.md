@@ -20,7 +20,22 @@ The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
    In the `delta` section, find the `pod.crashloop` finding and read
    `exit_code` and `last_state` — they choose the branch below.
 
-2. **Read what the container said before it died.** The current container
+2. **Was it healthy recently? Ask what changed first.** A workload that
+   was fine 30 minutes ago rarely breaks by itself — check for a rollout
+   or config change before reading any logs:
+
+   ```lookout
+   lookout triage changes Deployment/prod/api --since=30m
+   ```
+
+   A `change.rollout` (new `image`/`revision`) or `change.config`/
+   `change.secret` just before the first restart is usually the cause —
+   jump straight to verifying it in the branch table below. Mind the
+   summary's `source=` note: `live-approximation` (no sentinel store)
+   cannot see ConfigMap/Secret edits or label flips; `source=history`
+   (with `--store`) sees everything.
+
+3. **Read what the container said before it died.** The current container
    has restarted; the evidence is in the *previous* instance:
 
    ```lookout
@@ -30,23 +45,44 @@ The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
    `log.template` findings with `level=fatal|error` and `log.stacktrace`
    findings (top frames in `frames`) usually state the cause outright.
 
-3. **Branch on the exit evidence.**
+4. **No logs, or need the restart cadence? Pull the event timeline.**
+   When the container dies before logging (probe kills, OOM, image
+   pulls) or you need to know when the looping started and whether it is
+   still recurring:
+
+   ```lookout
+   lookout triage events --workload=Deployment/prod/api --since=1h
+   ```
+
+   One deduped entry per (object, reason family) over the whole owner
+   tree — `count`/`first_seen`/`last_seen` date the loop; `Unhealthy` →
+   `Killing` sequences expose probe kills the logs never show.
+
+5. **Branch on the exit evidence.**
 
    | Evidence | Likely cause | Verify with |
    | --- | --- | --- |
    | `last_state=OOMKilled` (exit 137) | memory limit too low or a leak | `lookout triage spec Deployment/prod/api` — compare `limits` vs the app's needs |
    | exit code 1/2, logs name a missing config key or file | broken ConfigMap/Secret wiring | `lookout state edges --workload=Deployment/prod/api` — `edge.missing_key` / `edge.missing_ref` name the exact key, env var, and container |
    | exit code 0 but still restarting | process exits cleanly; probe or command wrong | `lookout triage spec Deployment/prod/api` — check `liveness`/`readiness` one-liners and the container command |
-   | logs show connect/DNS failures to a dependency | dependency down, not this workload | `lookout state edges --workload=Deployment/prod/api` for selector/endpoint health of the dependency's Service; then re-run this playbook against the dependency |
-   | started crashing right after a rollout | bad new revision | `triage changes` lands M3 — meanwhile compare `lookout triage spec Deployment/prod/api` against the GitOps repo's previous revision |
+   | logs show connect/DNS failures to a dependency | dependency down, not this workload | `lookout state edges --workload=Deployment/prod/api` for selector/endpoint health of the dependency's Service; then confirm the hypothesis actively — `lookout net probe --dns=db.prod.svc.cluster.local --tcp=db.prod.svc:5432` from the cluster vantage — and re-run this playbook against the dependency |
+   | started crashing right after a rollout | bad new revision | `lookout triage changes Deployment/prod/api --since=1h` — the `change.rollout` finding names the `revision` and `image`; diff that revision in the GitOps repo |
 
-4. **Confirm the blast radius before acting.** The bundle's `radius`
-   section (`relation=upstream` neighbors — Services/Ingresses routing
-   here) tells you who is affected; check `edge.selector_unready` /
-   `edge.endpoints_unready` in the `edges` section to see whether traffic
-   is already failing over.
+6. **Confirm the blast radius before acting.**
 
-5. **Close the loop.** Fixes route through GitOps, never raw writes. After
+   ```lookout
+   lookout triage radius Deployment/prod/api
+   ```
+
+   `direction=upstream` neighbors (Services/Ingresses routing here) are
+   the user-facing impact; `direction=lateral` co-tenants share the node
+   or config. Cross-check `edge.selector_unready` /
+   `edge.endpoints_unready` in the bundle's `edges` section to see
+   whether traffic is already failing over. For a post-mortem, add
+   `--at=<onset> --store=<sentinel db>` to get the radius as it was at
+   onset, not as it is now.
+
+7. **Close the loop.** Fixes route through GitOps, never raw writes. After
    the fix rolls out, re-run:
 
    ```lookout
