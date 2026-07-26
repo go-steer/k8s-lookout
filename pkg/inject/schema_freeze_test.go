@@ -40,14 +40,9 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/inject/schema"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
-	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
-	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
-	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
-	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
-	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
-	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
 )
 
 // shippedKinds is the v1 kind inventory: every signal kind any
@@ -55,52 +50,22 @@ import (
 // serializes it. The two frozen M0 kinds and the source-namespaced
 // kinds share inject.Payload; the cross-cutting kinds carry their own
 // schema-stable structs.
-var shippedKinds = map[string]reflect.Type{
-	// Frozen M0 pair (byte-identical to the original watcher).
-	inject.KindEvent:    reflect.TypeOf(inject.Payload{}),
-	inject.KindFollowup: reflect.TypeOf(inject.Payload{}),
-
-	// §7.4 outcome records (the §9.3 ground-truth labels).
-	inject.KindResolved:         reflect.TypeOf(inject.ResolvedPayload{}),
-	inject.KindResolvedReverted: reflect.TypeOf(inject.ResolvedPayload{}),
-
-	// §7.5 storm kinds.
-	inject.KindStorm:                 reflect.TypeOf(inject.StormPayload{}),
-	inject.KindStormMember:           reflect.TypeOf(inject.StormMemberPayload{}),
-	inject.KindStormMemberSuperseded: reflect.TypeOf(inject.StormMemberPayload{}),
-	inject.KindStormUpdate:           reflect.TypeOf(inject.StormUpdatePayload{}),
-
-	// §7.7 watchboard kinds.
-	inject.KindWatchboardDigest:  reflect.TypeOf(inject.WatchboardDigestPayload{}),
-	inject.KindWatchboardRotated: reflect.TypeOf(inject.WatchboardRotatedPayload{}),
-
-	// §9.4 regression evidence.
-	inject.KindTriageRegressed: reflect.TypeOf(inject.TriageRegressedPayload{}),
-
-	// Source-namespaced kinds (§7.3): all ride inject.Payload with
-	// the §8 identity fields stamped (docs/signal-schema-v1.md).
-	objectstate.KindNodeNotReady:     reflect.TypeOf(inject.Payload{}),
-	objectstate.KindNodeFlapping:     reflect.TypeOf(inject.Payload{}),
-	objectstate.KindProgressDeadline: reflect.TypeOf(inject.Payload{}),
-	objectstate.KindEndpointsEmpty:   reflect.TypeOf(inject.Payload{}),
-	objectstate.KindPDBGridlocked:    reflect.TypeOf(inject.Payload{}),
-	objectstate.KindRestartBurst:     reflect.TypeOf(inject.Payload{}),
-	rollout.KindStall:                reflect.TypeOf(inject.Payload{}),
-	saturation.KindForecast:          reflect.TypeOf(inject.Payload{}),
-	degradation.KindCapacity:         reflect.TypeOf(inject.Payload{}),
-	degradation.KindProbeFlap:        reflect.TypeOf(inject.Payload{}),
-	expiry.KindWarning:               reflect.TypeOf(inject.Payload{}),
-	capacity.KindPending:             reflect.TypeOf(inject.Payload{}),
-	capacity.KindScaleUp:             reflect.TypeOf(inject.Payload{}),
-	capacity.KindScaleDown:           reflect.TypeOf(inject.Payload{}),
-	capacity.KindScaleUpGap:          reflect.TypeOf(inject.Payload{}),
-	capacity.KindStockout:            reflect.TypeOf(inject.Payload{}),
-	capacity.KindQuotaBlocked:        reflect.TypeOf(inject.Payload{}),
-	capacity.KindIPExhausted:         reflect.TypeOf(inject.Payload{}),
-	capacity.KindPendingAged:         reflect.TypeOf(inject.Payload{}),
-	quota.KindForecast:               reflect.TypeOf(inject.Payload{}),
-	tokenburn.KindBurn:               reflect.TypeOf(inject.Payload{}),
-}
+//
+// The ledger itself lives in pkg/inject/schema as exported data so
+// the docs-site generator (internal/sitedoc) renders the signal-kind
+// catalog from the SAME slice these freeze tests pin — the tests
+// below keep validating count, struct mapping, and engine-constant
+// alignment exactly as before the export.
+var shippedKinds = func() map[string]reflect.Type {
+	m := make(map[string]reflect.Type)
+	for _, k := range schema.Kinds() {
+		if _, dup := m[k.Kind]; dup {
+			panic("duplicate kind in pkg/inject/schema ledger: " + k.Kind)
+		}
+		m[k.Kind] = reflect.TypeOf(k.Payload)
+	}
+	return m
+}()
 
 // frozenFields pins, per wire struct, the ordered json field names of
 // signal-schema v1 (nested objects pinned separately below). Removing

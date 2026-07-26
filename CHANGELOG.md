@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the vanilla-Kubernetes degradation shown verbatim, image flavors +
   cosign verification, and documentation pointers — milestone
   narration moved out to `docs/milestones/`.
+- End-user docs site under `docs/site/` (Astro Starlight, stack mirrored
+  from core-agent: light-only theme, remark-prepend-base, GitHub Pages
+  deploy via the new `Docs` workflow). The Reference section is generated
+  by `dev/tools/gen-site-docs` (`internal/sitedoc`) from the same
+  declarations that produce `--help`, the MCP schemas, and the skill
+  reference stubs: one page per registered command, the full
+  `lookout watch` flag table (derived from the live flag surface via the
+  new `internal/watch.FlagInventory`), the signal-kind catalog (from the
+  v1 ledger, now exported as data in `pkg/inject/schema` and shared with
+  the freeze tests), and the Prometheus metrics table (names + help
+  derived from the live collectors via `internal/watch.MetricsInventory`).
+  A drift test in `internal/sitedoc` fails CI when committed pages differ
+  from regeneration. `dev/tools/docs-lint` (dropped at M0) is restored —
+  mirrored from core-agent, adapted to this tree — and wired into
+  `dev/tools/ci`, `dev/ci/presubmits/verify-docs-lint`, and the new
+  `Docs lint` workflow; `ci.yml`/`ci-docs.yml` path lists now let
+  docs-site-only changes skip Go CI with required checks staying green.
 
 ## [0.6.0] - 2026-07-26
 

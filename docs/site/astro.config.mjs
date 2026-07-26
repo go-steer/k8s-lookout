@@ -1,0 +1,91 @@
+// @ts-check
+import { defineConfig } from 'astro/config';
+import { unified } from '@astrojs/markdown-remark';
+import starlight from '@astrojs/starlight';
+import { remarkPrependBase } from './src/plugins/remark-prepend-base.mjs';
+
+const BASE = '/k8s-lookout';
+
+// Stack mirrored from core-agent's docs/site (a maintainer of one
+// repo should recognize the other): Astro Starlight, light-only
+// theme, remark-prepend-base so content links stay decoupled from
+// the deploy base.
+//
+// baseURL matches the production GH Pages path so relative links
+// resolve identically in dev and in prod.
+export default defineConfig({
+  site: 'https://go-steer.github.io',
+  base: BASE,
+  markdown: {
+    processor: unified({ remarkPlugins: [remarkPrependBase(BASE)] }),
+  },
+  integrations: [
+    starlight({
+      title: 'k8s-lookout',
+      description:
+        'Data-plane intelligence for core-agent: deterministic, token-dense eyes on Kubernetes/GKE clusters for LLM-driven troubleshooting agents.',
+      logo: undefined,
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/go-steer/k8s-lookout',
+        },
+      ],
+      editLink: {
+        baseUrl:
+          'https://github.com/go-steer/k8s-lookout/edit/main/docs/site/',
+      },
+      // Inline script runs before Starlight's own ThemeProvider script,
+      // pinning data-theme to 'light' before first paint. Belt-and-braces
+      // with the theme.css overrides that already apply under both
+      // [data-theme='light'] and [data-theme='dark']. (Mirrors core-agent.)
+      head: [
+        {
+          tag: 'script',
+          attrs: { 'is:inline': true },
+          content: "document.documentElement.dataset.theme = 'light';",
+        },
+      ],
+      // Palette + typography live in one file so the whole visual
+      // system is swappable.
+      customCss: ['./src/styles/theme.css'],
+      // Empty component overrides drop the dark-mode toggle from the
+      // navbar. Light-only site, same as core-agent.
+      components: {
+        ThemeSelect: './src/components/ThemeSelect.astro',
+        ThemeProvider: './src/components/ThemeProvider.astro',
+      },
+      // Sections use `autogenerate` so new pages appear automatically
+      // once added under the source dir. Reference is generated-only
+      // (dev/tools/gen-site-docs); the other sections are scaffolded
+      // in this PR and filled in follow-ups.
+      sidebar: [
+        {
+          label: 'Overview',
+          items: [{ label: 'Introduction', link: '/' }],
+        },
+        {
+          label: 'Getting started',
+          items: [{ autogenerate: { directory: 'getting-started' } }],
+        },
+        {
+          label: 'Concepts',
+          items: [{ autogenerate: { directory: 'concepts' } }],
+        },
+        {
+          label: 'Guides',
+          items: [{ autogenerate: { directory: 'guides' } }],
+        },
+        {
+          label: 'Reference',
+          items: [{ autogenerate: { directory: 'reference' } }],
+        },
+        {
+          label: 'Operations',
+          items: [{ autogenerate: { directory: 'operations' } }],
+        },
+      ],
+    }),
+  ],
+});
