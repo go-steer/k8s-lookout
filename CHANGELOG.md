@@ -13,6 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `apps/replicasets`, and `pods/log` — the M2 drill showed enrichment's
   spec and logs sections failing in-cluster without them (5 of 8 runs
   `outcome=partial`; see `docs/milestones/M2.md` §Observations).
+- Node-scoped incidents now resolve (M2 drill §Observations item 2):
+  the object-state source's node informer feeds a §7.4 `NodeClearance`
+  observer — node Ready=True stable for `--recovery-stable-for` →
+  `kind=resolved` (resolution=recovered; a node deleted with no
+  same-name replacement closes as object_deleted). Consequence: a
+  node-anchored storm can now FULLY resolve — the storm's aggregate
+  `kind=resolved` fires when all members including the node incident
+  clear (drill A ended 32/33 with the storm session left to the idle
+  TTL).
+- Live-graph enrichment no longer mislabels existing-but-unwatched
+  objects as dangling (M2 drill §Observations item 3): the topology
+  graph now declares which kinds its ingest watches
+  (`graph.Options.WatchedKinds` / `Snapshot.Watches`), and the radius
+  section claims `radius.missing reason=ReferencedNotFound` only for
+  watched kinds — a mount-referenced ConfigMap/Secret/PVC the live
+  informer set deliberately holds identity-only renders as
+  `radius.neighbor` with `observed=unknown` instead. One-shot
+  full-List bundles (CLI) watch everything and are byte-unchanged.
+- Storm sessions now carry size freshness (M2 drill §Observations
+  item 4): the formation `kind=storm` payload stays byte-frozen
+  (schema stability), and a NEW schema-stable `kind=storm.update`
+  followup (`affected_count`, `namespaces_count`,
+  `new_members_since_last` — pinned byte-exact) is injected into the
+  storm session when membership doubles or grows by 10 since the last
+  size report, rate-limited to one per minute
+  (`k8s_event_watcher_storm_updates_total` counts them).
 
 ### Added
 

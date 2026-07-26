@@ -36,6 +36,13 @@ type Snapshot struct {
 	keys []string
 	ids  *sync.Map
 
+	// watched is the ingest's Options.WatchedKinds as a set (shared,
+	// never mutated after construction). Nil means every supported
+	// kind is observed — the full-List one-shot posture, and the
+	// posture of snapshots restored from the §6.6 history encoding
+	// (which predates this field and carries no watched set).
+	watched map[NodeKind]bool
+
 	generation uint64
 }
 
@@ -82,6 +89,25 @@ func (s *Snapshot) Resolve(id NodeID) (Ref, bool) {
 		Name:      name,
 		Observed:  info.observed,
 	}, true
+}
+
+// Watches reports whether this snapshot's ingest actually observes
+// objects of the given kind from the API server (Options.
+// WatchedKinds). It is the honesty predicate behind Ref.Observed:
+//
+//   - Watches(k) && !Observed → the object is genuinely absent (a
+//     dangling reference — real triage signal).
+//   - !Watches(k) && !Observed → UNKNOWN: the node exists only as a
+//     referenced identity because this index never watches the kind;
+//     nothing may be claimed about the object's existence.
+//
+// A snapshot built without WatchedKinds (one-shot full-List graphs,
+// history-restored snapshots) watches everything.
+func (s *Snapshot) Watches(kind NodeKind) bool {
+	if s.watched == nil {
+		return true
+	}
+	return s.watched[kind]
 }
 
 // Out returns the outbound edges of id ("id --Kind--> Edge.To"),

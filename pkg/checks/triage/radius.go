@@ -131,7 +131,7 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 		return 0, err
 	}
 	for _, nb := range bundle.RadiusNeighbors(snap, id, depth) {
-		if err := inv.Out.Emit(neighborFinding(nb, cluster)); err != nil {
+		if err := inv.Out.Emit(neighborFinding(nb, snap, cluster)); err != nil {
 			return 0, err
 		}
 	}
@@ -148,8 +148,15 @@ var lateralRelations = map[graph.NodeKind]string{
 }
 
 // neighborFinding renders one blast-radius neighbor. cluster supplies
-// live pod readiness and is nil in --at mode.
-func neighborFinding(nb bundle.Neighbor, cluster *state.Cluster) emit.Finding {
+// live pod readiness and is nil in --at mode. snap supplies the
+// watched-kind honesty check (Snapshot.Watches): the ReferencedNotFound
+// claim is made only for kinds the snapshot's ingest actually observes
+// — an unobserved neighbor of an unwatched kind is reported with
+// observed=unknown instead (same rule as the bundle's radius section).
+// Both of this command's snapshot sources (one-shot List, history)
+// watch everything today, so behavior here is unchanged until a
+// partial-ingest snapshot is served.
+func neighborFinding(nb bundle.Neighbor, snap *graph.Snapshot, cluster *state.Cluster) emit.Finding {
 	relation := nb.Via.String()
 	details := []emit.Field{
 		{Key: "direction", Value: nb.Direction},
@@ -176,10 +183,14 @@ func neighborFinding(nb bundle.Neighbor, cluster *state.Cluster) emit.Finding {
 		Details:      details,
 	}
 	if !nb.Ref.Observed {
-		f.Kind = "radius.missing"
-		f.Severity = emit.SeverityWarning
-		f.Reason = "ReferencedNotFound"
-		f.Message = "referenced by the neighborhood but not observed"
+		if snap.Watches(nb.Ref.Kind) {
+			f.Kind = "radius.missing"
+			f.Severity = emit.SeverityWarning
+			f.Reason = "ReferencedNotFound"
+			f.Message = "referenced by the neighborhood but not observed"
+		} else {
+			f.Details = append(f.Details, emit.Field{Key: "observed", Value: "unknown"})
+		}
 	}
 	return f
 }

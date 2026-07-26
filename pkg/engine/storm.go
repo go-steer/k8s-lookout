@@ -160,6 +160,24 @@ type StormVerdict struct {
 	Members []StormMember
 	// Member is the observed incident's own record (Formed/Attached).
 	Member StormMember
+	// SizeUpdate, set only on StormAttached, tells the caller a
+	// kind=storm.update size refresh is due: membership grew past a
+	// reporting threshold (doubling or +stormUpdateGrowth since the
+	// last report, at most one per stormUpdateMinInterval). Nil when
+	// no update is due.
+	SizeUpdate *StormSizeUpdate
+}
+
+// StormSizeUpdate carries the freshness counters for one due
+// kind=storm.update followup (M2 drill observation 4).
+type StormSizeUpdate struct {
+	// AffectedCount / NamespaceCount are the storm's CURRENT totals
+	// (the formation payload's counts are frozen at formation time).
+	AffectedCount  int
+	NamespaceCount int
+	// NewSinceLast is the membership growth since the previous size
+	// report (the formation payload counts as the first report).
+	NewSinceLast int
 }
 
 const (
@@ -177,6 +195,17 @@ const (
 	// info stays info (it never opened sessions anyway) and critical
 	// cannot go higher.
 	stormEscalateSize = 10
+	// stormUpdateGrowth and stormUpdateMinInterval gate the §7.5 size
+	// refresh (M2 drill observation 4: the formation payload's
+	// affected_count is frozen at formation time — 3 — while reality
+	// grows to 33). A kind=storm.update followup is due when
+	// membership has DOUBLED since the last size report or grown by
+	// stormUpdateGrowth members, whichever comes first, rate-limited
+	// to one update per stormUpdateMinInterval. The initial payload
+	// stays byte-identical (schema stability); the update is a NEW
+	// kind with its own pin.
+	stormUpdateGrowth      = 10
+	stormUpdateMinInterval = time.Minute
 	// stormIdleTTL bounds an unresolved storm's lifetime: a storm
 	// that saw no member activity (attach or re-fire) for this long
 	// is closed so it cannot absorb unrelated future incidents
@@ -218,6 +247,11 @@ type stormState struct {
 	members     []StormMember
 	resolved    map[EventKey]bool
 	unresolved  int
+	// reportedCount / reportedAt track the last size report on the
+	// wire (formation, then each kind=storm.update) for the
+	// SizeUpdate thresholds.
+	reportedCount int
+	reportedAt    time.Time
 }
 
 // StormCorrelator is the §7.5 pipeline stage. Single instance per
@@ -327,7 +361,9 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		}
 		st.addMember(member, sig.Severity, seen, now)
 		c.byKey[key] = st.id
-		return StormVerdict{Kind: StormAttached, Storm: st.info(), Member: member}
+		v := StormVerdict{Kind: StormAttached, Storm: st.info(), Member: member}
+		v.SizeUpdate = st.maybeSizeUpdate(now)
+		return v
 	}
 
 	if len(cands) == 0 {
@@ -429,8 +465,43 @@ func (c *StormCorrelator) form(ancestor Ancestor, group []*pendingIncident, now 
 		}
 	}
 	c.pending = kept
+	// The formation payload is the first size report.
+	st.reportedCount = len(st.members)
+	st.reportedAt = now
 	c.storms[st.id] = st
 	return st
+}
+
+// maybeSizeUpdate decides whether a kind=storm.update size refresh is
+// due after a member attach (see stormUpdateGrowth /
+// stormUpdateMinInterval), advancing the report cursor when it is.
+// Deliberately event-driven: a storm that stops growing gets no
+// trailing update — the member followups and the eventual resolved
+// record already carry the final count. Caller holds mu.
+func (st *stormState) maybeSizeUpdate(now time.Time) *StormSizeUpdate {
+	count := len(st.members)
+	grew := count - st.reportedCount
+	if count < 2*st.reportedCount && count < st.reportedCount+stormUpdateGrowth {
+		return nil
+	}
+	if now.Sub(st.reportedAt) < stormUpdateMinInterval {
+		// Rate limit: hold the cursor so a later attach fires the
+		// (larger) update once the interval has passed.
+		return nil
+	}
+	nss := make(map[string]bool)
+	for _, m := range st.members {
+		if m.Namespace != "" {
+			nss[m.Namespace] = true
+		}
+	}
+	st.reportedCount = count
+	st.reportedAt = now
+	return &StormSizeUpdate{
+		AffectedCount:  count,
+		NamespaceCount: len(nss),
+		NewSinceLast:   grew,
+	}
 }
 
 // addMember attaches (or re-fires) a member on an open storm.

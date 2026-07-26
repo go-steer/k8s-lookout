@@ -36,9 +36,11 @@
 // arming (the engine's persisted dedup absorbs the repeat).
 //
 // This source also absorbed internal/watch's minimal pod observer: its
-// pod informer feeds the shared PodClearance state machine, so the
-// §7.4 recovery tracker uses ClearanceObserver() instead of a second
-// pod informer when the source is enabled.
+// pod informer feeds the shared PodClearance state machine, and its
+// node informer the NodeClearance one, so the §7.4 recovery tracker
+// uses ClearanceObserver() instead of second informers when the
+// source is enabled — and node-scoped incidents (node_notready and
+// the NodeNotReady reactive family) resolve like pod-scoped ones.
 package objectstate
 
 import (
@@ -266,6 +268,11 @@ type Source struct {
 	// pc is the shared §7.4 pod-clearance state machine, fed by this
 	// source's pod informer. See ClearanceObserver.
 	pc *PodClearance
+	// nc is the §7.4 node-clearance state machine, fed by this
+	// source's node informer (M2 drill observation 2: node-scoped
+	// incidents need a clearance observer too, or a node-anchored
+	// storm can never fully resolve). See ClearanceObserver.
+	nc *NodeClearance
 	// factory, when set via WithFactory, is the externally owned
 	// shared informer factory Run registers on instead of creating
 	// its own — §6.3's "one informer set serves the sentinel sources
@@ -298,6 +305,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		client:      client,
 		cfg:         cfg.normalize(),
 		pc:          NewPodClearance(),
+		nc:          NewNodeClearance(),
 		nodes:       make(map[types.UID]*nodeState),
 		deployments: make(map[types.UID]*deploymentState),
 		services:    make(map[serviceKey]*serviceState),
@@ -328,10 +336,30 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 }
 
 // ClearanceObserver returns the §7.4 clearance predicate backed by
-// this source's pod informer. The recovery tracker uses it instead of
-// internal/watch's standalone pod observer when the source is enabled
-// — one pod informer, identical judging behavior.
-func (s *Source) ClearanceObserver() engine.ClearanceObserver { return s.pc }
+// this source's informers: node-scoped incidents are judged by the
+// node informer's NodeClearance, pod-scoped ones by the pod
+// informer's PodClearance (each judges only its own object kind, so
+// composition order is immaterial). The recovery tracker uses it
+// instead of internal/watch's standalone pod observer when the source
+// is enabled — the same informers, no duplicates, and pod judging
+// behavior identical to before.
+func (s *Source) ClearanceObserver() engine.ClearanceObserver {
+	return composedClearance{s.nc, s.pc}
+}
+
+// composedClearance asks each observer in order; the first that can
+// judge the incident wins (the same rule the tracker applies across
+// registered observers).
+type composedClearance []engine.ClearanceObserver
+
+func (c composedClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
+	for _, o := range c {
+		if verdict, ok := o.Clearance(inc); ok {
+			return verdict, true
+		}
+	}
+	return engine.Clearance{}, false
+}
 
 // RequiredAccess implements sources.AccessDeclarer (§11): list+watch
 // on each informer target. Matches deploy/12-clusterrole-watcher.yaml.
@@ -434,6 +462,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("object-state: register node handler: %w", err)
 	}
+	s.nc.SetSynced(nodeH.HasSynced)
 	depH, err := factory.Apps().V1().Deployments().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { s.asDeployment(obj, s.onDeployment) },
 		UpdateFunc: func(_, obj any) { s.asDeployment(obj, s.onDeployment) },
@@ -541,6 +570,9 @@ func nodeReady(n *corev1.Node) (ready bool, msg string, ok bool) {
 }
 
 func (s *Source) onNode(n *corev1.Node) {
+	// Clearance duties first (§7.4 node observer, mirroring onPod).
+	s.nc.Upsert(n)
+
 	ready, detail, ok := nodeReady(n)
 	if !ok {
 		return
@@ -580,6 +612,7 @@ func (s *Source) onNode(n *corev1.Node) {
 }
 
 func (s *Source) onNodeDelete(n *corev1.Node) {
+	s.nc.Delete(n)
 	s.mu.Lock()
 	delete(s.nodes, n.UID)
 	s.mu.Unlock()

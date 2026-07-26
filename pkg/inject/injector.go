@@ -180,6 +180,12 @@ func (i *Injector) InjectStormMember(ctx context.Context, sessionID string, payl
 	return i.injectJSON(ctx, sessionID, payload)
 }
 
+// InjectStormUpdate POSTs a kind=storm.update size refresh into the
+// storm's session when membership grows past a reporting threshold.
+func (i *Injector) InjectStormUpdate(ctx context.Context, sessionID string, payload StormUpdatePayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
 // InjectWatchboardDigest POSTs a §7.7 rolling digest of warning-class
 // signals into the shared watchboard session. Same envelope and
 // endpoint — only the payload differs.

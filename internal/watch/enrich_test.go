@@ -653,11 +653,17 @@ func TestEnrich_SlowLogsStage_TimeoutPartialBundle(t *testing.T) {
 
 // --- live-graph path ---
 
-// liveSnapshotOf builds a one-shot topology graph from fixture
-// objects and returns it as the enricher's live-snapshot seam.
+// liveSnapshotOf builds a topology graph from fixture objects and
+// returns it as the enricher's live-snapshot seam. Declares the same
+// WatchedKinds as the production graph feed (pods/nodes/replicasets),
+// so unobserved nodes of other kinds judge as unknown, not missing —
+// the honesty rule the live radius section relies on.
 func liveSnapshotOf(t *testing.T, objs ...any) func() (*graph.Snapshot, error) {
 	t.Helper()
-	g := graph.New(graph.Options{SwapInterval: -1})
+	g := graph.New(graph.Options{
+		SwapInterval: -1,
+		WatchedKinds: []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet},
+	})
 	if err := g.Writer().FromObjects(slices.Values(objs)); err != nil {
 		t.Fatalf("graph FromObjects: %v", err)
 	}
@@ -720,6 +726,71 @@ func TestEnrich_LivePath_ReusesGraphAndCaches(t *testing.T) {
 	b2 := e.Incident(context.Background(), sig)
 	if !strings.Contains(b2, "enrichment_error stage=resolve") {
 		t.Errorf("unknown object should route to the scoped fallback:\n%s", b2)
+	}
+}
+
+// TestEnrich_LivePath_UnwatchedKindUnknownNotMissing is the M2 drill
+// observation 3 regression: the live informer set holds mount-
+// referenced ConfigMaps identity-only (§6.3), so an existing-but-
+// unwatched ConfigMap must render as radius.neighbor observed=unknown
+// — never as radius.missing reason=ReferencedNotFound, which drill B
+// asserted about a ConfigMap that existed the whole time. Watched
+// kinds (a genuinely absent Node here would be one) keep the real
+// missing claim.
+func TestEnrich_LivePath_UnwatchedKindUnknownNotMissing(t *testing.T) {
+	t.Parallel()
+	pod := enrichPod() // references ConfigMap app-config, never ingested
+	cs := fake.NewClientset(enrichDeployment())
+	e := testEnricher(newMetrics(), cs, enrichLogFixture())
+	e.snapshot = liveSnapshotOf(t, pod, enrichReplicaSet(), enrichNode())
+	e.livePod = func(ns, name string) (*corev1.Pod, error) { return pod, nil }
+
+	b := e.Incident(context.Background(), crashSignal())
+
+	var cmLine string
+	for _, line := range strings.Split(b, "\n") {
+		if strings.Contains(line, "name=app-config") && strings.Contains(line, "section=radius") {
+			cmLine = line
+			break
+		}
+	}
+	if cmLine == "" {
+		t.Fatalf("radius section lost the referenced ConfigMap:\n%s", b)
+	}
+	if strings.Contains(cmLine, "radius.missing") || strings.Contains(cmLine, "ReferencedNotFound") {
+		t.Errorf("existing-but-unwatched ConfigMap mislabeled as missing:\n%s", cmLine)
+	}
+	if !strings.Contains(cmLine, "kind=radius.neighbor") || !strings.Contains(cmLine, "observed=unknown") {
+		t.Errorf("unwatched ConfigMap should be radius.neighbor observed=unknown:\n%s", cmLine)
+	}
+}
+
+// TestEnrich_ScopedPath_MissingConfigMapStaysMissing pins the other
+// side of the observation-3 fix: the scoped fallback runs a full List
+// pass (watches everything), so a ConfigMap that is REALLY gone keeps
+// the radius.missing ReferencedNotFound claim — CLI one-shot bundles
+// are unchanged.
+func TestEnrich_ScopedPath_MissingConfigMapStaysMissing(t *testing.T) {
+	t.Parallel()
+	// Full fixture minus the ConfigMap: the pod's reference dangles
+	// for real.
+	cs := fake.NewClientset(enrichDeployment(), enrichReplicaSet(), enrichPod(), enrichNode())
+	e := testEnricher(newMetrics(), cs, enrichLogFixture())
+
+	b := e.Incident(context.Background(), crashSignal())
+
+	var cmLine string
+	for _, line := range strings.Split(b, "\n") {
+		if strings.Contains(line, "name=app-config") && strings.Contains(line, "section=radius") {
+			cmLine = line
+			break
+		}
+	}
+	if cmLine == "" {
+		t.Fatalf("radius section lost the dangling ConfigMap reference:\n%s", b)
+	}
+	if !strings.Contains(cmLine, "kind=radius.missing") || !strings.Contains(cmLine, "reason=ReferencedNotFound") {
+		t.Errorf("genuinely absent ConfigMap must keep the missing claim:\n%s", cmLine)
 	}
 }
 

@@ -92,6 +92,9 @@ type Writer struct {
 
 	intern *interner
 	gen    uint64
+	// watched is Options.WatchedKinds as a set, stamped into every
+	// published snapshot. Nil means "everything watched".
+	watched map[NodeKind]bool
 
 	// Writer-private incremental-maintenance state. Never shared
 	// with snapshots; mutated in place.
@@ -303,6 +306,7 @@ func (w *Writer) publish(b *batch) {
 		edges:      b.edges,
 		keys:       w.intern.keys,
 		ids:        &w.intern.ids,
+		watched:    w.watched,
 		generation: w.gen,
 	})
 }

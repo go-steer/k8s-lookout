@@ -56,6 +56,11 @@ const (
 	// per-incident session (opened before the storm formed) to point
 	// it at the storm session that now owns the incident.
 	KindStormMemberSuperseded = "storm.member_superseded"
+	// KindStormUpdate is the size refresh injected into the storm's
+	// session when membership grows past a reporting threshold: the
+	// formation payload's affected_count is frozen at formation time
+	// (schema stability), so freshness rides on this NEW kind.
+	KindStormUpdate = "storm.update"
 )
 
 // Values for Signal.Source (the §8 "source" field): which path

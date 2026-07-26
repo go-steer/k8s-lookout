@@ -94,6 +94,19 @@ type Options struct {
 	// Now is the clock stamped into ChangeRecord.At. Nil means
 	// time.Now; tests inject a fake for deterministic history.
 	Now func() time.Time
+
+	// WatchedKinds names the node kinds this graph's ingest actually
+	// OBSERVES from the API server (informer or List). It is what lets
+	// consumers tell a real absence from a blind spot: for a watched
+	// kind, Ref.Observed=false means the object is genuinely not on
+	// the API server (dangling reference — triage signal); for an
+	// unwatched kind it means only "identity-only in this index" —
+	// existence was never checked (§6.3: the live feed holds mounted
+	// ConfigMaps/Secrets/PVCs as referenced identities without
+	// watching them). Nil or empty means the ingest observes every
+	// supported kind — the one-shot full-List posture (state.
+	// LoadCluster), which keeps CLI bundles' behavior unchanged.
+	WatchedKinds []NodeKind
 }
 
 // Graph is the shared handle: the writer publishes snapshots into
@@ -118,6 +131,12 @@ func New(opts Options) *Graph {
 	}
 	g := &Graph{}
 	g.writer = newWriter(g, interval, opts.OnChange, now)
+	if len(opts.WatchedKinds) > 0 {
+		g.writer.watched = make(map[NodeKind]bool, len(opts.WatchedKinds))
+		for _, k := range opts.WatchedKinds {
+			g.writer.watched[k] = true
+		}
+	}
 	return g
 }
 
