@@ -114,7 +114,7 @@ func TestOffGCEDetectionIsBestEffort(t *testing.T) {
 	}
 }
 
-func TestAllCapabilitiesDeferredToM4M5(t *testing.T) {
+func TestCapabilities_CapacityLiveRestDeferred(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
 	p, err := New(context.Background(), cloud.Config{Project: "p"})
 	if err != nil {
@@ -125,8 +125,14 @@ func TestAllCapabilitiesDeferredToM4M5(t *testing.T) {
 		t.Fatalf("Capabilities() reports %d entries, want %d", len(statuses), len(cloud.AllCapabilities()))
 	}
 	for _, status := range statuses {
+		if status.Capability == cloud.CapabilityCapacity {
+			if !status.Available || status.Reason != "" {
+				t.Errorf("capacity status = %+v, want available with project set (M4)", status)
+			}
+			continue
+		}
 		if status.Available {
-			t.Errorf("capability %s reported available in the M1 skeleton", status.Capability)
+			t.Errorf("capability %s reported available before its milestone", status.Capability)
 		}
 		if status.Reason != reasonDeferred {
 			t.Errorf("capability %s reason = %q, want %q", status.Capability, status.Reason, reasonDeferred)
@@ -134,13 +140,35 @@ func TestAllCapabilitiesDeferredToM4M5(t *testing.T) {
 	}
 
 	if _, ok := p.Metrics(); ok {
-		t.Error("Metrics() available in the M1 skeleton")
+		t.Error("Metrics() available before M5")
 	}
 	if _, ok := p.Quota(); ok {
-		t.Error("Quota() available in the M1 skeleton")
+		t.Error("Quota() available before its M4 change lands")
+	}
+	if api, ok := p.Capacity(); !ok || api == nil {
+		t.Error("Capacity() unavailable with a project set (M4 landed it)")
 	}
 	u := cloud.Unavailable(p, cloud.CapabilityQuota)
 	if want := `unavailable reason="not implemented until M4/M5"`; u.Marker() != want {
 		t.Errorf("Marker() = %s, want %s", u.Marker(), want)
+	}
+}
+
+// Without a resolvable project the capacity capability degrades with
+// the explicit §2 reason instead of a client that cannot query.
+func TestCapacityUnavailableWithoutProject(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv(metadataHostEnv, "localhost:1")
+	p, err := New(context.Background(), cloud.Config{})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	if _, ok := p.Capacity(); ok {
+		t.Fatal("Capacity() available without a project")
+	}
+	u := cloud.Unavailable(p, cloud.CapabilityCapacity)
+	if u.Reason != reasonNoProject {
+		t.Errorf("reason = %q, want %q", u.Reason, reasonNoProject)
 	}
 }

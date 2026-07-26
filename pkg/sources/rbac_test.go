@@ -202,3 +202,40 @@ func TestRequirement_Subresource(t *testing.T) {
 		t.Errorf("SSAR attributes = %+v; want resource=nodes subresource=proxy", gotAttrs)
 	}
 }
+
+// TestRequirement_Name pins the M4 addition for the capacity source's
+// status-ConfigMap requirement: a name-scoped check renders the named
+// object and the SSAR carries ResourceAttributes.Name, so a
+// `resourceNames`-pinned kube-system Role satisfies exactly what the
+// source reads (and nothing broader).
+func TestRequirement_Name(t *testing.T) {
+	t.Parallel()
+	req := Requirement{Resource: "configmaps", Verb: "get", Namespace: "kube-system", Name: "cluster-autoscaler-status"}
+	if got, want := req.String(), "get configmaps cluster-autoscaler-status in namespace kube-system"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+
+	client := fake.NewClientset()
+	var gotAttrs *authorizationv1.ResourceAttributes
+	client.PrependReactor("create", "selfsubjectaccessreviews",
+		func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+			gotAttrs = review.Spec.ResourceAttributes
+			review = review.DeepCopy()
+			// Grant ONLY the named object — the resourceNames-pinned
+			// Role's behavior.
+			review.Status.Allowed = gotAttrs.Name == "cluster-autoscaler-status"
+			return true, review, nil
+		})
+	reviewer := NewAccessReviewer(client)
+	if ok, err := reviewer.Allowed(context.Background(), req); err != nil || !ok {
+		t.Fatalf("Allowed(named) = %v, %v; want true, nil", ok, err)
+	}
+	if gotAttrs == nil || gotAttrs.Name != "cluster-autoscaler-status" || gotAttrs.Namespace != "kube-system" {
+		t.Errorf("SSAR attributes = %+v; want the named, namespaced check", gotAttrs)
+	}
+	unnamed := Requirement{Resource: "configmaps", Verb: "get", Namespace: "kube-system"}
+	if ok, err := reviewer.Allowed(context.Background(), unnamed); err != nil || ok {
+		t.Errorf("Allowed(unnamed) = %v, %v; want false against a resourceNames-pinned grant", ok, err)
+	}
+}

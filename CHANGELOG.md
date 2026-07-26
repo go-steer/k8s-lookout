@@ -346,6 +346,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds `apps/statefulsets` list/watch, `metrics.k8s.io pods` get/list,
   and `nodes/proxy` get — all harmless while the sources stay
   disabled (the `--sources` default is unchanged: `k8s-events` only).
+
+- The `capacity` signal source (M4, DESIGN.md §7.2 row 7, §10.1) —
+  cluster-autoscaler signals from STRUCTURED sources, never the CA
+  text log. Enabled via `--sources=…,capacity` (ADDITIVE; the default
+  stays k8s-events only). Four sub-sources, one source:
+  (1) CA Kubernetes Events, watched by the capacity source's OWN
+  event-informer filter — the k8s-events `--reason` default is
+  untouched; the capacity source owns these reasons —
+  `NotTriggerScaleUp` → `capacity.pending` (warning, per-nodegroup
+  rejection reasons parsed from the real message shapes incl.
+  multi-nodegroup lists and comma-bearing taint reasons),
+  `TriggeredScaleUp` → `capacity.scaleup` (info), the ScaleDown
+  family → `capacity.scaledown` (info; ScaleDownFailed warning).
+  Event edges arm only after cache sync (the initial LIST is stale
+  history; the polled sub-sources own current state).
+  (2) The `cluster-autoscaler-status` ConfigMap in kube-system,
+  polled every `--capacity-poll` (default 60s), BOTH formats — the
+  legacy text block and the CA ≥ 1.30 yaml document (detected by the
+  `autoscalerStatus:` key): a nodegroup whose `cloudProviderTarget`
+  exceeds `ready` sustained > 3m fires `capacity.scaleup_gap`
+  ("asked for a node, didn't get one") — warning, critical when the
+  nodegroup's scale-up is in Backoff WITH a recorded error (yaml
+  `backoffInfo`); per-episode latch, nodegroup evidence
+  (target/registered/ready, health, backoff detail) in the message.
+  (3) Provider scale decisions through the §2 boundary
+  (`cloud.CapacityAPI` — on GKE the `cluster-autoscaler-visibility`
+  Cloud Logging stream): `GCE_STOCKOUT` → `capacity.stockout`,
+  quota reasons → `capacity.quota_blocked`, IP exhaustion →
+  `capacity.ip_exhausted` (all critical — the §10.1 remedy-disjoint
+  trio); no provider → the sub-source is OFF with the standard §2
+  `unavailable reason="…"` startup log, and the portable sub-sources
+  still fire on every scaleup failure.
+  (4) Pending-pod aging, the resident TRENDING version of `triage
+  delta`'s point-in-time scan: pods Pending+Unschedulable (the
+  scheduler's own PodScheduled=False/Unschedulable verdict) longer
+  than `--pending-age` (default 5m) fire `capacity.pending-aged`
+  (warning; critical at the design-fixed 15m), carrying the
+  scheduler's message as evidence.
+  Dedup families (M2 pattern, APPEND-ONLY): `pending` and
+  `pending-aged` join the scheduler's `FailedScheduling` family on
+  the Pod UID — one unplaceable pod is ONE session across all three
+  observers. `pkg/cloud/gke` implements `CapacityAPI` against Cloud
+  Logging (logadmin), parsing documented noScaleUp/scaleUp/
+  eventResult visibility records (per-MIG reasons; error messageIds
+  normalized: `scale.up.error.out.of.resources` → `GCE_STOCKOUT`,
+  `…quota.exceeded` → `GCE_QUOTA_EXCEEDED`, `…ip.space.exhausted` →
+  `IP_SPACE_EXHAUSTED`) behind a small `EntryLister` interface with
+  authored-from-docs JSON fixtures (§13; no live-project tests). New
+  dependency: `cloud.google.com/go/logging` (+transitives), imported
+  ONLY under the `gke`/`allproviders` build tags — `go tool nm` on
+  the default binary shows zero `cloud.google.com/go/logging` and
+  zero `pkg/cloud/gke` symbols (the #19 conformance tests still pin
+  this). RBAC: `sources.Requirement` gains `Name` (SSAR
+  ResourceAttributes.Name) so the source's one extra read — `get` on
+  the `cluster-autoscaler-status` ConfigMap — is declared
+  name-scoped and satisfied by the new kube-system Role pinned with
+  `resourceNames` (`deploy/14-role-watcher-capacity.yaml` +
+  `15-rolebinding-watcher-capacity.yaml`) instead of widening the
+  ClusterRole; events/pods informers ride the existing grants,
+  verified loudly at startup (§11).
 ### Docs
 
 - Skills teach the M3 command surface (DESIGN.md §4.4): `k8s-triage`

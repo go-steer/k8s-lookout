@@ -78,6 +78,12 @@
 #                       startup when enabled. See the §11 tradeoff
 #                       note on the secrets rule below.
 #
+# The capacity source (--sources=…,capacity, DESIGN.md §10.1) rides
+# the events and pods grants above; its one extra read — `get` on the
+# cluster-autoscaler-status ConfigMap — is a kube-system-namespaced
+# Role instead (14-role-watcher-capacity.yaml), pinned by
+# resourceNames rather than widening this ClusterRole.
+#
 # What the sentinel deliberately does NOT get:
 #   - patch/update/delete on anything — the sentinel is read-only
 #   - watch/get on secrets — the expiry source's `list` (below) is the
