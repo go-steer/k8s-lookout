@@ -321,6 +321,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `nodes/proxy` get — all harmless while the sources stay
   disabled (the `--sources` default is unchanged: `k8s-events` only).
 
+- `lookout triage top` (M3, DESIGN.md §5 — v2 top-analyzer, point-in-
+  time half): CPU/memory saturation vs LIMITS, right now, from ONE
+  metrics.k8s.io read over the scope (`--namespace` | `-A` |
+  `--workload`, which resolves member pods through the same
+  one-List-pass graph owner-chain `triage events`/`bundle` use). The
+  metrics-client join is NOT duplicated: the saturation source's
+  fetcher seam is reused via the new
+  `saturation.NewScopedMetricsPodFetcher` (same code path the sentinel
+  runs, narrowed to the asked-about namespace). Findings only at/above
+  `--top-warn` (default 80%, zero nominal state); `--all` dumps every
+  sampled row (info below the threshold) sorted by pct descending and
+  capped at `--limit` (default 50). The severity asymmetry is the
+  point and is documented in command help and package doc: MEMORY
+  ≥95% of limit is CRITICAL (incompressible — the kernel kills at the
+  limit), while CPU CAPS AT WARNING at any percentage (compressible —
+  over-limit throttles, never kills, and a single sample cannot prove
+  the sustained starvation a critical would claim; that proof lives in
+  `--history` or the sentinel's saturation source, which keeps the
+  slope→ETA math per the §5 respec). Containers with no cpu/memory
+  limit are invisible to a usage-vs-limit judgment, so they surface as
+  ONE aggregate info `top.unlimited` finding counting pods+containers
+  (`--show-unlimited` lists each as `top.unlimited_container` with the
+  `missing` dimensions). With `-A`, the node dimension is added:
+  `top.node` usage vs allocatable per node (`NodeMemoryPressure` /
+  `NodeCPUPressure` precursors, same asymmetry). `--history=<dur>`
+  goes through the `pkg/cloud` provider boundary (Metrics capability):
+  max/avg/p95 usage-vs-limit percent per container finding over the
+  window, queried in the backend-neutral `cloud.SeriesQuery` shape
+  (`container/cpu/used_millicores`, `container/memory/used_bytes` —
+  the GKE translation lands with the M4 backend); with no provider the
+  command emits the §2-mandated EXPLICIT degradation — a
+  `cloud.unavailable` finding plus the
+  `unavailable="no cloud provider configured"` summary marker — and
+  the point-in-time findings are unaffected. MCP: `k8s_resource_top`.
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in

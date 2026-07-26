@@ -27,26 +27,39 @@ import (
 )
 
 // metricsPodFetcher is the real PodUsageFetcher: container usage from
-// metrics.k8s.io joined with limits from the pod specs. Both listings
-// are cluster-wide per cycle — the sentinel is one resident process
-// per cluster (§7.2) and the metrics API is itself a cache, so this
-// costs two LISTs per --saturation-interval, not per pod.
+// metrics.k8s.io joined with limits from the pod specs. For the
+// sentinel both listings are cluster-wide per cycle — one resident
+// process per cluster (§7.2) and the metrics API is itself a cache,
+// so this costs two LISTs per --saturation-interval, not per pod.
+// namespace (metav1.NamespaceAll for the sentinel) narrows both
+// LISTs for one-shot consumers.
 type metricsPodFetcher struct {
-	metrics metricsv.Interface
-	core    kubernetes.Interface
+	metrics   metricsv.Interface
+	core      kubernetes.Interface
+	namespace string
 }
 
-// NewMetricsPodFetcher returns the metrics.k8s.io-backed fetcher.
+// NewMetricsPodFetcher returns the cluster-wide metrics.k8s.io-backed
+// fetcher (the sentinel's wiring).
 func NewMetricsPodFetcher(metrics metricsv.Interface, core kubernetes.Interface) PodUsageFetcher {
-	return &metricsPodFetcher{metrics: metrics, core: core}
+	return &metricsPodFetcher{metrics: metrics, core: core, namespace: metav1.NamespaceAll}
+}
+
+// NewScopedMetricsPodFetcher is NewMetricsPodFetcher restricted to
+// one namespace (metav1.NamespaceAll for the whole cluster) — the
+// seam `triage top` (§5) shares with this source: the same
+// usage-vs-limits join, scoped to what the one-shot command was
+// asked about, so the metrics-client code exists exactly once.
+func NewScopedMetricsPodFetcher(metrics metricsv.Interface, core kubernetes.Interface, namespace string) PodUsageFetcher {
+	return &metricsPodFetcher{metrics: metrics, core: core, namespace: namespace}
 }
 
 func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSample, error) {
-	pmList, err := f.metrics.MetricsV1beta1().PodMetricses(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	pmList, err := f.metrics.MetricsV1beta1().PodMetricses(f.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list pod metrics: %w", err)
 	}
-	podList, err := f.core.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
