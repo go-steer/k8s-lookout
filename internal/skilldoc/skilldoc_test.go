@@ -25,9 +25,12 @@ import (
 
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"
 )
 
 // repoRoot is the working-tree root relative to this package.

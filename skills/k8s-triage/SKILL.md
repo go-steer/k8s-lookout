@@ -7,12 +7,23 @@ description: Investigate Kubernetes/GKE incidents (crashloops, image pulls, pend
 
 `lookout` replaces kubectl describe/logs/get spelunking with compressed,
 deterministic, secret-safe findings. Prefer it over raw kubectl for every
-diagnostic read; fall back to kubectl only for surfaces lookout does not
-cover yet (listed at the end).
+diagnostic read; fall back to kubectl only for the few surfaces lookout
+does not cover yet (the playbooks name the raw fallback where one is
+still needed).
 
 ## Decision tree
 
-**Start with `bundle`.** It converts 4–5 separate reads into one correlated
+**Sudden regression? Ask "what changed" first.** When the report is "it
+was fine until ~30 minutes ago", the #1 SRE question comes before any
+log read:
+
+```lookout
+lookout triage changes Deployment/prod/api --since=30m
+```
+
+Details in "What changed before onset" below.
+
+**Otherwise start with `bundle`.** It converts 4–5 separate reads into one correlated
 payload — sanitized spec, everything abnormal, broken dependency edges,
 blast radius, distilled logs — scoped to one workload:
 
@@ -55,6 +66,10 @@ MCP tool with the same payload:
 | what is this container actually logging? | `lookout triage logs --workload=Deployment/prod/api --since=30m` | Drain-clustered templates with counts, not raw lines; `--previous` reads what a crashed container said before it died |
 | is its config/dependency wiring broken? | `lookout state edges --workload=Deployment/prod/api` | verifies ConfigMap/Secret keys, Service selectors + endpoints, Ingress backends, RBAC refs, TLS expiry — emits only broken edges |
 | what exactly is this object's spec? | `lookout triage spec Deployment/prod/api` | kubectl describe, but token-dense and secret-safe; accepts kubectl aliases (`po`, `deploy`, `svc`, `cm`, …) and CRDs via discovery |
+| what changed before it broke? | `lookout triage changes Deployment/prod/api --since=30m` | rollouts, config/secret updates, rescales, node ops in the target's graph neighborhood, chronological — see "What changed before onset" |
+| what has the *system* done to it lately? | `lookout triage events --workload=Deployment/prod/api --since=1h` | deduped event timeline over the whole owner-reference tree, with HPA-thrash detection — see "Event timeline vs logs" |
+| who else is affected? | `lookout triage radius Deployment/prod/api` | upstream routes, lateral co-tenants, downstream dependencies, with hop counts — see "Impact" |
+| is DNS/TCP/HTTP to it actually broken? | `lookout net probe --dns=api.prod.svc.cluster.local` | active confirmation from wherever lookout runs — see "Confirming a network hypothesis" |
 
 Concrete `state edges` output when a referenced ConfigMap key is missing
 (the classic CreateContainerConfigError) and a Service has unready
@@ -95,21 +110,158 @@ lookout state edges --workload=Deployment/prod/api --format=json
   emitted string passes the sanitizer. If you need a secret's *value*,
   lookout will not give it to you — by design.
 
-## Not here yet (M3) — and what to do meanwhile
+## What changed before onset (`triage changes`)
 
-- `triage events` (deduped event timeline), `triage radius --at` (blast
-  radius at incident onset), `triage changes` ("what changed before
-  onset"), `net probe` (active DNS/TCP/HTTP checks) land in M3.
-- Fallbacks: the `radius` section of `bundle` gives the *current* blast
-  radius; for event history use
-  `kubectl get events -n <ns> --sort-by=.lastTimestamp` (raw, undeduped —
-  budget tokens accordingly); for "what changed", compare
-  `lookout triage spec` output against the GitOps repo.
+The first question on any sudden regression — a workload that was
+healthy 30 minutes ago rarely breaks by itself:
+
+```lookout
+lookout triage changes Deployment/prod/api --since=30m
+```
+
+Findings are chronological
+`change.rollout|config|secret|scale|label|node|topology` records scoped
+to the target's graph neighborhood, each tagged with its `relation`
+(`self`/`upstream`/`lateral`/`downstream`) and provenance
+(`origin=log|event|api`). Field changes render as `path=from→to` pairs —
+names, counts, and shortened hashes, never values. A `change.rollout` or
+`change.config` in the window is usually the root cause; verify with
+`triage spec` or `state edges` before concluding.
+
+Abridged real output without a store:
+
+```lookout-golden
+kind=change.rollout severity=info namespace=prod kind_of_object=ReplicaSet name=web-rs-2 reason=NewReplicaSet message="new template revision created inside the window" at=2026-07-25T10:20:00Z relation=upstream origin=api revision=2 image=img:v2
+kind=change.scale severity=info namespace=prod kind_of_object=Deployment name=web reason=ScalingReplicaSet message="Scaled up replica set web-rs-2 to 3" at=2026-07-25T10:22:00Z relation=self origin=event
+…
+scanned=8 findings=3 elapsed=100ms source=live-approximation window=2026-07-25T10:00:00Z..2026-07-25T10:30:00Z
+```
+
+Mind the `source=` note on the summary line: `live-approximation` (no
+sentinel store) reconstructs rollouts and recent scale events from
+current API state but **cannot see** un-timestamped updates —
+ConfigMap/Secret edits, label flips, old cordons. `source=history` (from
+a sentinel store, below) sees everything the graph delta log recorded.
+
+## Event timeline vs logs (`triage events`)
+
+Two different testimonies: `triage logs` is what the *application* said;
+`triage events` is what *Kubernetes* did to it. Pull the event timeline
+when:
+
+- the pod never started (Pending/ContainerCreating — there are no logs);
+- the container dies before it can log (probe kills, OOM, image pulls);
+- you need cadence — when did this start, is it still recurring
+  (`count`, `first_seen`, `last_seen` on each entry);
+- replica counts are moving on their own — HPA thrash detection lives
+  here (`event.hpa_thrash`, with the replica sequence recovered from
+  `SuccessfulRescale` events).
+
+```lookout
+lookout triage events --workload=Deployment/prod/api --since=1h
+```
+
+Entries collapse by (object, reason family) across the whole
+owner-reference tree — kubectl get events, but deduped and ordered by
+newest activity. Abridged real output:
+
+```lookout-golden
+kind=event.warning severity=warning namespace=prod kind_of_object=Pod name=web-abc-1 reason=ImagePullBackOff message="Back-off pulling image \"registry.example/web:v9\"" count=5 first_seen=2026-07-25T11:30:00Z last_seen=2026-07-25T11:55:00Z variants=ErrImagePull,ImagePullBackOff source=kubelet
+kind=event.hpa_thrash severity=warning namespace=prod kind_of_object=HorizontalPodAutoscaler name=web-hpa reason=HPAThrash message="replica count changed direction 2 times within 30m0s — the HPA is oscillating, not converging" replicas=6->3->7->3 flips=2 window=30m0s target=Deployment/web
+…
+scanned=9 findings=4 elapsed=100ms
+```
+
+An `event.hpa_thrash` finding has its own playbook:
+`../playbooks/hpa-thrash.md`.
+
+## Impact: who else is affected (`triage radius`)
+
+`state edges` verifies *correctness* of the wiring; `triage radius`
+enumerates *impact* — run it before acting, to know who a fix (or the
+ongoing breakage) reaches:
+
+```lookout
+lookout triage radius Deployment/prod/api
+lookout triage radius --workload=StatefulSet/db/postgres --depth=2
+```
+
+```lookout-golden
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Service name=web direction=upstream relation=Selects hop=1
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Ingress name=edge direction=upstream relation=RoutesTo hop=2
+kind=radius.neighbor severity=info namespace=prod kind_of_object=Pod name=other-1 direction=lateral relation=shared-config hop=2 shared=ConfigMap/cm-app ready=true
+…
+scanned=14 findings=9 elapsed=100ms source=live
+```
+
+Read `direction`: `upstream` routes/owns/governs the target (Services,
+Ingresses — user-facing impact), `lateral` shares a node/config/volume
+(`shared=` names the shared object — co-tenant collateral), `downstream`
+is what the target depends on. `hop` is graph distance (1 = direct
+edge); `radius.missing` warns about referenced-but-absent objects. The
+`radius` section of `bundle` is the same data, one hop shallower — go
+direct to `triage radius` when impact is the question.
+
+## Confirming a network hypothesis (`net probe`)
+
+When config/topology reads produce a hypothesis — "the Service name
+doesn't resolve", "the DB port is filtered", "the upstream serves 5xx" —
+confirm it actively instead of inferring from more reads:
+
+```lookout
+lookout net probe --dns=api.prod.svc.cluster.local
+lookout net probe --tcp=db.prod.svc:5432 --probe-timeout=2s
+lookout net probe --http=https://api.prod.svc/healthz
+```
+
+```lookout-golden
+kind=probe.dns severity=info name=api.prod.svc.cluster.local message="resolved to 2 address(es)" ips=10.8.0.12,10.8.0.7 latency=100ms
+kind=probe.dns severity=critical name=missing.prod.svc message="lookup missing.prod.svc: no such host" error_class=nxdomain latency=100ms
+…
+scanned=3 findings=3 elapsed=100ms
+```
+
+- Vantage matters: probes originate wherever lookout runs. In a pod you
+  get the in-cluster view (cluster DNS, Service VIPs, NetworkPolicies as
+  that pod experiences them); on a laptop, the laptop's network. No pod
+  is ever spawned; zero cluster mutation.
+- Failures carry a machine-matchable `error_class`. Definitive negatives
+  (`nxdomain`, `refused`, `unreachable`, `reset`, `cert`, `http_5xx`)
+  are critical; indeterminate outcomes (`timeout` — could be policy,
+  load, or vantage; `http_4xx` — reachable, request turned away) are
+  warning.
+- Targets are not Kubernetes objects, so `--workload`/`--namespace`/
+  `--since` are rejected here.
+
+## Post-hoc: the state at onset (`--at` + `--store`)
+
+The graph-backed commands answer as of incident onset instead of now —
+"what *was* the blast radius / what changed before it" for a
+post-mortem:
+
+```lookout
+lookout triage radius Deployment/prod/api --at=20m --store=/var/lib/lookout/lookout.db
+lookout triage changes Deployment/prod/api --since=1h --at=2026-07-25T10:00:00Z --store=/var/lib/lookout/lookout.db
+```
+
+- `--at` takes RFC3339 or a duration ago (`20m`); it always requires
+  `--store` (point-in-time topology is served from the store, never
+  guessed).
+- The store is the SQLite file a `lookout watch` sentinel maintains via
+  its `--store` flag. In a standard deployment it lives inside the
+  sentinel (`k8s-event-watcher`) pod at `/var/lib/lookout/lookout.db`,
+  on the same persistent volume as `--dedup-persist`. Run lookout where
+  that file is reachable — exec in the sentinel pod, or `kubectl cp`
+  the file out first: history reads are fully offline, no cluster
+  access needed.
+- The summary line says which topology answered (`source=history` plus
+  the resolved `at=`). History stores topology, not status — `radius`
+  omits pod `ready` in history mode rather than guessing.
 
 ## Per-symptom playbooks and per-command references
 
 - Playbooks (exact command sequences per symptom): `../playbooks/`
-  — `crashloopbackoff.md`, `failedmount.md`.
+  — `crashloopbackoff.md`, `failedmount.md`, `hpa-thrash.md`.
 - Per-command deep docs (all flags, output-field glossaries):
   `references/` — generated from the same metadata as `--help`, so they
   never drift from the binary.
