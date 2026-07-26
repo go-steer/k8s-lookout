@@ -54,6 +54,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/memory"
+	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
 func init() {
@@ -122,12 +124,14 @@ func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "health",
 		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. Live checks only until M4, when open sentinel findings and triage-status records merge in.",
+		Summary: "\"Any issues with this cluster?\" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window (certs category)"},
+			{Name: "store", Type: emit.FlagString, Default: "",
+				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override"},
 		},
 		Output: append([]checks.OutputField{
 			{Name: "category", Doc: "scorecard category the finding belongs to (on health.category: which category this line scores)"},
@@ -140,6 +144,11 @@ func New(deps Deps) checks.Command {
 			{Name: "phase", Doc: "PersistentVolumeClaim phase on storage findings (Pending or Lost)"},
 			{Name: "webhook", Doc: "admission webhook as <configuration>/<webhook name>"},
 			{Name: "service", Doc: "service backend a webhook points at, as <namespace>/<name>"},
+			{Name: memory.DetailTriageStatus, Doc: "triage state from the matched §9.4 record (investigating|triaged|actioned|escalated) — present only with --store on merged findings"},
+			{Name: memory.DetailTriageRootCause, Doc: "the incident agent's root-cause hypothesis, from the matched triage-status record"},
+			{Name: memory.DetailTriageAction, Doc: "the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record"},
+			{Name: memory.DetailTriageSession, Doc: "incident session that wrote the matched triage-status record"},
+			{Name: memory.DetailTriageAge, Doc: "how long ago the matched triage-status record was last updated"},
 		}, deltaOutput()...),
 		Examples: []string{
 			"lookout health",
@@ -267,6 +276,30 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		reason += "; " + cloud.Unavailable(provider, cloud.CapabilityMetrics).Reason
 	}
 	card.unavailable["control-plane"] = reason
+
+	// Memory merge (§9.4, the M4 exit shape): with --store, join
+	// every finding against the sentinel's OPEN triage-status
+	// records — matched findings gain the triage_* fields and their
+	// severity reflects the agent's judgment, so the scorecard's
+	// worst-severity and ordering below see triaged reality too.
+	// Unmatched findings (and runs without --store) are unchanged.
+	if storePath := inv.Flags.String("store"); storePath != "" {
+		st, err := store.OpenRead(storePath)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = st.Close() }()
+		records, err := st.TriageStatuses(ctx, memory.TriageQuery{OpenOnly: true})
+		if err != nil {
+			return 0, err
+		}
+		joiner := memory.NewJoiner(records, now)
+		for _, fs := range card.findings {
+			for i := range fs {
+				joiner.Annotate(&fs[i])
+			}
+		}
+	}
 
 	// Deterministic, critical-first detail order for the categories
 	// collected from paged Lists (delta pre-sorts its own the same

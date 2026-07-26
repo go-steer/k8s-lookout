@@ -52,6 +52,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/memory"
+	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
 func init() {
@@ -102,12 +104,19 @@ func New(deps Deps) checks.Command {
 				Help: "cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget)"},
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window (edges section)"},
+			{Name: "store", Type: emit.FlagString, Default: "",
+				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override"},
 		},
 		Output: append([]checks.OutputField{
 			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs (a triage-events section joins in M3)"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
 			{Name: "hop", Doc: "radius neighbor's BFS depth from the target (1 = direct edge)"},
+			{Name: memory.DetailTriageStatus, Doc: "triage state from the matched §9.4 record (investigating|triaged|actioned|escalated) — present only with --store on merged findings"},
+			{Name: memory.DetailTriageRootCause, Doc: "the incident agent's root-cause hypothesis, from the matched triage-status record"},
+			{Name: memory.DetailTriageAction, Doc: "the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record"},
+			{Name: memory.DetailTriageSession, Doc: "incident session that wrote the matched triage-status record"},
+			{Name: memory.DetailTriageAge, Doc: "how long ago the matched triage-status record was last updated"},
 		}, composedOutput()...),
 		Examples: []string{
 			"lookout bundle --workload=Deployment/prod/api",
@@ -126,7 +135,12 @@ func New(deps Deps) checks.Command {
 // from the composed commands' own metadata where they are registered,
 // so the glossaries cannot drift apart.
 func composedOutput() []checks.OutputField {
-	seen := map[string]bool{"section": true, "sections": true, "relation": true, "hop": true}
+	seen := map[string]bool{
+		"section": true, "sections": true, "relation": true, "hop": true,
+		memory.DetailTriageStatus: true, memory.DetailTriageRootCause: true,
+		memory.DetailTriageAction: true, memory.DetailTriageSession: true,
+		memory.DetailTriageAge: true,
+	}
 	var out []checks.OutputField
 	for _, name := range []string{"triage spec", "triage delta", "triage logs", "state edges"} {
 		c, ok := checks.Lookup(name)
@@ -187,9 +201,31 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return 0, err
 	}
 
+	// Memory merge (§9.4): with --store, every bundle finding —
+	// the head included — joins against the sentinel's open
+	// triage-status records, so an incident bundle regenerated
+	// mid-triage carries the diagnosis and paper trail instead of
+	// re-presenting the raw symptom.
+	var joiner *memory.Joiner
+	if storePath := inv.Flags.String("store"); storePath != "" {
+		st, err := store.OpenRead(storePath)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = st.Close() }()
+		records, err := st.TriageStatuses(ctx, memory.TriageQuery{OpenOnly: true})
+		if err != nil {
+			return 0, err
+		}
+		joiner = memory.NewJoiner(records, deps.now())
+	}
+
 	out := func(section string, findings []emit.Finding) error {
 		for _, f := range findings {
 			f.Details = append([]emit.Field{{Key: "section", Value: section}}, f.Details...)
+			if joiner != nil {
+				joiner.Annotate(&f)
+			}
 			if err := inv.Out.Emit(f); err != nil {
 				return err
 			}
@@ -198,7 +234,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	// Head: what this bundle is about and how to read it.
-	if err := inv.Out.Emit(emit.Finding{
+	head := emit.Finding{
 		Kind:         "bundle.target",
 		Severity:     emit.SeverityInfo,
 		Namespace:    wl.Namespace,
@@ -209,7 +245,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			{Key: "pods", Value: strconv.Itoa(len(pods))},
 			{Key: "sections", Value: strings.Join([]string{sectionSpec, sectionDelta, sectionEdges, sectionRadius, sectionLogs}, ",")},
 		},
-	}); err != nil {
+	}
+	if joiner != nil {
+		joiner.Annotate(&head)
+	}
+	if err := inv.Out.Emit(head); err != nil {
 		return 0, err
 	}
 

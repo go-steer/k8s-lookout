@@ -18,6 +18,7 @@ MCP tool: `k8s_triage_workload`
 | `--depth` | 2 | blast-radius traversal depth: graph edges followed per direction in the radius section |
 | `--max-templates` | 15 | cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget) |
 | `--cert-warn` | 720h | report TLS certificates expiring within this window (edges section) |
+| `--store` | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override |
 
 ## Common flags (every lookout command)
 
@@ -40,6 +41,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `sections` | on the bundle.target head finding: the sections that follow |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
 | `hop` | radius neighbor's BFS depth from the target (1 = direct edge) |
+| `triage_status` | triage state from the matched §9.4 record (investigating\|triaged\|actioned\|escalated) — present only with --store on merged findings |
+| `triage_root_cause` | the incident agent's root-cause hypothesis, from the matched triage-status record |
+| `triage_action` | the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record |
+| `triage_session` | incident session that wrote the matched triage-status record |
+| `triage_age` | how long ago the matched triage-status record was last updated |
 | `labels` | resource labels as sorted k=v pairs |
 | `owner` | controlling owner as Kind/name |
 | `phase` | status.phase, only when abnormal for the kind (zero nominal state) |
