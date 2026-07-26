@@ -7,13 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-M5 — fleet & corpus — closes out the milestone plan: the signal
-schema is FROZEN as v1 (`docs/signal-schema-v1.md`), the §9.3 corpus
-harvester contract is validated end-to-end, and the multi-cluster
-rollup is demonstrated as the AX-side fingerprint join. Plus all five
-M4-drill observations fixed (`docs/milestones/M4.md` §Observations).
+## [0.6.0] - 2026-07-26
+
+M5 — fleet & corpus — closes out the §14 milestone plan (all six
+milestones complete): the signal schema is FROZEN as v1
+(`docs/signal-schema-v1.md`), the §9.3 corpus harvester contract is
+validated end-to-end, and the multi-cluster rollup is demonstrated as
+the AX-side fingerprint join — exit evidence and the post-M5 review
+backlog in `docs/milestones/M5.md`. Plus all five M4-drill
+observations fixed (`docs/milestones/M4.md` §Observations).
 
 ### Added
+
+- `skills/gitops-drift/` (the last §4.4 tree entry alongside the
+  still-backlogged `k8s-capacity`): the divergence-auditing workflow —
+  `stab drift` answers "who diverged" (managedFields ownership, spec
+  paths, manager strings never user identities), `triage changes`
+  answers "what changed" (chronological, provenance-tagged, `--store`
+  for the full delta log) — plus the remediation boundary (lookout
+  only reads; sync-vs-commit is a GitOps decision) and the §9.4
+  record-the-conclusion step. `k8s-triage` gained the M5 verification
+  rows (`state webhooks|volumes|wi`) and the `fingerprint=` reading
+  note; `cluster-health` drills webhooks into the real
+  `state webhooks`, control-plane into `perf probe`, adds the
+  pre-maintenance `stab drain` sweep, and replaces the stale
+  M1-era store-merge caveat with the shipped §9.4 behavior.
+  References regenerated for all three skills (the generator and
+  skilldoc tests now register the `perf`/`stab` groups).
 
 - **Signal-schema v1 freeze** (`docs/signal-schema-v1.md`, DESIGN.md
   §8/§14 M5): the fleet-rollup wire contract AX consumes as-is,

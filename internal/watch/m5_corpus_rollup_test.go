@@ -281,6 +281,11 @@ func TestDrill_CorpusHarvest_EndToEnd(t *testing.T) {
 		t.Errorf("label = %q, want the structured ground truth \"recovered\"", tr.Label)
 	}
 
+	// Drill evidence (docs/milestones/M5.md): the harvested
+	// trajectory, verbatim.
+	evidence, _ := json.Marshal(tr)
+	t.Logf("harvested trajectory: %s", evidence)
+
 	// The §9.4 record joined the corpus: flipped to resolved in the
 	// store by the recovery dispatch, no manual TTL bookkeeping.
 	records, err := st.TriageStatuses(ctx, memory.TriageQuery{Fingerprint: fp})
@@ -397,6 +402,16 @@ func TestDrill_MultiClusterRollup_Stockout(t *testing.T) {
 		if len(members) != 2 {
 			t.Errorf("group %s has members %v, want one per cluster", fp, members)
 		}
+	}
+
+	// Drill evidence (docs/milestones/M5.md): the fleet join,
+	// verbatim.
+	for fp, members := range groups {
+		t.Logf("fleet group %s → clusters %v", fp, members)
+	}
+	for _, cluster := range clusters {
+		wire, _ := json.Marshal(streams[cluster][0])
+		t.Logf("%s stockout wire payload: %s", cluster, wire)
 	}
 
 	// Kind-level storm coverage: the storm fingerprint recipe is
