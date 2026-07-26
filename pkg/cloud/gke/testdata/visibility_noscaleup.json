@@ -1,0 +1,87 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13: recorded GCP fixtures behind small client interfaces; no live-project tests). Shape: the GKE 'cluster autoscaler visibility events' documentation's noScaleUp decision record — logName container.googleapis.com/cluster-autoscaler-visibility, resource.type k8s_cluster. Per-MIG rejection reasons per DESIGN.md §10.1 source 3: GCE_STOCKOUT / GCE_QUOTA_EXCEEDED surface as reason parameters; documentation-form messageIds (no.scale.up.mig.*) appear verbatim. The contract test validates this shape, not live output.",
+  "entries": [
+    {
+      "timestamp": "2026-07-26T09:58:11Z",
+      "jsonPayload": {
+        "decision": {
+          "decideTime": "1784800691",
+          "eventId": "ed5cb16d-b06f-457c-a46d-f75dcca1f1ee",
+          "noScaleUp": {
+            "skippedMigs": [
+              {
+                "mig": {
+                  "name": "gke-prod-pool-skipped-grp",
+                  "nodepool": "pool-skipped",
+                  "zone": "us-east1-b"
+                },
+                "reason": {
+                  "messageId": "no.scale.up.mig.skipped",
+                  "parameters": ["max cluster cpu limit reached"]
+                }
+              }
+            ],
+            "unhandledPodGroups": [
+              {
+                "podGroup": {
+                  "samplePod": {"name": "web-1", "namespace": "shop"},
+                  "totalPodCount": 2
+                },
+                "rejectedMigs": [
+                  {
+                    "mig": {
+                      "name": "gke-prod-pool-a-grp",
+                      "nodepool": "pool-a",
+                      "zone": "us-east1-b"
+                    },
+                    "reason": {
+                      "messageId": "no.scale.up.mig.failing.predicate",
+                      "parameters": ["GCE_STOCKOUT"]
+                    }
+                  },
+                  {
+                    "mig": {
+                      "name": "gke-prod-pool-b-grp",
+                      "nodepool": "pool-b",
+                      "zone": "us-east1-c"
+                    },
+                    "reason": {
+                      "messageId": "no.scale.up.mig.failing.predicate",
+                      "parameters": ["GCE_QUOTA_EXCEEDED"]
+                    }
+                  },
+                  {
+                    "mig": {
+                      "name": "gke-prod-pool-c-grp",
+                      "nodepool": "pool-c",
+                      "zone": "us-east1-d"
+                    },
+                    "reason": {
+                      "messageId": "no.scale.up.mig.failing.predicate",
+                      "parameters": ["NodeAffinity", "node(s) didn't match Pod's node affinity/selector"]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "timestamp": "2026-07-26T09:59:02Z",
+      "jsonPayload": {
+        "decision": {
+          "decideTime": "1784800742",
+          "eventId": "aa0cb16d-1111-457c-a46d-f75dcca1f100",
+          "noScaleUp": {
+            "reason": {
+              "messageId": "no.scale.up.in.backoff",
+              "parameters": []
+            }
+          }
+        }
+      }
+    }
+  ]
+}

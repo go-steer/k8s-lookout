@@ -1,0 +1,57 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the GKE visibility 'eventResult' record — resultInfo.results[].errorMsg with the documented scale-up error messageIds (scale.up.error.out.of.resources = GCE stockout, scale.up.error.quota.exceeded, scale.up.error.ip.space.exhausted); parameters carry the failing MIG names per the documentation. Also one scaleUp decision record (increasedMigs) for the triggered-ask context.",
+  "entries": [
+    {
+      "timestamp": "2026-07-26T09:55:00Z",
+      "jsonPayload": {
+        "decision": {
+          "decideTime": "1784800500",
+          "eventId": "b6a3d2e1-2222-4d3c-9f00-000000000001",
+          "scaleUp": {
+            "increasedMigs": [
+              {
+                "mig": {
+                  "name": "gke-prod-pool-a-grp",
+                  "nodepool": "pool-a",
+                  "zone": "us-east1-b"
+                },
+                "requestedNodes": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "timestamp": "2026-07-26T09:57:30Z",
+      "jsonPayload": {
+        "resultInfo": {
+          "measureTime": "1784800650",
+          "results": [
+            {
+              "eventId": "b6a3d2e1-2222-4d3c-9f00-000000000001",
+              "errorMsg": {
+                "messageId": "scale.up.error.out.of.resources",
+                "parameters": ["gke-prod-pool-a-grp"]
+              }
+            },
+            {
+              "eventId": "b6a3d2e1-2222-4d3c-9f00-000000000002",
+              "errorMsg": {
+                "messageId": "scale.up.error.quota.exceeded",
+                "parameters": ["gke-prod-pool-b-grp"]
+              }
+            },
+            {
+              "eventId": "b6a3d2e1-2222-4d3c-9f00-000000000003",
+              "errorMsg": {
+                "messageId": "scale.up.error.ip.space.exhausted",
+                "parameters": []
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

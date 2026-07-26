@@ -195,6 +195,19 @@ var reasonCanonical = map[string]string{
 	// k8s-event counterpart on the same UID and map to themselves.
 	"node_notready": "NodeNotReady",
 	"restart_burst": "CrashLoopBackOff",
+
+	// APPEND-ONLY additions for the capacity source (M4), same M2
+	// leading/reactive pattern: a pod the autoscaler cannot place is
+	// ONE incident however many angles observe it. capacity.pending
+	// (the NotTriggerScaleUp event, Pod UID) and
+	// capacity.pending-aged (the resident aging sweep, Pod UID) join
+	// the scheduler's FailedScheduling events on the same pod —
+	// whichever fires first opens the session, the rest attach as
+	// followups. The nodegroup-keyed capacity reasons (scaleup_gap,
+	// stockout, quota_blocked, ip_exhausted) have no k8s-event
+	// counterpart on their synthetic UID and map to themselves.
+	"pending":      "FailedScheduling",
+	"pending-aged": "FailedScheduling",
 }
 
 // CanonicalReason returns the canonical reason for a given

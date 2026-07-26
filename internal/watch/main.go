@@ -43,11 +43,13 @@ import (
 
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
@@ -79,6 +81,8 @@ type flags struct {
 	expiryInterval        time.Duration
 	expiryWarn            time.Duration
 	expiryNamespaces      string
+	capacityPoll          time.Duration
+	pendingAge            time.Duration
 	dedupWindow           time.Duration
 	dedupPersist          string
 	unhealthyMinCount     int
@@ -136,7 +140,7 @@ func parseFlags(args []string) (*flags, error) {
 	// ADDITIVE flag: the default is exactly the M0 surface, so
 	// existing deployments keep byte-identical behavior without
 	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry. Default preserves the M0 watcher surface (k8s-events only).")
+	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity. Default preserves the M0 watcher surface (k8s-events only).")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -159,6 +163,12 @@ func parseFlags(args []string) (*flags, error) {
 	fs.DurationVar(&f.expiryInterval, "expiry-interval", time.Hour, "Interval between expiry scans (periodic paged LISTs — deliberately no Secret informer). Must be > 0.")
 	fs.DurationVar(&f.expiryWarn, "expiry-warn", 336*time.Hour, "Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h.")
 	fs.StringVar(&f.expiryNamespaces, "expiry-namespaces", "", "Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces. Scopes the sensitive secrets-list grant (§11) — the startup RBAC probe verifies exactly this scope.")
+
+	// Capacity source knobs (§7.2 row 7, §10.1). ADDITIVE flags; only
+	// meaningful with --sources=…,capacity. The critical pending-age
+	// escalation (15m) is design-fixed, not a flag.
+	fs.DurationVar(&f.capacityPoll, "capacity-poll", 60*time.Second, "Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0.")
+	fs.DurationVar(&f.pendingAge, "pending-age", 5*time.Minute, "How long a pod must be Pending+Unschedulable before capacity.pending-aged fires at warning (critical at the design-fixed 15m, or at this value when set higher). Must be > 0.")
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
@@ -294,6 +304,14 @@ func (f *flags) validate() error {
 	if f.expiryWarn < expiry.CriticalWindow {
 		return fmt.Errorf("--expiry-warn must be >= the design-fixed critical threshold (%s)", expiry.CriticalWindow)
 	}
+	// Capacity knobs (§7.2 row 7): config errors in every mode, like
+	// the other source thresholds, even when the source is disabled.
+	if f.capacityPoll <= 0 {
+		return errors.New("--capacity-poll must be > 0")
+	}
+	if f.pendingAge <= 0 {
+		return errors.New("--pending-age must be > 0")
+	}
 	// Storm bounds are validated before the mode switch's dry-run
 	// early return, like --sources: a nonsensical value is a config
 	// error in every mode.
@@ -379,7 +397,7 @@ func (f *flags) validate() error {
 func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {
@@ -1026,7 +1044,20 @@ func realMain(argv []string) error {
 			return fmt.Errorf("metrics.k8s.io client: %w", err)
 		}
 	}
-	bs, err := buildSources(f, client, dyn, metricsClient)
+	// The cloud provider (§2 boundary) exists only for the capacity
+	// source's provider scale-decision sub-source (§10.1 source 3).
+	// On a default (untagged) build or off-cloud, cloud.New resolves
+	// to the NoProvider sentinel and the sub-source reports itself
+	// unavailable explicitly — never silently (§2).
+	var provider cloud.Provider
+	if f.sourceEnabled(capacity.Name) {
+		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName})
+		if err != nil {
+			return fmt.Errorf("cloud provider: %w", err)
+		}
+		log.Printf("capacity: cloud provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
+	}
+	bs, err := buildSources(f, client, dyn, metricsClient, provider)
 	if err != nil {
 		return err
 	}
@@ -1201,6 +1232,7 @@ type builtSources struct {
 	saturation  *saturation.Source
 	degradation *degradation.Source
 	expiry      *expiry.Source
+	capacity    *capacity.Source
 }
 
 // buildSources registers the sources named by --sources (§7.2:
@@ -1212,8 +1244,10 @@ type builtSources struct {
 // source is enabled (it reads cert-manager Certificates unstructured;
 // the caller builds it only when needed); metricsClient is only
 // required (non-nil) when the saturation source is enabled — its
-// metrics.k8s.io dimension rides a separate clientset.
-func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface) (*builtSources, error) {
+// metrics.k8s.io dimension rides a separate clientset. provider is
+// the §2 cloud boundary for the capacity source; nil is tolerated
+// (treated as cloud.NoProvider — explicit unavailability, §2).
+func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface, provider cloud.Provider) (*builtSources, error) {
 	bs := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
 		var src sources.Source
@@ -1253,6 +1287,12 @@ func buildSources(f *flags, client kubernetes.Interface, dyn dynamic.Interface, 
 			cfg.Namespaces = splitCSV(f.expiryNamespaces)
 			bs.expiry = expiry.New(client, dyn, cfg)
 			src = bs.expiry
+		case capacity.Name:
+			cfg := capacity.DefaultConfig()
+			cfg.PollInterval = f.capacityPoll
+			cfg.PendingAge = f.pendingAge
+			bs.capacity = capacity.New(client, provider, cfg)
+			src = bs.capacity
 		default:
 			// validate() rejects unknown names before we get here.
 			return nil, fmt.Errorf("--sources: unknown source %q", name)

@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
@@ -48,7 +49,7 @@ func TestSourcesFlag_DefaultIsK8sEventsOnly(t *testing.T) {
 	if f.sources != k8sevents.Name {
 		t.Fatalf("default --sources = %q, want %q", f.sources, k8sevents.Name)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestSourcesFlag_ObjectStateEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestSourcesFlag_DegradationAndExpiryEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	built, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
+	built, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -295,7 +296,7 @@ func TestSourcesFlag_RolloutAndSaturationEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, metricsfake.NewSimpleClientset())
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, metricsfake.NewSimpleClientset(), nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -321,7 +322,7 @@ func TestSourcesFlag_SaturationWithoutMetricsClient(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if _, err := buildSources(f, fake.NewSimpleClientset(), nil, nil); err == nil {
+	if _, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil); err == nil {
 		t.Fatal("buildSources must fail when saturation is enabled without a metrics client")
 	}
 }
@@ -384,5 +385,73 @@ func TestSetupRecovery_TrendObserversWithoutPodRBAC(t *testing.T) {
 	}
 	if disp.tracker == nil {
 		t.Fatal("recovery must stay ENABLED via the rollout/saturation observers when only pod RBAC is missing")
+	}
+}
+
+// TestSourcesFlag_CapacityEnabled: the M4 capacity source registers
+// under its §7.2 name, receives the provider handle (here nil →
+// cloud.NoProvider inside the source: §2 explicit degradation), and
+// stays OFF by default.
+func TestSourcesFlag_CapacityEnabled(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=k8s-events,capacity", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildSources: %v", err)
+	}
+	if bs.capacity == nil {
+		t.Fatal("capacity enabled but not returned as a typed handle")
+	}
+	if _, ok := bs.registry.Lookup(capacity.Name); !ok {
+		t.Error("capacity not registered")
+	}
+
+	// Default surface: capacity must NOT be constructed.
+	fDefault, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	bsDefault, err := buildSources(fDefault, fake.NewSimpleClientset(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildSources(default): %v", err)
+	}
+	if bsDefault.capacity != nil {
+		t.Error("capacity must NOT be constructed by default")
+	}
+}
+
+// TestCapacityFlags_DefaultsAndBounds pins the ADDITIVE M4 flag
+// surface: --capacity-poll 60s, --pending-age 5m, nonsensical values
+// rejected in every mode.
+func TestCapacityFlags_DefaultsAndBounds(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if f.capacityPoll != 60*time.Second {
+		t.Errorf("default --capacity-poll = %v, want 60s", f.capacityPoll)
+	}
+	if f.pendingAge != 5*time.Minute {
+		t.Errorf("default --pending-age = %v, want 5m", f.pendingAge)
+	}
+	for _, bad := range [][]string{
+		{"--capacity-poll=0s", "--dry-run"},
+		{"--capacity-poll=-10s", "--dry-run"},
+		{"--pending-age=0s", "--dry-run"},
+	} {
+		f, err := parseFlags(bad)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", bad, err)
+		}
+		if err := f.validate(); err == nil {
+			t.Errorf("validate(%v) accepted a nonsensical value", bad)
+		}
 	}
 }

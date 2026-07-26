@@ -41,6 +41,14 @@ type Requirement struct {
 	// a namespaced Role cannot satisfy — exactly the §11 tier
 	// mismatch the probe exists to catch).
 	Namespace string
+	// Name scopes the check to one named object, for sources that
+	// only ever read a single well-known resource (the capacity
+	// source's cluster-autoscaler-status ConfigMap). A named
+	// requirement can be satisfied by a `resourceNames`-pinned Role
+	// rule — and MUST be declared named when that is all the source
+	// reads, or the SSAR would demand the broader all-names grant
+	// the deployment deliberately did not make. Empty = any name.
+	Name string
 }
 
 // String renders the requirement the way an operator would write it
@@ -52,6 +60,9 @@ func (r Requirement) String() string {
 	}
 	if r.Group != "" {
 		res += "." + r.Group
+	}
+	if r.Name != "" {
+		res += " " + r.Name
 	}
 	scope := "cluster-wide"
 	if r.Namespace != "" {
@@ -97,6 +108,7 @@ func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (bool, error
 				Subresource: req.Subresource,
 				Verb:        req.Verb,
 				Namespace:   req.Namespace,
+				Name:        req.Name,
 			},
 		},
 	}
