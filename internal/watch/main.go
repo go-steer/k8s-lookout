@@ -48,6 +48,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/memory/distill"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
@@ -101,6 +102,7 @@ type flags struct {
 	store                 string
 	storeTTL              time.Duration
 	storeMaxMB            int
+	distillInterval       time.Duration
 	graphSnapshotInterval time.Duration
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
@@ -218,6 +220,13 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. Empty (default) disables the store.")
 	fs.DurationVar(&f.storeTTL, "store-ttl", 720*time.Hour, "Retention for stored occurrences (§9.1 default 30 days); the prune loop deletes older rows. Must be > 0.")
 	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Must be >= 1.")
+
+	// Distilled memories (§9.2). ADDITIVE flag: the distiller runs
+	// only with --store — the occurrence window it reads AND the
+	// in-tree memory backend it writes both live there (pkg/memory
+	// documents why the sentinel store stands in for core-agent's
+	// shared Memory interface until one exists to bind to).
+	fs.DurationVar(&f.distillInterval, "distill-interval", 6*time.Hour, "How often the §9.2 distiller pass converts recurring occurrences into durable memory facts (requires --store; the pass reads the last 7d of occurrences). 0 disables distillation. Must be >= 0.")
 
 	// Graph history (§6.6). ADDITIVE flag: history turns on only when
 	// BOTH --store and the graph feed (--storm) are active — without a
@@ -361,6 +370,9 @@ func (f *flags) validate() error {
 	}
 	if f.storeMaxMB < 1 {
 		return errors.New("--store-max-mb must be >= 1")
+	}
+	if f.distillInterval < 0 {
+		return errors.New("--distill-interval must be >= 0 (0 disables distillation)")
 	}
 	if f.graphSnapshotInterval <= 0 {
 		return errors.New("--graph-snapshot-interval must be > 0")
@@ -995,6 +1007,18 @@ func realMain(argv []string) error {
 	// §9.1 TTL + size-bound prune loop (interval min(1h, ttl/24)).
 	// Nil-safe: returns immediately when the store is disabled.
 	go occStore.RunPrune(ctx)
+
+	// §9.2 distiller: the scheduled pass converting recurring
+	// occurrences into durable memory facts. Requires --store (both
+	// its input window and the in-tree memory backend live there);
+	// without one, distillation is off and says so once.
+	if occStore != nil && f.distillInterval > 0 {
+		go runDistillLoop(ctx, occStore, f.distillInterval, m)
+		log.Printf("distill: enabled (pass every %s over the last %s of occurrences → memory facts in %s)",
+			f.distillInterval, distill.DefaultWindow, f.store)
+	} else if f.distillInterval > 0 {
+		log.Printf("distill: disabled (requires --store; distilled facts live in the sentinel store — see pkg/memory)")
+	}
 
 	// Watchboard interval-flush loop (§7.7): flushes buffered
 	// warnings at --watchboard-flush age, plus a final best-effort

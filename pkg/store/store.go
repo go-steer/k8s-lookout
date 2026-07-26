@@ -147,6 +147,33 @@ var migrations = []string{
 	);
 	CREATE INDEX graph_changes_at ON graph_changes (at);
 	CREATE INDEX graph_changes_generation ON graph_changes (generation);`,
+
+	// v3: §9.2 distilled facts (see memory.go and pkg/memory). One
+	// row per (class, scope identity) — the distiller UPSERTS, so the
+	// table stays low-volume by construction. scope_key is the
+	// canonical sorted-key JSON identity; scope the same bytes kept
+	// as the readable column (they coincide today; the split leaves
+	// room for a richer stored form without an identity migration).
+	// Deliberately NOT covered by the §9.1 TTL/size prune: facts are
+	// durable memories, not telemetry.
+	`CREATE TABLE memory_facts (
+		id                  INTEGER PRIMARY KEY,
+		class               TEXT NOT NULL,
+		scope_key           TEXT NOT NULL,
+		scope               TEXT NOT NULL,
+		statement           TEXT NOT NULL,
+		window_start        INTEGER NOT NULL,
+		window_end          INTEGER NOT NULL,
+		occurrences         INTEGER NOT NULL DEFAULT 0,
+		distinct_objects    INTEGER NOT NULL DEFAULT 0,
+		first_seen          INTEGER,
+		last_seen           INTEGER,
+		source_fingerprints TEXT NOT NULL DEFAULT '[]',
+		created_at          INTEGER NOT NULL,
+		updated_at          INTEGER NOT NULL
+	);
+	CREATE UNIQUE INDEX memory_facts_identity ON memory_facts (class, scope_key);
+	CREATE INDEX memory_facts_updated ON memory_facts (updated_at);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

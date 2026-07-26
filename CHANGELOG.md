@@ -81,6 +81,28 @@ rollout as the last change before onset.
   and a new `go tool nm`-based conformance test in cmd/lookout fails
   if the default binary ever links a GCP symbol.
 
+- Distilled memories (M4, DESIGN.md §9.2): a scheduled distiller pass
+  in the sentinel (`--distill-interval`, default 6h, requires
+  `--store`) converts recurring raw occurrences into durable,
+  agent-queryable `DistilledFact` records (schema-stable JSON:
+  class, scope keys, statement, evidence window, occurrence counts,
+  source fingerprints). Three predicates ship first, each documented
+  in `pkg/memory/distill`: repeated `capacity.stockout` per
+  (cluster, zone, nodegroup) — the design's "us-east1-b n2d pool: 3
+  stockouts this week"; repeated crashloop/OOM incidents per
+  workload (≥2 fresh incidents and ≥5 occurrences in 7d); repeated
+  cert-renewal failures per issuer (≥3 failures across ≥2
+  certificates). Facts dedupe on (class, scope): re-distilling
+  updates the existing fact's window/counts instead of duplicating.
+  BINDING NOTE: DESIGN.md §9.2 routes these records through
+  core-agent's shared Memory interface, but core-agent v2.7.0 (the
+  pinned dep) does not ship it — `pkg/memory` defines lookout's own
+  minimal FactWriter/FactReader interface, implemented in-tree over
+  the sentinel store (migration v3, `memory_facts`; exempt from the
+  §9.1 TTL/size prune), with a documented TODO naming exactly what
+  core-agent must expose for the adapter swap. New metrics:
+  `k8s_event_watcher_memory_facts_total` (by class),
+  `k8s_event_watcher_distill_errors_total`.
 - The `degradation` and `expiry` sources (M3, DESIGN.md §7.2 rows 5–6)
   — two leading indicators, enabled via `--sources=…,degradation,expiry`
   (ADDITIVE; the default stays k8s-events only).
