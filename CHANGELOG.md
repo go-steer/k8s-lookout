@@ -269,6 +269,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signal) and updates whose tracked fields did not change (zero
   nominal state).
 
+- The `rollout` and `saturation` signal sources (M3, DESIGN.md §7.2
+  rows 3–4) — the first as-it-happens and trend leading indicators.
+  `rollout` (`--sources=...,rollout`) watches Deployments and
+  StatefulSets with in-progress rollouts through shared-factory
+  informers (Deployments + ReplicaSets + StatefulSets + pods; rides
+  the storm graph's factory when `--storm` is on) and emits
+  `rollout.stall` (warning) when the new revision has made ZERO
+  ready-count progress for `--rollout-observe` (default 3m) while the
+  old revision stays ≥90% ready — the §7.2 "new RS 0/1 ready for
+  4 min, old RS healthy — probable bad deploy", fired well before
+  `progressDeadlineSeconds` and EVIDENCE-based, distinct from
+  `objectstate.progress_deadline`'s deadline clock. Evidence rides the
+  message (`new_ready=/old_ready=/elapsed=/top_waiting_reason=`);
+  fires once per revision (dedup uid = workload UID, reason
+  `rollout_stall`); any new-pod readiness increase resets the window,
+  so slow-but-progressing rollouts never fire, and initial deploys
+  (no old-healthy baseline) are out of scope by design. `saturation`
+  (`--sources=...,saturation`) is v2 top-analyzer's regression math
+  resident: every `--saturation-interval` (default 30s) it samples
+  container CPU/memory from `metrics.k8s.io` against LIMITS and PVC
+  usage from each kubelet's stats summary (`nodes/proxy` GET;
+  unreachable → ONE loud log, PVC dimension skipped, auto-resumes —
+  portable per §2; an unavailable metrics API is instead a loud
+  startup error per §11), fits a least-squares line per (object,
+  resource) over `--saturation-window` (default 90m) and emits
+  `saturation.forecast` with the §8
+  `forecast{eta, confidence_basis:"linear-90m-window"}` attachment
+  (also on the wire: `inject.Payload` gains the ADDITIVE omitempty
+  `forecast` key, wire-pinned; non-trend payloads stay byte-identical
+  to the frozen shapes) — warning below `--saturation-warn` (default
+  60m to exhaustion),
+  critical below 15m; NO forecast on <8 samples, span under half the
+  window, non-positive slope, or no limit. Hysteresis: the fired
+  severity latches per target (same severity never re-fires;
+  escalation warning→critical fires once), releasing when the ETA
+  recedes beyond 2× the warn threshold or the slope stays
+  non-positive for a full re-observation period (window/2). Both
+  sources implement §7.4 ClearanceObservers wired into recovery:
+  rollout stalls clear on completion OR rollback (`recovered`) and on
+  workload deletion (`object_deleted`); saturation clears on the same
+  recede/non-positive-slope rules (the observer deliberately CLAIMS
+  every `forecast_*` incident and is registered ahead of pod-scoped
+  observers — a leaking pod is Ready right up to the OOM kill, so
+  pod-readiness must never judge these), and the fallback pod
+  observer's missing RBAC no longer disables recovery outright when
+  trend observers exist. New dependency: `k8s.io/metrics` v0.36.3
+  (same version as the existing k8s.io/* pins). RBAC:
+  `sources.Requirement` gains `Subresource`; the shipped ClusterRole
+  adds `apps/statefulsets` list/watch, `metrics.k8s.io pods` get/list,
+  and `nodes/proxy` get — all harmless while the sources stay
+  disabled (the `--sources` default is unchanged: `k8s-events` only).
+
 ## [0.3.0] - 2026-07-25
 
 M2 — closed loop (DESIGN.md §14). Exit criterion verified in

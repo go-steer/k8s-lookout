@@ -29,6 +29,10 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
+	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
+	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
+
+	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
 // TestSourcesFlag_DefaultIsK8sEventsOnly pins the ADDITIVE flag
@@ -44,17 +48,20 @@ func TestSourcesFlag_DefaultIsK8sEventsOnly(t *testing.T) {
 	if f.sources != k8sevents.Name {
 		t.Fatalf("default --sources = %q, want %q", f.sources, k8sevents.Name)
 	}
-	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	if built.objState != nil {
+	if bs.objState != nil {
 		t.Error("object-state must NOT be constructed by default")
 	}
-	if built.degradation != nil || built.expiry != nil {
+	if bs.rollout != nil || bs.saturation != nil {
+		t.Error("rollout/saturation must NOT be constructed by default")
+	}
+	if bs.degradation != nil || bs.expiry != nil {
 		t.Error("degradation/expiry must NOT be constructed by default")
 	}
-	all := built.registry.All()
+	all := bs.registry.All()
 	if len(all) != 1 || all[0].Name() != k8sevents.Name {
 		t.Errorf("default registry = %d sources, want just k8s-events", len(all))
 	}
@@ -69,17 +76,17 @@ func TestSourcesFlag_ObjectStateEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	if built.objState == nil {
+	if bs.objState == nil {
 		t.Fatal("object-state enabled but not returned for recovery wiring")
 	}
-	if _, ok := built.registry.Lookup(objectstate.Name); !ok {
+	if _, ok := bs.registry.Lookup(objectstate.Name); !ok {
 		t.Error("object-state not registered")
 	}
-	if _, ok := built.registry.Lookup(k8sevents.Name); !ok {
+	if _, ok := bs.registry.Lookup(k8sevents.Name); !ok {
 		t.Error("k8s-events not registered")
 	}
 }
@@ -96,7 +103,7 @@ func TestSourcesFlag_DegradationAndExpiryEnabled(t *testing.T) {
 	if err := f.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	built, err := buildSources(f, fake.NewSimpleClientset(), nil)
+	built, err := buildSources(f, fake.NewSimpleClientset(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
@@ -246,7 +253,7 @@ func TestSetupRecovery_ObjectStateObserverAbsorbed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), objState); err != nil {
+	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), &builtSources{objState: objState}); err != nil {
 		t.Fatalf("setupRecovery: %v", err)
 	}
 	if disp.tracker == nil {
@@ -268,10 +275,114 @@ func TestSetupRecovery_FallbackKeepsZeroConfigBehavior(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), nil); err != nil {
+	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), &builtSources{}); err != nil {
 		t.Fatalf("setupRecovery must not fail on missing RBAC in fallback mode: %v", err)
 	}
 	if disp.tracker != nil {
 		t.Fatal("recovery must be DISABLED (not enabled, not fatal) when the fallback observer lacks RBAC")
+	}
+}
+
+// TestSourcesFlag_RolloutAndSaturationEnabled: the two M3 trend/as-it-
+// happens sources register under their §7.2 names and come back as
+// typed handles for shared-factory + clearance wiring.
+func TestSourcesFlag_RolloutAndSaturationEnabled(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=k8s-events,rollout,saturation", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	bs, err := buildSources(f, fake.NewSimpleClientset(), nil, metricsfake.NewSimpleClientset())
+	if err != nil {
+		t.Fatalf("buildSources: %v", err)
+	}
+	if bs.rollout == nil || bs.saturation == nil {
+		t.Fatalf("rollout=%v saturation=%v, want both constructed", bs.rollout, bs.saturation)
+	}
+	for _, name := range []string{rollout.Name, saturation.Name, k8sevents.Name} {
+		if _, ok := bs.registry.Lookup(name); !ok {
+			t.Errorf("source %q not registered", name)
+		}
+	}
+}
+
+// TestSourcesFlag_SaturationWithoutMetricsClientIsAnError: buildSources
+// must refuse rather than construct a saturation source that would
+// nil-pointer at first fetch.
+func TestSourcesFlag_SaturationWithoutMetricsClient(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=saturation", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if _, err := buildSources(f, fake.NewSimpleClientset(), nil, nil); err == nil {
+		t.Fatal("buildSources must fail when saturation is enabled without a metrics client")
+	}
+}
+
+// TestTrendFlags_DefaultsAndBounds pins the ADDITIVE M3 flag surface:
+// defaults per DESIGN.md §7.2 rows 3-4, nonsensical values rejected in
+// every mode.
+func TestTrendFlags_DefaultsAndBounds(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if f.rolloutObserve != 3*time.Minute {
+		t.Errorf("default --rollout-observe = %v, want 3m", f.rolloutObserve)
+	}
+	if f.saturationInterval != 30*time.Second {
+		t.Errorf("default --saturation-interval = %v, want 30s", f.saturationInterval)
+	}
+	if f.saturationWindow != 90*time.Minute {
+		t.Errorf("default --saturation-window = %v, want 90m (the §8 linear-90m-window basis)", f.saturationWindow)
+	}
+	if f.saturationWarn != 60*time.Minute {
+		t.Errorf("default --saturation-warn = %v, want 60m", f.saturationWarn)
+	}
+	for _, bad := range [][]string{
+		{"--rollout-observe=0s", "--dry-run"},
+		{"--saturation-interval=0s", "--dry-run"},
+		{"--saturation-window=10s", "--saturation-interval=30s", "--dry-run"},
+		{"--saturation-warn=0s", "--dry-run"},
+	} {
+		f, err := parseFlags(bad)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", bad, err)
+		}
+		if err := f.validate(); err == nil {
+			t.Errorf("validate(%v) accepted a nonsensical bound", bad)
+		}
+	}
+}
+
+// TestSetupRecovery_TrendObserversWithoutPodRBAC: rollout/saturation
+// clearance observers keep the §7.4 loop alive even when the fallback
+// pod observer's RBAC is missing (fake SSAR denies) — pod clearance is
+// disabled loudly, the tracker still runs for the sources' own kinds.
+func TestSetupRecovery_TrendObserversWithoutPodRBAC(t *testing.T) {
+	t.Parallel()
+	client := fake.NewSimpleClientset() // fake SSAR returns not-allowed
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
+	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)), dedup: dedup, metrics: newMetrics(), dryRun: true}
+	bs := &builtSources{
+		rollout:    rollout.New(client, rollout.DefaultConfig()),
+		saturation: saturation.New(saturation.DefaultConfig(), nil, nil),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f := &flags{recoveryStableFor: 5 * time.Minute}
+	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), bs); err != nil {
+		t.Fatalf("setupRecovery: %v", err)
+	}
+	if disp.tracker == nil {
+		t.Fatal("recovery must stay ENABLED via the rollout/saturation observers when only pod RBAC is missing")
 	}
 }

@@ -38,6 +38,27 @@
 #                       not ClusterRole) cannot satisfy these and gets
 #                       the same loud per-source failure instead of a
 #                       silently empty watch.
+#   - list/watch statefulsets — the rollout source (DESIGN.md §7.2
+#                       row 3, enabled via --sources=...,rollout):
+#                       evidence-based stall detection for Deployment
+#                       and StatefulSet rollouts (its pods /
+#                       deployments / replicasets informers ride the
+#                       grants above and below — one shared informer
+#                       set). Harmless when the source is disabled
+#                       (the default); required when enabled —
+#                       verified loudly by the §11 startup probe.
+#   - get/list pods.metrics.k8s.io + get nodes/proxy — the saturation
+#                       source (DESIGN.md §7.2 row 4, enabled via
+#                       --sources=...,saturation): container CPU/mem
+#                       usage sampled from the metrics API, PVC usage
+#                       from each kubelet's stats summary
+#                       (/api/v1/nodes/<node>/proxy/stats/summary).
+#                       nodes/proxy is read-only GET here; when the
+#                       endpoint is unreachable at runtime the source
+#                       logs once and skips the PVC dimension.
+#                       Harmless when the source is disabled (the
+#                       default); required when enabled — verified
+#                       loudly at startup.
 #   - list/watch replicasets — the storm-correlation topology graph
 #                       (DESIGN.md §6.3 + §7.5, enabled via --storm):
 #                       a ReplicaSet's ownerReferences extend the
@@ -90,6 +111,18 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    # Read-only GET of each kubelet's stats summary for the
+    # saturation source's PVC dimension; the sentinel never writes
+    # through the node proxy.
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "watch"]

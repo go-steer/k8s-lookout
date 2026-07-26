@@ -31,6 +31,10 @@ type Requirement struct {
 	Group string
 	// Resource is the lowercase plural resource ("events", "pods").
 	Resource string
+	// Subresource is the optional subresource — the RBAC rule form is
+	// "resource/subresource" (e.g. "nodes/proxy" for the saturation
+	// source's kubelet stats summary reads).
+	Subresource string
 	// Verb is the RBAC verb ("list", "watch", "get", …).
 	Verb string
 	// Namespace scopes the check; empty means cluster-wide (which
@@ -43,6 +47,9 @@ type Requirement struct {
 // in a (Cluster)Role rule, for use in fail-loudly startup errors.
 func (r Requirement) String() string {
 	res := r.Resource
+	if r.Subresource != "" {
+		res += "/" + r.Subresource
+	}
 	if r.Group != "" {
 		res += "." + r.Group
 	}
@@ -85,10 +92,11 @@ func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (bool, error
 	review := &authorizationv1.SelfSubjectAccessReview{
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Group:     req.Group,
-				Resource:  req.Resource,
-				Verb:      req.Verb,
-				Namespace: req.Namespace,
+				Group:       req.Group,
+				Resource:    req.Resource,
+				Subresource: req.Subresource,
+				Verb:        req.Verb,
+				Namespace:   req.Namespace,
 			},
 		},
 	}

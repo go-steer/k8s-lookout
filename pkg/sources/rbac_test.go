@@ -174,3 +174,31 @@ func TestProbe_DeniedSSAR_EndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestRequirement_Subresource pins the M3 addition for the saturation
+// source's nodes/proxy requirement: the String rendering matches the
+// (Cluster)Role rule form and the SSAR carries the subresource.
+func TestRequirement_Subresource(t *testing.T) {
+	t.Parallel()
+	req := Requirement{Resource: "nodes", Subresource: "proxy", Verb: "get"}
+	if got, want := req.String(), "get nodes/proxy cluster-wide"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+
+	client := fake.NewClientset()
+	var gotAttrs *authorizationv1.ResourceAttributes
+	client.PrependReactor("create", "selfsubjectaccessreviews",
+		func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+			gotAttrs = review.Spec.ResourceAttributes
+			review = review.DeepCopy()
+			review.Status.Allowed = true
+			return true, review, nil
+		})
+	if ok, err := NewAccessReviewer(client).Allowed(context.Background(), req); err != nil || !ok {
+		t.Fatalf("Allowed = %v, %v; want true, nil", ok, err)
+	}
+	if gotAttrs == nil || gotAttrs.Subresource != "proxy" || gotAttrs.Resource != "nodes" {
+		t.Errorf("SSAR attributes = %+v; want resource=nodes subresource=proxy", gotAttrs)
+	}
+}
