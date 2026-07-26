@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-26
+
+M3 — leading indicators + history (DESIGN.md §14). Exit criterion verified
+in `docs/milestones/M3.md`: a staged bad deploy opened a session 3m10s
+after the rollout while every user request kept returning 200 (old
+revision serving under `maxUnavailable=0`); a staged memory leak opened a
+critical session 14 minutes before the OOM kill, with the forecast ETA
+accurate to 31 seconds; "blast radius at onset" was answered 28m34s after
+the fact — offline, from a copied sentinel store — naming the bad-image
+rollout as the last change before onset.
+
 ### Fixed
 
 - The shipped ClusterRole now grants `get` on `apps/deployments`,
