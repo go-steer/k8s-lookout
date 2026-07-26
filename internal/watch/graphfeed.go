@@ -83,7 +83,16 @@ type graphFeed struct {
 func newGraphFeed(factory informers.SharedInformerFactory, onChange func(graph.ChangeRecord)) *graphFeed {
 	return &graphFeed{
 		factory: factory,
-		graph:   graph.New(graph.Options{OnChange: onChange}),
+		graph: graph.New(graph.Options{
+			OnChange: onChange,
+			// The honesty declaration behind Ref.Observed: exactly the
+			// informer set Run registers (pods/nodes/replicasets). For
+			// these kinds an unobserved node is a REAL absence; every
+			// other kind exists here identity-only (see the "not
+			// watched" list above), so radius consumers must report it
+			// as unknown, never as missing.
+			WatchedKinds: []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet},
+		}),
 	}
 }
 

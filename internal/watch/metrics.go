@@ -46,6 +46,7 @@ type metrics struct {
 	stormsResolved      prometheus.Counter
 	stormsActive        prometheus.Gauge
 	stormMembers        *prometheus.CounterVec
+	stormUpdates        prometheus.Counter
 	watchboardEntries   *prometheus.CounterVec
 	watchboardDigests   prometheus.Counter
 	watchboardRotations prometheus.Counter
@@ -123,6 +124,10 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_storm_members_total",
 			Help: "Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival).",
 		}, []string{"kind"}),
+		stormUpdates: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_storm_updates_total",
+			Help: "Total kind=storm.update size refreshes injected into storm sessions (membership grew past a reporting threshold: doubling or +10, max one per minute).",
+		}),
 		watchboardEntries: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_watchboard_entries_total",
 			Help: "Total warning-class signals buffered onto the shared watchboard digest (§7.7), by signal kind.",
@@ -189,6 +194,7 @@ func newMetrics() *metrics {
 		m.stormsResolved,
 		m.stormsActive,
 		m.stormMembers,
+		m.stormUpdates,
 		m.watchboardEntries,
 		m.watchboardDigests,
 		m.watchboardRotations,

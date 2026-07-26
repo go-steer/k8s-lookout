@@ -516,6 +516,17 @@ func radiusNeighbors(snap *graph.Snapshot, id graph.NodeID, depth int) []Neighbo
 // section: relation (= direction) + hop, one line per neighbor; a
 // neighbor that exists only as a dangling reference is a warning, not
 // an info line.
+//
+// The missing claim is honest about the index's blind spots
+// (Snapshot.Watches): radius.missing reason=ReferencedNotFound is
+// asserted only for kinds the snapshot's ingest actually watches —
+// there, unobserved really means "not on the API server". A neighbor
+// of an UNWATCHED kind (the sentinel's live graph holds mounted
+// ConfigMaps/Secrets/PVCs identity-only, §6.3) stays a plain
+// radius.neighbor carrying observed=unknown: its existence was never
+// checked, and claiming a dangling reference would mislead the agent.
+// One-shot full-List snapshots watch everything, so CLI bundles are
+// unchanged.
 func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Finding {
 	var out []emit.Finding
 	for _, nb := range radiusNeighbors(snap, id, depth) {
@@ -531,10 +542,14 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 			},
 		}
 		if !nb.Ref.Observed {
-			f.Kind = "radius.missing"
-			f.Severity = emit.SeverityWarning
-			f.Reason = "ReferencedNotFound"
-			f.Message = "referenced by the neighborhood but not observed on the API server"
+			if snap.Watches(nb.Ref.Kind) {
+				f.Kind = "radius.missing"
+				f.Severity = emit.SeverityWarning
+				f.Reason = "ReferencedNotFound"
+				f.Message = "referenced by the neighborhood but not observed on the API server"
+			} else {
+				f.Details = append(f.Details, emit.Field{Key: "observed", Value: "unknown"})
+			}
 		}
 		out = append(out, f)
 	}

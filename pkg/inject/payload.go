@@ -109,6 +109,12 @@ const (
 	// pre-storm session, pointing it at the storm session that now
 	// owns the incident (followups and outcomes route there).
 	KindStormMemberSuperseded = "storm.member_superseded"
+	// KindStormUpdate is the storm-session size refresh: the initial
+	// kind=storm payload's affected_count is frozen at formation time,
+	// so when membership grows past a reporting threshold (doubling or
+	// +10 members, at most one per minute) the current totals ride
+	// this followup instead of mutating the frozen shape.
+	KindStormUpdate = "storm.update"
 )
 
 // StormIncidentRef is one member incident reference on the storm
@@ -181,6 +187,33 @@ type StormMemberPayload struct {
 	Cluster           string           `json:"cluster"`
 	Message           string           `json:"message"`
 	Incident          StormIncidentRef `json:"incident"`
+}
+
+// StormUpdatePayload is the JSON body for kind=storm.update: the
+// size refresh injected into the STORM's own session when membership
+// grows past a reporting threshold (M2 drill observation 4 — the
+// formation payload undersold the final blast radius: affected_count
+// froze at 3 while reality grew to 33). SCHEMA-STABLE: pinned
+// byte-exact by TestStormUpdate_ExactWireShape. The initial
+// kind=storm payload stays byte-identical; AX and playbooks read the
+// storm's current size from the LAST storm.update in the session (or
+// the formation payload when none fired).
+type StormUpdatePayload struct {
+	Kind              string `json:"kind"`
+	StormFingerprint  string `json:"storm_fingerprint"`
+	AncestorKind      string `json:"ancestor_kind"`
+	AncestorNamespace string `json:"ancestor_namespace,omitempty"`
+	AncestorName      string `json:"ancestor_name"`
+	Cluster           string `json:"cluster"`
+	Message           string `json:"message"`
+	// AffectedCount / NamespacesCount are the storm's CURRENT totals
+	// at emit time (same field names as the formation payload, so
+	// consumers fold them with one rule: latest wins).
+	AffectedCount   int `json:"affected_count"`
+	NamespacesCount int `json:"namespaces_count"`
+	// NewMembersSinceLast is the membership growth since the previous
+	// size report (formation, or the prior storm.update).
+	NewMembersSinceLast int `json:"new_members_since_last"`
 }
 
 // Watchboard wire kinds (DESIGN.md §7.7 + §15 Q2). Wire contract like

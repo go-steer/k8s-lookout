@@ -1312,7 +1312,7 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())
-		log.Printf("recovery: clearance observer backed by the object-state source's pod informer")
+		log.Printf("recovery: clearance observer backed by the object-state source's pod + node informers")
 	} else {
 		reviewer := sources.NewAccessReviewer(client)
 		podRBAC := true

@@ -159,6 +159,31 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	}
 	log.Printf("storm attach %s %s/%s → %s (sid=%s, members=%d)",
 		sig.Key.Reason, sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, v.Storm.AffectedCount)
+
+	// Size refresh (M2 drill observation 4): when the correlator says
+	// membership grew past a reporting threshold, follow the attach
+	// with a kind=storm.update carrying the CURRENT totals — the
+	// formation payload's counts are frozen at formation time.
+	if v.SizeUpdate != nil {
+		d.stormSizeUpdate(ctx, sid, *v.SizeUpdate, v.Storm)
+	}
+}
+
+// stormSizeUpdate injects the kind=storm.update size refresh into the
+// storm session.
+func (d *dispatcher) stormSizeUpdate(ctx context.Context, sid string, upd engine.StormSizeUpdate, info engine.StormInfo) {
+	payload := stormUpdatePayload(upd, info, d.cluster)
+	if d.dryRun {
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+	} else if err := d.injector.InjectStormUpdate(ctx, sid, payload); err != nil {
+		log.Printf("storm: inject size update for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
+		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
+		return
+	}
+	d.metrics.stormUpdates.Inc()
+	log.Printf("storm update %s: now %d incidents across %d namespace(s) (+%d since last report) → sid=%s",
+		info.Ancestor.Display(), upd.AffectedCount, upd.NamespaceCount, upd.NewSinceLast, sid)
 }
 
 // stormResolved injects the storm's own §9.3 outcome record when its
@@ -230,6 +255,24 @@ func stormPayload(info engine.StormInfo, cluster string) inject.StormPayload {
 		p.Context.Node = info.Ancestor.Name
 	}
 	return p
+}
+
+// stormUpdatePayload composes the schema-stable kind=storm.update
+// wire body. Pinned byte-exact by TestStormUpdate_ExactWireShape.
+func stormUpdatePayload(upd engine.StormSizeUpdate, info engine.StormInfo, cluster string) inject.StormUpdatePayload {
+	return inject.StormUpdatePayload{
+		Kind:              inject.KindStormUpdate,
+		StormFingerprint:  info.Fingerprint,
+		AncestorKind:      info.Ancestor.Kind,
+		AncestorNamespace: info.Ancestor.Namespace,
+		AncestorName:      info.Ancestor.Name,
+		Cluster:           cluster,
+		Message: fmt.Sprintf("%s storm grew to %d incidents across %d namespace(s) (+%d since the last size report); the initial kind=storm payload carries formation-time counts",
+			info.Ancestor.Display(), upd.AffectedCount, upd.NamespaceCount, upd.NewSinceLast),
+		AffectedCount:       upd.AffectedCount,
+		NamespacesCount:     upd.NamespaceCount,
+		NewMembersSinceLast: upd.NewSinceLast,
+	}
 }
 
 // stormMemberPayload composes the kind=storm.member /
