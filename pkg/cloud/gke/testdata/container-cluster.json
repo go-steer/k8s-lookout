@@ -1,0 +1,29 @@
+{
+  "//": "Recorded-shape fixture: container.googleapis.com/v1 projects.locations.clusters.get response (fields the ipspace read consumes). Authored from the GKE Cluster resource API reference — not captured from a live project (§13).",
+  "name": "prod",
+  "location": "us-east1-b",
+  "subnetwork": "prod-subnet",
+  "clusterIpv4Cidr": "10.8.0.0/14",
+  "servicesIpv4Cidr": "10.12.0.0/20",
+  "nodeIpv4CidrSize": 24,
+  "currentNodeCount": 93,
+  "ipAllocationPolicy": {
+    "useIpAliases": true,
+    "clusterSecondaryRangeName": "pods",
+    "servicesSecondaryRangeName": "services",
+    "clusterIpv4CidrBlock": "10.8.0.0/14",
+    "servicesIpv4CidrBlock": "10.12.0.0/20"
+  },
+  "nodePools": [
+    {
+      "name": "default-pool",
+      "podIpv4CidrSize": 24,
+      "status": "RUNNING"
+    },
+    {
+      "name": "burst-pool",
+      "podIpv4CidrSize": 25,
+      "status": "RUNNING"
+    }
+  ]
+}

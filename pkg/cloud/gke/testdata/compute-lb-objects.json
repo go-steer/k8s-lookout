@@ -1,0 +1,96 @@
+{
+  "//": "Recorded-shape fixtures: compute/v1 GET response bodies for the load-balancer objects the orphan sweep resolves, keyed by resource name. Authored from the Compute Engine BackendServices/UrlMaps/TargetHttpProxies/TargetPools/NetworkEndpointGroups GET API references — not captured from a live project (§13).",
+  "backendServices": {
+    "empty-bs": {
+      "kind": "compute#backendService",
+      "name": "empty-bs",
+      "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+      "loadBalancingScheme": "INTERNAL",
+      "backends": [
+        {
+          "group": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b/networkEndpointGroups/empty-neg",
+          "balancingMode": "CONNECTION"
+        }
+      ]
+    },
+    "web-bs": {
+      "kind": "compute#backendService",
+      "name": "web-bs",
+      "loadBalancingScheme": "EXTERNAL_MANAGED",
+      "backends": [
+        {
+          "group": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b/networkEndpointGroups/web-neg-b",
+          "balancingMode": "RATE",
+          "maxRatePerEndpoint": 100
+        },
+        {
+          "group": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-c/networkEndpointGroups/web-neg-c",
+          "balancingMode": "RATE",
+          "maxRatePerEndpoint": 100
+        }
+      ]
+    }
+  },
+  "urlMaps": {
+    "web-um": {
+      "kind": "compute#urlMap",
+      "name": "web-um",
+      "defaultService": "https://www.googleapis.com/compute/v1/projects/proj-1/global/backendServices/web-bs",
+      "pathMatchers": [
+        {
+          "name": "paths",
+          "defaultService": "https://www.googleapis.com/compute/v1/projects/proj-1/global/backendServices/web-bs",
+          "pathRules": [
+            {
+              "paths": ["/api/*"],
+              "service": "https://www.googleapis.com/compute/v1/projects/proj-1/global/backendServices/web-bs"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "targetHttpProxies": {
+    "web-proxy": {
+      "kind": "compute#targetHttpProxy",
+      "name": "web-proxy",
+      "urlMap": "https://www.googleapis.com/compute/v1/projects/proj-1/global/urlMaps/web-um"
+    }
+  },
+  "targetPools": {
+    "ghost-pool": {
+      "kind": "compute#targetPool",
+      "name": "ghost-pool",
+      "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+      "instances": []
+    },
+    "live-pool": {
+      "kind": "compute#targetPool",
+      "name": "live-pool",
+      "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+      "instances": [
+        "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b/instances/gke-prod-node-1"
+      ]
+    }
+  },
+  "networkEndpointGroups": {
+    "empty-neg": {
+      "kind": "compute#networkEndpointGroup",
+      "name": "empty-neg",
+      "networkEndpointType": "GCE_VM_IP_PORT",
+      "size": 0
+    },
+    "web-neg-b": {
+      "kind": "compute#networkEndpointGroup",
+      "name": "web-neg-b",
+      "networkEndpointType": "GCE_VM_IP_PORT",
+      "size": 2
+    },
+    "web-neg-c": {
+      "kind": "compute#networkEndpointGroup",
+      "name": "web-neg-c",
+      "networkEndpointType": "GCE_VM_IP_PORT",
+      "size": 1
+    }
+  }
+}

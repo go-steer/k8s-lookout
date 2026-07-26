@@ -114,43 +114,106 @@ func TestOffGCEDetectionIsBestEffort(t *testing.T) {
 	}
 }
 
-func TestCapabilities_CapacityLiveRestDeferred(t *testing.T) {
+// TestCapabilityAvailability pins the per-capability availability
+// judgment as of M4: the cloud-group capabilities and capacity are
+// available exactly when the identity they need is resolved, with
+// the §2 explicit reason otherwise; the rest stay deferred. Getters
+// must mirror Capabilities() exactly.
+func TestCapabilityAvailability(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
-	p, err := New(context.Background(), cloud.Config{Project: "p"})
-	if err != nil {
-		t.Fatalf("New error: %v", err)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+
+	newProvider := func(cfg cloud.Config) cloud.Provider {
+		t.Helper()
+		p, err := New(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("New error: %v", err)
+		}
+		return p
 	}
-	statuses := p.Capabilities()
-	if len(statuses) != len(cloud.AllCapabilities()) {
-		t.Fatalf("Capabilities() reports %d entries, want %d", len(statuses), len(cloud.AllCapabilities()))
-	}
-	for _, status := range statuses {
-		if status.Capability == cloud.CapabilityCapacity {
-			if !status.Available || status.Reason != "" {
-				t.Errorf("capacity status = %+v, want available with project set (M4)", status)
+	statusOf := func(p cloud.Provider, c cloud.Capability) cloud.CapabilityStatus {
+		t.Helper()
+		for _, s := range p.Capabilities() {
+			if s.Capability == c {
+				return s
 			}
-			continue
 		}
-		if status.Available {
-			t.Errorf("capability %s reported available before its milestone", status.Capability)
-		}
-		if status.Reason != reasonDeferred {
-			t.Errorf("capability %s reason = %q, want %q", status.Capability, status.Reason, reasonDeferred)
+		t.Fatalf("capability %s missing from Capabilities()", c)
+		return cloud.CapabilityStatus{}
+	}
+	getterOK := func(p cloud.Provider, c cloud.Capability) bool {
+		switch c {
+		case cloud.CapabilityMetrics:
+			_, ok := p.Metrics()
+			return ok
+		case cloud.CapabilityCapacity:
+			_, ok := p.Capacity()
+			return ok
+		case cloud.CapabilityQuota:
+			_, ok := p.Quota()
+			return ok
+		case cloud.CapabilityOrphans:
+			_, ok := p.Orphans()
+			return ok
+		case cloud.CapabilityIPSpace:
+			_, ok := p.IPSpace()
+			return ok
+		case cloud.CapabilityStockout:
+			_, ok := p.Stockouts()
+			return ok
+		default:
+			_, ok := p.WorkloadIdentity()
+			return ok
 		}
 	}
 
-	if _, ok := p.Metrics(); ok {
-		t.Error("Metrics() available before M5")
+	full := newProvider(cloud.Config{Project: "p", Location: "us-east1-b", Cluster: "prod"})
+	projectOnly := newProvider(cloud.Config{Project: "p"})
+	empty := newProvider(cloud.Config{})
+
+	cases := []struct {
+		capability  cloud.Capability
+		fullOK      bool
+		projOK      bool
+		projReason  string
+		emptyReason string
+	}{
+		{cloud.CapabilityMetrics, false, false, reasonDeferred, reasonDeferred},
+		{cloud.CapabilityCapacity, true, true, "", reasonNoProject},
+		{cloud.CapabilityQuota, true, true, "", reasonNoProject},
+		{cloud.CapabilityOrphans, true, true, "", reasonNoProject},
+		{cloud.CapabilityIPSpace, true, false, reasonNoClusterIdentity, reasonNoClusterIdentity},
+		{cloud.CapabilityStockout, true, true, "", reasonNoProject},
+		{cloud.CapabilityWorkloadIdentity, false, false, reasonDeferred, reasonDeferred},
 	}
-	if _, ok := p.Quota(); ok {
-		t.Error("Quota() available before its M4 change lands")
+	if len(cases) != len(cloud.AllCapabilities()) {
+		t.Fatalf("test table covers %d capabilities, boundary defines %d", len(cases), len(cloud.AllCapabilities()))
 	}
-	if api, ok := p.Capacity(); !ok || api == nil {
-		t.Error("Capacity() unavailable with a project set (M4 landed it)")
+	for _, tc := range cases {
+		if s := statusOf(full, tc.capability); s.Available != tc.fullOK {
+			t.Errorf("full identity: %s available=%v, want %v (reason %q)", tc.capability, s.Available, tc.fullOK, s.Reason)
+		}
+		if got := getterOK(full, tc.capability); got != tc.fullOK {
+			t.Errorf("full identity: %s getter ok=%v diverges from Capabilities()", tc.capability, got)
+		}
+		s := statusOf(projectOnly, tc.capability)
+		if s.Available != tc.projOK || (!tc.projOK && s.Reason != tc.projReason) {
+			t.Errorf("project only: %s = %+v, want available=%v reason %q", tc.capability, s, tc.projOK, tc.projReason)
+		}
+		if got := getterOK(projectOnly, tc.capability); got != tc.projOK {
+			t.Errorf("project only: %s getter ok=%v diverges from Capabilities()", tc.capability, got)
+		}
+		s = statusOf(empty, tc.capability)
+		if s.Available || s.Reason != tc.emptyReason {
+			t.Errorf("no identity: %s = %+v, want unavailable reason %q", tc.capability, s, tc.emptyReason)
+		}
 	}
-	u := cloud.Unavailable(p, cloud.CapabilityQuota)
-	if want := `unavailable reason="not implemented until M4/M5"`; u.Marker() != want {
-		t.Errorf("Marker() = %s, want %s", u.Marker(), want)
+
+	// The §2 marker for a missing-identity capability names the fix.
+	u := cloud.Unavailable(empty, cloud.CapabilityQuota)
+	if u.Reason != reasonNoProject {
+		t.Errorf("Unavailable reason = %q, want %q", u.Reason, reasonNoProject)
 	}
 }
 

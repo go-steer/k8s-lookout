@@ -1,0 +1,5 @@
+kind=ipspace.range severity=critical kind_of_object=Subnetwork name=prod-subnet reason=IPRangeNearExhaustion message="pods range at 96.9% of 10.8.0.0/14 — the next allocation fails at 100%: IP space is incompressible" cidr=10.8.0.0/14 purpose=pods used=253952 capacity=262144 pct=96.9
+kind=ipspace.range severity=warning kind_of_object=Subnetwork name=prod-subnet reason=IPRangeHighUtilization message="nodes range at 85.7% of 10.0.0.0/24 — critical from 95%; plan the secondary range before the slope arrives" cidr=10.0.0.0/24 purpose=nodes used=216 capacity=252 pct=85.7
+kind=ipspace.range severity=info kind_of_object=Subnetwork name=batch-subnet cidr=10.1.0.0/24 purpose=nodes used=18 capacity=252 pct=7.1
+kind=ipspace.range severity=info kind_of_object=Subnetwork name=prod-subnet reason=UsageNotCloudVisible message="services range 10.12.0.0/20: usage is not visible to the cloud APIs (allocated cluster-side) — capacity reported, utilization unknown" cidr=10.12.0.0/20 purpose=services capacity=4096
+scanned=4 findings=4 elapsed=100ms

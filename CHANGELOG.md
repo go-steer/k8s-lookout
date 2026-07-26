@@ -42,6 +42,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `cloud` command group (M4, DESIGN.md §5): `cloud
+  stockout|orphans|ipspace|quota` — the GCP-side point-in-time reads,
+  exposed over MCP as `k8s_cloud_stockout` / `k8s_cloud_orphans` /
+  `k8s_cloud_ipspace` / `k8s_cloud_quota`. `stockout` extracts
+  ZONE_RESOURCE_POOL_EXHAUSTED per zone/machine-type over `--since`
+  (default 24h) with an event-derived reroute suggestion (same-region
+  zones active in the window with no stockout for that type — never
+  claims knowledge outside the log window). `orphans`
+  (`--only=disks,lbs`, `--min-age` default 24h) reports unattached
+  billing-active disks (size/type/idle-age; undatable disks reported
+  with age unknown, never dropped) and forwarding rules resolving to
+  zero endpoints across backend-service, URL-map, and target-pool
+  shapes. `ipspace` judges pod/node range utilization at the fixed
+  §5 lines (warning ≥80%, critical ≥95%); the GKE services range is
+  reported as explicitly not-cloud-visible rather than a fake 0%.
+  `quota` ranks per-project usage/limit nearest-to-exhaustion with
+  findings from `--quota-warn` (default 80%, critical fixed at 95%,
+  `QuotaExhausted` at 100%); the summary counts every quota scanned.
+  All four go through pkg/cloud capabilities only: no provider (or
+  missing identity) yields the §2 explicit `cloud.unavailable`
+  finding + `unavailable reason="…"` summary marker at exit 0. The
+  gke provider implements the four capabilities against
+  google.golang.org/api (compute/logging/container) behind small
+  per-call client interfaces with doc-authored recorded fixtures
+  (§13); all GCP imports stay behind the `gke`/`allproviders` tags,
+  and a new `go tool nm`-based conformance test in cmd/lookout fails
+  if the default binary ever links a GCP symbol.
+
 - The `degradation` and `expiry` sources (M3, DESIGN.md §7.2 rows 5–6)
   — two leading indicators, enabled via `--sources=…,degradation,expiry`
   (ADDITIVE; the default stays k8s-events only).

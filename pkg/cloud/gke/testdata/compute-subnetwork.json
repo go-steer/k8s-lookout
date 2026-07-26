@@ -1,0 +1,18 @@
+{
+  "//": "Recorded-shape fixture: compute/v1 subnetworks.get response. Authored from the Compute Engine Subnetworks:get API reference — not captured from a live project (§13).",
+  "kind": "compute#subnetwork",
+  "name": "prod-subnet",
+  "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+  "network": "https://www.googleapis.com/compute/v1/projects/proj-1/global/networks/prod-vpc",
+  "ipCidrRange": "10.0.0.0/24",
+  "secondaryIpRanges": [
+    {
+      "rangeName": "pods",
+      "ipCidrRange": "10.8.0.0/14"
+    },
+    {
+      "rangeName": "services",
+      "ipCidrRange": "10.12.0.0/20"
+    }
+  ]
+}
