@@ -59,6 +59,8 @@ type metrics struct {
 	enrichmentBytes     prometheus.Histogram
 	enrichmentTruncated prometheus.Counter
 	enrichmentFailures  *prometheus.CounterVec
+	memoryFacts         *prometheus.CounterVec
+	distillErrors       prometheus.Counter
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -178,6 +180,14 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_enrichment_failures_total",
 			Help: "Total enrichment stage failures, by stage (resolve|spec|delta|edges|radius|logs). Failures never block the inject; they surface as enrichment_error trailers in the attached bundle.",
 		}, []string{"stage"}),
+		memoryFacts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_memory_facts_total",
+			Help: "Total §9.2 distilled facts written (upserts included) by the scheduled distiller pass, by fact class.",
+		}, []string{"class"}),
+		distillErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_distill_errors_total",
+			Help: "Total failed §9.2 distiller passes. A failed pass loses freshness only — the next pass re-derives every fact from the occurrence window.",
+		}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -207,6 +217,8 @@ func newMetrics() *metrics {
 		m.enrichmentBytes,
 		m.enrichmentTruncated,
 		m.enrichmentFailures,
+		m.memoryFacts,
+		m.distillErrors,
 	)
 	return m
 }
