@@ -28,6 +28,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sink, with a curl-able example exchange built from captured milestone
   payloads and `dev/drills/stub-daemon.py` as the runnable reference
   receiver. core-agent remains the first-class default.
+- Pluggable agent sinks: `pkg/inject` now exposes the two-verb
+  `Sink` interface (`OpenIncident` + `Append`) every sentinel inject
+  routes through, with two implementations selected by the new
+  additive `--sink` flag (default `core-agent` — byte-identical wire
+  and unchanged flag semantics for every existing deployment; all
+  frozen wire pins pass untouched). `--sink=webhook` delivers to any
+  generic HTTP receiver at `--sink-url`: `POST <url>/incidents` opens
+  an incident with the signal-schema v1 payload JSON as the request
+  body (the exact bytes that ride inside the core-agent envelope's
+  `message` — never wrapped), `POST <url>/incidents/<id>/events`
+  appends follow-ups, optional Bearer auth via `--sink-token-env`.
+  Receivers answer 2xx with `{"id":"<opaque>"}`; stateless receivers
+  that return no id get locally generated ids (logged once). https is
+  strongly recommended; plain http is allowed with a loud startup
+  warning. The webhook wire is pinned byte-exact
+  (`internal/watch/webhook_dispatch_test.go`) and frozen like the
+  daemon envelope. Transport posture (10s timeout, otelhttp-wrapped,
+  no retries) is shared with — and identical to — the core-agent
+  client.
+- `k8s_event_watcher_sink_info{sink}` gauge (value 1 on the active
+  sink). Metrics decision: the frozen operation counters
+  (`session_creates_total`, `inject_errors_total`, …) stay
+  sink-agnostic with their exact names and label sets — the sink is
+  process-level config, so a per-request `sink` label would add a
+  constant-valued dimension and change existing series identities;
+  the info gauge carries it instead.
+
+### Changed
+
+- `--sink=webhook` validation: `--mode`, `--target-session`, and
+  `--owner` are core-agent session concepts and are rejected with the
+  webhook sink; `--daemon-url`/`--token-env` are no longer required
+  when it is selected. The token-burn source requires the core-agent
+  sink (its §12 cost stack is the daemon's attach API): with
+  `--sink=webhook` it idles with a loud startup message instead of
+  running.
+- Watchboard rotation on a stateless sink (webhook) opens the
+  successor incident WITH its first digest and appends the
+  `watchboard.rotated` lineage pointer to the closed incident
+  afterwards — a generic receiver has no create-empty verb. The
+  core-agent sink keeps the frozen §15 Q2 wire order (successor
+  session first, lineage pointer before the successor's first digest)
+  via its `inject.SessionOpener` capability; the existing rotation
+  pins pass unchanged.
 
 ## [0.6.1] - 2026-07-26
 

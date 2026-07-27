@@ -41,20 +41,38 @@ import (
 // incident itself never opens a session — its suppression is the
 // storm forming.
 func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engine.StormVerdict) {
+	info := v.Storm
+	// Compose the storm payload — enrichment included — BEFORE the
+	// open: the sink delivers the initial payload with the open.
+	// Enrichment (§7.6), storm flavor: the ancestor's blast radius
+	// from the live graph, radius-only by design — a storm exists to
+	// collapse N incidents into one session, so its enrichment must
+	// not fan back out into N log fetches. Severity-gated like the
+	// per-incident stage; errors ride inside the bundle.
+	payload := stormPayload(info, d.cluster)
+	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(info.Severity) {
+		if bundleStr := d.enrich.Storm(ctx, info); bundleStr != "" {
+			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
+		}
+	}
 	sid := d.targetSid
+	// openErr carries a partial OpenIncident failure (storm session
+	// opened, initial delivery failed): counted below like the
+	// pre-Sink inject error, never fatal to member bookkeeping.
+	var openErr error
 	if d.mode == "per-incident" && !d.dryRun {
-		newSid, err := d.injector.CreateSession(ctx)
-		if err != nil {
+		newSid, err := d.injector.OpenIncident(ctx, payload)
+		if newSid == "" {
 			log.Printf("storm: create storm session for %s: %v", v.Storm.Ancestor.Display(), err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
 			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
 			return
 		}
 		sid = newSid
+		openErr = err
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	}
 	d.storm.BindStormSession(v.Storm.ID, sid)
-	info := v.Storm
 	info.SessionID = sid
 	// §9.1: the triggering signal's outcome is "my arrival formed the
 	// storm" — earlier members were already recorded when they routed
@@ -90,22 +108,16 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	d.metrics.stormsFormed.Inc()
 	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 
-	payload := stormPayload(info, d.cluster)
-	// Enrichment (§7.6), storm flavor: the ancestor's blast radius
-	// from the live graph, radius-only by design — a storm exists to
-	// collapse N incidents into one session, so its enrichment must
-	// not fan back out into N log fetches. Severity-gated like the
-	// per-incident stage; errors ride inside the bundle.
-	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(info.Severity) {
-		if bundleStr := d.enrich.Storm(ctx, info); bundleStr != "" {
-			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
-		}
-	}
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-	} else if err := d.injector.InjectStorm(ctx, sid, payload); err != nil {
-		log.Printf("storm: inject storm for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
+	} else if d.mode == "shared" {
+		// Shared mode has no open — the storm payload appends to the
+		// pre-configured target session.
+		openErr = d.injector.Append(ctx, sid, payload)
+	}
+	if !d.dryRun && openErr != nil {
+		log.Printf("storm: inject storm for %s (sid=%s): %v", info.Ancestor.Display(), sid, openErr)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 	}
 	log.Printf("storm formed on %s: %d incidents across %d namespace(s) → sid=%s (mode=%s)",
@@ -122,7 +134,7 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 			fmt.Printf("--- dry-run payload for session %q ---\n%s\n", m.SessionID, string(out))
 			continue
 		}
-		if err := d.injector.InjectStormMember(ctx, m.SessionID, mp); err != nil {
+		if err := d.injector.Append(ctx, m.SessionID, mp); err != nil {
 			log.Printf("storm: supersede member %s/%s (sid=%s): %v", m.Namespace, m.Name, m.SessionID, err)
 			d.metrics.injectErrors.WithLabelValues(m.Reason, "inject").Inc()
 		}
@@ -153,7 +165,7 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	if d.dryRun {
 		out, _ := json.MarshalIndent(mp, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-	} else if err := d.injector.InjectStormMember(ctx, sid, mp); err != nil {
+	} else if err := d.injector.Append(ctx, sid, mp); err != nil {
 		log.Printf("storm: attach member %s/%s to %s (sid=%s): %v", sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 	}
@@ -176,7 +188,7 @@ func (d *dispatcher) stormSizeUpdate(ctx context.Context, sid string, upd engine
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-	} else if err := d.injector.InjectStormUpdate(ctx, sid, payload); err != nil {
+	} else if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("storm: inject size update for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
 		return
@@ -222,7 +234,7 @@ func (d *dispatcher) stormResolved(ctx context.Context, sig engine.Signal, info 
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-	} else if err := d.injector.InjectResolved(ctx, sid, payload); err != nil {
+	} else if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("storm: inject storm resolved for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
 		return

@@ -65,6 +65,7 @@ type metrics struct {
 	triageFlips          prometheus.Counter
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
+	sinkInfo             *prometheus.GaugeVec
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -88,11 +89,11 @@ func newMetrics() *metrics {
 		}, []string{"reason", "namespace"}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_inject_errors_total",
-			Help: "Total inject (or session-create) attempts that returned a non-2xx response or transport error.",
+			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Frozen name; counts sink operations regardless of --sink.",
 		}, []string{"reason", "http_code"}),
 		sessionCreates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_session_creates_total",
-			Help: "Total POST /sessions attempts, labeled by outcome.",
+			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Frozen name from M0.",
 		}, []string{"outcome"}),
 		activeIncidents: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "k8s_event_watcher_active_incidents",
@@ -208,6 +209,10 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_cross_source_followups_total",
 			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (M4 observation 4 — leading/reactive joins made session-visible), by joining source family.",
 		}, []string{"source"}),
+		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "k8s_event_watcher_sink_info",
+			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the frozen operation counters — existing scrapes keep their exact series identities.",
+		}, []string{"sink"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -243,6 +248,7 @@ func newMetrics() *metrics {
 		m.triageFlips,
 		m.triageRegressed,
 		m.crossSourceFollowups,
+		m.sinkInfo,
 	)
 	return m
 }

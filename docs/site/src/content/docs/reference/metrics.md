@@ -21,8 +21,8 @@ is added without an inventory row.
 | `k8s_event_watcher_events_seen_total` | counter | `reason`, `namespace` | Total k8s events observed by the informer, before filter.", unit: " |
 | `k8s_event_watcher_events_injected_total` | counter | `reason`, `namespace` | Total events that survived filter + dedup and were POSTed to the daemon.", unit: " |
 | `k8s_event_watcher_events_deduped_total` | counter | `reason`, `namespace` | Total events suppressed by the rolling-window dedup cache.", unit: " |
-| `k8s_event_watcher_inject_errors_total` | counter | `reason`, `http_code` | Total inject (or session-create) attempts that returned a non-2xx response or transport error.", unit: " |
-| `k8s_event_watcher_session_creates_total` | counter | `outcome` | Total POST /sessions attempts, labeled by outcome.", unit: " |
+| `k8s_event_watcher_inject_errors_total` | counter | `reason`, `http_code` | Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Frozen name; counts sink operations regardless of --sink.", unit: " |
+| `k8s_event_watcher_session_creates_total` | counter | `outcome` | Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Frozen name from M0.", unit: " |
 | `k8s_event_watcher_active_incidents` | gauge | — | Current number of incidents in the sidecar's dedup cache.", unit: " |
 | `k8s_event_watcher_recoveries_observed_total` | counter | `resolution` | Total kind=resolved outcome records emitted (§7.4), by resolution (recovered\|object_deleted).", unit: " |
 | `k8s_event_watcher_recoveries_reverted_total` | counter | — | Total kind=resolved.reverted records emitted: symptom recurred within the revert window after a resolve.", unit: " |
@@ -51,4 +51,5 @@ is added without an inventory row.
 | `k8s_event_watcher_triage_resolved_flips_total` | counter | — | Total §9.4 triage-status records flipped to resolved by §7.4 recovery injects (the automatic lifecycle — resolved records join the §9.3 corpus).", unit: " |
 | `k8s_event_watcher_triage_regressed_total` | counter | — | Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time (M4 observation 3). Evidence only, never a re-page.", unit: " |
 | `k8s_event_watcher_cross_source_followups_total` | counter | `source` | Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (M4 observation 4 — leading/reactive joins made session-visible), by joining source family.", unit: " |
+| `k8s_event_watcher_sink_info` | gauge | `sink` | The configured agent sink (--sink), value fixed at 1 on the active label (core-agent\|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the frozen operation counters — existing scrapes keep their exact series identities.", unit: " |
 

@@ -72,6 +72,9 @@ type flags struct {
 	mode                  string
 	targetSession         string
 	owner                 string
+	sink                  string
+	sinkURL               string
+	sinkTokenEnv          string
 	reasons               string
 	namespaces            string
 	excludeNamespaces     string
@@ -158,6 +161,14 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.mode, "mode", "per-incident", "Session routing mode: per-incident (create per (uid,reason)) or shared (all to --target-session).")
 	fs.StringVar(&f.targetSession, "target-session", "", "Required when --mode=shared: SessionID to post all injects to.")
 	fs.StringVar(&f.owner, "owner", "", "X-Asserted-Caller value for POST /sessions in per-incident mode. Sidecar must be in daemon's proxy_identities.")
+
+	// Agent sink (docs/agent-sink-design.md). ADDITIVE flags: the
+	// default is the core-agent daemon client the sentinel has always
+	// spoken — byte-identical wire — so existing deployments keep
+	// behaving identically with zero config change.
+	fs.StringVar(&f.sink, "sink", sinkCoreAgent, "Agent sink receiving incident payloads: core-agent (default: POST /sessions + /sessions/<sid>/inject against --daemon-url) or webhook (generic receiver: POST <sink-url>/incidents opens an incident with the schema-v1 payload JSON as the body; POST <sink-url>/incidents/<id>/events appends follow-ups).")
+	fs.StringVar(&f.sinkURL, "sink-url", "", "Base URL of the generic webhook receiver (no trailing slash). Required with --sink=webhook. https is STRONGLY recommended: plain http is allowed (remote receivers are the point) but warns loudly at startup — incident payloads and the bearer token ride unencrypted.")
+	fs.StringVar(&f.sinkTokenEnv, "sink-token-env", "", "Env var name holding the bearer token the webhook sink sends as Authorization: Bearer. Optional (unset = unauthenticated POSTs); only valid with --sink=webhook.")
 
 	// Event filtering.
 	fs.StringVar(&f.reasons, "reason", "", "Comma-separated allow-list of Event.Reason values. Empty = shipped default set.")
@@ -324,13 +335,55 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	return fs, f
 }
 
+// sink* are the --sink values (docs/agent-sink-design.md).
+const (
+	sinkCoreAgent = "core-agent"
+	sinkWebhook   = "webhook"
+)
+
 // validate checks flag combinations after parse. Called once from
 // main so misconfig fails before any network / API touching.
 func (f *flags) validate() error {
-	if !f.dryRun && f.daemonURL == "" {
+	// Agent sink (--sink): validated first — the daemon-flag
+	// requirements below are sink-conditional. A typo'd sink name is a
+	// config error in every mode, like --sources.
+	switch f.sink {
+	case sinkCoreAgent, sinkWebhook:
+	default:
+		return fmt.Errorf("--sink must be core-agent or webhook (got %q)", f.sink)
+	}
+	if f.sink == sinkWebhook {
+		if !f.dryRun && f.sinkURL == "" {
+			return errors.New("--sink-url is required with --sink=webhook (unless --dry-run)")
+		}
+		if strings.HasSuffix(f.sinkURL, "/") {
+			return fmt.Errorf("--sink-url must not end with '/' (got %q)", f.sinkURL)
+		}
+		// core-agent session concepts make no sense against a generic
+		// receiver: reject loudly instead of silently ignoring them.
+		// --mode's default value is accepted (it is a no-op: the
+		// webhook sink always opens one incident per signal).
+		if f.mode != "per-incident" {
+			return fmt.Errorf("--mode is a core-agent session concept: --sink=webhook always opens per-incident webhook incidents (got --mode=%s)", f.mode)
+		}
+		if f.targetSession != "" {
+			return errors.New("--target-session is a core-agent session concept: not valid with --sink=webhook")
+		}
+		if f.owner != "" {
+			return errors.New("--owner is a core-agent session concept (X-Asserted-Caller on POST /sessions): not valid with --sink=webhook")
+		}
+	} else {
+		if f.sinkURL != "" {
+			return errors.New("--sink-url is only valid with --sink=webhook")
+		}
+		if f.sinkTokenEnv != "" {
+			return errors.New("--sink-token-env is only valid with --sink=webhook (the core-agent sink authenticates via --token-env)")
+		}
+	}
+	if !f.dryRun && f.sink == sinkCoreAgent && f.daemonURL == "" {
 		return errors.New("--daemon-url is required (unless --dry-run)")
 	}
-	if !f.dryRun && f.tokenEnv == "" {
+	if !f.dryRun && f.sink == sinkCoreAgent && f.tokenEnv == "" {
 		return errors.New("--token-env is required (unless --dry-run)")
 	}
 	if strings.HasSuffix(f.daemonURL, "/") {
@@ -418,8 +471,10 @@ func (f *flags) validate() error {
 	// --daemon-url (the §3 boundary rides the same daemon the
 	// injector talks to), so this only bites --dry-run runs, which
 	// skip --daemon-url — same loud-config posture as everything
-	// above.
-	if f.sourceEnabled(tokenburn.Name) && f.tokenEndpoint == "" && f.daemonURL == "" {
+	// above. With --sink=webhook the source never runs (it requires
+	// the core-agent sink; buildSources idles it with a loud startup
+	// message), so the endpoint requirement doesn't apply.
+	if f.sink == sinkCoreAgent && f.sourceEnabled(tokenburn.Name) && f.tokenEndpoint == "" && f.daemonURL == "" {
 		return fmt.Errorf("--sources: %s requires --daemon-url or --token-endpoint (the §12 cost stack is the core-agent daemon's attach API)", tokenburn.Name)
 	}
 	// Storm bounds are validated before the mode switch's dry-run
@@ -486,7 +541,7 @@ func (f *flags) validate() error {
 		if f.dryRun {
 			return nil
 		}
-		if f.owner == "" {
+		if f.sink == sinkCoreAgent && f.owner == "" {
 			return errors.New("--owner is required in per-incident mode (must match a proxy identity in the daemon's users.json)")
 		}
 	case "shared":
@@ -555,14 +610,19 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// dispatcher is the pipeline that ties filter → dedup → injector +
+// dispatcher is the pipeline that ties filter → dedup → sink +
 // metrics for one signal. Sources (pkg/sources) feed it through
 // DispatchSignal; storm correlation, severity routing, and
 // enrichment slot in here as they land (§7.1).
 type dispatcher struct {
-	filter   *engine.Filter
-	dedup    *engine.DedupCache
-	injector *inject.Injector
+	filter *engine.Filter
+	dedup  *engine.DedupCache
+	// injector is the agent sink (docs/agent-sink-design.md) every
+	// inject routes through: the core-agent daemon client by default
+	// (--sink=core-agent — the field keeps its historical name), or
+	// the generic webhook sink (--sink=webhook). Two verbs only:
+	// OpenIncident for new incidents, Append for everything bound.
+	injector inject.Sink
 	metrics  *metrics
 	cluster  string
 	// project / zone are the resolved §8 deployment identity (see
@@ -818,16 +878,38 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.board.Add(ctx, sig, result.Count)
 		return
 	}
-	sid := d.targetSid
 	if d.mode == "per-incident" && !d.dryRun {
-		newSid, err := d.injector.CreateSession(ctx)
-		if err != nil {
+		// Enrichment (§7.6): pre-warm the session by attaching the
+		// in-process bundle to the INITIAL inject — composed BEFORE
+		// the open, because the sink delivers the initial payload
+		// with it. Severity-gated by --enrich; hard-capped by
+		// --enrich-timeout. Runs under injectLock deliberately —
+		// critical incidents are rare, the budget is seconds, and
+		// enriching after unlock would let a followup for the same
+		// key race ahead of the session's first message. Errors never
+		// block the inject: they ride inside the bundle as
+		// enrichment_error trailers.
+		if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
+			if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+				sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+			}
+		}
+		payload := incidentPayload(sig, result)
+		// New incident → the sink's open verb: the core-agent sink
+		// POSTs /sessions then the frozen inject envelope (the exact
+		// pre-Sink byte sequence); the webhook sink POSTs /incidents
+		// with the payload as the body. A non-empty id alongside an
+		// error means the container opened but the initial delivery
+		// failed — bind anyway (followups and §7.4 outcomes still
+		// have a home) and count the inject error, exactly the
+		// pre-Sink behavior.
+		sid, err := d.injector.OpenIncident(ctx, payload)
+		if sid == "" {
 			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
 			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
 			return
 		}
-		sid = newSid
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 		// BindIncident = BindSession + the identity the recovery
 		// tracker needs to survive a restart (rides on dedup-persist).
@@ -838,10 +920,43 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			// storm inject points its session at the storm's.
 			d.storm.NoteMemberSession(sig.Key, sid)
 		}
+		// Hand the bound incident to the recovery tracker (§7.4) so
+		// the fix-verify loop closes into this session.
+		if d.tracker != nil {
+			d.tracker.Track(engine.Incident{
+				Key:       sig.Key,
+				SessionID: sid,
+				FirstSeen: sig.FirstSeen,
+				Ref:       sig.IncidentRef(),
+			})
+		}
+		// §9.1: record the routing DECISION (route=injected, with the
+		// session it targets), not delivery success — delivery errors
+		// stay the sink's telemetry (inject_errors_total). The
+		// recorded signal carries no enrichment (the store strips it).
+		d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
+		if err != nil {
+			log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
+			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+			return
+		}
+		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+		// Info-level log: the successful-inject case was silent before
+		// #212 — operators had to correlate client-go informer warnings
+		// with daemon session-list dumps to infer whether the watcher
+		// was firing at all. Making success visible turns "is the
+		// sidecar working?" into a grep. sid is traceable in the daemon's
+		// own logs / /sessions API so cross-container reconstruction of
+		// an incident is a single traceID-style filter.
+		log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
+			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+		return
 	}
-	// Hand the bound incident to the recovery tracker (§7.4) so the
-	// fix-verify loop closes into this session. Shared mode tracks
-	// too — the outcome routes to the shared session.
+	// Shared mode + dry-run: no incident open — the payload appends to
+	// the pre-configured target session (or prints).
+	sid := d.targetSid
+	// Hand the bound incident to the recovery tracker (§7.4). Shared
+	// mode tracks too — the outcome routes to the shared session.
 	if d.tracker != nil {
 		d.tracker.Track(engine.Incident{
 			Key:       sig.Key,
@@ -850,20 +965,42 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			Ref:       sig.IncidentRef(),
 		})
 	}
-	// Enrichment (§7.6): pre-warm the session by attaching the
-	// in-process bundle to the INITIAL inject. Per-incident mode only
-	// (shared mode has no session creation to warm and keeps its
-	// frozen contract); severity-gated by --enrich; hard-capped by
-	// --enrich-timeout. Runs under injectLock deliberately — critical
-	// incidents are rare, the budget is seconds, and enriching after
-	// unlock would let a followup for the same key race ahead of the
-	// session's first message. Errors never block the inject: they
-	// ride inside the bundle as enrichment_error trailers.
+	// Enrichment stays per-incident-mode-only (§7.6): shared mode has
+	// no session creation to warm and keeps its frozen contract.
 	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(sig.Severity) {
 		if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
 			sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
 		}
 	}
+	payload := incidentPayload(sig, result)
+	// §9.1: record the routing DECISION — see the per-incident branch.
+	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
+	if d.dryRun {
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+		log.Printf("would-fire %s pod=%s/%s (sid=%s, mode=%s, dry-run)",
+			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+		return
+	}
+	if err := d.injector.Append(ctx, sid, payload); err != nil {
+		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		return
+	}
+	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
+		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+}
+
+// incidentPayload composes the wire payload for a NEW incident from
+// the signal + its dedup result: the frozen k8s-event shape for the
+// M0 kinds, the §8 source-namespaced shape (stampIdentity) for the
+// rest, with the additive enrichment/forecast/quota-draft attachments
+// when present. Split from DispatchSignal so both the per-incident
+// open path and the shared/dry-run append path build the identical
+// bytes.
+func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payload {
 	payload := inject.Payload{
 		Kind:         sig.Kind,
 		Reason:       sig.Key.Reason,
@@ -907,34 +1044,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			Justification:  sig.QuotaDraft.Justification,
 		}
 	}
-	// §9.1: record the routing DECISION (route=injected, with the
-	// session it targets), not delivery success — inject transport
-	// errors stay the injector's telemetry (inject_errors_total).
-	// The recorded signal carries no enrichment (the store strips it).
-	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
-	if d.dryRun {
-		out, _ := json.MarshalIndent(payload, "", "  ")
-		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
-		log.Printf("would-fire %s pod=%s/%s (sid=%s, mode=%s, dry-run)",
-			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
-		return
-	}
-	if err := d.injector.Inject(ctx, sid, payload); err != nil {
-		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
-		return
-	}
-	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
-	// Info-level log: the successful-inject case was silent before
-	// #212 — operators had to correlate client-go informer warnings
-	// with daemon session-list dumps to infer whether the watcher
-	// was firing at all. Making success visible turns "is the
-	// sidecar working?" into a grep. sid is traceable in the daemon's
-	// own logs / /sessions API so cross-container reconstruction of
-	// an incident is a single traceID-style filter.
-	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
-		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+	return payload
 }
 
 // injectTriageRegressed emits the §9.4 regression-evidence followup
@@ -977,7 +1087,7 @@ func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signa
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
 		return
 	}
-	if err := d.injector.InjectTriageRegressed(ctx, result.SessionID, payload); err != nil {
+	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
 		log.Printf("triage-status: regression followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 		return
@@ -1026,7 +1136,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
 		return
 	}
-	if err := d.injector.Inject(ctx, result.SessionID, payload); err != nil {
+	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
 		log.Printf("dispatcher: cross-source followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 		return
@@ -1102,7 +1212,7 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 		d.countResolved(sig)
 		return
 	}
-	if err := d.injector.InjectResolved(ctx, sid, payload); err != nil {
+	if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("recovery: inject %s for %s/%s (sid=%s): %v", sig.Kind, sig.Namespace, sig.Name, sid, err)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
 		return
@@ -1252,12 +1362,22 @@ func realMain(argv []string) error {
 	}
 	defer func() { _ = otelShutdown(context.Background()) }()
 
-	// Resolve bearer token from env (unless dry-run).
+	// Resolve the sink's bearer token from env (unless dry-run):
+	// --token-env for the core-agent daemon (required), --sink-token-env
+	// for the webhook receiver (optional — but a NAMED env var must be
+	// non-empty, same loud posture).
 	var token string
-	if !f.dryRun {
+	if !f.dryRun && f.sink == sinkCoreAgent {
 		token = os.Getenv(f.tokenEnv)
 		if token == "" {
 			return fmt.Errorf("bearer token env var %s is empty", f.tokenEnv)
+		}
+	}
+	var sinkToken string
+	if !f.dryRun && f.sink == sinkWebhook && f.sinkTokenEnv != "" {
+		sinkToken = os.Getenv(f.sinkTokenEnv)
+		if sinkToken == "" {
+			return fmt.Errorf("bearer token env var %s is empty", f.sinkTokenEnv)
 		}
 	}
 
@@ -1272,17 +1392,40 @@ func realMain(argv []string) error {
 
 	m := newMetrics()
 
-	var inj *inject.Injector
+	// Agent sink selection (docs/agent-sink-design.md): the core-agent
+	// daemon client by default — byte-identical wire to every release
+	// before the Sink extraction — or the generic webhook sink.
+	var inj inject.Sink
 	if !f.dryRun {
-		inj, err = inject.NewInjector(inject.Config{
-			DaemonURL:      f.daemonURL,
-			BearerToken:    token,
-			AssertedCaller: f.owner,
-		})
-		if err != nil {
-			return fmt.Errorf("injector: %w", err)
+		switch f.sink {
+		case sinkWebhook:
+			if strings.HasPrefix(f.sinkURL, "http://") {
+				log.Printf("sink: webhook receiver %s uses plain http — incident payloads and the bearer token ride unencrypted; use https for anything beyond a trusted network", f.sinkURL)
+			}
+			ws, werr := inject.NewWebhookSink(inject.WebhookConfig{
+				URL:         f.sinkURL,
+				BearerToken: sinkToken,
+			})
+			if werr != nil {
+				return fmt.Errorf("webhook sink: %w", werr)
+			}
+			inj = ws
+		default:
+			ci, cerr := inject.NewInjector(inject.Config{
+				DaemonURL:      f.daemonURL,
+				BearerToken:    token,
+				AssertedCaller: f.owner,
+			})
+			if cerr != nil {
+				return fmt.Errorf("injector: %w", cerr)
+			}
+			inj = ci
 		}
 	}
+	// Which sink this process delivers to, as a scrapeable info gauge
+	// (the frozen operation counters stay sink-agnostic — see
+	// metrics.go on why the sink dimension is not a new label).
+	m.sinkInfo.WithLabelValues(f.sink).Set(1)
 
 	// §8 deployment identity: cluster is --cluster-name (M0);
 	// zone/project resolve by precedence — explicit flag > provider
@@ -1597,8 +1740,13 @@ func realMain(argv []string) error {
 		}
 	}
 
-	log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
-		f.clusterName, f.daemonURL, f.mode, f.owner)
+	if f.sink == sinkWebhook {
+		log.Printf("k8s-event-watcher: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
+			f.clusterName, f.sinkURL)
+	} else {
+		log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
+			f.clusterName, f.daemonURL, f.mode, f.owner)
+	}
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
@@ -1722,6 +1870,15 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			bs.quota = q
 			src = bs.quota
 		case tokenburn.Name:
+			// The token-burn source requires the core-agent sink: its
+			// §12 cost stack IS the core-agent daemon's attach API.
+			// With --sink=webhook the sentinel idles the source with a
+			// loud startup message instead of failing — the same
+			// posture as distillation without --store.
+			if f.sink == sinkWebhook {
+				log.Printf("token-burn: disabled (--sink=webhook — the §12 cost stack is the core-agent daemon's attach API; the source requires --sink=core-agent)")
+				continue
+			}
 			// §12: the cost stack rides the same daemon the
 			// injector talks to; --token-endpoint overrides for
 			// split deployments. validate() already required one of
