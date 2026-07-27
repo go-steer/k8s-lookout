@@ -99,6 +99,7 @@ func crashLoopSignal() engine.Signal {
 			LastSeen:      time.Date(2026, 7, 24, 10, 5, 0, 0, time.UTC),
 			ControllerRef: "ReplicaSet/checkout-svc-7b9d",
 			Count:         1,
+			Type:          "Warning",
 		},
 	}
 }

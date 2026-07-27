@@ -40,7 +40,7 @@ breaking change to running deployments, never a refactor.
 | `--degradation-drop` | float | `0.3` | Minimum ready-ratio decline from window start (with >= 2 distinct downward steps) that fires degradation.capacity. Must be in (0, 1]. |
 | `--degradation-window` | duration | `15m0s` | Trend window for the degradation source's ready-ratio series and probe-flap counting. Must be > 0. |
 | `--distill-interval` | duration | `6h0m0s` | How often the §9.2 distiller pass converts recurring occurrences into durable memory facts (requires --store; the pass reads the last 7d of occurrences). 0 disables distillation. Must be >= 0. |
-| `--dry-run` | bool | — | Print inject payloads to stdout without calling the daemon. |
+| `--dry-run` | bool | — | Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run. |
 | `--enrich` | string | `critical` | Which severities get §7.6 enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off. |
 | `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (§15 Q3: fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them. |
 | `--enrich-log-lines` | int | `200` | Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1. |

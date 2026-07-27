@@ -81,6 +81,7 @@ func TestDispatchSignal_SourcePathWireShapeFrozen(t *testing.T) {
 			Node:          "node-1",
 			Labels:        map[string]string{"team": "checkout"},
 			Count:         1,
+			Type:          "Warning",
 		},
 	})
 	if len(*injects) != 1 {
@@ -93,7 +94,7 @@ func TestDispatchSignal_SourcePathWireShapeFrozen(t *testing.T) {
 		t.Fatalf("captured body isn't the inject envelope: %v (body=%q)", err, (*injects)[0])
 	}
 	// Byte-for-byte the `want` of TestDispatcher_ExactInjectPayloadWireShape.
-	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}}}`
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}},"type":"Warning"}`
 	if envelope.Message != want {
 		t.Errorf("Signal-path inject payload drifted from the frozen wire shape:\n got: %s\nwant: %s", envelope.Message, want)
 	}

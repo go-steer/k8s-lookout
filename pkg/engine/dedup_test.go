@@ -686,3 +686,146 @@ func TestCrossSourceJoin_OncePerFamilyPerWindow(t *testing.T) {
 		t.Error("unstamped fresh entry reported a cross-source join")
 	}
 }
+
+// TestCanonicalReasonForEvent pins the message-aware canonicalization
+// against the REAL kubelet message shapes (pkg/kubelet/images and the
+// sync-result error surfacing). These strings are a deliberate,
+// documented dependency on kubelet wording — if kubelet rewords them
+// the matchers degrade to the messageless mapping, and this table is
+// where a matcher change becomes visible.
+func TestCanonicalReasonForEvent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		reason, message string
+		want            string
+	}{
+		// BackOff disambiguation: pull vs crash-loop.
+		{"backoff pulling image", "BackOff",
+			`Back-off pulling image "nginx:invalid-tag-for-testing"`, "ImagePullBackOff"},
+		{"backoff restarting container", "BackOff",
+			"Back-off restarting failed container server in pod web-1", "CrashLoopBackOff"},
+		{"backoff empty message keeps messageless guess", "BackOff", "", "CrashLoopBackOff"},
+		// Failed pull shapes under the generic Failed reason.
+		{"failed to pull image", "Failed",
+			`Failed to pull image "nginx:invalid-tag-for-testing": rpc error: code = NotFound desc = failed to pull and unpack image`, "ImagePullBackOff"},
+		{"failed with ErrImagePull sync result", "Failed",
+			"Error: ErrImagePull", "ImagePullBackOff"},
+		{"failed with ImagePullBackOff sync result", "Failed",
+			"Error: ImagePullBackOff", "ImagePullBackOff"},
+		{"failed without pull shape stays Failed", "Failed",
+			"Error: failed to create containerd task", "Failed"},
+		// Non-BackOff/Failed reasons defer to the messageless map.
+		{"ErrImagePull still maps via family table", "ErrImagePull",
+			"anything", "ImagePullBackOff"},
+		{"unrelated reason unchanged", "OOMKilled",
+			"pulling image mentioned but reason is specific", "OOMKilled"},
+		{"objectstate family unchanged", "restart_burst", "", "CrashLoopBackOff"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CanonicalReasonForEvent(tc.reason, tc.message); got != tc.want {
+				t.Errorf("CanonicalReasonForEvent(%q, %q) = %q, want %q", tc.reason, tc.message, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalKey_MessageAware pins TriageEvent.CanonicalKey — the
+// dispatcher's ONE canonical pipeline key — as the message-aware
+// composition: reason class from CanonicalReasonForEvent, UID kept,
+// original Key untouched (wire payloads keep the raw reason).
+func TestCanonicalKey_MessageAware(t *testing.T) {
+	t.Parallel()
+	ev := TriageEvent{
+		Key:     EventKey{UID: "pod-1", Reason: "BackOff"},
+		Message: `Back-off pulling image "nginx:broken"`,
+	}
+	got := ev.CanonicalKey()
+	if got != (EventKey{UID: "pod-1", Reason: "ImagePullBackOff"}) {
+		t.Errorf("CanonicalKey = %+v, want {pod-1 ImagePullBackOff}", got)
+	}
+	if ev.Key.Reason != "BackOff" {
+		t.Errorf("CanonicalKey must not mutate the original key; got %q", ev.Key.Reason)
+	}
+	// Idempotent on already-canonical keys: a restored/tracked key
+	// re-canonicalized without a message stays put.
+	if again := CanonicalReason(got.Reason); again != got.Reason {
+		t.Errorf("canonical class %q is not a fixed point of CanonicalReason (got %q) — key threading breaks", got.Reason, again)
+	}
+}
+
+// TestDedup_PullFamilyCollapse_MessageAware is the incident-level
+// proof of the message-aware fix (mirrors kube-agents' watcher test):
+// all four reason/message variants kubelet emits for ONE image-pull
+// failure — Failed+"Failed to pull image", Failed+"Error:
+// ErrImagePull", BackOff+"Back-off pulling image", Failed+"Error:
+// ImagePullBackOff" — collapse into one dedup slot and route to the
+// one bound session, instead of opening four parallel sessions.
+func TestDedup_PullFamilyCollapse_MessageAware(t *testing.T) {
+	t.Parallel()
+	c := newTestDedup(t, 5*time.Minute, "")
+	next := tsGen(time.Now(), time.Second)
+	variants := []TriageEvent{
+		{Key: EventKey{UID: "pod-pull", Reason: "Failed"},
+			Message: `Failed to pull image "nginx:invalid-tag-for-testing": rpc error: code = NotFound`},
+		{Key: EventKey{UID: "pod-pull", Reason: "Failed"}, Message: "Error: ErrImagePull"},
+		{Key: EventKey{UID: "pod-pull", Reason: "BackOff"},
+			Message: `Back-off pulling image "nginx:invalid-tag-for-testing"`},
+		{Key: EventKey{UID: "pod-pull", Reason: "Failed"}, Message: "Error: ImagePullBackOff"},
+	}
+	first := c.Observe(variants[0].CanonicalKey(), next())
+	if first.Kind != DedupNewIncident {
+		t.Fatalf("first variant: kind = %v, want DedupNewIncident", first.Kind)
+	}
+	c.BindSession(variants[0].CanonicalKey(), "session-shared")
+	for i, v := range variants[1:] {
+		got := c.Observe(v.CanonicalKey(), next())
+		if got.Kind != DedupDuplicate {
+			t.Errorf("variant %d (%s %q): kind = %v, want DedupDuplicate", i+1, v.Key.Reason, v.Message, got.Kind)
+		}
+		if got.SessionID != "session-shared" {
+			t.Errorf("variant %d: SessionID = %q, want session-shared", i+1, got.SessionID)
+		}
+	}
+	if c.Len() != 1 {
+		t.Errorf("Len = %d, want 1 — the pull family must occupy ONE dedup slot", c.Len())
+	}
+}
+
+// TestDedup_Restore_CorruptFileStartsFresh pins the persist-corruption
+// tolerance: an unparseable snapshot must never refuse to boot the
+// sentinel — the cache logs, starts empty, and the next Snapshot
+// rewrites the file. (Fixed 2026-07-27: this path used to return the
+// unmarshal error out of NewDedupCache, crash-looping the sentinel on
+// a corrupt file; behavior now matches kube-agents' watcher.)
+func TestDedup_Restore_CorruptFileStartsFresh(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "dedup.json")
+	if err := os.WriteFile(path, []byte(`{"u1|R": {"count": truncated-garbag`), 0o600); err != nil {
+		t.Fatalf("write corrupt snapshot: %v", err)
+	}
+	c, err := NewDedupCache(5*time.Minute, path)
+	if err != nil {
+		t.Fatalf("NewDedupCache on corrupt snapshot must start fresh, got error: %v", err)
+	}
+	if c.Len() != 0 {
+		t.Errorf("Len = %d, want 0 (fresh cache after corrupt snapshot)", c.Len())
+	}
+	// The cache is fully functional: observe, snapshot (repairing the
+	// file), and restore again.
+	key := EventKey{UID: "u-after", Reason: "CrashLoopBackOff"}
+	next := tsGen(time.Now(), time.Second)
+	if got := c.Observe(key, next()); got.Kind != DedupNewIncident {
+		t.Fatalf("Observe after corrupt restore: kind = %v, want DedupNewIncident", got.Kind)
+	}
+	c.BindSession(key, "sess-repaired")
+	if err := c.Snapshot(); err != nil {
+		t.Fatalf("Snapshot over corrupt file: %v", err)
+	}
+	c2 := newTestDedup(t, 5*time.Minute, path)
+	if sid, ok := c2.LookupSession(key); !ok || sid != "sess-repaired" {
+		t.Errorf("restore after repair = (%q, %v), want (sess-repaired, true)", sid, ok)
+	}
+}

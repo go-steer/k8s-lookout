@@ -74,9 +74,11 @@ clear and hold stable for `--recovery-stable-for` (with
 
 ## Trying it without a daemon
 
-- **`--dry-run`** prints inject payloads to stdout without calling any
-  daemon (and skips building the kube client, so it validates config
-  only — it cannot exercise the event path).
+- **`--dry-run`** watches the cluster for real — informers, sources,
+  filter/dedup/routing all run, so it needs cluster access like a
+  normal run — but prints inject payloads to stdout instead of calling
+  any daemon or sink. Point it at a kubeconfig (or run it in-cluster),
+  break something, and watch the payloads appear.
 - The capture stub
   [`dev/drills/stub-daemon.py`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/stub-daemon.py)
   implements the two endpoints and logs every request body — deployed

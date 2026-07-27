@@ -160,6 +160,11 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 // and the "k8s-event" kind constant are frozen — playbook skills
 // pattern-match them — so any byte-level drift here is a breaking
 // change to deployed skills, not an internal detail.
+//
+// Re-baselined 2026-07-27 (pre-consumer amendment, zero deployed
+// consumers): the frozen shape gained the "type" field (k8s
+// Event.Type, after "context" — kube-agents' watcher wire). See
+// docs/signal-schema-v1.md §Amendments.
 func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 	t.Parallel()
 	base, injects, _ := newFakeDaemon(t)
@@ -190,6 +195,7 @@ func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 		Node:          "node-1",
 		Labels:        map[string]string{"team": "checkout"},
 		Count:         1,
+		Type:          "Warning",
 	})
 	if len(*injects) != 1 {
 		t.Fatalf("expected 1 inject; got %d", len(*injects))
@@ -202,7 +208,7 @@ func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 	if err := json.Unmarshal([]byte((*injects)[0]), &envelope); err != nil {
 		t.Fatalf("captured body isn't the inject envelope: %v (body=%q)", err, (*injects)[0])
 	}
-	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}}}`
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}},"type":"Warning"}`
 	if envelope.Message != want {
 		t.Errorf("inject payload wire shape drifted:\n got: %s\nwant: %s", envelope.Message, want)
 	}
@@ -395,4 +401,59 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestDispatcher_PullFamilyOneSession is the pipeline-level proof of
+// the message-aware reason canonicalization (adopted from kube-agents'
+// watcher): the four reason/message variants kubelet emits for ONE
+// image-pull failure open exactly ONE session — not four parallel
+// sessions at 4x the spend — while every wire payload preserves its
+// ORIGINAL event reason (canonicalization is a keying mechanism, never
+// a payload rewrite).
+func TestDispatcher_PullFamilyOneSession(t *testing.T) {
+	t.Parallel()
+	base, injects, _ := newFakeDaemon(t)
+	inj, err := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
+	if err != nil {
+		t.Fatalf("NewInjector: %v", err)
+	}
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
+	disp := &dispatcher{
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"Failed", "BackOff", "ErrImagePull"}, nil, nil, 0)),
+		dedup:    dedup,
+		injector: inj,
+		metrics:  newMetrics(),
+		cluster:  "test-cluster",
+		mode:     "per-incident",
+	}
+	ctx := context.Background()
+	ts := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	variants := []struct {
+		reason, message string
+	}{
+		{"Failed", `Failed to pull image "nginx:broken": rpc error: code = NotFound`},
+		{"Failed", "Error: ErrImagePull"},
+		{"BackOff", `Back-off pulling image "nginx:broken"`},
+		{"Failed", "Error: ImagePullBackOff"},
+	}
+	for i, v := range variants {
+		disp.Dispatch(ctx, engine.TriageEvent{
+			Key:       engine.EventKey{UID: "pod-pull-1", Reason: v.reason},
+			Namespace: "shop",
+			Name:      "frontend-abc",
+			Message:   v.message,
+			LastSeen:  ts.Add(time.Duration(i) * time.Second),
+			Count:     1,
+		})
+	}
+	// One session's initial inject; the three other variants are
+	// dedup-suppressed into the same slot.
+	if len(*injects) != 1 {
+		t.Fatalf("expected 1 inject (one incident for the whole pull family); got %d", len(*injects))
+	}
+	// The single wire payload carries the FIRST variant's original
+	// reason — never the canonical class.
+	if !strings.Contains((*injects)[0], `\"reason\":\"Failed\"`) && !strings.Contains((*injects)[0], `"reason":"Failed"`) {
+		t.Errorf("wire payload must preserve the original event reason %q; got %q", "Failed", (*injects)[0])
+	}
 }

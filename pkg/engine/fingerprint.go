@@ -31,9 +31,10 @@ import (
 //
 //   - kind: the §7.3 signal kind, e.g. "k8s-event", "capacity.stockout".
 //   - reasonClass: the CANONICALIZED reason — pass the raw reason
-//     through CanonicalReason first so ErrImagePull and
-//     ImagePullBackOff produce the same fingerprint, mirroring the
-//     dedup family collapse.
+//     through CanonicalReasonForEvent (message in hand — the
+//     dispatcher's push path) or CanonicalReason (messageless) first
+//     so ErrImagePull and ImagePullBackOff produce the same
+//     fingerprint, mirroring the dedup family collapse.
 //   - objectClass: the KIND of the affected object ("Pod", "Node",
 //     "Deployment") — never its name or UID.
 //   - zone: the failure domain, empty when unknown. Zone is in the
@@ -79,11 +80,18 @@ func Fingerprint(kind, reasonClass, objectClass, zone string) string {
 //	ScanFingerprint(reason, objectClass, zone)
 //	  = Fingerprint("k8s-event", CanonicalReason(reason), objectClass, zone)
 //
-// The reason passes through CanonicalReason exactly like the push
-// path's dispatcher stamp, so `lookout health`'s pod.crashloop
-// finding and the sentinel's CrashLoopBackOff inject carry identical
-// fingerprints (the §8 merge, and the AX cross-path dedup). This is
-// the one recipe the §9.4 join has used since it shipped; changing it
+// The reason passes through the MESSAGELESS CanonicalReason on
+// purpose: scan findings derive their reasons from object STATUS
+// (container waiting.reason is already the specific
+// ImagePullBackOff / CrashLoopBackOff, never kubelet's generic
+// BackOff/Failed event spellings), so the message-aware
+// CanonicalReasonForEvent would change nothing here — and scan
+// findings carry no event message to feed it. The push path's
+// dispatcher stamp uses the message-aware variant on the same
+// families, so `lookout health`'s pod.crashloop finding and the
+// sentinel's CrashLoopBackOff inject carry identical fingerprints
+// (the §8 merge, and the AX cross-path dedup). This is the one
+// recipe the §9.4 join has used since it shipped; changing it
 // desynchronizes every open triage-status record.
 func ScanFingerprint(reason, objectClass, zone string) string {
 	return Fingerprint(KindK8sEvent, CanonicalReason(reason), objectClass, zone)

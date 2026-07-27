@@ -28,9 +28,14 @@ The §8 incident-class key, `pkg/engine.Fingerprint`:
 
 - `kind` — the signal kind (below); `"storm"` for storm aggregates
   (with the blast-radius ancestor's kind as object-class).
-- `reason-class` — the **canonicalized** reason
-  (`engine.CanonicalReason`): `ErrImagePull` and `ImagePullBackOff`
-  hash identically, mirroring the dedup family collapse.
+- `reason-class` — the **canonicalized** reason: `ErrImagePull` and
+  `ImagePullBackOff` hash identically, mirroring the dedup family
+  collapse. The push path canonicalizes **message-aware**
+  (`engine.CanonicalReasonForEvent`): kubelet's generic
+  `BackOff`/`Failed` event reasons are classified by their message —
+  pull-shaped messages land in `ImagePullBackOff`, the rest in
+  `CrashLoopBackOff` (`BackOff`) or stay `Failed`. Messageless callers
+  (`engine.CanonicalReason`) keep the reason-only mapping.
 - `object-class` — the KIND of the affected object (`Pod`, `Node`,
   `NodeGroup`), never its name or UID.
 - `zone` — the failure domain, empty when unknown. Zone is inside the
@@ -85,21 +90,25 @@ ip_exhausted|pending-aged`, `quota.forecast`, `token.burn`.
 
 ## Frozen field sets
 
-`Payload` (the §8 superset, M5-final): `kind`, `reason`, `namespace`,
-`kind_of_object`, `name`, `container`\*, `uid`, `message`, `count`,
-`first_seen`, `last_seen`, `cluster`, `project`\*, `zone`\*,
-`source`\*, `severity`\*, `fingerprint`\*, `context`
-(`controller_ref`\*, `node`\*, `labels`\*), `enrichment`\*
-(`bundle`), `forecast`\* (`eta`, `confidence_basis`),
-`quota_increase_draft`\* (`quota_id`, `region`, `unit`\*,
-`current_usage`, `current_limit`, `suggested_limit`, `slope_per_day`,
-`justification`). Fields marked \* are omitempty.
+`Payload` (the §8 superset, M5-final + 2026-07-27 amendment): `kind`,
+`reason`, `namespace`, `kind_of_object`, `name`, `container`\*,
+`uid`, `message`, `count`, `first_seen`, `last_seen`, `cluster`,
+`project`\*, `zone`\*, `source`\*, `severity`\*, `fingerprint`\*,
+`context` (`controller_ref`\*, `node`\*, `labels`\*), `type` (the
+k8s `Event.Type`, `Normal`/`Warning`; empty for synthetic source
+signals — NOT omitempty, positioned after `context` to match
+kube-agents' watcher wire), `enrichment`\* (`bundle`), `forecast`\*
+(`eta`, `confidence_basis`), `quota_increase_draft`\* (`quota_id`,
+`region`, `unit`\*, `current_usage`, `current_limit`,
+`suggested_limit`, `slope_per_day`, `justification`). Fields marked
+\* are omitempty.
 
 **The M0 freeze inside the freeze:** on `kind=k8s-event` /
 `k8s-event-followup` the dispatcher never stamps
 `project`/`zone`/`source`/`severity`/`fingerprint` — those payloads
 stay byte-identical to the original watcher (playbook back-compat;
-wire pins in `internal/watch`). Every OTHER kind carries the full §8
+wire pins in `internal/watch`), re-baselined ONCE on 2026-07-27 to add
+`type` (see §Amendments). Every OTHER kind carries the full §8
 identity. Consumers needing the k8s-event class key compute it from
 the frozen fields (`ScanFingerprint`) or take it from the incident's
 outcome record, which always carries `fingerprint`.
@@ -124,6 +133,37 @@ action → externally verified outcome) from a captured eventlog by
 pure schema walks. Reference implementation: `pkg/corpus` (CLI:
 `go run ./dev/tools/harvest-corpus`), validated end-to-end against
 the real dispatcher in `TestDrill_CorpusHarvest_EndToEnd`.
+
+## Amendments (dated pre-consumer corrections)
+
+Gari's standing policy for this window: there are **zero deployed
+consumers** of lookout today (only kube-agents' in-tree watcher fork
+and the core-agent demos), so frozen pins and vectors may be amended
+**cleanly, once**, with no migration machinery or compat shims — each
+amendment recorded here with its date. This section closes when the
+first external consumer deploys.
+
+- **2026-07-27 — reason-class table corrected pre-any-consumer:**
+  pull-related `BackOff`/`Failed` events classify as
+  `ImagePullBackOff` (message-aware `engine.CanonicalReasonForEvent`,
+  adopted from kube-agents' watcher #406). Consequence: dedup keys,
+  session bindings, store `canonical_reason` rows, and fingerprints
+  computed for pull-shaped `BackOff`/`Failed` **events** change class
+  from `CrashLoopBackOff`/`Failed` to `ImagePullBackOff`. The
+  `Fingerprint` recipe itself (hash, separator, field order) is
+  untouched and the pinned vectors in `fingerprint_test.go` stand
+  unchanged — only the reason-class INPUT for those event shapes was
+  corrected. Messageless `CanonicalReason` keeps its old mapping.
+- **2026-07-27 — `type` field added; M0 byte pins re-baselined:** the
+  frozen M0 `k8s-event`/`k8s-event-followup` payloads (and every
+  `Payload`-shaped kind) gained `type` — the k8s `Event.Type` — after
+  `context`, not omitempty, matching kube-agents' watcher wire
+  exactly. The M0 "byte-identical" pins in `internal/watch` and the
+  webhook-sink wire pins were re-pinned once to the new frozen truth.
+  Scan-side `emit.Finding` deliberately does NOT gain `type`: scan
+  findings are point-in-time observations of object state, not
+  Events — there is no `Event.Type` to report, and inventing one from
+  severity would be a lie.
 
 ## Evolution
 

@@ -320,7 +320,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 
 	// Operational.
 	fs.StringVar(&f.logLevel, "log-level", "info", "One of: debug, info, warn, error.")
-	fs.BoolVar(&f.dryRun, "dry-run", false, "Print inject payloads to stdout without calling the daemon.")
+	fs.BoolVar(&f.dryRun, "dry-run", false, "Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run.")
 	fs.StringVar(&f.metricsAddr, "metrics-addr", "", "Prometheus /metrics + /healthz listener address (host:port). Empty = disabled.")
 	fs.DurationVar(&f.snapshotInterval, "snapshot-interval", 30*time.Second, "How often to persist the dedup cache when --dedup-persist is set. 0 = only on shutdown.")
 
@@ -639,7 +639,9 @@ type dispatcher struct {
 	// incident this dispatcher binds is handed to it for clearance
 	// watching, and the resolved signals it emits come back through
 	// DispatchSignal. Nil when recovery is disabled
-	// (--recovery-stable-for=0, dry-run, or missing pods RBAC).
+	// (--recovery-stable-for=0 or missing pods RBAC). Dry-run keeps
+	// the tracker — outcome records print to stdout like every other
+	// dry-run payload.
 	tracker *engine.RecoveryTracker
 	// routing, when non-nil, is the §7.7 severity-routing policy:
 	// per-kind severity defaults come stamped by the sources; config
@@ -737,8 +739,17 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.dispatchResolved(ctx, sig)
 		return
 	}
+	// The canonical pipeline key, computed ONCE per signal with the
+	// message in hand (engine.CanonicalReasonForEvent): kubelet's
+	// generic BackOff/Failed reasons need the message to land in the
+	// right family (pull vs crash-loop). Every key-shaped stage below
+	// — fingerprint, dedup, cross-source joins, triage regression
+	// state, storm member notes, recovery tracking — uses THIS key,
+	// so they all agree on the incident's identity. The wire payload
+	// keeps sig.Key.Reason (the original event reason) untouched.
+	key := sig.CanonicalKey()
 	if sig.Fingerprint == "" {
-		sig.Fingerprint = engine.Fingerprint(sig.Kind, engine.CanonicalReason(sig.Key.Reason), sig.KindOfObject, sig.Zone)
+		sig.Fingerprint = engine.Fingerprint(sig.Kind, key.Reason, sig.KindOfObject, sig.Zone)
 	}
 	// Effective severity (§7.7): the source-stamped per-kind default,
 	// unless config overrides the kind via --severity. Stamped before
@@ -764,7 +775,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if !d.filter.Accept(sig) {
 		return
 	}
-	result := d.dedup.Observe(sig.Key, sig.LastSeen)
+	result := d.dedup.Observe(key, sig.LastSeen)
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
 	if result.Kind == engine.DedupDuplicate {
 		d.metrics.eventsDedupSuppress.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
@@ -788,7 +799,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// record rewrite: the agent/human decides
 		// (docs/triage-status-write-design.md §out-of-scope).
 		if downgraded != nil && result.SessionID != "" {
-			if baseline, due := d.triage.noteRegression(sig.Key, result.Count); due {
+			if baseline, due := d.triage.noteRegression(key, result.Count); due {
 				d.injectTriageRegressed(ctx, sig, *downgraded, baseline, result)
 			}
 		}
@@ -802,7 +813,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// source family per incident per window by CrossSourceJoin.
 		// Per-incident mode only, like every routing stage.
 		if d.mode == "per-incident" && result.SessionID != "" {
-			if openedBy, join := d.dedup.CrossSourceJoin(sig.Key, sig.Kind); join {
+			if openedBy, join := d.dedup.CrossSourceJoin(key, sig.Kind); join {
 				d.injectJoinFollowup(ctx, sig, result, openedBy)
 				return
 			}
@@ -816,9 +827,9 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// A fresh incident window: stamp which source family opened it
 	// (the reference point for cross-source join followups above) and
 	// reset any regression baseline from the previous window.
-	d.dedup.NoteIncidentKind(sig.Key, sig.Kind)
+	d.dedup.NoteIncidentKind(key, sig.Kind)
 	if d.triage != nil {
-		d.triage.windowRolled(sig.Key)
+		d.triage.windowRolled(key)
 	}
 	// Severity routing, info class (§7.7): stored only per §9.1 —
 	// with --store set the signal is persisted (route=info-stored) and
@@ -913,18 +924,18 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 		// BindIncident = BindSession + the identity the recovery
 		// tracker needs to survive a restart (rides on dedup-persist).
-		d.dedup.BindIncident(sig.Key, sid, sig.IncidentRef())
+		d.dedup.BindIncident(key, sid, sig.IncidentRef())
 		if d.storm != nil {
 			// Remember the session for a possible later supersede:
 			// if this incident becomes a founding storm member, the
 			// storm inject points its session at the storm's.
-			d.storm.NoteMemberSession(sig.Key, sid)
+			d.storm.NoteMemberSession(key, sid)
 		}
 		// Hand the bound incident to the recovery tracker (§7.4) so
 		// the fix-verify loop closes into this session.
 		if d.tracker != nil {
 			d.tracker.Track(engine.Incident{
-				Key:       sig.Key,
+				Key:       key,
 				SessionID: sid,
 				FirstSeen: sig.FirstSeen,
 				Ref:       sig.IncidentRef(),
@@ -959,7 +970,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// mode tracks too — the outcome routes to the shared session.
 	if d.tracker != nil {
 		d.tracker.Track(engine.Incident{
-			Key:       sig.Key,
+			Key:       key,
 			SessionID: sid,
 			FirstSeen: sig.FirstSeen,
 			Ref:       sig.IncidentRef(),
@@ -1019,6 +1030,7 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 			Node:          sig.Node,
 			Labels:        sig.Labels,
 		},
+		Type: sig.Type,
 	}
 	stampIdentity(&payload, sig)
 	if sig.Enrichment != nil {
@@ -1124,6 +1136,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 			Node:          sig.Node,
 			Labels:        sig.Labels,
 		},
+		Type: sig.Type,
 	}
 	stampIdentity(&payload, sig)
 	// §9.1: the occurrence row records the JOIN routing decision with
@@ -1552,15 +1565,16 @@ func realMain(argv []string) error {
 			f.watchboardBatch, f.watchboardFlush, f.watchboardRotate)
 	}
 
-	// Build the kube client (skip in dry-run to avoid needing a
-	// real cluster for CI / local exploratory runs).
+	// Build the kube client. Dry-run runs the FULL watch pipeline —
+	// informers, sources, filter/dedup/routing — against the real
+	// cluster; only the sink deliveries are replaced by printing
+	// payloads to stdout (the dispatcher's dryRun branches). The M0
+	// behavior of skipping the kube client entirely made --dry-run a
+	// flag-validation no-op that watched nothing — adopted the fix
+	// from kube-agents' watcher: a dry run you cannot point at a
+	// cluster and SEE payloads from is not a dry run.
 	if f.dryRun {
-		log.Printf("k8s-event-watcher: --dry-run: skipping kube client; would watch cluster %q", f.clusterName)
-		<-ctx.Done()
-		if err := dedup.Snapshot(); err != nil {
-			log.Printf("dedup snapshot on shutdown: %v", err)
-		}
-		return nil
+		log.Printf("k8s-event-watcher: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", f.clusterName)
 	}
 	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 	if err != nil {

@@ -192,14 +192,17 @@ func newRow(sig engine.Signal, out Outcome, now time.Time) *row {
 		name:        sig.Name,
 		uid:         sig.Key.UID,
 		reason:      sig.Key.Reason,
-		canonical:   engine.CanonicalReason(sig.Key.Reason),
-		message:     sig.Message,
-		count:       sig.Count,
-		firstSeen:   nullTime(sig.FirstSeen),
-		lastSeen:    nullTime(sig.LastSeen),
-		sessionID:   nullString(out.SessionID),
-		stormFP:     nullString(out.StormFingerprint),
-		raw:         raw,
+		// Message-aware canonical: the store's canonical_reason
+		// column must agree with the dispatcher's dedup/fingerprint
+		// class for the same signal (the §9.2/§9.4 joins read it).
+		canonical: engine.CanonicalReasonForEvent(sig.Key.Reason, sig.Message),
+		message:   sig.Message,
+		count:     sig.Count,
+		firstSeen: nullTime(sig.FirstSeen),
+		lastSeen:  nullTime(sig.LastSeen),
+		sessionID: nullString(out.SessionID),
+		stormFP:   nullString(out.StormFingerprint),
+		raw:       raw,
 	}
 	if sig.Forecast != nil && !sig.Forecast.ETA.IsZero() {
 		r.forecastETA = sql.NullInt64{Int64: sig.Forecast.ETA.UTC().UnixNano(), Valid: true}

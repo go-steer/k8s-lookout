@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Adopted four fixes and one wire-contract addition from kube-agents'
+in-tree copy of the k8s-event-watcher (their #329/#382/#406), with a
+one-time re-baseline of the affected frozen pins.
+
+**Re-baseline note (2026-07-27, standing policy for this change):**
+there are zero deployed consumers of lookout today (only kube-agents'
+watcher fork and the core-agent demos), so the byte-frozen M0 inject
+pins, the webhook wire pins, and the schema-v1 `Payload` field ledger
+were amended CLEANLY ONCE — no migration machinery, no compat shims.
+Each amendment is dated and recorded in
+`docs/signal-schema-v1.md` §Amendments; the `Fingerprint` recipe and
+its pinned cross-cluster vectors are untouched.
+
+### Added
+
+- `type` field on the wire (`inject.Payload.Type`, json `type`): the
+  k8s `Event.Type` (`Normal`/`Warning`), populated by the k8s-events
+  source via the new `engine.TriageEvent.Type`. Positioned after
+  `context` and NOT omitempty, matching kube-agents' watcher wire
+  byte-for-byte; empty for synthetic source signals (they observe
+  transitions and forecasts, not Events). The M0 byte-exact pins and
+  the webhook wire pins were re-baselined once for it (see the note
+  above). Scan-side `emit.Finding` deliberately does not gain the
+  field — scan findings aren't Events.
+
+### Fixed
+
+- Message-aware reason canonicalization
+  (`engine.CanonicalReasonForEvent`): kubelet emits the generic
+  `BackOff`/`Failed` reasons for both crash-loop and image-pull
+  cycles, and only the event message disambiguates them. Pull-shaped
+  messages (`Back-off pulling image …`, `Failed to pull image …`,
+  `Error: ErrImagePull`, `Error: ImagePullBackOff`) now classify as
+  `ImagePullBackOff` — one image-pull failure is ONE incident (one
+  dedup slot, one session, one fingerprint class), not a parallel
+  session per reason variant. The dispatcher computes the canonical
+  pipeline key once per signal (`TriageEvent.CanonicalKey`) and
+  threads it through dedup, storm bookkeeping, triage regression
+  state, watchboard binding, and recovery tracking; `lookout triage
+  events` (pull path) and the store's `canonical_reason` column use
+  the same message-aware class. Wire payloads keep the original event
+  reason, and the messageless `engine.CanonicalReason` mapping is
+  unchanged for reason-only callers.
+- `--dry-run` actually watches: the sentinel now builds the kube
+  client and runs the full pipeline (informers, sources,
+  filter/dedup/routing, recovery) in dry-run, printing inject
+  payloads to stdout instead of calling the daemon/sink — previously
+  it skipped the kube client entirely and validated flags against an
+  idle process. Dry-run therefore now requires cluster access, like a
+  normal run (help text, reference page, and getting-started docs
+  updated).
+- `runtime.ErrorHandlers` in the k8s-events source is now APPENDED
+  to instead of replaced: the old assignment clobbered client-go's
+  package-global handler list for every other informer consumer in
+  the process — a real multi-source bug now that one binary runs many
+  informer-backed sources.
+- Corrupt `--dedup-persist` snapshots no longer refuse to boot the
+  sentinel: an unparseable file is logged and the cache starts fresh
+  (the code previously returned the unmarshal error out of
+  `NewDedupCache` while its comment promised "start fresh" — a
+  crash-loop on corruption). The version-tolerant loader behavior is
+  unchanged; a corrupt-file fixture test pins the new path.
+
 ## [0.7.0] - 2026-07-26
 
 Pluggable agent sinks: the watch-path's two-verb runtime contract is now

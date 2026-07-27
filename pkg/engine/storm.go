@@ -326,8 +326,12 @@ func severityRank(s Severity) int {
 // storm, never the seed of a second one.
 func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 	now := c.clock()
-	key := sig.Key
-	key.Reason = CanonicalReason(key.Reason)
+	// Message-aware canonical: the correlator has the signal (and so
+	// its message) in hand, and its member keys must agree with the
+	// dedup cache's — both sides derive them via
+	// CanonicalReasonForEvent. The member ref's wire Reason below
+	// stays the original.
+	key := sig.CanonicalKey()
 	member := StormMember{
 		Key:          key,
 		Fingerprint:  sig.Fingerprint,

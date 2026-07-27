@@ -50,6 +50,15 @@ type Payload struct {
 	Severity    string         `json:"severity,omitempty"`
 	Fingerprint string         `json:"fingerprint,omitempty"`
 	Context     PayloadContext `json:"context"`
+	// Type is the k8s Event.Type ("Normal" or "Warning") for
+	// event-shaped kinds; empty for synthetic source signals (they
+	// observe transitions and forecasts, not Events). Field name,
+	// casing, and position (immediately after "context", NOT
+	// omitempty) match kube-agents' watcher wire exactly, so playbook
+	// skills written against either watcher parse both. Re-baselined
+	// into the frozen k8s-event shape 2026-07-27 as a pre-consumer
+	// amendment (docs/signal-schema-v1.md §Amendments).
+	Type string `json:"type"`
 	// Enrichment is the §7.6 warm-session attachment, present only on
 	// the INITIAL inject of a per-incident session when the enrichment
 	// stage ran. ADDITIVE to the frozen k8s-event shape: omitempty
