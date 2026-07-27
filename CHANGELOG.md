@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-26
+
+Pluggable agent sinks: the watch-path's two-verb runtime contract is now
+explicit (docs/agent-sink-design.md). core-agent remains the wire-identical
+default; `--sink=webhook` delivers the same frozen schema-v1 payloads to any
+HTTP receiver. Plus the docs-site Integrations page.
+
 ### Added
 
 - `docs/agent-sink-design.md` — design note settling the agent-sink
