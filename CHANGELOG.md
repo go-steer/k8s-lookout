@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-27
+
+Adopts the improvements kube-agents made to their in-tree copy of the
+k8s-event-watcher (their #329/#382/#406), re-baselining the affected
+frozen pins once under the zero-deployed-users policy: message-aware
+reason canonicalization, a --dry-run that actually watches, the `type`
+payload field, ErrorHandlers hygiene, and persist-corruption tolerance.
+
 Adopted four fixes and one wire-contract addition from kube-agents'
 in-tree copy of the k8s-event-watcher (their #329/#382/#406), with a
 one-time re-baseline of the affected frozen pins.
