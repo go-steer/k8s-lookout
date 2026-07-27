@@ -5,6 +5,13 @@ sidebar:
   order: 0
 ---
 
+This section is for anyone starting from zero: you have a kubeconfig,
+maybe an AI agent, and you have never run lookout. By the end you will
+have the binary installed, real diagnostic output from a cluster you
+already have access to, and — if you take the later steps — a sentinel
+deployed in-cluster, opening incident sessions for your agent. The
+first useful command needs nothing deployed at all.
+
 Everything ships as one multicall binary, `lookout`, and the path in is
 incremental — each step works without the next:
 

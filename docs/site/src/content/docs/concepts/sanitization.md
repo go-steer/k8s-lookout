@@ -5,10 +5,14 @@ sidebar:
   order: 5
 ---
 
-Every payload that can carry a spec passes through one sanitizer before
-anything reaches stdout, an MCP response, or a session inject. It is
-defense in depth applied in the emit layer — not opt-in per tool, not
-skippable by a new command that forgets to call it.
+Anything lookout emits can end up in a model's context window, a chat
+transcript, or a log file — places a database password must never
+appear. This page explains what is stripped or masked before any output
+leaves the process, how CI proves it, and the guarantee's honest
+limits. The mechanism is a single sanitizer applied in the emit layer,
+before anything reaches stdout, an MCP response, or a session inject —
+not opt-in per tool, not skippable by a new command that forgets to
+call it.
 
 ## What is stripped and masked
 

@@ -1,50 +1,74 @@
 ---
 title: k8s-lookout
-description: Data-plane intelligence for core-agent — deterministic, token-dense eyes on Kubernetes/GKE clusters for LLM-driven troubleshooting agents.
+description: Cluster diagnostics for AI troubleshooting agents — compact, secret-safe answers about what's broken in a Kubernetes cluster, and an optional watcher that opens incidents the moment trouble starts.
 template: doc
 tableOfContents: false
 ---
 
-`k8s-lookout` gives [`core-agent`](https://github.com/go-steer/core-agent)-driven
-troubleshooting agents deterministic, token-dense reads of Kubernetes/GKE
-clusters. It emits compressed, secret-safe findings instead of raw telemetry
-dumps, and it opens agent incident sessions from leading indicators instead of
-waiting for pages.
+k8s-lookout helps AI troubleshooting agents see what is happening inside
+a Kubernetes cluster. It answers the questions an investigation runs on —
+what is broken, what changed, who is affected — in a form small enough
+and safe enough to hand straight to a language model, and it can watch
+the cluster and tell your agent the moment something starts going wrong.
 
-## Two halves, one multicall binary
+## The problem
 
-Everything ships as one binary, `lookout`:
+An AI agent troubleshooting a cluster is only as good as what it can
+see. Point it at raw `kubectl` output and it drowns: describing one
+crash-looping payment service takes a dozen slow commands, most of the
+output is routine noise, and some of it — environment variables, mounted
+Secrets — is exactly the material that must never reach a model. And
+even a well-equipped agent only investigates when asked. Nobody tells it
+the moment a bad image tag ships or a certificate is three days from
+expiring.
 
-- **Read-path** — one-shot diagnostic commands an agent runs mid-investigation
-  (`lookout triage|state|stab|perf|cloud|net|bundle|health`), each emitting
-  logfmt/JSON findings under a fixed output contract (pure payload on stdout,
-  diagnostics on stderr, a final `scanned= findings= elapsed=` summary line).
-  Every read command is also exposed 1:1 as an MCP tool via `lookout mcp`.
-- **Watch-path** — `lookout watch`, a resident per-cluster sentinel that turns
-  leading indicators (state transitions, trend slopes, expiry countdowns) into
-  per-incident agent sessions with warm context — detecting issues before, or
-  as, they happen rather than after.
+## What lookout does
+
+lookout is a command-line toolset that answers diagnostic questions
+about a cluster in a compact, secret-safe form an agent can act on
+directly — also callable as tools over MCP, the protocol most agent
+runtimes speak. An optional in-cluster watcher, the **sentinel**, spots
+trouble as it develops and opens an incident session for your agent —
+often before users notice anything.
+
+lookout never writes to your cluster. It reads, watches, and reports;
+any fix goes through your agent's own approval process.
+
+## A taste
+
+"Any issues with this cluster?" is one command:
 
 ```sh
-# First call of an investigation: everything abnormal, in one scan.
-lookout triage delta -A
+lookout health
 ```
 
-Most of the suite is pure `client-go` and runs on any conformant Kubernetes
-cluster; GKE/GCP-specific capability lives behind a cloud-provider boundary
-and reports itself as `unavailable` when absent. Images are published at
-`ghcr.io/go-steer/lookout`.
+```console
+kind=health.category severity=info category=nodes status=healthy
+kind=health.category severity=warning category=crashloops status=degraded total=8 top="pod.restarts agent-sandbox-system/agent-sandbox-controller-7c69875fcc-n7xms; pod.restarts kube-system/coredns-7d764666f9-g82j9; …"
+kind=health.category severity=info category=rollouts status=healthy
+scanned=16 findings=18 elapsed=537ms
+```
 
-## Where to go
+(Real output against a kind cluster, abridged.) Every category reports,
+healthy resources stay quiet, and the last line always says what was
+scanned — so "all clear" is never ambiguous silence.
 
-- [Getting started](/getting-started/) — install and first commands.
-- [Concepts](/concepts/) — the output contract, signal engine, fingerprints.
-- [Guides](/guides/) — workflow walkthroughs.
-- [Reference](/reference/) — generated: every command, the sentinel's flags,
-  the signal-kind catalog, Prometheus metrics.
-- [Operations](/operations/) — deploying and running the sentinel.
+## Where next
 
-The complete specification is
-[`docs/DESIGN.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/DESIGN.md)
-in the repository; agent education (skills and playbooks) ships in
-[`skills/`](https://github.com/go-steer/k8s-lookout/tree/main/skills).
+- **Just want to point it at a cluster?** →
+  [Getting started](/getting-started/) — install and first commands,
+  nothing deployed.
+- **Want incidents to open themselves?** →
+  [Deploy the sentinel](/getting-started/deploy/).
+- **Want to understand how it works?** → [Concepts](/concepts/) — the
+  mental model behind the commands.
+- **Integrating another agent framework?** →
+  [Integrations](/getting-started/integrations/) — the same tools from
+  any MCP client, shell-capable agent, or webhook receiver.
+
+Everything ships as a single binary, `lookout`, with images at
+`ghcr.io/go-steer/lookout`; it works out of the box with
+[`core-agent`](https://github.com/go-steer/core-agent). The full command
+surface is in the [Reference](/reference/), day-2 sentinel material in
+[Operations](/operations/), and the complete specification in
+[`docs/DESIGN.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/DESIGN.md).

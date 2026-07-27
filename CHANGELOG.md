@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Docs site: plain-language rewrite of the entry points for first-time
+  readers — new landing page (problem, what lookout does, one real
+  output sample, audience router), a "How lookout thinks" overview
+  replacing the Concepts section stub, orienting introductions on the
+  Getting started / Guides / Operations indexes (plus a symptom-based
+  "which guide do I need" table), and plain-register opening paragraphs
+  on every concepts detail page. Writing only: no command, flag, or
+  reference-content changes; all sample output is pre-existing captured
+  output.
+
 - Docs: removed references to the external fleet project by name —
   fleet-rollup rationale now uses generic phrasing ("the fleet layer",
   "a fleet-level consumer") throughout docs, comments, and test text.

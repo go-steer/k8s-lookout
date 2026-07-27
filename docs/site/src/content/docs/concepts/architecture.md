@@ -5,9 +5,12 @@ sidebar:
   order: 1
 ---
 
-`k8s-lookout` exists to give an LLM-driven troubleshooting agent
-deterministic, token-dense eyes on a Kubernetes cluster. Everything follows
-from a handful of principles:
+This page explains how lookout is put together: two ways in — one-shot
+commands you run mid-investigation, and a resident watcher that lives in
+the cluster — and why both share a single binary. If you have wondered
+why the output is so terse, or why a healthy resource prints nothing,
+the answer is one of a handful of principles everything else follows
+from:
 
 - **Token density.** Raw telemetry costs money, evicts context, and slows
   the loop. Deterministic pre-compression — dedup by template, strip nominal
