@@ -254,8 +254,14 @@
   white-space: nowrap;
 }
 .sl-markdown-content table {
-  display: table;
+  /* Scroll-contain wide tables instead of letting min-content width
+   * (nowrap code spans above) push them under the right-hand TOC on
+   * narrow viewports. display:block keeps inner table layout while
+   * allowing overflow-x; max-width pins the box to the content column. */
+  display: block;
+  max-width: 100%;
   width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
 }
 .sl-markdown-content table th,
@@ -272,4 +278,19 @@
 }
 .sl-markdown-content table tbody tr:hover {
   background: var(--sl-color-gray-7);
+}
+
+/* --- Right "On this page" rail ---
+ * Starlight sizes it from --sl-sidebar-width (18.75rem), the same
+ * variable as the left nav. A table of contents needs far less;
+ * the reclaimed space goes to the content column. Unlayered author
+ * CSS wins over Starlight's @layer rules, so no !important.
+ */
+@media (min-width: 72rem) {
+  .right-sidebar-container {
+    width: max(
+      13.5rem,
+      calc(13.5rem + (100% - var(--sl-content-width) - 13.5rem) / 2)
+    );
+  }
 }
