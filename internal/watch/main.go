@@ -102,7 +102,7 @@ type flags struct {
 	dedupPersist          string
 	unhealthyMinCount     int
 	recoveryStableFor     time.Duration
-	storm                 bool
+	storm                 string
 	stormWindow           time.Duration
 	stormMin              int
 	severity              severityFlag
@@ -176,10 +176,14 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces.")
 
 	// Signal sources (§7.2: sources are individually enabled).
-	// ADDITIVE flag: the default is exactly the M0 surface, so
-	// existing deployments keep byte-identical behavior without
-	// touching their config.
-	fs.StringVar(&f.sources, "sources", k8sevents.Name, "Comma-separated signal sources to enable: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn. Default preserves the M0 watcher surface (k8s-events only).")
+	// DEFAULT CHANGED to auto (2026-07-27, zero-deployed-users policy;
+	// the pre-auto default was k8s-events only): auto probes each
+	// portable source's declared needs at startup and enables what the
+	// deployment supports — see resolveSourcesAuto in auto.go. An
+	// explicit list keeps the original §11 semantics exactly: every
+	// named source's probe failure is fatal, and --sources=k8s-events
+	// reproduces the old default byte-for-byte.
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn. quota (project tier) and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's probe failure is fatal.")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -241,15 +245,16 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Recovery injects (§7.4).
 	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")
 
-	// Storm correlation (§7.5). ADDITIVE and default-OFF in this
-	// change: the topology-graph informers need RBAC (pods, nodes,
-	// apps/replicasets list+watch) that deployments running the M0
-	// ClusterRole may lack, and — unlike the recovery observer —
-	// correlation is opted into explicitly, so a missing grant is a
-	// loud startup error rather than a silent degrade. Flipping the
-	// default is an M2-exit decision.
-	fs.BoolVar(&f.storm, "storm", false, "Enable storm correlation (§7.5): group new incidents sharing a blast-radius key (nearest common topology ancestor) into one kind=storm session. Requires pods/nodes/replicasets list+watch RBAC for the graph informers (verified loudly at startup).")
-	fs.DurationVar(&f.stormWindow, "storm-window", engine.DefaultStormWindow, "Second-level correlation window for storm formation. 0 disables correlation even with --storm.")
+	// Storm correlation (§7.5). DEFAULT CHANGED to auto (2026-07-27,
+	// zero-deployed-users policy; the flag was a default-false bool
+	// before): auto probes the graph informer grants at startup and
+	// resolves on/off with a loud line either way — see
+	// resolveStormAuto in auto.go. --storm=on keeps the original
+	// explicit-opt-in semantics: a missing grant is a fatal startup
+	// error. SYNTAX CHANGED with the type: bare `--storm` (valid bool
+	// syntax) now errors; write --storm=on.
+	fs.StringVar(&f.storm, "storm", stormAuto, "Storm correlation (§7.5): auto (the default — probe the graph informers' grants at startup: pods/nodes/replicasets list+watch; all present resolves on, a miss resolves off with one loud line naming the grant), on (fatal at startup when a grant is missing), or off. true/false are aliases for on/off; bare --storm is no longer valid syntax. When on, new incidents sharing a blast-radius key (nearest common topology ancestor) group into one kind=storm session.")
+	fs.DurationVar(&f.stormWindow, "storm-window", engine.DefaultStormWindow, "Second-level correlation window for storm formation. 0 disables correlation even with --storm=on.")
 	fs.IntVar(&f.stormMin, "storm-min", engine.DefaultStormMin, "Minimum incidents sharing a blast-radius key within --storm-window to form a storm. Must be >= 2.")
 
 	// Severity routing (§7.7). ADDITIVE flags: with no --severity
@@ -300,7 +305,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// resident graph there is nothing to snapshot, and without a store
 	// there is nowhere to put it. Point-in-time queries (--at) and
 	// `triage changes` read what this writes.
-	fs.DurationVar(&f.graphSnapshotInterval, "graph-snapshot-interval", 5*time.Minute, "How often to persist a compressed topology snapshot to --store (§6.6; the per-delta change log is written continuously). Effective only with --store AND --storm (the graph feed). Must be > 0.")
+	fs.DurationVar(&f.graphSnapshotInterval, "graph-snapshot-interval", 5*time.Minute, "How often to persist a compressed topology snapshot to --store (§6.6; the per-delta change log is written continuously). Effective only with --store AND storm correlation on (the graph feed). Must be > 0.")
 
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
@@ -391,14 +396,35 @@ func (f *flags) validate() error {
 	}
 	// Sources are validated before the mode switch's dry-run early
 	// return: a typo'd source name is a config error in every mode.
+	// "auto" is the whole value or absent — mixing it with named
+	// sources is ambiguous (is the name a floor, a pin, or a typo?)
+	// and rejected loudly rather than guessed at.
 	names := splitCSV(f.sources)
 	if len(names) == 0 {
-		return fmt.Errorf("--sources must enable at least one source (known: %s)", strings.Join(knownSources, ", "))
+		return fmt.Errorf("--sources must enable at least one source (known: %s; or auto)", strings.Join(knownSources, ", "))
 	}
-	for _, name := range names {
-		if !slices.Contains(knownSources, name) {
-			return fmt.Errorf("--sources: unknown source %q (known: %s)", name, strings.Join(knownSources, ", "))
+	if slices.Contains(names, autoValue) {
+		if len(names) != 1 {
+			return fmt.Errorf("--sources: auto cannot be combined with named sources (got %q) — use auto alone, or pin an explicit list", f.sources)
 		}
+		f.sources = autoValue
+	} else {
+		for _, name := range names {
+			if !slices.Contains(knownSources, name) {
+				return fmt.Errorf("--sources: unknown source %q (known: %s; or auto)", name, strings.Join(knownSources, ", "))
+			}
+		}
+	}
+	// Storm mode (§7.5): normalize the bool-era aliases first so the
+	// rest of startup switches on exactly three values.
+	switch f.storm {
+	case "true":
+		f.storm = stormOn
+	case "false":
+		f.storm = stormOff
+	case stormAuto, stormOn, stormOff:
+	default:
+		return fmt.Errorf("--storm must be auto, on, or off (got %q; true/false are aliases for on/off, and bare --storm is no longer valid — write --storm=on)", f.storm)
 	}
 	// Rollout / saturation bounds (§7.2 rows 3–4): config errors in
 	// every mode, like --sources itself, even when the sources are
@@ -563,9 +589,15 @@ func (f *flags) validate() error {
 	return nil
 }
 
-// stormEnabled reports whether §7.5 storm correlation is on: the
-// explicit --storm opt-in AND a non-zero correlation window.
-func (f *flags) stormEnabled() bool { return f.storm && f.stormWindow > 0 }
+// stormEnabled reports whether §7.5 storm correlation is on:
+// --storm resolved (or set) to on AND a non-zero correlation window.
+// Meaningful only after resolveAutoDefaults has replaced a --storm=auto
+// with its resolution — before that, auto reads as not-enabled.
+func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow > 0 }
+
+// sourcesAuto reports whether --sources is the auto sentinel value,
+// i.e. startup must resolve the portable set before building sources.
+func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
 var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, tokenburn.Name}
@@ -1582,8 +1614,20 @@ func realMain(argv []string) error {
 		return err
 	}
 
+	// Auto defaults (--sources=auto / --storm=auto): resolve BEFORE
+	// any source-conditional client building below — the rest of
+	// startup then sees a concrete source list and a concrete storm
+	// on/off, exactly as if the operator had pinned them. Explicit
+	// values skip this entirely and keep the frozen §11 semantics
+	// (named source or --storm=on probe failure = fatal). Auto is the
+	// ONLY mode that downgrades a miss to skip-with-loud-line.
+	if err := resolveAutoDefaults(ctx, f, client); err != nil {
+		return err
+	}
+
 	// Signal sources (§7.2), individually enabled via --sources
-	// (default: k8s-events only — the frozen M0 surface). The dynamic
+	// (auto resolves to the supported portable set above; an explicit
+	// list is honored verbatim). The dynamic
 	// client exists only for the expiry source's discovery-gated
 	// cert-manager reads, and the saturation source's metrics.k8s.io
 	// dimension needs its own clientset — each built from the same
@@ -1656,7 +1700,7 @@ func realMain(argv []string) error {
 			onChange = occStore.RecordGraphChange
 		}
 		feed = newGraphFeed(sharedFactory, onChange)
-	} else if f.storm {
+	} else if f.storm == stormOn {
 		log.Printf("storm: disabled (--storm-window=0)")
 	}
 

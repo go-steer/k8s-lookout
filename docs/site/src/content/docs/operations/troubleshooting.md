@@ -12,12 +12,44 @@ is the **silent empty watch** — an informer without list/watch permission
 would log a warning once and then report nothing forever, which reads as
 "cluster healthy".
 
+## The `--sources=auto` startup summary
+
+With the default `--sources=auto`, startup probes each portable
+source's declared needs and prints a summary block — one line per
+candidate, enabled lines included, so what auto decided is read from
+the log, never inferred from silence. A worked example from a cluster
+with the shipped RBAC but no metrics-server:
+
+```
+sources: auto — probing the portable set (RBAC per source; metrics.k8s.io for saturation); misses are skipped loudly — pin --sources explicitly to make a miss fatal (§11)
+source k8s-events: enabled (always on — a sentinel that cannot watch events is misdeployed)
+source object-state: enabled
+source rollout: enabled
+source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)
+source degradation: enabled
+source expiry: enabled
+source capacity: enabled
+sources: auto resolved → k8s-events,object-state,rollout,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)
+storm: auto — on (pods/nodes/replicasets graph grants verified; independent of object-state — the graph feed runs its own informers, shared with the sources' when both are on)
+```
+
+Line anatomy: the header states the rules; each `source <name>:` line
+is enabled or `disabled (missing <grant> — <how to fix it>, or name
+it in --sources to make this fatal)`; the `resolved →` footer is the
+effective source list the rest of startup uses; and the final
+`storm: auto` line is `--storm=auto`'s resolution the same way. Two
+things are fatal even under auto: `k8s-events` failing its probe (a
+sentinel that cannot watch events is misdeployed — fix the
+deployment), and a probe that cannot be *evaluated* at all (see
+below).
+
 ## RBAC probe failures at startup
 
-Before anything starts watching, every enabled source's declared RBAC
-needs are verified against the sentinel's actual credentials (via
-SelfSubjectAccessReview — the probe itself needs no RBAC beyond
-authenticating). A miss is fatal and names exactly what to fix:
+With an **explicit** `--sources` list (or `--storm=on`), every named
+source's declared RBAC needs are verified against the sentinel's
+actual credentials (via SelfSubjectAccessReview — the probe itself
+needs no RBAC beyond authenticating) and a miss is fatal, naming
+exactly what to fix — explicit lists never downgrade to a skip:
 
 ```
 source "object-state" requires permission to "list nodes cluster-wide" (scope: Cluster)
@@ -54,7 +86,7 @@ review — a cluster/credentials problem, not a Role problem.
 | `capacity` | Rides the events + pods grants, plus the `kube-system` Role (`deploy/14`/`15`): `get` on the `cluster-autoscaler-status` ConfigMap. The provider scale-decision sub-source additionally needs the `-gke` image with cloud credentials. |
 | `quota` | The `-gke` image (or a `-tags gke/allproviders` build) plus read-only project credentials (`compute.regions.get`, `monitoring.timeSeries.list`, `logging.logEntries.list`, `cloudquotas.quotaInfos.list`). One instance per GCP project. |
 | `token-burn` | No Kubernetes RBAC — it polls the core-agent cost stack at `--daemon-url` (or `--token-endpoint`). |
-| `--storm` | `pods`, `nodes`, `replicasets.apps` list/watch for the topology-graph informers — verified loudly at startup like a source. |
+| `--storm` | `pods`, `nodes`, `replicasets.apps` list/watch for the topology-graph informers. `--storm=auto` (the default) resolves on/off against these grants with a loud line either way; `--storm=on` makes a miss fatal, like an explicitly named source. Independent of `object-state` — the graph feed runs its own informers. |
 | Enrichment (`--enrich`) | `pods/log` get, `get` on the workload kinds, and `list` on the incident namespace's workload/service/configmap/ingress/RBAC kinds for the scoped-list fallback. All in the shipped ClusterRole; a gap here is not fatal — sections fail into `enrichment_error` trailers and `enrichments_total{outcome="partial"}`. |
 
 ## Common startup errors, verbatim
@@ -65,7 +97,8 @@ review — a cluster/credentials problem, not a Role problem.
 | `--token-env is required (unless --dry-run)` | Name the env var holding the bearer token, and make sure the Deployment sources it from the token Secret. |
 | `--owner is required in per-incident mode (must match a proxy identity in the daemon's users.json)` | Set `--owner`; if session creates then fail with 4xx (`inject_errors_total`), the identity is missing on the daemon side. |
 | `--target-session is required in shared mode` | `--mode=shared` posts everything to one existing session; name it. |
-| `--sources: unknown source "…" (known: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn)` | Typo in the source list. |
+| `--sources: unknown source "…" (known: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn; or auto)` | Typo in the source list. |
+| `--storm must be auto, on, or off (got "…"; true/false are aliases for on/off, and bare --storm is no longer valid — write --storm=on)` | The bool-era `--storm` syntax; the flag is a three-mode string now. |
 | `source "quota" requires a cloud provider with the quota capability …; build with -tags gke/allproviders and run with cloud credentials, or drop "quota" from --sources` | You enabled the quota source in the default (GCP-free) image. Pin the `-gke` flavor — the refusal is the conformance boundary working as designed. |
 | `--saturation-window must be > --saturation-interval (the regression needs a window of samples)` | Flags of a disabled source are still validated — a nonsensical value is a config error in every mode. The same pattern covers every numeric flag (`--storm-min must be >= 2 (a storm of one is an incident)`, …). |
 

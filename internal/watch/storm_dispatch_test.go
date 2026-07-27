@@ -351,17 +351,21 @@ func TestProbeGraphAccess(t *testing.T) {
 	}
 }
 
-// TestStormFlags pins the ADDITIVE flag surface: defaults keep storm
-// correlation OFF (M0/M2 deployments are untouched until they opt
-// in), and the bounds are validated.
+// TestStormFlags pins the --storm flag surface. DEFAULT CHANGED
+// DELIBERATELY on 2026-07-27 under the zero-deployed-users policy
+// (one post-M0 pin change, recorded in the CHANGELOG): --storm is now
+// a string mode defaulting to auto (probe the graph grants at
+// startup, resolve on/off loudly — auto_test.go covers resolution);
+// it was a default-false bool through 0.8.0. --storm=on keeps the
+// old opt-in fatality; bounds stay validated in every mode.
 func TestStormFlags(t *testing.T) {
 	t.Parallel()
 	f, err := parseFlags(nil)
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if f.storm {
-		t.Error("default --storm must be false (graph informers need RBAC M0 deployments may lack)")
+	if f.storm != stormAuto {
+		t.Errorf("default --storm = %q, want auto (the 2026-07-27 default change)", f.storm)
 	}
 	if f.stormWindow != 60*time.Second {
 		t.Errorf("default storm-window = %v, want 60s", f.stormWindow)
@@ -370,10 +374,10 @@ func TestStormFlags(t *testing.T) {
 		t.Errorf("default storm-min = %d, want 3", f.stormMin)
 	}
 	if f.stormEnabled() {
-		t.Error("stormEnabled must be false by default")
+		t.Error("stormEnabled must be false before auto resolution runs")
 	}
 
-	on, err := parseFlags([]string{"--dry-run", "--storm", "--storm-window=30s", "--storm-min=5"})
+	on, err := parseFlags([]string{"--dry-run", "--storm=on", "--storm-window=30s", "--storm-min=5"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
@@ -384,12 +388,12 @@ func TestStormFlags(t *testing.T) {
 		t.Errorf("storm flags not honored: %+v", on)
 	}
 
-	zero, _ := parseFlags([]string{"--dry-run", "--storm", "--storm-window=0"})
+	zero, _ := parseFlags([]string{"--dry-run", "--storm=on", "--storm-window=0"})
 	if err := zero.validate(); err != nil {
 		t.Fatalf("validate --storm-window=0: %v (0 disables, must not be rejected)", err)
 	}
 	if zero.stormEnabled() {
-		t.Error("--storm-window=0 must disable correlation even with --storm")
+		t.Error("--storm-window=0 must disable correlation even with --storm=on")
 	}
 
 	bad, _ := parseFlags([]string{"--dry-run", "--storm-min=1"})

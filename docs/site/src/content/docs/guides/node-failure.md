@@ -9,7 +9,8 @@ sidebar:
 NotReady, and a naive per-incident pipeline opens thirty-plus sessions —
 none of which mentions the actual cause.
 
-With `--storm`, the sentinel groups incidents sharing a **blast-radius
+With storm correlation on (`--storm=auto`, the default, resolves on
+when the graph grants are present), the sentinel groups incidents sharing a **blast-radius
 key** — the nearest common ancestor in the topology graph — into one
 `kind=storm` session. All output below is from the M2 exit drill,
 abridged: 30 victim pods pinned to `kl-m2-worker2`, then

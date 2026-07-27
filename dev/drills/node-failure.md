@@ -68,7 +68,7 @@ recorded kind run):
 
 ```
 --sources=k8s-events,object-state
---storm
+--storm=on
 --enrich=critical
 --recovery-stable-for=60s          # drill value; production default is 5m
 --severity=objectstate.endpoints_empty=warning   # optional: watchboard demo

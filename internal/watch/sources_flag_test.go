@@ -36,35 +36,68 @@ import (
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
-// TestSourcesFlag_DefaultIsK8sEventsOnly pins the ADDITIVE flag
-// contract: --sources defaults to exactly the M0 surface, so an
-// existing deployment that never sets it keeps identical behavior
-// (the frozen-flag test stays untouched by design).
-func TestSourcesFlag_DefaultIsK8sEventsOnly(t *testing.T) {
+// TestSourcesFlag_DefaultIsAuto pins the --sources default. DEFAULT
+// CHANGED DELIBERATELY on 2026-07-27 under the zero-deployed-users
+// policy (one post-M0 pin change, recorded in the CHANGELOG): the
+// default is now "auto" — probe-and-enable across the portable set,
+// resolved by resolveSourcesAuto (auto_test.go) — where it had been
+// k8s-events only (the frozen M0 surface) since the flag landed. The
+// M0 flag surface itself (TestFlagSurfaceFrozen) predates --sources
+// and is untouched. --sources=k8s-events reproduces the pre-auto
+// default byte-for-byte, pinned below.
+func TestSourcesFlag_DefaultIsAuto(t *testing.T) {
 	t.Parallel()
 	f, err := parseFlags(nil)
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if f.sources != k8sevents.Name {
-		t.Fatalf("default --sources = %q, want %q", f.sources, k8sevents.Name)
+	if f.sources != autoValue {
+		t.Fatalf("default --sources = %q, want %q (the 2026-07-27 default change)", f.sources, autoValue)
+	}
+
+	// The old default, pinned explicitly: --sources=k8s-events builds
+	// exactly the M0 surface — one source, no typed handles.
+	f, err = parseFlags([]string{"--sources=k8s-events", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
 	if bs.objState != nil {
-		t.Error("object-state must NOT be constructed by default")
+		t.Error("object-state must NOT be constructed with --sources=k8s-events")
 	}
 	if bs.rollout != nil || bs.saturation != nil {
-		t.Error("rollout/saturation must NOT be constructed by default")
+		t.Error("rollout/saturation must NOT be constructed with --sources=k8s-events")
 	}
 	if bs.degradation != nil || bs.expiry != nil {
-		t.Error("degradation/expiry must NOT be constructed by default")
+		t.Error("degradation/expiry must NOT be constructed with --sources=k8s-events")
 	}
 	all := bs.registry.All()
 	if len(all) != 1 || all[0].Name() != k8sevents.Name {
-		t.Errorf("default registry = %d sources, want just k8s-events", len(all))
+		t.Errorf("--sources=k8s-events registry = %d sources, want just k8s-events", len(all))
+	}
+}
+
+// TestSourcesFlag_AutoMixRejected: "auto" is a whole-value sentinel,
+// not a list member — mixing it with named sources is a config error,
+// never a guess.
+func TestSourcesFlag_AutoMixRejected(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=auto,object-state", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	err = f.validate()
+	if err == nil {
+		t.Fatal("--sources=auto,<name> must be a config error")
+	}
+	if !strings.Contains(err.Error(), "auto cannot be combined") {
+		t.Errorf("error should explain the auto/list conflict: %v", err)
 	}
 }
 
@@ -412,17 +445,18 @@ func TestSourcesFlag_CapacityEnabled(t *testing.T) {
 		t.Error("capacity not registered")
 	}
 
-	// Default surface: capacity must NOT be constructed.
-	fDefault, err := parseFlags(nil)
+	// Explicit lists stay literal: a list without capacity must NOT
+	// construct it (the pre-auto default surface, pinned).
+	fDefault, err := parseFlags([]string{"--sources=k8s-events", "--dry-run"})
 	if err != nil {
-		t.Fatalf("parseFlags(nil): %v", err)
+		t.Fatalf("parseFlags: %v", err)
 	}
 	bsDefault, err := buildSources(fDefault, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
-		t.Fatalf("buildSources(default): %v", err)
+		t.Fatalf("buildSources(k8s-events only): %v", err)
 	}
 	if bsDefault.capacity != nil {
-		t.Error("capacity must NOT be constructed by default")
+		t.Error("capacity must NOT be constructed without being named")
 	}
 }
 

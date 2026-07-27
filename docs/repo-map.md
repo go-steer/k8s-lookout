@@ -181,9 +181,13 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`triage-status-write-design.md`](./triage-status-write-design.md),
   not in the original command table; still awaiting maintainer
   sign-off.
-- **`--storm` defaults OFF** (design ships storm correlation in M2 as
-  standard behavior) pending the M3 `GraphAt` restart-replay fix —
-  see `docs/milestones/M3.md` observations.
+- **`--storm` default** — design ships storm correlation as standard
+  behavior; it shipped default-OFF through 0.8.0 (M3 `GraphAt`
+  restart-replay observations). Divergence closed by the auto-defaults
+  change: `--storm=auto` (with `--sources=auto`) now resolves ON
+  whenever the graph grants are present; the milestone notes' "stays
+  OFF" lines are point-in-time. The `GraphAt` restart-replay item
+  itself remains open — tracked in `docs/milestones/M3.md`/`M5.md`.
 - **`k8s-capacity` skill** (§4.4 tree): shipped post-M5 alongside the
   docs-site Guides section — divergence closed (the M5 record's
   "never shipped" note is point-in-time).
