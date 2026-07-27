@@ -10,7 +10,9 @@ must collect, connect, and eventually silence. When `lookout`'s sentinel
 spots a problem it instead opens a **session** — an ongoing record of
 one incident that accumulates the follow-up observations, the
 diagnosis, and finally proof the problem is actually gone. This page
-explains the four mechanisms that make that work.
+explains the four mechanisms that make that work; for the inventory of
+what's watched in the first place, see [What the sentinel
+watches](/getting-started/what-the-sentinel-watches/).
 
 ## Recovery injects: fix-verify without polling
 

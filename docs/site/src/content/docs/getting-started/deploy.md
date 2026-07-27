@@ -72,10 +72,12 @@ minimum: `--daemon-url`, `--token-env`, `--mode=per-incident`, `--owner`,
 `--metrics-addr=:9090`, `--log-level=info`. The capability opt-ins:
 
 - **`--sources`** — which signal sources run. The default is
-  `k8s-events` only (the frozen predecessor surface). The full set:
-  `k8s-events, object-state, rollout, saturation, degradation, expiry,
-  capacity, quota, token-burn`. Each source's RBAC needs are probed at
-  startup; each is individually disableable.
+  `k8s-events` only (the frozen predecessor surface); the other eight
+  are opt-in. What each source watches for, with example triggers and
+  extra needs, is [What the sentinel
+  watches](/getting-started/what-the-sentinel-watches/). Each enabled
+  source's RBAC needs are probed at startup; each is individually
+  disableable.
 - **`--storm`** — storm correlation: incidents sharing a blast-radius
   key (nearest common topology ancestor) within `--storm-window` form
   one `kind=storm` session instead of dozens of per-pod pages. Requires

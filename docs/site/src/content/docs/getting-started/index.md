@@ -24,11 +24,14 @@ incremental — each step works without the next:
 3. [Deploy the sentinel](/getting-started/deploy/) — `kubectl apply -f
    deploy/`, what each manifest is, the RBAC tiers, and the flags that
    matter.
-4. [Connect to core-agent](/getting-started/connect-core-agent/) — the
+4. [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
+   — the failure classes it monitors, what is on out of the box, and
+   the flag line that turns the rest on.
+5. [Connect to core-agent](/getting-started/connect-core-agent/) — the
    daemon contract: sessions, injects, per-incident vs shared routing.
-5. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
+6. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
    for daemons that cannot shell out.
-6. [Integrations](/getting-started/integrations/) — beyond core-agent:
+7. [Integrations](/getting-started/integrations/) — beyond core-agent:
    the read path from any MCP client or shell-capable agent, and the
    watch path into any webhook receiver.
 
