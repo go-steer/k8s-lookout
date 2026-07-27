@@ -61,6 +61,9 @@
 
   /* Content measure + type scale */
   --sl-content-width: 62rem;
+  /* Anchor content to the left nav; spare width falls to the right
+   * instead of pooling as a gutter between nav and content. */
+  --sl-content-margin-inline: 0 auto;
   --sl-line-height: 1.7;
   --sl-text-base: 1rem;
 }
@@ -289,9 +292,14 @@
 @media (min-width: 72rem) {
   .right-sidebar-container {
     /* Flat width: Starlight's own formula grows the rail with the
-     * viewport; a table of contents never needs more than this.
-     * Extra viewport width goes to the content column instead
-     * (--sl-content-width above). */
+     * viewport; a table of contents never needs more than this. */
     width: 13.5rem;
+  }
+  /* Cap the pane holding the content column so the TOC rail sits
+   * immediately to the content's right; spare viewport width falls
+   * to the far right of the rail instead of pooling between the
+   * nav, the content, and the TOC. */
+  .main-pane {
+    max-width: calc(var(--sl-content-width) + 2 * var(--sl-content-pad-x));
   }
 }
