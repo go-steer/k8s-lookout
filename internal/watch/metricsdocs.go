@@ -79,6 +79,7 @@ func MetricsInventory() []MetricDoc {
 		{m.triageFlips, "counter", nil},
 		{m.triageRegressed, "counter", nil},
 		{m.crossSourceFollowups, "counter", []string{"source"}},
+		{m.sinkInfo, "gauge", []string{"sink"}},
 	}
 	out := make([]MetricDoc, 0, len(rows))
 	for _, r := range rows {

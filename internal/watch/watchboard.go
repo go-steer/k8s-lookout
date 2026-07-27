@@ -49,7 +49,14 @@ import (
 
 // watchboardConfig is the flag-shaped construction input.
 type watchboardConfig struct {
-	injector      *inject.Injector
+	// injector is the agent sink digests flush through (the field
+	// keeps its historical name). When it carries the
+	// inject.SessionOpener capability (the core-agent sink), rotation
+	// keeps the frozen §15 Q2 wire order — empty successor session
+	// first, lineage pointer into the closed session, then the digest.
+	// A stateless sink (webhook) opens the successor WITH the digest
+	// and appends the lineage pointer afterwards.
+	injector      inject.Sink
 	metrics       *metrics
 	cluster       string
 	dryRun        bool
@@ -181,49 +188,15 @@ func (b *watchboard) flushLocked(ctx context.Context) {
 			b.generation = 1
 		}
 	} else if b.sid == "" || b.injects >= b.rotateAfter {
-		rotating := b.sid != ""
-		newSid, err := b.injector.CreateSession(ctx)
-		if err != nil {
-			b.metrics.sessionCreates.WithLabelValues("error").Inc()
-			if rotating {
-				// Rotation deferred, not data lost: keep flushing into
-				// the over-threshold session and retry the rotation on
-				// the next flush.
-				log.Printf("watchboard: create successor session failed (rotation deferred to next flush): %v", err)
-			} else {
-				// No board session at all — drop the buffer, consistent
-				// with a failed per-incident CreateSession dropping its
-				// event. The next warning starts a fresh buffer.
-				b.metrics.injectErrors.WithLabelValues("watchboard", "session_create").Inc()
-				log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(b.buffer), err)
-				b.clearBufferLocked()
-				return
-			}
-		} else {
-			b.metrics.sessionCreates.WithLabelValues("ok").Inc()
-			if rotating {
-				rotated := inject.WatchboardRotatedPayload{
-					Kind:               inject.KindWatchboardRotated,
-					Cluster:            b.cluster,
-					BoardGeneration:    b.generation,
-					SuccessorSessionID: newSid,
-					InjectsCount:       b.injects,
-					RotatedAt:          now,
-				}
-				if rerr := b.injector.InjectWatchboardRotated(ctx, b.sid, rotated); rerr != nil {
-					// The lineage pointer is best-effort: the successor
-					// is already the live board, and the digest lineage
-					// stays reconstructable from (generation, sequence).
-					b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
-					log.Printf("watchboard: rotated lineage inject into %s failed: %v", b.sid, rerr)
-				}
-				b.metrics.watchboardRotations.Inc()
-				log.Printf("watchboard: rotated after %d digest inject(s): %s → %s (generation %d → %d)",
-					b.injects, b.sid, newSid, b.generation, b.generation+1)
-			}
-			b.sid = newSid
-			b.generation++
-			b.injects = 0
+		opener, ok := b.injector.(inject.SessionOpener)
+		if !ok {
+			// Stateless sink: the successor incident opens WITH the
+			// digest as its payload — the whole flush happens there.
+			b.openStatelessLocked(ctx, now)
+			return
+		}
+		if !b.openSessionLocked(ctx, opener, now) {
+			return
 		}
 	}
 
@@ -231,7 +204,7 @@ func (b *watchboard) flushLocked(ctx context.Context) {
 	if b.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", b.sid, string(out))
-	} else if err := b.injector.InjectWatchboardDigest(ctx, b.sid, payload); err != nil {
+	} else if err := b.injector.Append(ctx, b.sid, payload); err != nil {
 		// Dropped, consistent with a failed per-incident inject: the
 		// entries were counted (watchboard_entries_total) and remain
 		// visible in the dedup cache; retrying a stateful buffer
@@ -241,6 +214,138 @@ func (b *watchboard) flushLocked(ctx context.Context) {
 		b.clearBufferLocked()
 		return
 	}
+	b.finishFlushLocked()
+}
+
+// openSessionLocked creates (or rotates onto) the watchboard session
+// through the core-agent sink's SessionOpener capability, keeping the
+// frozen §15 Q2 wire order: empty successor first, kind=
+// watchboard.rotated into the closed session, digest afterwards (the
+// caller's flush). Returns false when the flush must stop (no session
+// to flush into — buffer already dropped). Caller holds b.mu.
+func (b *watchboard) openSessionLocked(ctx context.Context, opener inject.SessionOpener, now time.Time) bool {
+	rotating := b.sid != ""
+	newSid, err := opener.CreateSession(ctx)
+	if err != nil {
+		b.metrics.sessionCreates.WithLabelValues("error").Inc()
+		if rotating {
+			// Rotation deferred, not data lost: keep flushing into
+			// the over-threshold session and retry the rotation on
+			// the next flush.
+			log.Printf("watchboard: create successor session failed (rotation deferred to next flush): %v", err)
+			return true
+		}
+		// No board session at all — drop the buffer, consistent
+		// with a failed per-incident CreateSession dropping its
+		// event. The next warning starts a fresh buffer.
+		b.metrics.injectErrors.WithLabelValues("watchboard", "session_create").Inc()
+		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(b.buffer), err)
+		b.clearBufferLocked()
+		return false
+	}
+	b.metrics.sessionCreates.WithLabelValues("ok").Inc()
+	if rotating {
+		rotated := inject.WatchboardRotatedPayload{
+			Kind:               inject.KindWatchboardRotated,
+			Cluster:            b.cluster,
+			BoardGeneration:    b.generation,
+			SuccessorSessionID: newSid,
+			InjectsCount:       b.injects,
+			RotatedAt:          now,
+		}
+		if rerr := b.injector.Append(ctx, b.sid, rotated); rerr != nil {
+			// The lineage pointer is best-effort: the successor
+			// is already the live board, and the digest lineage
+			// stays reconstructable from (generation, sequence).
+			b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
+			log.Printf("watchboard: rotated lineage inject into %s failed: %v", b.sid, rerr)
+		}
+		b.metrics.watchboardRotations.Inc()
+		log.Printf("watchboard: rotated after %d digest inject(s): %s → %s (generation %d → %d)",
+			b.injects, b.sid, newSid, b.generation, b.generation+1)
+	}
+	b.sid = newSid
+	b.generation++
+	b.injects = 0
+	return true
+}
+
+// openStatelessLocked is the flush + rotation path for sinks WITHOUT
+// the SessionOpener capability (the webhook sink): an incident at a
+// stateless receiver exists only by receiving its first payload, so
+// the successor opens WITH the digest and the kind=watchboard.rotated
+// lineage pointer is appended to the CLOSED incident afterwards — the
+// one place the webhook wire order differs from the core-agent
+// sink's. Caller holds b.mu.
+func (b *watchboard) openStatelessLocked(ctx context.Context, now time.Time) {
+	rotating := b.sid != ""
+	prevSid, prevGen, prevInjects := b.sid, b.generation, b.injects
+	// Successor lineage coordinates ride the opening digest:
+	// (generation+1, sequence 1).
+	b.generation++
+	b.injects = 0
+	payload := b.digestPayloadLocked(now)
+	newSid, err := b.injector.OpenIncident(ctx, payload)
+	if newSid == "" {
+		b.sid, b.generation, b.injects = prevSid, prevGen, prevInjects
+		b.metrics.sessionCreates.WithLabelValues("error").Inc()
+		if rotating {
+			// Rotation deferred like the SessionOpener path — but the
+			// digest rode the failed open, so deliver it into the
+			// over-threshold incident instead.
+			log.Printf("watchboard: open successor incident failed (rotation deferred to next flush): %v", err)
+			payload = b.digestPayloadLocked(now)
+			if aerr := b.injector.Append(ctx, b.sid, payload); aerr != nil {
+				b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
+				log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", b.sid, len(b.buffer), aerr)
+				b.clearBufferLocked()
+				return
+			}
+			b.finishFlushLocked()
+			return
+		}
+		b.metrics.injectErrors.WithLabelValues("watchboard", "session_create").Inc()
+		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(b.buffer), err)
+		b.clearBufferLocked()
+		return
+	}
+	b.metrics.sessionCreates.WithLabelValues("ok").Inc()
+	b.sid = newSid
+	if rotating {
+		rotated := inject.WatchboardRotatedPayload{
+			Kind:               inject.KindWatchboardRotated,
+			Cluster:            b.cluster,
+			BoardGeneration:    prevGen,
+			SuccessorSessionID: newSid,
+			InjectsCount:       prevInjects,
+			RotatedAt:          now,
+		}
+		if rerr := b.injector.Append(ctx, prevSid, rotated); rerr != nil {
+			// Best-effort lineage, same as the SessionOpener path.
+			b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
+			log.Printf("watchboard: rotated lineage inject into %s failed: %v", prevSid, rerr)
+		}
+		b.metrics.watchboardRotations.Inc()
+		log.Printf("watchboard: rotated after %d digest inject(s): %s → %s (generation %d → %d)",
+			prevInjects, prevSid, newSid, prevGen, prevGen+1)
+	}
+	if err != nil {
+		// Incident opened but the digest delivery failed (a partial
+		// open — not something the webhook sink produces today, but
+		// the Sink contract allows it): consistent with a failed
+		// digest inject, the buffer is dropped after counting.
+		b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
+		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", b.sid, len(b.buffer), err)
+		b.clearBufferLocked()
+		return
+	}
+	b.finishFlushLocked()
+}
+
+// finishFlushLocked is the common success tail of a digest delivery:
+// counters, per-entry session binding, the flush log, buffer reset.
+// Caller holds b.mu.
+func (b *watchboard) finishFlushLocked() {
 	b.injects++
 	b.metrics.watchboardDigests.Inc()
 	// Bind AFTER the successful inject: followups and §7.4 outcomes

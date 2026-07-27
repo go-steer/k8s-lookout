@@ -35,7 +35,8 @@ k8s-lookout/
 │   ├── engine/           # source-agnostic pipeline pieces: filter, dedup, storm, severity
 │   │                     #   routing, recovery, fingerprint recipe, quota-draft
 │   ├── graph/            # in-memory topology index (COW snapshots) + LKGH history/replay
-│   ├── inject/           # daemon HTTP client + the FROZEN wire payload types
+│   ├── inject/           # agent sinks behind the two-verb Sink interface (core-agent
+│   │                     #   daemon client + generic webhook) + FROZEN wire payload types
 │   ├── kube/             # client bootstrap (kubeconfig/in-cluster) + informer source glue
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
@@ -69,9 +70,9 @@ enrichment (internal/watch) ───┘        │              (summary line, 
 Watch-path — the sentinel pipeline (§7.1), wired in `internal/watch`:
 
 ```
-pkg/sources (9) ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ daemon
-                  └────────────── pkg/engine ──────────┘   (pkg/checks,               sessions
-                                     │                      in-process)
+pkg/sources (9) ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
+                  └────────────── pkg/engine ──────────┘   (pkg/checks,     (Sink)     daemon sessions
+                                     │                      in-process)                | webhook /incidents
         pkg/store (occurrences, graph history, §9.2/§9.4 records via pkg/memory)
         pkg/graph (blast-radius keys for storm correlation; snapshots into the store)
 ```
@@ -90,6 +91,7 @@ Violating any of these is a bug, not a test update
 | --- | --- | --- |
 | `lookout watch` flag surface (M0 image-swap compat) | `internal/watch/main.go` | `internal/watch/flags_contract_test.go` (`TestFlagSurfaceFrozen`; additive flags get their own pin tests) |
 | Inject wire payloads, incl. byte-frozen M0 `k8s-event`/`k8s-event-followup` pair | `pkg/inject/injector.go` | `pkg/inject/schema_freeze_test.go` (field-set ledger, 32-kind inventory, byte-exact round-trip) |
+| Webhook sink wire (`POST /incidents` + `/incidents/<id>/events`, schema-v1 payload as the body — never the daemon envelope) | `pkg/inject/webhook.go` | `internal/watch/webhook_dispatch_test.go` (byte-exact open/append pins: k8s-event, resolved, storm, watchboard.digest, watchboard.rotated) |
 | Signal-schema v1 ledger (fleet contract with AX) | [`signal-schema-v1.md`](./signal-schema-v1.md) | same freeze tests; removal/rename is a v2 negotiation with AX, additions extend ledger + doc together |
 | engine↔inject kind constants stay one value | `pkg/engine/signal.go`, `pkg/inject` | `internal/watch/signal_contract_test.go` |
 | Fingerprint recipe (the §8/§9.4 join key) | `pkg/engine/fingerprint.go` | `pkg/engine/fingerprint_test.go` + `TestFingerprintParity_PushAndScan` (`internal/watch/m5_corpus_rollup_test.go`) |

@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package inject implements the thin HTTP client the watch sentinel
-// uses to speak to a core-agent daemon, plus the frozen wire types it
-// POSTs (see payload.go).
+// Package inject implements the agent sinks the watch sentinel
+// delivers incidents through — the core-agent daemon client (the
+// default) and the generic webhook sink (webhook.go), both behind the
+// two-verb Sink interface (sink.go) — plus the frozen wire types they
+// POST (see payload.go).
 package inject
 
 import (
@@ -26,9 +28,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
-
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Config captures the daemon-side surface the sidecar posts
@@ -61,11 +60,22 @@ type Config struct {
 // per-incident session and returns the SessionID) and
 // POST /sessions/<sid>/inject (queues a message on that session's
 // inbox). No SSE, no auth introspection, no session-list — this is
-// intentionally the thinnest wire client.
+// intentionally the thinnest wire client. It is the core-agent
+// implementation of Sink (and of the SessionOpener capability); the
+// typed Inject* methods below predate the Sink extraction and remain
+// for compatibility — they and the Sink verbs share injectJSON, so
+// the wire bytes are identical either way.
 type Injector struct {
 	cfg    Config
 	client *http.Client
 }
+
+// Compile-time contract: the core-agent client is a Sink and can open
+// empty sessions ahead of their first payload.
+var (
+	_ Sink          = (*Injector)(nil)
+	_ SessionOpener = (*Injector)(nil)
+)
 
 // NewInjector constructs an Injector from the config. Validates the
 // required fields early so misconfig fails fast.
@@ -84,23 +94,36 @@ func NewInjector(cfg Config) (*Injector, error) {
 	// injector's responsibility to enforce).
 	client := cfg.HTTPClient
 	if client == nil {
-		// Real production client with a modest timeout —
-		// POST /sessions + POST /inject are both cheap. If the
-		// daemon takes >10s to accept one, something's wrong.
-		//
-		// Wrapped with otelhttp so the outbound POST carries the
-		// current span's traceparent — that's how the daemon
-		// (which wraps its attach mux with otelhttp.NewHandler)
-		// picks the trace context up and continues the trace
-		// across the process boundary. See #217. When telemetry
-		// is off (otel.exporter=none, the default), the propagator
-		// is a no-op and the wrapper adds negligible overhead.
-		client = &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
-		}
+		// The shared sink transport (sink.go): 10s timeout,
+		// otelhttp-wrapped so the outbound POST carries the current
+		// span's traceparent across the process boundary. See #217.
+		client = newSinkHTTPClient()
 	}
 	return &Injector{cfg: cfg, client: client}, nil
+}
+
+// OpenIncident implements Sink against the core-agent daemon: POST
+// /sessions opens the per-incident session, then the initial payload
+// is delivered through the same envelope Inject always sent — the
+// wire bytes are identical to the pre-Sink CreateSession + Inject
+// pair. When the session was created but the initial delivery failed,
+// the SessionID is returned ALONGSIDE the error (see the Sink
+// contract) so callers can keep the incident bound to the session —
+// exactly the pre-Sink dispatcher behavior of binding on create and
+// counting the inject error separately.
+func (i *Injector) OpenIncident(ctx context.Context, payload any) (string, error) {
+	sid, err := i.CreateSession(ctx)
+	if err != nil {
+		return "", err
+	}
+	return sid, i.injectJSON(ctx, sid, payload)
+}
+
+// Append implements Sink: deliver one payload into the existing
+// incident session — the exact endpoint, envelope, and bytes of
+// Inject.
+func (i *Injector) Append(ctx context.Context, id string, payload any) error {
+	return i.injectJSON(ctx, id, payload)
 }
 
 // createSessionResponse mirrors pkg/attach.createSessionResponse's
