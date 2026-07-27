@@ -23,7 +23,7 @@ lookout triage changes <Kind>/[<namespace>/]<name> [flags]
 | --- | --- | --- | --- |
 | `--depth` | int | `2` | neighborhood radius: graph edges followed per direction to decide which objects' changes are in scope |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

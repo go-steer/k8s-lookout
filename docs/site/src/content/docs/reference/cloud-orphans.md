@@ -22,7 +22,7 @@ lookout cloud orphans [flags]
 | `--only` | string | `disks,lbs` | resource classes to sweep, comma-separated: disks, lbs |
 | `--min-age` | duration | `24h0m0s` | report a disk only when unattached at least this long (age from last detach, else creation); disks with no datable age are always reported |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

@@ -15,7 +15,7 @@ MCP tool: `k8s_workload_identity`
 lookout state wi [flags]
 ```
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

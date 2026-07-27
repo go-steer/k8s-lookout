@@ -21,7 +21,7 @@ lookout perf probe [flags]
 | --- | --- | --- | --- |
 | `--pack` | string | — | which query pack to run (required): apiserver\|apf\|etcd\|startup |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

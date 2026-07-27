@@ -5,7 +5,7 @@ sidebar:
   order: 6
 ---
 
-You do not need GKE — or any cloud — to use lookout: around 80% of the
+You do not need GKE — or any cloud — to use `lookout`: around 80% of the
 suite is pure `client-go` and works on **any conformant Kubernetes
 cluster**, a local kind cluster included. This page explains exactly
 which pieces do need a cloud provider, and how a missing capability

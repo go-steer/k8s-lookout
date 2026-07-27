@@ -6,7 +6,7 @@ sidebar:
 ---
 
 This section is for anyone starting from zero: you have a kubeconfig,
-maybe an AI agent, and you have never run lookout. By the end you will
+maybe an AI agent, and you have never run `lookout`. By the end you will
 have the binary installed, real diagnostic output from a cluster you
 already have access to, and — if you take the later steps — a sentinel
 deployed in-cluster, opening incident sessions for your agent. The

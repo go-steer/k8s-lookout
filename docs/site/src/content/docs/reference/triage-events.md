@@ -22,7 +22,7 @@ lookout triage events [flags]
 | `--hpa-window` | duration | `30m` | report event.hpa_thrash when enough scale-direction changes fall inside a window this long |
 | `--hpa-flips` | int | `2` | scale-direction changes within --hpa-window that count as thrash (2 = up→down→up) |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

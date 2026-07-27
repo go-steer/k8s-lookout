@@ -45,7 +45,7 @@ graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — -
 - Writes are non-blocking: a full writer buffer or failed batch insert
   loses records rather than stalling the pipeline, counted in
   `store_write_drops_total` by cause. Alert on that counter — see
-  [Observing lookout](/operations/observability/).
+  [Observing `lookout`](/operations/observability/).
 
 ## Copying the store off a pod
 

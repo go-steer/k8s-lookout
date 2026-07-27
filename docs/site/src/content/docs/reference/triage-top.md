@@ -25,7 +25,7 @@ lookout triage top [flags]
 | `--show-unlimited` | bool | — | list each container missing a cpu or memory limit individually (default: one aggregate count) |
 | `--history` | duration | — | enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

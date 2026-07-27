@@ -26,7 +26,7 @@ lookout triage logs [flags]
 | `--max-templates` | int | `40` | cap emitted template clusters; the low-count tail is summarized in one log.overflow finding |
 | `--keep-probes` | bool | — | keep health/readiness probe request lines instead of stripping them |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

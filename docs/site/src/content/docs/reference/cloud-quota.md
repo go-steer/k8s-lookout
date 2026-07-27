@@ -22,7 +22,7 @@ lookout cloud quota [flags]
 | `--quota-warn` | int | `80` | report a quota only at or above this percent of its limit (critical is fixed at 95%) |
 | `--all` | bool | — | exploratory dump: emit every ratable quota regardless of --quota-warn (info severity below it), sorted by pct descending |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

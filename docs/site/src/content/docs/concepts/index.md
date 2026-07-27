@@ -6,14 +6,14 @@ sidebar:
 ---
 
 This page is the ramp into the detail pages: the mental model behind
-lookout's behavior, in plain terms, before any schema or flag. Read it
+`lookout`'s behavior, in plain terms, before any schema or flag. Read it
 if you have run a few commands (or are deciding whether to deploy the
 sentinel) and want to understand why the output looks the way it does.
 Nothing here requires having read the design spec.
 
 ## Two halves
 
-lookout splits along one line: are you asking the cluster a question,
+`lookout` splits along one line: are you asking the cluster a question,
 or is the cluster telling you something? The first half is a set of
 one-shot diagnostic commands you (or your agent) run mid-investigation —
 "what's broken", "what changed", "show me the logs, distilled" — each
@@ -31,7 +31,7 @@ same underlying checks; the details are in
 
 Most incident questions are about relationships, and the Kubernetes API
 does not answer those directly: finding everything connected to one pod
-takes a dozen separate lookups. lookout maintains an in-memory map — the
+takes a dozen separate lookups. `lookout` maintains an in-memory map — the
 **topology graph** — that answers "what does this workload depend on,
 who is affected if it breaks, and what changed around it" in a single
 query, against the live cluster or against any past moment the sentinel
@@ -41,7 +41,7 @@ time is [The topology graph](/concepts/topology-graph/).
 ## Fewer, richer signals — not more alerts
 
 Traditional monitoring optimizes for detection: fire an alert per
-symptom and let a human sort the pile. lookout optimizes for
+symptom and let a human sort the pile. `lookout` optimizes for
 investigation: fewer observations, each carrying more, already
 correlated. Everything it emits — a scan finding, a sentinel incident —
 has one fixed shape (a **signal**) and carries a **fingerprint**, a
@@ -76,7 +76,7 @@ documented limits are in
 
 ## Runs anywhere, degrades loudly
 
-Most of lookout is plain Kubernetes and works on any conformant
+Most of `lookout` is plain Kubernetes and works on any conformant
 cluster, a local kind cluster included. The cloud-specific parts
 (GKE/GCP today) sit behind a strict boundary, and a missing capability
 always announces itself — an explicit "unavailable" finding or a named
@@ -86,11 +86,11 @@ for "all clear". The exact split is
 
 ## Who is trusted to do what
 
-The trust model is an escalation with a hard stop. lookout *observes*:
+The trust model is an escalation with a hard stop. `lookout` *observes*:
 scans produce findings, the sentinel turns findings into sessions. Your
 agent *decides*: it reads those sessions, diagnoses, and records its
 judgment. And when something must actually change in the cluster, the
-agent *acts through its own permission gates* — lookout holds read-only
+agent *acts through its own permission gates* — `lookout` holds read-only
 credentials and never writes to the cluster, so the blast radius of the
 eyes is zero by construction. How an agent's judgment feeds back into
 routing and scan output is part of

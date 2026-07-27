@@ -5,7 +5,7 @@ template: doc
 tableOfContents: false
 ---
 
-k8s-lookout helps AI troubleshooting agents see what is happening inside
+`k8s-lookout` helps AI troubleshooting agents see what is happening inside
 a Kubernetes cluster. It answers the questions an investigation runs on —
 what is broken, what changed, who is affected — in a form small enough
 and safe enough to hand straight to a language model, and it can watch
@@ -22,16 +22,16 @@ even a well-equipped agent only investigates when asked. Nobody tells it
 the moment a bad image tag ships or a certificate is three days from
 expiring.
 
-## What lookout does
+## What `lookout` does
 
-lookout is a command-line toolset that answers diagnostic questions
+`lookout` is a command-line toolset that answers diagnostic questions
 about a cluster in a compact, secret-safe form an agent can act on
 directly — also callable as tools over MCP, the protocol most agent
 runtimes speak. An optional in-cluster watcher, the **sentinel**, spots
 trouble as it develops and opens an incident session for your agent —
 often before users notice anything.
 
-lookout never writes to your cluster. It reads, watches, and reports;
+`lookout` never writes to your cluster. It reads, watches, and reports;
 any fix goes through your agent's own approval process.
 
 ## A taste

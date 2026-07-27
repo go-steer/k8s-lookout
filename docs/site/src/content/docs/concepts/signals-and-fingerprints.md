@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-Everything lookout tells you — a finding printed by a scan, an incident
+Everything `lookout` tells you — a finding printed by a scan, an incident
 the sentinel opens — arrives in one shape: a **Signal**. This page
 explains that shape, the **fingerprint** that names an incident's
 *class* so the same problem seen twice is counted once, and why the

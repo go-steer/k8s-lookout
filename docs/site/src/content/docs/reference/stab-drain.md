@@ -21,7 +21,7 @@ lookout stab drain [flags]
 | --- | --- | --- | --- |
 | `--node` | string | — | analyze one node in detail: every blocker on it becomes its own finding. Exactly one of --node or -A (all-nodes summary) is required. |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

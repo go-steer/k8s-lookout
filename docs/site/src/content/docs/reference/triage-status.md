@@ -28,7 +28,7 @@ lookout triage status [flags]
 | `--severity-override` | string | — | your routing judgment for further signals of this incident: critical\|warning\|info (empty = keep the signal's own class). Honored by sentinel routing and health scans while the record is open |
 | `--action` | string | — | action taken / paper trail ("fix PR opened; config rollout pending") |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

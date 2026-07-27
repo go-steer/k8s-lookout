@@ -40,7 +40,7 @@ standing drill policy, the Kubernetes legs live on kind; all abridged.
 The draft is formula-pinned (suggested limit covers twice the expected
 request turnaround at the observed slope, floored at 1.5× the current
 limit), with a human-grade justification generated from the same numbers
-the forecast fired on. **lookout drafts; it never files.** Submitting the
+the forecast fired on. **`lookout` drafts; it never files.** Submitting the
 increase request is the agent's move, through the `core-agent` daemon's
 permission gate — the one place in the suite where the managed write path
 is a clean API call with paperwork attached.

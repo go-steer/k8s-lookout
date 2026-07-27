@@ -42,7 +42,7 @@ breaking change to running deployments, never a refactor.
 | `--distill-interval` | duration | `6h0m0s` | How often the §9.2 distiller pass converts recurring occurrences into durable memory facts (requires --store; the pass reads the last 7d of occurrences). 0 disables distillation. Must be >= 0. |
 | `--dry-run` | bool | — | Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run. |
 | `--enrich` | string | `critical` | Which severities get §7.6 enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off. |
-| `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (§15 Q3: fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them. |
+| `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (§15 Q3: fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the `lookout` command that reproduces them. |
 | `--enrich-log-lines` | int | `200` | Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1. |
 | `--enrich-timeout` | duration | `5s` | Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0. |
 | `--exclude-namespace` | string | — | Comma-separated deny-list of namespaces. |

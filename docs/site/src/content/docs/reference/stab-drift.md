@@ -21,7 +21,7 @@ lookout stab drift [flags]
 | --- | --- | --- | --- |
 | `--manager` | string | — | the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning the most spec leaf fields summed across the scanned objects, ties broken to the lexicographically smallest |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

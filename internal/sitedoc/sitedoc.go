@@ -35,6 +35,7 @@ package sitedoc
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -98,7 +99,7 @@ func commandPage(c checks.Command) string {
 		b.WriteString("## Flags\n\n")
 		writeSpecTable(&b, c.Flags)
 	}
-	b.WriteString("## Common flags (every lookout command)\n\n")
+	b.WriteString("## Common flags (every `lookout` command)\n\n")
 	writeSpecTable(&b, emit.CommonFlags())
 	if c.GraphBacked {
 		b.WriteString("## Point-in-time flags (graph-backed commands)\n\n")
@@ -283,7 +284,7 @@ func indexPage(reg *checks.Registry) string {
 		b.WriteString("\n")
 	}
 	for _, g := range reg.Groups() {
-		fmt.Fprintf(&b, "### lookout %s\n\n%s\n\n", g, escapeProse(checks.GroupSummary(g)))
+		fmt.Fprintf(&b, "### `lookout %s`\n\n%s\n\n", g, escapeProse(checks.GroupSummary(g)))
 		for _, c := range reg.GroupCommands(g) {
 			writeIndexRow(&b, c)
 		}
@@ -318,16 +319,56 @@ func yamlQuote(s string) string {
 // split the cell — pipes break GFM tables even inside code spans).
 func cell(s string) string { return strings.ReplaceAll(escapeProse(s), "|", "\\|") }
 
-// escapeProse backslash-escapes raw '<' OUTSIDE `code spans` so
-// placeholder tokens like <Kind> render as literal text instead of
-// being parsed as HTML by the site build. Inside code spans '<' is
-// already literal and must stay untouched.
+// escapeProse prepares metadata prose for the site's markdown OUTSIDE
+// `code spans` (inside them everything is already literal): raw '<'
+// is backslash-escaped so placeholder tokens like <Kind> render as
+// text instead of parsing as HTML, and bare product names get the
+// site's code formatting (`k8s-lookout` the project, `lookout` the
+// binary) — the docs-site convention; --help and the MCP schemas
+// render the same metadata without backticks, so the formatting is
+// applied here, never in the source strings.
 func escapeProse(s string) string {
 	parts := strings.Split(s, "`")
 	for i := 0; i < len(parts); i += 2 {
-		parts[i] = strings.ReplaceAll(parts[i], "<", `\<`)
+		parts[i] = codeProductNames(strings.ReplaceAll(parts[i], "<", `\<`))
 	}
 	return strings.Join(parts, "`")
+}
+
+// productName matches a product-name token; boundary checks in
+// codeProductNames keep it from firing inside paths, image refs, or
+// filenames ("go-steer/k8s-lookout", "ghcr.io/go-steer/lookout",
+// "lookout.db").
+var productName = regexp.MustCompile(`k8s-lookout|lookout`)
+
+// codeProductNames wraps bare "k8s-lookout" / "lookout" tokens in
+// backticks. A token is bare when it is not glued to identifier, path,
+// or hostname characters on either side; a trailing '.' counts as
+// sentence punctuation unless it starts an extension ("lookout.db").
+func codeProductNames(s string) string {
+	wordy := func(c byte) bool {
+		return c == '_' || c == '-' || c == '/' ||
+			('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9')
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range productName.FindAllStringIndex(s, -1) {
+		start, end := m[0], m[1]
+		if start > 0 && (wordy(s[start-1]) || s[start-1] == '.') {
+			continue
+		}
+		if end < len(s) && (wordy(s[end]) ||
+			(s[end] == '.' && end+1 < len(s) && wordy(s[end+1]) && s[end+1] != '-' && s[end+1] != '/')) {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteByte('`')
+		b.WriteString(s[start:end])
+		b.WriteByte('`')
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // SortedPaths returns the generated paths in stable order (test and

@@ -21,7 +21,7 @@ lookout cloud ipspace [flags]
 | --- | --- | --- | --- |
 | `--all` | bool | — | exploratory dump: emit every range regardless of utilization (info severity below 80%), sorted by pct descending |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

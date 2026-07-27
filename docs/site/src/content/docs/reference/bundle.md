@@ -25,7 +25,7 @@ lookout bundle [flags]
 | `--cert-warn` | duration | `720h` | report TLS certificates expiring within this window (edges section) |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

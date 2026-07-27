@@ -23,7 +23,7 @@ lookout triage radius <Kind>/[<namespace>/]<name> [flags]
 | --- | --- | --- | --- |
 | `--depth` | int | `3` | graph edges followed per direction from the target's pods |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

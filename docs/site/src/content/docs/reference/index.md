@@ -23,7 +23,7 @@ Composed entry points:
 - [`lookout bundle`](/reference/bundle/) — The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.
 - [`lookout health`](/reference/health/) — "Any issues with this cluster?" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
-### lookout cloud
+### `lookout cloud`
 
 GCP-side reads: stockouts, orphaned resources, IP space, quota
 
@@ -32,26 +32,26 @@ GCP-side reads: stockouts, orphaned resources, IP space, quota
 - [`lookout cloud quota`](/reference/cloud-quota/) — Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings from --quota-warn (default 80%), critical at 95% — quota is incompressible (scale-ups fail at the limit) and increases need lead time. Trend/ETA lives in the quota source.
 - [`lookout cloud stockout`](/reference/cloud-stockout/) — GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.
 
-### lookout net
+### `lookout net`
 
 active DNS/TCP/HTTP probes from inside the cluster
 
-- [`lookout net probe`](/reference/net-probe/) — Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever lookout runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.
+- [`lookout net probe`](/reference/net-probe/) — Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever `lookout` runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.
 
-### lookout perf
+### `lookout perf`
 
 control-plane and startup performance via Cloud Monitoring query packs
 
 - [`lookout perf probe`](/reference/perf-probe/) — Control-plane and startup performance via metrics query packs: --pack=apiserver (p99 latency by verb/resource), apf (queue saturation + 429 rejects), etcd (WAL fsync p99 + DB size), startup (pod-first-ready p95 trend); apf/etcd need GKE control-plane metrics enabled — absence degrades to an explicit pack_unavailable finding.
 
-### lookout stab
+### `lookout stab`
 
 stability reads: GitOps drift, node-drain blockers
 
 - [`lookout stab drain`](/reference/stab-drain/) — Before draining a node, list everything that will block the drain (PDBs at disruptionsAllowed=0) or be destroyed by it (bare pods, emptyDir data, single-replica workloads); --node details one node, -A means all nodes here (pods are always examined across all namespaces); scanned counts pods examined after the standard-drain skips (mirror/DaemonSet/completed pods).
 - [`lookout stab drift`](/reference/stab-drift/) — Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers; reports manager strings only, never user identities (identity needs audit logs; later query pack). Default scope: all namespaces; scanned counts workload objects examined.
 
-### lookout state
+### `lookout state`
 
 dependency + configuration verification: edges, webhooks, workload identity, volumes
 
@@ -60,7 +60,7 @@ dependency + configuration verification: edges, webhooks, workload identity, vol
 - [`lookout state webhooks`](/reference/state-webhooks/) — When creates/updates hang or fail cluster-wide with "failed calling webhook", or before relying on a policy engine: audit every admission webhook — dead backends × failurePolicy (Fail + dead backend rejects every matching admission), the namespace/rule blast radius, timeout stall risk, CA-bundle expiry. The full check; health's webhooks category delegates here.
 - [`lookout state wi`](/reference/state-wi/) — When a GKE pod gets 403s or metadata-server errors calling GCP APIs, verify the Workload Identity chain — KSA annotation (iam.gke.io/gcp-service-account) → roles/iam.workloadIdentityUser binding on the GSA — reporting only the broken links; vanilla clusters report an explicit unavailable.
 
-### lookout triage
+### `lookout triage`
 
 incident reads: everything abnormal, condensed logs/events, blast radius, what changed
 
