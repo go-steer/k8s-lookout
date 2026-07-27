@@ -80,7 +80,7 @@ import (
 const Name = "rollout"
 
 // KindStall is the one kind this source emits (§7.3). APPEND-ONLY:
-// kinds are part of the signal schema playbooks and AX match on.
+// kinds are part of the signal schema playbooks and fleet consumers match on.
 const KindStall = "rollout.stall"
 
 // ReasonStall is the dedup/fingerprint reason (the kind suffix, same

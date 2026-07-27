@@ -1,12 +1,13 @@
-# Signal Schema v1 — the frozen AX contract
+# Signal Schema v1 — the frozen fleet-rollup contract
 
 Status: **FROZEN** (M5, 2026-07-26). This is the fleet-rollup wire
 contract of DESIGN.md §8, closed out per §14 M5 ("fingerprint schema
-finalized with AX") and the standing session decision: frozen as v1
-**here**, with contract tests in this repository as the ledger — no
-filing in the ax repo. AX consumes these payloads **as-is**; any
-change that removes or renames a frozen field, or alters the
-fingerprint recipe, is a **v2 negotiation with AX**, not a patch.
+finalized for fleet rollup") and the standing session decision: frozen
+as v1 **here**, with contract tests in this repository as the ledger —
+no external filing. The fleet-level consumer takes these payloads
+**as-is**; any change that removes or renames a frozen field, or
+alters the fingerprint recipe, is a **v2 negotiation with fleet
+consumers**, not a patch.
 Additions are allowed within v1 (additive-only), but must land in the
 same change as their ledger and doc updates.
 
@@ -45,7 +46,7 @@ The §8 incident-class key, `pkg/engine.Fingerprint`:
   fingerprints, and `cluster`/`project` ride alongside as join
   dimensions.
 
-**The AX rollup is a join, not a parse**: group by `fingerprint`,
+**The fleet rollup is a join, not a parse**: group by `fingerprint`,
 fan out by `cluster`/`project`/`zone`. Demonstrated as a test
 assertion in `internal/watch/m5_corpus_rollup_test.go`
 (`TestDrill_MultiClusterRollup_Stockout`: two sentinel instances, one
@@ -172,7 +173,7 @@ first external consumer deploys.
   inventory (source-namespaced or design-doc'd cross-cutting).
 - **Breaking (v2):** removing/renaming a field, changing a json tag,
   reordering, or touching the fingerprint recipe (encoding,
-  separator, field order, field set). Requires negotiation with AX
-  and a coordinated fleet upgrade — a unilateral change silently
+  separator, field order, field set). Requires coordination with
+  fleet consumers and a coordinated fleet upgrade — a unilateral change silently
   splits every fleet-wide rollup into disjoint halves during a
   rolling upgrade.

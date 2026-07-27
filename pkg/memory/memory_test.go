@@ -22,7 +22,8 @@ import (
 )
 
 // TestDistilledFact_SchemaGolden pins the wire encoding byte-exact.
-// The JSON shape is a schema-stable contract (§9.2): agents and AX
+// The JSON shape is a schema-stable contract (§9.2): agents and fleet
+// consumers
 // consume these records outside this repo. A failing pin is a
 // BREAKING CHANGE to review, never a test to update casually —
 // evolution is additive-only.

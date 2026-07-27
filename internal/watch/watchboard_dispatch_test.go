@@ -399,7 +399,7 @@ func TestWatchboard_SizeBasedRotation(t *testing.T) {
 }
 
 // TestWatchboardDigest_ExactWireShape pins the §7.7 kind=
-// watchboard.digest payload byte-for-byte. SCHEMA-STABLE (AX +
+// watchboard.digest payload byte-for-byte. SCHEMA-STABLE (fleet consumers +
 // playbooks parse structurally): treat a failing pin as a breaking
 // schema change, never as a test to update.
 func TestWatchboardDigest_ExactWireShape(t *testing.T) {
@@ -503,7 +503,7 @@ func TestStormBypassesWarningRouting(t *testing.T) {
 }
 
 // TestWatchboardKindConstants pins the watchboard wire kinds — the
-// strings AX and playbook skills match.
+// strings fleet consumers and playbook skills match.
 func TestWatchboardKindConstants(t *testing.T) {
 	t.Parallel()
 	if inject.KindWatchboardDigest != "watchboard.digest" {

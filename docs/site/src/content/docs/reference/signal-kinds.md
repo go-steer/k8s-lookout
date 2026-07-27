@@ -8,7 +8,8 @@ description: "The signal-schema v1 kind catalog — every kind the sentinel can 
 The signal-schema v1 kind inventory (32 kinds), rendered from the SAME
 exported ledger (`pkg/inject/schema`) the freeze tests in `pkg/inject` pin
 (docs/signal-schema-v1.md). The schema is FROZEN: removing or renaming a kind
-or a frozen field is a v2 negotiation with AX, never a routine change;
+or a frozen field is a v2 negotiation with fleet consumers, never a
+routine change;
 additions are v1-additive and extend the ledger, the field pins, and the
 schema doc in the same change.
 

@@ -196,7 +196,8 @@ func kindsPage() string {
 		"The signal-schema v1 kind inventory (%d kinds), rendered from the SAME\n"+
 		"exported ledger (`pkg/inject/schema`) the freeze tests in `pkg/inject` pin\n"+
 		"(docs/signal-schema-v1.md). The schema is FROZEN: removing or renaming a kind\n"+
-		"or a frozen field is a v2 negotiation with AX, never a routine change;\n"+
+		"or a frozen field is a v2 negotiation with fleet consumers, never a\n"+
+		"routine change;\n"+
 		"additions are v1-additive and extend the ledger, the field pins, and the\n"+
 		"schema doc in the same change.\n\n"+
 		"Every payload carries a stable incident-class `fingerprint` plus\n"+

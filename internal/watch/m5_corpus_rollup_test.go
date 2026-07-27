@@ -15,7 +15,7 @@
 // M5 exit checks (DESIGN.md §14): the §9.3 corpus-harvester contract
 // validated end-to-end against the REAL dispatcher, the push/pull
 // fingerprint parity of the v1 schema freeze, and the multi-cluster
-// stockout rollup simulated as the AX-side fingerprint join
+// stockout rollup simulated as the fleet-side fingerprint join
 // (docs/signal-schema-v1.md; evidence recorded in
 // docs/milestones/M5.md).
 
@@ -323,7 +323,7 @@ func stockoutSignal(kind, uid, reason, objectClass, name, zone string) engine.Si
 // fleet half: TWO sentinel dispatcher instances (cluster=prod-east /
 // prod-west) observe the same staged zonal stockout (plus the
 // quota_blocked class), and the captured inject streams roll up
-// AX-side as a pure fingerprint join — identical fingerprints,
+// fleet-side as a pure fingerprint join — identical fingerprints,
 // differing cluster identity, no payload parsing.
 func TestDrill_MultiClusterRollup_Stockout(t *testing.T) {
 	t.Parallel()
@@ -370,7 +370,7 @@ func TestDrill_MultiClusterRollup_Stockout(t *testing.T) {
 			t.Fatalf("stream order drifted: %s vs %s (want %s)", east.Kind, west.Kind, kind)
 		}
 		if east.Fingerprint == "" || east.Fingerprint != west.Fingerprint {
-			t.Errorf("%s: fingerprints differ across clusters (east=%s west=%s) — the AX join breaks", kind, east.Fingerprint, west.Fingerprint)
+			t.Errorf("%s: fingerprints differ across clusters (east=%s west=%s) — the fleet rollup join breaks", kind, east.Fingerprint, west.Fingerprint)
 		}
 		if east.Cluster != "prod-east" || west.Cluster != "prod-west" {
 			t.Errorf("%s: cluster identity wrong: %q / %q", kind, east.Cluster, west.Cluster)
@@ -386,7 +386,7 @@ func TestDrill_MultiClusterRollup_Stockout(t *testing.T) {
 		t.Errorf("stockout zone = %q, want %s", streams["prod-east"][0].Zone, zone)
 	}
 
-	// The AX-side rollup: group BOTH streams by fingerprint alone.
+	// The fleet-side rollup: group BOTH streams by fingerprint alone.
 	// The staged stockout collapses to ONE fleet-level group with a
 	// member per cluster; so does quota_blocked; nothing else exists.
 	groups := map[string][]string{}

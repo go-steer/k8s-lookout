@@ -43,7 +43,7 @@ stays disabled.
 | Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace`. Cluster-scoped sources fail loudly at startup and must be disabled explicitly — never a silently empty watch. The topology graph builds a namespace-local subgraph. |
 | Cluster | one sentinel per cluster (canonical) | One informer cache, one topology index, one credential boundary, one failure domain. One daemon may serve many sentinels. |
 | Project | quota source only | One instance per GCP project, regardless of cluster count. Needs the `-gke` image. |
-| Fleet | AX, not lookout | Sentinel-per-cluster fan-in; AX joins signals on `fingerprint` + `cluster`/`zone`/`project`. |
+| Fleet | the fleet layer, not lookout | Sentinel-per-cluster fan-in; a fleet-level consumer joins signals on `fingerprint` + `cluster`/`zone`/`project`. |
 
 ### Namespace-tier caveats — failures are loud
 

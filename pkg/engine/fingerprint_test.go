@@ -21,7 +21,7 @@ import "testing"
 //
 // FROZEN CONTRACT — these vectors are a cross-cluster wire contract,
 // not an implementation detail. Fingerprints are persisted in
-// incident records and joined on by AX across clusters running
+// incident records and joined on by fleet consumers across clusters running
 // DIFFERENT lookout versions; if this test fails, the change breaks
 // every fleet rollup mid-upgrade. Fix the code to restore the pinned
 // values — never update the vectors. (Every hash is independently

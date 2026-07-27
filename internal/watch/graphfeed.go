@@ -63,7 +63,7 @@ import (
 //     grouping needs a jobs watch); they arrive with the full §6.1
 //     graph in the enrichment milestone (M3), not here.
 //   - Zone grouping is excluded from storm keys entirely: zone-tier
-//     correlation is AX's fleet job (§7.5).
+//     correlation is the fleet layer's job (§7.5).
 type graphFeed struct {
 	factory informers.SharedInformerFactory
 	graph   *graph.Graph
@@ -261,7 +261,8 @@ var stormObjectKinds = map[string]graph.NodeKind{
 
 // ancestorClass ranks ancestor kinds by the §7.5 key priority:
 // node > owner chain > shared config/PVC > namespace. -1 excludes the
-// kind from storm keys entirely: Zone (fleet tier — AX's join, §7.5),
+// kind from storm keys entirely: Zone (fleet tier — the fleet layer's
+// join, §7.5),
 // Pod/Container (an object, not a blast-radius key), and the
 // traffic-layer kinds (not ancestors on the CommonAncestors relation).
 func ancestorClass(k graph.NodeKind) int {

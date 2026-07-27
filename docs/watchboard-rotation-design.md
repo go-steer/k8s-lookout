@@ -140,5 +140,6 @@ observed warning, but followups and outcomes route to the storm session).
 - **Enrichment of digest entries** (§7.6 is per-incident/critical; a
   digest entry that needs investigation gets `lookout` reads from the
   agent, not a pre-warmed bundle).
-- **Fleet-level watchboards.** Cross-cluster rollup of warning digests is
-  AX's job, joining on the fingerprints each entry already carries.
+- **Fleet-level watchboards.** Cross-cluster rollup of warning digests
+  belongs to the fleet layer, joining on the fingerprints each entry
+  already carries.

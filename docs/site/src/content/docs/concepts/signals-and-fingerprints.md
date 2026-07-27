@@ -47,7 +47,7 @@ The incident-class key:
   fingerprints, with `cluster`/`project` riding alongside as join
   dimensions.
 
-That makes the fleet-tier (AX) rollup **a join, not a parse**. From the M5
+That makes the fleet-tier rollup **a join, not a parse**. From the M5
 multi-cluster drill — two sentinel instances, one staged zonal stockout,
 grouped by `fingerprint` alone:
 

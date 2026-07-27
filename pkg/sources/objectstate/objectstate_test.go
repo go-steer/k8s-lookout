@@ -767,7 +767,8 @@ func TestProbe_FailsLoudlyForObjectState(t *testing.T) {
 }
 
 // TestKindInventoryFrozen pins the kind strings and their default
-// severities: kinds are append-only schema (playbooks and AX match on
+// severities: kinds are append-only schema (playbooks and fleet
+// consumers match on
 // them), and the reason is always the kind suffix.
 func TestKindInventoryFrozen(t *testing.T) {
 	t.Parallel()

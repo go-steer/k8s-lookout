@@ -274,7 +274,8 @@ func TestStormRecovery_AllMembersClear(t *testing.T) {
 // TestStormFormed_ExactWireShape pins the §7.5 kind=storm payload
 // byte-for-byte, plus the kind=storm.member_superseded pointer left
 // in a pre-storm member session and the kind=storm.member late-attach
-// followup. SCHEMA-STABLE (AX + playbooks parse structurally): treat
+// followup. SCHEMA-STABLE (fleet consumers + playbooks parse
+// structurally): treat
 // a failing pin as a breaking schema change, never as a test to
 // update.
 func TestStormFormed_ExactWireShape(t *testing.T) {

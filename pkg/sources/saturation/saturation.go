@@ -79,7 +79,8 @@ const KindForecast = "saturation.forecast"
 
 // Resource dimensions. The dedup/fingerprint reason is
 // "forecast_<resource>" so the same object's memory and CPU forecasts
-// are distinct incidents (and distinct §8 fingerprint classes for AX).
+// are distinct incidents (and distinct §8 fingerprint classes for
+// fleet rollup).
 const (
 	ResourceCPU    = "cpu"
 	ResourceMemory = "memory"
