@@ -60,7 +60,7 @@
   --sl-color-accent-high: #0092b8;
 
   /* Content measure + type scale */
-  --sl-content-width: 55rem;
+  --sl-content-width: 62rem;
   --sl-line-height: 1.7;
   --sl-text-base: 1rem;
 }
@@ -288,9 +288,10 @@
  */
 @media (min-width: 72rem) {
   .right-sidebar-container {
-    width: max(
-      13.5rem,
-      calc(13.5rem + (100% - var(--sl-content-width) - 13.5rem) / 2)
-    );
+    /* Flat width: Starlight's own formula grows the rail with the
+     * viewport; a table of contents never needs more than this.
+     * Extra viewport width goes to the content column instead
+     * (--sl-content-width above). */
+    width: 13.5rem;
   }
 }
