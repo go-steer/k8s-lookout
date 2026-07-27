@@ -205,6 +205,7 @@ Where the tree deliberately differs from DESIGN.md, in one place:
 - Design notes: [`signal-schema-v1.md`](./signal-schema-v1.md),
   [`triage-status-write-design.md`](./triage-status-write-design.md),
   [`watchboard-rotation-design.md`](./watchboard-rotation-design.md),
+  [`agent-sink-design.md`](./agent-sink-design.md),
   [`graph-q5-gate.md`](./graph-q5-gate.md).
 - [`milestones/`](./milestones/) — M0–M5 completion records with
   exit-check evidence and the post-M5 review backlog (M5.md).

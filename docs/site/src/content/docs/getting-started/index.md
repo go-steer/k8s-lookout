@@ -21,6 +21,9 @@ incremental — each step works without the next:
    daemon contract: sessions, injects, per-incident vs shared routing.
 5. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
    for daemons that cannot shell out.
+6. [Integrations](/getting-started/integrations/) — beyond core-agent:
+   the read path from any MCP client or shell-capable agent, and the
+   watch path into any webhook receiver.
 
 The [Reference](/reference/) section is generated from the same
 declarations that produce `--help` — when this section links a flag or a

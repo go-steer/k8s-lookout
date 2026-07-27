@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `docs/agent-sink-design.md` — design note settling the agent-sink
+  contract: the two verbs the watch-path requires of any agent runtime
+  (open an incident context, append to it; plus an optional usage query
+  for token-burn only), the `pkg/inject` Sink interface with the
+  core-agent HTTP client as the wire-identical default (frozen pins as
+  the regression proof; additive `--sink`/`--sink-url`/
+  `--sink-token-env` flags), the webhook wire contract
+  (`POST /incidents`, `POST /incidents/<id>/events`, Bearer auth,
+  stateless receivers legal), and the out-of-scope list (per-framework
+  adapters per the no-speculative-surface rule, acknowledgement
+  semantics beyond HTTP status, multi-sink fanout). Linked from the
+  repo-map design-notes list.
+- Docs site: Integrations page (Getting started, step 6) — consuming
+  the read path from any MCP client (generic config shape + Claude Code
+  one-liner), from shell-capable agents via the CLI contract, and
+  skills portability; receiving the watch path anywhere via the webhook
+  sink, with a curl-able example exchange built from captured milestone
+  payloads and `dev/drills/stub-daemon.py` as the runnable reference
+  receiver. core-agent remains the first-class default.
+
 ## [0.6.1] - 2026-07-26
 
 End-user documentation site (Astro Starlight, mirroring core-agent's
