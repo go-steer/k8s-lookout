@@ -58,7 +58,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `capability` | cloud.unavailable: the provider capability --history needed (metrics) |
 | `provider` | cloud.unavailable: the provider that was asked |
 | `history` | summary-line note: the --history window the stats cover |
-| `unavailable` | summary-line note (§2 marker): why --history could not be served |
+| `unavailable` | summary-line note: why --history could not be served |
 
 ## Output contract
 

@@ -48,7 +48,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `why` | orphan.lb: the provider's orphan judgment (e.g. which backend resolved empty) |
 | `capability` | cloud.unavailable: the provider capability this command needed (orphans) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the cloud read could not be served |
+| `unavailable` | summary-line note: why the cloud read could not be served |
 
 ## Output contract
 

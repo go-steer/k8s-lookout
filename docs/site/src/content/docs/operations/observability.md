@@ -64,7 +64,7 @@ graph history: enabled (snapshot every 1m0s + per-delta change log …)
 expiry: cert-manager CRD not found — Certificate renewal-state scanning disabled; TLS secrets and webhook CA bundles are still scanned
 ```
 
-A missing "enabled/ready" line for a stage you configured, or any §11
-probe error, is a misconfiguration — see
+A missing "enabled/ready" line for a stage you configured, or any
+startup RBAC-probe error, is a misconfiguration — see
 [Troubleshooting](/operations/troubleshooting/). The sentinel also
 exports OpenTelemetry spans with `--otel-exporter=console|otlp`.

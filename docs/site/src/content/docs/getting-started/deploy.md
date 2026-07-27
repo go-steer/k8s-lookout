@@ -36,7 +36,7 @@ no watch, no get, no informer cache of secret material. Scope it with
 `--expiry-namespaces`, or remove the rule entirely if the expiry source
 stays disabled.
 
-## Deployment tiers (DESIGN.md §11)
+## Deployment tiers
 
 | Tier | Unit | Mechanism |
 | --- | --- | --- |

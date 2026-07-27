@@ -66,7 +66,7 @@ review — a cluster/credentials problem, not a Role problem.
 | `--owner is required in per-incident mode (must match a proxy identity in the daemon's users.json)` | Set `--owner`; if session creates then fail with 4xx (`inject_errors_total`), the identity is missing on the daemon side. |
 | `--target-session is required in shared mode` | `--mode=shared` posts everything to one existing session; name it. |
 | `--sources: unknown source "…" (known: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn)` | Typo in the source list. |
-| `source "quota" requires a cloud provider with the quota capability …; build with -tags gke/allproviders and run with cloud credentials, or drop "quota" from --sources` | You enabled the quota source in the default (GCP-free) image. Pin the `-gke` flavor — the refusal is the §2 conformance boundary working as designed. |
+| `source "quota" requires a cloud provider with the quota capability …; build with -tags gke/allproviders and run with cloud credentials, or drop "quota" from --sources` | You enabled the quota source in the default (GCP-free) image. Pin the `-gke` flavor — the refusal is the conformance boundary working as designed. |
 | `--saturation-window must be > --saturation-interval (the regression needs a window of samples)` | Flags of a disabled source are still validated — a nonsensical value is a config error in every mode. The same pattern covers every numeric flag (`--storm-min must be >= 2 (a storm of one is an incident)`, …). |
 
 ## Loud degradations that are *not* errors

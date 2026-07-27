@@ -21,7 +21,7 @@ lookout triage spec <Kind>/[<namespace>/]<name> [flags]
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `--diff` | bool | — | diff against the previous graph-history revision — requires a sentinel store; lands in M3 (§6.6) |
+| `--diff` | bool | — | diff against the previous graph-history revision — requires a sentinel store; lands in M3 |
 
 ## Common flags (every `lookout` command)
 

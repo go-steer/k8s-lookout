@@ -45,7 +45,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pct` | used as a percent of capacity, one decimal |
 | `capability` | cloud.unavailable: the provider capability this command needed (ipspace) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the cloud read could not be served |
+| `unavailable` | summary-line note: why the cloud read could not be served |
 
 ## Output contract
 

@@ -36,7 +36,7 @@ lookout triage radius <Kind>/[<namespace>/]<name> [flags]
 
 ## Point-in-time flags (graph-backed commands)
 
-This command answers from the topology graph and accepts the §6.6 point-in-time flags:
+This command answers from the topology graph and accepts the point-in-time flags:
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

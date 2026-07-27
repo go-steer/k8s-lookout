@@ -36,7 +36,7 @@ lookout triage changes <Kind>/[<namespace>/]<name> [flags]
 
 ## Point-in-time flags (graph-backed commands)
 
-This command answers from the topology graph and accepts the §6.6 point-in-time flags:
+This command answers from the topology graph and accepts the point-in-time flags:
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -51,8 +51,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | --- | --- |
 | `at` | when the change happened, RFC 3339 (also the summary-line note for the resolved --at instant) |
 | `relation` | the changed object's place in the target's neighborhood: self (the target or its pods), upstream, lateral, downstream |
-| `fields` | changed fields as path=from→to pairs — names, counts, and shortened hashes only, never values (§6.5) |
-| `origin` | where the change was seen: log (§6.6 delta log), event (Kubernetes Event), api (reconstructed from current API state) |
+| `fields` | changed fields as path=from→to pairs — names, counts, and shortened hashes only, never values |
+| `origin` | where the change was seen: log (delta log), event (Kubernetes Event), api (reconstructed from current API state) |
 | `revision` | deployment.kubernetes.io/revision of a rollout's ReplicaSet (live approximation) |
 | `image` | first container image of a rollout's new pod template (live approximation) |
 | `window` | summary-line note: the (from, to] window the answer covers, RFC 3339 |

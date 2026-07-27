@@ -32,7 +32,7 @@ graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — -
   log. Written only when `--storm` runs (that is the graph feed). This
   is what serves `--at` point-in-time queries and `triage changes`' full
   delta log.
-- **Triage-status records** — the §9.4 diagnosis records written by
+- **Triage-status records** — the diagnosis records written by
   [`lookout triage status`](/reference/triage-status/) and flipped to
   `resolved` automatically by recovery injects.
 

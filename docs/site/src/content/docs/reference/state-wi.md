@@ -39,7 +39,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `env` | the credential-file env var found (GOOGLE_APPLICATION_CREDENTIALS) |
 | `capability` | cloud.unavailable: the provider capability this command needed (workload-identity) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the cloud read could not be served |
+| `unavailable` | summary-line note: why the cloud read could not be served |
 
 ## Output contract
 
