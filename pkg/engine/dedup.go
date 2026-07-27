@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"slices"
 	"strings"
@@ -177,13 +178,14 @@ func (c *DedupCache) clock() time.Time {
 //     the exponential backoff kicks in. Same failure, two reason
 //     values within seconds.
 //   - BackOff → CrashLoopBackOff: BackOff accompanies both crash-
-//     loop and image-pull cycles. In practice, when it collides
-//     with an ImagePullBackOff for the same pod, that pod's
-//     ImagePullBackOff entry already exists so BackOff routes there
-//     via the CrashLoopBackOff canonical (which will be reset when
-//     the crash-loop entry expires). Yes, this is subtle. If a
-//     future variant wants to disambiguate, a `--reason-canonical`
-//     config override can drop or remap entries.
+//     loop and image-pull cycles; without a message only the
+//     crash-loop guess is available (it is by far the more common
+//     cycle). Event-shaped callers — every path that HAS the event
+//     message — use CanonicalReasonForEvent instead, which reads
+//     the message and files pull-shaped BackOff (and Failed) under
+//     ImagePullBackOff. This messageless row deliberately keeps the
+//     old best-guess for reason-only callers (restored keys,
+//     reason-only lookups).
 //
 // Observed live during v2.6 GKE-troubleshoot demo drive: one
 // paymentservice ImagePullBackOff spawned 4 parallel sessions
@@ -251,11 +253,63 @@ var reasonCanonical = map[string]string{
 // carry different fingerprints across clusters depending on which
 // kubelet retry-cycle variant each sentinel saw first. Reasons not in
 // reasonCanonical map to themselves (no change).
+//
+// MESSAGELESS callers only: when the event's message is in hand, use
+// CanonicalReasonForEvent instead — the generic BackOff and Failed
+// reasons are ambiguous without it (see below), and this function
+// keeps the messageless best-guess (BackOff → CrashLoopBackOff)
+// unchanged for callers that genuinely have no message (restored
+// incident keys, reason-only lookups).
 func CanonicalReason(reason string) string {
 	if canonical, ok := reasonCanonical[reason]; ok {
 		return canonical
 	}
 	return reason
+}
+
+// CanonicalReasonForEvent is the message-aware CanonicalReason for
+// event-shaped callers: kubelet emits the GENERIC reasons "BackOff"
+// and "Failed" for both crash-loop and image-pull cycles, and only
+// the message disambiguates them. Without it, one ImagePullBackOff
+// incident fans out into parallel dedup slots (and sessions) per
+// reason variant — the failure mode kube-agents observed live and
+// fixed in their watcher fork.
+//
+// HONESTY NOTE — this is a dependency on kubelet MESSAGE STRINGS,
+// which are not API: the matchers pin the shapes kubelet has emitted
+// for years (pkg/kubelet/images: `Back-off pulling image "…"`,
+// `Failed to pull image "…"`; sync-result errors surface as
+// `Error: ErrImagePull` / `Error: ImagePullBackOff`). If kubelet ever
+// rewords them, the match falls through to the messageless mapping —
+// degraded grouping (BackOff → CrashLoopBackOff), never a crash or a
+// missed event. The tests in dedup_test.go pin the real shapes so a
+// deliberate matcher change is visible.
+//
+// Reasons other than BackOff/Failed defer to CanonicalReason: the
+// message adds nothing for them, and the append-only family map stays
+// the single source of truth.
+func CanonicalReasonForEvent(reason, message string) string {
+	switch reason {
+	case "BackOff":
+		// Kubelet's image-pull backoff: `Back-off pulling image "…"`.
+		// Every other BackOff shape (`Back-off restarting failed
+		// container …`) is the crash-loop cycle.
+		if strings.Contains(message, "pulling image") {
+			return "ImagePullBackOff"
+		}
+		return "CrashLoopBackOff"
+	case "Failed":
+		// Kubelet's pull failures under the generic Failed reason:
+		// `Failed to pull image "…": …` plus the sync-result error
+		// strings `Error: ErrImagePull` / `Error: ImagePullBackOff`.
+		if strings.Contains(message, "Failed to pull image") ||
+			strings.Contains(message, "ErrImagePull") ||
+			strings.Contains(message, "ImagePullBackOff") {
+			return "ImagePullBackOff"
+		}
+		return reason
+	}
+	return CanonicalReason(reason)
 }
 
 // Observe records that key was just seen with eventLastTS (the
@@ -598,10 +652,18 @@ func (c *DedupCache) restore() error {
 	}
 	var snapshot map[string]*dedupEntry
 	if err := json.Unmarshal(data, &snapshot); err != nil {
-		// Corrupt persist file: log and start fresh. Better than
-		// refusing to boot the sidecar. Caller can inspect the
-		// file if they care.
-		return fmt.Errorf("dedup: unmarshal snapshot (starting fresh): %w", err)
+		// Corrupt persist file: log and start fresh with an empty
+		// cache. Better than refusing to boot the sentinel — dedup
+		// state is an optimization (worst case: one duplicate session
+		// per active incident), while a crash-looping sentinel misses
+		// every new incident. The file stays on disk untouched until
+		// the next Snapshot for operators who want to inspect it.
+		// (Fixed: this path used to return the error, which failed
+		// NewDedupCache and errored out the whole sentinel — the
+		// comment above promised "start fresh" but the code refused
+		// to boot. Behavior now matches kube-agents' watcher.)
+		log.Printf("dedup: unmarshal snapshot %s (starting fresh with an empty cache): %v", c.persistPath, err)
+		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

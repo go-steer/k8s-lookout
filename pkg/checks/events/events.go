@@ -291,7 +291,11 @@ func accumulate(timeline map[engine.EventKey]*entry, ev *corev1.Event, first, la
 	if uid == "" {
 		uid = io.Kind + "/" + io.Namespace + "/" + io.Name
 	}
-	key := engine.EventKey{UID: uid, Reason: engine.CanonicalReason(ev.Reason)}
+	// Message-aware canonical (engine.CanonicalReasonForEvent): the
+	// listed event's message is in hand, so kubelet's generic
+	// BackOff/Failed reasons land in the same family the sentinel's
+	// dedup cache files them under (pull vs crash-loop).
+	key := engine.EventKey{UID: uid, Reason: engine.CanonicalReasonForEvent(ev.Reason, ev.Message)}
 	count := int(ev.Count)
 	if count < 1 {
 		count = 1

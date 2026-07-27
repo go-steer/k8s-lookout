@@ -401,13 +401,16 @@ func (b *watchboard) clearBufferLocked() {
 // it while it sat in the buffer — the existing binding wins: bindings
 // are per-incident and point at wherever the incident lives.
 func (d *dispatcher) bindWatchboardIncident(sig engine.Signal, sid string) {
-	if _, ok := d.dedup.LookupSession(sig.Key); ok {
+	// Same canonical pipeline key DispatchSignal used for this
+	// signal's dedup slot (message-aware — see TriageEvent.CanonicalKey).
+	key := sig.CanonicalKey()
+	if _, ok := d.dedup.LookupSession(key); ok {
 		return
 	}
-	d.dedup.BindIncident(sig.Key, sid, sig.IncidentRef())
+	d.dedup.BindIncident(key, sid, sig.IncidentRef())
 	if d.tracker != nil {
 		d.tracker.Track(engine.Incident{
-			Key:       sig.Key,
+			Key:       key,
 			SessionID: sid,
 			FirstSeen: sig.FirstSeen,
 			Ref:       sig.IncidentRef(),

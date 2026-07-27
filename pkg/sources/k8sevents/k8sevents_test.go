@@ -198,6 +198,7 @@ func TestToTriageEvent_PopulatesAllFields(t *testing.T) {
 		FirstTimestamp: metav1.Time{Time: time.Unix(1000, 0)},
 		LastTimestamp:  metav1.Time{Time: time.Unix(2000, 0)},
 		Count:          7,
+		Type:           corev1.EventTypeWarning,
 	}
 	got := toTriageEvent(ev)
 	if got.Key.Reason != "OOMKilled" {
@@ -226,6 +227,9 @@ func TestToTriageEvent_PopulatesAllFields(t *testing.T) {
 	}
 	if got.FirstSeen.Unix() != 1000 || got.LastSeen.Unix() != 2000 {
 		t.Errorf("Timestamps: FirstSeen=%d LastSeen=%d", got.FirstSeen.Unix(), got.LastSeen.Unix())
+	}
+	if got.Type != "Warning" {
+		t.Errorf("Type = %q, want Warning (Event.Type must ride into the payload's \"type\" field)", got.Type)
 	}
 }
 

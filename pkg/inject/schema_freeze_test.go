@@ -74,10 +74,15 @@ var shippedKinds = func() map[string]reflect.Type {
 // update. Additions land at the end of a struct AND of this ledger
 // AND in docs/signal-schema-v1.md, in the same change.
 var frozenFields = map[string][]string{
+	// "type" landed 2026-07-27 (pre-consumer amendment, adopted from
+	// kube-agents' watcher): the k8s Event.Type, positioned after
+	// "context" to match their wire byte-for-byte on the k8s-event
+	// kinds. NOT omitempty (their contract); empty for synthetic
+	// source signals. See docs/signal-schema-v1.md §Amendments.
 	"Payload": {"kind", "reason", "namespace", "kind_of_object", "name",
 		"container", "uid", "message", "count", "first_seen", "last_seen",
 		"cluster", "project", "zone", "source", "severity", "fingerprint",
-		"context", "enrichment", "forecast", "quota_increase_draft"},
+		"context", "type", "enrichment", "forecast", "quota_increase_draft"},
 	"ResolvedPayload": {"kind", "reason", "namespace", "kind_of_object",
 		"name", "container", "uid", "fingerprint", "cluster", "first_seen",
 		"resolved_at", "cleared_after", "observed_stable_for", "resolution",

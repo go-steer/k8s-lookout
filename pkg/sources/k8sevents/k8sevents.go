@@ -120,15 +120,18 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("k8s-events: register event handler: %w", err)
 	}
-	// Silence the client-go internal error log ("unknown object
-	// type in cache") on shutdown — cache.HandleCrash trips over
-	// ctx.Done races otherwise. The default panic handler still
-	// fires for real crashes.
-	runtime.ErrorHandlers = []runtime.ErrorHandler{
+	// Route client-go internal errors ("unknown object type in
+	// cache" on shutdown ctx.Done races, reflector list failures)
+	// through our logger. APPEND, never replace: runtime.ErrorHandlers
+	// is package-global process state shared by every client-go
+	// consumer in this binary — replacing the slice silently discarded
+	// the default handlers (and any handler another source installed),
+	// a real bug once two informer-backed sources run in one process.
+	runtime.ErrorHandlers = append(runtime.ErrorHandlers,
 		func(_ context.Context, err error, _ string, _ ...any) {
 			log.Printf("k8s-events: informer error: %v", err)
 		},
-	}
+	)
 
 	factory.Start(ctx.Done())
 	// WaitForCacheSync blocks until the initial list is done —
@@ -203,6 +206,7 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 		Node:          nodeFromSource(ev),
 		Labels:        labelsFromMeta(ev.ObjectMeta),
 		Count:         int(ev.Count),
+		Type:          ev.Type,
 	}
 }
 

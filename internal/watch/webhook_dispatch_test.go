@@ -119,7 +119,7 @@ func TestWebhookDispatch_ExactOpenWireShape(t *testing.T) {
 	if got.Auth != "Bearer tok_hook" {
 		t.Errorf("Authorization = %q, want Bearer tok_hook (--sink-token-env)", got.Auth)
 	}
-	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"}}`
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"},"type":"Warning"}`
 	if got.Body != want {
 		t.Errorf("webhook open body drifted from the frozen wire shape:\n got: %s\nwant: %s", got.Body, want)
 	}

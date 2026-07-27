@@ -54,4 +54,25 @@ type TriageEvent struct {
 	// the source recorded this same event). The sidecar's own dedup
 	// counter is separate — see dedup.go.
 	Count int
+	// Type is the k8s Event.Type ("Normal" or "Warning"), populated by
+	// the k8s-events source. Empty for synthetic signals from other
+	// sources — they observe state transitions and forecasts, not
+	// Events, and inventing a type would be dishonest. Rides the wire
+	// as the payload's "type" field (pkg/inject.Payload.Type).
+	Type string
+}
+
+// CanonicalKey returns the event's pipeline key: the EventKey with
+// Reason replaced by its message-aware canonical class
+// (CanonicalReasonForEvent). This is THE dedup/binding/tracking key —
+// the dispatcher computes it once per signal and threads it through
+// dedup, storm bookkeeping, triage regression state, and the recovery
+// tracker, so every stage agrees on which incident an event belongs
+// to even when kubelet spelled the reason generically ("BackOff",
+// "Failed"). The wire payload keeps the ORIGINAL Key.Reason —
+// canonicalization never rewrites what went over the wire.
+func (t TriageEvent) CanonicalKey() EventKey {
+	k := t.Key
+	k.Reason = CanonicalReasonForEvent(k.Reason, t.Message)
+	return k
 }
