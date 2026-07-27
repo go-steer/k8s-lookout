@@ -185,16 +185,17 @@ Three interfaces, all pre-existing, none new:
 | --- | --- | --- |
 | `core-agent` daemon | `POST /sessions`, `POST /sessions/<sid>/inject` HTTP API | lookout → daemon |
 | `core-agent` cost stack | cost/usage query API (token-burn source, §12) | lookout → daemon |
-| AX (fleet layer) | rollup-ready signal schema (§8); per-cluster deployment | AX consumes lookout signals |
+| Fleet aggregation layer (external) | rollup-ready signal schema (§8); per-cluster deployment | the fleet layer consumes lookout signals |
 
 **Fleet scope is explicitly out of scope for this repo.** One process watching
 a thousand API servers is wrong on every axis (API server load, credential
 blast radius, failure domain). lookout deploys per cluster (watch-path) or per
-project (quota source); cross-cluster rollup and coordination is AX territory.
-This includes a *federated central graph*: the topology index (§6) is strictly
-per-cluster, and AX joins signals — not graphs — across clusters. What lookout
-owes the fleet tier is a signal schema AX can aggregate without parsing prose —
-§8.
+project (quota source); cross-cluster rollup and coordination belong to a
+fleet aggregation layer, out of scope for this repo. This includes a
+*federated central graph*: the topology index (§6) is strictly per-cluster,
+and the fleet layer joins signals — not graphs — across clusters. What
+lookout owes the fleet tier is a signal schema a fleet-level consumer can
+aggregate without parsing prose — §8.
 
 ---
 
@@ -338,7 +339,7 @@ assumed), 2 cut, 7 added.
 | `cloud ipspace` | `ip-space-monitor` | Pod/Service CIDR utilization per subnet. | Point-in-time; consumption *rate* lives in the capacity source (§10). |
 | `cloud quota` | *(new)* | Per-project quota usage/limit snapshot with nearest-to-exhaustion ranking. | Read companion of the quota source (§10). |
 | `bundle` | *(new)* | Given `--workload=…` (or `--incident=<inject payload>`): run delta + events + edges + logs + radius scoped to the target, emit one correlated payload including the sanitized spec. | The first tool call of every incident, and the enrichment payload for §7.6. Converts 4–5 agent round trips into one. Exposed over MCP as `k8s_triage_workload`. |
-| `health` | *(new)* | The "are there issues with this cluster?" scorecard: one composed pass over ~10 check categories — control-plane latency (`perf probe` packs), node conditions, crash loops, aged Pending, rollout stalls, PVC/storage health, system add-ons, ResourceQuotas, cert expiry, webhook health — each category reporting `healthy` or findings, merged with open sentinel findings (§9.1) and triage-status records (§9.4). | Composition, not new checks: every category delegates to an existing `pkg/checks` implementation. The merge is the point — output reflects *triaged reality* ("payment-service CrashLoop: triaged 10 min ago, root cause DB pool exhaustion, PR open, downgraded to warning"), not raw telemetry. Exposed over MCP as `k8s_cluster_health`; the per-cluster answer AX aggregates for the fleet-wide question. |
+| `health` | *(new)* | The "are there issues with this cluster?" scorecard: one composed pass over ~10 check categories — control-plane latency (`perf probe` packs), node conditions, crash loops, aged Pending, rollout stalls, PVC/storage health, system add-ons, ResourceQuotas, cert expiry, webhook health — each category reporting `healthy` or findings, merged with open sentinel findings (§9.1) and triage-status records (§9.4). | Composition, not new checks: every category delegates to an existing `pkg/checks` implementation. The merge is the point — output reflects *triaged reality* ("payment-service CrashLoop: triaged 10 min ago, root cause DB pool exhaustion, PR open, downgraded to warning"), not raw telemetry. Exposed over MCP as `k8s_cluster_health`; the per-cluster answer a fleet-level consumer aggregates for the fleet-wide question. |
 | `net probe` | *(new)* | Active DNS/TCP/HTTP check from inside the cluster. | Hypothesis confirmation, not inference. Bends read-only in letter, not spirit; still zero cluster mutation. Phase M3. |
 
 **Cut from v2:**
@@ -583,8 +584,8 @@ keep their exact names and casing for playbook back-compat):
   "source": "sentinel",              // "sentinel" (push) | "scan" (read-path finding)
   "severity": "critical",
   "fingerprint": "sha256:…",        // stable hash of (kind, reason-class, object-class, zone) —
-                                     // NOT of the object name — so AX can recognize the same
-                                     // failure across clusters
+                                     // NOT of the object name — so a fleet-level consumer can
+                                     // recognize the same failure across clusters
   "cluster": "prod-east",
   "project": "acme-prod",
   "zone": "us-east1-b",
@@ -597,9 +598,9 @@ keep their exact names and casing for playbook back-compat):
 }
 ```
 
-`fingerprint` + `cluster`/`project`/`zone` are what make fleet rollup an AX
-join instead of an AX parsing project: the same stockout hitting 40 clusters
-in a zone carries 40 identical fingerprints. lookout ships the schema; AX
+`fingerprint` + `cluster`/`project`/`zone` are what make fleet rollup a join
+instead of a parsing project: the same stockout hitting 40 clusters in a zone
+carries 40 identical fingerprints. lookout ships the schema; the fleet layer
 ships the rollup.
 
 **One schema for push and pull.** Read-path findings (from `health`, `triage
@@ -607,8 +608,8 @@ delta`, etc.) are Signals too, with `source: scan`. Point-in-time scans miss
 transients; the push stream lacks stateful context — merging them is only
 cheap if they dedupe on the same `fingerprint`. That's how `lookout health`
 rolls "the sentinel paged on this 20 minutes ago" and "the scan still sees it"
-into one finding instead of two, and how AX avoids double-counting a symptom
-reported by both paths.
+into one finding instead of two, and how a fleet-level consumer avoids
+double-counting a symptom reported by both paths.
 
 ---
 
@@ -701,7 +702,7 @@ single writer — an event for an already-bound incident becomes a followup
 inject to the existing session (today's shipped dedup behavior), which *is*
 the "check for active finding, attach, don't re-triage" flow, minus the lock
 infrastructure. Cross-agent contention only exists at fleet tier, which is
-AX's coordination problem by the settled boundary (§3). And storage tiering is
+the fleet layer's coordination problem by the settled boundary (§3). And storage tiering is
 already decided by the shared-memory design (FTS5-over-eventlog in-tree, Redis
 AMS extras adapter) — we add a record type, not a database.
 
@@ -772,7 +773,7 @@ quota APIs. Sources:
 | Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace` (existing flags). Cluster-scoped sources (`object-state` nodes, `capacity`, PDB checks) **fail loudly at startup** — "source X requires cluster RBAC" — and are disabled explicitly, never silently empty. The topology index builds a namespace-local subgraph (no Node/Zone layer). |
 | Cluster | one sentinel per cluster (canonical) | one informer cache, one topology index, one credential boundary, one failure domain. One daemon may serve many sentinels (unchanged from v2.6 design). |
 | Project | quota source only | one instance per GCP project, regardless of cluster count. |
-| Fleet (1000s) | **AX, not lookout** | sentinel-per-cluster fan-in; AX joins on `fingerprint` + `cluster`/`zone`/`project` (§8). No federated central graph (§3). lookout's storm correlation (§7.5) is the single-cluster instance of the same idea. |
+| Fleet (1000s) | **the fleet layer, not lookout** | sentinel-per-cluster fan-in; the fleet layer joins on `fingerprint` + `cluster`/`zone`/`project` (§8). No federated central graph (§3). lookout's storm correlation (§7.5) is the single-cluster instance of the same idea. |
 
 Read-path commands are stateless and scope by flags (`--namespace`,
 `--workload`, `-A`); granularity is free there.
@@ -831,7 +832,7 @@ Carried from v2 and the shipped watcher, normalized:
 | **M2 — closed loop** | Recovery injects (§7.4), storm correlation via graph blast-radius keys (§7.5), severity routing (§7.7), enrichment via in-process bundle (§7.6); `object-state` source. | Node-failure drill produces 1 storm session, not 30; fix-verify round-trips without agent polling. |
 | **M3 — leading indicators + history** | `rollout`, `saturation`, `degradation`, `expiry` sources; raw store (§9.1) incl. graph snapshots/delta log; `triage events`, `triage top`, `triage radius --at`, `triage changes`, `net probe`. | A staged bad deploy and a staged memory leak both open sessions before user-visible failure; "blast radius at onset" answerable 30 min after the fact. |
 | **M4 — capacity & quota** | `capacity` + `quota` sources (§10); `cloud stockout|orphans|ipspace|quota`; distilled memories (§9.2); triage-status records (§9.4) + memory-merged `health`; quota write path behind permission gate. | Staged quota exhaustion yields correlated incident + drafted increase request; a health scan run mid-incident reports the triage state, not a fresh unknown. |
-| **M5 — fleet & corpus** | Remaining reads (`state wi|webhooks|volumes`, `stab drift|drain`, `perf probe`); fingerprint schema finalized with AX; `token-burn` source; corpus harvester contract validated end-to-end (§9.3). | AX can rollup a multi-cluster staged stockout; one harvested labeled trajectory from a real incident. |
+| **M5 — fleet & corpus** | Remaining reads (`state wi|webhooks|volumes`, `stab drift|drain`, `perf probe`); fingerprint schema finalized for fleet rollup; `token-burn` source; corpus harvester contract validated end-to-end (§9.3). | a fleet-level consumer can rollup a multi-cluster staged stockout; one harvested labeled trajectory from a real incident. |
 
 ---
 

@@ -40,9 +40,11 @@ opens agent incident sessions from leading indicators (watch-path).
 - **Back-compat:** inject kinds `k8s-event` / `k8s-event-followup` and the
   shipped `InjectPayload` field names are frozen (playbooks pattern-match
   them). New kinds are `source.event`-namespaced.
-- **Scope boundaries:** fleet-level coordination is AX's job; `core-agent`
-  stays k8s-agnostic and never imports this module. Signals carry
-  `fingerprint`/`cluster`/`project`/`zone` so AX can roll up without parsing.
+- **Scope boundaries:** fleet-level coordination belongs to a fleet
+  aggregation layer, out of scope for this repo; `core-agent` stays
+  k8s-agnostic and never imports this module. Signals carry
+  `fingerprint`/`cluster`/`project`/`zone` so a fleet-level consumer can
+  roll up without parsing.
 - **Skills/playbooks live here** (`skills/`), never in core-agent — they
   version with tool flags and output formats. Skills map to workflows, not to
   commands (DESIGN.md §4.4).
@@ -69,13 +71,13 @@ is finished; post-M5 work is the review backlog in
 Every §4.1 command and all nine §7.2 sources ship; the signal schema
 is FROZEN as v1 (`docs/signal-schema-v1.md` — removing/renaming a
 frozen field or touching the fingerprint recipe is a v2 negotiation
-with AX, never a test update; additions are additive-only and extend
+with fleet consumers, never a test update; additions are additive-only and extend
 the ledger + doc in the same change). The full frozen-contract →
 guardian-test table is in `docs/repo-map.md`; per-milestone evidence
 and archaeology live in `docs/milestones/M0–M5.md`.
 
 Key open items (full list in M5.md): the real-incident trajectory +
-real AX integration + real-GCP drills (human steps; runbooks in
+real fleet-rollup integration + real-GCP drills (human steps; runbooks in
 `dev/drills/`), core-agent's shared Memory surface and
 CostCeiling-on-/usage TODOs, the `triage status` §4.1 extension
 awaiting review, `health`'s control-plane category not yet delegating

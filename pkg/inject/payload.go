@@ -36,7 +36,8 @@ type Payload struct {
 	// Project / Zone / Source / Severity / Fingerprint complete the
 	// §8 schema on SOURCE-NAMESPACED kinds (docs/signal-schema-v1.md,
 	// the M5 v1 freeze): fingerprint + cluster/project/zone are what
-	// make fleet rollup an AX join instead of an AX parsing project.
+	// make fleet rollup a fleet-layer join instead of a parsing
+	// project.
 	// ADDITIVE via omitempty, and the dispatcher stamps them ONLY on
 	// kinds other than the frozen k8s-event / k8s-event-followup pair
 	// — those payloads stay byte-identical to M0 (the frozen wire
@@ -83,7 +84,8 @@ type Payload struct {
 // projected (or, for countdowns, exact) exhaustion time and
 // ConfidenceBasis names the model that produced it — e.g.
 // "linear-90m-window" for a regression, "certificate-notAfter" for a
-// countdown — so the agent and AX can judge how much to trust it.
+// countdown — so the agent and fleet-level consumers can judge how
+// much to trust it.
 type PayloadForecast struct {
 	ETA             time.Time `json:"eta"`
 	ConfidenceBasis string    `json:"confidence_basis"`
@@ -149,7 +151,7 @@ const (
 )
 
 // Storm wire kinds (DESIGN.md §7.5). Like the resolved kinds these are
-// wire contract: playbook skills and AX match the exact strings.
+// wire contract: playbook skills and fleet consumers match the exact strings.
 const (
 	// KindStorm is the aggregate incident payload injected into the
 	// ONE session a correlated burst opens.
@@ -185,7 +187,7 @@ type StormIncidentRef struct {
 // StormPayload is the JSON body injected for kind=storm (DESIGN.md
 // §7.5): ONE incident for a correlated burst — "Node X NotReady; 30
 // pods affected across 6 namespaces; 3 representative incidents
-// attached". SCHEMA-STABLE: AX and playbook skills parse it
+// attached". SCHEMA-STABLE: fleet consumers and playbook skills parse it
 // structurally; the wire pin test in internal/watch is byte-exact.
 //
 // The ancestor fields carry the blast-radius key (the §6.4 nearest
@@ -247,7 +249,7 @@ type StormMemberPayload struct {
 // formation payload undersold the final blast radius: affected_count
 // froze at 3 while reality grew to 33). SCHEMA-STABLE: pinned
 // byte-exact by TestStormUpdate_ExactWireShape. The initial
-// kind=storm payload stays byte-identical; AX and playbooks read the
+// kind=storm payload stays byte-identical; fleet consumers and playbooks read the
 // storm's current size from the LAST storm.update in the session (or
 // the formation payload when none fired).
 type StormUpdatePayload struct {
@@ -313,7 +315,7 @@ type TriageRegressedPayload struct {
 }
 
 // Watchboard wire kinds (DESIGN.md §7.7 + §15 Q2). Wire contract like
-// the storm kinds: playbook skills and AX match the exact strings.
+// the storm kinds: playbook skills and fleet consumers match the exact strings.
 const (
 	// KindWatchboardDigest is the rolling digest of warning-class
 	// signals batched into the shared watchboard session.
@@ -391,7 +393,7 @@ type WatchboardRotatedPayload struct {
 //
 // Identity fields (reason … cluster, context) repeat the ORIGINAL
 // incident's identity; in particular Fingerprint is the original
-// incident's fingerprint, so AX and `lookout health` join outcome to
+// incident's fingerprint, so fleet consumers and `lookout health` join outcome to
 // incident on one key. Reason carries the canonical reason-class
 // (the dedup/binding key — e.g. "ImagePullBackOff" even if the wire
 // event said "ErrImagePull"), because the outcome closes the incident

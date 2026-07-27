@@ -71,7 +71,7 @@ type IncidentRef struct {
 	Container     string `json:"container,omitempty"`
 	ControllerRef string `json:"controller_ref,omitempty"`
 	// Fingerprint is the ORIGINAL incident's fingerprint. Resolved
-	// signals carry it unchanged so AX / health can join outcome to
+	// signals carry it unchanged so fleet consumers / health can join outcome to
 	// incident on one key.
 	Fingerprint string `json:"fingerprint,omitempty"`
 	Cluster     string `json:"cluster,omitempty"`
@@ -362,7 +362,7 @@ func (t *RecoveryTracker) stabilityStart(inc Incident, verdict Clearance, now ti
 
 // resolvedSignal composes the outcome Signal for a transition: the
 // original incident's identity and fingerprint (same fingerprint →
-// AX/health join outcome to incident), with the Recovery attachment.
+// fleet rollup and health join outcome to incident), with the Recovery attachment.
 // Severity is info — the outcome routes to the incident's bound
 // session regardless of severity policy.
 func resolvedSignal(kind string, inc Incident, rec Recovery) Signal {

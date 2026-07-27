@@ -167,7 +167,7 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	for _, f := range findings {
 		// §8 push/pull dedup key (docs/signal-schema-v1.md): every
 		// symptom-class finding carries the same fingerprint the
-		// sentinel would stamp on a push for this breakage, so AX and
+		// sentinel would stamp on a push for this breakage, so fleet rollup and
 		// the §9.4 join never double-count a symptom reported by both
 		// paths. Findings without an incident-class identity
 		// (reason+object) stay fingerprint-free — zero nominal state.

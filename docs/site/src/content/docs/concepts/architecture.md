@@ -102,7 +102,7 @@ any generated surface goes stale.
 
 Three boundaries, all pre-existing: the sentinel posts sessions and injects
 to the daemon's HTTP API; the `token-burn` source reads the daemon's cost
-stack; and fleet tooling (AX) consumes the
+stack; and fleet-level tooling consumes the
 [frozen signal schema](/concepts/signals-and-fingerprints/). Fleet scope is
 explicitly out of scope here — lookout deploys per cluster (or per project,
 for the quota source), and cross-cluster rollup joins signals, not graphs.

@@ -323,7 +323,7 @@ func TestPollDecisions_QuotaBlockedReKeysToQuotaUID(t *testing.T) {
 }
 
 // TestKindsAreFrozenStrings pins the §7.3 kind names — playbooks and
-// AX match on these exact strings.
+// fleet consumers match on these exact strings.
 func TestKindsAreFrozenStrings(t *testing.T) {
 	t.Parallel()
 	frozen := map[string]string{

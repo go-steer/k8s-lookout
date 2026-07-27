@@ -143,7 +143,6 @@ deployment's `.agents/skills/`.
 | Repo | Role |
 | --- | --- |
 | [`core-agent`](https://github.com/go-steer/core-agent) | the agent daemon; lookout talks to it over `POST /sessions` + `/inject` |
-| [`ax`](https://github.com/go-steer/ax) | fleet layer; joins lookout's frozen signal schema (`fingerprint` + `cluster`/`project`/`zone`) across clusters |
 
 ## Documentation
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Docs: removed references to the external fleet project by name —
+  fleet-rollup rationale now uses generic phrasing ("the fleet layer",
+  "a fleet-level consumer") throughout docs, comments, and test text.
+  No functional change; all frozen pins and goldens are byte-identical.
+
 ## [0.8.0] - 2026-07-27
 
 Adopts the improvements kube-agents made to their in-tree copy of the
@@ -277,7 +282,7 @@ M5 — fleet & corpus — closes out the §14 milestone plan (all six
 milestones complete): the signal schema is FROZEN as v1
 (`docs/signal-schema-v1.md`), the §9.3 corpus harvester contract is
 validated end-to-end, and the multi-cluster rollup is demonstrated as
-the AX-side fingerprint join — exit evidence and the post-M5 review
+the fleet-side fingerprint join — exit evidence and the post-M5 review
 backlog in `docs/milestones/M5.md`. Plus all five M4-drill
 observations fixed (`docs/milestones/M4.md` §Observations).
 
@@ -300,19 +305,20 @@ observations fixed (`docs/milestones/M4.md` §Observations).
   skilldoc tests now register the `perf`/`stab` groups).
 
 - **Signal-schema v1 freeze** (`docs/signal-schema-v1.md`, DESIGN.md
-  §8/§14 M5): the fleet-rollup wire contract AX consumes as-is,
-  frozen in-repo per the standing decision (no ax-repo filing).
+  §8/§14 M5): the fleet-rollup wire contract fleet consumers take
+  as-is, frozen in-repo per the standing decision (no external
+  filing).
   Machine-readable ledger in `pkg/inject/schema_freeze_test.go`: all
   32 shipped kinds enumerated and mapped to their wire structs, every
   struct's ordered json field list pinned (removal/rename fails the
-  ledger — a v2 negotiation with AX, never a test update; additions
+  ledger — a v2 negotiation with fleet consumers, never a test update; additions
   are additive-only and must extend the ledger consciously), and
   every payload round-trips marshal→unmarshal→marshal byte-exact so
   schema-walking consumers re-serialize losslessly.
 - **§8 identity fields on source-namespaced payloads**: kinds other
   than the frozen `k8s-event`/`k8s-event-followup` pair now carry
   `source`, `severity`, `fingerprint`, and (when known) `project`/
-  `zone` on the wire — fleet rollup becomes an AX join on
+  `zone` on the wire — fleet rollup becomes a fleet-layer join on
   (fingerprint, cluster/project/zone) instead of a parsing project.
   The M0 pair stays byte-identical (frozen wire pins unchanged); the
   `quota.forecast`/`saturation.forecast` pins were extended to the
@@ -1254,7 +1260,7 @@ record in the incident's own session 76 seconds later.
   forecast, and the frozen cross-cluster `fingerprint`
   (`sha256(kind ⊕ reason-class ⊕ object-class ⊕ zone)`, NUL-separated —
   the failure *class*, never the object name — pinned by contract-test
-  vectors so AX fleet rollup joins stay stable across versions).
+  vectors so fleet rollup joins stay stable across versions).
   `pkg/sources` carries the §7.2 `Source` interface
   (`Name`/`Scope`/`Run(ctx, emit)`), a source registry, and the §11
   startup capability probe: sources declare required RBAC and the
@@ -1332,8 +1338,8 @@ record in the incident's own session 76 seconds later.
   graph register on the same shared factory; the graph adds only a
   ReplicaSet watch — pods/nodes are already watched,
   ConfigMap/Secret/PVC ancestors come free as identities referenced by
-  pod specs, and Zone is excluded because zone-tier grouping is AX's
-  fleet join). New incidents enter a rolling window (default 60s);
+  pod specs, and Zone is excluded because zone-tier grouping is the
+  fleet layer's join). New incidents enter a rolling window (default 60s);
   when `--storm-min` (default 3) of them share a blast-radius key —
   the nearest common topology ancestor, priority node > owner chain
   (nearest first: ReplicaSet, then Deployment) > shared
@@ -1354,7 +1360,8 @@ record in the incident's own session 76 seconds later.
   record (reason `storm`, uid `storm:<ancestor key>`). All three storm
   payloads are schema-stable with byte-exact wire pins; the storm
   fingerprint is `sha256(storm ⊕ reason-class ⊕ ancestor-kind ⊕ zone)`
-  so AX joins the same node-failure storm across clusters. ADDITIVE
+  so the fleet layer joins the same node-failure storm across
+  clusters. ADDITIVE
   flags, default OFF: `--storm` (opt-in — the graph informers need
   pods/nodes/replicasets list+watch; ClusterRole updated, §11 probe
   fails loudly when the grant is missing; flipping the default is an

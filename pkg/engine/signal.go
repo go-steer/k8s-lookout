@@ -115,7 +115,8 @@ func (s Severity) Valid() bool {
 // when the signal is a leading indicator ("pod hits memory limit in
 // ~14 min"), ETA is the projected exhaustion time and ConfidenceBasis
 // names the model that produced it (e.g. "linear-90m-window") so the
-// agent — and AX — can judge how much to trust it. Nil for reactive
+// agent — and fleet-level consumers — can judge how much to trust
+// it. Nil for reactive
 // signals.
 type Forecast struct {
 	ETA             time.Time

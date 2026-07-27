@@ -86,7 +86,8 @@ const Name = "capacity"
 const kindPrefix = "capacity."
 
 // Signal kinds emitted by this source. APPEND-ONLY: kinds are part of
-// the signal schema playbooks and AX match on — never rename or reuse
+// the signal schema playbooks and fleet consumers match on — never
+// rename or reuse
 // one. The dedup/fingerprint reason for each is the kind suffix.
 const (
 	// KindPending: a NotTriggerScaleUp event — the autoscaler looked

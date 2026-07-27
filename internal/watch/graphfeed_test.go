@@ -81,7 +81,8 @@ func buildFeedGraph(t *testing.T, objs ...any) *graphFeed {
 
 // TestGraphAncestors_Priority pins the §7.5 key priority over a REAL
 // topology: node > owner chain (nearest owner first) > shared
-// config > namespace — and Zone excluded (fleet tier, AX's join).
+// config > namespace — and Zone excluded (fleet tier, the fleet
+// layer's join).
 func TestGraphAncestors_Priority(t *testing.T) {
 	t.Parallel()
 	g := buildFeedGraph(t,
@@ -103,7 +104,7 @@ func TestGraphAncestors_Priority(t *testing.T) {
 	}
 	for _, a := range got {
 		if a.Kind == "Zone" {
-			t.Error("Zone must never be a storm key (fleet tier is AX's join)")
+			t.Error("Zone must never be a storm key (fleet tier is the fleet layer's join)")
 		}
 	}
 }

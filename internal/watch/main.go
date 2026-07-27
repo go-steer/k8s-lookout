@@ -1287,7 +1287,8 @@ func identityFromProvider(p cloud.Provider, flagProject, flagZone string) (proje
 
 // stampIdentity completes the §8 schema on a source-namespaced
 // payload (docs/signal-schema-v1.md, the M5 v1 freeze): fingerprint +
-// source + severity + zone/project ride the wire so AX can roll up a
+// source + severity + zone/project ride the wire so a fleet-level
+// consumer can roll up a
 // fleet-wide symptom as a join on (fingerprint, cluster/project/zone)
 // instead of parsing payloads. The frozen kinds — k8s-event and
 // k8s-event-followup — are deliberately excluded: their payloads stay

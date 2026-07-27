@@ -18,7 +18,7 @@
 // and (next change in this stack) the triage-status records incident
 // agents write at material transitions. Both are RECORD TYPES with
 // schema-stable JSON — never prose — so every consumer (severity
-// routing, health/bundle merge, AX rollup, the §9.3 corpus
+// routing, health/bundle merge, fleet rollup, the §9.3 corpus
 // harvester) joins on fields, not NLP.
 //
 // # Why lookout owns this interface (the core-agent binding decision)
@@ -92,7 +92,8 @@ const (
 //
 // The JSON encoding is SCHEMA-STABLE: field names and shapes are a
 // wire contract consumed outside this repo (agents query these
-// records; AX may harvest them). Additive evolution only; the golden
+// records; a fleet-level consumer may harvest them). Additive
+// evolution only; the golden
 // test pins the bytes.
 type DistilledFact struct {
 	// Class names the pattern that produced the fact, dot-namespaced
@@ -122,7 +123,7 @@ type DistilledFact struct {
 	LastSeen  time.Time `json:"last_seen"`
 	// SourceFingerprints are the §8 fingerprints of the incident
 	// classes the evidence came from — the join key back to raw
-	// occurrences, sessions, and AX rollups. Sorted, deduplicated,
+	// occurrences, sessions, and fleet rollups. Sorted, deduplicated,
 	// capped at MaxSourceFingerprints.
 	SourceFingerprints []string `json:"source_fingerprints,omitempty"`
 	// Created is when the fact first materialized; Updated when the

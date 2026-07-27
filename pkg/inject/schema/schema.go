@@ -27,7 +27,7 @@
 // Additions are v1-additive (§8): extend this ledger, the field pins
 // in pkg/inject/schema_freeze_test.go, and docs/signal-schema-v1.md
 // in the same change. Removing or renaming an entry is a v2
-// negotiation with AX, never a routine edit.
+// negotiation with fleet consumers, never a routine edit.
 package schema
 
 import (

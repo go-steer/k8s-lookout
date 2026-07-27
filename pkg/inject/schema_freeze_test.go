@@ -14,7 +14,7 @@
 
 // Signal-schema v1 freeze (docs/signal-schema-v1.md, DESIGN.md §8/§14
 // M5): these tests are the machine-readable ledger of the frozen wire
-// contract AX consumes as-is.
+// contract fleet consumers consume as-is.
 //
 //   - Every SHIPPED signal kind is enumerated and mapped to the wire
 //     struct that serializes it — a kind added without extending the
@@ -22,11 +22,11 @@
 //   - Every wire struct's field list (json tags, in order) is pinned.
 //     A frozen field disappearing or changing its json tag fails the
 //     pin: that is a BREAKING change requiring v2 negotiation with
-//     AX, never a test to update. Adding a field is allowed within
+//     fleet consumers, never a test to update. Adding a field is allowed within
 //     v1 but must consciously extend the pinned list here and the
 //     schema doc (additive-only evolution).
 //   - Every payload type round-trips marshal → unmarshal → marshal
-//     byte-identically, so a §9.3 harvester or an AX ingester can
+//     byte-identically, so a §9.3 harvester or a fleet-level ingester can
 //     re-serialize what it read without corrupting the record.
 package inject_test
 
@@ -70,7 +70,7 @@ var shippedKinds = func() map[string]reflect.Type {
 // frozenFields pins, per wire struct, the ordered json field names of
 // signal-schema v1 (nested objects pinned separately below). Removing
 // or renaming an entry here — or shipping a struct whose tags no
-// longer produce this list — is a v2 negotiation with AX, not a test
+// longer produce this list — is a v2 negotiation with fleet consumers, not a test
 // update. Additions land at the end of a struct AND of this ledger
 // AND in docs/signal-schema-v1.md, in the same change.
 var frozenFields = map[string][]string{
@@ -160,7 +160,7 @@ func TestSchemaV1_FieldSetsFrozen(t *testing.T) {
 		got := jsonFields(typ)
 		want := frozenFields[name]
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s wire fields drifted from the v1 freeze (docs/signal-schema-v1.md):\n got: %v\nwant: %v\nRemoving/renaming is a v2 negotiation with AX; additions must extend the ledger consciously.", name, got, want)
+			t.Errorf("%s wire fields drifted from the v1 freeze (docs/signal-schema-v1.md):\n got: %v\nwant: %v\nRemoving/renaming is a v2 negotiation with fleet consumers; additions must extend the ledger consciously.", name, got, want)
 		}
 	}
 }
@@ -207,7 +207,7 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 // TestSchemaV1_RoundTrip serializes a fully-populated instance of
 // every wire payload, unmarshals it, and re-serializes: the bytes
 // must be identical, so any schema-walking consumer (the §9.3
-// harvester, an AX ingester) can re-emit records losslessly.
+// harvester, a fleet-level ingester) can re-emit records losslessly.
 func TestSchemaV1_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ts := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)

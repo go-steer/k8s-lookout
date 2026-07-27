@@ -22,7 +22,7 @@ import (
 // Fingerprint computes the §8 signal fingerprint: a stable hash of
 // the incident CLASS, deliberately NOT of the affected object. Two
 // pods crash-looping in different clusters of the same zone carry the
-// same fingerprint; that is the point — AX rolls up a fleet-wide
+// same fingerprint; that is the point — the fleet layer rolls up a fleet-wide
 // symptom as a join on (fingerprint, cluster/project/zone) instead of
 // parsing payloads, and `lookout health` merges "the sentinel paged
 // on this" with "the scan still sees it" into one finding.
@@ -50,7 +50,8 @@ import (
 //
 // with NUL (0x00) as the field separator (a byte that cannot appear
 // in any input). Fingerprints are persisted in incident records and
-// compared ACROSS clusters and lookout versions by AX; changing the
+// compared ACROSS clusters and lookout versions by fleet consumers;
+// changing the
 // encoding, separator, field order, or field set silently splits
 // every fleet-wide rollup into disjoint halves during a rolling
 // upgrade. The pinned vectors in fingerprint_test.go are the
@@ -90,7 +91,7 @@ func Fingerprint(kind, reasonClass, objectClass, zone string) string {
 // dispatcher stamp uses the message-aware variant on the same
 // families, so `lookout health`'s pod.crashloop finding and the
 // sentinel's CrashLoopBackOff inject carry identical fingerprints
-// (the §8 merge, and the AX cross-path dedup). This is the one
+// (the §8 merge, and the fleet-level cross-path dedup). This is the one
 // recipe the §9.4 join has used since it shipped; changing it
 // desynchronizes every open triage-status record.
 func ScanFingerprint(reason, objectClass, zone string) string {
