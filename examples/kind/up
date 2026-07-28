@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Create the examples kind cluster and everything the sentinel's
+# opt-in sources need from the cluster side:
+#
+#   - kind cluster `lookout-examples` (control-plane + 2 workers)
+#   - metrics-server (the saturation source REFUSES to start without
+#     metrics.k8s.io; kind needs --kubelet-insecure-tls)
+#   - the demo images pre-pulled into the nodes, so scenario rollouts
+#     don't race registry pulls
+#
+# Flags:
+#   --build   build the lookout image from HEAD (tag lookout:examples-dev)
+#             and side-load it, instead of using the GHCR image later.
+#             Prints the LOOKOUT_IMAGE export to use with sentinel/up.
+
+. "$(dirname "$0")/../lib.sh"
+
+build_image=false
+[[ "${1:-}" == "--build" ]] && build_image=true
+
+for tool in kind kubectl docker; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "ERROR: $tool not found on PATH" >&2
+    exit 1
+  }
+done
+
+if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+  echo "▸ kind cluster '$CLUSTER_NAME' already exists — reusing"
+else
+  echo "▸ creating kind cluster '$CLUSTER_NAME'"
+  kind create cluster --config "$(examples_root)/kind/cluster.yaml"
+fi
+kubectl config use-context "$EXAMPLES_CONTEXT" >/dev/null
+
+echo "▸ waiting for nodes Ready"
+kubectl wait --for=condition=Ready nodes --all --timeout=180s
+
+echo "▸ installing metrics-server (required by the saturation source)"
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+# kind kubelets serve self-signed certs; without this metrics-server
+# never turns Ready and metrics.k8s.io stays unavailable.
+kubectl -n kube-system patch deployment metrics-server --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}
+]'
+kubectl -n kube-system rollout status deploy/metrics-server --timeout=180s
+echo "▸ waiting for metrics.k8s.io to answer"
+waited=0
+until kubectl top nodes >/dev/null 2>&1; do
+  ((waited >= 120)) && {
+    echo "ERROR: metrics.k8s.io still unavailable after 120s" >&2
+    exit 1
+  }
+  sleep 5
+  waited=$((waited + 5))
+done
+
+echo "▸ pre-pulling demo images into the kind nodes"
+for img in python:3.12-alpine python:3.11-alpine; do
+  docker pull "$img"
+  kind load docker-image "$img" --name "$CLUSTER_NAME"
+done
+
+if $build_image; then
+  echo "▸ building lookout:examples-dev from HEAD"
+  (cd "$(repo_root)" && docker build -t lookout:examples-dev --build-arg VERSION=examples-dev .)
+  kind load docker-image lookout:examples-dev --name "$CLUSTER_NAME"
+  echo
+  echo "Side-loaded. Deploy the sentinel with:"
+  echo "  LOOKOUT_IMAGE=lookout:examples-dev examples/sentinel/up"
+else
+  echo
+  echo "Next: examples/sentinel/up   (uses ghcr.io/go-steer/lookout:latest;"
+  echo "      re-run this script with --build to use a from-HEAD image)"
+fi

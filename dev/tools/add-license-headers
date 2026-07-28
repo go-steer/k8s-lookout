@@ -157,26 +157,32 @@ def main() -> None:
                 counts["go"] += 1
                 print(f"go:   {path.relative_to(REPO_ROOT)}")
 
-    # Shell: dev/tools + dev/ci/presubmits. Skip helper data files.
-    for d in (REPO_ROOT / "dev/tools", REPO_ROOT / "dev/ci/presubmits"):
-        if not d.exists():
+    # Shell: dev/tools + dev/ci/presubmits (flat) and examples/
+    # (recursive: kind/sentinel setup + per-scenario scripts + lib.sh).
+    # Skip helper data files.
+    shell_walk = [
+        *[p for d in (REPO_ROOT / "dev/tools", REPO_ROOT / "dev/ci/presubmits")
+          if d.exists() for p in d.iterdir()],
+        *[p for p in (REPO_ROOT / "examples").rglob("*")
+          if (REPO_ROOT / "examples").exists()],
+    ]
+    for path in shell_walk:
+        if not path.is_file():
             continue
-        for path in d.iterdir():
-            if not path.is_file():
-                continue
-            if path.suffix in (".yml", ".yaml", ".md"):
-                continue
-            if path.suffix == ".py":
-                continue
-            if path.name == "common.sh" or is_executable_or_sh(path):
-                if apply_header(path, HASH_HEADER, "# ", has_shebang=True):
-                    counts["sh"] += 1
-                    print(f"sh:   {path.relative_to(REPO_ROOT)}")
+        if path.suffix in (".yml", ".yaml", ".md"):
+            continue
+        if path.suffix == ".py":
+            continue
+        if path.name in ("common.sh", "lib.sh") or is_executable_or_sh(path):
+            if apply_header(path, HASH_HEADER, "# ", has_shebang=True):
+                counts["sh"] += 1
+                print(f"sh:   {path.relative_to(REPO_ROOT)}")
 
-    # YAML: workflows, golangci-lint config, hugo config.
+    # YAML: workflows, golangci-lint config, deploy + examples manifests.
     yaml_files = [
         *list((REPO_ROOT / ".github/workflows").glob("*.yml")),
         REPO_ROOT / "dev/tools/.golangci.yml",
+        *sorted((REPO_ROOT / "examples").rglob("*.yaml")),
     ]
     for path in yaml_files:
         if not path.exists():

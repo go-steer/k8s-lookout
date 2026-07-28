@@ -97,6 +97,12 @@ project-tier (quota source, `-gke` image) deployments are covered in
 DESIGN.md §11 — sources whose RBAC scope isn't satisfied fail loudly at
 startup, never as a silently empty watch.
 
+Want to see both halves against real failures first?
+[`examples/`](./examples/) stands up a kind cluster, the sentinel
+against a capture stub, demo workloads, and ten inject/verify/revert
+failure scenarios (`examples/e2e` runs the lot) — plus the recipe for
+testing the CLI through agent harnesses via skills or MCP.
+
 ## Command surface
 
 | Command | What it does |

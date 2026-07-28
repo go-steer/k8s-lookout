@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# End-to-end scenario driver: inject → verify → revert, per scenario,
+# against the CURRENT (examples) cluster. Verification is two-surface:
+# the sentinel's wire capture (stub-daemon logs) AND the read-path CLI.
+#
+# Usage:
+#   examples/e2e                 # all non-destructive scenarios, ordered
+#   examples/e2e crashloop pending
+#   examples/e2e node-failure    # destructive (docker stop) — explicit only
+#
+# Prereqs: examples/kind/up, examples/sentinel/up, and
+# `kubectl apply -f examples/workloads/` (applied automatically if
+# missing). Exit 0 only if every selected scenario passed.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+
+# Ordering matters a little: pdb-gridlock runs before endpoints-empty
+# and bad-rollout last, so earlier injects' dedup windows and shared
+# victims (api, web) don't shadow later signals.
+DEFAULT_SCENARIOS=(
+  crashloop
+  image-pull
+  failed-mount
+  oom
+  pending
+  cert-expiry
+  pdb-gridlock
+  endpoints-empty
+  bad-rollout
+)
+
+scenarios=("$@")
+if ((${#scenarios[@]} == 0)); then
+  scenarios=("${DEFAULT_SCENARIOS[@]}")
+fi
+for s in "${scenarios[@]}"; do
+  if [[ ! -x "$(examples_root)/scenarios/$s/inject" ]]; then
+    echo "ERROR: unknown scenario '$s'. Available:" >&2
+    ls "$(examples_root)/scenarios" | sed 's/^/  /' >&2
+    exit 2
+  fi
+done
+
+echo "▸ preflight"
+kubectl -n "$SENTINEL_NS" rollout status deploy/k8s-event-watcher --timeout=30s >/dev/null || {
+  echo "ERROR: sentinel not running — examples/sentinel/up first" >&2
+  exit 1
+}
+kubectl -n "$SENTINEL_NS" rollout status deploy/stub-daemon --timeout=30s >/dev/null || {
+  echo "ERROR: stub daemon not running — examples/sentinel/up first" >&2
+  exit 1
+}
+if ! kubectl get namespace "$DEMO_NS" >/dev/null 2>&1; then
+  echo "▸ demo workloads missing — applying examples/workloads/"
+  kubectl apply -f "$(examples_root)/workloads/"
+fi
+kubectl -n "$DEMO_NS" wait --for=condition=Available deploy --all --timeout=180s >/dev/null
+echo "  ✓ sentinel, stub, and demo workloads ready"
+echo "  ✓ lookout binary: $(lookout_bin)"
+
+declare -A results
+failed=0
+for s in "${scenarios[@]}"; do
+  dir="$(examples_root)/scenarios/$s"
+  printf '\n\033[1m════ scenario: %s ════\033[0m\n' "$s"
+  ok=true
+  if ! "$dir/inject"; then
+    ok=false
+    echo "✗ $s: inject failed" >&2
+  elif ! "$dir/verify"; then
+    ok=false
+    echo "✗ $s: verify failed" >&2
+  fi
+  # Always revert, even after a failure — leave the cluster clean.
+  if ! "$dir/revert"; then
+    ok=false
+    echo "✗ $s: revert failed — cluster may need manual cleanup" >&2
+  fi
+  if $ok; then
+    results[$s]=PASS
+  else
+    results[$s]=FAIL
+    failed=$((failed + 1))
+  fi
+  # Let events/dedup settle so scenarios don't bleed into each other.
+  sleep 10
+done
+
+printf '\n\033[1m════ e2e summary ════\033[0m\n'
+for s in "${scenarios[@]}"; do
+  printf '  %-18s %s\n' "$s" "${results[$s]}"
+done
+if ((failed > 0)); then
+  echo
+  echo "$failed scenario(s) failed. Wire capture for forensics:" >&2
+  echo "  kubectl -n $SENTINEL_NS logs deploy/stub-daemon" >&2
+  exit 1
+fi
+echo
+echo "All ${#scenarios[@]} scenario(s) passed."

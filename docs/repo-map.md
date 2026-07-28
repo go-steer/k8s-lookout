@@ -53,6 +53,9 @@ k8s-lookout/
 │   │                     #   quota-exhaustion) + stub-daemon.py capture sink
 │   └── tools/            # ci (runs all presubmits), build, lint-go, test-unit,
 │                         #   gen-skill-refs, harvest-corpus, add-license-headers, …
+├── examples/             # runnable e2e: kind recipe, sentinel + capture stub, demo
+│                         #   workloads, inject/verify/revert failure scenarios, e2e driver,
+│                         #   agent-harness (skills/MCP) testing guide
 └── docs/                 # DESIGN.md (normative), design notes, milestones/, this map
 ```
 
@@ -154,6 +157,7 @@ cannot silently drift from tool output.
 | pipeline drills: scripted signal streams through the REAL dispatcher | `internal/watch/*_dispatch_test.go`, `m5_corpus_rollup_test.go` (storms, recovery, routing, quota, corpus, rollup) |
 | doc-example validation | `internal/skilldoc/examples_test.go` |
 | live-cluster replay drills (human-run, never CI) | `dev/drills/*.md` runbooks + `stub-daemon.py` |
+| live-cluster e2e scenarios (local kind / GKE staging, never CI) | `examples/e2e` + `examples/scenarios/*` (inject/verify/revert against the wire capture + read-path) |
 
 CI: `dev/tools/ci` runs the same steps as `.github/workflows/ci.yml`
 (format → vet → build → lint → mod-tidy → test → vuln), individually
