@@ -1,0 +1,145 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: E2E (kind)
+
+# Live-cluster e2e of examples/scenarios against a kind cluster, using
+# an image BUILT FROM THIS COMMIT (kind/up --build) — this tests HEAD,
+# not the last released GHCR image. Two tiers:
+#
+#   - push to main   → smoke: crashloop + failed-mount + bad-rollout
+#                      (~10 min: reactive events, state edges, rollout
+#                      source, recovery closed loop)
+#   - weekly / manual → the full non-destructive set + node-failure
+#                      (~40 min)
+#
+# Deliberately NOT a pull_request job: signal routing legitimately
+# varies with cluster history (storms, dedup, resolved.reverted — see
+# examples/README.md), and a ~98%-reliable required check taxes every
+# PR. PR presubmits stay hermetic (AGENTS.md testing conventions);
+# this workflow is the "something real is continuously tested" tier.
+#
+# On failure: stub-daemon + sentinel logs and cluster state are
+# uploaded as artifacts (the wire capture is the forensics), and
+# scheduled runs open an issue so failures aren't silent.
+
+on:
+  schedule:
+    - cron: '23 6 * * 1' # Mondays 06:23 UTC — off the :00 stampede
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: 'space-separated scenarios (empty = full set + node-failure)'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/site/**'
+      - 'LICENSE'
+      - '.github/workflows/docs*.yml'
+      - '.github/workflows/release*.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: e2e-kind
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # CI runners are slower than the workstation the timings were
+      # calibrated on; doubles every verify-script await window.
+      LOOKOUT_E2E_TIMEOUT_SCALE: '2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.31.0
+
+      - name: Cluster up (image built from HEAD)
+        run: examples/kind/up --build
+
+      - name: Sentinel + stub daemon
+        run: LOOKOUT_IMAGE=lookout:examples-dev examples/sentinel/up
+
+      - name: Demo workloads
+        run: |
+          kubectl apply -f examples/workloads/
+          kubectl -n lookout-demo wait --for=condition=Available deploy --all --timeout=300s
+          kubectl -n lookout-demo wait --for=condition=Ready pod/vantage --timeout=180s
+
+      - name: Run scenarios
+        env:
+          # Via env, never inline-interpolated into the script — the
+          # e2e driver validates names against scenarios/ and exits 2
+          # on anything unknown.
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          case "${{ github.event_name }}" in
+            push)
+              examples/e2e crashloop failed-mount bad-rollout
+              ;;
+            workflow_dispatch)
+              if [ -n "$SCENARIOS" ]; then
+                # shellcheck disable=SC2086 — word-splitting is the contract
+                examples/e2e $SCENARIOS
+              else
+                examples/e2e
+                examples/e2e node-failure
+              fi
+              ;;
+            *)
+              examples/e2e
+              examples/e2e node-failure
+              ;;
+          esac
+
+      - name: Collect forensics
+        if: failure()
+        run: |
+          mkdir -p _forensics
+          kubectl -n agent-triage logs deploy/stub-daemon --tail=-1 >_forensics/stub-daemon.log 2>&1 || true
+          kubectl -n agent-triage logs deploy/k8s-event-watcher --tail=-1 >_forensics/sentinel.log 2>&1 || true
+          kubectl get pods -A -o wide >_forensics/pods.txt 2>&1 || true
+          kubectl get events -A --sort-by=.lastTimestamp >_forensics/events.txt 2>&1 || true
+          kubectl -n lookout-demo describe pods >_forensics/describe-lookout-demo.txt 2>&1 || true
+
+      - name: Upload forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-forensics-${{ github.run_id }}
+          path: _forensics/
+          retention-days: 14
+
+      - name: Open issue on scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "weekly kind e2e failed: run ${{ github.run_id }}" \
+            --body "The scheduled kind e2e run failed on $(date -u +%Y-%m-%d). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} — the wire capture and sentinel log are attached as the e2e-forensics artifact. See examples/README.md § Re-runs, dedup, and storm absorption before assuming a product regression."
