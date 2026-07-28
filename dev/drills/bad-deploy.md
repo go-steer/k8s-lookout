@@ -41,7 +41,7 @@ minus the kind-only bits):
 
 ```
 --sources=k8s-events,object-state,rollout,saturation,degradation,expiry
---storm --enrich=critical
+--storm=on --enrich=critical
 --store=/data/lookout.db
 --graph-snapshot-interval=1m       # drill value; default 5m
 --recovery-stable-for=60s          # drill value; default 5m

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**Default-pin note (2026-07-27, zero-deployed-users policy):** the two
+flag-default changes below amend post-M0 flag-default pins CLEANLY
+ONCE, with the pin tests updated deliberately (dated policy comments in
+`internal/watch/sources_flag_test.go` / `storm_dispatch_test.go`). The
+M0 frozen flag surface (`TestFlagSurfaceFrozen`, the 19 predecessor
+flags) is untouched — `--sources` and `--storm` postdate it. All frozen
+wire pins are byte-identical.
+
+- `--sources` now defaults to `auto` (was `k8s-events` only):
+  probe-and-enable across the seven portable sources (k8s-events,
+  object-state, rollout, saturation, degradation, expiry, capacity) —
+  each candidate's §11 RBAC probe passing enables it, and saturation
+  additionally requires the metrics.k8s.io API in discovery. Misses are
+  skipped with one explicit startup line naming the source, the missing
+  grant/API, and the fix; the summary block always prints (enabled
+  lines included). `k8s-events` failing its probe is fatal — a sentinel
+  that cannot watch events is misdeployed. `quota` (project tier) and
+  `token-burn` (core-agent cost stack) are never auto-enabled. Explicit
+  lists keep the frozen semantics exactly: a named source's probe
+  failure is fatal, and `--sources=k8s-events` reproduces the old
+  default byte-for-byte.
+- `--storm` now defaults to `auto` (was off) **and changes syntax**:
+  the flag is a string taking `auto|on|off` (`true`/`false` accepted as
+  aliases). auto probes the graph informer grants
+  (pods/nodes/replicasets list+watch) — present resolves on, missing
+  resolves off with a loud line; `--storm=on` keeps the old fatality.
+  The resolution is independent of object-state (the graph feed runs
+  its own informers; factory sharing is an optimization). BREAKING
+  SYNTAX: bare `--storm` (valid bool syntax before) now errors — write
+  `--storm=on`; drills and docs updated.
+- `deploy/51-deployment-watcher.yaml` now ships the full capability
+  surface explicitly: all seven portable sources plus `token-burn`,
+  `--storm=on`, and `--store=/var/lib/lookout/lookout.db` on an
+  emptyDir volume (commented PVC alternative for durable post-mortems).
+  Explicit on purpose — the manifest ships alongside the full RBAC, so
+  a grant gap should fail loudly, not skip. The image-swap upgrade path
+  for predecessor deployments is unchanged.
+
 - Docs site: plain-language rewrite of the entry points for first-time
   readers — new landing page (problem, what lookout does, one real
   output sample, audience router), a "How lookout thinks" overview

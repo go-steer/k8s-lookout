@@ -17,12 +17,22 @@
 # kube-apiserver, filters + dedupes, and POSTs matched events to the
 # core-agent daemon's session inject endpoint.
 #
-# This is core-agent's 51-deployment-watcher.yaml with ONE change:
-# the image line. The ghcr.io/go-steer/lookout image's ENTRYPOINT is
-# ["/lookout", "watch"], so the bare-flag `args:` below splice in
-# behind `watch` exactly as they spliced in behind the old
+# This started as core-agent's 51-deployment-watcher.yaml with ONE
+# change: the image line. The ghcr.io/go-steer/lookout image's
+# ENTRYPOINT is ["/lookout", "watch"], so the bare-flag `args:` below
+# splice in behind `watch` exactly as they spliced in behind the old
 # k8s-event-watcher binary — an existing deployment swaps images with
-# zero other config change (M0 exit criterion, DESIGN.md §14).
+# zero other config change (M0 exit criterion, DESIGN.md §14). That
+# image-swap path still holds; NEW deployments from this manifest
+# additionally get the full capability surface EXPLICITLY: every
+# portable source plus token-burn pinned in `args:` (explicit lists
+# make a missing grant a loud startup FAILURE, §11 — the right
+# posture when this manifest's RBAC is applied alongside), storm
+# correlation on, and the occurrence store on a volume. Note the
+# binary's own defaults are `--sources=auto --storm=auto`
+# (probe-and-enable: misses are skipped with a loud line instead of
+# failing) — a manifest that pins nothing still gets everything the
+# deployment's RBAC supports.
 #
 # Runs as a SEPARATE Deployment from the daemon (not a sidecar
 # container in the daemon's pod) so:
@@ -87,6 +97,21 @@ spec:
             - "--in-cluster"
             - "--metrics-addr=:9090"
             - "--log-level=info"
+            # Full capability surface, pinned explicitly (§11: a named
+            # source's missing grant is a loud startup error — this
+            # manifest ships with the matching RBAC in deploy/12-15).
+            # The seven portable sources plus token-burn (its cost
+            # stack is the --daemon-url daemon right above); quota
+            # stays off — it is the per-GCP-project opt-in that also
+            # needs the -gke image flavor (see IMAGE FLAVORS).
+            - "--sources=k8s-events,object-state,rollout,saturation,degradation,expiry,capacity,token-burn"
+            - "--storm=on"
+            # Occurrence store (§9.1): info-signal persistence, graph
+            # history (--at post-mortems), triage-status records.
+            - "--store=/var/lib/lookout/lookout.db"
+          volumeMounts:
+            - name: lookout-data
+              mountPath: /var/lib/lookout
           env:
             - name: WATCHER_TOKEN
               valueFrom:
@@ -116,3 +141,18 @@ spec:
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        # The occurrence store's home. emptyDir is the zero-friction
+        # default: the store is telemetry, never control flow, so
+        # losing it on pod reschedule costs history, not correctness.
+        # For durable post-mortems (--at queries across restarts,
+        # `triage changes`), swap in the PVC below — the image is
+        # distroless (no tar), so `kubectl cp` off a live pod does NOT
+        # work; a PVC you can mount from a debug pod is the practical
+        # way to copy the store out.
+        - name: lookout-data
+          emptyDir: {}
+        # PVC alternative (create the claim first):
+        # - name: lookout-data
+        #   persistentVolumeClaim:
+        #     claimName: lookout-data

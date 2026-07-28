@@ -82,4 +82,5 @@ real fleet-rollup integration + real-GCP drills (human steps; runbooks in
 CostCeiling-on-/usage TODOs, the `triage status` §4.1 extension
 awaiting review, `health`'s control-plane category not yet delegating
 to the perf packs, the `k8s-capacity` skill, and the M3 graph-history
-observations (`--storm` default stays OFF pending the restart fix).
+observations (the `GraphAt` restart-replay fix — still open, though
+`--storm` now defaults to auto rather than OFF).

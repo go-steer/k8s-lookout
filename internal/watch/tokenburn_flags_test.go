@@ -16,6 +16,7 @@ package watch
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,17 +52,23 @@ func TestSourcesFlag_TokenBurnEnabled(t *testing.T) {
 		t.Error("token-burn not registered")
 	}
 
-	// Default surface: token-burn must NOT be constructed.
-	fDefault, err := parseFlags(nil)
+	// token-burn is explicit-only: it is not in the auto candidate
+	// set (autoSourceNames — the §12 cost stack is a paid polling
+	// loop, a deployment decision), and a list without it must not
+	// construct it.
+	if slices.Contains(autoSourceNames, tokenburn.Name) {
+		t.Error("token-burn must NOT be an auto-resolution candidate")
+	}
+	fDefault, err := parseFlags([]string{"--sources=k8s-events", "--dry-run"})
 	if err != nil {
-		t.Fatalf("parseFlags(nil): %v", err)
+		t.Fatalf("parseFlags: %v", err)
 	}
 	bsDefault, err := buildSources(fDefault, "", fake.NewSimpleClientset(), nil, nil, nil)
 	if err != nil {
-		t.Fatalf("buildSources(default): %v", err)
+		t.Fatalf("buildSources(k8s-events only): %v", err)
 	}
 	if bsDefault.tokenBurn != nil {
-		t.Error("token-burn must NOT be constructed by default")
+		t.Error("token-burn must NOT be constructed without being named")
 	}
 }
 

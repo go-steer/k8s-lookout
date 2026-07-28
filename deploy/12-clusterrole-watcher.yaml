@@ -17,6 +17,14 @@
 # mutations happen through the core-agent daemon's MCP tool calls,
 # authorized by the daemon's own ServiceAccount.
 #
+# These grants are also what `--sources=auto` / `--storm=auto` (the
+# binary's defaults) RESOLVE AGAINST at startup: each portable
+# source's declared needs are probed, a full grant enables the
+# source, and a gap skips it with one loud line naming the missing
+# rule from this file. Explicitly named sources (and --storm=on) turn
+# that same gap into a fatal startup error — which is why the shipped
+# Deployment (51) pins its sources explicitly against this role.
+#
 # What the sentinel needs:
 #   - list/watch events — the primary informer target
 #   - list/watch pods — the recovery clearance observer (DESIGN.md
@@ -31,8 +39,8 @@
 #     poddisruptionbudgets — the object-state source (DESIGN.md §7.2,
 #                       enabled via --sources=k8s-events,object-state):
 #                       leading indicators from state transitions.
-#                       Harmless when the source is disabled (the
-#                       default); required when enabled — the §11
+#                       Harmless when the source is disabled;
+#                       required when enabled — the §11
 #                       startup probe fails loudly naming the missing
 #                       grant. A namespace-scoped deployment (Role,
 #                       not ClusterRole) cannot satisfy these and gets
@@ -44,9 +52,9 @@
 #                       and StatefulSet rollouts (its pods /
 #                       deployments / replicasets informers ride the
 #                       grants above and below — one shared informer
-#                       set). Harmless when the source is disabled
-#                       (the default); required when enabled —
-#                       verified loudly by the §11 startup probe.
+#                       set). Harmless when the source is disabled;
+#                       required when enabled — verified loudly by
+#                       the §11 startup probe.
 #   - get/list pods.metrics.k8s.io + get nodes/proxy — the saturation
 #                       source (DESIGN.md §7.2 row 4, enabled via
 #                       --sources=...,saturation): container CPU/mem
@@ -56,26 +64,28 @@
 #                       nodes/proxy is read-only GET here; when the
 #                       endpoint is unreachable at runtime the source
 #                       logs once and skips the PVC dimension.
-#                       Harmless when the source is disabled (the
-#                       default); required when enabled — verified
-#                       loudly at startup.
+#                       Harmless when the source is disabled;
+#                       required when enabled — verified loudly at
+#                       startup.
 #   - list/watch replicasets — the storm-correlation topology graph
-#                       (DESIGN.md §6.3 + §7.5, enabled via --storm):
-#                       a ReplicaSet's ownerReferences extend the
+#                       (DESIGN.md §6.3 + §7.5, --storm): a
+#                       ReplicaSet's ownerReferences extend the
 #                       blast-radius owner chain to the Deployment,
 #                       the ancestor operators recognize. The graph's
 #                       pods/nodes informers ride the grants above
 #                       (one shared informer set). Harmless when
-#                       --storm is off (the default); required when on
-#                       — verified loudly at startup like a source.
+#                       --storm=off; --storm=auto (the default)
+#                       resolves ON when this grant is present and
+#                       off (loudly) when it is not; --storm=on makes
+#                       the gap a fatal startup error instead.
 #   - list secrets, serviceaccounts; list webhook configurations;
 #     list cert-manager certificates — the expiry source (DESIGN.md
 #                       §7.2 row 6, enabled via --sources=…,expiry):
 #                       expiry countdowns over TLS certs, webhook CA
 #                       bundles, SA token expiries, and cert-manager
 #                       renewal state. Harmless when the source is
-#                       disabled (the default); verified loudly at
-#                       startup when enabled. See the §11 tradeoff
+#                       disabled; verified loudly at startup when
+#                       enabled. See the §11 tradeoff
 #                       note on the secrets rule below.
 #
 # The capacity source (--sources=…,capacity, DESIGN.md §10.1) rides

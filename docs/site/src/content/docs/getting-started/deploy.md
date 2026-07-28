@@ -25,7 +25,7 @@ the [next page](/getting-started/connect-core-agent/).
 | `11-serviceaccount-watcher.yaml` | The sentinel's ServiceAccount (`k8s-event-watcher` — resource names kept for drop-in continuity with predecessor deployments). Bound to no GCP IAM role: the sentinel talks only to the local API server and the daemon. |
 | `12-clusterrole-watcher.yaml` | The minimum-necessary, **read-only** ClusterRole. No patch/update/delete on anything — the sentinel observes; mutations happen through the core-agent daemon's own permission gate. Each rule is annotated with the source that needs it; rules for disabled sources are harmless. |
 | `13-clusterrolebinding-watcher.yaml` | Binds the ServiceAccount to the ClusterRole. |
-| `14-role-watcher-capacity.yaml` | A `kube-system`-namespaced Role for the capacity source's one extra read: `get` on the `cluster-autoscaler-status` ConfigMap, pinned by `resourceNames` rather than widening the ClusterRole. Only needed with `--sources=…,capacity`. |
+| `14-role-watcher-capacity.yaml` | A `kube-system`-namespaced Role for the capacity source's one extra read: `get` on the `cluster-autoscaler-status` ConfigMap, pinned by `resourceNames` rather than widening the ClusterRole. Only the capacity source needs it — under `--sources=auto` its absence skips the source loudly; with capacity named explicitly it is fatal. |
 | `15-rolebinding-watcher-capacity.yaml` | Binds the ServiceAccount to the capacity Role. |
 | `51-deployment-watcher.yaml` | The sentinel Deployment: one replica, distroless image, nonroot, `/healthz` liveness/readiness probes on the metrics port, and the shipped `args:`. A separate Deployment from the daemon (not a sidecar) so the two scale and restart independently; for another cluster, copy it and change `--cluster-name` + `--daemon-url`. |
 
@@ -40,7 +40,7 @@ stays disabled.
 
 | Tier | Unit | Mechanism |
 | --- | --- | --- |
-| Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace`. Cluster-scoped sources fail loudly at startup and must be disabled explicitly — never a silently empty watch. The topology graph builds a namespace-local subgraph. |
+| Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace`. Cluster-scoped sources cannot run: `--sources=auto` (the default) skips each with a loud line naming the missing grant, while an explicit list fails loudly at startup — never a silently empty watch either way. The topology graph builds a namespace-local subgraph. |
 | Cluster | one sentinel per cluster (canonical) | One informer cache, one topology index, one credential boundary, one failure domain. One daemon may serve many sentinels. |
 | Project | quota source only | One instance per GCP project, regardless of cluster count. Needs the `-gke` image. |
 | Fleet | the fleet layer, not `lookout` | Sentinel-per-cluster fan-in; a fleet-level consumer joins signals on `fingerprint` + `cluster`/`zone`/`project`. |
@@ -49,9 +49,12 @@ stays disabled.
 
 A namespace-scoped (Role-only) deployment cannot satisfy sources that
 watch cluster-scoped objects (`object-state`'s nodes, `capacity`, PDB
-checks, the `--storm` graph informers). The startup RBAC probe verifies
-every enabled source's declared needs against the actual ServiceAccount
-and refuses to start on a mismatch, naming exactly what is missing:
+checks, the `--storm` graph informers). Under the default
+`--sources=auto`/`--storm=auto`, those resolve OFF — each with one
+startup line naming the missing grant — and the sentinel runs with
+what the Role supports (`k8s-events` at minimum; events access itself
+is non-negotiable). Name a source explicitly and the same probe
+refuses to start instead, naming exactly what is missing:
 
 ```
 source "object-state" requires permission to "list nodes cluster-wide" (scope: Cluster)
@@ -66,23 +69,34 @@ requirements table.
 
 ## The flags that matter
 
-The shipped `args:` in `51-deployment-watcher.yaml` are the wiring
-minimum: `--daemon-url`, `--token-env`, `--mode=per-incident`, `--owner`,
+The shipped `args:` in `51-deployment-watcher.yaml` carry the wiring
+(`--daemon-url`, `--token-env`, `--mode=per-incident`, `--owner`,
 `--cluster-name`, `--dedup-window=5m`, `--in-cluster`,
-`--metrics-addr=:9090`, `--log-level=info`. The capability opt-ins:
+`--metrics-addr=:9090`, `--log-level=info`) plus the full capability
+surface pinned explicitly: all seven portable sources and
+`token-burn`, `--storm=on`, and a `--store` on an emptyDir volume.
+The capability flags:
 
-- **`--sources`** — which signal sources run. The default is
-  `k8s-events` only (the frozen predecessor surface); the other eight
-  are opt-in. What each source watches for, with example triggers and
-  extra needs, is [What the sentinel
-  watches](/getting-started/what-the-sentinel-watches/). Each enabled
-  source's RBAC needs are probed at startup; each is individually
-  disableable.
+- **`--sources`** — which signal sources run. The default is `auto`:
+  probe every portable source's needs at startup — RBAC per source,
+  metrics.k8s.io presence for `saturation` — and enable what the
+  deployment supports, skipping misses with one loud line each
+  (`k8s-events` must pass; a sentinel that cannot watch events fails
+  to start). An explicit list is the strict mode: every named
+  source's probe failure is fatal — which is why the shipped `args:`
+  pin the list, since they ship alongside the full RBAC. `quota` and
+  `token-burn` are never auto-enabled. What each source watches for,
+  with example triggers and extra needs, is [What the sentinel
+  watches](/getting-started/what-the-sentinel-watches/).
 - **`--storm`** — storm correlation: incidents sharing a blast-radius
   key (nearest common topology ancestor) within `--storm-window` form
-  one `kind=storm` session instead of dozens of per-pod pages. Requires
-  pods/nodes/replicasets list+watch for the graph informers (in the
-  shipped ClusterRole). Off by default.
+  one `kind=storm` session instead of dozens of per-pod pages. Takes
+  `auto` (the default: the graph informers' pods/nodes/replicasets
+  list+watch grants present resolve on; a miss resolves off with a
+  loud line), `on` (a missing grant is a fatal startup error), or
+  `off` — `true`/`false` are accepted as aliases, but the old bare
+  `--storm` bool syntax now errors; write `--storm=on`. Independent
+  of `object-state`: the graph feed runs its own informers.
 - **`--store`** — the sentinel-local SQLite occurrence store: every
   emitted signal with its routing outcome, graph snapshots + change log
   (which unlock `--at` post-mortem queries), and triage-status records.
@@ -114,7 +128,7 @@ drill-tuned values marked):
 
 ```
 --sources=k8s-events,object-state,rollout,saturation,degradation,expiry
---storm --enrich=critical
+--storm=on --enrich=critical
 --store=/data/lookout.db
 --graph-snapshot-interval=1m      # drill value; default 5m
 --recovery-stable-for=60s         # drill value; default 5m

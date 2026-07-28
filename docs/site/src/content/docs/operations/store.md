@@ -8,7 +8,7 @@ sidebar:
 `--store=/var/lib/lookout/lookout.db` gives the sentinel a local,
 embedded SQLite store (pure Go, no cgo) — put it on the same volume as
 `--dedup-persist`. Startup confirms it, along with the history feed when
-`--storm` provides the graph:
+storm correlation provides the graph:
 
 ```
 store: enabled (path=/data/lookout.db, ttl=720h …)
@@ -29,7 +29,8 @@ graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — -
   facts.
 - **Graph history** — compressed topology snapshots every
   `--graph-snapshot-interval` (default 5m) plus the per-delta change
-  log. Written only when `--storm` runs (that is the graph feed). This
+  log. Written only when storm correlation runs (that is the graph
+feed). This
   is what serves `--at` point-in-time queries and `triage changes`' full
   delta log.
 - **Triage-status records** — the diagnosis records written by

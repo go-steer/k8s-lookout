@@ -45,7 +45,8 @@ because outcome records are schema-stable structs, never prose.
 ## Storm correlation: one session, not thirty
 
 A naive per-incident model turns one node failure into ~30 sessions for 30
-evicted pods. With `--storm`, a second-level correlation window groups new
+evicted pods. With storm correlation on (`--storm` defaults to auto:
+on whenever the graph grants are present), a second-level correlation window groups new
 incidents sharing a **blast-radius key** — the nearest common ancestor in
 the [topology graph](/concepts/topology-graph/) (node, owner chain, shared
 ConfigMap/PVC, namespace) — into one `kind=storm` session: *"Node X
