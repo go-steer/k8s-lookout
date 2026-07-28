@@ -2,7 +2,7 @@
 title: MCP setup
 description: lookout mcp — every read command as an MCP tool over stdio or loopback HTTP, and why the HTTP transport is loopback-only.
 sidebar:
-  order: 5
+  order: 6
 ---
 
 Every read-path command is also exposed 1:1 as an MCP tool:
@@ -26,7 +26,7 @@ through the same sanitizer.
 - **stdio (default)** — the transport a daemon uses when it spawns
   `lookout mcp` as a child process. Diagnostics go to stderr only.
 - **`--listen=<host:port>`** — streamable HTTP, for the same-pod case
-  where the daemon and lookout run as separate containers sharing the
+  where the daemon and `lookout` run as separate containers sharing the
   pod's network namespace. **Non-loopback binds are refused**:
 
   ```
@@ -35,7 +35,7 @@ through the same sanitizer.
   ```
 
   The rationale is exactly what the error says: the MCP server carries
-  no authentication story, and a lookout reachable off-host would hand
+  no authentication story, and a `lookout` reachable off-host would hand
   its cluster read access to the network. It never listens on a
   routable interface.
 
@@ -43,7 +43,7 @@ through the same sanitizer.
 
 Register `lookout mcp` in the daemon's MCP server configuration as a
 stdio server (spawned command: `lookout`, args: `["mcp"]`), or — when the
-daemon image cannot exec at all — run lookout as a second container in
+daemon image cannot exec at all — run `lookout` as a second container in
 the daemon's pod with `--listen=127.0.0.1:<port>` and register the HTTP
 endpoint. In-cluster, the pod's ServiceAccount needs read RBAC covering
 the checks you expect agents to call; the sentinel's shipped ClusterRole

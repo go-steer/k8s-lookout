@@ -36,14 +36,14 @@ no watch, no get, no informer cache of secret material. Scope it with
 `--expiry-namespaces`, or remove the rule entirely if the expiry source
 stays disabled.
 
-## Deployment tiers (DESIGN.md §11)
+## Deployment tiers
 
 | Tier | Unit | Mechanism |
 | --- | --- | --- |
 | Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace`. Cluster-scoped sources fail loudly at startup and must be disabled explicitly — never a silently empty watch. The topology graph builds a namespace-local subgraph. |
 | Cluster | one sentinel per cluster (canonical) | One informer cache, one topology index, one credential boundary, one failure domain. One daemon may serve many sentinels. |
 | Project | quota source only | One instance per GCP project, regardless of cluster count. Needs the `-gke` image. |
-| Fleet | the fleet layer, not lookout | Sentinel-per-cluster fan-in; a fleet-level consumer joins signals on `fingerprint` + `cluster`/`zone`/`project`. |
+| Fleet | the fleet layer, not `lookout` | Sentinel-per-cluster fan-in; a fleet-level consumer joins signals on `fingerprint` + `cluster`/`zone`/`project`. |
 
 ### Namespace-tier caveats — failures are loud
 
@@ -72,10 +72,12 @@ minimum: `--daemon-url`, `--token-env`, `--mode=per-incident`, `--owner`,
 `--metrics-addr=:9090`, `--log-level=info`. The capability opt-ins:
 
 - **`--sources`** — which signal sources run. The default is
-  `k8s-events` only (the frozen predecessor surface). The full set:
-  `k8s-events, object-state, rollout, saturation, degradation, expiry,
-  capacity, quota, token-burn`. Each source's RBAC needs are probed at
-  startup; each is individually disableable.
+  `k8s-events` only (the frozen predecessor surface); the other eight
+  are opt-in. What each source watches for, with example triggers and
+  extra needs, is [What the sentinel
+  watches](/getting-started/what-the-sentinel-watches/). Each enabled
+  source's RBAC needs are probed at startup; each is individually
+  disableable.
 - **`--storm`** — storm correlation: incidents sharing a blast-radius
   key (nearest common topology ancestor) within `--storm-window` form
   one `kind=storm` session instead of dozens of per-pod pages. Requires
@@ -122,4 +124,4 @@ After `kubectl apply`, read the startup log before walking away: every
 armed stage announces itself (`store: enabled …`, `graph history:
 enabled …`, `storm: topology graph ready …`), and every problem is a
 named, loud line — see
-[Observing lookout](/operations/observability/).
+[Observing `lookout`](/operations/observability/).

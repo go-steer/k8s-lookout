@@ -21,7 +21,7 @@ lookout state edges [flags]
 | --- | --- | --- | --- |
 | `--cert-warn` | duration | `720h` | report TLS certificates expiring within this window |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

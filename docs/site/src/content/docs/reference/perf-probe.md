@@ -21,7 +21,7 @@ lookout perf probe [flags]
 | --- | --- | --- | --- |
 | `--pack` | string | — | which query pack to run (required): apiserver\|apf\|etcd\|startup |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -51,7 +51,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `trend` | startup pack: second-half vs first-half mean delta of the window, e.g. "+34%" — the p95 trend direction |
 | `capability` | cloud.unavailable: the provider capability this command needed (metrics) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the metrics backend could not be served |
+| `unavailable` | summary-line note: why the metrics backend could not be served |
 
 ## Output contract
 

@@ -15,7 +15,7 @@ MCP tool: `k8s_volume_conflicts`
 lookout state volumes [flags]
 ```
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

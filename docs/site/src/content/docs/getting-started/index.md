@@ -5,6 +5,13 @@ sidebar:
   order: 0
 ---
 
+This section is for anyone starting from zero: you have a kubeconfig,
+maybe an AI agent, and you have never run `lookout`. By the end you will
+have the binary installed, real diagnostic output from a cluster you
+already have access to, and — if you take the later steps — a sentinel
+deployed in-cluster, opening incident sessions for your agent. The
+first useful command needs nothing deployed at all.
+
 Everything ships as one multicall binary, `lookout`, and the path in is
 incremental — each step works without the next:
 
@@ -17,11 +24,14 @@ incremental — each step works without the next:
 3. [Deploy the sentinel](/getting-started/deploy/) — `kubectl apply -f
    deploy/`, what each manifest is, the RBAC tiers, and the flags that
    matter.
-4. [Connect to core-agent](/getting-started/connect-core-agent/) — the
+4. [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
+   — the failure classes it monitors, what is on out of the box, and
+   the flag line that turns the rest on.
+5. [Connect to core-agent](/getting-started/connect-core-agent/) — the
    daemon contract: sessions, injects, per-incident vs shared routing.
-5. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
+6. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
    for daemons that cannot shell out.
-6. [Integrations](/getting-started/integrations/) — beyond core-agent:
+7. [Integrations](/getting-started/integrations/) — beyond core-agent:
    the read path from any MCP client or shell-capable agent, and the
    watch path into any webhook receiver.
 

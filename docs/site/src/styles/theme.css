@@ -60,7 +60,10 @@
   --sl-color-accent-high: #0092b8;
 
   /* Content measure + type scale */
-  --sl-content-width: 55rem;
+  --sl-content-width: 62rem;
+  /* Anchor content to the left nav; spare width falls to the right
+   * instead of pooling as a gutter between nav and content. */
+  --sl-content-margin-inline: 0 auto;
   --sl-line-height: 1.7;
   --sl-text-base: 1rem;
 }
@@ -254,8 +257,14 @@
   white-space: nowrap;
 }
 .sl-markdown-content table {
-  display: table;
+  /* Scroll-contain wide tables instead of letting min-content width
+   * (nowrap code spans above) push them under the right-hand TOC on
+   * narrow viewports. display:block keeps inner table layout while
+   * allowing overflow-x; max-width pins the box to the content column. */
+  display: block;
+  max-width: 100%;
   width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
 }
 .sl-markdown-content table th,
@@ -272,4 +281,25 @@
 }
 .sl-markdown-content table tbody tr:hover {
   background: var(--sl-color-gray-7);
+}
+
+/* --- Right "On this page" rail ---
+ * Starlight sizes it from --sl-sidebar-width (18.75rem), the same
+ * variable as the left nav. A table of contents needs far less;
+ * the reclaimed space goes to the content column. Unlayered author
+ * CSS wins over Starlight's @layer rules, so no !important.
+ */
+@media (min-width: 72rem) {
+  .right-sidebar-container {
+    /* Flat width: Starlight's own formula grows the rail with the
+     * viewport; a table of contents never needs more than this. */
+    width: 13.5rem;
+  }
+  /* Cap the pane holding the content column so the TOC rail sits
+   * immediately to the content's right; spare viewport width falls
+   * to the far right of the rail instead of pooling between the
+   * nav, the content, and the TOC. */
+  .main-pane {
+    max-width: calc(var(--sl-content-width) + 2 * var(--sl-content-pad-x));
+  }
 }

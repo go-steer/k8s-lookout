@@ -15,7 +15,7 @@ MCP tool: `k8s_cloud_stockout`
 lookout cloud stockout [flags]
 ```
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `window` | summary-line note: the lookback the events cover |
 | `capability` | cloud.unavailable: the provider capability this command needed (stockout) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the cloud read could not be served |
+| `unavailable` | summary-line note: why the cloud read could not be served |
 
 ## Output contract
 

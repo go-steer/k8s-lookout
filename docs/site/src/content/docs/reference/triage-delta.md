@@ -24,7 +24,7 @@ lookout triage delta [flags]
 | `--pending-age` | duration | `5m` | flag Pending pods older than this; also the grace before a not-ready container in a Running pod is flagged |
 | `--quota-warn` | int | `90` | warn when a ResourceQuota resource reaches this percent of its hard limit (the hard limit itself is always critical) |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

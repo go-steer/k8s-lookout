@@ -5,11 +5,14 @@ sidebar:
   order: 4
 ---
 
-Most monitoring stacks emit alerts: stateless notifications a human joins,
-dedupes, and eventually silences. lookout's watch-path deliberately emits
-**sessions** — stateful incident containers that accumulate the followups,
-the diagnosis, and finally a ground-truth outcome. Four mechanisms make
-that work.
+Most monitoring tools send alerts: one-shot notifications that someone
+must collect, connect, and eventually silence. When `lookout`'s sentinel
+spots a problem it instead opens a **session** — an ongoing record of
+one incident that accumulates the follow-up observations, the
+diagnosis, and finally proof the problem is actually gone. This page
+explains the four mechanisms that make that work; for the inventory of
+what's watched in the first place, see [What the sentinel
+watches](/getting-started/what-the-sentinel-watches/).
 
 ## Recovery injects: fix-verify without polling
 
@@ -112,5 +115,5 @@ context the first tool calls would have fetched; followups, correlated
 observations from other sources, and the agent's own diagnosis accumulate
 in it; routing respects what has already been triaged; and the world —
 not the agent — declares the outcome. An alert asks a human to find out
-what happened. A lookout session already knows, and can prove when it's
+what happened. A `lookout` session already knows, and can prove when it's
 over.

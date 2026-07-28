@@ -21,7 +21,7 @@ lookout state webhooks [flags]
 | --- | --- | --- | --- |
 | `--cert-warn` | duration | `720h` | report webhook CA bundles expiring within this window |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |

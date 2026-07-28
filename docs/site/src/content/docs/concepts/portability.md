@@ -5,10 +5,13 @@ sidebar:
   order: 6
 ---
 
-Around 80% of the suite is pure `client-go` and works on **any conformant
-Kubernetes cluster**. The cloud-specific surface is small, enumerable, and
-walled off behind a provider boundary — absence degrades per capability,
-loudly, never silently.
+You do not need GKE — or any cloud — to use `lookout`: around 80% of the
+suite is pure `client-go` and works on **any conformant Kubernetes
+cluster**, a local kind cluster included. This page explains exactly
+which pieces do need a cloud provider, and how a missing capability
+announces itself plainly instead of erroring out or staying silent —
+the surface is small, enumerable, and walled off behind a provider
+boundary.
 
 ## The split
 

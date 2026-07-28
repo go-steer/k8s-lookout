@@ -2,7 +2,7 @@
 title: Integrations
 description: Beyond core-agent — the read path from any MCP client or shell-capable agent, skills portability, and receiving the watch path anywhere over the webhook sink.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 core-agent is the first-class runtime and the default everywhere, but
@@ -70,7 +70,7 @@ cp -r skills/k8s-triage skills/cluster-health skills/gitops-drift \
 ```
 
 Skills version with tool flags and output formats, so reinstall the
-`skills/` matching the lookout tag you deploy. `playbooks/` is shared
+`skills/` matching the `lookout` tag you deploy. `playbooks/` is shared
 reference material the skills link to — keep it alongside.
 
 ## Receiving the watch path anywhere
@@ -132,7 +132,7 @@ What a receiver should know:
 
 - **You may be stateless.** Ignore the ids you hand out if you like —
   every payload carries its own identity (`fingerprint`, object
-  coordinates, `kind`), and lookout sequences opens before appends.
+  coordinates, `kind`), and `lookout` sequences opens before appends.
   Correlating payloads into per-incident threads is your opportunity,
   not your obligation.
 - **A reference receiver already exists.**

@@ -5,12 +5,14 @@ sidebar:
   order: 2
 ---
 
-The Kubernetes API is flat and resource-centric: reconstructing "what
+The first questions in any incident are about relationships: what does
+this pod depend on, who talks to it, what else shares its node? The
+Kubernetes API is flat and resource-centric — reconstructing "what
 relates to this pod" costs an agent 10–15 round trips unless something
-maintains the relations for it. That something is the in-memory topology
-index — no CLI of its own, consumed by `state edges`,
-`triage radius|changes|events|spec`, `bundle`, storm correlation, and
-session enrichment.
+maintains the relations for it. This page explains that something: the
+in-memory topology index, which has no CLI of its own but sits behind
+`state edges`, `triage radius|changes|events|spec`, `bundle`, storm
+correlation, and session enrichment.
 
 ## The pod-nexus model
 

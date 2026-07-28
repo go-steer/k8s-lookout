@@ -5,6 +5,12 @@ sidebar:
   order: 0
 ---
 
+This section is for whoever keeps the sentinel running after it is
+deployed — a platform or SRE hat more than an agent-author one. By the
+end you will know what the sentinel stores on disk and for how long,
+how warning-level noise stays bounded, how to verify the sentinel is
+healthy and what to alert on, and what its startup errors mean.
+
 Day-2 material for a deployed sentinel (deploying it in the first place
 is [Getting started → Deploy the sentinel](/getting-started/deploy/)):
 
@@ -15,7 +21,7 @@ is [Getting started → Deploy the sentinel](/getting-started/deploy/)):
   batched into digests, the size-based rotation lifecycle, and lineage.
 - [Drills & verification](/operations/drills/) — the staged-failure
   runbooks in `dev/drills/` and when to run them.
-- [Observing lookout](/operations/observability/) — the Prometheus
+- [Observing `lookout`](/operations/observability/) — the Prometheus
   metrics, `/healthz`, startup-log verification, and what to alert on.
 - [Troubleshooting](/operations/troubleshooting/) — RBAC probe failures,
   source-by-source requirements, common startup errors verbatim, and

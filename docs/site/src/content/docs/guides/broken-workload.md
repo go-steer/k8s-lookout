@@ -110,7 +110,7 @@ instead of silence.
 3. Sudden regression instead? Ask
    [what changed](/guides/what-changed/) *first*.
 
-In the M1 exit check this double fault was fully root-caused with lookout
+In the M1 exit check this double fault was fully root-caused with `lookout`
 reads alone — no kubectl was needed for the diagnosis.
 
 ## As an agent skill

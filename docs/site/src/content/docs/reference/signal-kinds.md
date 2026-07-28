@@ -16,7 +16,7 @@ schema doc in the same change.
 Every payload carries a stable incident-class `fingerprint` plus
 `cluster`/`project`/`zone` join dimensions — fleet rollup is a join, not a
 parsing project. The one exception is the frozen M0 pair, which stays
-byte-identical to the original `k8s-event-watcher` and never gains the §8
+byte-identical to the original `k8s-event-watcher` and never gains the
 identity fields.
 
 ## Cross-cutting kinds
@@ -27,19 +27,19 @@ Emitted by the dispatcher itself (outcome records, storms, watchboard, triage ev
 | --- | --- | --- |
 | `k8s-event` | `Payload` | Frozen M0 reactive kind: the opening inject of a per-incident session, byte-identical to the original k8s-event-watcher. |
 | `k8s-event-followup` | `Payload` | Frozen M0 reactive kind: a dedup-window recurrence injected into the already-open incident session. |
-| `resolved` | `ResolvedPayload` | §7.4 outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered\|object_deleted. |
-| `resolved.reverted` | `ResolvedPayload` | §7.4 outcome record: the symptom recurred within the revert window after a resolve. |
-| `storm` | `StormPayload` | §7.5 aggregate incident: opened when --storm-min incidents share a blast-radius key within --storm-window. |
-| `storm.member` | `StormMemberPayload` | §7.5 membership record injected into the storm session for each folded incident. |
-| `storm.member_superseded` | `StormMemberPayload` | §7.5 supersede pointer left in a pre-storm incident session that the storm absorbed. |
-| `storm.update` | `StormUpdatePayload` | §7.5 storm size refresh (latest wins): membership grew past a reporting threshold. |
-| `watchboard.digest` | `WatchboardDigestPayload` | §7.7 warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush). |
-| `watchboard.rotated` | `WatchboardRotatedPayload` | §15 Q2 size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests. |
-| `triage.regressed` | `TriageRegressedPayload` | §9.4 regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page. |
+| `resolved` | `ResolvedPayload` | Outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered\|object_deleted. |
+| `resolved.reverted` | `ResolvedPayload` | Outcome record: the symptom recurred within the revert window after a resolve. |
+| `storm` | `StormPayload` | Aggregate incident: opened when --storm-min incidents share a blast-radius key within --storm-window. |
+| `storm.member` | `StormMemberPayload` | Membership record injected into the storm session for each folded incident. |
+| `storm.member_superseded` | `StormMemberPayload` | Supersede pointer left in a pre-storm incident session that the storm absorbed. |
+| `storm.update` | `StormUpdatePayload` | Storm size refresh (latest wins): membership grew past a reporting threshold. |
+| `watchboard.digest` | `WatchboardDigestPayload` | Warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush). |
+| `watchboard.rotated` | `WatchboardRotatedPayload` | Size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests. |
+| `triage.regressed` | `TriageRegressedPayload` | Regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page. |
 
 ## Source-namespaced kinds
 
-All ride `inject.Payload` with the full §8 identity stamped (`source`, `severity`, `fingerprint`, `project`, `zone`). The source column is the `--sources` name that emits the kind.
+All ride `inject.Payload` with the full identity stamped (`source`, `severity`, `fingerprint`, `project`, `zone`). The source column is the `--sources` name that emits the kind.
 
 | Kind | Source | Role |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ All ride `inject.Payload` with the full §8 identity stamped (`source`, `severit
 | `capacity.scaledown` | `capacity` | The ScaleDown event family (info; warning for ScaleDownFailed). |
 | `capacity.scaleup_gap` | `capacity` | A nodegroup's cloudProviderTarget exceeded its ready count beyond the sustain window — asked for a node, didn't get one. |
 | `capacity.stockout` | `capacity` | A provider scale decision names a stockout: the zone/machine-type has no capacity. Remedy-disjoint from quota. |
-| `capacity.quota_blocked` | `capacity` | A provider scale decision names quota exhaustion: file a quota increase (§10.3). Remedy-disjoint from stockout. |
+| `capacity.quota_blocked` | `capacity` | A provider scale decision names quota exhaustion: file a quota increase. Remedy-disjoint from stockout. |
 | `capacity.ip_exhausted` | `capacity` | A provider scale decision names IP exhaustion: new nodes/pods cannot get addresses. |
 | `capacity.pending-aged` | `capacity` | A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m). |
 | `quota.forecast` | `quota` | A GCP quota's usage slope projects exhaustion (warning ETA\<7d or usage>=90%; critical ETA\<48h or >=98%), with a quota-increase draft attached. |

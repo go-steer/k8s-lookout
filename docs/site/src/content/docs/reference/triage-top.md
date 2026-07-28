@@ -25,7 +25,7 @@ lookout triage top [flags]
 | `--show-unlimited` | bool | — | list each container missing a cpu or memory limit individually (default: one aggregate count) |
 | `--history` | duration | — | enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -58,7 +58,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `capability` | cloud.unavailable: the provider capability --history needed (metrics) |
 | `provider` | cloud.unavailable: the provider that was asked |
 | `history` | summary-line note: the --history window the stats cover |
-| `unavailable` | summary-line note (§2 marker): why --history could not be served |
+| `unavailable` | summary-line note: why --history could not be served |
 
 ## Output contract
 

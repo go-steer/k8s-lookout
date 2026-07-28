@@ -5,9 +5,12 @@ sidebar:
   order: 1
 ---
 
-`k8s-lookout` exists to give an LLM-driven troubleshooting agent
-deterministic, token-dense eyes on a Kubernetes cluster. Everything follows
-from a handful of principles:
+This page explains how `lookout` is put together: two ways in — one-shot
+commands you run mid-investigation, and a resident watcher that lives in
+the cluster — and why both share a single binary. If you have wondered
+why the output is so terse, or why a healthy resource prints nothing,
+the answer is one of a handful of principles everything else follows
+from:
 
 - **Token density.** Raw telemetry costs money, evicts context, and slows
   the loop. Deterministic pre-compression — dedup by template, strip nominal
@@ -72,7 +75,7 @@ leading classes: `k8s-events` (the reactive baseline), `object-state`
 ETA forecasts), `degradation` (ready-ratio trends), `expiry` (certificate
 countdowns), `capacity` and `quota` (cluster-autoscaler and project-quota
 seams), and `token-burn` (agent spend as a saturation dimension). The full
-flag surface is in [Reference → lookout watch](/reference/watch/); every
+flag surface is in [Reference → `lookout watch`](/reference/watch/); every
 signal kind is cataloged in
 [Reference → Signal kinds](/reference/signal-kinds/).
 
@@ -104,5 +107,5 @@ Three boundaries, all pre-existing: the sentinel posts sessions and injects
 to the daemon's HTTP API; the `token-burn` source reads the daemon's cost
 stack; and fleet-level tooling consumes the
 [frozen signal schema](/concepts/signals-and-fingerprints/). Fleet scope is
-explicitly out of scope here — lookout deploys per cluster (or per project,
+explicitly out of scope here — `lookout` deploys per cluster (or per project,
 for the quota source), and cross-cluster rollup joins signals, not graphs.

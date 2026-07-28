@@ -5,11 +5,15 @@ sidebar:
   order: 3
 ---
 
-Everything the sentinel puts on the wire — and every finding a read-path
-scan emits — is a **Signal** under one schema, frozen as v1. The complete
-kind catalog is generated from the same ledger the freeze tests pin:
-[Reference → Signal kinds](/reference/signal-kinds/); the normative contract
-is
+Everything `lookout` tells you — a finding printed by a scan, an incident
+the sentinel opens — arrives in one shape: a **Signal**. This page
+explains that shape, the **fingerprint** that names an incident's
+*class* so the same problem seen twice is counted once, and why the
+schema is frozen as v1: other tools parse it, so it changes only by
+agreement. The complete kind catalog is generated from the same ledger
+the freeze tests pin:
+[Reference → Signal kinds](/reference/signal-kinds/); the normative
+contract is
 [`docs/signal-schema-v1.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/signal-schema-v1.md).
 
 ## The payload

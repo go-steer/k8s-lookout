@@ -22,7 +22,7 @@ lookout cloud quota [flags]
 | `--quota-warn` | int | `80` | report a quota only at or above this percent of its limit (critical is fixed at 95%) |
 | `--all` | bool | — | exploratory dump: emit every ratable quota regardless of --quota-warn (info severity below it), sorted by pct descending |
 
-## Common flags (every lookout command)
+## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -46,7 +46,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pct` | usage as a percent of the limit, one decimal |
 | `capability` | cloud.unavailable: the provider capability this command needed (quota) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note (§2 marker): why the cloud read could not be served |
+| `unavailable` | summary-line note: why the cloud read could not be served |
 
 ## Output contract
 
