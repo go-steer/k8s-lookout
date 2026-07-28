@@ -410,8 +410,10 @@ func (s *Source) judge(q cloud.QuotaUsage, hist cloud.QuotaHistory, now time.Tim
 		if headroom < 0 {
 			headroom = 0
 		}
-		eta = time.Duration(headroom / slope * float64(time.Second))
-		hasETA = true
+		// hasETA=false here is the overflow clamp (issue #80): a
+		// projection beyond the representable horizon is no
+		// projection, same as a non-positive slope.
+		eta, hasETA = saturation.ETAFromSeconds(headroom / slope)
 	}
 
 	var sev engine.Severity

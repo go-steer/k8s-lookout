@@ -537,9 +537,15 @@ func (s *Source) evaluate(ser *series, baseline float64, now time.Time) *engine.
 			budgetHot, exhausted = true, true
 			eta = 0
 		} else if costRate > 0 {
-			eta = time.Duration((s.cfg.BudgetUSD - spent) / costRate * float64(time.Second))
-			if eta < s.cfg.BurnETA {
-				budgetHot = true
+			// ok=false is the overflow clamp (issue #80): a projection
+			// beyond the representable horizon is no projection, same
+			// as costRate <= 0 — eta stays -1 (unknown) so the calm
+			// path below is undisturbed.
+			if d, ok := saturation.ETAFromSeconds((s.cfg.BudgetUSD - spent) / costRate); ok {
+				eta = d
+				if eta < s.cfg.BurnETA {
+					budgetHot = true
+				}
 			}
 		}
 	}

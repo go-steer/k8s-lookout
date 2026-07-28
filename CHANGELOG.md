@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Saturation, quota, and token-burn forecasts no longer fire false
+  CRITICALs on flat or near-flat series (#80): the ETA conversion
+  overflowed `time.Duration` when headroom/slope exceeded ~292 years —
+  on amd64 the float→int64 conversion wraps to a *negative* ETA that
+  read as "already breached", so the epsilon slope least-squares
+  leaves on an idle pod's constant memory could open a critical
+  incident session (and draft a quota increase). Projections beyond
+  the representable horizon now read as no projection, via one shared
+  clamp (`saturation.ETAFromSeconds`) at all three sites.
+
 ## [0.9.0] - 2026-07-28
 
 The sentinel now configures itself: `--sources` and `--storm` default

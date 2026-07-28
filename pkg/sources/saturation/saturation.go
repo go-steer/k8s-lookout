@@ -523,7 +523,23 @@ func (s *Source) record(key targetKey, ser *series, value, limit float64, now ti
 		return nil
 	}
 	slope := leastSquaresSlope(ser.samples) // units per second
-	if slope <= 0 {
+	current := ser.samples[n-1].v
+	headroom := ser.limit - current
+	var (
+		eta    time.Duration
+		hasETA bool
+	)
+	if slope > 0 {
+		if headroom <= 0 {
+			eta, hasETA = 0, true // already at/over the limit
+		} else {
+			// hasETA=false here is the overflow clamp (issue #80): a
+			// projection beyond the representable horizon is no
+			// projection, same as a non-positive slope.
+			eta, hasETA = ETAFromSeconds(headroom / slope)
+		}
+	}
+	if !hasETA {
 		if ser.nonPosSince.IsZero() {
 			ser.nonPosSince = now
 		}
@@ -534,15 +550,6 @@ func (s *Source) record(key targetKey, ser *series, value, limit float64, now ti
 		return nil
 	}
 	ser.nonPosSince = time.Time{}
-
-	current := ser.samples[n-1].v
-	headroom := ser.limit - current
-	var eta time.Duration
-	if headroom <= 0 {
-		eta = 0 // already at/over the limit
-	} else {
-		eta = time.Duration(headroom / slope * float64(time.Second))
-	}
 	if eta > s.cfg.clearETA() {
 		// Receded beyond 2×warn: release the latch so a future
 		// approach re-fires; clearance reports the symptom absent.
