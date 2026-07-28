@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Deploy the sentinel (`lookout watch`) + the capture stub into the
+# current cluster, using the shipped deploy/ manifests UNMODIFIED for
+# RBAC and the watcher Deployment shape — only the image and args are
+# patched for the examples:
+#
+#   1. namespace agent-triage + the k8s-event-watcher-token Secret
+#   2. stub daemon (dev/drills/stub-daemon.py) as Service core-agent:7777
+#   3. kubectl apply -f deploy/   (RBAC + watcher, exactly as shipped)
+#   4. patch the watcher image ($LOOKOUT_IMAGE, default GHCR latest)
+#      and args (opt-in sources, storm, enrichment, drill-speed timings)
+#
+# Env:
+#   LOOKOUT_IMAGE   image to run (default ghcr.io/go-steer/lookout:latest;
+#                   use lookout:examples-dev after kind/up --build)
+
+. "$(dirname "$0")/../lib.sh"
+require_examples_context
+
+image="${LOOKOUT_IMAGE:-ghcr.io/go-steer/lookout:latest}"
+root="$(repo_root)"
+
+echo "▸ namespace + token secret"
+kubectl create namespace "$SENTINEL_NS" --dry-run=client -o yaml | kubectl apply -f -
+# The stub does no auth validation (it only logs whether a bearer token
+# was present) — any value works; the manifest just requires the Secret.
+kubectl -n "$SENTINEL_NS" create secret generic k8s-event-watcher-token \
+  --from-literal=token=examples-stub-token --dry-run=client -o yaml | kubectl apply -f -
+
+echo "▸ stub daemon (Service core-agent:7777 — the wire capture)"
+kubectl -n "$SENTINEL_NS" create configmap stub-daemon \
+  --from-file=stub-daemon.py="$root/dev/drills/stub-daemon.py" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f "$(examples_root)/sentinel/10-stub-daemon.yaml"
+
+echo "▸ shipped deploy/ manifests (RBAC unmodified)"
+kubectl apply -f "$root/deploy/"
+
+# On kind, pin the sentinel + stub to the FIRST worker so the
+# node-failure scenario can stop the second one without killing them
+# (the M2 drill's nodeSelector, automated).
+if is_kind_context; then
+  pin_node="${CLUSTER_NAME}-worker"
+  if kubectl get node "$pin_node" >/dev/null 2>&1; then
+    echo "▸ pinning sentinel + stub to $pin_node (node-failure scenario survivability)"
+    for d in stub-daemon k8s-event-watcher; do
+      kubectl -n "$SENTINEL_NS" patch deployment "$d" --type=merge -p \
+        "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$pin_node\"}}}}}"
+    done
+  fi
+fi
+
+# The saturation source refuses to start when metrics.k8s.io is
+# unavailable (by design — loud, not silent). Drop it if the API isn't
+# answering rather than crash-looping the sentinel.
+sources="k8s-events,object-state,rollout,saturation,degradation,expiry,capacity"
+if ! kubectl top nodes >/dev/null 2>&1; then
+  echo "⚠ metrics.k8s.io not answering — dropping the saturation source" >&2
+  echo "  (examples/kind/up installs metrics-server; on other clusters install it and re-run)" >&2
+  sources="k8s-events,object-state,rollout,degradation,expiry,capacity"
+fi
+
+echo "▸ patching watcher: image=$image sources=$sources"
+args=(
+  "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
+  "--token-env=WATCHER_TOKEN"
+  "--mode=per-incident"
+  "--owner=lookout-examples@local"
+  "--cluster-name=$CLUSTER_NAME"
+  "--in-cluster"
+  "--metrics-addr=:9090"
+  "--log-level=info"
+  "--sources=$sources"
+  "--storm"
+  "--enrich=critical"
+  "--dedup-window=5m"
+  # Drill-speed values so scenarios verify in minutes, not defaults'
+  # production pacing (recovery 5m, rollout-observe 3m, pending 5m,
+  # expiry scan 1h). Same promotions the dev/drills runbooks use.
+  "--recovery-stable-for=60s"
+  "--rollout-observe=90s"
+  "--pending-age=75s"
+  "--expiry-interval=2m"
+  "--expiry-namespaces=$DEMO_NS"
+  "--severity=rollout.stall=critical"
+)
+args_json="$(printf '"%s",' "${args[@]}")"
+args_json="[${args_json%,}]"
+kubectl -n "$SENTINEL_NS" patch deployment k8s-event-watcher --type=json -p "[
+  {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},
+  {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$args_json}
+]"
+
+echo "▸ waiting for rollouts"
+kubectl -n "$SENTINEL_NS" rollout status deploy/stub-daemon --timeout=180s
+kubectl -n "$SENTINEL_NS" rollout status deploy/k8s-event-watcher --timeout=180s
+
+echo
+echo "▸ sentinel startup log (source probes + armed stages):"
+sleep 3
+kubectl -n "$SENTINEL_NS" logs deploy/k8s-event-watcher --tail=30 | sed 's/^/    /'
+echo
+echo "Wire capture: kubectl -n $SENTINEL_NS logs deploy/stub-daemon -f"
+echo "Next: kubectl apply -f examples/workloads/   then pick a scenario."
