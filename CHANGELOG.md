@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-28
+
+The sentinel now configures itself: `--sources` and `--storm` default
+to `auto`, probing what the deployment's RBAC actually grants. And the
+repo grows a runnable e2e layer — `examples/` deploys the sentinel
+against real workloads on kind, drives ten real failures, and asserts
+on the wire; CI runs a smoke subset on every merge to main and the
+full set weekly, non-blocking.
+
+### Added
+
+- `examples/` — a runnable e2e layer between the unit/contract suites
+  and the human-run `dev/drills/` runbooks (#76): a kind recipe
+  (metrics-server, image pre-pull, `--build` for a from-HEAD image), a
+  sentinel + capture-stub deploy that applies the shipped `deploy/`
+  manifests unmodified, the `lookout-demo` victim workloads, and ten
+  inject/verify/revert failure scenarios (crashloop, image-pull,
+  failed-mount, oom, pending, cert-expiry, pdb-gridlock,
+  endpoints-empty, bad-rollout, node-failure) — each verified on BOTH
+  surfaces: the schema-v1 inject wire via the stub capture, and the
+  read-path CLI. Plus `examples/e2e` (the driver), an agent-harness
+  guide (skills / `lookout mcp` / plain CLI, with per-scenario
+  prompts), and GKE staging deltas in `examples/gke/`. Every script
+  refuses to run unless the kubectl context is the examples cluster.
+- Non-blocking kind e2e in CI (#77, #78):
+  `.github/workflows/e2e-kind.yml` builds the image from HEAD and runs
+  a smoke subset (crashloop, failed-mount, bad-rollout) on every push
+  to main plus the full set weekly; failures upload the wire capture +
+  sentinel log as artifacts and open an issue. PR presubmits stay
+  hermetic — a live cluster never gates a PR (AGENTS.md testing
+  convention amended to say exactly that).
+
 ### Changed
 
 **Default-pin note (2026-07-27, zero-deployed-users policy):** the two
