@@ -85,7 +85,11 @@ args=(
   "--metrics-addr=:9090"
   "--log-level=info"
   "--sources=$sources"
-  "--storm"
+  # =true, not bare or =on: since the auto-defaults change --storm is a
+  # string flag (auto|on|off) and bare --storm swallows the next arg;
+  # 'true' is the one spelling both that flag AND the older boolean
+  # flag in pre-auto GHCR images accept.
+  "--storm=true"
   "--enrich=critical"
   "--dedup-window=5m"
   # Drill-speed values so scenarios verify in minutes, not defaults'
