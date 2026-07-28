@@ -79,6 +79,17 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
+## CI
+
+`.github/workflows/e2e-kind.yml` runs these scenarios non-blocking
+against an image built from HEAD (`kind/up --build`): a smoke subset
+(crashloop, failed-mount, bad-rollout) on every push to main, and the
+full set plus node-failure weekly (or on demand via
+workflow_dispatch). PR presubmits stay hermetic — a live cluster never
+gates a PR. CI sets `LOOKOUT_E2E_TIMEOUT_SCALE=2` because runners are
+slower than a workstation; set it locally if your machine needs more
+headroom too.
+
 ## Re-runs, dedup, and storm absorption
 
 The sentinel is doing its job when a re-run looks quieter than the

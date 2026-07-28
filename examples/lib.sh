@@ -121,9 +121,14 @@ stub_since() {
 # Polls <command...> every 5s until it exits 0 or the timeout expires.
 # The command's output is suppressed — callers print their own
 # evidence line. Returns 1 on timeout (with a loud message).
+#
+# LOOKOUT_E2E_TIMEOUT_SCALE (integer, default 1) multiplies every
+# await timeout — CI runners are slower than a workstation; the
+# e2e-kind workflow sets 2.
 await() {
   local timeout="$1" desc="$2"
   shift 2
+  timeout=$((timeout * ${LOOKOUT_E2E_TIMEOUT_SCALE:-1}))
   local waited=0
   while true; do
     if "$@" >/dev/null 2>&1; then

@@ -56,7 +56,11 @@ opens agent incident sessions from leading indicators (watch-path).
   should be one-line ports between them.
 - Testing per DESIGN.md §13: `fake.Clientset` fixtures for k8s, recorded
   fixtures behind small interfaces for GCP, contract tests on every command's
-  output schema. No live-cluster or live-project tests in CI.
+  output schema. PR presubmits are hermetic — no live-cluster or live-project
+  tests gate a PR, ever. Live-cluster kind e2e (`examples/e2e`) runs
+  non-blocking in CI: a smoke subset post-merge on main and the full set
+  weekly (`.github/workflows/e2e-kind.yml`). Live-project (GCP) tests stay
+  out of CI entirely.
 - Apache 2.0 license headers on Go source files (match the files migrated
   from core-agent); `dev/tools/add-license-headers` for new shell/YAML/Python
   files. Markdown files carry no header.
