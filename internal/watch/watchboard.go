@@ -178,6 +178,20 @@ func (b *watchboard) run(ctx context.Context) {
 	}
 }
 
+// startBoard runs the watchboard flush loop in a goroutine and
+// returns a wait func that blocks until run has returned — i.e.
+// until the final shutdown FlushNow has completed. wait is never nil.
+// The wiring shutdown path calls wait so a terminating sentinel does
+// not exit before the board's last flush lands (issue #108).
+func startBoard(ctx context.Context, board *watchboard) (wait func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		board.run(ctx)
+	}()
+	return func() { <-done }
+}
+
 // flushLocked injects the buffered warnings as one digest, rotating
 // the session first when the §15 Q2 threshold is reached. Caller
 // holds b.mu.

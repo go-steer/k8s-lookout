@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Buffered watchboard warnings are no longer dropped on shutdown
+  (#108): the interval-flush loop ran in a fire-and-forget goroutine,
+  so on SIGTERM the sentinel could exit before that goroutine's final
+  best-effort flush landed. The shutdown path now joins the loop and
+  blocks on its last flush (bounded by the existing 3s timeout).
 - The storm-correlation graph feed no longer settles on stale topology
   after an informer resync (#107): arming set `armed=true` and dropped
   the lock before replaying the pre-arm buffer, so a live delta racing
