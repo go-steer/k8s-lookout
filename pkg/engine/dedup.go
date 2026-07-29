@@ -96,6 +96,13 @@ type DedupResult struct {
 	Kind      DedupResultKind
 	SessionID string // only set when Kind==duplicate; the existing session
 	Count     int    // window count (1 for first, N for duplicates)
+	// Storm, when non-empty, is the fingerprint of the §7.5 storm this
+	// key was folded into (AttachToStorm). Set on DedupDuplicate results
+	// so the dispatcher's #96 unbound-retry guard can tell a storm-
+	// claimed but session-less member (retry the STORM open / suppress
+	// as a member) from genuine #84 open residue (retry the per-incident
+	// open) — the two compose only if the guard consults it (issue #104).
+	Storm string
 }
 
 type DedupResultKind int
@@ -369,7 +376,7 @@ func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
 		// Case 1: replay. Same activity we already processed;
 		// don't advance LastSeen (retry cooldown untouched).
 		entry.Count++
-		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
+		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 	}
 	if now.Sub(entry.LastSeen) > c.window {
 		// Case 2: retry safety net. Prior session's cooldown
@@ -389,7 +396,7 @@ func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
 	entry.Count++
 	entry.LastSeen = now
 	entry.EventLastTS = eventLastTS
-	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count}
+	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 }
 
 // BindSession attaches the SessionID from a successful CreateSession

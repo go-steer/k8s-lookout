@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Storm suppression now holds when a storm's session create fails
+  (#104): the #94 storm retry and the #84/#96 unbound-retry did not
+  compose — a session-less storm member's next duplicate passed the
+  unbound-retry guard and opened a competing per-incident session,
+  the §7.5 N-session fan-out. The dedup result now carries the storm
+  fingerprint so the guard excludes storm-claimed members (recording
+  them as `storm-member`, session-less until the storm's retry-on-
+  attach reopens it), the failed-formation path now marks the storm
+  trigger's dedup entry so its duplicates are recognized too, and the
+  §9.1 store record on that path is restored.
 - A failed session create for a new per-incident symptom no longer
   suppresses it forever (#84): the unbound dedup entry left behind by
   the failed open black-holed every later event for the key, because
