@@ -71,6 +71,14 @@ type Command struct {
 	// Hidden commands resolve and run but are omitted from every
 	// listing (used for test scaffolding).
 	Hidden bool
+	// Writes marks a command that MUTATES state rather than only
+	// reading it (e.g. `triage status --status=...`, the §9.4
+	// triage-status upsert). The MCP surface advertises such a tool
+	// with ReadOnlyHint:false so a convention-following client does
+	// not auto-approve it as a read (issue #105). Plain additive
+	// field: the zero value (false) keeps every existing read-path
+	// command exactly as it was.
+	Writes bool
 }
 
 // OutputField documents one Details key a command may emit.

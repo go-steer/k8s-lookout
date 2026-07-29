@@ -52,7 +52,6 @@ import (
 // at construction time.
 func New(reg *checks.Registry, version string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
-	readOnly := true
 	for _, c := range reg.All() {
 		if c.Hidden {
 			continue
@@ -61,9 +60,12 @@ func New(reg *checks.Registry, version string) *mcp.Server {
 			Name:        c.MCPName,
 			Description: toolDescription(c),
 			InputSchema: inputSchema(c),
-			// The whole surface is the read path (§4.3); write
-			// verbs are not part of this design.
-			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
+			// Most of this surface is the read path (§4.3) and stays
+			// ReadOnlyHint:true. A command that mutates state (c.Writes
+			// — the §9.4 triage-status upsert) is advertised
+			// non-read-only so a convention-following client does not
+			// auto-approve it as a read (issue #105).
+			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: !c.Writes},
 		}, handler(c))
 	}
 	return server

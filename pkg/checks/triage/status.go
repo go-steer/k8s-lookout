@@ -61,6 +61,12 @@ func StatusCommand() checks.Command {
 	return checks.Command{
 		Name:    "triage status",
 		MCPName: "k8s_triage_status",
+		// This command CAN write (the §9.4 triage-status upsert when
+		// --status is set; without it, it reads). Because it can mutate
+		// state, the MCP surface must advertise it as a write
+		// (ReadOnlyHint:false) so clients don't auto-approve it as a
+		// read (issue #105).
+		Writes:  true,
 		Summary: "Write (or read back) the §9.4 triage-status record for an incident — diagnosis, action taken, and your severity judgment — so health scans stop reporting it as a fresh unknown and the sentinel stops re-paging followups; the incident playbooks' closing move.",
 		Flags: []emit.FlagSpec{
 			{Name: "store", Type: emit.FlagString, Default: "",
