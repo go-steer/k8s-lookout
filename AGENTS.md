@@ -74,10 +74,14 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**Implementation complete through M5 (v0.6.0)** — the §14 phase plan
-is finished; post-M5 work is the review backlog in
-`docs/milestones/M5.md` §Remaining known gaps, not new milestones.
-Every §4.1 command and all nine §7.2 sources ship; the signal schema
+**Implementation complete through M5; released at v0.9.0** — the §14
+phase plan is finished, and post-M5 work has been hardening and
+operability, not new milestones: auto sentinel defaults (`--sources` /
+`--storm` probe-and-enable, #75), the runnable kind/GKE failure
+scenarios under `examples/` with non-blocking e2e CI (#76, #77), the
+Starlight docs site (`docs/site/`), and the round-1/round-2 adversarial
+review backlog (`docs/milestones/M5.md` §Remaining known gaps). Every
+§4.1 command and all nine §7.2 sources ship; the signal schema
 is FROZEN as v1 (`docs/signal-schema-v1.md` — removing/renaming a
 frozen field or touching the fingerprint recipe is a v2 negotiation
 with fleet consumers, never a test update; additions are additive-only and extend
