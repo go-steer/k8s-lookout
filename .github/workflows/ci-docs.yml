@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Green stubs for docs-only / image-config-only changes: ci.yml skips
+# Checks for docs-only / image-config-only changes: ci.yml skips
 # those paths, but the branch-protection required checks (test, lint,
 # tidy, vuln) must still report success or the PR can never merge.
-# Job names here MUST match ci.yml exactly.
+# Job names here MUST match ci.yml exactly. lint/tidy/vuln are green
+# stubs; `test` really runs the generated-doc drift tests (#88) — a
+# hand-edit to a generated reference page (docs/site reference/*,
+# skills/*/references/*) must fail ON the docs PR, not on the next
+# unrelated Go PR once ci.yml runs again.
 #
 # Keep the `paths:` list here in lockstep with the `paths-ignore:`
 # list in ci.yml; a mismatch means either checks never run (PR
@@ -59,7 +63,15 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - run: echo "non-Go change — no Go to test"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache-dependency-path: '**/go.sum'
+      - run: go mod download
+      - name: Generated docs are drift-free
+        run: go test ./internal/sitedoc/ ./internal/skilldoc/
 
   lint:
     name: lint
