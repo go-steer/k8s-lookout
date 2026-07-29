@@ -431,7 +431,9 @@ correctness of blast-radius answers during churn.
 ### 6.5 Sanitizer
 
 Lives in `pkg/emit`, applied to every payload on every surface (CLI, MCP,
-inject) — not opt-in per tool. Strips system metadata (`managedFields`,
+inject) — not opt-in per tool. On the inject surface the mask runs at
+dispatcher payload assembly (`internal/watch`), since `pkg/inject` is a
+dependency-free leaf that cannot import the sanitizer. Strips system metadata (`managedFields`,
 `resourceVersion`, `uid`, noisy status), elides defaulted fields, and masks
 secret material: `Secret.data` values, env vars sourced from Secrets, and
 value-shaped strings matching credential heuristics → `[REDACTED]`. The graph

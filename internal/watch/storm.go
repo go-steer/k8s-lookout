@@ -254,8 +254,8 @@ func stormPayload(info engine.StormInfo, cluster string) inject.StormPayload {
 		AncestorNamespace: info.Ancestor.Namespace,
 		AncestorName:      info.Ancestor.Name,
 		Reason:            info.Reason,
-		Message: fmt.Sprintf("%s: %d incidents across %d namespace(s) share this blast-radius key; %d representative incident(s) attached; member sessions are suppressed and route here",
-			info.Ancestor.Display(), info.AffectedCount, info.NamespaceCount, len(info.Representatives)),
+		Message: maskString(fmt.Sprintf("%s: %d incidents across %d namespace(s) share this blast-radius key; %d representative incident(s) attached; member sessions are suppressed and route here",
+			info.Ancestor.Display(), info.AffectedCount, info.NamespaceCount, len(info.Representatives))),
 		AffectedCount:      info.AffectedCount,
 		NamespacesCount:    info.NamespaceCount,
 		FirstSeen:          info.FirstSeen,
@@ -279,8 +279,8 @@ func stormUpdatePayload(upd engine.StormSizeUpdate, info engine.StormInfo, clust
 		AncestorNamespace: info.Ancestor.Namespace,
 		AncestorName:      info.Ancestor.Name,
 		Cluster:           cluster,
-		Message: fmt.Sprintf("%s storm grew to %d incidents across %d namespace(s) (+%d since the last size report); the initial kind=storm payload carries formation-time counts",
-			info.Ancestor.Display(), upd.AffectedCount, upd.NamespaceCount, upd.NewSinceLast),
+		Message: maskString(fmt.Sprintf("%s storm grew to %d incidents across %d namespace(s) (+%d since the last size report); the initial kind=storm payload carries formation-time counts",
+			info.Ancestor.Display(), upd.AffectedCount, upd.NamespaceCount, upd.NewSinceLast)),
 		AffectedCount:       upd.AffectedCount,
 		NamespacesCount:     upd.NamespaceCount,
 		NewMembersSinceLast: upd.NewSinceLast,
@@ -306,7 +306,7 @@ func stormMemberPayload(kind string, m engine.StormMember, info engine.StormInfo
 		AncestorNamespace: info.Ancestor.Namespace,
 		AncestorName:      info.Ancestor.Name,
 		Cluster:           cluster,
-		Message:           msg,
+		Message:           maskString(msg), // §6.5 inject surface (issue #82)
 		Incident:          stormRef(m),
 	}
 }

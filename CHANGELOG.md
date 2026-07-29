@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The §6.5 sanitizer now really covers the inject surface (#82):
+  incident, followup, triage-regressed, resolved, and storm payloads
+  masked nothing — an event message carrying a URL password, JWT, or
+  auth header reached the per-incident agent session verbatim, despite
+  the "every payload on every surface" design claim (only the
+  enrichment bundle was sanitized). Cluster-sourced free text (event
+  messages, label values) is now masked at dispatcher payload
+  assembly; innocent content passes through byte-identical, so the
+  frozen wire shape is unchanged.
+
 ## [0.9.0] - 2026-07-28
 
 The sentinel now configures itself: `--sources` and `--storm` default
