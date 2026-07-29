@@ -850,6 +850,23 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 				return
 			}
 		}
+		// Unbound entry on a session-class duplicate (issue #84): the
+		// residue of an OpenIncident that failed with sid=="" — no
+		// BindIncident ever ran. The case-2 retry safety net cannot
+		// repair it, because case 3 advances LastSeen on every
+		// sub-window event and a steady symptom stream never exits
+		// the dedup window (see above). Retry the open on THIS
+		// duplicate instead — the #81 storm-path convention (retry on
+		// the next event, which has the payload in hand). Guarded to
+		// the severity class that opens sessions: info- and
+		// watchboard-routed entries are legitimately unbound, not
+		// residue. Never fires an Append at sid=="".
+		if d.mode == "per-incident" && !d.dryRun && result.SessionID == "" &&
+			(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
+			(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard) {
+			d.retryIncidentOpen(ctx, sig, result, key)
+			return
+		}
 		// §9.1: suppressed duplicates are still emitted signals — the
 		// store keeps them (with the session the incident is bound to)
 		// so lookback sees the true occurrence rate, not the deduped one.
@@ -1089,6 +1106,67 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 		}
 	}
 	return payload
+}
+
+// retryIncidentOpen re-attempts the per-incident open for a duplicate
+// whose dedup entry is unbound (issue #84). Semantics mirror the
+// fresh-incident open path exactly — enrichment, standard
+// incidentPayload composition (result.Count carries the occurrences
+// seen so far), bind-on-partial-open, storm member note, tracker
+// handoff, §9.1 record, metrics — because this IS that open, deferred
+// to the first event after the daemon recovered. While the daemon
+// stays down, each duplicate costs one POST /sessions
+// (sessionCreates{error}, like the original failure) and the key
+// stays suppressed; no Append is ever attempted without a session.
+func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, result engine.DedupResult, key engine.EventKey) {
+	d.injectLock.Lock()
+	defer d.injectLock.Unlock()
+	// Re-check under the lock: a racing duplicate (or a storm claim)
+	// may have just bound the key.
+	if sid, ok := d.dedup.LookupSession(key); ok && sid != "" {
+		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: sid})
+		return
+	}
+	if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
+		if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+			sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+		}
+	}
+	payload := incidentPayload(sig, result)
+	sid, err := d.injector.OpenIncident(ctx, payload)
+	if sid == "" {
+		log.Printf("dispatcher: retry create session for %s/%s: %v (unbound entry, count=%d)",
+			sig.Namespace, sig.Name, err, result.Count)
+		d.metrics.sessionCreates.WithLabelValues("error").Inc()
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
+		return
+	}
+	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
+	d.dedup.BindIncident(key, sid, sig.IncidentRef())
+	// The session's actual opener is THIS signal's source family —
+	// re-stamp so cross-source join followups reference reality.
+	d.dedup.NoteIncidentKind(key, sig.Kind)
+	if d.storm != nil {
+		d.storm.NoteMemberSession(key, sid)
+	}
+	if d.tracker != nil {
+		d.tracker.Track(engine.Incident{
+			Key:       key,
+			SessionID: sid,
+			FirstSeen: sig.FirstSeen,
+			Ref:       sig.IncidentRef(),
+		})
+	}
+	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
+	if err != nil {
+		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		return
+	}
+	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s, open deferred past a failed create)",
+		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
 
 // injectTriageRegressed emits the §9.4 regression-evidence followup

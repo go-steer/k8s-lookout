@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed session create for a new per-incident symptom no longer
+  suppresses it forever (#84): the unbound dedup entry left behind by
+  the failed open black-holed every later event for the key, because
+  the case-3 LastSeen refresh kept a steady symptom stream inside the
+  dedup window indefinitely (and `--dedup-persist` carried the unbound
+  entry across restarts). The dispatcher now retries the open on the
+  next duplicate — the per-incident mirror of #81's storm-path retry —
+  binding, tracking, and recording exactly as the original open would
+  have.
 - Saturation, quota, and token-burn forecasts no longer fire false
   CRITICALs on flat or near-flat series (#80): the ETA conversion
   overflowed `time.Duration` when headroom/slope exceeded ~292 years —

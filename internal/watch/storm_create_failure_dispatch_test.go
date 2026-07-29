@@ -16,12 +16,6 @@ package watch
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -46,72 +40,6 @@ import (
 // incidents must reach an agent session within a bounded number of
 // events, and no Append may ever be issued against an empty session
 // id.
-
-// flakySessionDaemon is newRoutingFakeDaemon plus a scriptable
-// outage: while down, POST /sessions is refused with 503 (the
-// injector's single POST then reports sid="") — inject POSTs always
-// succeed and are captured with the session id they targeted,
-// INCLUDING one addressed to an empty id (path /sessions//inject),
-// which must never reach the wire.
-type flakySessionDaemon struct {
-	mu      sync.Mutex
-	down    bool
-	injects []routedInject
-	created int // successful POST /sessions
-	refused int // POST /sessions rejected while down
-}
-
-func newFlakySessionDaemon(t *testing.T) (baseURL string, fd *flakySessionDaemon) {
-	t.Helper()
-	fd = &flakySessionDaemon{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fd.mu.Lock()
-		defer fd.mu.Unlock()
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/sessions":
-			if fd.down {
-				fd.refused++
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte(`{"error":"daemon restarting"}`))
-				return
-			}
-			fd.created++
-			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"app":"core-agent","user":"alice","sessionID":"sess-%d","url":"http://x"}`, fd.created)
-			return
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/sessions/") && strings.HasSuffix(r.URL.Path, "/inject"):
-			sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sessions/"), "/inject")
-			body, _ := io.ReadAll(r.Body)
-			fd.injects = append(fd.injects, routedInject{SessionID: sid, Body: string(body)})
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"ok":true}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL, fd
-}
-
-func (fd *flakySessionDaemon) setDown(down bool) {
-	fd.mu.Lock()
-	defer fd.mu.Unlock()
-	fd.down = down
-}
-
-func (fd *flakySessionDaemon) injectLog() []routedInject {
-	fd.mu.Lock()
-	defer fd.mu.Unlock()
-	out := make([]routedInject, len(fd.injects))
-	copy(out, fd.injects)
-	return out
-}
-
-func (fd *flakySessionDaemon) sessionsCreated() int {
-	fd.mu.Lock()
-	defer fd.mu.Unlock()
-	return fd.created
-}
 
 // formStormDuringOutage drives the issue #81 window against a 6-signal
 // burst: two healthy per-incident opens (sess-1, sess-2), then the
