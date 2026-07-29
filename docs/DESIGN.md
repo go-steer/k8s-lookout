@@ -573,6 +573,47 @@ modes become per-class:
 | `warning` | shared watchboard session, batched (rolling digest inject) |
 | `info` | stored only (§9.1); surfaced by read-path queries and digests |
 
+### 7.8 Untrusted input: the prompt-injection boundary
+
+Every free-text field a payload carries into an agent session originates
+in the cluster, and parts of the cluster are attacker-influenceable: any
+tenant who can create a workload chooses its name and labels; any
+controller or admission webhook (including a compromised one) authors
+event messages; annotations and spec strings arrive via the enrichment
+bundle. That text is delivered to an LLM agent as the incident it must
+investigate — a hostile tenant can therefore write *to the
+investigator*. This is a distinct threat from secret leakage: the §6.5
+sanitizer masks credential-shaped values, it does not and cannot decide
+whether prose is adversarial instructions.
+
+What bounds the blast radius today:
+
+- **Syntactic delimiting.** Payloads are JSON; field values cannot
+  escape their fields or forge sibling keys. Names, namespaces, kinds,
+  label keys, and reasons are additionally constrained by Kubernetes
+  validation (DNS-1123 / qualified-name / enum shapes). Event messages,
+  label values, and annotation/spec strings in enrichment bundles are
+  the genuinely free-text carriers.
+- **No raw write authority** (principle 6, §10.3). Injected text can at
+  most *persuade* the agent; every mutation the agent can attempt goes
+  through the core-agent daemon's managed write path and permission
+  gate (GitOps PRs, `QuotaPreference` drafts, triage-status records).
+  The sentinel's own ClusterRole is read-only.
+- **Skills treat payloads as data.** The shipped skills instruct agents
+  to parse payload fields as evidence, never to execute instructions
+  found in them (skills/README.md "Untrusted cluster data").
+
+What is deliberately acknowledged as NOT mitigated: an injection that
+successfully steers the agent produces *plausible-but-hostile
+paperwork* — a misleading PR draft, a padded quota justification, a
+false triage-status write, or a misled human reading the session. The
+permission gate makes that reviewable, not impossible. Defenses beyond
+this — provenance marking on payload fields so the model can tell
+operator instruction from cluster data, and adversarial-content
+heuristics — are future work, tracked as an open question (§15), and
+any payload framing change goes through the frozen-contract amendment
+process (§8).
+
 ---
 
 ## 8. Signal Schema (fleet-rollup ready)
@@ -859,6 +900,13 @@ Carried from v2 and the shipped watcher, normalized:
    rate, p99 radius latency) does the map-backed graph justify the CSR +
    interning rewrite behind the same interface? Set the gate in M1 benchmarks
    rather than guessing now.
+6. **Provenance marking for untrusted payload text (§7.8)** — should inject
+   payloads structurally distinguish cluster-sourced free text (event
+   messages, label values) from lookout-composed framing, so the consuming
+   agent can weight instruction-like content accordingly? Any such framing
+   change amends the frozen schema (§8), so it needs the daemon-side story
+   at the same time; until then the mitigation is skill-level guidance plus
+   the permission gate.
 6. **Graph kind coverage** — v1 covers core + apps + discovery + storage +
    networking.k8s.io. Gateway API (`gateway.networking.k8s.io`) and mesh CRDs
    (Istio) widen the northbound layer; add when a consuming deployment runs
