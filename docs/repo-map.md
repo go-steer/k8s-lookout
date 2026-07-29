@@ -67,7 +67,10 @@ Read-path — one implementation, three invocation surfaces (§4.3):
             CLI (cmd/lookout) ─┐
      MCP (internal/mcpserver) ─┼─→ pkg/checks ─→ pkg/emit envelope + sanitizer ─→ stdout / MCP response
 enrichment (internal/watch) ───┘        │              (summary line, exit 0)      / inject attachment
-                                        └── pkg/graph (radius, edges, changes, --at history)
+                                        ├── pkg/graph (radius, edges, changes, --at history)
+                                        └── pkg/sources/saturation (checks/top only: the shared
+                                            metrics fetcher/sample seam — deliberate §10.2 crossing
+                                            so the metrics-client join exists exactly once)
 ```
 
 Watch-path — the sentinel pipeline (§7.1), wired in `internal/watch`:
@@ -102,6 +105,7 @@ Violating any of these is a bug, not a test update
 | Sanitizer: no secret value on any surface | `pkg/emit/sanitize.go` | `pkg/emit/sanitize_test.go` golden fixtures (`pkg/emit/testdata/sanitize/`) — an unmasked credential fixture fails CI |
 | Shipped ClusterRole covers the enrichment read paths | `deploy/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
 | Command output schema ↔ declared metadata | each `pkg/checks/*` | `pkg/checks/checktest.VerifyContract` in every command's suite |
+| Bundle section identifiers/order across CLI and enrichment ("the enrichment bundle IS a bundle") | `pkg/checks/bundle/bundle.go` + `internal/watch/enrich.go` | `internal/watch/enrich_bundle_contract_test.go` (`TestBundleSectionContractFrozen`; pins both heads' `sections=` joins and both bodies' emission order) |
 
 ## Provider boundary and build tags
 
@@ -190,8 +194,12 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   restart-replay observations). Divergence closed by the auto-defaults
   change: `--storm=auto` (with `--sources=auto`) now resolves ON
   whenever the graph grants are present; the milestone notes' "stays
-  OFF" lines are point-in-time. The `GraphAt` restart-replay item
-  itself remains open — tracked in `docs/milestones/M3.md`/`M5.md`.
+  OFF" lines are point-in-time. The `GraphAt` restart-replay item was
+  FIXED by #55 (store epoch ids, migration v5; regression tests in
+  `pkg/store/history_test.go`) two days before the default flip — the
+  M3/M5 milestone "remains open / stays OFF pending" lines were
+  written stale the same morning #55 merged and are point-in-time,
+  not current state.
 - **`k8s-capacity` skill** (§4.4 tree): shipped post-M5 alongside the
   docs-site Guides section — divergence closed (the M5 record's
   "never shipped" note is point-in-time).
