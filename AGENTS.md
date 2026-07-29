@@ -39,7 +39,12 @@ opens agent incident sessions from leading indicators (watch-path).
   explicit `unavailable` finding, never silence.
 - **Back-compat:** inject kinds `k8s-event` / `k8s-event-followup` and the
   shipped `InjectPayload` field names are frozen (playbooks pattern-match
-  them). New kinds are `source.event`-namespaced.
+  them). New kinds are `source.event`-namespaced. The CLI surface (flags,
+  syntax, defaults, exit codes) is governed by
+  `docs/cli-stability-policy.md`: released+unmarked = Stable =
+  deprecate-then-remove over ≥2 minors, old form accepted with a stderr
+  warning, and skills/deploy/examples updated in the same PR. The
+  zero-deployed-users clause is expired — do not cite it.
 - **Scope boundaries:** fleet-level coordination belongs to a fleet
   aggregation layer, out of scope for this repo; `core-agent` stays
   k8s-agnostic and never imports this module. Signals carry
