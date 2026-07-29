@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the expiry source, so it cannot be dropped by disabling expiry; the
   documented narrow path is the §11 namespace tier.
 
+### Changed
+
+- The release-images workflow now verifies what it publishes (#111):
+  after signing, every pushed tag of BOTH image flavors (`:<v>` and
+  `:<v>-gke`) is re-checked with the documented `cosign verify`
+  invocation — asserting the signature and the tag→digest linkage the
+  `-gke` flavor previously left unchecked — then the image is pulled
+  by digest and smoke-run (`lookout version`, entrypoint intact). The
+  two flavors, formerly ~150 duplicated lines, now share one
+  matrix-driven job that differs only in BUILD_TAGS, tag suffix, and
+  OCI title/description.
+
 ### Fixed
 
 - The `/metrics` `reason` label can no longer grow without bound
