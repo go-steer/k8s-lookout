@@ -136,13 +136,21 @@ var (
 	// and masks the value. Flag names ending in -name/-ref/-file/
 	// -path/-dir/-id are skipped by maskCredentialFlags: those
 	// values are references, not secrets (--secret-name=db-creds).
-	reCredentialFlag = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*)(=|[ \t]+)(\S+)`)
+	//
+	// 'pass' / 'passphrase' (issue #106) are matched as whole hyphen-
+	// delimited SEGMENTS (--pass, --db-pass, --ssl-passphrase), not as
+	// substrings like the other words: the flag path uses substring
+	// matching, so a naive `pass` alternative would over-mask --bypass=.
+	// The `--?(?:[a-z0-9-]*-)?` prefix requires a dash immediately
+	// before the word, so "bypass" (no dash before "pass") never matches.
+	reCredentialFlag = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*|--?(?:[a-z0-9-]*-)?(?:passphrase|pass))(=|[ \t]+)(\S+)`)
 
 	// reCredentialFlagName matches a bare credential flag with no
 	// attached value, for args/command lists in the two-element
 	// form (["--db-password", "hunter2"]) where the secret is the
-	// NEXT list element.
-	reCredentialFlagName = regexp.MustCompile(`(?i)^--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*$`)
+	// NEXT list element. Same 'pass'/'passphrase' segment-anchoring as
+	// reCredentialFlag (issue #106) so --bypass stays benign.
+	reCredentialFlagName = regexp.MustCompile(`(?i)^(?:--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*|--?(?:[a-z0-9-]*-)?(?:passphrase|pass))$`)
 )
 
 // credentialFlagRefSuffixes are flag-name suffixes that mark the
@@ -204,6 +212,11 @@ func credentialFlagIsRef(name string) bool {
 // itself is credential-suggestive and name-match alone masks).
 var credentialWords = map[string]bool{
 	"password": true, "passwd": true, "pwd": true,
+	// 'pass' / 'passphrase' (issue #106): matched per-word by
+	// credentialKey (keyWords splits DB_PASS → {db,pass}), so BYPASS,
+	// COMPASS, and passenger — where "pass" is only a substring — stay
+	// clean. The flag path anchors them separately (reCredentialFlag).
+	"pass": true, "passphrase": true,
 	"secret": true, "secrets": true,
 	"token": true, "tokens": true,
 	"credential": true, "credentials": true, "creds": true,

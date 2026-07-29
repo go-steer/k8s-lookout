@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The secret sanitizer now masks `pass`/`passphrase` env names and
+  flags (#106): env vars like `DB_PASS`, `PG_PASS`, `REDIS_PASS`, or
+  `SSL_PASSPHRASE` holding a low-entropy human password (below the
+  shape/entropy heuristic) previously leaked verbatim through `triage
+  spec`, enrichment specs, and MCP output because the credential word
+  list only had `password`/`passwd`/`pwd`. Both the env-name path and
+  the `--db-pass=`/`--ssl-passphrase` flag path now cover them, with
+  whole-word/segment anchoring so `BYPASS`, `COMPASS`, and `--bypass`
+  are untouched.
 - Storm suppression now holds when a storm's session create fails
   (#104): the #94 storm retry and the #84/#96 unbound-retry did not
   compose — a session-less storm member's next duplicate passed the
