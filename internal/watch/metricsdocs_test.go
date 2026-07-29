@@ -18,6 +18,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // TestMetricsInventoryComplete is the presence check behind the
@@ -30,8 +32,24 @@ import (
 func TestMetricsInventoryComplete(t *testing.T) {
 	inv := MetricsInventory()
 
-	// One row per collector field (every field except `registry`).
-	collectors := reflect.TypeOf(metrics{}).NumField() - 1
+	// One row per metric collector field: count fields whose type
+	// implements prometheus.Collector, excluding the registry (a
+	// *prometheus.Registry is itself a Collector — it can nest — but it
+	// is the container, not a metric). Non-collector bookkeeping state
+	// (the #109 reason-cap mutex/map) is ignored, while a new metric
+	// collector added without a row still fails here.
+	collectorType := reflect.TypeOf((*prometheus.Collector)(nil)).Elem()
+	mt := reflect.TypeOf(metrics{})
+	collectors := 0
+	for i := 0; i < mt.NumField(); i++ {
+		f := mt.Field(i)
+		if f.Name == "registry" {
+			continue
+		}
+		if f.Type.Implements(collectorType) {
+			collectors++
+		}
+	}
 	if len(inv) != collectors {
 		t.Fatalf("MetricsInventory has %d rows, metrics struct has %d collector fields — add the missing row(s) in metricsdocs.go", len(inv), collectors)
 	}

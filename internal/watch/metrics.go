@@ -20,11 +20,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// reasonLabelCap bounds the distinct values the free-form "reason"
+// label may take on /metrics (#109); reasonOther is the collapse value
+// for every new reason seen past the cap. Cardinality is then
+// <= reasonLabelCap+1.
+const reasonLabelCap = 100
+const reasonOther = "other"
 
 // metrics bundles the sidecar's Prometheus counters + gauges. Kept
 // as a struct so the wiring is testable — tests can construct a
@@ -66,6 +74,13 @@ type metrics struct {
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
 	sinkInfo             *prometheus.GaugeVec
+
+	// reasonSeen tracks the distinct free-form reason values already
+	// admitted to the "reason" label, bounded by reasonLabelCap
+	// (#109). Guarded by reasonMu — dispatch runs from source
+	// callbacks concurrently.
+	reasonMu   sync.Mutex
+	reasonSeen map[string]struct{}
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -74,7 +89,8 @@ type metrics struct {
 func newMetrics() *metrics {
 	reg := prometheus.NewRegistry()
 	m := &metrics{
-		registry: reg,
+		registry:   reg,
+		reasonSeen: make(map[string]struct{}),
 		eventsSeen: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_events_seen_total",
 			Help: "Total k8s events observed by the informer, before filter.",
@@ -251,6 +267,24 @@ func newMetrics() *metrics {
 		m.sinkInfo,
 	)
 	return m
+}
+
+// boundReason caps the cardinality of the free-form reason label
+// (#109): the first reasonLabelCap distinct reasons keep their real
+// value; any further NEW reason collapses to reasonOther. Event.reason
+// is free-form (raw k8s events + scheduler-predicate text), so an
+// unbounded reason label would grow /metrics without limit.
+func (m *metrics) boundReason(reason string) string {
+	m.reasonMu.Lock()
+	defer m.reasonMu.Unlock()
+	if _, ok := m.reasonSeen[reason]; ok {
+		return reason
+	}
+	if len(m.reasonSeen) >= reasonLabelCap {
+		return reasonOther
+	}
+	m.reasonSeen[reason] = struct{}{}
+	return reason
 }
 
 // serveMetrics starts a small HTTP server exposing /metrics on addr.

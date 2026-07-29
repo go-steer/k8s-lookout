@@ -193,14 +193,14 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if d.triage != nil && d.mode == "per-incident" {
 		sig.Severity, downgraded = d.triage.Apply(ctx, sig)
 	}
-	d.metrics.eventsSeen.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 	if !d.filter.Accept(sig) {
 		return
 	}
 	result := d.dedup.Observe(key, sig.LastSeen)
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
 	if result.Kind == engine.DedupDuplicate {
-		d.metrics.eventsDedupSuppress.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+		d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 		// Info-level log: the operator asked "is the watcher seeing
 		// events?" and today the answer was "yes when things break,
 		// silent when things work" — this line makes suppressed
@@ -375,7 +375,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		if sid == "" {
 			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
-			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 			return
 		}
 		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
@@ -405,10 +405,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 		if err != nil {
 			log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
-			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 			return
 		}
-		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 		// Info-level log: the successful-inject case was silent before
 		// #212 — operators had to correlate client-go informer warnings
 		// with daemon session-list dumps to infer whether the watcher
@@ -446,17 +446,17 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-		d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 		log.Printf("would-fire %s pod=%s/%s (sid=%s, mode=%s, dry-run)",
 			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 		return
 	}
 	if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
-	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
@@ -546,7 +546,7 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		log.Printf("dispatcher: retry create session for %s/%s: %v (unbound entry, count=%d)",
 			sig.Namespace, sig.Name, err, result.Count)
 		d.metrics.sessionCreates.WithLabelValues("error").Inc()
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
 		return
 	}
@@ -569,10 +569,10 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 	if err != nil {
 		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
-	d.metrics.eventsInjected.WithLabelValues(sig.Key.Reason, sig.Namespace).Inc()
+	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s, open deferred past a failed create)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
@@ -619,7 +619,7 @@ func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signa
 	}
 	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
 		log.Printf("triage-status: regression followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
 	log.Printf("triage-status: regressed %s %s/%s count=%d baseline=%d factor=%d → sid=%s (evidence only — no re-page)",
@@ -669,7 +669,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 	}
 	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
 		log.Printf("dispatcher: cross-source followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
 	log.Printf("followup %s %s/%s → sid=%s (cross-source join: %s joined a %s-opened incident)",
@@ -745,7 +745,7 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 	}
 	if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("recovery: inject %s for %s/%s (sid=%s): %v", sig.Kind, sig.Namespace, sig.Name, sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
 	d.countResolved(sig)

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `/metrics` `reason` label can no longer grow without bound
+  (#109): `Event.reason` is free-form (raw k8s events, scheduler
+  predicate text), yet it was stamped verbatim onto the reason label
+  of the events/inject counters — one Prometheus series per distinct
+  reason string. A runtime distinct-value cap now keeps the first 100
+  distinct reasons and collapses the rest to `other`, bounding
+  cardinality without a static allowlist to maintain.
 - Buffered watchboard warnings are no longer dropped on shutdown
   (#108): the interval-flush loop ran in a fire-and-forget goroutine,
   so on SIGTERM the sentinel could exit before that goroutine's final
