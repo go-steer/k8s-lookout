@@ -1052,7 +1052,7 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 		Name:         sig.Name,
 		Container:    sig.Container,
 		UID:          sig.Key.UID,
-		Message:      sig.Message,
+		Message:      maskString(sig.Message), // §6.5 inject surface (issue #82)
 		Count:        result.Count,
 		FirstSeen:    sig.FirstSeen,
 		LastSeen:     sig.LastSeen,
@@ -1060,7 +1060,7 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 		Context: inject.PayloadContext{
 			ControllerRef: sig.ControllerRef,
 			Node:          sig.Node,
-			Labels:        sig.Labels,
+			Labels:        maskLabels(sig.Labels),
 		},
 		Type: sig.Type,
 	}
@@ -1122,7 +1122,7 @@ func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signa
 		Context: inject.PayloadContext{
 			ControllerRef: sig.ControllerRef,
 			Node:          sig.Node,
-			Labels:        sig.Labels,
+			Labels:        maskLabels(sig.Labels), // §6.5 inject surface (issue #82)
 		},
 	}
 	d.metrics.triageRegressed.Inc()
@@ -1158,7 +1158,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 		Name:         sig.Name,
 		Container:    sig.Container,
 		UID:          sig.Key.UID,
-		Message:      sig.Message,
+		Message:      maskString(sig.Message), // §6.5 inject surface (issue #82)
 		Count:        result.Count,
 		FirstSeen:    sig.FirstSeen,
 		LastSeen:     sig.LastSeen,
@@ -1166,7 +1166,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 		Context: inject.PayloadContext{
 			ControllerRef: sig.ControllerRef,
 			Node:          sig.Node,
-			Labels:        sig.Labels,
+			Labels:        maskLabels(sig.Labels),
 		},
 		Type: sig.Type,
 	}
@@ -1361,7 +1361,7 @@ func resolvedPayload(sig engine.Signal) inject.ResolvedPayload {
 		Context: inject.PayloadContext{
 			ControllerRef: sig.ControllerRef,
 			Node:          sig.Node,
-			Labels:        sig.Labels,
+			Labels:        maskLabels(sig.Labels), // §6.5 inject surface (issue #82)
 		},
 	}
 	if sig.Kind == engine.KindResolvedReverted {
