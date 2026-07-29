@@ -28,7 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interrupted formation — binds the session, rebinds and re-tracks
   every member, and delivers the owed supersede pointers. No Append
   is ever issued against an empty session id.
->>>>>>> e7af0f6 (fix: retry storm session open on attach — create failure black-holed the correlated class)
 - The §6.5 sanitizer now really covers the inject surface (#82):
   incident, followup, triage-regressed, resolved, and storm payloads
   masked nothing — an event message carrying a URL password, JWT, or
