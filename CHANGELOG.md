@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deployment-guide docs drift corrected (#113): the "What each
+  manifest is" table now documents `16-networkpolicy-watcher.yaml`
+  (default-deny ingress, and its **inert without an enforcing CNI**
+  caveat), and the M5 milestone note no longer claims the `--storm`
+  default "stays OFF" — 0.9.0 shipped auto-defaults (#75), so
+  `--storm=auto` probes the graph-informer grants and resolves on
+  where present.
 - The `/metrics` `reason` label can no longer grow without bound
   (#109): `Event.reason` is free-form (raw k8s events, scheduler
   predicate text), yet it was stamped verbatim onto the reason label
