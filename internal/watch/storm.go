@@ -66,6 +66,19 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 			log.Printf("storm: create storm session for %s: %v", v.Storm.Ancestor.Display(), err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
 			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+			// §9.1 (issue #104 req 3): every signal that survives the
+			// filter is recorded — the failed formation is no exception.
+			// The trigger's outcome is still "my arrival formed the storm",
+			// session-less until the retry-on-attach (#94) reopens it.
+			d.store.Record(sig, store.Outcome{Route: store.RouteStorm, StormFingerprint: info.Fingerprint})
+			// Issue #104 req 2: mark the TRIGGER's dedup entry storm-claimed
+			// even though the open failed. Without this its entry keeps
+			// Storm=="" (stormFormed returns before the member rebind loop),
+			// so a later DUPLICATE of the trigger key would pass the #96
+			// unbound-retry guard and open a competing per-incident session.
+			// The storm's real session is bound to every member (trigger
+			// included) by retryStormOpen once the sink recovers.
+			d.dedup.AttachToStorm(sig.Key, "", info.Fingerprint, sig.IncidentRef())
 			return
 		}
 		sid = newSid

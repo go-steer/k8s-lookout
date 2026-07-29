@@ -251,10 +251,28 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// the severity class that opens sessions: info- and
 		// watchboard-routed entries are legitimately unbound, not
 		// residue. Never fires an Append at sid=="".
-		if d.mode == "per-incident" && !d.dryRun && result.SessionID == "" &&
+		//
+		// A STORM-CLAIMED entry (result.Storm != "") is excluded (issue
+		// #104): a session-less storm member is not #84 open residue —
+		// the storm claimed it, and its own retry-on-attach (#94) owns
+		// recovering the storm session. Opening a fresh per-incident
+		// (kind=k8s-event) session here would overwrite the storm binding,
+		// the §7.5 N-session fan-out. It is suppressed as a storm member
+		// below instead; the storm's next fresh attach reopens the class.
+		if d.mode == "per-incident" && !d.dryRun && result.SessionID == "" && result.Storm == "" &&
 			(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
 			(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard) {
 			d.retryIncidentOpen(ctx, sig, result, key)
+			return
+		}
+		// Storm-claimed but session-less duplicate (issue #104): the
+		// storm's formation/attach open failed and has not recovered yet.
+		// Its outcome is membership, not a session of its own — record it
+		// against the storm (route=storm-member, empty session until the
+		// storm reopens) rather than the plain route=suppressed row below,
+		// and never open a competing per-incident session.
+		if result.SessionID == "" && result.Storm != "" {
+			d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
 			return
 		}
 		// §9.1: suppressed duplicates are still emitted signals — the
