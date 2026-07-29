@@ -620,6 +620,22 @@ func (c *StormCorrelator) BindStormSession(id, sessionID string) {
 	}
 }
 
+// StormMembers snapshots an open storm's members (arrival order).
+// Read-only, like ActiveStorms — the dispatcher uses it to rebind
+// every member when it recovers a storm whose formation-time session
+// open failed (issue #81): the StormAttached verdict carries only the
+// representatives, not the full member list. Nil when no storm with
+// that id is open.
+func (c *StormCorrelator) StormMembers(id string) []StormMember {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.storms[id]
+	if !ok {
+		return nil
+	}
+	return append([]StormMember(nil), st.members...)
+}
+
 // MemberResolved records that a member incident's symptom cleared
 // (its kind=resolved outcome fired, §7.4). When that was the LAST
 // unresolved member, the storm is resolved: it is closed (so future
