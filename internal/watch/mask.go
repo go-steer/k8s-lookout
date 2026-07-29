@@ -23,9 +23,13 @@ import "github.com/go-steer/k8s-lookout/pkg/emit"
 // assembly site that copies cluster free text (event messages, label
 // values) into an inject payload must route it through here.
 // Structurally constrained identifiers — object names, namespaces,
-// kinds, label keys, reasons, fingerprints, timestamps — are NOT
-// masked: k8s validation (DNS-1123 / qualified-name / enum shapes)
-// cannot carry the credential shapes MaskString catches.
+// kinds, label keys, fingerprints, timestamps — are NOT masked: k8s
+// validation (DNS-1123 / qualified-name / enum shapes) cannot carry
+// the credential shapes MaskString catches. Event.reason is NOT in
+// that constrained set — it is free-form (raw k8s events + scheduler-
+// predicate text) — but it is not a credential surface either; its
+// only unbounded-input risk is /metrics label cardinality, handled
+// separately by metrics.boundReason (#109), not by masking here.
 
 // maskString applies the §6.5 value-shape heuristics (URL passwords,
 // JWTs, auth headers, credential flags, …) to one cluster-sourced

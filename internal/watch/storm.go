@@ -65,7 +65,7 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 		if newSid == "" {
 			log.Printf("storm: create storm session for %s: %v", v.Storm.Ancestor.Display(), err)
 			d.metrics.sessionCreates.WithLabelValues("error").Inc()
-			d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 			// §9.1 (issue #104 req 3): every signal that survives the
 			// filter is recorded — the failed formation is no exception.
 			// The trigger's outcome is still "my arrival formed the storm",
@@ -131,7 +131,7 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	}
 	if !d.dryRun && openErr != nil {
 		log.Printf("storm: inject storm for %s (sid=%s): %v", info.Ancestor.Display(), sid, openErr)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 	}
 	log.Printf("storm formed on %s: %d incidents across %d namespace(s) → sid=%s (mode=%s)",
 		info.Ancestor.Display(), info.AffectedCount, info.NamespaceCount, sid, d.mode)
@@ -149,7 +149,7 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 		}
 		if err := d.injector.Append(ctx, m.SessionID, mp); err != nil {
 			log.Printf("storm: supersede member %s/%s (sid=%s): %v", m.Namespace, m.Name, m.SessionID, err)
-			d.metrics.injectErrors.WithLabelValues(m.Reason, "inject").Inc()
+			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(m.Reason), "inject").Inc()
 		}
 	}
 }
@@ -194,7 +194,7 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 		log.Printf("storm: attach member %s/%s to %s: no storm session bound — member followup dropped", sig.Namespace, sig.Name, v.Storm.Ancestor.Display())
 	} else if err := d.injector.Append(ctx, sid, mp); err != nil {
 		log.Printf("storm: attach member %s/%s to %s (sid=%s): %v", sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 	}
 	log.Printf("storm attach %s %s/%s → %s (sid=%s, members=%d)",
 		sig.Key.Reason, sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, v.Storm.AffectedCount)
@@ -233,7 +233,7 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 	if sid == "" {
 		log.Printf("storm: retry storm session for %s: %v", info.Ancestor.Display(), err)
 		d.metrics.sessionCreates.WithLabelValues("error").Inc()
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 		return ""
 	}
 	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
@@ -241,7 +241,7 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 		// Partial open (session created, initial delivery failed):
 		// bind anyway, count the inject error — stormFormed semantics.
 		log.Printf("storm: inject storm for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
-		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 	}
 	d.storm.BindStormSession(info.ID, sid)
 
@@ -285,7 +285,7 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 		mp.StormSessionID = sid
 		if err := d.injector.Append(ctx, m.SessionID, mp); err != nil {
 			log.Printf("storm: supersede member %s/%s (sid=%s): %v", m.Namespace, m.Name, m.SessionID, err)
-			d.metrics.injectErrors.WithLabelValues(m.Reason, "inject").Inc()
+			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(m.Reason), "inject").Inc()
 		}
 	}
 	return sid
