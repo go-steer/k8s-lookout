@@ -51,9 +51,15 @@ driving, the rationale changes and so does what we build:
    (`scanned=412 findings=0 elapsed=1.2s`) so an agent can distinguish
    "cluster healthy" from "wrong flag / broken tool".
 6. **Deterministic read-path, managed write-path.** Tools inspect and diagnose.
-   The two sanctioned write actions — GitOps PRs for cluster changes, and
+   The two *cluster-facing* write actions — GitOps PRs for cluster changes, and
    `QuotaPreference` requests for quota increases (§10.3) — route through the
-   daemon's permission gate, never raw write authority.
+   daemon's permission gate, never raw write authority. A third write exists and
+   is **not** cluster-facing and **not** yet daemon-gated: `lookout triage
+   status` (§9.4) upserts a triage-status record into the sentinel's `--store`
+   SQLite file directly, with `--store` access control as its sole authorization
+   until core-agent's memory surface ships the gate
+   (docs/triage-status-write-design.md, "Out of scope"). It cannot change the
+   cluster, but it can steer the sentinel's own routing — see §7.8.
 7. **Closed loops.** An agent that acts must learn from the world whether the
    action worked. The sentinel that watched a symptom appear also watches it
    clear and injects the resolution (§7.4). Every incident therefore produces a
@@ -594,20 +600,41 @@ What bounds the blast radius today:
   validation (DNS-1123 / qualified-name / enum shapes). Event messages,
   label values, and annotation/spec strings in enrichment bundles are
   the genuinely free-text carriers.
-- **No raw write authority** (principle 6, §10.3). Injected text can at
-  most *persuade* the agent; every mutation the agent can attempt goes
-  through the core-agent daemon's managed write path and permission
-  gate (GitOps PRs, `QuotaPreference` drafts, triage-status records).
-  The sentinel's own ClusterRole is read-only.
+- **No raw write authority over the cluster** (principle 6, §10.3).
+  Injected text can at most *persuade* the agent; the cluster-facing
+  mutations it can attempt — GitOps PRs and `QuotaPreference` drafts —
+  route through the core-agent daemon's managed write path and
+  permission gate. The sentinel's own ClusterRole is read-only.
+  **Exception — the triage-status write is not gated today.** `lookout
+  triage status` (§9.4) writes the sentinel's `--store` directly, and
+  the dispatcher honors an open record's `severity_override` when
+  routing (§7.4). So an injection that steers the agent to write
+  `--severity-override=info` for the incident it is investigating can
+  make the sentinel stop paging *that incident/object* — the write is
+  keyed by `(fingerprint, resource_key)` (plus the controller ref), so
+  the mute is scoped to one incident or workload, not a whole severity
+  class cluster-wide, and it lasts only until the §7.4 recovery flip
+  clears the record (which requires the symptom to actually resolve).
+  This is a real routing effect, not just paperwork; the only
+  counter-signal is the once-per-window `kind=triage.regressed`
+  evidence injected into the same (possibly compromised) session.
+  Closing the gap needs the daemon-mediated write path
+  (docs/triage-status-write-design.md, "Out of scope").
 - **Skills treat payloads as data.** The shipped skills instruct agents
   to parse payload fields as evidence, never to execute instructions
   found in them (skills/README.md "Untrusted cluster data").
 
 What is deliberately acknowledged as NOT mitigated: an injection that
 successfully steers the agent produces *plausible-but-hostile
-paperwork* — a misleading PR draft, a padded quota justification, a
-false triage-status write, or a misled human reading the session. The
-permission gate makes that reviewable, not impossible. Defenses beyond
+paperwork* — a misleading PR draft, a padded quota justification, or a
+misled human reading the session. For the gated cluster-facing writes
+the permission gate makes that reviewable, not impossible. The
+triage-status write is the sharper case called out above: it is not
+gated today, and a hostile `severity_override` has a direct
+paging-suppression effect (scoped to the incident/object, bounded by
+the §7.4 recovery flip) rather than only producing reviewable
+paperwork — closing that is tracked with the daemon-mediated write
+path. Defenses beyond
 this — provenance marking on payload fields so the model can tell
 operator instruction from cluster data, and adversarial-content
 heuristics — are future work, tracked as an open question (§15), and

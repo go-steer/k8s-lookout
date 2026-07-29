@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The prompt-injection threat model no longer overstates its
+  guarantees (#105): DESIGN.md §7.8 and principle 6 claimed *every*
+  agent write — triage-status records included — routes through the
+  daemon's permission gate. `lookout triage status` actually writes the
+  sentinel's `--store` directly and ungated, and a hostile
+  `--severity-override` can suppress paging for the affected
+  incident/object until the §7.4 recovery flip. The docs now name this
+  ungated third write and its scoped paging-suppression effect, and the
+  MCP surface stops advertising the write tool `k8s_triage_status` as
+  `ReadOnlyHint:true` (new `checks.Command.Writes` marker) so
+  convention-following clients no longer auto-approve it as a read.
 - The secret sanitizer now masks `pass`/`passphrase` env names and
   flags (#106): env vars like `DB_PASS`, `PG_PASS`, `REDIS_PASS`, or
   `SSL_PASSPHRASE` holding a low-entropy human password (below the
