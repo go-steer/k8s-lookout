@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed session create at storm formation no longer black-holes
+  the correlated incident class (#81): the correlator commits the
+  storm before the open, so a transient daemon outage at exactly that
+  moment left a session-less storm that suppressed every later
+  correlated incident (each attach refreshed the idle TTL, so the
+  suppression outlived any ongoing burst). The dispatcher now retries
+  the open on each subsequent attach and, on success, completes the
+  interrupted formation — binds the session, rebinds and re-tracks
+  every member, and delivers the owed supersede pointers. No Append
+  is ever issued against an empty session id.
+
 ## [0.9.0] - 2026-07-28
 
 The sentinel now configures itself: `--sources` and `--storm` default

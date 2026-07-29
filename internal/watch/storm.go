@@ -149,6 +149,16 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	sid := v.Storm.SessionID
 	if d.mode == "shared" {
 		sid = d.targetSid
+	} else if sid == "" && d.mode == "per-incident" && !d.dryRun {
+		// Session-less storm (issue #81): the formation-time open
+		// failed and the correlator kept the storm. Retry the open on
+		// this attach — the attach path has the payload it needs —
+		// so one transient sink error cannot suppress the correlated
+		// class for as long as the burst refreshes the storm's TTL.
+		// Still "" on failure: the member routes nowhere this event,
+		// and the NEXT attach retries again.
+		sid = d.retryStormOpen(ctx, sig, v.Storm)
+		v.Storm.SessionID = sid
 	}
 	ref := sig.IncidentRef()
 	// §9.1: a late arrival's outcome is membership, not a session of
@@ -165,6 +175,10 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	if d.dryRun {
 		out, _ := json.MarshalIndent(mp, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+	} else if sid == "" {
+		// No Append may ever target an empty session id (issue #81):
+		// the storm is still session-less after the retry above.
+		log.Printf("storm: attach member %s/%s to %s: no storm session bound — member followup dropped", sig.Namespace, sig.Name, v.Storm.Ancestor.Display())
 	} else if err := d.injector.Append(ctx, sid, mp); err != nil {
 		log.Printf("storm: attach member %s/%s to %s (sid=%s): %v", sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
@@ -176,9 +190,92 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	// membership grew past a reporting threshold, follow the attach
 	// with a kind=storm.update carrying the CURRENT totals — the
 	// formation payload's counts are frozen at formation time.
-	if v.SizeUpdate != nil {
+	// Skipped while session-less (issue #81): never Append to sid=="".
+	if v.SizeUpdate != nil && (d.dryRun || sid != "") {
 		d.stormSizeUpdate(ctx, sid, *v.SizeUpdate, v.Storm)
 	}
+}
+
+// retryStormOpen re-attempts the storm-session open that failed at
+// formation time (issue #81), from the attach path of a session-less
+// storm. On success it completes the interrupted formation: binds the
+// session, rebinds EVERY current member (founding members plus any
+// that attached while session-less — the correlator's snapshot, not
+// the verdict's capped representatives), counts the storm formed (the
+// failed-open path never incremented stormsFormed, so this is the
+// storm's single increment), and supersedes members' pre-storm
+// sessions. Returns "" when the open failed again — the caller must
+// not Append anywhere. Runs under d.injectLock like stormFormed.
+func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info engine.StormInfo) string {
+	// Same composition as formation, with the storm's CURRENT counts:
+	// the formation-time payload was never delivered, so nothing is
+	// frozen yet.
+	payload := stormPayload(info, d.cluster)
+	if d.enrich != nil && d.enrich.enabledFor(info.Severity) {
+		if bundleStr := d.enrich.Storm(ctx, info); bundleStr != "" {
+			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
+		}
+	}
+	sid, err := d.injector.OpenIncident(ctx, payload)
+	if sid == "" {
+		log.Printf("storm: retry storm session for %s: %v", info.Ancestor.Display(), err)
+		d.metrics.sessionCreates.WithLabelValues("error").Inc()
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "session_create").Inc()
+		return ""
+	}
+	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
+	if err != nil {
+		// Partial open (session created, initial delivery failed):
+		// bind anyway, count the inject error — stormFormed semantics.
+		log.Printf("storm: inject storm for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
+		d.metrics.injectErrors.WithLabelValues(sig.Key.Reason, "inject").Inc()
+	}
+	d.storm.BindStormSession(info.ID, sid)
+
+	// Rebind + retrack every member, exactly as stormFormed would
+	// have: dedup followups and recovery outcomes now route to the
+	// recovered session. stormMembers counters are NOT emitted here —
+	// post-failure attaches were already counted "attached", and the
+	// founding members' suppressed/superseded split was lost with the
+	// failed formation (under-count beats double-count).
+	members := d.storm.StormMembers(info.ID)
+	for _, m := range members {
+		ref := engine.IncidentRef{
+			Namespace:    m.Namespace,
+			KindOfObject: m.KindOfObject,
+			Name:         m.Name,
+			Fingerprint:  m.Fingerprint,
+			Cluster:      d.cluster,
+		}
+		if m.Key == sig.CanonicalKey() {
+			ref = sig.IncidentRef() // attacher: full identity in hand
+		} else if bound, ok := d.dedup.LookupBinding(m.Key); ok {
+			ref = bound.Ref // richer (container, controller_ref)
+		}
+		d.dedup.AttachToStorm(m.Key, sid, info.Fingerprint, ref)
+		if d.tracker != nil {
+			d.tracker.Track(engine.Incident{Key: m.Key, SessionID: sid, FirstSeen: m.FirstSeen, Ref: ref})
+		}
+	}
+	d.metrics.stormsFormed.Inc()
+	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
+	log.Printf("storm session recovered on %s: %d incidents across %d namespace(s) → sid=%s (formation-time open had failed)",
+		info.Ancestor.Display(), len(members), info.NamespaceCount, sid)
+
+	// Supersede pointers into the members' pre-storm sessions — due
+	// since formation, deliverable only now.
+	for _, m := range members {
+		if m.SessionID == "" || m.SessionID == sid {
+			continue
+		}
+		mp := stormMemberPayload(inject.KindStormMemberSuperseded, m, info, d.cluster)
+		mp.StormSessionID = sid
+		if err := d.injector.Append(ctx, m.SessionID, mp); err != nil {
+			log.Printf("storm: supersede member %s/%s (sid=%s): %v", m.Namespace, m.Name, m.SessionID, err)
+			d.metrics.injectErrors.WithLabelValues(m.Reason, "inject").Inc()
+		}
+	}
+	return sid
 }
 
 // stormSizeUpdate injects the kind=storm.update size refresh into the
