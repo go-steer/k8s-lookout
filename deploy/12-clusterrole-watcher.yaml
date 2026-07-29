@@ -192,18 +192,26 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
-  # ---- expiry source (--sources=…,expiry) ----
-  # §11 TRADEOFF — this is the sentinel's one read of Secret VALUES
-  # (tls.crt to parse notAfter; the token JWT for its exp claim), and
-  # it is deliberately `list` only: no watch, no get, no informer —
-  # a periodic paged scan that retains nothing but (identity,
-  # notAfter, subject CN, issuer CN). No secret byte can reach a
-  # signal, and the §6.5 sanitizer remains the second net, not the
-  # mechanism. Deployments that cannot accept a cluster-wide secrets
-  # list scope it with --expiry-namespaces (the startup probe then
-  # verifies exactly the scoped namespaces) or bind a namespaced Role
-  # instead. Remove this rule entirely when the expiry source is
-  # disabled.
+  # ---- secrets: expiry source + enrichment edges (#87) ----
+  # §11 TRADEOFF — the broadest grant in this file: `list` on Secrets
+  # cluster-wide returns VALUES, so a compromise of this pod reads
+  # every Secret in the cluster. It is deliberately `list` only (no
+  # watch, no get, no informer) and serves exactly two readers:
+  #   1. the expiry source (--sources=…,expiry): periodic paged scan
+  #      parsing tls.crt notAfter / token exp, retaining only
+  #      (identity, notAfter, subject CN, issuer CN);
+  #   2. enrichment's scoped-list fallback (state edges secret-KEY
+  #      verification, M4 observation 2) — guardian-enforced by
+  #      pkg/checks/state/rbac_test.go, so this rule CANNOT simply be
+  #      deleted while enrichment ships; the earlier "remove this rule
+  #      when expiry is disabled" note was wrong.
+  # No secret byte can reach a signal (the §6.5 sanitizer is the
+  # second net, not the mechanism), and deploy/16's default-deny
+  # NetworkPolicy removes co-tenant network access to the pod.
+  # Deployments that cannot accept the cluster-wide grant run the §11
+  # namespace tier instead: --namespace scoping with a namespaced Role
+  # binding this same rule set per namespace, and --expiry-namespaces
+  # so the startup probe verifies exactly the scoped namespaces.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]
