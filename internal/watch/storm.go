@@ -61,11 +61,9 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	// pre-Sink inject error, never fatal to member bookkeeping.
 	var openErr error
 	if d.mode == "per-incident" && !d.dryRun {
-		newSid, err := d.injector.OpenIncident(ctx, payload)
-		if newSid == "" {
+		newSid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+		if !ok {
 			log.Printf("storm: create storm session for %s: %v", v.Storm.Ancestor.Display(), err)
-			d.metrics.sessionCreates.WithLabelValues("error").Inc()
-			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 			// §9.1 (issue #104 req 3): every signal that survives the
 			// filter is recorded — the failed formation is no exception.
 			// The trigger's outcome is still "my arrival formed the storm",
@@ -83,7 +81,6 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 		}
 		sid = newSid
 		openErr = err
-		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	}
 	d.storm.BindStormSession(v.Storm.ID, sid)
 	info.SessionID = sid
@@ -95,29 +92,8 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	// Rebind + retrack every member to the storm session: dedup
 	// followups and recovery outcomes now route there (the extended
 	// binding model — the entry records the storm fingerprint too).
-	for _, m := range v.Members {
-		ref := engine.IncidentRef{
-			Namespace:    m.Namespace,
-			KindOfObject: m.KindOfObject,
-			Name:         m.Name,
-			Fingerprint:  m.Fingerprint,
-			Cluster:      d.cluster,
-		}
-		if m.Key == sig.Key {
-			ref = sig.IncidentRef() // trigger: full identity in hand
-		} else if bound, ok := d.dedup.LookupBinding(m.Key); ok {
-			ref = bound.Ref // richer (container, controller_ref)
-		}
-		d.dedup.AttachToStorm(m.Key, sid, info.Fingerprint, ref)
-		if d.tracker != nil {
-			d.tracker.Track(engine.Incident{Key: m.Key, SessionID: sid, FirstSeen: m.FirstSeen, Ref: ref})
-		}
-		if m.SessionID == "" {
-			d.metrics.stormMembers.WithLabelValues("suppressed").Inc()
-		} else {
-			d.metrics.stormMembers.WithLabelValues("superseded").Inc()
-		}
-	}
+	// countMembers=true: formation owns the suppressed/superseded split.
+	d.rebindStormMembers(v.Members, sid, info.Fingerprint, sig.Key, sig.IncidentRef(), true)
 	d.metrics.stormsFormed.Inc()
 	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 
@@ -229,14 +205,11 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
 		}
 	}
-	sid, err := d.injector.OpenIncident(ctx, payload)
-	if sid == "" {
+	sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+	if !ok {
 		log.Printf("storm: retry storm session for %s: %v", info.Ancestor.Display(), err)
-		d.metrics.sessionCreates.WithLabelValues("error").Inc()
-		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 		return ""
 	}
-	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	if err != nil {
 		// Partial open (session created, initial delivery failed):
 		// bind anyway, count the inject error — stormFormed semantics.
@@ -251,25 +224,11 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 	// post-failure attaches were already counted "attached", and the
 	// founding members' suppressed/superseded split was lost with the
 	// failed formation (under-count beats double-count).
+	// countMembers=false: post-failure attaches were already counted
+	// "attached" and the founding suppressed/superseded split was lost
+	// with the failed formation — under-count beats double-count.
 	members := d.storm.StormMembers(info.ID)
-	for _, m := range members {
-		ref := engine.IncidentRef{
-			Namespace:    m.Namespace,
-			KindOfObject: m.KindOfObject,
-			Name:         m.Name,
-			Fingerprint:  m.Fingerprint,
-			Cluster:      d.cluster,
-		}
-		if m.Key == sig.CanonicalKey() {
-			ref = sig.IncidentRef() // attacher: full identity in hand
-		} else if bound, ok := d.dedup.LookupBinding(m.Key); ok {
-			ref = bound.Ref // richer (container, controller_ref)
-		}
-		d.dedup.AttachToStorm(m.Key, sid, info.Fingerprint, ref)
-		if d.tracker != nil {
-			d.tracker.Track(engine.Incident{Key: m.Key, SessionID: sid, FirstSeen: m.FirstSeen, Ref: ref})
-		}
-	}
+	d.rebindStormMembers(members, sid, info.Fingerprint, sig.CanonicalKey(), sig.IncidentRef(), false)
 	d.metrics.stormsFormed.Inc()
 	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 	log.Printf("storm session recovered on %s: %d incidents across %d namespace(s) → sid=%s (formation-time open had failed)",

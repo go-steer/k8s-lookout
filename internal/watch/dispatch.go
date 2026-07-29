@@ -371,14 +371,11 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// failed — bind anyway (followups and §7.4 outcomes still
 		// have a home) and count the inject error, exactly the
 		// pre-Sink behavior.
-		sid, err := d.injector.OpenIncident(ctx, payload)
-		if sid == "" {
+		sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+		if !ok {
 			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
-			d.metrics.sessionCreates.WithLabelValues("error").Inc()
-			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 			return
 		}
-		d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 		// BindIncident = BindSession + the identity the recovery
 		// tracker needs to survive a restart (rides on dedup-persist).
 		d.dedup.BindIncident(key, sid, sig.IncidentRef())
@@ -541,16 +538,13 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		}
 	}
 	payload := incidentPayload(sig, result)
-	sid, err := d.injector.OpenIncident(ctx, payload)
-	if sid == "" {
+	sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+	if !ok {
 		log.Printf("dispatcher: retry create session for %s/%s: %v (unbound entry, count=%d)",
 			sig.Namespace, sig.Name, err, result.Count)
-		d.metrics.sessionCreates.WithLabelValues("error").Inc()
-		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "session_create").Inc()
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
 		return
 	}
-	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	d.dedup.BindIncident(key, sid, sig.IncidentRef())
 	// The session's actual opener is THIS signal's source family —
 	// re-stamp so cross-source join followups reference reality.
