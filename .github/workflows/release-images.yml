@@ -35,12 +35,26 @@ name: Release images
 #                had to build its own image. Same Dockerfile, same
 #                signing — only BUILD_TAGS differs.
 #
+# The two flavors are a SINGLE job driven by a `flavor` matrix
+# (`build-and-push`): the build + push + sign + verify pipeline is
+# identical, so only the per-flavor knobs (BUILD_TAGS, tag suffix,
+# :latest tag, OCI title/description) live in `strategy.matrix`.
+# fail-fast is off so a break in one flavor doesn't cancel the other
+# mid-publish.
+#
 # Images are signed via Sigstore keyless (GitHub Actions OIDC →
 # Fulcio short-lived cert). Verify with:
 #
 #   cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
 #     --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# That exact invocation runs post-publish (the "Verify published
+# signatures + smoke test" step below) against EVERY tag this job
+# pushes, for BOTH flavors — the workflow no longer trusts that a
+# `cosign sign` exit-0 means consumers can actually verify what's on
+# the registry, and the previously-unchecked `-gke` tag→digest
+# linkage is now asserted on every release.
 #
 # Manual republish (e.g. for a tag pushed before this workflow
 # existed): use the workflow_dispatch entrypoint with the tag input.
@@ -66,8 +80,38 @@ env:
 
 jobs:
   build-and-push:
-    name: lookout
+    name: ${{ matrix.job_name }}
     runs-on: ubuntu-24.04
+
+    strategy:
+      # Publish both flavors independently — if one fails to build or
+      # verify, let the other finish rather than cancelling a
+      # half-published release.
+      fail-fast: false
+      matrix:
+        include:
+          # The default, GCP-free flavor: bare tags, plain :latest,
+          # empty BUILD_TAGS.
+          - flavor: default
+            job_name: lookout
+            build_tags: ''
+            tag_suffix: ''
+            latest_tag: latest
+            oci_title: lookout
+            oci_description: 'k8s-lookout: deterministic Kubernetes/GKE reads for agent-driven troubleshooting, plus the resident per-cluster sentinel (lookout watch, the former k8s-event-watcher).'
+          # The GKE flavor (M4 drill observation 5): identical
+          # pipeline, one extra build-arg (BUILD_TAGS=allproviders →
+          # the gke cloud provider links in), every tag suffixed
+          # -gke. latest_tag is spelled out as latest-gke (never a
+          # bare :latest) so this leg can NEVER shadow the GCP-free
+          # default.
+          - flavor: gke
+            job_name: lookout-gke
+            build_tags: allproviders
+            tag_suffix: -gke
+            latest_tag: latest-gke
+            oci_title: lookout (gke)
+            oci_description: 'k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).'
 
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +148,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # docker/metadata-action computes the full tag matrix from a
-      # declarative spec. On a released `v0.1.0` push it produces:
+      # declarative spec. On a released `v0.1.0` push the default
+      # flavor produces:
       #   :v0.1.0  :0.1.0  :0.1  :0  :latest
       # On a pre-release `v0.2.0-rc.1` push it produces:
       #   :v0.2.0-rc.1  :0.2.0-rc.1
@@ -112,6 +157,12 @@ jobs:
       #    handler skips :{{major}}.{{minor}} and :{{major}} for
       #    pre-releases; we skip :latest via the enable-guard below.)
       # On workflow_dispatch with tag input: uses that input verbatim.
+      #
+      # The `-gke` flavor produces the same shape with every entry
+      # suffixed via `suffix=${{ matrix.tag_suffix }}` (empty for the
+      # default flavor) and latest_tag spelled out per-flavor
+      # (latest / latest-gke) so the -gke leg can never publish a
+      # bare :latest.
       #
       # {{raw}} (the git-tag-verbatim `:vX.Y.Z` form) is published in
       # ADDITION to core-agent's stripped-`v` pyramid because the
@@ -134,24 +185,24 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
           tags: |
             # Semver tag → git-tag form + full pyramid of floating tags
-            type=semver,pattern={{raw}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # Released semver tags get :latest — pre-release tags
-            # (v0.2.0-rc.1 / v0.2.0-dev.1 / etc.) do NOT, so an RC
+            type=semver,pattern={{raw}},suffix=${{ matrix.tag_suffix }}
+            type=semver,pattern={{version}},suffix=${{ matrix.tag_suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ matrix.tag_suffix }}
+            type=semver,pattern={{major}},suffix=${{ matrix.tag_suffix }}
+            # Released semver tags get :latest (:latest-gke) — pre-release
+            # tags (v0.2.0-rc.1 / v0.2.0-dev.1 / etc.) do NOT, so an RC
             # doesn't accidentally become the tag consumers pull by
             # default. Semver's convention: any tag containing a `-`
             # is a pre-release.
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=raw,value=${{ matrix.latest_tag }},enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             # Manual dispatch with tag input
-            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+            type=raw,value=${{ inputs.tag }}${{ matrix.tag_suffix }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
           # OCI image LABELS — baked into each per-platform image
           # config blob. Consumed by OCI-aware tooling (registries
           # other than GHCR, image inspectors).
           labels: |
-            org.opencontainers.image.title=lookout
-            org.opencontainers.image.description=k8s-lookout: deterministic Kubernetes/GKE reads for agent-driven troubleshooting, plus the resident per-cluster sentinel (lookout watch, the former k8s-event-watcher).
+            org.opencontainers.image.title=${{ matrix.oci_title }}
+            org.opencontainers.image.description=${{ matrix.oci_description }}
             org.opencontainers.image.vendor=go-steer
           # OCI ANNOTATIONS — attached to the manifest / index.
           # GHCR renders its package-page description from the index
@@ -159,8 +210,8 @@ jobs:
           # populate the GHCR page). Keep this list in sync with
           # `labels:` above.
           annotations: |
-            org.opencontainers.image.title=lookout
-            org.opencontainers.image.description=k8s-lookout: deterministic Kubernetes/GKE reads for agent-driven troubleshooting, plus the resident per-cluster sentinel (lookout watch, the former k8s-event-watcher).
+            org.opencontainers.image.title=${{ matrix.oci_title }}
+            org.opencontainers.image.description=${{ matrix.oci_description }}
             org.opencontainers.image.vendor=go-steer
 
       # Compute the build version: the tag if we're on one, else the
@@ -181,7 +232,8 @@ jobs:
       # Build + push multi-arch image. type=gha cache speeds up
       # iterative builds substantially — the Go module download +
       # dependency compile is the slow part and it caches cleanly
-      # across builds with the same go.mod/go.sum.
+      # across builds with the same go.mod/go.sum. BUILD_TAGS is empty
+      # for the default flavor (GCP-free) and `allproviders` for -gke.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
@@ -196,6 +248,7 @@ jobs:
           build-args: |
             GO_VERSION=${{ steps.go-version.outputs.version }}
             VERSION=${{ steps.version.outputs.version }}
+            BUILD_TAGS=${{ matrix.build_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -216,105 +269,51 @@ jobs:
           # every tag that points at the same digest.
           echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
 
-  # The GKE flavor (M4 drill observation 5): identical pipeline, one
-  # extra build-arg (BUILD_TAGS=allproviders → the gke cloud provider
-  # links in), every tag suffixed -gke. The default image stays
-  # GCP-free; project-tier quota deployments (`--sources=…,quota`)
-  # pin this flavor instead of building their own.
-  build-and-push-gke:
-    name: lookout-gke
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract Go version from go.mod
-        id: go-version
-        run: |
-          GO_VERSION=$(grep -E '^go [0-9]+\.[0-9]+(\.[0-9]+)?$' go.mod | awk '{print $2}')
-          if [[ -z "$GO_VERSION" ]]; then
-            echo "::error::Could not extract Go version from go.mod" >&2
-            exit 1
-          fi
-          echo "version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Building against Go ${GO_VERSION}"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # The -gke tag pyramid: same shape as the default flavor's,
-      # every entry explicitly suffixed (including the raw latest-gke
-      # — spelled out rather than flavor-suffixed so this job can
-      # NEVER publish a bare :latest and shadow the GCP-free default).
-      - name: Compute image tags + labels + annotations
-        id: meta
-        uses: docker/metadata-action@v5
-        env:
-          DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{raw}},suffix=-gke
-            type=semver,pattern={{version}},suffix=-gke
-            type=semver,pattern={{major}}.{{minor}},suffix=-gke
-            type=semver,pattern={{major}},suffix=-gke
-            type=raw,value=latest-gke,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
-            type=raw,value=${{ inputs.tag }}-gke,enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
-          labels: |
-            org.opencontainers.image.title=lookout (gke)
-            org.opencontainers.image.description=k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).
-            org.opencontainers.image.vendor=go-steer
-          annotations: |
-            org.opencontainers.image.title=lookout (gke)
-            org.opencontainers.image.description=k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).
-            org.opencontainers.image.vendor=go-steer
-
-      - name: Compute build version
-        id: version
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            VERSION="${{ github.ref_name }}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
-            VERSION="${{ inputs.tag }}"
-          else
-            VERSION="main-$(git rev-parse --short HEAD)"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          build-args: |
-            GO_VERSION=${{ steps.go-version.outputs.version }}
-            VERSION=${{ steps.version.outputs.version }}
-            BUILD_TAGS=allproviders
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign images
+      # Post-publish verification — the gap #111 flagged. Signing
+      # exiting 0 does NOT prove a consumer can verify what's on the
+      # registry, nor that each published tag actually resolves to the
+      # signed digest (the `-gke` linkage was never checked). This
+      # step runs the exact `cosign verify` invocation documented in
+      # the header against EVERY tag pushed, then pulls the image by
+      # its immutable digest and smoke-runs the binary. It runs once
+      # per flavor via the matrix, so BOTH flavors are verified.
+      - name: Verify published signatures + smoke test
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
+          set -euo pipefail
+
+          # Verify each published tag's signature. Verifying BY TAG
+          # (not by digest) also asserts the tag→digest linkage: a tag
+          # that didn't land, or points at an unsigned digest, fails
+          # here. This is what closes the unchecked `-gke` linkage.
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            echo "▸ verifying signature: ${tag}"
+            cosign verify "${tag}" \
+              --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              > /dev/null
+          done <<< "$TAGS"
+
+          # Smoke test: pull by the immutable digest and run the
+          # binary. The image ENTRYPOINT is ["/lookout", "watch"], so
+          # override it to exercise `lookout version` — proves the
+          # published artifact is a runnable lookout binary, not just
+          # a signed blob. (Pulls the amd64 child of the multi-arch
+          # index on this runner.)
+          SMOKE_IMG="${REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}@${DIGEST}"
+          echo "▸ smoke: docker run --entrypoint /lookout ${SMOKE_IMG} version"
+          docker run --rm --entrypoint /lookout "${SMOKE_IMG}" version
+
+          # Confirm the drop-in ENTRYPOINT is intact — existing
+          # k8s-event-watcher deployments rely on ["/lookout","watch"]
+          # (their `args:` are bare watch flags). A regression here
+          # would silently break every such deployment on upgrade.
+          ENTRYPOINT=$(docker inspect --format '{{json .Config.Entrypoint}}' "${SMOKE_IMG}")
+          echo "▸ entrypoint: ${ENTRYPOINT}"
+          if [[ "${ENTRYPOINT}" != '["/lookout","watch"]' ]]; then
+            echo "::error::unexpected entrypoint ${ENTRYPOINT} (want [\"/lookout\",\"watch\"])" >&2
+            exit 1
+          fi
