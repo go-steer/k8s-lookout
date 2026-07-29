@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-29
+
+A hardening release from two rounds of adversarial review. The
+sentinel's failure modes stop black-holing incidents: failed session
+creates and storm formation no longer suppress a symptom or a
+correlated class forever (#80, #81, #84, #104), buffered warnings
+survive SIGTERM (#108), and the storm graph feed no longer settles on
+stale topology after an informer resync (#107). Real leak and
+overstatement paths close: the §6.5 sanitizer finally covers the whole
+inject surface and learns `pass`/`passphrase` (#82, #106), and the
+prompt-injection threat model is corrected to name its one ungated
+write (#105). The deployment ships a default-deny ingress NetworkPolicy
+(#87), the `/metrics` `reason` label is bounded (#109), and the release
+pipeline now verifies every image it signs (#111).
+
 ### Added
 
 - The prompt-injection trust boundary is now named and documented
