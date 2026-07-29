@@ -31,8 +31,12 @@ name: E2E (kind)
 # this workflow is the "something real is continuously tested" tier.
 #
 # On failure: stub-daemon + sentinel logs and cluster state are
-# uploaded as artifacts (the wire capture is the forensics), and
-# scheduled runs open an issue so failures aren't silent.
+# uploaded as artifacts (the wire capture is the forensics), and both
+# unattended tiers (push smoke, weekly full) file or update a single
+# open tracking issue so failures aren't silent (#90) — under
+# auto-merge nobody reliably watches the Actions tab, and releases are
+# cut daily, far faster than the weekly signal. Manual dispatches
+# don't file: whoever clicked is watching.
 
 on:
   schedule:
@@ -134,12 +138,26 @@ jobs:
           path: _forensics/
           retention-days: 14
 
-      - name: Open issue on scheduled failure
-        if: failure() && github.event_name == 'schedule'
+      - name: File or update tracking issue on unattended failure
+        # push = post-merge smoke (tests HEAD after every merge);
+        # schedule = weekly full run. One open issue collects repeats —
+        # a broken week must not file daily duplicates.
+        if: failure() && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "weekly kind e2e failed: run ${{ github.run_id }}" \
-            --body "The scheduled kind e2e run failed on $(date -u +%Y-%m-%d). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} — the wire capture and sentinel log are attached as the e2e-forensics artifact. See examples/README.md § Re-runs, dedup, and storm absorption before assuming a product regression."
+          tier="${{ github.event_name }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing="$(gh issue list --repo "${{ github.repository }}" \
+            --state open --search 'kind e2e failed in:title' \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" \
+              --repo "${{ github.repository }}" \
+              --body "Another failure ($tier tier, $(date -u +%Y-%m-%d), ${{ github.sha }}): $run_url"
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "kind e2e failed ($tier tier): run ${{ github.run_id }}" \
+              --body "The $tier-tier kind e2e run failed on $(date -u +%Y-%m-%d) at ${{ github.sha }}. Run: $run_url — the wire capture and sentinel log are attached as the e2e-forensics artifact. See examples/README.md § Re-runs, dedup, and storm absorption before assuming a product regression."
+          fi
