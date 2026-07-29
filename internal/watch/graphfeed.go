@@ -180,15 +180,8 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	if err := w.FromObjects(slices.Values(objs)); err != nil {
 		return fmt.Errorf("storm: graph initial sync: %w", err)
 	}
-	g.mu.Lock()
-	buffered := g.buf
-	g.buf = nil
-	g.armed = true
-	g.mu.Unlock()
-	if len(buffered) > 0 {
-		if err := w.ApplyInitial(buffered...); err != nil {
-			return fmt.Errorf("storm: replay buffered graph deltas: %w", err)
-		}
+	if err := g.armAndReplay(w); err != nil {
+		return fmt.Errorf("storm: replay buffered graph deltas: %w", err)
 	}
 	if snap, err := g.graph.Snapshot(); err == nil {
 		log.Printf("storm: topology graph ready (%d nodes, %d edges) — blast-radius correlation armed", snap.NumNodes(), snap.NumEdges())
@@ -196,6 +189,34 @@ func (g *graphFeed) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	w.Close()
+	return nil
+}
+
+// armAndReplay drains the pre-arm buffer, replays it onto the writer,
+// and arms the feed — all under a SINGLE critical section (issue #107).
+//
+// The lock is held across the ApplyInitial replay on purpose: enqueue
+// also takes g.mu, so a live delta arriving during arming blocks until
+// this method releases the lock — by which point every buffered
+// (initial-sync) delta is already queued into the writer. That
+// ordering is the invariant: buffered deltas always precede live ones,
+// so a stale buffered placement can never be replayed on top of (and
+// clobber) a newer live change for the same object. Setting g.armed and
+// releasing the lock BEFORE ApplyInitial would reopen that window.
+//
+// Holding g.mu across ApplyInitial briefly blocks the informer handler
+// during initial sync — intended: a one-time cost on the sync path.
+// An empty buffer still arms; the error from ApplyInitial is returned
+// unwrapped (the Run call site keeps the §6.3 replay wrap).
+func (g *graphFeed) armAndReplay(w *graph.Writer) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	buffered := g.buf
+	g.buf = nil
+	g.armed = true
+	if len(buffered) > 0 {
+		return w.ApplyInitial(buffered...)
+	}
 	return nil
 }
 

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The storm-correlation graph feed no longer settles on stale topology
+  after an informer resync (#107): arming set `armed=true` and dropped
+  the lock before replaying the pre-arm buffer, so a live delta racing
+  that window was queued ahead of the buffered initial-sync deltas and
+  a stale buffered placement could clobber a newer live change for the
+  same object. Arm-and-replay now runs under a single critical section,
+  guaranteeing buffered deltas always precede live ones.
 - The prompt-injection threat model no longer overstates its
   guarantees (#105): DESIGN.md §7.8 and principle 6 claimed *every*
   agent write — triage-status records included — routes through the
