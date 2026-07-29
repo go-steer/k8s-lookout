@@ -266,8 +266,9 @@ func realMain(argv []string) error {
 	// Watchboard interval-flush loop (§7.7): flushes buffered
 	// warnings at --watchboard-flush age, plus a final best-effort
 	// flush on shutdown so a terminating sentinel keeps its buffer.
+	var waitBoard func()
 	if disp.board != nil {
-		go disp.board.run(ctx)
+		waitBoard = startBoard(ctx, disp.board)
 		log.Printf("watchboard: enabled (batch=%d, flush=%s, rotate after %d digest injects — §15 Q2 size-based)",
 			f.watchboardBatch, f.watchboardFlush, f.watchboardRotate)
 	}
@@ -487,6 +488,14 @@ func realMain(argv []string) error {
 	// isn't lost. Best-effort — failure is logged, not fatal.
 	if snapErr := dedup.Snapshot(); snapErr != nil {
 		log.Printf("dedup snapshot on shutdown: %v", snapErr)
+	}
+	// Block on the watchboard's final flush (§7.7, issue #108): run's
+	// shutdown branch does a best-effort FlushNow when ctx cancels, and
+	// this join keeps the process alive until it lands so buffered
+	// warnings aren't dropped on SIGTERM. Nil-guarded: the board is
+	// optional (per-incident mode without warning routing).
+	if waitBoard != nil {
+		waitBoard()
 	}
 	if err == nil {
 		feedMu.Lock()
