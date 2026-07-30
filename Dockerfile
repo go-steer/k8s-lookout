@@ -55,6 +55,12 @@ COPY . .
 # release-images.yml GitHub Action overrides them all.
 ARG VERSION=v0.0.0-dev
 
+# Commit SHA + build date, stamped alongside VERSION (#146). The
+# defaults mark a build where nothing was injected; internal/version
+# then falls back to Go's embedded VCS metadata where available.
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
 # Go build tags. Empty (default) produces the GCP-free binary the §2
 # conformance test pins — no cloud SDK linked, `--sources=…,quota`
 # refuses loudly at startup. Release builds also publish a
@@ -77,10 +83,15 @@ ENV CGO_ENABLED=0 \
 # -s -w strips DWARF + symbol table to shrink the binary by ~30%.
 # -trimpath strips the absolute paths in stack traces (which would
 # otherwise leak the build host's filesystem layout).
-# -X main.version stamps the release identity `lookout version` reports.
+# The internal/version stamps are the release identity `lookout
+# version` / `--version` report and the sentinel logs at startup
+# (#146: version + SHA + date, core-agent's scheme).
 RUN go build \
     -tags "${BUILD_TAGS}" \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -ldflags "-s -w \
+      -X github.com/go-steer/k8s-lookout/internal/version.Version=${VERSION} \
+      -X github.com/go-steer/k8s-lookout/internal/version.Commit=${COMMIT} \
+      -X github.com/go-steer/k8s-lookout/internal/version.Date=${BUILD_DATE}" \
     -trimpath \
     -o /out/lookout \
     ./cmd/lookout

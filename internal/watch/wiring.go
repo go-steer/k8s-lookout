@@ -35,6 +35,8 @@ import (
 
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
+	"github.com/go-steer/k8s-lookout/internal/version"
+
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
@@ -71,6 +73,10 @@ func realMain(argv []string) error {
 	if err := f.validate(); err != nil {
 		return err
 	}
+
+	// Build identity first (#146): a running pod must identify its
+	// build from `kubectl logs` alone — version, commit, build date.
+	log.Printf("%s", version.String("lookout"))
 
 	// OpenTelemetry init. Registers the W3C traceparent propagator
 	// globally (so otelhttp-wrapped outbound POSTs carry trace

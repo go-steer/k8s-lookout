@@ -205,16 +205,23 @@ rules:
   #      (identity, notAfter, subject CN, issuer CN);
   #   2. enrichment's scoped-list fallback (state edges secret-KEY
   #      verification, M4 observation 2) — guardian-enforced by
-  #      pkg/checks/state/rbac_test.go, so this rule CANNOT simply be
-  #      deleted while enrichment ships; the earlier "remove this rule
-  #      when expiry is disabled" note was wrong.
+  #      pkg/checks/state/rbac_test.go: the rule cannot be dropped
+  #      from THIS SHIPPED FILE while enrichment defaults on, because
+  #      the shipped manifest must match the shipped defaults.
   # No secret byte can reach a signal (the §6.5 sanitizer is the
   # second net, not the mechanism), and deploy/16's default-deny
   # NetworkPolicy removes co-tenant network access to the pod.
-  # Deployments that cannot accept the cluster-wide grant run the §11
-  # namespace tier instead: --namespace scoping with a namespaced Role
-  # binding this same rule set per namespace, and --expiry-namespaces
-  # so the startup probe verifies exactly the scoped namespaces.
+  # Deployments that cannot accept the cluster-wide grant have two
+  # outs (both validated on a live cluster — the Autopilot first-run
+  # report behind issues #144-#146):
+  #   - the §11 namespace tier: --namespace scoping with a namespaced
+  #     Role binding this same rule set per namespace, and
+  #     --expiry-namespaces so the startup probe verifies exactly the
+  #     scoped namespaces; or
+  #   - delete the secrets + serviceaccounts rules from YOUR copy and
+  #     run --enrich=off — under --sources=auto the expiry source
+  #     then skips itself on the missing grant with one loud line,
+  #     and the remaining sources run clean.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]

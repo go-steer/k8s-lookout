@@ -22,6 +22,7 @@ import (
 	"os"
 
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
+	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 )
 
@@ -89,7 +90,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	server := mcpserver.New(checks.Default(), version)
+	server := mcpserver.New(checks.Default(), version.Semver())
 	if err := mcpserver.Serve(ctx, server, *listen, nil); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1
