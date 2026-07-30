@@ -11,6 +11,7 @@ require (
 	github.com/google/jsonschema-go v0.4.2
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/prometheus/client_golang v1.24.1
+	github.com/robfig/cron/v3 v3.0.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 	google.golang.org/api v0.287.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af

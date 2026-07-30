@@ -31,6 +31,18 @@ behind the new `audit` provider capability (#128).
 
 ### Added
 
+- New `workload` watch source (issue #129, on by default under
+  `--sources=auto`): `workload.job_failed` fires on a Job's `Failed`
+  condition (`BackoffLimitExceeded`, `DeadlineExceeded`, …) and
+  `workload.cron_missed` when an unsuspended CronJob passes a
+  scheduled activation without running — batch failures previously
+  invisible unless their pods crashlooped. Consecutive missed
+  activations escalate to critical at 3. §7.4 clearance: a
+  CronJob-owned failed Job clears on the next successful sibling run;
+  a missed schedule clears when it fires again or is suspended.
+  Requires `watch` on `batch` jobs/cronjobs
+  (deploy/12-clusterrole-watcher.yaml updated).
+
 - `stab drift --identity` resolves each drift finding to the audited
   principal who wrote it — `principal`, `principal_agent`, and
   `other_principals` fields from the cloud provider's audit trail

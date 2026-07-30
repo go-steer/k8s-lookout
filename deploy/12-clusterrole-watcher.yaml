@@ -160,8 +160,11 @@ rules:
     resources: ["daemonsets"]
     verbs: ["get", "list"]
   - apiGroups: ["batch"]
+    # "get"/"list" for enrichment (above); "watch" for the workload
+    # source's Job + CronJob informers (workload.job_failed /
+    # workload.cron_missed, issue #129).
     resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     # Enrichment scoped-list continued: services + configmaps feed
     # the bundle's edges section (reference-integrity checks). List

@@ -28,6 +28,7 @@ shipped threshold.
 | Services going dark, drains about to stall | A Service's ready-endpoint count drops to zero; a PodDisruptionBudget's allowed disruptions hit 0 with pods behind it | `object-state` | **Auto** | none |
 | Crash loops and stuck rollouts, before the events | A pod's restart count climbs 3 in 10 minutes — ahead of the kubelet's `BackOff` events; a Deployment burns 80% of its progress deadline with unready replicas | `object-state` | **Auto** | none |
 | Bad deploys, while the old version still serves | New pods crash-looping while the old version still serves: zero ready-count progress for 3 minutes (`--rollout-observe`) with the old ReplicaSet healthy | `rollout` | **Auto** | none |
+| Failed batch work and dead schedules | A Job's `Failed` condition goes True (`BackoffLimitExceeded`, `DeadlineExceeded`); an unsuspended CronJob passes a scheduled activation without running — three consecutive misses escalate to critical | `workload` | **Auto** | none |
 | Resources trending toward exhaustion | A pod leaking ~1 MiB every 30 s, forecast to hit its 64 Mi memory limit in ~14 minutes; a PVC filling in ~3 h | `saturation` | **Auto** | metrics-server (`metrics.k8s.io`) — absent, auto skips the source with one loud line |
 | Service capacity eroding before the outage | A backend's ready endpoints declining 5/5 → 3/5 across the trend window; a readiness probe that keeps flapping below the reactive threshold | `degradation` | **Auto** | none |
 | Certificates and tokens running out | A TLS certificate 13 days from expiry; a cert-manager `Certificate` whose last renewal failed | `expiry` | **Auto** | none |
@@ -73,11 +74,12 @@ sources: auto — probing the portable set (RBAC per source; metrics.k8s.io for 
 source k8s-events: enabled (always on — a sentinel that cannot watch events is misdeployed)
 source object-state: enabled
 source rollout: enabled
+source workload: enabled
 source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)
 source degradation: enabled
 source expiry: enabled
 source capacity: enabled
-sources: auto resolved → k8s-events,object-state,rollout,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)
+sources: auto resolved → k8s-events,object-state,rollout,workload,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)
 ```
 
 `--storm` defaults to auto the same way: the graph informer grants
@@ -105,7 +107,7 @@ you asked for (the shipped `deploy/51` manifest does exactly this,
 since it ships alongside the full RBAC):
 
 ```
---sources=k8s-events,object-state,rollout,saturation,degradation,expiry,capacity --storm=on --store=/var/lib/lookout/lookout.db --enrich=critical
+--sources=k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity --storm=on --store=/var/lib/lookout/lookout.db --enrich=critical
 ```
 
 `--sources=k8s-events` reproduces the pre-auto default surface
