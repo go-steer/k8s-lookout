@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-30
+
+Two new watch sources and the fixes from the first real-cluster
+evaluation (GKE Autopilot, issues #144-#146): the `workload` source
+(failed Jobs, dead CronJob schedules) and the `notifications` source
+(GKE upgrade events and security bulletins); the RBAC probe now
+repeats the authorizer's own reason instead of coaching RBAC widening
+for platform denials, and saturation degrades its PVC dimension on
+Autopilot instead of dying; build identity (version+commit+date) is
+stamped everywhere including the sentinel's first log line; the
+deploy manifest is current and auto-sourced; releases now publish
+GitHub Release objects and the workflow guards the manifest pin and
+the flavor tags (the v0.11.0 `:latest` mispointing cannot recur).
+
 ### Fixed
 
 - The startup RBAC probe no longer misdiagnoses platform denials as
