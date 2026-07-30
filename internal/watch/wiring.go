@@ -51,6 +51,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
@@ -366,6 +367,9 @@ func realMain(argv []string) error {
 		if bs.degradation != nil {
 			bs.degradation.WithFactory(sharedFactory)
 		}
+		if bs.workload != nil {
+			bs.workload.WithFactory(sharedFactory)
+		}
 		// Graph history (§6.6): with a store configured, every applied
 		// graph delta also logs a ChangeRecord through the store's
 		// buffered writer. Without one, onChange stays nil and the
@@ -526,6 +530,7 @@ type builtSources struct {
 	registry    *sources.Registry
 	objState    *objectstate.Source
 	rollout     *rollout.Source
+	workload    *workload.Source
 	saturation  *saturation.Source
 	degradation *degradation.Source
 	expiry      *expiry.Source
@@ -564,6 +569,9 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Observe = f.rolloutObserve
 			bs.rollout = rollout.New(client, cfg)
 			src = bs.rollout
+		case workload.Name:
+			bs.workload = workload.New(client, workload.DefaultConfig())
+			src = bs.workload
 		case saturation.Name:
 			if metricsClient == nil {
 				return nil, fmt.Errorf("--sources: %s requires a metrics.k8s.io client (programming error: buildSources called without one)", saturation.Name)
@@ -714,6 +722,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	if bs.tokenBurn != nil {
 		observers = append(observers, bs.tokenBurn.ClearanceObserver())
 		log.Printf("recovery: token-burn clearance observer registered (spend receded / session ended → cleared)")
+	}
+	if bs.workload != nil {
+		observers = append(observers, bs.workload.ClearanceObserver())
+		log.Printf("recovery: workload clearance observer registered (sibling cron run succeeded / schedule resumed / object deleted → cleared)")
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())

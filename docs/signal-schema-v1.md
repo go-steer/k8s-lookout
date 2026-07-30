@@ -84,7 +84,9 @@ Cross-cutting kinds, each with its own schema-stable struct
 
 Source-namespaced kinds — all ride `Payload`: `objectstate.
 node_notready|node_flapping|progress_deadline|endpoints_empty|
-pdb_gridlocked|restart_burst`, `rollout.stall`, `saturation.forecast`,
+pdb_gridlocked|restart_burst`, `rollout.stall`, `workload.
+job_failed|cron_missed` (added post-M5, #129 — kinds are
+append-only), `saturation.forecast`,
 `degradation.capacity|probe_flap`, `expiry.warning`, `capacity.
 pending|scaleup|scaledown|scaleup_gap|stockout|quota_blocked|
 ip_exhausted|pending-aged`, `quota.forecast`, `token.burn`.

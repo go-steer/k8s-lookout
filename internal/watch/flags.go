@@ -32,6 +32,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
 // The frozen `lookout watch` flag surface (M0 contract; §14 CLI
@@ -575,7 +576,7 @@ func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow
 func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, tokenburn.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, tokenburn.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {

@@ -114,11 +114,12 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source k8s-events: enabled (always on — a sentinel that cannot watch events is misdeployed)",
 		"source object-state: enabled",
 		"source rollout: enabled",
+		"source workload: enabled",
 		"source saturation: enabled",
 		"source degradation: enabled",
 		"source expiry: enabled",
 		"source capacity: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,saturation,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)
@@ -177,7 +178,7 @@ func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	want := []string{"k8s-events", "object-state", "rollout", "degradation", "expiry", "capacity"}
+	want := []string{"k8s-events", "object-state", "rollout", "workload", "degradation", "expiry", "capacity"}
 	if !slices.Equal(res.enabled, want) {
 		t.Errorf("enabled = %v, want %v (saturation off)", res.enabled, want)
 	}
@@ -355,7 +356,7 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 	if err := resolveAutoDefaults(context.Background(), f, client); err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
-	if want := "k8s-events,object-state,rollout,degradation,expiry,capacity"; f.sources != want {
+	if want := "k8s-events,object-state,rollout,workload,degradation,expiry,capacity"; f.sources != want {
 		t.Errorf("resolved sources = %q, want %q (no metrics API in fake discovery)", f.sources, want)
 	}
 	if f.storm != stormOn {
