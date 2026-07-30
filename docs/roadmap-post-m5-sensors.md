@@ -138,6 +138,10 @@ In recommended order, each tracked by its own issue:
 | 3 | GKE cluster notifications source | C.1 | #130 |
 | 4 | HPA pinned + cluster bin-packing forecast | B.2 + B.3 | #131 |
 | 5 | `family.member` followup inject | A.2 | #132 |
+| 6 | Node pressure conditions sensor | B.4 | #134 |
+| 7 | GCLB/Ingress health (event reasons first) | C.5 | #135 |
 
 Everything else in Tiers A–C stays in this doc until promoted to an
-issue; Tier D stays here as the standing no.
+issue — #136 records the per-item disposition (what would promote
+each, and which are deliberately folded into other tracks). Tier D
+stays here as the standing no.
