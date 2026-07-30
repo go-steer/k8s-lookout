@@ -27,6 +27,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
+	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
@@ -69,6 +70,7 @@ type flags struct {
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
+	notificationsSub      string
 	tokenPoll             time.Duration
 	burnMultiple          float64
 	burnETA               time.Duration
@@ -159,7 +161,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, saturation, degradation, expiry, capacity, quota, token-burn. quota (project tier) and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's probe failure is fatal.")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, saturation, degradation, expiry, capacity, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's probe failure is fatal.")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -197,8 +199,13 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%) are
 	// design-fixed, not flags.
 	fs.DurationVar(&f.quotaPoll, "quota-poll", 15*time.Minute, "Poll interval for the quota source's inventory read and per-watched-quota history query. Must be > 0.")
+
 	fs.DurationVar(&f.quotaWindow, "quota-window", 7*24*time.Hour, "History window the quota usage slope is fitted over (the §8 linear-<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0.")
 	fs.Float64Var(&f.quotaWarn, "quota-warn", 0.80, "Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1).")
+
+	// Notifications source (post-M5 #130). ADDITIVE flag; only
+	// meaningful with --sources=...,notifications.
+	fs.StringVar(&f.notificationsSub, "notifications-subscription", "", "Subscription the notifications source reads (GKE: a Pub/Sub subscription on the cluster's notificationConfig topic) — either projects/<p>/subscriptions/<name> or a bare name resolved against the provider project. Required when the notifications source is enabled.")
 
 	// Token-burn source knobs (§7.2 row 9, §12). ADDITIVE flags; only
 	// meaningful with --sources=…,token-burn. The cost stack rides
@@ -576,7 +583,7 @@ func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow
 func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, tokenburn.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, quota.Name, notifications.Name, tokenburn.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {

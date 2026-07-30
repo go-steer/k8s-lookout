@@ -46,6 +46,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
+	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
@@ -335,8 +336,8 @@ func realMain(argv []string) error {
 	// quota.New's loud §11 error — because a project-tier deployment
 	// without a cloud makes no sense.
 	var provider cloud.Provider
-	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) {
-		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName})
+	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) || f.sourceEnabled(notifications.Name) {
+		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName, NotificationsSubscription: f.notificationsSub})
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}
@@ -536,6 +537,7 @@ type builtSources struct {
 	expiry      *expiry.Source
 	capacity    *capacity.Source
 	quota       *quota.Source
+	notes       *notifications.Source
 	tokenBurn   *tokenburn.Source
 }
 
@@ -619,6 +621,17 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			}
 			bs.quota = q
 			src = bs.quota
+		case notifications.Name:
+			// Post-M5 #130: explicit-only project-tier source, the
+			// quota posture — New fails LOUDLY (naming the source and
+			// the missing capability/subscription) when the provider
+			// cannot serve the stream; no degraded mode.
+			n, err := notifications.New(provider, notifications.DefaultConfig())
+			if err != nil {
+				return nil, err
+			}
+			bs.notes = n
+			src = bs.notes
 		case tokenburn.Name:
 			// The token-burn source requires the core-agent sink: its
 			// §12 cost stack IS the core-agent daemon's attach API.

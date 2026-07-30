@@ -29,7 +29,8 @@ Provider-gated (GKE/GCP today):
 - the `cloud` command group (`stockout|orphans|ipspace|quota`);
 - `state wi` (Workload Identity verification) and the `perf probe` metric
   packs (Cloud Monitoring is the only metrics backend so far);
-- the `quota` source, and one of the capacity source's sub-seams (below).
+- the `quota` and `notifications` sources, and one of the capacity
+  source's sub-seams (below).
 
 ## The boundary is architectural, and tested
 

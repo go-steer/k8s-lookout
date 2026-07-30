@@ -54,6 +54,8 @@ const (
 	reasonNoProject = "GCP project undetectable (pin it in provider config or run on GCE)"
 
 	reasonNoClusterIdentity = "GKE cluster identity undetectable (project, location, and cluster name are all required — pin them or run on GKE)"
+
+	reasonNoSubscription = "no notifications subscription configured (--notifications-subscription: a Pub/Sub subscription on the cluster's notificationConfig topic)"
 )
 
 func init() {
@@ -63,9 +65,10 @@ func init() {
 // Provider is the GKE cloud provider. Identity fields are resolved at
 // construction; capability backends arrive in M4/M5.
 type Provider struct {
-	project  string
-	location string
-	cluster  string
+	project      string
+	location     string
+	cluster      string
+	subscription string
 }
 
 // New constructs the GKE provider, resolving identity in precedence
@@ -76,9 +79,10 @@ type Provider struct {
 // fail loudly when they actually need them.
 func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 	p := &Provider{
-		project:  cfg.Project,
-		location: cfg.Location,
-		cluster:  cfg.Cluster,
+		project:      cfg.Project,
+		location:     cfg.Location,
+		cluster:      cfg.Cluster,
+		subscription: cfg.NotificationsSubscription,
 	}
 
 	if p.project == "" {
@@ -160,6 +164,17 @@ func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
 		// GKE identity is required.
 		if p.project == "" || p.location == "" || p.cluster == "" {
 			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
+		}
+	case cloud.CapabilityNotifications:
+		// Subscription read (post-M5 #130): needs the explicitly
+		// configured subscription first (there is no default — the
+		// operator creates it on the notificationConfig topic), then
+		// the project to resolve a bare subscription name.
+		if p.subscription == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoSubscription}
+		}
+		if p.project == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoProject}
 		}
 	default:
 		return cloud.CapabilityStatus{Capability: c, Reason: reasonDeferred}
@@ -245,6 +260,15 @@ func (p *Provider) Audit() (cloud.AuditAPI, bool) {
 		return nil, false
 	}
 	return newAuditAPI(p), true
+}
+
+// Notifications implements cloud.Provider (post-M5 #130,
+// notifications.go). The Pub/Sub client is dialed lazily on Receive.
+func (p *Provider) Notifications() (cloud.NotificationsAPI, bool) {
+	if !p.available(cloud.CapabilityNotifications) {
+		return nil, false
+	}
+	return newNotificationsAPI(p), true
 }
 
 // firstEnv returns the first non-empty value among the named

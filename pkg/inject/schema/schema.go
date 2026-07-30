@@ -35,11 +35,13 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
 // KindSpec is one shipped signal kind in the v1 ledger.
@@ -117,6 +119,10 @@ var kinds = []KindSpec{
 		"A pod's summed container restart count grew past the burst threshold — the leading edge of a crash loop, ahead of BackOff events."},
 	{rollout.KindStall, inject.Payload{}, "rollout",
 		"A new revision made zero ready-count progress for --rollout-observe while the old revision stayed healthy."},
+	{workload.KindJobFailed, inject.Payload{}, "workload",
+		"A Job's Failed condition went True (BackoffLimitExceeded, DeadlineExceeded, ...) — batch failure with no crashlooping pod behind it."},
+	{workload.KindCronMissed, inject.Payload{}, "workload",
+		"An unsuspended CronJob passed a scheduled activation without lastScheduleTime advancing; consecutive misses escalate to critical."},
 	{saturation.KindForecast, inject.Payload{}, "saturation",
 		"A linear-regression forecast says a resource dimension exhausts within --saturation-warn (critical below 15m)."},
 	{degradation.KindCapacity, inject.Payload{}, "degradation",
@@ -143,6 +149,12 @@ var kinds = []KindSpec{
 		"A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m)."},
 	{quota.KindForecast, inject.Payload{}, "quota",
 		"A GCP quota's usage slope projects exhaustion (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%), with a quota-increase draft attached."},
+	{notifications.KindUpgrade, inject.Payload{}, "notifications",
+		"The provider announced a control-plane or node-pool upgrade starting — store-recorded evidence for incident-window correlation."},
+	{notifications.KindUpgradeAvailable, inject.Payload{}, "notifications",
+		"The provider offered a new version for auto-upgrade."},
+	{notifications.KindSecurityBulletin, inject.Payload{}, "notifications",
+		"A provider security bulletin affects this cluster — batched to the watchboard."},
 	{tokenburn.KindBurn, inject.Payload{}, "token-burn",
 		"An agent session's token rate ran at --burn-multiple times the cross-session baseline, or projects budget exhaustion within --burn-eta."},
 }

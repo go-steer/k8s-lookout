@@ -516,6 +516,7 @@ type Source interface {
 | `expiry` | leading (countdown) | TLS secrets, webhook CA bundles, SA key ages, cert-manager status | "cert expires in 72 h and last renewal failed" |
 | `capacity` | leading + reactive | CA events, `cluster-autoscaler-status` ConfigMap, GKE CA visibility logs (§10.1) | scaleup failed (`GCE_STOCKOUT` / `GCE_QUOTA_EXCEEDED`), pending-pod aging, headroom trend |
 | `quota` | leading (countdown) | Cloud Quotas + Monitoring quota metrics, per **project** (§10.2) | "CPUS us-east1 at 91%, exhausted in ~6 days at current slope" |
+| `notifications` | reactive (provider announcements) | provider cluster-notification stream, per **project** (GKE notificationConfig Pub/Sub; post-M5 #130) | upgrade started on a node pool (info → store, correlates incident windows), security bulletin (warning → watchboard) |
 | `token-burn` | leading (trend) | `core-agent` cost-stack API (§12) | "session X burning 4× baseline; budget exhausted in ~20 min" |
 
 Sources are individually enabled in config. A deployment whose RBAC can't

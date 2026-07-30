@@ -29,6 +29,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
+	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
+	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
 )
 
 // grantReviewer is a fake SSAR reviewer driven by a predicate:
@@ -102,6 +105,18 @@ func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 // silence), in §7.2 order, in this exact shape. Operators grep these
 // lines and the troubleshooting page quotes them; change them
 // deliberately or not at all.
+// The explicit-only trio must never enter the auto candidate set:
+// enabling them is a deployment decision (project tier, an
+// operator-created subscription, the paid cost stack), not a
+// probeable cluster capability.
+func TestAutoCandidatesExcludeExplicitOnlySources(t *testing.T) {
+	for _, name := range []string{quota.Name, notifications.Name, tokenburn.Name} {
+		if slices.Contains(autoSourceNames, name) {
+			t.Errorf("source %q is an auto candidate; it must stay explicit-only", name)
+		}
+	}
+}
+
 func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
@@ -119,7 +134,7 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source degradation: enabled",
 		"source expiry: enabled",
 		"source capacity: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)

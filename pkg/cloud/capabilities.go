@@ -311,6 +311,38 @@ type AuditAPI interface {
 	ObjectWrites(ctx context.Context, ref AuditRef, w TimeWindow) ([]ObjectWrite, error)
 }
 
+// ClusterNotification is one provider-published cluster event —
+// on GKE a notificationConfig Pub/Sub message: an upgrade starting,
+// an upgrade becoming available, or a security bulletin affecting
+// the cluster.
+type ClusterNotification struct {
+	Time time.Time
+	// Type is the provider's event type, unqualified: on GKE the
+	// tail of the type_url attribute — "UpgradeEvent",
+	// "UpgradeAvailableEvent", "SecurityBulletinEvent". Consumers
+	// branch on it; unknown types pass through for display.
+	Type string
+	// Cluster/Location identify the emitting cluster — a topic may
+	// serve many clusters in a project.
+	Cluster  string
+	Location string
+	// Attributes are the notification payload's fields, flattened to
+	// strings (resource type, versions, operation, bulletin ID, CVE
+	// list, ...). Provider-authored but ultimately cluster-adjacent
+	// text: display-only, never parsed for authorization (§8).
+	Attributes map[string]string
+	// Message is the provider's human-readable description.
+	Message string
+}
+
+// NotificationsAPI is the provider's cluster notification stream.
+type NotificationsAPI interface {
+	// Receive blocks, delivering notifications to handle until ctx is
+	// cancelled (then returns nil) or the stream fails (the error).
+	// handle may be called concurrently.
+	Receive(ctx context.Context, handle func(ClusterNotification)) error
+}
+
 // WorkloadIdentityAPI verifies KSA↔cloud-identity bindings.
 type WorkloadIdentityAPI interface {
 	// VerifyBinding verifies that the cluster identity
