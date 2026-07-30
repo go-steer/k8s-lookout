@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release pipeline: the `-gke` matrix leg no longer claims the bare
+  `:latest` tag. docker/metadata-action's implicit `latest=auto`
+  added `:latest` on any release tag in BOTH flavor legs, so
+  whichever leg pushed last owned it — on v0.11.0 that left
+  `:latest` pointing at the gke-flavor digest (breaking the README's
+  ":latest = GCP-free default" contract) and failed the default
+  leg's signature verify. `flavor: latest=false` makes the explicit
+  `latest` / `latest-gke` entries the only source of those tags.
+
 ## [0.11.0] - 2026-07-30
 
 An interop-fix release. The injector's bodyless `POST /sessions`
