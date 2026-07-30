@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-30
+
+An interop-fix release. The injector's bodyless `POST /sessions`
+now declares `Content-Type: application/json`, which core-agent's
+browser-CSRF guard (shipped in its 2.8.0-dev.1) requires on every
+state-changing attach request — without it, every per-incident
+session open against a current daemon failed at dispatch with 415
+(#139). `v0.11.0` is therefore the watcher floor for core-agent ≥
+2.8.0-dev.1. Also ships `stab drift --identity` audit attribution
+behind the new `audit` provider capability (#128).
+
 ### Fixed
 
 - Session create against core-agent ≥ 2.8.0-dev.1 no longer fails
