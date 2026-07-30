@@ -146,6 +146,10 @@ func (i *Injector) CreateSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("injector: build POST /sessions: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+i.cfg.BearerToken)
+	// The daemon's browser-CSRF guard (core-agent #431) 415s any
+	// state-changing request without this content type — including
+	// bodyless ones like this create.
+	req.Header.Set("Content-Type", "application/json")
 	if i.cfg.AssertedCaller != "" {
 		req.Header.Set("X-Asserted-Caller", i.cfg.AssertedCaller)
 	}

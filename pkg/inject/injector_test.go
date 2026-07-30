@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,18 @@ func newFakeDaemon(t *testing.T) (baseURL string, capturedInjects *[]string, cap
 	var sessionCounter int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auths = append(auths, r.Header.Get("Authorization")+"|"+r.Header.Get("X-Asserted-Caller"))
+		// Mirror the daemon's browser-CSRF guard (core-agent #431):
+		// every state-changing request must declare exactly the
+		// application/json media type (parameters like charset are
+		// fine), even the bodyless POST /sessions. Enforcing it here
+		// makes every injector test a regression test for the 415 the
+		// real daemon returns when the header is missing.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+				http.Error(w, "unsupported media type: state-changing attach endpoints require \"Content-Type: application/json\"", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/sessions":
 			id := atomic.AddInt32(&sessionCounter, 1)

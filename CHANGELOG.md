@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Session create against core-agent ≥ 2.8.0-dev.1 no longer fails
+  with 415. The daemon's browser-CSRF guard (core-agent #431)
+  requires `Content-Type: application/json` on every state-changing
+  request — including the bodyless `POST /sessions` — and the
+  injector's `CreateSession` didn't send it, so every per-incident
+  session open failed at dispatch (`status 415: unsupported media
+  type`). The inject path already sent the header; only session
+  creation was affected.
+
 ### Added
 
 - `stab drift --identity` resolves each drift finding to the audited
