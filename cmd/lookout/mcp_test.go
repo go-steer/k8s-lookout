@@ -24,6 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
+	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 )
 
@@ -51,7 +52,7 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 		t.Fatal("default registry has no visible commands — check imports")
 	}
 
-	server := mcpserver.New(checks.Default(), version)
+	server := mcpserver.New(checks.Default(), version.Version)
 	serverT, clientT := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(t.Context(), serverT, nil); err != nil {
 		t.Fatalf("server connect: %v", err)

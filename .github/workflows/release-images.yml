@@ -240,6 +240,13 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      # Build date for the internal/version stamp (#146) — one value
+      # per job so both flavors of one release report the same
+      # timestamp.
+      - name: Resolve build date
+        id: build-date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       # Build + push multi-arch image. type=gha cache speeds up
       # iterative builds substantially — the Go module download +
       # dependency compile is the slow part and it caches cleanly
@@ -259,6 +266,8 @@ jobs:
           build-args: |
             GO_VERSION=${{ steps.go-version.outputs.version }}
             VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-date.outputs.date }}
             BUILD_TAGS=${{ matrix.build_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

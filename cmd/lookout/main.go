@@ -28,11 +28,9 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
-)
 
-// version is stamped at build time via
-// -ldflags "-X main.version=v0.1.0"; "dev" for local builds.
-var version = "dev"
+	"github.com/go-steer/k8s-lookout/internal/version"
+)
 
 // command is one lookout subcommand. run receives the args after the
 // subcommand name and returns the process exit code per the §4.2
@@ -60,7 +58,7 @@ func init() {
 		name:    "version",
 		summary: "print the lookout version",
 		run: func(_ context.Context, _ []string) int {
-			fmt.Println(version)
+			fmt.Println(version.String("lookout"))
 			return 0
 		},
 	})
@@ -91,6 +89,11 @@ func realMain(args []string) int {
 	switch args[0] {
 	case "-h", "--help", "help":
 		usage(os.Stdout)
+		return 0
+	case "-version", "--version":
+		// Flag spelling of the version subcommand (#146: operators
+		// and scripts expect --version to work on any binary).
+		fmt.Println(version.String("lookout"))
 		return 0
 	}
 	cmd, ok := commands[args[0]]

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Build identity, core-agent style (#146): `lookout version` and the
+  new `--version` flag report `lookout vX.Y.Z (commit <sha8>, built
+  <date>)`; release images stamp version + commit + date;
+  `go install` builds fall back to Go's embedded module/VCS metadata
+  instead of the literal `dev`; and the sentinel logs its build
+  identity as its first startup line, so a running pod is
+  identifiable from `kubectl logs` alone.
+
+### Changed
+
+- `deploy/51-deployment-watcher.yaml` now pins the release it ships
+  with (it sat at v0.1.0 for eleven releases, #146; the release
+  workflow now refuses to tag on a stale pin) and rides the binary's
+  `--sources=auto` default instead of an explicit source list — the
+  Autopilot crash-loop in #145 was auto-skippable; strict fail-fast
+  deployments re-pin the list explicitly (documented in-file).
+
 - New `notifications` watch source (issue #130, explicit-only like
   `quota`): reads the provider's cluster-notification stream — GKE's
   notificationConfig Pub/Sub topic via a new `notifications` provider

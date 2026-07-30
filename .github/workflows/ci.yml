@@ -124,6 +124,12 @@ jobs:
           check-latest: true
       - name: Verify tidy
         run: dev/ci/presubmits/verify-mod-tidy
+      - name: Verify version fallback
+        # Needs tags: the check compares internal/version's -dev
+        # fallback against the latest release tag (#146).
+        run: |
+          git fetch --tags --force origin
+          dev/ci/presubmits/verify-version-fallback
 
   vuln:
     name: govulncheck
