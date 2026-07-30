@@ -116,6 +116,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # #146 guard: deploy/51's image pin must be the version being
+      # released — it sat at v0.1.0 for eleven releases because
+      # nothing tied cutting a release to the manifest. A stale pin
+      # fails the release BEFORE anything publishes.
+      - name: Verify deploy manifest pin matches the tag
+        if: github.ref_type == 'tag'
+        run: |
+          PINNED=$(grep -oE 'image: ghcr.io/go-steer/lookout:v[0-9]+\.[0-9]+\.[0-9]+' deploy/51-deployment-watcher.yaml | head -1 | sed 's/.*lookout://')
+          if [[ "$PINNED" != "${{ github.ref_name }}" ]]; then
+            echo "::error::deploy/51-deployment-watcher.yaml pins ${PINNED} but the release tag is ${{ github.ref_name }} — bump the pin in the release-cut commit (docs/release-process.md)" >&2
+            exit 1
+          fi
+          echo "deploy/51 pin matches ${{ github.ref_name }}"
+
       # Extract Go version from go.mod so the build container always
       # tracks the project's pinned version. Bumping go.mod
       # automatically bumps the build image — no second-source-of-
@@ -337,3 +351,55 @@ jobs:
             echo "::error::unexpected entrypoint ${ENTRYPOINT} (want [\"/lookout\",\"watch\"])" >&2
             exit 1
           fi
+
+  # Post-publish flavor-divergence guard (#144): on v0.11.0 both
+  # matrix legs implicitly claimed :latest (metadata-action's
+  # latest=auto) and the gke leg won the race — :latest served the
+  # GCP provider build, the opposite of the documented default. #142
+  # fixed the tagging; this job makes a recurrence fail the release:
+  # the floating tags must diverge from each other and each must
+  # equal its version tag.
+  verify-flavor-divergence:
+    if: github.ref_type == 'tag'
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Assert latest/-gke digests diverge and match their version tags
+        run: |
+          set -euo pipefail
+          dig() {
+            docker buildx imagetools inspect "ghcr.io/go-steer/lookout:$1" --format '{{json .Manifest.Digest}}'
+          }
+          LATEST=$(dig latest); LATEST_GKE=$(dig latest-gke)
+          VER=$(dig "${{ github.ref_name }}"); VER_GKE=$(dig "${{ github.ref_name }}-gke")
+          echo "latest=${LATEST} latest-gke=${LATEST_GKE}"
+          echo "${{ github.ref_name }}=${VER} ${{ github.ref_name }}-gke=${VER_GKE}"
+          [[ "$LATEST" == "$LATEST_GKE" ]] && { echo "::error::latest and latest-gke share a digest — a flavor leg claimed the wrong floating tag (#144)"; exit 1; }
+          [[ "$LATEST" != "$VER" ]] && { echo "::error::latest does not match ${{ github.ref_name }}"; exit 1; }
+          [[ "$LATEST_GKE" != "$VER_GKE" ]] && { echo "::error::latest-gke does not match ${{ github.ref_name }}-gke"; exit 1; }
+          echo "flavor tags verified: divergent floating tags, each matching its version"
+
+  # GitHub Release object (#146, core-agent's discoverability model):
+  # every release tag gets a Release whose body is the CHANGELOG
+  # section plus the image/cosign footer, composed by
+  # dev/release/compose-release-notes.sh. Runs after both flavors
+  # verified so a Release never points at a half-published registry
+  # state.
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: [build-and-push, verify-flavor-divergence]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose notes and create the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./dev/release/compose-release-notes.sh "${{ github.ref_name }}" /tmp/notes.md
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file /tmp/notes.md \
+            --verify-tag
