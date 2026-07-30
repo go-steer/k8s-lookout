@@ -117,12 +117,12 @@ var graphAccess = []sources.Requirement{
 // for correlation and a silently keyless correlator would lie.
 func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) error {
 	for _, req := range graphAccess {
-		allowed, err := reviewer.Allowed(ctx, req)
+		d, err := reviewer.Allowed(ctx, req)
 		if err != nil {
 			return fmt.Errorf("storm: capability probe for %q failed: %w", req, err)
 		}
-		if !allowed {
-			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and this ServiceAccount does not have it; grant it (see deploy/12-clusterrole-watcher.yaml) or drop --storm — refusing to run correlation over a silently empty graph", req)
+		if !d.Allowed {
+			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and %s — or drop --storm; refusing to run correlation over a silently empty graph (see deploy/12-clusterrole-watcher.yaml)", req, sources.DenialRemedy(d))
 		}
 	}
 	return nil

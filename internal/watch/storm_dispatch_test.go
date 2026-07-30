@@ -330,8 +330,8 @@ func TestStormKindConstantsAlignedWithWireContract(t *testing.T) {
 // denyingReviewer denies one requirement's resource, allows the rest.
 type denyingReviewer struct{ denyResource string }
 
-func (r denyingReviewer) Allowed(_ context.Context, req sources.Requirement) (bool, error) {
-	return req.Resource != r.denyResource, nil
+func (r denyingReviewer) Allowed(_ context.Context, req sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{Allowed: req.Resource != r.denyResource}, nil
 }
 
 // TestProbeGraphAccess is the §11 loud-failure check for the graph

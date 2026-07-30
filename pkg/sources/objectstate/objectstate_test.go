@@ -747,15 +747,15 @@ func TestRequiredAccess_CoversEveryWatch(t *testing.T) {
 // denyReviewer denies one requirement, allows the rest.
 type denyReviewer struct{ deny sources.Requirement }
 
-func (r denyReviewer) Allowed(_ context.Context, req sources.Requirement) (bool, error) {
-	return req != r.deny, nil
+func (r denyReviewer) Allowed(_ context.Context, req sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{Allowed: req != r.deny}, nil
 }
 
 func TestProbe_FailsLoudlyForObjectState(t *testing.T) {
 	t.Parallel()
 	s := New(fake.NewSimpleClientset(), Config{})
 	deny := sources.Requirement{Resource: "nodes", Verb: "watch"}
-	err := sources.Probe(context.Background(), denyReviewer{deny: deny}, s)
+	_, err := sources.Probe(context.Background(), denyReviewer{deny: deny}, s)
 	if err == nil {
 		t.Fatal("Probe must fail when a declared permission is missing (§11)")
 	}

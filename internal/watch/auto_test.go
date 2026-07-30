@@ -40,15 +40,15 @@ type grantReviewer struct {
 	allow func(sources.Requirement) bool
 }
 
-func (r grantReviewer) Allowed(_ context.Context, req sources.Requirement) (bool, error) {
-	return r.allow(req), nil
+func (r grantReviewer) Allowed(_ context.Context, req sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{Allowed: r.allow(req)}, nil
 }
 
 // erroringReviewer fails every probe — the "could not verify" case.
 type erroringReviewer struct{}
 
-func (erroringReviewer) Allowed(context.Context, sources.Requirement) (bool, error) {
-	return false, errors.New("apiserver unreachable")
+func (erroringReviewer) Allowed(context.Context, sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{}, errors.New("apiserver unreachable")
 }
 
 func allowAll() grantReviewer {
@@ -394,5 +394,52 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 	}
 	if f3.sources != "k8s-events" || f3.storm != stormOff {
 		t.Errorf("explicit flags must pass through untouched: sources=%q storm=%q", f3.sources, f3.storm)
+	}
+}
+
+// autopilotReviewer mimics GKE Autopilot: everything granted except
+// nodes/proxy, which Warden denies WITH a reason, for every principal
+// (#145).
+type autopilotReviewer struct{}
+
+func (autopilotReviewer) Allowed(_ context.Context, req sources.Requirement) (sources.Decision, error) {
+	if req.Resource == "nodes" && req.Subresource == "proxy" {
+		return sources.Decision{Reason: `GKE Warden authz [denied by managed-namespaces-limitation]: cluster scoped resource "nodes/proxy" is managed and access is denied`}, nil
+	}
+	return sources.Decision{Allowed: true}, nil
+}
+
+// TestResolveSourcesAuto_AutopilotDegradesSaturation pins #145's
+// optional tier end to end: on a platform that denies nodes/proxy to
+// every principal, saturation still ENABLES (metrics.k8s.io CPU and
+// memory forecasting works) with the PVC dimension reported degraded
+// — the authorizer's reason verbatim in the line, never an RBAC
+// accusation.
+func TestResolveSourcesAuto_AutopilotDegradesSaturation(t *testing.T) {
+	t.Parallel()
+	f := autoFlags(t)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), autopilotReviewer{}, metricsPresent)
+	if err != nil {
+		t.Fatalf("resolveSourcesAuto: %v", err)
+	}
+	if !slices.Contains(res.enabled, "saturation") {
+		t.Fatalf("saturation disabled on Autopilot-shaped denial; enabled = %v", res.enabled)
+	}
+	var line string
+	for _, l := range res.lines {
+		if strings.HasPrefix(l, "source saturation:") {
+			line = l
+		}
+	}
+	if !strings.HasPrefix(line, "source saturation: enabled, degraded (") {
+		t.Fatalf("saturation line = %q, want enabled-degraded", line)
+	}
+	for _, want := range []string{"get nodes/proxy cluster-wide", "GKE Warden authz", "platform policy"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("degraded line missing %q: %s", want, line)
+		}
+	}
+	if strings.Contains(line, "this ServiceAccount does not have it") {
+		t.Errorf("degraded line claims an RBAC gap despite the authorizer reason: %s", line)
 	}
 }

@@ -135,27 +135,51 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 	}
 	for _, name := range autoSourceNames {
 		var missing *sources.Requirement
+		var missingWhy sources.Decision
+		var degraded []string
 		for _, req := range access[name] {
-			allowed, err := reviewer.Allowed(ctx, req)
+			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return nil, fmt.Errorf("sources: auto: capability probe for %q (source %q) failed: %w", req, name, err)
 			}
-			if !allowed {
-				r := req
-				missing = &r
-				break
+			if d.Allowed {
+				continue
+			}
+			if req.Optional {
+				// #145: an optional miss degrades one dimension; the
+				// source still runs and handles the runtime denial
+				// itself.
+				degraded = append(degraded, fmt.Sprintf("%q denied — %s", req, sources.DenialRemedy(d)))
+				continue
+			}
+			r := req
+			missing, missingWhy = &r, d
+			break
+		}
+		// missClause keeps the classic "missing <grant>" wording when
+		// the authorizer offered no explanation, and leads with the
+		// authorizer's own words when it did (#145: a platform denial
+		// like GKE Autopilot's Warden must not read as an RBAC gap).
+		missClause := ""
+		if missing != nil {
+			missClause = fmt.Sprintf("missing %q", *missing)
+			if missingWhy.Reason != "" {
+				missClause = fmt.Sprintf("%q denied by the authorizer: %s — if that names a platform policy (e.g. GKE Autopilot's Warden), no grant can satisfy it", *missing, missingWhy.Reason)
 			}
 		}
 		switch {
 		case missing != nil && name == k8sevents.Name:
-			return nil, fmt.Errorf("source %q requires permission to %q and this ServiceAccount does not have it — a sentinel that cannot watch events is misdeployed; %s", name, *missing, grantHint(name))
+			return nil, fmt.Errorf("source %q requires permission to %q and %s — a sentinel that cannot watch events is misdeployed; %s", name, *missing, sources.DenialRemedy(missingWhy), grantHint(name))
 		case missing != nil:
-			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (missing %q — %s, or name it in --sources to make this fatal)", name, *missing, grantHint(name)))
+			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (%s — %s, or name it in --sources to make this fatal)", name, missClause, grantHint(name)))
 		case name == saturation.Name && metricsCheck != nil && metricsCheck() != nil:
 			res.lines = append(res.lines, "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)")
 		case name == k8sevents.Name:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled (always on — a sentinel that cannot watch events is misdeployed)", name))
+		case len(degraded) > 0:
+			res.enabled = append(res.enabled, name)
+			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled, degraded (%s)", name, strings.Join(degraded, "; ")))
 		default:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled", name))
@@ -182,11 +206,11 @@ func resolveStormAuto(ctx context.Context, f *flags, reviewer sources.AccessRevi
 		return false, "storm: auto — off (--storm-window=0 disables correlation)", nil
 	}
 	for _, req := range graphAccess {
-		allowed, aerr := reviewer.Allowed(ctx, req)
+		d, aerr := reviewer.Allowed(ctx, req)
 		if aerr != nil {
 			return false, "", fmt.Errorf("storm: auto: capability probe for %q failed: %w", req, aerr)
 		}
-		if !allowed {
+		if !d.Allowed {
 			return false, fmt.Sprintf("storm: auto — off (missing %q for the topology-graph informers — grant pods/nodes/replicasets list+watch (deploy/12-clusterrole-watcher.yaml), or set --storm=on to make this fatal)", req), nil
 		}
 	}

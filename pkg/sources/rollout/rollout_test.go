@@ -497,7 +497,7 @@ func TestRequiredAccess_DeclaresAllInformerTargets(t *testing.T) {
 func TestProbe_MissingGrantNamesThisSource(t *testing.T) {
 	t.Parallel()
 	s := New(fake.NewSimpleClientset(), Config{})
-	err := sources.Probe(context.Background(), denyReviewer{}, s)
+	_, err := sources.Probe(context.Background(), denyReviewer{}, s)
 	if err == nil {
 		t.Fatal("Probe must fail loudly when a grant is missing (§11)")
 	}
@@ -508,7 +508,9 @@ func TestProbe_MissingGrantNamesThisSource(t *testing.T) {
 
 type denyReviewer struct{}
 
-func (denyReviewer) Allowed(context.Context, sources.Requirement) (bool, error) { return false, nil }
+func (denyReviewer) Allowed(context.Context, sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{}, nil
+}
 
 // TestArmAfterSync runs the REAL informer path: a rollout already
 // stalled at startup must stay silent through the initial LIST, then

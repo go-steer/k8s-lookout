@@ -631,7 +631,7 @@ func TestRequiredAccess_CoversEveryWatch(t *testing.T) {
 func TestProbe_FailsLoudly(t *testing.T) {
 	t.Parallel()
 	s := New(fake.NewSimpleClientset(), Config{})
-	err := sources.Probe(context.Background(), denyReviewer{}, s)
+	_, err := sources.Probe(context.Background(), denyReviewer{}, s)
 	if err == nil {
 		t.Fatal("Probe passed with all access denied")
 	}
@@ -642,7 +642,9 @@ func TestProbe_FailsLoudly(t *testing.T) {
 
 type denyReviewer struct{}
 
-func (denyReviewer) Allowed(context.Context, sources.Requirement) (bool, error) { return false, nil }
+func (denyReviewer) Allowed(context.Context, sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{}, nil
+}
 
 // TestKindInventoryFrozen: kinds are wire contract (§7.3) — pinned.
 func TestKindInventoryFrozen(t *testing.T) {

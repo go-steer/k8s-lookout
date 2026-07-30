@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The startup RBAC probe no longer misdiagnoses platform denials as
+  missing grants (#145): SelfSubjectAccessReview reasons now surface
+  verbatim in probe failures — on GKE Autopilot, Warden's
+  "managed-namespaces-limitation" denial of `nodes/proxy` reads as
+  the platform policy it is, instead of an instruction to widen RBAC
+  that no grant can satisfy. The saturation source's `nodes/proxy`
+  requirement is now optional: on Autopilot the source runs with
+  CPU/memory forecasting (`metrics.k8s.io`) and reports the PVC
+  dimension degraded, rather than being disabled (or, under an
+  explicit `--sources` list, crash-looping the sentinel).
+
 ### Added
 
 - New `notifications` watch source (issue #130, explicit-only like
