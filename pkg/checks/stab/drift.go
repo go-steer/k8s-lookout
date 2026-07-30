@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
@@ -41,29 +42,38 @@ const driftKindNames = "Deployment|StatefulSet|DaemonSet"
 // RESPECCED): out-of-band drift vs the GitOps manager, read from
 // managedFields. The honesty constraint is structural, not stylistic:
 // managedFields carries the MANAGER STRING (e.g. "kubectl-edit"),
-// never who ran it — user identity lives in audit logs and ships as a
-// later query pack, not here. Every surface of this command says so.
+// never who ran it — user identity lives in audit logs, and only
+// `--identity` (the §5 identity query pack, #128) resolves it, via
+// the provider's audit trail through the §2 boundary. Every surface
+// of this command says which of the two it is reporting.
 func DriftCommand(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "stab drift",
 		MCPName: "k8s_gitops_drift",
-		Summary: "Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers; reports manager strings only, never user identities (identity needs audit logs; later query pack). Default scope: all namespaces; scanned counts workload objects examined.",
+		Summary: "Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers. Reports manager strings (tool names, not people); --identity additionally resolves each drift write to the audited principal via the cloud provider's audit trail (GKE Cloud Audit Logs), reporting an explicit unavailable on clusters without one. Default scope: all namespaces; scanned counts workload objects examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "manager", Type: emit.FlagString, Default: "",
 				Help: "the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning the most spec leaf fields summed across the scanned objects, ties broken to the lexicographically smallest"},
+			{Name: "identity", Type: emit.FlagBool, Default: "false",
+				Help: "resolve each finding's last drift write to the audited principal (who ran it) via the cloud provider's audit trail; requires a provider with the audit capability (GKE: Cloud Audit Logs admin-activity read), otherwise the summary line reports an explicit unavailable"},
 		},
 		Output: []checks.OutputField{
-			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; that requires audit logs); on the summary line: the resolved GitOps manager"},
+			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager"},
 			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected), or none (scope owns no spec fields)"},
 			{Name: "operation", Doc: "managedFields operation of the foreign manager's last write: Apply or Update"},
 			{Name: "tool", Doc: "client tool recognized from the manager string (kubectl for kubectl-edit/kubectl-patch/kubectl-*)"},
 			{Name: "fields", Doc: "compact spec paths the foreign manager owns (e.g. spec.template.spec.containers[app].image), capped at 8 with a +N more tail"},
 			{Name: "field_count", Doc: "total spec leaf fields the foreign manager owns on this object (uncapped)"},
 			{Name: "age", Doc: "how long ago the foreign manager last wrote (managedFields time); omitted when the API server recorded no time"},
+			{Name: "principal", Doc: "--identity: the audited principal of the write nearest the drift time (GKE: principalEmail), or the explicit sentinel none-in-audit-window / no-write-time-anchor when the trail cannot answer"},
+			{Name: "principal_agent", Doc: "--identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only"},
+			{Name: "other_principals", Doc: "--identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail"},
+			{Name: "identity", Doc: "summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent)"},
 		},
 		Examples: []string{
 			"lookout stab drift",
 			"lookout stab drift --namespace=prod --manager=argocd-controller",
+			"lookout stab drift --workload=Deployment/prod/api --identity",
 			"lookout stab drift --workload=Deployment/prod/api --format=json",
 		},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
@@ -156,14 +166,39 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	}
 
 	now := deps.now()
-	var findings []emit.Finding
+	var hits []driftHit
 	for _, o := range objs {
 		for mgr, own := range o.owners {
 			if mgr == manager {
 				continue
 			}
-			findings = append(findings, driftFinding(o, mgr, own, now))
+			hits = append(hits, driftHit{f: driftFinding(o, mgr, own, now), obj: o, own: own})
 		}
+	}
+
+	// Identity enrichment (--identity, §5 identity query pack #128):
+	// resolve each finding's drift write to the audited principal via
+	// the provider's audit trail. Capability absent → the findings
+	// still emit (the portable read owes nothing to the cloud) and
+	// the summary carries the §2 explicit unavailable marker; a real
+	// backend failure fails the scan like any other read error.
+	if inv.Flags.Bool("identity") {
+		provider, err := deps.provider(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if api, ok := provider.Audit(); ok {
+			if err := enrichIdentity(ctx, api, hits); err != nil {
+				return 0, err
+			}
+		} else if err := inv.Out.Note("identity", cloud.Unavailable(provider, cloud.CapabilityAudit).Marker()); err != nil {
+			return 0, err
+		}
+	}
+
+	findings := make([]emit.Finding, len(hits))
+	for i, h := range hits {
+		findings[i] = h.f
 	}
 	sortFindings(findings)
 	for _, f := range findings {
@@ -180,9 +215,113 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	return len(objs), nil
 }
 
+// driftHit pairs one rendered finding with the object and ownership
+// it came from, so the identity enrichment can anchor its audit query
+// on the drift write's time without re-parsing the finding.
+type driftHit struct {
+	f   emit.Finding
+	obj driftObject
+	own *specOwnership
+}
+
+// identitySlack is the audit-query half-window around the drift
+// write's managedFields time: the API server stamps managedFields and
+// the audit trail from the same request, so a generous slack only
+// needs to absorb clock skew and entry batching, not real drift.
+const identitySlack = 15 * time.Minute
+
+// The principal sentinels: explicit values, never empty-and-silent
+// (§2), when --identity ran but the trail could not answer for this
+// finding.
+const (
+	// principalNoneInWindow: the audit query returned no writes in
+	// the ±identitySlack window — retention expired, audit logging
+	// disabled for the cluster, or the write predates the trail.
+	principalNoneInWindow = "none-in-audit-window"
+	// principalNoAnchor: the API server recorded no managedFields
+	// time for the drift write, so there is nothing to anchor the
+	// audit window on.
+	principalNoAnchor = "no-write-time-anchor"
+)
+
+// driftAuditRefs maps the drift kinds to their audit REST identity.
+// All three live in apps/v1; the namespace/name are stamped per hit.
+var driftAuditRefs = map[string]cloud.AuditRef{
+	"Deployment":  {APIGroup: "apps", Version: "v1", Resource: "deployments"},
+	"StatefulSet": {APIGroup: "apps", Version: "v1", Resource: "statefulsets"},
+	"DaemonSet":   {APIGroup: "apps", Version: "v1", Resource: "daemonsets"},
+}
+
+// enrichIdentity resolves each hit's drift write to the audited
+// principal: the write nearest the managedFields time wins the
+// `principal` field (plus its client string as `principal_agent`);
+// every other distinct principal inside the window lands in
+// `other_principals`. Findings the trail cannot answer for get an
+// explicit sentinel, never silence.
+func enrichIdentity(ctx context.Context, api cloud.AuditAPI, hits []driftHit) error {
+	for i := range hits {
+		h := &hits[i]
+		if !h.own.hasTime {
+			h.f.Details = append(h.f.Details, emit.Field{Key: "principal", Value: principalNoAnchor})
+			continue
+		}
+		ref, ok := driftAuditRefs[h.obj.kind]
+		if !ok {
+			// A kind added to driftKinds but not here would otherwise
+			// query a garbage filter and report a misleading
+			// none-in-audit-window — fail loudly instead.
+			return fmt.Errorf("stab drift: no audit REST identity for kind %q", h.obj.kind)
+		}
+		ref.Namespace, ref.Name = h.obj.namespace, h.obj.name
+		anchor := h.own.last.Time
+		writes, err := api.ObjectWrites(ctx, ref, cloud.TimeWindow{
+			Start: anchor.Add(-identitySlack),
+			End:   anchor.Add(identitySlack),
+		})
+		if err != nil {
+			return err
+		}
+		if len(writes) == 0 {
+			h.f.Details = append(h.f.Details, emit.Field{Key: "principal", Value: principalNoneInWindow})
+			continue
+		}
+		nearest := writes[0]
+		for _, w := range writes[1:] {
+			if absDuration(w.Time.Sub(anchor)) < absDuration(nearest.Time.Sub(anchor)) {
+				nearest = w
+			}
+		}
+		h.f.Details = append(h.f.Details, emit.Field{Key: "principal", Value: nearest.Principal})
+		if nearest.UserAgent != "" {
+			h.f.Details = append(h.f.Details, emit.Field{Key: "principal_agent", Value: nearest.UserAgent})
+		}
+		var others []string
+		seen := map[string]bool{nearest.Principal: true}
+		for _, w := range writes {
+			if !seen[w.Principal] {
+				seen[w.Principal] = true
+				others = append(others, w.Principal)
+			}
+		}
+		if len(others) > 0 {
+			sort.Strings(others)
+			h.f.Details = append(h.f.Details, emit.Field{Key: "other_principals", Value: cappedList(others)})
+		}
+	}
+	return nil
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
 // driftFinding renders one (object, foreign manager) pair. Message
 // names the manager string, the drifted-field summary, and the age —
-// and never claims a user identity (§5 respec).
+// and never claims a user identity itself (§5 respec); identity is
+// exclusively the audited `principal` detail --identity appends.
 func driftFinding(o driftObject, mgr string, own *specOwnership, now time.Time) emit.Finding {
 	paths := make([]string, 0, len(own.paths))
 	for p := range own.paths {

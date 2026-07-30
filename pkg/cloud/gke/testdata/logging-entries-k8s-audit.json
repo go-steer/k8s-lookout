@@ -1,0 +1,70 @@
+{
+  "//": "Recorded-shape fixture: logging.googleapis.com/v2 entries:list response. Authored from the Cloud Logging LogEntry / AuditLog API reference and the documented GKE k8s_cluster admin-activity entry shape for API-server writes (io.k8s.apps.v1.deployments.patch) — not captured from a live project (§13: no live-project tests in CI).",
+  "entries": [
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T08:40:12.345678Z",
+      "resource": {
+        "type": "k8s_cluster",
+        "labels": {
+          "project_id": "proj-1",
+          "location": "us-east1",
+          "cluster_name": "prod"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "io.k8s.apps.v1.deployments.patch",
+        "resourceName": "apps/v1/namespaces/prod/deployments/api",
+        "authenticationInfo": {
+          "principalEmail": "alice@example.com"
+        },
+        "requestMetadata": {
+          "callerIp": "203.0.113.7",
+          "callerSuppliedUserAgent": "kubectl/v1.31.0 (linux/amd64) kubernetes/9edcffc"
+        }
+      }
+    },
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T08:31:02.000000Z",
+      "resource": {
+        "type": "k8s_cluster",
+        "labels": {
+          "project_id": "proj-1",
+          "location": "us-east1",
+          "cluster_name": "prod"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "io.k8s.apps.v1.deployments.update",
+        "resourceName": "apps/v1/namespaces/prod/deployments/api",
+        "authenticationInfo": {
+          "principalEmail": "deployer@proj-1.iam.gserviceaccount.com"
+        },
+        "requestMetadata": {
+          "callerIp": "10.0.0.12"
+        }
+      }
+    },
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T08:30:00.000000Z",
+      "resource": {
+        "type": "k8s_cluster",
+        "labels": {
+          "project_id": "proj-1",
+          "location": "us-east1",
+          "cluster_name": "prod"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "io.k8s.apps.v1.deployments.patch",
+        "resourceName": "apps/v1/namespaces/prod/deployments/api",
+        "authenticationInfo": {}
+      }
+    }
+  ]
+}

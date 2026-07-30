@@ -265,6 +265,52 @@ type WIBinding struct {
 	Problems []string
 }
 
+// AuditRef identifies one Kubernetes object for an audit-trail
+// query. The caller supplies the REST identity (group/version/plural
+// resource), not the Kind — audit entries are keyed by request path,
+// and asking the provider to pluralize would smuggle a discovery
+// dependency into the boundary.
+type AuditRef struct {
+	// APIGroup is the object's API group; "" for the core group.
+	APIGroup string
+	// Version is the group version the writes went through ("v1").
+	Version string
+	// Resource is the lowercase plural resource name ("deployments").
+	Resource  string
+	Namespace string
+	Name      string
+}
+
+// ObjectWrite is one audited write to a Kubernetes object: who
+// changed it, when, through what API method. The provider's
+// admin-activity trail records writes only — reads never appear here.
+type ObjectWrite struct {
+	Time time.Time
+	// Principal is the authenticated caller — on GKE the audit
+	// entry's principalEmail: a user, a service account, or a
+	// controller identity. Never parsed, only displayed (§8).
+	Principal string
+	// Method is the API method of the write (GKE:
+	// "io.k8s.apps.v1.deployments.patch").
+	Method string
+	// UserAgent is the caller-supplied client string when the trail
+	// records one ("kubectl/v1.31.0 ..."), "" otherwise. It is
+	// caller-controlled text — display-only, never matched for
+	// authorization decisions.
+	UserAgent string
+}
+
+// AuditAPI queries the provider's audit trail for Kubernetes object
+// writes (GKE: Cloud Audit Logs admin-activity entries on the
+// k8s_cluster resource). It answers "who wrote this object in this
+// window" — the identity half of `stab drift` (§5) that
+// managedFields structurally cannot carry.
+type AuditAPI interface {
+	// ObjectWrites returns the audited writes to ref within w,
+	// newest first.
+	ObjectWrites(ctx context.Context, ref AuditRef, w TimeWindow) ([]ObjectWrite, error)
+}
+
 // WorkloadIdentityAPI verifies KSA↔cloud-identity bindings.
 type WorkloadIdentityAPI interface {
 	// VerifyBinding verifies that the cluster identity

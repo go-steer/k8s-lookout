@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `stab drift --identity` resolves each drift finding to the audited
+  principal who wrote it — `principal`, `principal_agent`, and
+  `other_principals` fields from the cloud provider's audit trail
+  (GKE: Cloud Audit Logs admin-activity entries), behind the new
+  `audit` provider capability. Clusters without one get the explicit
+  §2 `identity=unavailable` marker; findings the trail cannot answer
+  for carry the `none-in-audit-window` / `no-write-time-anchor`
+  sentinels, never silence. (#128)
+
 ## [0.10.0] - 2026-07-29
 
 A hardening release from two rounds of adversarial review. The

@@ -14,11 +14,11 @@
 
 // Package stab implements the `lookout stab` command group
 // (DESIGN.md §5): stability reads. `stab drift` detects out-of-band
-// edits vs the GitOps manager via managedFields — manager strings
-// only, never user identities (§5: identity requires audit logs and
-// is a later query pack). `stab drain` reports everything that will
-// block, or be destroyed by, a node drain — a gridlocked PDB IS a
-// drain blocker.
+// edits vs the GitOps manager via managedFields — manager strings by
+// default; `--identity` resolves them to audited principals through
+// the §2 provider boundary (the §5 identity query pack, issue #128).
+// `stab drain` reports everything that will block, or be destroyed
+// by, a node drain — a gridlocked PDB IS a drain blocker.
 package stab
 
 import (
@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
@@ -48,6 +49,12 @@ type Deps struct {
 	// Now anchors age math (managedFields entry times). Nil means
 	// time.Now.
 	Now func() time.Time
+	// Provider yields the cloud provider for the optional identity
+	// enrichment (`stab drift --identity`). Nil means cloud.New
+	// default detection — the NoProvider sentinel on vanilla builds,
+	// where the flag reports an explicit unavailable, never silence
+	// (§2).
+	Provider func(ctx context.Context) (cloud.Provider, error)
 }
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
@@ -55,6 +62,13 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 		return d.Client(ctx)
 	}
 	return kube.BuildClient(kube.Options{})
+}
+
+func (d Deps) provider(ctx context.Context) (cloud.Provider, error) {
+	if d.Provider != nil {
+		return d.Provider(ctx)
+	}
+	return cloud.New(ctx, cloud.Config{})
 }
 
 func (d Deps) now() time.Time {
