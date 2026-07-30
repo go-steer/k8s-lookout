@@ -52,7 +52,7 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 		t.Fatal("default registry has no visible commands — check imports")
 	}
 
-	server := mcpserver.New(checks.Default(), version.Version)
+	server := mcpserver.New(checks.Default(), version.Semver())
 	serverT, clientT := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(t.Context(), serverT, nil); err != nil {
 		t.Fatalf("server connect: %v", err)

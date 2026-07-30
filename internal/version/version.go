@@ -19,7 +19,9 @@
 // overridable at release time via -ldflags; plain `go build` /
 // `go install` falls back to the VCS metadata Go embeds when
 // -buildvcs=true (the default since Go 1.18), so dev builds still
-// report a real SHA.
+// report a real SHA. (Known limit, shared with core-agent: Go embeds
+// no vcs.* settings when building from a LINKED git worktree — such
+// builds report "commit none".)
 //
 // Release process (docs/release-process.md):
 //
@@ -74,6 +76,14 @@ var (
 func String(prog string) string {
 	v, c, d, dirty := resolveBuildInfo(Version, Commit, Date)
 	return formatVersion(prog, v, c, d, dirty)
+}
+
+// Semver returns the resolved version alone (the ReadBuildInfo
+// fallback applied) for consumers that want the bare semver — the
+// MCP server's advertised version.
+func Semver() string {
+	v, _, _, _ := resolveBuildInfo(Version, Commit, Date)
+	return v
 }
 
 // resolveBuildInfo returns the version/commit/date/dirty tuple to
