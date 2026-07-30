@@ -183,6 +183,17 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
+          # latest=false kills metadata-action's implicit latest=auto,
+          # which adds a BARE :latest on any non-prerelease semver tag
+          # in BOTH matrix legs — the -gke leg would (and in v0.11.0
+          # did) overwrite the GCP-free :latest with the gke digest,
+          # breaking the README's ":latest = default flavor" contract
+          # and failing the default leg's signature verify (it resolved
+          # :latest to the other leg's not-yet-signed digest). The
+          # explicit type=raw entries below are the ONLY source of
+          # :latest / :latest-gke.
+          flavor: |
+            latest=false
           tags: |
             # Semver tag → git-tag form + full pyramid of floating tags
             type=semver,pattern={{raw}},suffix=${{ matrix.tag_suffix }}
