@@ -148,17 +148,26 @@ func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (Decision, e
 	return d, nil
 }
 
-// DenialRemedy renders the remedy clause for a denied requirement.
-// With no authorizer reason the classic §11 wording stands; with one,
-// the authorizer's own words lead and the remedy accounts for
-// platform policies no grant can satisfy (issue #145: never claim
-// "this ServiceAccount does not have it" when the authorizer said
-// something more specific).
+// DenialDetail renders the explanation half of a denied requirement:
+// the classic §11 wording when the authorizer offered no reason, the
+// authorizer's own words when it did (issue #145: never claim "this
+// ServiceAccount does not have it" when the authorizer said something
+// more specific — on GKE Autopilot the reason names Warden, a policy
+// no grant can satisfy). Callers append their own context-correct
+// remedy; DenialRemedy is the source-context composition.
+func DenialDetail(d Decision) string {
+	if d.Reason == "" {
+		return "this ServiceAccount does not have it"
+	}
+	return fmt.Sprintf("the authorizer denied it: %s — if that names a platform policy (e.g. GKE Autopilot's Warden), no RBAC grant can satisfy it", d.Reason)
+}
+
+// DenialRemedy is DenialDetail plus the source-context remedy clause.
 func DenialRemedy(d Decision) string {
 	if d.Reason == "" {
-		return "this ServiceAccount does not have it; grant it or disable the source"
+		return DenialDetail(d) + "; grant it or disable the source"
 	}
-	return fmt.Sprintf("the authorizer denied it: %s — if that names a platform policy (e.g. GKE Autopilot's Warden), no RBAC grant can satisfy it and the source (or dimension) cannot run on this platform; otherwise grant it or disable the source", d.Reason)
+	return DenialDetail(d) + " and the source (or dimension) cannot run on this platform; otherwise grant it or disable the source"
 }
 
 // Probe verifies every requirement declared by every source before
@@ -194,7 +203,7 @@ func Probe(ctx context.Context, reviewer AccessReviewer, srcs ...Source) ([]stri
 				continue
 			}
 			if req.Optional {
-				notes = append(notes, fmt.Sprintf("source %q: %q denied — %s; the source runs with that dimension disabled", s.Name(), req, DenialRemedy(d)))
+				notes = append(notes, fmt.Sprintf("source %q: %q denied — %s; the source runs with that dimension disabled", s.Name(), req, DenialDetail(d)))
 				continue
 			}
 			return notes, fmt.Errorf("source %q requires permission to %q (scope: %s) and %s — refusing to run a silently empty watch", s.Name(), req, s.Scope(), DenialRemedy(d))

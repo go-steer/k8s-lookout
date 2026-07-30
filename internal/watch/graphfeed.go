@@ -122,7 +122,7 @@ func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) erro
 			return fmt.Errorf("storm: capability probe for %q failed: %w", req, err)
 		}
 		if !d.Allowed {
-			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and %s — or drop --storm; refusing to run correlation over a silently empty graph (see deploy/12-clusterrole-watcher.yaml)", req, sources.DenialRemedy(d))
+			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and %s — grant it (deploy/12-clusterrole-watcher.yaml) if a grant can help, or drop --storm; refusing to run correlation over a silently empty graph", req, sources.DenialDetail(d))
 		}
 	}
 	return nil

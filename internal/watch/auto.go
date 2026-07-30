@@ -160,21 +160,25 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 		// the authorizer offered no explanation, and leads with the
 		// authorizer's own words when it did (#145: a platform denial
 		// like GKE Autopilot's Warden must not read as an RBAC gap).
-		missClause := ""
+		missClause, missTail := "", ""
 		if missing != nil {
 			missClause = fmt.Sprintf("missing %q", *missing)
+			missTail = fmt.Sprintf("%s, or name it in --sources to make this fatal", grantHint(name))
 			if missingWhy.Reason != "" {
 				missClause = fmt.Sprintf("%q denied by the authorizer: %s — if that names a platform policy (e.g. GKE Autopilot's Warden), no grant can satisfy it", *missing, missingWhy.Reason)
+				// No "grant it" coaching one clause after "no grant
+				// can satisfy it" (the #145 review's finding 2).
+				missTail = "name it in --sources to make this fatal"
 			}
 		}
 		switch {
 		case missing != nil && name == k8sevents.Name:
 			return nil, fmt.Errorf("source %q requires permission to %q and %s — a sentinel that cannot watch events is misdeployed; %s", name, *missing, sources.DenialRemedy(missingWhy), grantHint(name))
 		case missing != nil:
-			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (%s — %s, or name it in --sources to make this fatal)", name, missClause, grantHint(name)))
+			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (%s — %s)", name, missClause, missTail))
 		case name == saturation.Name && metricsCheck != nil && metricsCheck() != nil:
 			res.lines = append(res.lines, "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)")
-		case name == k8sevents.Name:
+		case name == k8sevents.Name && len(degraded) == 0:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled (always on — a sentinel that cannot watch events is misdeployed)", name))
 		case len(degraded) > 0:
@@ -211,6 +215,9 @@ func resolveStormAuto(ctx context.Context, f *flags, reviewer sources.AccessRevi
 			return false, "", fmt.Errorf("storm: auto: capability probe for %q failed: %w", req, aerr)
 		}
 		if !d.Allowed {
+			if d.Reason != "" {
+				return false, fmt.Sprintf("storm: auto — off (%q denied by the authorizer: %s — set --storm=on to make this fatal)", req, d.Reason), nil
+			}
 			return false, fmt.Sprintf("storm: auto — off (missing %q for the topology-graph informers — grant pods/nodes/replicasets list+watch (deploy/12-clusterrole-watcher.yaml), or set --storm=on to make this fatal)", req), nil
 		}
 	}
@@ -241,6 +248,7 @@ func resolveAutoDefaults(ctx context.Context, f *flags, client kubernetes.Interf
 			log.Printf("%s", l)
 		}
 		f.sources = strings.Join(res.enabled, ",")
+		f.sourcesAutoResolved = true
 	}
 	if f.storm == stormAuto {
 		on, line, err := resolveStormAuto(ctx, f, reviewer)

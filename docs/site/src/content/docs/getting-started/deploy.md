@@ -83,9 +83,13 @@ The capability flags:
   metrics.k8s.io presence for `saturation` — and enable what the
   deployment supports, skipping misses with one loud line each
   (`k8s-events` must pass; a sentinel that cannot watch events fails
-  to start). An explicit list is the strict mode: every named
-  source's probe failure is fatal — which is why the shipped `args:`
-  pin the list, since they ship alongside the full RBAC. `quota` and
+  to start). An explicit list is the strict mode: a named
+  source's missing REQUIRED grant is fatal (optional dimensions, like
+  `saturation`'s `nodes/proxy` PVC read, degrade loudly instead —
+  platform policies such as GKE Autopilot's Warden deny that one to
+  every principal). The shipped `args:` ride the auto default so the
+  manifest runs unchanged on such platforms; pin the list explicitly
+  for strict fail-fast semantics. `quota` and
   `token-burn` are never auto-enabled. What each source watches for,
   with example triggers and extra needs, is [What the sentinel
   watches](/getting-started/what-the-sentinel-watches/).

@@ -33,8 +33,9 @@ cannot work there, and no RBAC grant can change that. The startup probe
 recognizes the platform denial: saturation still enables with CPU and
 memory forecasting (`metrics.k8s.io` works normally on Autopilot) and
 the log reports the PVC dimension degraded, quoting the authorizer's
-reason. Prefer `--sources=auto` on Autopilot; an explicit `--sources`
-list treats every probe miss as fatal by design.
+reason. This holds under `--sources=auto` and an explicit list alike —
+the `nodes/proxy` read is an *optional* requirement, so only missing
+REQUIRED grants make an explicit list fail fast.
 
 Provider-gated (GKE/GCP today):
 
