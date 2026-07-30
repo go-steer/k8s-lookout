@@ -70,7 +70,10 @@ func newAuditAPI(p *Provider) *auditAPI {
 
 // auditResourceName renders the protoPayload.resourceName of a
 // Kubernetes audit entry: "<group>/<version>/namespaces/<ns>/
-// <resource>/<name>", with the core group spelled "core".
+// <resource>/<name>", with the core group spelled "core". Namespaced
+// objects only — GKE renders cluster-scoped objects WITHOUT the
+// namespaces segment, a shape no current consumer needs; extend here
+// (empty Namespace → drop the segment) when one does.
 func auditResourceName(ref cloud.AuditRef) string {
 	group := ref.APIGroup
 	if group == "" {
@@ -92,7 +95,7 @@ func auditFilter(project, location, cluster string, ref cloud.AuditRef, w cloud.
 			`protoPayload.resourceName=%q`+"\n"+
 			`timestamp>=%q AND timestamp<%q`,
 		project, location, cluster, auditResourceName(ref),
-		w.Start.UTC().Format(time.RFC3339), w.End.UTC().Format(time.RFC3339))
+		w.Start.UTC().Format(time.RFC3339Nano), w.End.UTC().Format(time.RFC3339Nano))
 }
 
 // k8sAuditPayload is the slice of the audit-log proto payload the

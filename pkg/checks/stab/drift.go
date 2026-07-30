@@ -265,7 +265,13 @@ func enrichIdentity(ctx context.Context, api cloud.AuditAPI, hits []driftHit) er
 			h.f.Details = append(h.f.Details, emit.Field{Key: "principal", Value: principalNoAnchor})
 			continue
 		}
-		ref := driftAuditRefs[h.obj.kind]
+		ref, ok := driftAuditRefs[h.obj.kind]
+		if !ok {
+			// A kind added to driftKinds but not here would otherwise
+			// query a garbage filter and report a misleading
+			// none-in-audit-window — fail loudly instead.
+			return fmt.Errorf("stab drift: no audit REST identity for kind %q", h.obj.kind)
+		}
 		ref.Namespace, ref.Name = h.obj.namespace, h.obj.name
 		anchor := h.own.last.Time
 		writes, err := api.ObjectWrites(ctx, ref, cloud.TimeWindow{
