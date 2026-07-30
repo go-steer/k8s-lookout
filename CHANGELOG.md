@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New `notifications` watch source (issue #130, explicit-only like
+  `quota`): reads the provider's cluster-notification stream — GKE's
+  notificationConfig Pub/Sub topic via a new `notifications` provider
+  capability and `--notifications-subscription`. Upgrade events are
+  store-recorded (info) so incident windows correlate with upgrade
+  windows; `UpgradeAvailableEvent` is recorded for pre-warning;
+  security bulletins land on the watchboard (warning). Backlog older
+  than 1h at receipt is dropped loudly, never replayed as live
+  signal.
+
 ### Fixed
 
 - Release pipeline: the `-gke` matrix leg no longer claims the bare

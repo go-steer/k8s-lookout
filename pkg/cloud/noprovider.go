@@ -57,3 +57,4 @@ func (u unconfigured) IPSpace() (IPSpaceAPI, bool)                   { return ni
 func (u unconfigured) Stockouts() (StockoutAPI, bool)                { return nil, false }
 func (u unconfigured) WorkloadIdentity() (WorkloadIdentityAPI, bool) { return nil, false }
 func (u unconfigured) Audit() (AuditAPI, bool)                       { return nil, false }
+func (u unconfigured) Notifications() (NotificationsAPI, bool)       { return nil, false }

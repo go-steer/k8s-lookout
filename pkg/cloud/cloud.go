@@ -79,6 +79,10 @@ const (
 	// provider's audit trail (`stab drift --identity`; GKE Cloud Audit
 	// Logs, §5 identity query pack).
 	CapabilityAudit Capability = "audit"
+	// CapabilityNotifications is the provider's cluster notification
+	// stream (GKE: the notificationConfig Pub/Sub topic — upgrade
+	// events and security bulletins; the `notifications` source).
+	CapabilityNotifications Capability = "notifications"
 )
 
 // AllCapabilities returns every Capability the boundary defines, in
@@ -94,6 +98,7 @@ func AllCapabilities() []Capability {
 		CapabilityStockout,
 		CapabilityWorkloadIdentity,
 		CapabilityAudit,
+		CapabilityNotifications,
 	}
 }
 
@@ -162,4 +167,7 @@ type Provider interface {
 	// Audit attributes Kubernetes object writes to authenticated
 	// principals (CapabilityAudit).
 	Audit() (AuditAPI, bool)
+	// Notifications is the cluster notification stream
+	// (CapabilityNotifications).
+	Notifications() (NotificationsAPI, bool)
 }

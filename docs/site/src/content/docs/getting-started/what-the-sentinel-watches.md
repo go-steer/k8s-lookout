@@ -35,6 +35,7 @@ shipped threshold.
 | The autoscaler failing to deliver nodes | A pod Pending and unschedulable past 5 minutes; a nodegroup that asked the cloud for a node and didn't get one for 3 minutes | `capacity` | **Auto** | a running cluster-autoscaler; GCP provider (`-gke` image) for the structured whys — stockout vs quota vs IP exhaustion |
 | Cloud quota exhaustion, days out | `CPUS/us-east1` at 98% of limit, exhausted in ~16 h at the current slope — drafted increase request attached | `quota` | No — explicit | GCP provider (`-gke` image); project tier — exactly one sentinel per GCP project enables it |
 | Agent token spend burning out of control | One session's token rate at 4× the cross-session median, sustained two polls; a session budget projected to exhaust inside 30 minutes | `token-burn` | No — explicit | `core-agent` daemon — its cost stack is the data source |
+| The provider's own announcements: upgrades and security bulletins | A control-plane or node-pool upgrade starts (recorded for incident-window correlation); a security bulletin affecting the cluster lands on the watchboard | `notifications` | No — explicit | GKE notificationConfig topic + a Pub/Sub subscription (`--notifications-subscription`) |
 
 "Auto" means the source is on whenever the startup probe finds its
 grants (the shipped `deploy/` manifests carry all of them) — a miss

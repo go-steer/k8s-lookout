@@ -41,6 +41,14 @@ type Config struct {
 	Project  string
 	Location string
 	Cluster  string
+
+	// NotificationsSubscription names the provider-side subscription
+	// the notifications capability reads (GKE: a Pub/Sub subscription
+	// on the cluster's notificationConfig topic — either the full
+	// "projects/<p>/subscriptions/<name>" or the bare name, resolved
+	// against Project). Empty leaves the capability unavailable with
+	// the explicit §2 reason.
+	NotificationsSubscription string
 }
 
 // Factory constructs a Provider from config. Implementations are

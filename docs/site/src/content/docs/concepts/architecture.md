@@ -75,7 +75,8 @@ leading classes: `k8s-events` (the reactive baseline), `object-state`
 Jobs and CronJob schedules that stop producing runs), `saturation` (slope →
 ETA forecasts), `degradation` (ready-ratio trends), `expiry` (certificate
 countdowns), `capacity` and `quota` (cluster-autoscaler and project-quota
-seams), and `token-burn` (agent spend as a saturation dimension). The full
+seams), `notifications` (the provider's own upgrade events and security
+bulletins), and `token-burn` (agent spend as a saturation dimension). The full
 flag surface is in [Reference → `lookout watch`](/reference/watch/); every
 signal kind is cataloged in
 [Reference → Signal kinds](/reference/signal-kinds/).
