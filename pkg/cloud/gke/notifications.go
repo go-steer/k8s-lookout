@@ -109,26 +109,25 @@ func (r *pubsubReceiver) Receive(ctx context.Context, handle func(pubsubMessage)
 // Receive implements cloud.NotificationsAPI.
 func (a *notificationsAPI) Receive(ctx context.Context, handle func(cloud.ClusterNotification)) error {
 	return a.receiver.Receive(ctx, func(m pubsubMessage) {
-		if n, ok := parseNotification(m); ok {
-			handle(n)
-		}
+		handle(parseNotification(m))
 	})
 }
 
-// parseNotification translates one Pub/Sub message. Messages without
-// a type_url attribute are not cluster notifications (someone pointed
-// the subscription at the wrong topic) and are dropped here — the
-// consuming source counts and reports what it receives, and an ack'd
-// drop beats infinite redelivery.
-func parseNotification(m pubsubMessage) (cloud.ClusterNotification, bool) {
-	var zero cloud.ClusterNotification
+// parseNotification translates one Pub/Sub message. A message without
+// a type_url attribute is not a cluster notification (someone pointed
+// the subscription at the wrong topic): it flows through with
+// Type="" so the SOURCE counts and reports it as unknown — the
+// adapter never classifies silently (§2) — and stays ack'd, because
+// redelivering a stray forever helps no one.
+func parseNotification(m pubsubMessage) cloud.ClusterNotification {
 	typeURL := m.Attributes["type_url"]
-	if typeURL == "" {
-		return zero, false
+	var typ string
+	if typeURL != "" {
+		typ = typeURL[strings.LastIndexByte(typeURL, '.')+1:]
 	}
 	n := cloud.ClusterNotification{
 		Time:       m.PublishTime,
-		Type:       typeURL[strings.LastIndexByte(typeURL, '.')+1:],
+		Type:       typ,
 		Cluster:    m.Attributes["cluster_name"],
 		Location:   m.Attributes["cluster_location"],
 		Attributes: map[string]string{},
@@ -153,5 +152,5 @@ func parseNotification(m pubsubMessage) (cloud.ClusterNotification, bool) {
 			}
 		}
 	}
-	return n, true
+	return n
 }

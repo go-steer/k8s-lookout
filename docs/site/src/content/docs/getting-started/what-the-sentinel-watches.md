@@ -80,7 +80,7 @@ source saturation: disabled (metrics.k8s.io unavailable — install metrics-serv
 source degradation: enabled
 source expiry: enabled
 source capacity: enabled
-sources: auto resolved → k8s-events,object-state,rollout,workload,degradation,expiry,capacity (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)
+sources: auto resolved → k8s-events,object-state,rollout,workload,degradation,expiry,capacity (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)
 ```
 
 `--storm` defaults to auto the same way: the graph informer grants

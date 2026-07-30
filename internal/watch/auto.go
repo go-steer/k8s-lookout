@@ -59,6 +59,9 @@ const (
 //   - quota: project tier (§11) — exactly one sentinel per GCP project
 //     enables it, on a provider-tagged image; that is a deployment
 //     decision, not a probeable cluster capability.
+//   - notifications: needs an operator-created Pub/Sub subscription
+//     (--notifications-subscription) on the project's notification
+//     topic — a deployment decision, not a probeable capability.
 //   - token-burn: reads the core-agent daemon's cost stack, a paid
 //     polling loop against the daemon — enabling it is a cost/topology
 //     decision the operator makes explicitly.
@@ -158,7 +161,7 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled", name))
 		}
 	}
-	res.lines = append(res.lines, fmt.Sprintf("sources: auto resolved → %s (quota and token-burn stay explicit-only: project tier and the core-agent cost stack)", strings.Join(res.enabled, ",")))
+	res.lines = append(res.lines, fmt.Sprintf("sources: auto resolved → %s (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)", strings.Join(res.enabled, ",")))
 	return res, nil
 }
 

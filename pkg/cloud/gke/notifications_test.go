@@ -75,8 +75,13 @@ func TestNotificationsReceiveTranslation(t *testing.T) {
 	if err := api.Receive(context.Background(), func(n cloud.ClusterNotification) { got = append(got, n) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("delivered %d notifications, want 1 (stray dropped): %+v", len(got), got)
+	// The stray flows through with Type="" — the SOURCE counts it as
+	// unknown; the adapter never classifies silently (§2).
+	if len(got) != 2 {
+		t.Fatalf("delivered %d notifications, want 2 (stray passes with empty Type): %+v", len(got), got)
+	}
+	if got[1].Type != "" {
+		t.Errorf("stray Type = %q, want empty", got[1].Type)
 	}
 	n := got[0]
 	if n.Type != "UpgradeEvent" {

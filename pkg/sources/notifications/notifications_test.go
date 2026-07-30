@@ -129,7 +129,7 @@ func TestTranslateBulletinAndAvailable(t *testing.T) {
 	if bulletin.Kind != KindSecurityBulletin || bulletin.Severity != engine.SeverityWarning {
 		t.Errorf("bulletin = %s/%s, want warning (watchboard routing)", bulletin.Kind, bulletin.Severity)
 	}
-	if bulletin.Key.UID != "bulletin:gcp-2026-777" {
+	if bulletin.Key.UID != "bulletin:gcp-2026-777/prod" {
 		t.Errorf("bulletin UID = %q", bulletin.Key.UID)
 	}
 	if avail.Kind != KindUpgradeAvailable || avail.Severity != engine.SeverityInfo {
@@ -142,18 +142,41 @@ func TestTranslateBulletinAndAvailable(t *testing.T) {
 
 func TestStaleAndUnknownDropped(t *testing.T) {
 	s := newTestSource(t, &fakeAPI{notes: []cloud.ClusterNotification{
-		// A backlog event from yesterday: stale, dropped.
+		// A backlog upgrade from yesterday: stale, dropped.
 		{Time: testNow.Add(-25 * time.Hour), Type: "UpgradeEvent", Cluster: "prod"},
 		// An event type this source does not understand yet.
 		{Time: testNow.Add(-time.Minute), Type: "FutureEvent", Cluster: "prod"},
+		// A stray from the wrong topic (adapter passes it through
+		// with an empty Type): counted as unknown.
+		{Time: testNow.Add(-time.Minute), Type: "", Cluster: "prod"},
 		upgradeNote("prod", "op-2"),
 	}})
 	sigs := run(t, s)
 	if len(sigs) != 1 || sigs[0].Key.UID != "upgrade-op:op-2" {
 		t.Fatalf("got %+v, want only the live upgrade", sigs)
 	}
-	if s.droppedStale.Load() != 1 || s.droppedUnknown.Load() != 1 {
-		t.Errorf("drop counters = stale:%d unknown:%d, want 1/1", s.droppedStale.Load(), s.droppedUnknown.Load())
+	if s.droppedStale.Load() != 1 || s.droppedUnknown.Load() != 2 {
+		t.Errorf("drop counters = stale:%d unknown:%d, want 1/2", s.droppedStale.Load(), s.droppedUnknown.Load())
+	}
+}
+
+func TestStaleBulletinStillDelivered(t *testing.T) {
+	// A bulletin published during sentinel downtime is exactly what
+	// the Pub/Sub backlog exists to preserve — the stale drop applies
+	// to upgrade kinds only (the review finding on destroyed
+	// bulletins).
+	s := newTestSource(t, &fakeAPI{notes: []cloud.ClusterNotification{{
+		Time: testNow.Add(-25 * time.Hour), Type: "SecurityBulletinEvent",
+		Cluster: "prod", Location: "us-east1",
+		Attributes: map[string]string{"bulletinId": "gcp-2026-778"},
+		Message:    "A new security bulletin affects this cluster.",
+	}}})
+	sigs := run(t, s)
+	if len(sigs) != 1 || sigs[0].Kind != KindSecurityBulletin {
+		t.Fatalf("stale bulletin dropped: %+v", sigs)
+	}
+	if s.droppedStale.Load() != 0 {
+		t.Errorf("stale counter = %d, want 0", s.droppedStale.Load())
 	}
 }
 

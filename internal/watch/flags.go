@@ -68,9 +68,9 @@ type flags struct {
 	capacityPoll          time.Duration
 	pendingAge            time.Duration
 	quotaPoll             time.Duration
-	notificationsSub      string
 	quotaWindow           time.Duration
 	quotaWarn             float64
+	notificationsSub      string
 	tokenPoll             time.Duration
 	burnMultiple          float64
 	burnETA               time.Duration
@@ -200,11 +200,12 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// design-fixed, not flags.
 	fs.DurationVar(&f.quotaPoll, "quota-poll", 15*time.Minute, "Poll interval for the quota source's inventory read and per-watched-quota history query. Must be > 0.")
 
+	fs.DurationVar(&f.quotaWindow, "quota-window", 7*24*time.Hour, "History window the quota usage slope is fitted over (the §8 linear-<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0.")
+	fs.Float64Var(&f.quotaWarn, "quota-warn", 0.80, "Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1).")
+
 	// Notifications source (post-M5 #130). ADDITIVE flag; only
 	// meaningful with --sources=...,notifications.
 	fs.StringVar(&f.notificationsSub, "notifications-subscription", "", "Subscription the notifications source reads (GKE: a Pub/Sub subscription on the cluster's notificationConfig topic) — either projects/<p>/subscriptions/<name> or a bare name resolved against the provider project. Required when the notifications source is enabled.")
-	fs.DurationVar(&f.quotaWindow, "quota-window", 7*24*time.Hour, "History window the quota usage slope is fitted over (the §8 linear-<window> confidence basis); a forecast needs usage points spanning at least half of it. Must be > 0.")
-	fs.Float64Var(&f.quotaWarn, "quota-warn", 0.80, "Usage/limit ratio above which a quota is always watched (history fetched every poll) in addition to the top-10 nearest exhaustion. Must be in (0, 1).")
 
 	// Token-burn source knobs (§7.2 row 9, §12). ADDITIVE flags; only
 	// meaningful with --sources=…,token-burn. The cost stack rides

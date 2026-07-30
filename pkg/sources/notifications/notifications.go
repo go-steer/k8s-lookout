@@ -41,11 +41,16 @@
 // and a topic may carry notifications for several clusters — every
 // signal names its cluster.
 //
-// Staleness: a pre-existing subscription can hold a backlog. Events
-// older than Config.StaleAfter at receipt are dropped with one loud
-// summary line per Run — replaying last week's upgrade as a live
-// signal would be worse than silence, and the §9.1 store keeps the
-// durable history.
+// Staleness: a pre-existing subscription can hold a backlog.
+// UPGRADE events older than Config.StaleAfter at receipt are dropped
+// loudly — replaying last week's completed upgrade as a live signal
+// would be worse than silence. Security bulletins are EXEMPT: a
+// bulletin published while the sentinel was down is exactly what the
+// Pub/Sub backlog exists to preserve, and durable awareness on the
+// watchboard is the point — age rides in the message instead. Drops
+// log immediately (first of each class, then every 100th) plus a
+// Run-exit summary; a source built to run for months cannot save its
+// reporting for shutdown (§2).
 //
 // No §7.4 clearance observer: these are point-in-time facts. Info
 // signals route to the store without opening sessions, and the
@@ -179,14 +184,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 }
 
 // translate maps one provider notification to its signal. ok=false
-// drops it (stale or unknown type), counted for the Run summary.
+// drops it (stale upgrade or unknown/stray type), counted AND logged
+// (first per class, then every 100th — §2, see the package comment).
 func (s *Source) translate(n cloud.ClusterNotification) (engine.Signal, bool) {
 	var zero engine.Signal
 	now := s.clock()
-	if !n.Time.IsZero() && now.Sub(n.Time) > s.cfg.StaleAfter {
-		s.droppedStale.Add(1)
-		return zero, false
-	}
 
 	var kind, reason string
 	severity := engine.SeverityInfo
@@ -199,7 +201,17 @@ func (s *Source) translate(n cloud.ClusterNotification) (engine.Signal, bool) {
 		kind, reason = KindSecurityBulletin, ReasonSecurityBulletin
 		severity = engine.SeverityWarning
 	default:
-		s.droppedUnknown.Add(1)
+		if c := s.droppedUnknown.Add(1); c == 1 || c%100 == 0 {
+			log.Printf("notifications: dropped unknown-type message %d (type %q from %s/%s) — a stray topic or an event type newer than this build", c, n.Type, n.Location, n.Cluster)
+		}
+		return zero, false
+	}
+	// Staleness applies to upgrade kinds only: a backlog bulletin is
+	// preserved awareness, not replay (see the package comment).
+	if kind != KindSecurityBulletin && !n.Time.IsZero() && now.Sub(n.Time) > s.cfg.StaleAfter {
+		if c := s.droppedStale.Add(1); c == 1 || c%100 == 0 {
+			log.Printf("notifications: dropped stale message %d (%s from %s/%s, published %s ago > %s)", c, n.Type, n.Location, n.Cluster, now.Sub(n.Time).Truncate(time.Second), s.cfg.StaleAfter)
+		}
 		return zero, false
 	}
 
@@ -224,14 +236,17 @@ func (s *Source) translate(n cloud.ClusterNotification) (engine.Signal, bool) {
 }
 
 // signalUID is the dedup key. Each distinct provider event gets its
-// own incident identity: bulletins by bulletin ID (redeliveries and
-// per-cluster repeats of the SAME bulletin dedup together), upgrades
-// by operation ID when the payload carries one, else by
-// cluster+type+resource so concurrent control-plane and node-pool
-// upgrades stay distinct.
+// own incident identity: bulletins by bulletin ID AND cluster — a
+// bulletin affecting three clusters on a shared project topic is
+// three watchboard entries, one per cluster, because collapsing them
+// would leave only the race-winning cluster's name on the record and
+// erase the others' exposure; redeliveries for the SAME cluster still
+// dedup. Upgrades key by operation ID when the payload carries one,
+// else by cluster+type+resource so concurrent control-plane and
+// node-pool upgrades stay distinct.
 func signalUID(n cloud.ClusterNotification, reason string) string {
 	if id := n.Attributes["bulletinId"]; id != "" && reason == ReasonSecurityBulletin {
-		return "bulletin:" + id
+		return "bulletin:" + id + "/" + n.Cluster
 	}
 	if op := n.Attributes["operation"]; op != "" {
 		return "upgrade-op:" + op
