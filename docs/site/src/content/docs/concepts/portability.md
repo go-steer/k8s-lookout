@@ -21,8 +21,8 @@ Portable everywhere (vanilla Kubernetes, kind included):
   `stab drift|drain`, `bundle`, `health`, `net probe`;
 - the topology graph and everything built on it;
 - the sentinel sources `k8s-events`, `object-state`, `rollout`,
-  `saturation` (metrics.k8s.io + kubelet stats), `degradation`, `expiry`,
-  and `token-burn`.
+  `workload`, `saturation` (metrics.k8s.io + kubelet stats),
+  `degradation`, `expiry`, and `token-burn`.
 
 Provider-gated (GKE/GCP today):
 

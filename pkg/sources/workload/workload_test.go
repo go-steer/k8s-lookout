@@ -392,6 +392,63 @@ func TestCronClearanceSuspend(t *testing.T) {
 	}
 }
 
+func TestCronClearanceRestoredIncident(t *testing.T) {
+	// Restart posture: the incident predates this process, so there
+	// is no miss memory (tracks empty of lastMissed). A run observed
+	// since arming proves the schedule recovered; a pre-arm
+	// lastSchedule proves nothing.
+	s, _, clock := newTestSource(t, Config{})
+	preArm := testStart.Add(-2 * time.Hour)
+	s.onCronJob(cronJob("c1", "prod", "hourly", "0 * * * *", &preArm))
+
+	cl, ok := s.Clearance(cronIncident("c1"))
+	if !ok || cl.Cleared {
+		t.Fatalf("pre-arm lastSchedule cleared a restored incident: %+v ok=%v", cl, ok)
+	}
+
+	*clock = testStart.Add(time.Hour + time.Minute)
+	resumeObserved := *clock
+	ran := testStart.Add(time.Hour)
+	s.onCronJob(cronJob("c1", "prod", "hourly", "0 * * * *", &ran))
+
+	cl, ok = s.Clearance(cronIncident("c1"))
+	if !ok || !cl.Cleared || cl.Resolution != engine.ResolutionRecovered {
+		t.Fatalf("post-arm run must clear a restored incident: %+v ok=%v", cl, ok)
+	}
+	if !cl.StableSince.Equal(resumeObserved) {
+		t.Errorf("StableSince = %v, want the run OBSERVATION %v", cl.StableSince, resumeObserved)
+	}
+}
+
+func TestQuietObjectsSurviveLongUptime(t *testing.T) {
+	// Quiet live objects must never age out of the mirror: a
+	// terminally failed Job and a dead schedule produce no informer
+	// updates, and a last-seen prune would falsely resolve their
+	// incidents as object_deleted (the review finding on the removed
+	// StateTTL prune).
+	s, _, clock := newTestSource(t, Config{Grace: 5 * time.Minute})
+	s.onJob(job("j1", "prod", "migrate", nil))
+	s.onJob(job("j1", "prod", "migrate", nil, failedCond("BackoffLimitExceeded")))
+	s.onCronJob(cronJob("c1", "prod", "hourly", "0 * * * *", nil))
+	*clock = testStart.Add(time.Hour + 6*time.Minute)
+	if sigs := s.sweep(*clock); len(sigs) != 1 {
+		t.Fatalf("setup: expected the miss to fire")
+	}
+
+	// Three days later, without a single informer touch:
+	*clock = testStart.Add(72 * time.Hour)
+	s.sweep(*clock)
+
+	cl, ok := s.Clearance(jobIncident("j1"))
+	if !ok || cl.Cleared {
+		t.Fatalf("quiet failed job aged into %+v ok=%v, want held open", cl, ok)
+	}
+	cl, ok = s.Clearance(cronIncident("c1"))
+	if !ok || cl.Cleared {
+		t.Fatalf("quiet dead schedule aged into %+v ok=%v, want held open", cl, ok)
+	}
+}
+
 func TestCronClearanceDeleted(t *testing.T) {
 	s, _, _ := newTestSource(t, Config{})
 	s.onCronJob(cronJob("c1", "prod", "hourly", "0 * * * *", nil))

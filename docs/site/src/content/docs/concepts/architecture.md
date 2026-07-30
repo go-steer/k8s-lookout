@@ -71,7 +71,8 @@ sources ──→ filter ──→ dedup ──→ storm correlation ──→ s
 The sources (enabled per deployment via `--sources`) cover reactive and
 leading classes: `k8s-events` (the reactive baseline), `object-state`
 (transitions: node flaps, emptied endpoints, gridlocked PDBs), `rollout`
-(stalls caught while the old revision still serves), `saturation` (slope →
+(stalls caught while the old revision still serves), `workload` (failed
+Jobs and CronJob schedules that stop producing runs), `saturation` (slope →
 ETA forecasts), `degradation` (ready-ratio trends), `expiry` (certificate
 countdowns), `capacity` and `quota` (cluster-autoscaler and project-quota
 seams), and `token-burn` (agent spend as a saturation dimension). The full

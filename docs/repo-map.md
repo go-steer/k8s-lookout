@@ -41,8 +41,8 @@ k8s-lookout/
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
 │   ├── sources/          # §7.2 signal sources, one package each: k8sevents, objectstate,
-│   │                     #   rollout, saturation, degradation, expiry, capacity, quota,
-│   │                     #   tokenburn; rbac.go declares per-source RBAC requirements
+│   │                     #   rollout, workload, saturation, degradation, expiry, capacity,
+│   │                     #   quota, tokenburn; rbac.go declares per-source RBAC requirements
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
 ├── deploy/               # sentinel manifests: SA, read-only ClusterRole(+Binding),
@@ -76,7 +76,7 @@ enrichment (internal/watch) ───┘        │              (summary line, 
 Watch-path — the sentinel pipeline (§7.1), wired in `internal/watch`:
 
 ```
-pkg/sources (9) ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
+pkg/sources (10) ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
                   └────────────── pkg/engine ──────────┘   (pkg/checks,     (Sink)     daemon sessions
                                      │                      in-process)                | webhook /incidents
         pkg/store (occurrences, graph history, §9.2/§9.4 records via pkg/memory)

@@ -24,7 +24,7 @@ The inject payload carries the incident's identity (`kind`, `reason`,
 `zone`), the class key (`fingerprint`), and optional attachments: a
 `forecast` (`eta`, `confidence_basis`) on trend signals, an
 `enrichment.bundle` on warmed sessions, and a `quota_increase_draft` on
-quota forecasts. Kinds are namespaced by source — `rollout.stall`,
+quota forecasts. Kinds are namespaced by source — `rollout.stall`, `workload.job_failed`,
 `saturation.forecast`, `capacity.stockout`, `quota.forecast`, `token.burn` —
 plus cross-cutting kinds like `resolved`, `storm`, and `watchboard.digest`.
 

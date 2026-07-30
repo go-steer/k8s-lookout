@@ -64,7 +64,10 @@
 //   - cron_missed clears as recovered when lastScheduleTime advances
 //     (the schedule fired again) or the CronJob is suspended (the
 //     operator ended the "should have run" condition deliberately);
-//     as object_deleted when the CronJob is gone.
+//     as object_deleted when the CronJob is gone. Incidents restored
+//     from a previous sentinel's dedup snapshot carry no in-process
+//     miss memory — for those, ANY run observed since arming proves
+//     the schedule recovered (it necessarily postdates the old miss).
 package workload
 
 import (
@@ -118,13 +121,17 @@ type Config struct {
 	// activation missed — absorbing controller latency and short
 	// startingDeadlineSeconds windows. Default 5m.
 	Grace time.Duration
-	// TickInterval drives the miss sweep (a dead schedule produces no
-	// informer updates — the clock has to notice) and the state-TTL
-	// prune. Default 30s.
+	// TickInterval drives the miss sweep (a dead schedule produces
+	// no informer updates — the clock has to notice). Default 30s.
+	//
+	// There is deliberately NO state TTL: the objects this source
+	// exists for are quiet by definition (a terminally failed Job
+	// never updates again; a dead schedule writes no status), so a
+	// last-seen prune would evict LIVE objects and falsely resolve
+	// their incidents as object_deleted. The mirror is bounded by the
+	// cluster's Job/CronJob count like any informer cache; DeleteFunc
+	// (with tombstone unwrapping) owns removal.
 	TickInterval time.Duration
-	// StateTTL bounds per-object memory (safety net behind
-	// DeleteFunc). Default 24h.
-	StateTTL time.Duration
 }
 
 // DefaultConfig returns the shipped thresholds.
@@ -132,7 +139,6 @@ func DefaultConfig() Config {
 	return Config{
 		Grace:        5 * time.Minute,
 		TickInterval: 30 * time.Second,
-		StateTTL:     24 * time.Hour,
 	}
 }
 
@@ -144,9 +150,6 @@ func (c Config) normalize() Config {
 	}
 	if c.TickInterval <= 0 {
 		c.TickInterval = d.TickInterval
-	}
-	if c.StateTTL <= 0 {
-		c.StateTTL = d.StateTTL
 	}
 	return c
 }
@@ -166,7 +169,6 @@ type jobEntry struct {
 	// failedObservedAt stamps the not-failed→failed transition
 	// observation (clearance compares sibling successes against it).
 	failedObservedAt time.Time
-	lastSeen         time.Time
 }
 
 // cronEntry is the per-CronJob state mirror.
@@ -180,29 +182,36 @@ type cronEntry struct {
 	// CronJob has never scheduled).
 	lastSchedule time.Time
 	creation     time.Time
-	lastSeen     time.Time
 }
 
 // cronTrack is the per-CronJob miss memory.
 type cronTrack struct {
-	// fired gates each missed activation to one emission.
-	fired map[time.Time]bool
 	// consecutive counts misses since the last observed run — the
-	// CriticalMisses escalation input.
+	// CriticalMisses escalation input. NOT reset by a sibling Job
+	// completing: an old run finishing proves the workload works, not
+	// that the SCHEDULE is producing runs — only lastScheduleTime
+	// advancing does that.
 	consecutive int
-	// lastMissed is the newest activation called missed; clearance
-	// requires lastSchedule to advance past it.
+	// lastMissed is the newest activation called missed. It doubles
+	// as the miss-anchor (each activation is judged exactly once) and
+	// the clearance reference (lastSchedule must advance past it).
 	lastMissed time.Time
-	// recoveredAt / suspendedAt stamp the respective clearance
+	// runObservedAt / suspendedAt stamp the respective clearance
 	// transitions AS OBSERVED (M3 observation 4: StableSince counts
 	// from observation, never from a historical status timestamp).
-	recoveredAt time.Time
-	suspendedAt time.Time
-	prevSuspend bool
+	// runObservedAt is the FIRST post-arm lastSchedule advance seen
+	// after the latest miss (a new miss zeroes it), so a healthy
+	// high-frequency schedule cannot keep re-stamping it and starve
+	// the §7.4 stability window.
+	runObservedAt time.Time
+	suspendedAt   time.Time
+	prevSuspend   bool
+	// prevLastSchedule is the previous observation's lastSchedule —
+	// the advance-transition edge detector.
+	prevLastSchedule time.Time
 	// parseWarned dedups the unparseable-schedule log line to once
 	// per (schedule, timeZone) revision.
 	parseWarned string
-	lastSeen    time.Time
 }
 
 // cronSuccess records the newest observed sibling completion per
@@ -417,7 +426,6 @@ func (s *Source) onJob(j *batchv1.Job) {
 	e.namespace, e.name = j.Namespace, j.Name
 	e.ownerCron, e.ownerName = ownerUID, ownerName
 	e.failed, e.complete = failed, complete
-	e.lastSeen = now
 	armed := s.armed
 
 	var sig *engine.Signal
@@ -430,8 +438,9 @@ func (s *Source) onJob(j *batchv1.Job) {
 		sig = s.newJobFailed(j, failedReason, ownerName, now)
 	}
 	if armed && complete && !wasComplete && ownerUID != "" {
-		// A sibling success: the job_failed clearance evidence and
-		// the cron_missed consecutive-miss reset both key off it.
+		// A sibling success: the job_failed clearance evidence.
+		// Deliberately NOT a cron_missed consecutive reset — see
+		// cronTrack.consecutive.
 		s.successes[ownerUID] = &cronSuccess{observedAt: now}
 	}
 	s.mu.Unlock()
@@ -467,22 +476,27 @@ func (s *Source) onCronJob(c *batchv1.CronJob) {
 		e.lastSchedule = c.Status.LastScheduleTime.Time
 	}
 	e.creation = c.CreationTimestamp.Time
-	e.lastSeen = now
 
 	// Track the suspend transition and the schedule-advance
 	// transition here (informer-driven, so StableSince stamps the
 	// observation): the sweep only judges misses.
-	tr := s.trackFor(c.UID, now)
+	tr := s.trackFor(c.UID)
 	if e.suspend && !tr.prevSuspend {
 		tr.suspendedAt = now
 	}
 	tr.prevSuspend = e.suspend
+	if s.armed && known && e.lastSchedule.After(tr.prevLastSchedule) && tr.runObservedAt.IsZero() {
+		// The first observed run since the latest miss (or since
+		// arming) — the clearance StableSince. Later advances leave
+		// it alone so a healthy high-frequency schedule cannot keep
+		// restarting the §7.4 stability window. Gated on `known`: the
+		// first population of a pre-existing CronJob's mirror is not
+		// an observed run, whatever lastSchedule it arrives with.
+		tr.runObservedAt = now
+	}
+	tr.prevLastSchedule = e.lastSchedule
 	if !tr.lastMissed.IsZero() && !e.lastSchedule.Before(tr.lastMissed) {
-		// The schedule fired again past the missed activation.
-		if tr.recoveredAt.IsZero() || tr.consecutive > 0 {
-			tr.recoveredAt = now
-		}
-		tr.consecutive = 0
+		tr.consecutive = 0 // the schedule fired past the missed activation
 	}
 	s.mu.Unlock()
 }
@@ -497,13 +511,12 @@ func (s *Source) onCronJobDelete(c *batchv1.CronJob) {
 
 // trackFor returns (creating if needed) a CronJob's miss memory.
 // Called under s.mu.
-func (s *Source) trackFor(uid types.UID, now time.Time) *cronTrack {
+func (s *Source) trackFor(uid types.UID) *cronTrack {
 	tr, ok := s.tracks[uid]
 	if !ok {
-		tr = &cronTrack{fired: make(map[time.Time]bool)}
+		tr = &cronTrack{}
 		s.tracks[uid] = tr
 	}
-	tr.lastSeen = now
 	return tr
 }
 
@@ -518,9 +531,11 @@ func cronSpec(schedule, timeZone string) string {
 	return schedule
 }
 
-// sweep judges every CronJob's schedule and prunes TTL-expired
-// memory. Returns the signals to emit (the caller sends them outside
-// the lock).
+// sweep judges every CronJob's schedule. Returns the signals to emit
+// (the caller sends them outside the lock). There is no TTL prune —
+// see Config.TickInterval: evicting quiet LIVE objects would falsely
+// resolve their incidents as object_deleted, and DeleteFunc owns
+// removal.
 func (s *Source) sweep(now time.Time) []engine.Signal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -529,30 +544,6 @@ func (s *Source) sweep(now time.Time) []engine.Signal {
 		for uid, e := range s.crons {
 			if sig := s.evalCron(uid, e, now); sig != nil {
 				out = append(out, *sig)
-			}
-		}
-	}
-	// TTL prune (safety net behind DeleteFunc).
-	cutoff := now.Add(-s.cfg.StateTTL)
-	for uid, e := range s.jobs {
-		if e.lastSeen.Before(cutoff) {
-			delete(s.jobs, uid)
-		}
-	}
-	for uid, e := range s.crons {
-		if e.lastSeen.Before(cutoff) {
-			delete(s.crons, uid)
-			delete(s.tracks, uid)
-			delete(s.successes, uid)
-		}
-	}
-	for uid, tr := range s.tracks {
-		if tr.lastSeen.Before(cutoff) {
-			delete(s.tracks, uid)
-		}
-		for exp := range tr.fired {
-			if exp.Before(cutoff) {
-				delete(tr.fired, exp)
 			}
 		}
 	}
@@ -565,7 +556,7 @@ func (s *Source) evalCron(uid types.UID, e *cronEntry, now time.Time) *engine.Si
 	if e.suspend {
 		return nil // deliberate operator state, never a miss
 	}
-	tr := s.trackFor(uid, now)
+	tr := s.trackFor(uid)
 	spec := cronSpec(e.schedule, e.timeZone)
 	sched, err := cron.ParseStandard(spec)
 	if err != nil {
@@ -602,12 +593,11 @@ func (s *Source) evalCron(uid types.UID, e *cronEntry, now time.Time) *engine.Si
 	if !e.lastSchedule.Before(expected) {
 		return nil // it ran; the informer handler resets the streak
 	}
-	if tr.fired[expected] {
-		return nil // this activation already reported
-	}
-	tr.fired[expected] = true
+	// One judgment per activation: lastMissed feeds the anchor above,
+	// so expected is always strictly after everything already fired.
 	tr.lastMissed = expected
 	tr.consecutive++
+	tr.runObservedAt = time.Time{} // a new miss invalidates the last recovery stamp
 
 	severity := engine.SeverityWarning
 	if tr.consecutive >= CriticalMisses {
@@ -738,10 +728,27 @@ func (s *Source) cronClearance(inc engine.Incident) (engine.Clearance, bool) {
 			Resolution:  engine.ResolutionRecovered,
 		}, true
 	}
-	if tr != nil && !tr.lastMissed.IsZero() && !e.lastSchedule.Before(tr.lastMissed) {
+	// Two recovery shapes: the miss this process observed has been
+	// run past (lastMissed known), or — the restart posture — the
+	// incident predates this process (no track memory), in which case
+	// ANY run observed since arming postdates the old miss and proves
+	// the schedule is producing runs again. Without the second arm a
+	// restored cron_missed incident could never clear as recovered
+	// (only suspend/delete would exit it).
+	cleared := false
+	if tr != nil && !tr.lastMissed.IsZero() {
+		cleared = !e.lastSchedule.Before(tr.lastMissed)
+	} else {
+		cleared = e.lastSchedule.After(s.armedAt)
+	}
+	if cleared {
+		var since time.Time
+		if tr != nil {
+			since = tr.runObservedAt
+		}
 		return engine.Clearance{
 			Cleared:     true,
-			StableSince: tr.recoveredAt,
+			StableSince: since,
 			Resolution:  engine.ResolutionRecovered,
 		}, true
 	}

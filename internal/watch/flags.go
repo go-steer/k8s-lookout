@@ -159,7 +159,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, saturation, degradation, expiry, capacity, quota, token-burn. quota (project tier) and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's probe failure is fatal.")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, saturation, degradation, expiry, capacity, quota, token-burn. quota (project tier) and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's probe failure is fatal.")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
