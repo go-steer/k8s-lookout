@@ -164,6 +164,9 @@ func TestCapabilityAvailability(t *testing.T) {
 		case cloud.CapabilityStockout:
 			_, ok := p.Stockouts()
 			return ok
+		case cloud.CapabilityAudit:
+			_, ok := p.Audit()
+			return ok
 		default:
 			_, ok := p.WorkloadIdentity()
 			return ok
@@ -188,6 +191,7 @@ func TestCapabilityAvailability(t *testing.T) {
 		{cloud.CapabilityIPSpace, true, false, reasonNoClusterIdentity, reasonNoClusterIdentity},
 		{cloud.CapabilityStockout, true, true, "", reasonNoProject},
 		{cloud.CapabilityWorkloadIdentity, true, true, "", reasonNoProject},
+		{cloud.CapabilityAudit, true, false, reasonNoClusterIdentity, reasonNoClusterIdentity},
 	}
 	if len(cases) != len(cloud.AllCapabilities()) {
 		t.Fatalf("test table covers %d capabilities, boundary defines %d", len(cases), len(cloud.AllCapabilities()))

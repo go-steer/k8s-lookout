@@ -75,6 +75,10 @@ const (
 	// CapabilityWorkloadIdentity is workload-identity binding
 	// verification (`state wi`; GKE KSA↔GSA, EKS IRSA analog).
 	CapabilityWorkloadIdentity Capability = "workload-identity"
+	// CapabilityAudit is Kubernetes object write attribution from the
+	// provider's audit trail (`stab drift --identity`; GKE Cloud Audit
+	// Logs, §5 identity query pack).
+	CapabilityAudit Capability = "audit"
 )
 
 // AllCapabilities returns every Capability the boundary defines, in
@@ -89,6 +93,7 @@ func AllCapabilities() []Capability {
 		CapabilityIPSpace,
 		CapabilityStockout,
 		CapabilityWorkloadIdentity,
+		CapabilityAudit,
 	}
 }
 
@@ -154,4 +159,7 @@ type Provider interface {
 	// WorkloadIdentity verifies identity bindings
 	// (CapabilityWorkloadIdentity).
 	WorkloadIdentity() (WorkloadIdentityAPI, bool)
+	// Audit attributes Kubernetes object writes to authenticated
+	// principals (CapabilityAudit).
+	Audit() (AuditAPI, bool)
 }

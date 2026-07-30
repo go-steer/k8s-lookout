@@ -2,7 +2,7 @@
 
 # lookout stab drift
 
-Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers; reports manager strings only, never user identities (identity needs audit logs; later query pack). Default scope: all namespaces; scanned counts workload objects examined.
+Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers. Reports manager strings (tool names, not people); --identity additionally resolves each drift write to the audited principal via the cloud provider's audit trail (GKE Cloud Audit Logs), reporting an explicit unavailable on clusters without one. Default scope: all namespaces; scanned counts workload objects examined.
 
 MCP tool: `k8s_gitops_drift`
 
@@ -15,6 +15,7 @@ MCP tool: `k8s_gitops_drift`
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--manager` | — | the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning the most spec leaf fields summed across the scanned objects, ties broken to the lexicographically smallest |
+| `--identity` | — | resolve each finding's last drift write to the audited principal (who ran it) via the cloud provider's audit trail; requires a provider with the audit capability (GKE: Cloud Audit Logs admin-activity read), otherwise the summary line reports an explicit unavailable |
 
 ## Common flags (every lookout command)
 
@@ -33,13 +34,17 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 
 | Field | Meaning |
 | --- | --- |
-| `manager` | on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; that requires audit logs); on the summary line: the resolved GitOps manager |
+| `manager` | on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager |
 | `detection` | summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected), or none (scope owns no spec fields) |
 | `operation` | managedFields operation of the foreign manager's last write: Apply or Update |
 | `tool` | client tool recognized from the manager string (kubectl for kubectl-edit/kubectl-patch/kubectl-*) |
 | `fields` | compact spec paths the foreign manager owns (e.g. spec.template.spec.containers[app].image), capped at 8 with a +N more tail |
 | `field_count` | total spec leaf fields the foreign manager owns on this object (uncapped) |
 | `age` | how long ago the foreign manager last wrote (managedFields time); omitted when the API server recorded no time |
+| `principal` | --identity: the audited principal of the write nearest the drift time (GKE: principalEmail), or the explicit sentinel none-in-audit-window / no-write-time-anchor when the trail cannot answer |
+| `principal_agent` | --identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only |
+| `other_principals` | --identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail |
+| `identity` | summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent) |
 
 ## Output contract
 
@@ -55,5 +60,6 @@ on stderr only), 2 usage.
 ```lookout
 lookout stab drift
 lookout stab drift --namespace=prod --manager=argocd-controller
+lookout stab drift --workload=Deployment/prod/api --identity
 lookout stab drift --workload=Deployment/prod/api --format=json
 ```

@@ -154,6 +154,13 @@ func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
 		if p.project == "" || p.location == "" || p.cluster == "" {
 			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
 		}
+	case cloud.CapabilityAudit:
+		// Cluster-scoped read (post-M5 #128): audit entries are
+		// filtered by the k8s_cluster resource labels, so the full
+		// GKE identity is required.
+		if p.project == "" || p.location == "" || p.cluster == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
+		}
 	default:
 		return cloud.CapabilityStatus{Capability: c, Reason: reasonDeferred}
 	}
@@ -229,6 +236,15 @@ func (p *Provider) WorkloadIdentity() (cloud.WorkloadIdentityAPI, bool) {
 		return nil, false
 	}
 	return newWIAPI(p), true
+}
+
+// Audit implements cloud.Provider (post-M5 #128, audit.go). The
+// Logging client is dialed lazily on first ObjectWrites call.
+func (p *Provider) Audit() (cloud.AuditAPI, bool) {
+	if !p.available(cloud.CapabilityAudit) {
+		return nil, false
+	}
+	return newAuditAPI(p), true
 }
 
 // firstEnv returns the first non-empty value among the named

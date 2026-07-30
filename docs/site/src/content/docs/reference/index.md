@@ -49,7 +49,7 @@ control-plane and startup performance via Cloud Monitoring query packs
 stability reads: GitOps drift, node-drain blockers
 
 - [`lookout stab drain`](/reference/stab-drain/) — Before draining a node, list everything that will block the drain (PDBs at disruptionsAllowed=0) or be destroyed by it (bare pods, emptyDir data, single-replica workloads); --node details one node, -A means all nodes here (pods are always examined across all namespaces); scanned counts pods examined after the standard-drain skips (mirror/DaemonSet/completed pods).
-- [`lookout stab drift`](/reference/stab-drift/) — Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers; reports manager strings only, never user identities (identity needs audit logs; later query pack). Default scope: all namespaces; scanned counts workload objects examined.
+- [`lookout stab drift`](/reference/stab-drift/) — Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers. Reports manager strings (tool names, not people); --identity additionally resolves each drift write to the audited principal via the cloud provider's audit trail (GKE Cloud Audit Logs), reporting an explicit unavailable on clusters without one. Default scope: all namespaces; scanned counts workload objects examined.
 
 ### `lookout state`
 

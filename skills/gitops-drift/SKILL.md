@@ -43,7 +43,14 @@ scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority
   foreign managers (`reason=OutOfBandManager`) are warning: a rogue
   co-manager (legacy Helm, an operator fighting the controller).
 - `manager` is a TOOL name from `managedFields`, never a user
-  identity — attributing the edit to a person requires audit logs.
+  identity. To attribute the edit to a person, re-run with
+  `--identity`: on a cluster with a cloud audit trail (GKE) each
+  finding gains `principal` (who wrote it), `principal_agent` (their
+  client), and `other_principals`; without one the summary carries an
+  explicit `identity=unavailable` marker. The sentinels
+  `none-in-audit-window` / `no-write-time-anchor` mean the trail
+  could not answer for that finding — retention, disabled audit
+  logging, or a write the API server never timestamped.
 - `fields` are the drifted spec paths — names, never values. Diff
   the paths against the Git manifest to see the intended state.
 - `findings=0` with `detection=majority|declared` on the summary
