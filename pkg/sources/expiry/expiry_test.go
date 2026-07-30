@@ -566,7 +566,7 @@ func TestRequiredAccess_DeclaresTheSensitiveRead(t *testing.T) {
 	}
 
 	// And the probe fails loudly when denied (§11).
-	err := sources.Probe(context.Background(), denyReviewer{}, s)
+	_, err := sources.Probe(context.Background(), denyReviewer{}, s)
 	if err == nil || !strings.Contains(err.Error(), Name) {
 		t.Fatalf("Probe = %v, want loud failure naming the source", err)
 	}
@@ -574,7 +574,9 @@ func TestRequiredAccess_DeclaresTheSensitiveRead(t *testing.T) {
 
 type denyReviewer struct{}
 
-func (denyReviewer) Allowed(context.Context, sources.Requirement) (bool, error) { return false, nil }
+func (denyReviewer) Allowed(context.Context, sources.Requirement) (sources.Decision, error) {
+	return sources.Decision{}, nil
+}
 
 // TestRun_InitialScanImmediate: Run scans before the first tick and a
 // first-scan failure is fatal (startup honesty).

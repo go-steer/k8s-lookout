@@ -313,7 +313,14 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 		{Group: "metrics.k8s.io", Resource: "pods", Verb: "list"},
 		{Resource: "pods", Verb: "list"},
 		{Resource: "nodes", Verb: "list"},
-		{Resource: "nodes", Subresource: "proxy", Verb: "get"},
+		// Optional (#145): the PVC dimension's kubelet stats-summary
+		// read. GKE Autopilot's Warden denies nodes/proxy to every
+		// principal — no grant can satisfy it — while the
+		// metrics.k8s.io dimensions work fine, and this source
+		// already degrades the PVC dimension loudly at runtime.
+		// Gating the whole source on it would trade CPU/memory
+		// forecasts for nothing.
+		{Resource: "nodes", Subresource: "proxy", Verb: "get", Optional: true},
 	}
 }
 

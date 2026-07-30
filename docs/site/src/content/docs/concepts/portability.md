@@ -24,6 +24,19 @@ Portable everywhere (vanilla Kubernetes, kind included):
   `workload`, `saturation` (metrics.k8s.io + kubelet stats),
   `degradation`, `expiry`, and `token-burn`.
 
+## GKE Autopilot
+
+Autopilot runs everything above with one platform limitation: GKE Warden
+denies `nodes/proxy` to **every** principal — including cluster-admin —
+so the saturation source's PVC dimension (kubelet stats-summary reads)
+cannot work there, and no RBAC grant can change that. The startup probe
+recognizes the platform denial: saturation still enables with CPU and
+memory forecasting (`metrics.k8s.io` works normally on Autopilot) and
+the log reports the PVC dimension degraded, quoting the authorizer's
+reason. This holds under `--sources=auto` and an explicit list alike —
+the `nodes/proxy` read is an *optional* requirement, so only missing
+REQUIRED grants make an explicit list fail fast.
+
 Provider-gated (GKE/GCP today):
 
 - the `cloud` command group (`stockout|orphans|ipspace|quota`);

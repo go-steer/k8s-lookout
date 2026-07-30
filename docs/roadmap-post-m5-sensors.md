@@ -111,7 +111,11 @@ list of things we keep deliberately saying no to.
    `Translate`, NEG attach failures) are not in the default
    allow-list, and LB backend unhealthy-ratio metrics are untapped;
    `cloud orphans` only catches rules with zero backends.
-6. **Autopilot posture.** Autopilot appears nowhere in the repo.
+6. **Autopilot posture.** (Partially done post-#145: the probe
+   reports platform denials in the authorizer's words, saturation
+   degrades its PVC dimension instead of dying, and Autopilot is
+   documented in portability/install. Remaining: provider-side
+   detection via `clusters.get` and capacity-semantics re-badging.)
    Minimum viable: detect it (`clusters.get` autopilot field), loudly
    degrade the nodes-proxy paths it blocks (PVC/ephemeral stats), and
    re-badge capacity semantics — node provisioning is Google's there,

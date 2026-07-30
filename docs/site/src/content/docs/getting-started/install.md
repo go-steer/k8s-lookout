@@ -45,6 +45,12 @@ cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
 
 `cosign verify` works identically against the `-gke` tags.
 
+**GKE Autopilot:** both flavors run on Autopilot, with one platform
+limitation — Warden denies `nodes/proxy` to every principal, so the
+saturation source's PVC dimension is disabled there (CPU/memory
+forecasting still works). The sentinel reports this at startup; see
+[Concepts → Portability](/concepts/portability/#gke-autopilot).
+
 ## From source
 
 Go 1.26+:

@@ -423,7 +423,17 @@ func realMain(argv []string) error {
 	// anything — a deployment whose ServiceAccount can't support a
 	// source fails loudly here, naming the source and the missing
 	// permission, never a silently empty watch.
-	if err := sources.Probe(ctx, sources.NewAccessReviewer(client), registry.All()...); err != nil {
+	probeNotes, err := sources.Probe(ctx, sources.NewAccessReviewer(client), registry.All()...)
+	if !f.sourcesAutoResolved {
+		// Optional-requirement denials (#145): the source runs with
+		// one dimension degraded — reported here, never silent.
+		// Under --sources=auto the resolution summary already printed
+		// the same fact per source, so these would be duplicates.
+		for _, note := range probeNotes {
+			log.Printf("%s", note)
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if feed != nil {
@@ -747,20 +757,20 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 		reviewer := sources.NewAccessReviewer(client)
 		podRBAC := true
 		for _, req := range recoveryAccess {
-			allowed, err := reviewer.Allowed(ctx, req)
+			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
 			}
-			if !allowed {
+			if !d.Allowed {
 				if len(observers) == 0 {
-					log.Printf("recovery: DISABLED — ServiceAccount lacks %q; grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req)
+					log.Printf("recovery: DISABLED — %q denied (%s); grant pods list/watch (see deploy/12-clusterrole-watcher.yaml) to enable §7.4 recovery injects", req, sources.DenialDetail(d))
 					return nil
 				}
 				// The M2 fallback posture, source-aware: incidents
 				// owned by source-specific observers still get
 				// outcome records; only pod-scoped clearance is
 				// missing.
-				log.Printf("recovery: pod clearance DISABLED — ServiceAccount lacks %q; source-specific clearance observers stay active", req)
+				log.Printf("recovery: pod clearance DISABLED — %q denied (%s); source-specific clearance observers stay active", req, sources.DenialDetail(d))
 				podRBAC = false
 				break
 			}

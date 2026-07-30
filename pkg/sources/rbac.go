@@ -49,6 +49,14 @@ type Requirement struct {
 	// reads, or the SSAR would demand the broader all-names grant
 	// the deployment deliberately did not make. Empty = any name.
 	Name string
+	// Optional marks a requirement whose denial degrades ONE
+	// dimension of the source instead of invalidating it: the probe
+	// reports the miss loudly but the source still runs (it must
+	// handle the runtime denial itself). The canonical case is the
+	// saturation source's nodes/proxy read — platform-denied on GKE
+	// Autopilot for every principal, while the source's
+	// metrics.k8s.io dimensions work fine (issue #145).
+	Optional bool
 }
 
 // String renders the requirement the way an operator would write it
@@ -78,11 +86,25 @@ type AccessDeclarer interface {
 	RequiredAccess() []Requirement
 }
 
+// Decision is one probe answer, carrying the authorizer's own
+// explanation when it supplied one. Reason matters more than it
+// looks (issue #145): on managed platforms the denial can be a
+// non-RBAC policy — GKE Autopilot's Warden denies nodes/proxy to
+// EVERY principal — and a message that says "grant it" for a denial
+// no grant can satisfy coaches operators toward over-granting.
+type Decision struct {
+	Allowed bool
+	// Reason is the authorizer's explanation (SSAR Status.Reason,
+	// plus Status.EvaluationError when present); empty when the
+	// authorizer offered none.
+	Reason string
+}
+
 // AccessReviewer answers "can I?" for one requirement. The real
 // implementation asks the API server via SelfSubjectAccessReview;
 // tests substitute a fake that denies.
 type AccessReviewer interface {
-	Allowed(ctx context.Context, req Requirement) (bool, error)
+	Allowed(ctx context.Context, req Requirement) (Decision, error)
 }
 
 // NewAccessReviewer returns the client-go backed AccessReviewer:
@@ -99,7 +121,7 @@ type ssarReviewer struct {
 	client kubernetes.Interface
 }
 
-func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (bool, error) {
+func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (Decision, error) {
 	review := &authorizationv1.SelfSubjectAccessReview{
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
@@ -114,9 +136,38 @@ func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (bool, error
 	}
 	resp, err := r.client.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
 	if err != nil {
-		return false, err
+		return Decision{}, err
 	}
-	return resp.Status.Allowed, nil
+	d := Decision{Allowed: resp.Status.Allowed, Reason: resp.Status.Reason}
+	if resp.Status.EvaluationError != "" {
+		if d.Reason != "" {
+			d.Reason += "; "
+		}
+		d.Reason += resp.Status.EvaluationError
+	}
+	return d, nil
+}
+
+// DenialDetail renders the explanation half of a denied requirement:
+// the classic §11 wording when the authorizer offered no reason, the
+// authorizer's own words when it did (issue #145: never claim "this
+// ServiceAccount does not have it" when the authorizer said something
+// more specific — on GKE Autopilot the reason names Warden, a policy
+// no grant can satisfy). Callers append their own context-correct
+// remedy; DenialRemedy is the source-context composition.
+func DenialDetail(d Decision) string {
+	if d.Reason == "" {
+		return "this ServiceAccount does not have it"
+	}
+	return fmt.Sprintf("the authorizer denied it: %s — if that names a platform policy (e.g. GKE Autopilot's Warden), no RBAC grant can satisfy it", d.Reason)
+}
+
+// DenialRemedy is DenialDetail plus the source-context remedy clause.
+func DenialRemedy(d Decision) string {
+	if d.Reason == "" {
+		return DenialDetail(d) + "; grant it or disable the source"
+	}
+	return DenialDetail(d) + " and the source (or dimension) cannot run on this platform; otherwise grant it or disable the source"
 }
 
 // Probe verifies every requirement declared by every source before
@@ -131,21 +182,32 @@ func (r ssarReviewer) Allowed(ctx context.Context, req Requirement) (bool, error
 // Sources that do not implement AccessDeclarer are skipped. An error
 // from the reviewer itself (API unreachable, SSAR rejected) is also
 // fatal: "could not verify" must not degrade into "assumed fine".
-func Probe(ctx context.Context, reviewer AccessReviewer, srcs ...Source) error {
+//
+// Optional requirements (Requirement.Optional) degrade instead of
+// failing: a denial produces a note the caller logs — the source
+// still runs and handles the runtime denial itself (§11 loudness
+// with #145's platform reality).
+func Probe(ctx context.Context, reviewer AccessReviewer, srcs ...Source) ([]string, error) {
+	var notes []string
 	for _, s := range srcs {
 		decl, ok := s.(AccessDeclarer)
 		if !ok {
 			continue
 		}
 		for _, req := range decl.RequiredAccess() {
-			allowed, err := reviewer.Allowed(ctx, req)
+			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
-				return fmt.Errorf("source %q: capability probe for %q failed: %w", s.Name(), req, err)
+				return notes, fmt.Errorf("source %q: capability probe for %q failed: %w", s.Name(), req, err)
 			}
-			if !allowed {
-				return fmt.Errorf("source %q requires permission to %q (scope: %s) and this ServiceAccount does not have it; grant it or disable the source — refusing to run a silently empty watch", s.Name(), req, s.Scope())
+			if d.Allowed {
+				continue
 			}
+			if req.Optional {
+				notes = append(notes, fmt.Sprintf("source %q: %q denied — %s; the source runs with that dimension disabled", s.Name(), req, DenialDetail(d)))
+				continue
+			}
+			return notes, fmt.Errorf("source %q requires permission to %q (scope: %s) and %s — refusing to run a silently empty watch", s.Name(), req, s.Scope(), DenialRemedy(d))
 		}
 	}
-	return nil
+	return notes, nil
 }
