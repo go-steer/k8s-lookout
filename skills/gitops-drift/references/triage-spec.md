@@ -16,7 +16,7 @@ MCP tool: `k8s_resource_spec`
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--diff` | — | diff against the previous graph-history revision — requires a sentinel store; lands in M3 (§6.6) |
+| `--diff` | — | diff against the previous graph-history revision — requires a sentinel store; not yet implemented (§6.6) |
 
 ## Common flags (every lookout command)
 
