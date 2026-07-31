@@ -44,13 +44,17 @@ that plant fake credentials.
 
 ## Install the CLI
 
+Prebuilt binaries (v0.13.0+; linux/darwin amd64+arm64, windows amd64;
+`lookout-gke_*` assets = GKE provider compiled in):
+
 ```sh
-go install github.com/go-steer/k8s-lookout/cmd/lookout@latest
+gh release download -R go-steer/k8s-lookout -p 'lookout_*_linux_amd64.tar.gz'
+tar -xzf lookout_*_linux_amd64.tar.gz && sudo install lookout /usr/local/bin/
 ```
 
-Requires Go 1.26+. There are no prebuilt binary downloads yet. Without
-Go, run from the container image (entrypoint override is required —
-the image's default entrypoint is the sentinel):
+Or with Go 1.26+: `go install github.com/go-steer/k8s-lookout/cmd/lookout@latest`.
+Without either, run from the container image (entrypoint override is
+required — the image's default entrypoint is the sentinel):
 
 ```sh
 docker run --rm --entrypoint /lookout \

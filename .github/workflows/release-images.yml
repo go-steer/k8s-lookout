@@ -56,6 +56,11 @@ name: Release images
 # the registry, and the previously-unchecked `-gke` tag→digest
 # linkage is now asserted on every release.
 #
+# The same tag also produces prebuilt workstation binaries (see the
+# build-binaries job: linux amd64/arm64, darwin amd64/arm64, windows
+# amd64 — both flavors, SHA256SUMS signed keyless), attached to the
+# GitHub Release the github-release job creates.
+#
 # Manual republish (e.g. for a tag pushed before this workflow
 # existed): use the workflow_dispatch entrypoint with the tag input.
 
@@ -352,6 +357,119 @@ jobs:
             exit 1
           fi
 
+  # Prebuilt workstation binaries, attached to the GitHub Release.
+  # The CLI + MCP server run anywhere; only the sentinel is
+  # in-cluster Linux — so the matrix covers workstations: linux
+  # amd64/arm64, darwin amd64/arm64, windows amd64. Both image
+  # flavors are mirrored (lookout = GCP-free default, lookout-gke =
+  # -tags allproviders) with the same internal/version ldflags stamp
+  # as the Dockerfile, so `lookout version` reports the same identity
+  # whether it came from an image or a tarball. One job, a loop, not
+  # a 10-leg matrix: cross-compiling Go is seconds per target, and a
+  # single job yields one artifact dir and ONE SHA256SUMS covering
+  # every archive (signed keyless via cosign sign-blob).
+  build-binaries:
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute build version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="${{ inputs.tag }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build date
+        id: build-date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile all platforms, both flavors
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ steps.build-date.outputs.date }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          LDFLAGS="-s -w \
+            -X github.com/go-steer/k8s-lookout/internal/version.Version=${VERSION} \
+            -X github.com/go-steer/k8s-lookout/internal/version.Commit=${COMMIT} \
+            -X github.com/go-steer/k8s-lookout/internal/version.Date=${BUILD_DATE}"
+
+          for flavor in "default:" "gke:allproviders"; do
+            name="lookout"; tags="${flavor#*:}"
+            [[ "${flavor%%:*}" == "gke" ]] && name="lookout-gke"
+            for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+              GOOS="${platform%%/*}"; GOARCH="${platform#*/}"
+              bin="lookout"; [[ "$GOOS" == "windows" ]] && bin="lookout.exe"
+              echo "▸ ${name} ${GOOS}/${GOARCH}"
+              CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+                go build -trimpath -tags "$tags" -ldflags "$LDFLAGS" \
+                -o "build/${name}_${GOOS}_${GOARCH}/${bin}" ./cmd/lookout
+              cp LICENSE "build/${name}_${GOOS}_${GOARCH}/"
+              archive="${name}_${VERSION}_${GOOS}_${GOARCH}"
+              if [[ "$GOOS" == "windows" ]]; then
+                (cd "build/${name}_${GOOS}_${GOARCH}" && zip -q "../../dist/${archive}.zip" "$bin" LICENSE)
+              else
+                tar -czf "dist/${archive}.tar.gz" -C "build/${name}_${GOOS}_${GOARCH}" "$bin" LICENSE
+              fi
+            done
+          done
+          ls -l dist/
+
+      # Smoke the one target that runs on this runner: prove the
+      # archives contain a runnable lookout reporting the release
+      # identity, not just well-named blobs.
+      - name: Smoke test linux/amd64 binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for name in lookout lookout-gke; do
+            tar -xzf "dist/${name}_${VERSION}_linux_amd64.tar.gz" -C /tmp
+            OUT=$(/tmp/lookout version)
+            echo "▸ ${name}: ${OUT}"
+            grep -q "${VERSION}" <<< "$OUT" || { echo "::error::${name} reports wrong version: ${OUT}" >&2; exit 1; }
+            rm /tmp/lookout
+          done
+
+      - name: Checksums + keyless signature
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- * > "lookout_${VERSION}_SHA256SUMS"
+          cat "lookout_${VERSION}_SHA256SUMS"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums (cosign sign-blob, keyless)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cosign sign-blob --yes \
+            --bundle "dist/lookout_${VERSION}_SHA256SUMS.sigstore.json" \
+            "dist/lookout_${VERSION}_SHA256SUMS"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
   # Post-publish flavor-divergence guard (#144): on v0.11.0 both
   # matrix legs implicitly claimed :latest (metadata-action's
   # latest=auto) and the gke leg won the race — :latest served the
@@ -387,12 +505,16 @@ jobs:
   # state.
   github-release:
     if: github.ref_type == 'tag'
-    needs: [build-and-push, verify-flavor-divergence]
+    needs: [build-and-push, verify-flavor-divergence, build-binaries]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: dist
       - name: Compose notes and create the Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -402,4 +524,5 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --notes-file /tmp/notes.md \
-            --verify-tag
+            --verify-tag \
+            dist/*

@@ -27,8 +27,13 @@ wrong flavor with nothing to catch it.
      (signatures by tag, smoke run, entrypoint pin);
    - flavor-divergence guard: `:latest` ≠ `:latest-gke`, each equal
      to its version tag (#144);
+   - prebuilt binaries (linux amd64/arm64, darwin amd64/arm64,
+     windows amd64 × both flavors) cross-compiled with the same
+     internal/version stamp, smoke-tested, checksummed, the
+     SHA256SUMS signed keyless (`cosign sign-blob`);
    - GitHub Release created with the CHANGELOG section + image
-     footer (`dev/release/compose-release-notes.sh`).
+     footer (`dev/release/compose-release-notes.sh`), binaries
+     attached as assets.
 4. **Post-release bump**: on main, set
    `internal/version/version.go` `Version = "vX.(Y+1).0-dev"`.
    `dev/ci/presubmits/verify-version-fallback` fails CI until done.
@@ -36,10 +41,14 @@ wrong flavor with nothing to catch it.
 ## Verifying a release
 
 ```bash
-gh release view vX.Y.Z
+gh release view vX.Y.Z          # 12 assets: 5 platforms × 2 flavors + SHA256SUMS + .sigstore.json
 cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
   --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest      # == vX.Y.Z digest
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest-gke  # == vX.Y.Z-gke digest
+cosign verify-blob lookout_vX.Y.Z_SHA256SUMS \
+  --bundle lookout_vX.Y.Z_SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

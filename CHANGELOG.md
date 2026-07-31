@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prebuilt release binaries: every release now attaches workstation
+  binaries for linux amd64/arm64, macOS amd64/arm64, and windows
+  amd64 — in both flavors (`lookout_*` GCP-free, `lookout-gke_*`
+  with the GKE provider) — with a keyless-signed SHA256SUMS.
+  `gh release download -R go-steer/k8s-lookout -p 'lookout_*_<os>_<arch>.tar.gz'`.
+
 - Agent-facing docs surface: the site now publishes `llms.txt`,
   `llms-full.txt`, and `llms-small.txt` (llmstxt.org convention, via
   starlight-llms-txt), a curated "Using k8s-lookout from an AI agent"

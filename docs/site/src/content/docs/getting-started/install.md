@@ -9,17 +9,28 @@ One binary covers all three surfaces — the CLI, the MCP server
 (`lookout mcp`), and the sentinel (`lookout watch`). Installing means
 getting that binary where you need it:
 
-- **On a workstation** — for the CLI and the MCP server — install with
-  Go (1.26+):
+- **On a workstation** — for the CLI and the MCP server — download a
+  prebuilt binary from the
+  [latest release](https://github.com/go-steer/k8s-lookout/releases/latest)
+  (v0.13.0 and later; Linux and macOS on amd64/arm64, Windows on
+  amd64 — Windows archives are `.zip`):
+
+  ```sh
+  gh release download -R go-steer/k8s-lookout -p 'lookout_*_linux_amd64.tar.gz'
+  tar -xzf lookout_*_linux_amd64.tar.gz && sudo install lookout /usr/local/bin/
+  ```
+
+  The `lookout-gke_*` assets are the same binary with the GKE/GCP
+  provider compiled in (see the flavor guide below). Or build from
+  source with Go 1.26+:
 
   ```sh
   go install github.com/go-steer/k8s-lookout/cmd/lookout@latest
   ```
 
-  That is the whole install; `lookout health` against your current
-  kubeconfig works immediately ([First reads](/getting-started/first-run/)
-  is the next page). Prebuilt binary downloads are not published yet —
-  `go install` and the container images are the supported paths.
+  Either way that is the whole install; `lookout health` against your
+  current kubeconfig works immediately
+  ([First reads](/getting-started/first-run/) is the next page).
 
 - **In a cluster** — for the sentinel — use the container images below;
   [Deploy the sentinel](/getting-started/deploy/) applies the shipped
@@ -63,7 +74,17 @@ cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-`cosign verify` works identically against the `-gke` tags.
+`cosign verify` works identically against the `-gke` tags. Release
+binaries are covered by a keyless-signed checksums file attached to
+each release:
+
+```sh
+cosign verify-blob lookout_vX.Y.Z_SHA256SUMS \
+  --bundle lookout_vX.Y.Z_SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c lookout_vX.Y.Z_SHA256SUMS --ignore-missing
+```
 
 **GKE Autopilot:** both flavors run on Autopilot, with one platform
 limitation — Warden denies `nodes/proxy` to every principal, so the
