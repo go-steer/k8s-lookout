@@ -43,9 +43,8 @@ required on the daemon side.
 
 ## What an inject looks like
 
-Captured on the wire by the M0 exit check (a stub daemon logging every
-request —
-[`docs/milestones/M0.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M0.md)):
+Captured on the wire during a validation drill (a stub daemon logging
+every request):
 
 ```
 REQ POST /sessions
@@ -83,4 +82,4 @@ clear and hold stable for `--recovery-stable-for` (with
   [`dev/drills/stub-daemon.py`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/stub-daemon.py)
   implements the two endpoints and logs every request body — deployed
   behind a Service named `core-agent:7777`, it is the wire-level
-  evidence capture every drill and milestone record uses.
+  evidence capture every validation drill uses.

@@ -39,7 +39,7 @@ Two layers of proof, not policy:
   payload containing an unmasked credential fixture fails CI. The fixtures
   are the promise: adding a new output surface without sanitizer coverage
   breaks the build.
-- **Live exit-check evidence.** The M1 milestone drill planted a marker
+- **Live drill evidence.** A live validation drill planted a marker
   value (`SUPERSECRETVALUE_M1`) in a cluster Secret, mounted it as env in a
   broken workload, and ran the full investigation surface over it — bundle,
   spec, edges, health, and a complete MCP session. Every captured stdout and

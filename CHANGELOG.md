@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `deploy/kustomization.yaml`: the sentinel now installs without a
+  clone — `kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=vX.Y.Z"`.
+  From a clone, use `kubectl apply -k deploy/` — `apply -f` on the
+  directory no longer works (it chokes on the kustomization file);
+  `examples/sentinel/up` updated accordingly.
+
+### Changed
+
+- The docs site now reads as user docs: the landing and getting-started
+  pages name the three surfaces (CLI, MCP server, sentinel) explicitly,
+  install leads with the quickest path per audience, and internal
+  milestone/project references were swept from prose and runtime strings
+  (metric help text, `--enrich-cap`/`--diff` help, the signal-kind
+  ledger). Captured drill output is unchanged.
+- `lookout triage spec --diff` now says "not yet implemented" instead of
+  citing an internal milestone; behavior is unchanged (it was never
+  implemented).
+
 ## [0.12.0] - 2026-07-30
 
 Two new watch sources and the fixes from the first real-cluster

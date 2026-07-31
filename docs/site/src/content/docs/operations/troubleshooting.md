@@ -105,8 +105,8 @@ review — a cluster/credentials problem, not a Role problem.
 ## Loud degradations that are *not* errors
 
 These startup lines report reduced capability and keep running —
-expected on the clusters they describe (all captured verbatim from the
-milestone runs):
+expected on the clusters they describe (all captured verbatim from
+recorded drill runs):
 
 ```
 capacity: provider scale-decision sub-source (§10.1 source 3) disabled:
@@ -133,8 +133,8 @@ and never silence. Three shapes to recognize:
   ```
 
 - **`health` categories** answer `status=unavailable` (e.g.
-  `category=control-plane … message="requires cloud provider metrics
-  (M4); no cloud provider configured"`) rather than pretending healthy.
+  `category=control-plane … message="requires cloud provider metrics;
+  no cloud provider configured"`) rather than pretending healthy.
 - **`perf probe` packs** whose backing metrics are not enabled on the
   cluster degrade to an explicit `pack_unavailable` finding.
 

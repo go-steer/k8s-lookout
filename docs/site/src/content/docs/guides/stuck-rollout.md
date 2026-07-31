@@ -1,6 +1,6 @@
 ---
 title: Your rollout is stuck
-description: rollout.stall fires while the old revision still serves — a session before any user notices, a rollback, and a verified resolved record. Real output from the M3 exit drill.
+description: rollout.stall fires while the old revision still serves — a session before any user notices, a rollback, and a verified resolved record. Real captured drill output.
 sidebar:
   order: 2
 ---
@@ -15,7 +15,7 @@ ReplicaSet making zero ready-count progress for `--rollout-observe`
 (default 3m) *while the old revision stays healthy* is a probable bad
 deploy — fired well before the deadline.
 
-All output below is from the M3 exit drill (kind cluster, sentinel with
+All output below is from a live validation drill (kind cluster, sentinel with
 `--sources=…,rollout,…`), abridged. The staged failure: `drill-a/webapp`
 (2 replicas serving HTTP behind a Service, `maxUnavailable=0 maxSurge=1`)
 updated to a valid image with a crashing command.

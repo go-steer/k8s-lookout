@@ -83,9 +83,8 @@ Two properties worth knowing:
   readiness are omitted in history mode rather than guessed.
 - **Replay does not cross a sentinel restart.** Snapshot generations are
   per-process, so a `--at` window spanning a restart is currently
-  unanswerable from the store (a known, documented gap — the drill records
-  in [`docs/milestones/`](https://github.com/go-steer/k8s-lookout/tree/main/docs/milestones)
-  track it). Post-mortems inside one sentinel incarnation work as designed.
+  unanswerable from the store — a known, documented gap. Post-mortems
+  inside one sentinel incarnation work as designed.
 
 One-shot CLI invocations serve `--at` only when pointed at a sentinel's
 store file via `--store`; history reads are fully offline — copy the SQLite

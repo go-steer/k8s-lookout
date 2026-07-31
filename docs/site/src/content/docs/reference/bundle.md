@@ -42,7 +42,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 
 | Field | Meaning |
 | --- | --- |
-| `section` | which bundle section the finding belongs to: spec\|delta\|edges\|radius\|logs (a triage-events section joins in M3) |
+| `section` | which bundle section the finding belongs to: spec\|delta\|edges\|radius\|logs |
 | `sections` | on the bundle.target head finding: the sections that follow |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
 | `hop` | radius neighbor's BFS depth from the target (1 = direct edge) |

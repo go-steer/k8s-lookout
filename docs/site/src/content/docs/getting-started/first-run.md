@@ -16,7 +16,7 @@ lookout health
 ```
 
 ```console
-kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics (M4); no cloud provider configured" category=control-plane status=unavailable
+kind=health.category severity=info reason=Unavailable message="requires cloud provider metrics; no cloud provider configured" category=control-plane status=unavailable
 kind=health.category severity=info category=nodes status=healthy
 kind=health.category severity=warning category=crashloops status=degraded total=8 top="pod.restarts agent-sandbox-system/agent-sandbox-controller-7c69875fcc-n7xms; pod.restarts kube-system/coredns-7d764666f9-g82j9; …"
 kind=health.category severity=info category=pending status=healthy
@@ -56,9 +56,8 @@ kind=workload.rollout severity=warning namespace=shop kind_of_object=Deployment 
 scanned=20 findings=2 elapsed=148ms
 ```
 
-(Real output from the M1 exit check — a kind cluster seeded with a
-deliberately broken Deployment; the full investigation transcript is in
-[`docs/milestones/M1.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M1.md).)
+(Real output from a live validation drill — a kind cluster seeded with
+a deliberately broken Deployment.)
 The healthy Deployment, kube-system, and the node emitted nothing;
 `scanned=20` proves they were examined.
 

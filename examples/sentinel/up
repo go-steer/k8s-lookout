@@ -20,7 +20,7 @@
 #
 #   1. namespace agent-triage + the k8s-event-watcher-token Secret
 #   2. stub daemon (dev/drills/stub-daemon.py) as Service core-agent:7777
-#   3. kubectl apply -f deploy/   (RBAC + watcher, exactly as shipped)
+#   3. kubectl apply -k deploy/   (RBAC + watcher, exactly as shipped)
 #   4. patch the watcher image ($LOOKOUT_IMAGE, default GHCR latest)
 #      and args (opt-in sources, storm, enrichment, drill-speed timings)
 #
@@ -48,7 +48,10 @@ kubectl -n "$SENTINEL_NS" create configmap stub-daemon \
 kubectl apply -f "$(examples_root)/sentinel/10-stub-daemon.yaml"
 
 echo "▸ shipped deploy/ manifests (RBAC unmodified)"
-kubectl apply -f "$root/deploy/"
+# -k, not -f: deploy/ carries a kustomization.yaml (for the no-clone
+# `kubectl apply -k github.com/...` install), and `apply -f` on the
+# directory chokes on it.
+kubectl apply -k "$root/deploy/"
 
 # On kind, pin the sentinel + stub to the FIRST worker so the
 # node-failure scenario can stop the second one without killing them

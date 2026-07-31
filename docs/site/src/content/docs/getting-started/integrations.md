@@ -76,8 +76,8 @@ reference material the skills link to — keep it alongside.
 ## Receiving the watch path anywhere
 
 The sentinel's delivery side is a `Sink`: the core-agent daemon
-client is the default (`--sink=core-agent`, wire-identical to every
-release since M0), and `--sink=webhook` delivers the same
+client is the default (`--sink=core-agent`, wire-identical across
+every release), and `--sink=webhook` delivers the same
 [schema-v1 signal payloads](/reference/signal-kinds/) to any HTTP
 receiver:
 
@@ -101,8 +101,8 @@ Every request carries `Authorization: Bearer <token>` from
 `--sink-token-env`, and the body is the schema-v1 payload JSON
 itself — what the core-agent sink wraps in its inject envelope, here
 unwrapped. The exchange, curl-able against your own receiver (both
-payloads below are captured ones, from the M0 wire capture and the
-M2 fix-verify drill, abridged):
+payloads below are real ones captured on the wire during validation
+drills, abridged):
 
 ```sh
 curl -s -X POST "https://receiver.example.com/lookout/incidents" \
@@ -137,7 +137,7 @@ What a receiver should know:
   not your obligation.
 - **A reference receiver already exists.**
   [`dev/drills/stub-daemon.py`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/stub-daemon.py)
-  is the capture receiver every drill and milestone record uses —
+  is the capture receiver every validation drill uses —
   a page of stdlib Python implementing the open/append pattern
   (in the default sink's core-agent shape) and logging each body as
   one greppable line. Start there.

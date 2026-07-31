@@ -1,9 +1,29 @@
 ---
 title: Install
-description: Container images (default and -gke), cosign verification, go install, and the entrypoint / image-swap compatibility contract.
+description: Get the lookout binary — go install for the workstation, container images (default and -gke) for cluster deployments — plus cosign verification and the image-swap compatibility contract.
 sidebar:
   order: 1
 ---
+
+One binary covers all three surfaces — the CLI, the MCP server
+(`lookout mcp`), and the sentinel (`lookout watch`). Installing means
+getting that binary where you need it:
+
+- **On a workstation** — for the CLI and the MCP server — install with
+  Go (1.26+):
+
+  ```sh
+  go install github.com/go-steer/k8s-lookout/cmd/lookout@latest
+  ```
+
+  That is the whole install; `lookout health` against your current
+  kubeconfig works immediately ([First reads](/getting-started/first-run/)
+  is the next page). Prebuilt binary downloads are not published yet —
+  `go install` and the container images are the supported paths.
+
+- **In a cluster** — for the sentinel — use the container images below;
+  [Deploy the sentinel](/getting-started/deploy/) applies the shipped
+  manifests with one `kubectl apply -k`, no clone needed.
 
 ## Container images
 
@@ -51,17 +71,11 @@ saturation source's PVC dimension is disabled there (CPU/memory
 forecasting still works). The sentinel reports this at startup; see
 [Concepts → Portability](/concepts/portability/#gke-autopilot).
 
-## From source
+## Building with a cloud provider
 
-Go 1.26+:
-
-```sh
-go install github.com/go-steer/k8s-lookout/cmd/lookout@latest
-```
-
-That builds the GCP-free default. For a provider-enabled binary, build
-with tags — `-tags gke` for the GKE provider alone, `-tags allproviders`
-for everything (what the `-gke` image ships):
+`go install` builds the GCP-free default. For a provider-enabled binary,
+build with tags — `-tags gke` for the GKE provider alone,
+`-tags allproviders` for everything (what the `-gke` image ships):
 
 ```sh
 go build -tags allproviders ./cmd/lookout
@@ -74,10 +88,9 @@ The image's entrypoint is `["/lookout", "watch"]`, so a Deployment's bare
 contract: the image is a drop-in swap for existing
 `ghcr.io/go-steer/k8s-event-watcher` deployments — same flags, same exit
 codes, same `k8s_event_watcher_*` metric names, byte-identical
-`k8s-event` inject payloads. The M0 exit check
-([`docs/milestones/M0.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M0.md))
-verified a predecessor deployment running with only the image line
-changed.
+`k8s-event` inject payloads. The contract was verified against a live
+predecessor deployment with only the image line changed, and CI contract
+tests keep it frozen.
 
 To run a read-path command from the image (rather than the sentinel),
 override the entrypoint — e.g. `--entrypoint /lookout` with `docker run`,

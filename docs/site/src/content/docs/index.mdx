@@ -22,14 +22,23 @@ even a well-equipped agent only investigates when asked. Nobody tells it
 the moment a bad image tag ships or a certificate is three days from
 expiring.
 
-## What `lookout` does
+## What's in the box
 
-`lookout` is a command-line toolset that answers diagnostic questions
-about a cluster in a compact, secret-safe form an agent can act on
-directly — also callable as tools over MCP, the protocol most agent
-runtimes speak. An optional in-cluster watcher, the **sentinel**, spots
-trouble as it develops and opens an incident session for your agent —
-often before users notice anything.
+Everything ships as one binary, `lookout`, used three ways — each one
+works without the others:
+
+- **The `lookout` CLI** — one-shot diagnostic commands (`lookout
+  health`, `lookout triage delta`, `lookout bundle`, …) that you or a
+  shell-capable agent run against your current kubeconfig.
+  Nothing gets deployed; this is the two-minute starting point.
+- **The MCP server** — `lookout mcp` exposes every one of those
+  commands 1:1 as MCP tools, for agent runtimes that speak MCP instead
+  of shelling out. Same checks, same output, same sanitizer.
+- **The sentinel** — `lookout watch`, an optional daemon you deploy
+  into the cluster. It watches for trouble as it develops — a stalling
+  rollout, memory climbing toward a limit, a certificate counting
+  down — and opens an incident session for your agent, often before
+  users notice anything.
 
 `lookout` never writes to your cluster. It reads, watches, and reports;
 any fix goes through your agent's own approval process.
@@ -56,20 +65,21 @@ scanned — so "all clear" is never ambiguous silence.
 ## Where next
 
 - **Just want to point it at a cluster?** →
-  [Getting started](/getting-started/) — install and first commands,
-  nothing deployed.
+  [Getting started](/getting-started/) — install the CLI and run the
+  first commands, nothing deployed.
 - **Want incidents to open themselves?** →
   [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
   — what it monitors out of the box and what you can turn on, then
-  [deploy it](/getting-started/deploy/).
+  [deploy it](/getting-started/deploy/) with one `kubectl apply`.
+- **Wiring up an agent?** → [MCP setup](/getting-started/mcp/) for any
+  MCP-speaking runtime, or
+  [Integrations](/getting-started/integrations/) for shell-capable
+  agents and webhook receivers.
 - **Want to understand how it works?** → [Concepts](/concepts/) — the
   mental model behind the commands.
-- **Integrating another agent framework?** →
-  [Integrations](/getting-started/integrations/) — the same tools from
-  any MCP client, shell-capable agent, or webhook receiver.
 
-Everything ships as a single binary, `lookout`, with images at
-`ghcr.io/go-steer/lookout`; it works out of the box with
+Container images live at `ghcr.io/go-steer/lookout`; everything works
+out of the box with
 [`core-agent`](https://github.com/go-steer/core-agent). The full command
 surface is in the [Reference](/reference/), and day-2 sentinel material
 in [Operations](/operations/).

@@ -104,8 +104,9 @@ every named source's startup probe failure is a fatal error naming
 the exact grant (`source "object-state" requires permission to "list
 nodes cluster-wide" …`) — never a silently empty watch, and never a
 skip. Pin a list when you'd rather crash-loop than run with less than
-you asked for (the shipped `deploy/51` manifest does exactly this,
-since it ships alongside the full RBAC):
+you asked for — the shipped `deploy/51` manifest carries the strict
+list as a ready-to-uncomment alternative, since it ships alongside the
+full RBAC:
 
 ```
 --sources=k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity --storm=on --store=/var/lib/lookout/lookout.db --enrich=critical

@@ -159,16 +159,19 @@ func watchPage() string {
 	b.WriteString(`` +
 		"`lookout watch` is the watch-path half of the binary: a resident\n" +
 		"per-cluster sentinel that turns leading indicators into per-incident agent\n" +
-		"sessions on a core-agent daemon. It is the moved `k8s-event-watcher`: the M0\n" +
-		"flag subset, metric names, and the `k8s-event`/`k8s-event-followup` wire shape\n" +
+		"sessions on a core-agent daemon. It subsumes the predecessor\n" +
+		"`k8s-event-watcher`: that project's flag subset, metric names, and the\n" +
+		"`k8s-event`/`k8s-event-followup` wire shape\n" +
 		"are frozen, so a predecessor deployment swaps images with zero config change.\n\n" +
 		"## Usage\n\n```sh\nlookout watch [flags]\n```\n\n" +
-		"Signal sources are individually enabled via `--sources`; the default\n" +
-		"is exactly the M0 surface (`k8s-events` only). Flags of a disabled source are\n" +
+		"Signal sources are individually enabled via `--sources`; the default,\n" +
+		"`auto`, probes each portable source's needs at startup and enables what the\n" +
+		"deployment supports. Flags of a disabled source are\n" +
 		"still validated — a nonsensical value is a config error in every mode.\n\n" +
 		"## Flags\n\n" +
 		"The table is generated from the sentinel's real flag declarations\n" +
-		"(`internal/watch.FlagInventory`), sorted by name. The M0-frozen subset is\n" +
+		"(`internal/watch.FlagInventory`), sorted by name. The predecessor-frozen\n" +
+		"subset is\n" +
 		"pinned by `TestFlagSurfaceFrozen`: removing or renaming one of those is a\n" +
 		"breaking change to running deployments, never a refactor.\n\n")
 	b.WriteString("| Flag | Type | Default | Meaning |\n| --- | --- | --- | --- |\n")
@@ -203,11 +206,12 @@ func kindsPage() string {
 		"schema doc in the same change.\n\n"+
 		"Every payload carries a stable incident-class `fingerprint` plus\n"+
 		"`cluster`/`project`/`zone` join dimensions — fleet rollup is a join, not a\n"+
-		"parsing project. The one exception is the frozen M0 pair, which stays\n"+
+		"parsing project. The one exception is the frozen reactive pair\n"+
+		"(`k8s-event`, `k8s-event-followup`), which stays\n"+
 		"byte-identical to the original `k8s-event-watcher` and never gains the\n"+
 		"identity fields.\n\n", len(kinds))
 
-	b.WriteString("## Cross-cutting kinds\n\nEmitted by the dispatcher itself (outcome records, storms, watchboard, triage evidence) plus the frozen M0 reactive pair.\n\n")
+	b.WriteString("## Cross-cutting kinds\n\nEmitted by the dispatcher itself (outcome records, storms, watchboard, triage evidence) plus the frozen reactive pair.\n\n")
 	b.WriteString("| Kind | Wire struct | Role |\n| --- | --- | --- |\n")
 	for _, k := range kinds {
 		if k.Source != "" && k.Source != "k8s-events" {
@@ -238,8 +242,9 @@ func metricsPage() string {
 		"Every metric the sentinel serves on --metrics-addr, derived from the registered collectors.")
 	b.WriteString("" +
 		"`lookout watch --metrics-addr=host:port` serves Prometheus metrics on\n" +
-		"`/metrics` (plus `/healthz`). The `k8s_event_watcher_` prefix is frozen from\n" +
-		"M0 — predecessor dashboards and alerts keep working across the image swap.\n\n" +
+		"`/metrics` (plus `/healthz`). The `k8s_event_watcher_` prefix is frozen for\n" +
+		"compatibility with the predecessor project — existing dashboards and alerts\n" +
+		"keep working across the image swap.\n\n" +
 		"Generation note (the documented choice): metric names and help strings are\n" +
 		"derived from the live collectors (`internal/watch.MetricsInventory`); the\n" +
 		"type and label columns are stamped per collector in that inventory because\n" +

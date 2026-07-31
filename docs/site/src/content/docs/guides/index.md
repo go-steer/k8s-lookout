@@ -22,8 +22,8 @@ own cluster, and you will know which commands answer which questions.
 | The incident is over and you need to know what changed before it | [What changed before the incident](/guides/what-changed/) |
 | You'd rather hit quota and capacity limits on your terms than in an outage | [Capacity & quota ahead of time](/guides/capacity-quota/) |
 
-Each guide walks the real workflow, using output captured during the
-milestone exit drills (abridged, never invented):
+Each guide walks the real workflow, using output captured during live
+validation drills (abridged, never invented):
 
 - [Investigate a broken workload](/guides/broken-workload/) — the
   bundle-first flow: root-causing a double fault in one call.

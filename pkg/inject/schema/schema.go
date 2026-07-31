@@ -73,9 +73,9 @@ var kinds = []KindSpec{
 	// Frozen M0 pair (byte-identical to the original watcher; the
 	// dispatcher never stamps §8 identity fields on these).
 	{inject.KindEvent, inject.Payload{}, "k8s-events",
-		"Frozen M0 reactive kind: the opening inject of a per-incident session, byte-identical to the original k8s-event-watcher."},
+		"Frozen reactive kind: the opening inject of a per-incident session, byte-identical to the original k8s-event-watcher."},
 	{inject.KindFollowup, inject.Payload{}, "k8s-events",
-		"Frozen M0 reactive kind: a dedup-window recurrence injected into the already-open incident session."},
+		"Frozen reactive kind: a dedup-window recurrence injected into the already-open incident session."},
 
 	// §7.4 outcome records (the §9.3 ground-truth labels).
 	{inject.KindResolved, inject.ResolvedPayload{}, "",

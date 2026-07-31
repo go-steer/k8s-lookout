@@ -18,7 +18,7 @@ In `--mode=shared` the watchboard is disabled — everything routes to
 Warnings buffer until either `--watchboard-batch` of them accumulate
 (default 5) or the oldest buffered warning reaches `--watchboard-flush`
 in age (default 60s) — whichever comes first. The board session is
-created lazily on the first flush. Captured live in the M2 exit check:
+created lazily on the first flush. Captured live in a validation drill:
 
 ```
 00:58:45 watchboard: buffered objectstate.endpoints_empty weblab/web (severity=warning, buffered=1/5)
@@ -82,12 +82,12 @@ chain is walkable from either end.
 - **Triage-status overrides feed it.** An incident an agent downgraded
   via [`triage status`](/reference/triage-status/) `--severity-override`
   routes its next dedup cycle to the watchboard instead of re-paging —
-  the M4 exit check captured the digest entry carrying the downgraded
+  a live drill captured the digest entry carrying the downgraded
   incident's exact fingerprint.
 
 Per-kind routing is tunable with `--severity kind=level` (repeatable) —
-the M2 drill demoted a default-critical kind to warning
-(`--severity=objectstate.endpoints_empty=warning`) and the M3 drill
+one recorded drill demoted a default-critical kind to warning
+(`--severity=objectstate.endpoints_empty=warning`) and another
 promoted `rollout.stall` to critical for a staging cluster where bad
 deploys are the hunt. The full decision record is
 [`docs/watchboard-rotation-design.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/watchboard-rotation-design.md);
