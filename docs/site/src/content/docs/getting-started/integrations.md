@@ -2,7 +2,7 @@
 title: Integrations
 description: Beyond core-agent — the read path from any MCP client or shell-capable agent, skills portability, and receiving the watch path anywhere over the webhook sink.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 core-agent is the first-class runtime and the default everywhere, but
