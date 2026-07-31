@@ -16,15 +16,14 @@ its bearer token):
 kubectl create namespace agent-triage
 kubectl -n agent-triage create secret generic k8s-event-watcher-token \
   --from-literal=token="$WATCHER_TOKEN"
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=main"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.13.0"
 ```
 
-The manifest on `main` pins the current release image; from the next
-release on, pin `?ref=` to the tag you are deploying instead. The first
-two commands exist because the manifests reference the namespace and
-Secret but deliberately do not create them. From a clone,
-`kubectl apply -k deploy/` applies the same set (use `-k`, not `-f` —
-the directory carries the kustomization).
+Pin `?ref=` to the release you are deploying — each tag's manifest
+pins its matching image. The first two commands exist because the
+manifests reference the namespace and Secret but deliberately do not
+create them. From a clone, `kubectl apply -k deploy/` applies the same
+set (use `-k`, not `-f` — the directory carries the kustomization).
 
 ## What each manifest is
 
