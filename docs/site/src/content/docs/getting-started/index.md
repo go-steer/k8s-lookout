@@ -24,17 +24,20 @@ works without the next:
 2. [First reads](/getting-started/first-run/) — the CLI against your
    current kubeconfig: `lookout health` and `lookout triage delta`, no
    deployment needed.
-3. [Deploy the sentinel](/getting-started/deploy/) — one
+3. [Tutorial](/getting-started/tutorial/) — a ~20-minute end-to-end
+   run on a disposable kind cluster: stage real failures, watch the
+   sentinel open and close incidents.
+4. [Deploy the sentinel](/getting-started/deploy/) — one
    `kubectl apply -k` from the shipped manifests, what each manifest
    is, the RBAC tiers, and the flags that matter.
-4. [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
+5. [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
    — the failure classes it monitors, what is on out of the box, and
    the flag line that turns the rest on.
-5. [Connect to core-agent](/getting-started/connect-core-agent/) — the
+6. [Connect to core-agent](/getting-started/connect-core-agent/) — the
    daemon contract: sessions, injects, per-incident vs shared routing.
-6. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
+7. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
    for agent runtimes that cannot shell out.
-7. [Integrations](/getting-started/integrations/) — beyond core-agent:
+8. [Integrations](/getting-started/integrations/) — beyond core-agent:
    the read path from any MCP client or shell-capable agent, and the
    watch path into any webhook receiver.
 

@@ -21,7 +21,12 @@ The complete specification is [`docs/DESIGN.md`](./docs/DESIGN.md); for
 where things live in the tree, see the
 [repo architecture map](./docs/repo-map.md).
 
-<!-- TODO: link the documentation site once docs/site/ + its Pages deploy workflow land. -->
+**Documentation:** [go-steer.github.io/k8s-lookout](https://go-steer.github.io/k8s-lookout/).
+AI agents installing or operating this: start at
+[the agent guide](https://go-steer.github.io/k8s-lookout/agents/), or
+fetch the whole docs as one file —
+[`llms.txt`](https://go-steer.github.io/k8s-lookout/llms.txt) /
+[`llms-full.txt`](https://go-steer.github.io/k8s-lookout/llms-full.txt).
 
 [![CI](https://github.com/go-steer/k8s-lookout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/go-steer/k8s-lookout/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
