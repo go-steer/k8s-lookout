@@ -7,8 +7,9 @@ description: "The resident per-cluster sentinel: every flag, derived from the li
 
 `lookout watch` is the watch-path half of the binary: a resident
 per-cluster sentinel that turns leading indicators into per-incident agent
-sessions on a core-agent daemon. It is the moved `k8s-event-watcher`: the M0
-flag subset, metric names, and the `k8s-event`/`k8s-event-followup` wire shape
+sessions on a core-agent daemon. It subsumes the predecessor
+`k8s-event-watcher`: that project's flag subset, metric names, and the
+`k8s-event`/`k8s-event-followup` wire shape
 are frozen, so a predecessor deployment swaps images with zero config change.
 
 ## Usage
@@ -17,14 +18,16 @@ are frozen, so a predecessor deployment swaps images with zero config change.
 lookout watch [flags]
 ```
 
-Signal sources are individually enabled via `--sources`; the default
-is exactly the M0 surface (`k8s-events` only). Flags of a disabled source are
+Signal sources are individually enabled via `--sources`; the default,
+`auto`, probes each portable source's needs at startup and enables what the
+deployment supports. Flags of a disabled source are
 still validated — a nonsensical value is a config error in every mode.
 
 ## Flags
 
 The table is generated from the sentinel's real flag declarations
-(`internal/watch.FlagInventory`), sorted by name. The M0-frozen subset is
+(`internal/watch.FlagInventory`), sorted by name. The predecessor-frozen
+subset is
 pinned by `TestFlagSurfaceFrozen`: removing or renaming one of those is a
 breaking change to running deployments, never a refactor.
 
@@ -42,7 +45,7 @@ breaking change to running deployments, never a refactor.
 | `--distill-interval` | duration | `6h0m0s` | How often the distiller pass converts recurring occurrences into durable memory facts (requires --store; the pass reads the last 7d of occurrences). 0 disables distillation. Must be >= 0. |
 | `--dry-run` | bool | — | Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run. |
 | `--enrich` | string | `critical` | Which severities get enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off. |
-| `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (fixed budget, revisited with M2 telemetry). Truncation happens at section boundaries; dropped sections become overflow trailers naming the `lookout` command that reproduces them. |
+| `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (fixed budget). Truncation happens at section boundaries; dropped sections become overflow trailers naming the `lookout` command that reproduces them. |
 | `--enrich-log-lines` | int | `200` | Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1. |
 | `--enrich-timeout` | duration | `5s` | Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0. |
 | `--exclude-namespace` | string | — | Comma-separated deny-list of namespaces. |

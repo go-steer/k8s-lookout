@@ -90,8 +90,7 @@ this"), which is most of what an agent needs; the workflow-level
 decision tree ships as skills in
 [`skills/`](https://github.com/go-steer/k8s-lookout/tree/main/skills).
 
-The M1 exit check smoke-tested the loop end to end: `initialize` →
+The loop is smoke-tested end to end in a live drill: `initialize` →
 `tools/list`, then `tools/call k8s_cluster_health` returned
 `isError:false` with the identical scorecard payload the CLI prints,
-summary line included
-([`docs/milestones/M1.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M1.md)).
+summary line included.

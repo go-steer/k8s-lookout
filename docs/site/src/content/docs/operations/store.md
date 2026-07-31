@@ -16,7 +16,7 @@ graph history: enabled (snapshot every 1m0s + per-delta change log …)
 graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — --at queries answerable from here on
 ```
 
-(Startup lines from the M3 exit check.)
+(Startup lines from a live validation drill.)
 
 ## What's in it
 
@@ -61,14 +61,14 @@ container). The store must sit on a volume you can reach another way:
 
 Copy all of `lookout.db`, `lookout.db-wal`, and `lookout.db-shm` — the
 WAL sidecar files carry recent writes. Copying while the sentinel is
-live is fine: WAL mode absorbs the concurrent reader (the M4 drill
-copied and queried a live store while the sentinel kept writing).
+live is fine: WAL mode absorbs the concurrent reader (a validation
+drill copied and queried a live store while the sentinel kept writing).
 
 ## `--at`: answering questions about the past
 
 Graph-backed commands (`triage radius`, `triage changes`) accept
 `--at=<RFC3339|duration-ago> --store=<copy>` and answer from history —
-no cluster access on the query path. From the M3 exit check, 28m34s
+no cluster access on the query path. From a live drill, 28m34s
 after a bad-deploy onset, against the copied store:
 
 ```console
@@ -114,6 +114,5 @@ The store also upgrades read-path scans:
 [`lookout health --store=…`](/reference/health/) and `bundle --store=…`
 merge open triage-status records into findings — a scan run mid-incident
 carries `triage_status=`, `triage_root_cause=`, the session pointer, and
-the agent's severity override instead of re-reporting a fresh unknown
-(captured end-to-end in
-[`docs/milestones/M4.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M4.md)).
+the agent's severity override instead of re-reporting a fresh unknown —
+captured end-to-end in a live drill.

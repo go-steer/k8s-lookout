@@ -1,6 +1,6 @@
 ---
 title: Catch resource exhaustion early
-description: A staged memory leak, forecast by slope — warning 24 minutes before failure, a critical session 14 minutes before the OOM kill, ETA accurate to 31 seconds. Real M3 drill output.
+description: A staged memory leak, forecast by slope — warning 24 minutes before failure, a critical session 14 minutes before the OOM kill, ETA accurate to 31 seconds. Real captured drill output.
 sidebar:
   order: 3
 ---
@@ -15,7 +15,7 @@ kubelet volume stats) and fits a slope: not "at 54% of limit" but "limit
 reached in ~14m at the observed trend". Deterministic arithmetic, not ML —
 and it owns the time series a one-shot read never had.
 
-All output below is from the M3 exit drill, abridged: pod `drill-b/leaker`
+All output below is from a live validation drill, abridged: pod `drill-b/leaker`
 with a 64Mi memory limit, leaking ~1MiB every 30s, started 10:50:27. The
 drill ran `--saturation-window=10m` (production default 90m).
 

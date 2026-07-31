@@ -26,8 +26,8 @@ package checks
 // clients (specKinds table below); anything else resolves its
 // group/version/resource via discovery and reads through the dynamic
 // client. `--diff` against the previous graph-history revision is
-// deliberately a registered-but-unavailable surface until history
-// lands in M3 (§6.6).
+// deliberately a registered-but-unavailable surface until the
+// store-backed diff is implemented (§6.6).
 
 import (
 	"context"
@@ -181,7 +181,7 @@ func SpecCommand(deps SpecDeps) Command {
 		},
 		Flags: []emit.FlagSpec{
 			{Name: "diff", Type: emit.FlagBool, Default: "false",
-				Help: "diff against the previous graph-history revision — requires a sentinel store; lands in M3 (§6.6)"},
+				Help: "diff against the previous graph-history revision — requires a sentinel store; not yet implemented (§6.6)"},
 		},
 		Output: []OutputField{
 			{Name: "labels", Doc: "resource labels as sorted k=v pairs"},
@@ -253,7 +253,7 @@ type specTarget struct {
 
 func runSpec(ctx context.Context, deps SpecDeps, inv emit.Invocation) (int, error) {
 	if inv.Flags.Bool("diff") {
-		return 0, emit.UsageErrorf("--diff requires a sentinel store; lands in M3 (§6.6)")
+		return 0, emit.UsageErrorf("--diff is not yet implemented (§6.6)")
 	}
 	target, err := resolveSpecTarget(inv)
 	if err != nil {

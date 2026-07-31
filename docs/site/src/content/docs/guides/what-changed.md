@@ -1,6 +1,6 @@
 ---
 title: What changed before the incident
-description: Post-mortems with --at — blast radius and change timeline as of onset, answered offline from a copied sentinel store, 29 minutes after the cluster moved on. Real M3 drill output.
+description: Post-mortems with --at — blast radius and change timeline as of onset, answered offline from a copied sentinel store, 29 minutes after the cluster moved on. Real captured drill output.
 sidebar:
   order: 5
 ---
@@ -15,7 +15,7 @@ A sentinel running with `--store` records exactly that topology: periodic
 graph snapshots plus a per-delta change log in its SQLite store. The
 graph-backed commands accept `--at=<RFC3339|duration-ago>` with
 `--store=<file>` and answer as of that instant. All output below is from
-the M3 exit drill, abridged.
+a live validation drill, abridged.
 
 The setting: a bad deploy of `drill-a/webapp` stalled at **10:54:55** (the
 onset — see [Your rollout is stuck](/guides/stuck-rollout/)); it was
@@ -99,7 +99,7 @@ Always check `source=` before trusting a historical answer:
 Two current limits, found and documented by the drill: replay cannot cross
 a sentinel restart (query within one incarnation), and historical targets
 must be a Pod or ReplicaSet (the sentinel graph feed holds Deployments
-identity-only). The M3 milestone record tracks both.
+identity-only). Both are known, tracked gaps.
 
 ## As an agent skill
 

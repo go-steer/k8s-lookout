@@ -25,8 +25,7 @@
 // derivations, and the log-target resolution; the spec section
 // renders the very object that List returned. Findings carry a
 // `section` field (spec|delta|edges|radius|logs) so the stream reads
-// as one document. A `triage events` section joins in M3 when that
-// command exists.
+// as one document.
 package bundle
 
 import (
@@ -108,7 +107,7 @@ func New(deps Deps) checks.Command {
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override"},
 		},
 		Output: append([]checks.OutputField{
-			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs (a triage-events section joins in M3)"},
+			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
 			{Name: "hop", Doc: "radius neighbor's BFS depth from the target (1 = direct edge)"},

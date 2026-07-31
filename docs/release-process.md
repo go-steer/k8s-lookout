@@ -17,6 +17,8 @@ wrong flavor with nothing to catch it.
    - `deploy/51-deployment-watcher.yaml`: bump the image pin to
      `vX.Y.Z`. The release workflow's preflight guard refuses to tag
      on a stale pin.
+   - `docs/site/src/content/docs/getting-started/deploy.md`: bump the
+     `?ref=vX.Y.Z` in the `kubectl apply -k` line to match.
 2. **Tag**: `git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
 3. **The workflow does the rest** (`.github/workflows/release-images.yml`):
    - preflight: deploy/51 pin == tag;

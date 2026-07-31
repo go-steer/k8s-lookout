@@ -1,6 +1,6 @@
 ---
 title: Investigate a broken workload
-description: The bundle-first flow — root-causing a double fault in one call, then narrowing with targeted reads. Real output from the M1 exit check.
+description: The bundle-first flow — root-causing a double fault in one call, then narrowing with targeted reads. Real captured drill output.
 sidebar:
   order: 1
 ---
@@ -10,7 +10,7 @@ In this (real) case it was broken twice over: the image was updated to a
 nonexistent tag (`busybox:1.36-nonexistent-m1`), *and* the ConfigMap key
 its pod template references (`log.level`) was deleted. A healthy
 Deployment (`web`) runs alongside. All output below is captured from the
-M1 exit check on a kind cluster, abridged.
+a live validation drill on a kind cluster, abridged.
 
 ## 1. `bundle` first — one correlated payload
 
@@ -110,7 +110,7 @@ instead of silence.
 3. Sudden regression instead? Ask
    [what changed](/guides/what-changed/) *first*.
 
-In the M1 exit check this double fault was fully root-caused with `lookout`
+In the drill this double fault was fully root-caused with `lookout`
 reads alone — no kubectl was needed for the diagnosis.
 
 ## As an agent skill

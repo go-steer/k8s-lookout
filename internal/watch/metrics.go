@@ -109,7 +109,7 @@ func newMetrics() *metrics {
 		}, []string{"reason", "http_code"}),
 		sessionCreates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_session_creates_total",
-			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Frozen name from M0.",
+			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Name frozen for predecessor compatibility.",
 		}, []string{"outcome"}),
 		activeIncidents: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "k8s_event_watcher_active_incidents",
@@ -169,7 +169,7 @@ func newMetrics() *metrics {
 		}),
 		infoDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_info_dropped_total",
-			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting. Frozen name from M2.",
+			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting.",
 		}, []string{"kind"}),
 		storeRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_store_records_total",
@@ -219,11 +219,11 @@ func newMetrics() *metrics {
 		}),
 		triageRegressed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_triage_regressed_total",
-			Help: "Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time (M4 observation 3). Evidence only, never a re-page.",
+			Help: "Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time. Evidence only, never a re-page.",
 		}),
 		crossSourceFollowups: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_cross_source_followups_total",
-			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (M4 observation 4 — leading/reactive joins made session-visible), by joining source family.",
+			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (leading/reactive joins made session-visible), by joining source family.",
 		}, []string{"source"}),
 		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "k8s_event_watcher_sink_info",

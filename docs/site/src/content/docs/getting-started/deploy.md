@@ -5,18 +5,25 @@ sidebar:
   order: 3
 ---
 
-The watch-path — `lookout watch`, the resident per-cluster sentinel —
-deploys from the shipped manifests:
+The sentinel — `lookout watch`, the resident per-cluster watcher —
+deploys from the shipped manifests, no clone needed. Three commands,
+assuming a core-agent daemon is answering at the in-cluster
+`--daemon-url` (wiring the daemon is the
+[next page](/getting-started/connect-core-agent/); `$WATCHER_TOKEN` is
+its bearer token):
 
 ```sh
-kubectl apply -f deploy/
+kubectl create namespace agent-triage
+kubectl -n agent-triage create secret generic k8s-event-watcher-token \
+  --from-literal=token="$WATCHER_TOKEN"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=main"
 ```
 
-Three prerequisites a real deployment already has (the shipped manifests
-reference them but do not create them): the `agent-triage` namespace, a
-`k8s-event-watcher-token` Secret holding the daemon bearer token, and a
-core-agent daemon answering at the `--daemon-url` — wiring the daemon is
-the [next page](/getting-started/connect-core-agent/).
+The manifest on `main` pins the current release image; from the next
+release on, pin `?ref=` to the tag you are deploying instead. The first
+two commands exist because the manifests reference the namespace and
+Secret but deliberately do not create them. From a clone,
+`kubectl apply -f deploy/` applies the same set.
 
 ## What each manifest is
 
@@ -27,7 +34,7 @@ the [next page](/getting-started/connect-core-agent/).
 | `13-clusterrolebinding-watcher.yaml` | Binds the ServiceAccount to the ClusterRole. |
 | `14-role-watcher-capacity.yaml` | A `kube-system`-namespaced Role for the capacity source's one extra read: `get` on the `cluster-autoscaler-status` ConfigMap, pinned by `resourceNames` rather than widening the ClusterRole. Only the capacity source needs it — under `--sources=auto` its absence skips the source loudly; with capacity named explicitly it is fatal. |
 | `15-rolebinding-watcher-capacity.yaml` | Binds the ServiceAccount to the capacity Role. |
-| `16-networkpolicy-watcher.yaml` | Default-deny ingress for the sentinel pod (#87): only same-namespace scrapers reach `/metrics` + `/healthz` on `:9090`, since that surface is an incident-topology map a co-tenant should not scrape. Admit off-namespace monitoring (e.g. a `gmp-system` namespace) by uncommenting the `namespaceSelector` block. **Inert without an enforcing CNI** — if your CNI does not enforce NetworkPolicy the manifest is a no-op, and the Secret-read RBAC tradeoff in `deploy/12` still applies. Egress is left unrestricted (the API server, daemon, and cloud API addresses are environment-specific). |
+| `16-networkpolicy-watcher.yaml` | Default-deny ingress for the sentinel pod: only same-namespace scrapers reach `/metrics` + `/healthz` on `:9090`, since that surface is an incident-topology map a co-tenant should not scrape. Admit off-namespace monitoring (e.g. a `gmp-system` namespace) by uncommenting the `namespaceSelector` block. **Inert without an enforcing CNI** — if your CNI does not enforce NetworkPolicy the manifest is a no-op, and the Secret-read RBAC tradeoff in `deploy/12` still applies. Egress is left unrestricted (the API server, daemon, and cloud API addresses are environment-specific). |
 | `51-deployment-watcher.yaml` | The sentinel Deployment: one replica, distroless image, nonroot, `/healthz` liveness/readiness probes on the metrics port, and the shipped `args:`. A separate Deployment from the daemon (not a sidecar) so the two scale and restart independently; for another cluster, copy it and change `--cluster-name` + `--daemon-url`. |
 
 One deliberate tradeoff to know about: the expiry source's `secrets`
@@ -73,10 +80,11 @@ requirements table.
 The shipped `args:` in `51-deployment-watcher.yaml` carry the wiring
 (`--daemon-url`, `--token-env`, `--mode=per-incident`, `--owner`,
 `--cluster-name`, `--dedup-window=5m`, `--in-cluster`,
-`--metrics-addr=:9090`, `--log-level=info`) plus the full capability
-surface pinned explicitly: all seven portable sources and
-`token-burn`, `--storm=on`, and a `--store` on an emptyDir volume.
-The capability flags:
+`--metrics-addr=:9090`, `--log-level=info`) plus `--storm=on` and a
+`--store` on an emptyDir volume; sources ride the binary's
+`--sources=auto` default, so the manifest enables everything its RBAC
+supports and runs unchanged on platforms that deny a grant to every
+principal. The capability flags:
 
 - **`--sources`** — which signal sources run. The default is `auto`:
   probe every portable source's needs at startup — RBAC per source,
@@ -126,10 +134,9 @@ The capability flags:
 The generated [`lookout watch` reference](/reference/watch/) is the full
 table of all 57 flags, derived from the live flag surface.
 
-A battle-tested full-capability flag set — the exact args the M3 exit
-drill appended to the shipped set
-([`docs/milestones/M3.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M3.md);
-drill-tuned values marked):
+A battle-tested full-capability flag set — the exact args a live
+validation drill appended to the shipped set (drill-tuned values
+marked):
 
 ```
 --sources=k8s-events,object-state,rollout,saturation,degradation,expiry

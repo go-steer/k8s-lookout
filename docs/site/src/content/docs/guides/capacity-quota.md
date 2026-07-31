@@ -1,6 +1,6 @@
 ---
 title: Capacity & quota ahead of time
-description: The correlated quota incident with a drafted increase request attached, and the proactive cloud sweeps — stockout, quota, IP space. Real output from the M4 exit check.
+description: The correlated quota incident with a drafted increase request attached, and the proactive cloud sweeps — stockout, quota, IP space. Real captured drill output.
 sidebar:
   order: 6
 ---
@@ -12,7 +12,7 @@ a multi-day increase-request turnaround in the middle of it.
 
 Two halves to staying ahead of it: the resident `quota`/`capacity` sources
 (watch-path, one quota source per GCP project), and the on-demand `cloud`
-sweeps (read-path). Output below is from the M4 exit check — the engine
+sweeps (read-path). Output below is from a live validation drill — the engine
 legs run the real merged pipeline over recorded cloud fixtures per the
 standing drill policy, the Kubernetes legs live on kind; all abridged.
 

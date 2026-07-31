@@ -435,7 +435,7 @@ func TestSpecTargetUsageErrors(t *testing.T) {
 		{"too many segments", []string{"Pod/a/b/c"}, "invalid resource reference"},
 		{"empty segment", []string{"Pod//x"}, "invalid resource reference"},
 		{"-A rejected", []string{"Pod/prod/x", "-A"}, "exactly one resource"},
-		{"--diff before M3", []string{"Pod/prod/x", "--diff"}, "lands in M3 (§6.6)"},
+		{"--diff unimplemented", []string{"Pod/prod/x", "--diff"}, "not yet implemented (§6.6)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

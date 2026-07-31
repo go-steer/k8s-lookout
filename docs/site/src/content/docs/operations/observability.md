@@ -13,9 +13,9 @@ probes both hit it.
 
 ## Metrics
 
-The `k8s_event_watcher_` prefix is frozen from M0, so predecessor
-dashboards and alerts keep working across the image swap. A real scrape
-from the M0 exit check:
+The `k8s_event_watcher_` prefix is frozen for compatibility with the
+predecessor project, so existing dashboards and alerts keep working
+across the image swap. A real scrape from a live validation drill:
 
 ```
 k8s_event_watcher_events_seen_total{namespace="default",reason="BackOff"} 4
@@ -51,8 +51,8 @@ load gauges worth graphing rather than alerting on.
 ## The startup log is a checklist
 
 Every armed stage announces itself, and every degradation is a named
-line — read it once after each deploy or flag change. From the recorded
-M2/M3 runs:
+line — read it once after each deploy or flag change. From recorded
+drill runs:
 
 ```
 storm: topology graph ready (54 nodes, 68 edges)

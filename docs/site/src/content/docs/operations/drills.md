@@ -6,8 +6,9 @@ sidebar:
 ---
 
 [`dev/drills/`](https://github.com/go-steer/k8s-lookout/tree/main/dev/drills)
-contains runbooks that replay each milestone's exit criterion against a
-**real GKE staging cluster**, plus the fixtures they use:
+contains runbooks that replay the scenarios `lookout` is validated
+against — staged failures, run against a **real GKE staging cluster** —
+plus the fixtures they use:
 
 - [`stub-daemon.py`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/stub-daemon.py)
   — a small capture daemon implementing `POST /sessions` and
@@ -35,12 +36,12 @@ warning; take it literally.
 
 ## The drills
 
-| Runbook | What it proves | Recorded original |
+| Runbook | What it proves | Recorded run |
 | --- | --- | --- |
 | [`node-failure.md`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/node-failure.md) | Storm correlation + fix-verify: a killed node produces **1 storm session, not 30** (the kind run: 3 session creates for 33 affected objects), and recovery injects close every member without any agent polling. Includes the VM-stop-vs-drain distinction — a graceful drain exercises a different storm key and is the rehearsal, not the replay. | [`docs/milestones/M2.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M2.md) |
 | [`bad-deploy.md`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/bad-deploy.md) | A bad rollout under `maxUnavailable=0` fires `rollout.stall` on the Deployment (~3m, ahead of `progressDeadlineSeconds` by ~5m) while users keep getting 200s from the old revision; plus the post-mortem half — copying the store off the node and answering "blast radius at onset" with `--at` after the cluster has moved on. | [`docs/milestones/M3.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M3.md) |
 | [`memory-leak.md`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/memory-leak.md) | A slow leaker under a memory limit produces `saturation.forecast` — ETA and confidence basis attached — while the pod is still Running/Ready, minutes before the kernel OOM-kills it (kind run: critical session 14 minutes before the OOM, forecast ETA accurate to 31 seconds). Explains the window-vs-drill-time tradeoff (`--saturation-window`). | [`docs/milestones/M3.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M3.md) |
-| [`quota-exhaustion.md`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/quota-exhaustion.md) | The full quota story against real GCP APIs: a quota driven toward its limit yields `quota.forecast` with the drafted increase request attached; the autoscaler slamming into it folds into the **same** incident; filing the draft goes through the permission gate (you run the `gcloud` command — `lookout` only reads); plus the mid-incident `health --store` triage-state check. Maps every milestone fixture to the real API it stands in for. | [`docs/milestones/M4.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M4.md) |
+| [`quota-exhaustion.md`](https://github.com/go-steer/k8s-lookout/blob/main/dev/drills/quota-exhaustion.md) | The full quota story against real GCP APIs: a quota driven toward its limit yields `quota.forecast` with the drafted increase request attached; the autoscaler slamming into it folds into the **same** incident; filing the draft goes through the permission gate (you run the `gcloud` command — `lookout` only reads); plus the mid-incident `health --store` triage-state check. Maps every test fixture to the real API it stands in for. | [`docs/milestones/M4.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/milestones/M4.md) |
 
 The runbooks share infrastructure deliberately: the same stub daemon,
 the same `deploy/` manifests applied unmodified, and flag sets that
@@ -50,6 +51,6 @@ with drill-tuned values (shorter windows, faster snapshots) marked
 against the production defaults.
 
 Keep the captures. Stub logs, sentinel logs, metrics scrapes, and the
-copied store are the drill record — the milestone documents linked above
+copied store are the drill record — the recorded runs linked above
 are exactly that material for the original runs, and the resolved
 payloads in yours are corpus records.

@@ -6,7 +6,7 @@ Argument:
   <Kind>/[<namespace>/]<name>  the resource to read; Kind is case-insensitive, accepts the aliases po=Pod, deploy=Deployment, rs=ReplicaSet, sts=StatefulSet, ds=DaemonSet, svc=Service, cm=ConfigMap, pvc=PersistentVolumeClaim, ing=Ingress, netpol=NetworkPolicy, no=Node, and unlisted kinds (CRDs) resolve via API discovery (qualify as <Kind>.<group> if ambiguous). Omit <namespace> for cluster-scoped kinds, or to use --namespace (falling back to "default"). --workload=<Kind>/<ns>/<name> is the flag-shaped alternative.
 
 Flags:
-  --diff  diff against the previous graph-history revision — requires a sentinel store; lands in M3 (§6.6)
+  --diff  diff against the previous graph-history revision — requires a sentinel store; not yet implemented (§6.6)
 
 Common flags (every lookout command):
   --namespace=<string>  limit the scan to one namespace

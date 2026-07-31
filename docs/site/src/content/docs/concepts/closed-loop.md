@@ -25,7 +25,7 @@ into the *same session*, carrying `cleared_after`, `observed_stable_for`,
 and a structured `resolution` (`recovered` or `object_deleted`). Recurrence
 within the window fires `kind=resolved.reverted` instead.
 
-From the M2 drill: a crashlooping pod's ConfigMap was patched, nothing else
+From a live drill: a crashlooping pod's ConfigMap was patched, nothing else
 touched — 76 seconds later (stability window + one tracker tick) the
 incident's session received, with zero polling by anyone:
 
@@ -106,8 +106,8 @@ store. Three consumers honor it:
 `--status` accepts only the agent-written states
 (`investigating|triaged|actioned|escalated`); `resolved` is reserved for
 the sentinel's observed-stability flip, so the outcome labels stay
-trustworthy. The [capacity guide](/guides/capacity-quota/) and the M4
-milestone record show the whole flow live.
+trustworthy. The [capacity guide](/guides/capacity-quota/) shows the
+whole flow live.
 
 ## Why sessions, not alerts
 

@@ -1,6 +1,6 @@
 ---
 title: A node just died
-description: Storm correlation in practice — 33 affected objects, one storm session, and the full member/update/resolved lifecycle. Real output from the M2 exit drill.
+description: Storm correlation in practice — 33 affected objects, one storm session, and the full member/update/resolved lifecycle. Real captured drill output.
 sidebar:
   order: 4
 ---
@@ -12,7 +12,7 @@ none of which mentions the actual cause.
 With storm correlation on (`--storm=auto`, the default, resolves on
 when the graph grants are present), the sentinel groups incidents sharing a **blast-radius
 key** — the nearest common ancestor in the topology graph — into one
-`kind=storm` session. All output below is from the M2 exit drill,
+`kind=storm` session. All output below is from a live validation drill,
 abridged: 30 victim pods pinned to `kl-m2-worker2`, then
 `docker stop kl-m2-worker2` at 00:50:38 — a hard kubelet death.
 
@@ -74,8 +74,7 @@ sentinel injects schema-stable `kind=storm.update` refreshes
 (`affected_count`, `namespaces_count`, `new_members_since_last`) so the
 headline size is readable without folding the whole session. (That
 followup kind exists *because* this drill showed the formation payload
-underselling the final blast radius — the gap and its fix are in the M2
-milestone record.)
+underselling the final blast radius.)
 
 ## Recovery: the storm collapses the bookkeeping too
 
