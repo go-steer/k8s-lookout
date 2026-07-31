@@ -35,6 +35,15 @@ fetch the whole docs as one file —
 
 ## Install
 
+**Prebuilt binaries** (v0.13.0+; Linux/macOS amd64 + arm64, Windows
+amd64; both flavors; keyless-signed checksums) on the
+[releases page](https://github.com/go-steer/k8s-lookout/releases/latest):
+
+```sh
+gh release download -R go-steer/k8s-lookout -p 'lookout_*_linux_amd64.tar.gz'
+tar -xzf lookout_*_linux_amd64.tar.gz && sudo install lookout /usr/local/bin/
+```
+
 **Container images** (multi-arch amd64 + arm64; distroless static;
 Sigstore-signed):
 
