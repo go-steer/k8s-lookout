@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `deploy/kustomization.yaml`: the sentinel now installs without a
   clone — `kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=vX.Y.Z"`.
+  From a clone, use `kubectl apply -k deploy/` — `apply -f` on the
+  directory no longer works (it chokes on the kustomization file);
+  `examples/sentinel/up` updated accordingly.
 
 ### Changed
 

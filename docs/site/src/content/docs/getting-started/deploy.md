@@ -1,8 +1,8 @@
 ---
 title: Deploy the sentinel
-description: kubectl apply -f deploy/ — what each manifest is, the RBAC tiers, namespace-tier caveats, and a walkthrough of the flags that matter.
+description: One kubectl apply -k, no clone — what each manifest is, the RBAC tiers, namespace-tier caveats, and a walkthrough of the flags that matter.
 sidebar:
-  order: 3
+  order: 4
 ---
 
 The sentinel — `lookout watch`, the resident per-cluster watcher —
@@ -23,7 +23,8 @@ The manifest on `main` pins the current release image; from the next
 release on, pin `?ref=` to the tag you are deploying instead. The first
 two commands exist because the manifests reference the namespace and
 Secret but deliberately do not create them. From a clone,
-`kubectl apply -f deploy/` applies the same set.
+`kubectl apply -k deploy/` applies the same set (use `-k`, not `-f` —
+the directory carries the kustomization).
 
 ## What each manifest is
 
