@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-31
+
+The adoption release, driven by feedback from the first outside users:
+the docs now read as user docs — the three surfaces (the `lookout`
+CLI, the MCP server, the in-cluster sentinel) are named up front, and
+internal milestone references are gone from prose and runtime strings
+alike; the sentinel installs with one `kubectl apply -k`, no clone;
+the site publishes an agent-optimized surface (`llms.txt`, a curated
+`/agents/` guide, and a 20-minute tutorial whose every output block
+was captured live); and releases now ship prebuilt workstation
+binaries for Linux, macOS, and Windows in both flavors, with
+keyless-signed checksums.
+
 ### Added
 
 - Prebuilt release binaries: every release now attaches workstation
