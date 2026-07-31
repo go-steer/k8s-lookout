@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
+import starlightLlmsTxt from 'starlight-llms-txt';
 import { remarkPrependBase } from './src/plugins/remark-prepend-base.mjs';
 
 const BASE = '/k8s-lookout';
@@ -47,6 +48,19 @@ export default defineConfig({
           content: "document.documentElement.dataset.theme = 'light';",
         },
       ],
+      // llms.txt / llms-full.txt / llms-small.txt at the site root,
+      // built from the same content collection as the pages — the
+      // agent-facing mirror of the site (llmstxt.org convention).
+      // /agents/ is the curated entry point and sorts first.
+      plugins: [
+        starlightLlmsTxt({
+          projectName: 'k8s-lookout',
+          description:
+            'Cluster diagnostics for AI troubleshooting agents: one binary with three surfaces — the lookout CLI, an MCP server (lookout mcp), and an in-cluster sentinel (lookout watch). Read-only against the cluster, secret-safe, token-dense output. Start at "Using k8s-lookout from an AI agent" for install and setup tasks.',
+          promote: ['agents', 'getting-started/**'],
+          demote: ['reference/**'],
+        }),
+      ],
       // Palette + typography live in one file so the whole visual
       // system is swappable.
       customCss: ['./src/styles/theme.css'],
@@ -63,7 +77,10 @@ export default defineConfig({
       sidebar: [
         {
           label: 'Overview',
-          items: [{ label: 'Introduction', link: '/' }],
+          items: [
+            { label: 'Introduction', link: '/' },
+            { label: 'For AI agents', link: '/agents/' },
+          ],
         },
         {
           label: 'Getting started',

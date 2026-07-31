@@ -2,7 +2,7 @@
 title: MCP setup
 description: lookout mcp — every read command as an MCP tool over stdio or loopback HTTP, and why the HTTP transport is loopback-only.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 Every read-path command is also exposed 1:1 as an MCP tool:

@@ -2,7 +2,7 @@
 title: What the sentinel watches
 description: The failure classes the sentinel monitors, which signal source covers each, and what --sources=auto (the default) turns on by probing your deployment's grants.
 sidebar:
-  order: 4
+  order: 5
 ---
 
 The sentinel is one process per cluster, and what it watches is the

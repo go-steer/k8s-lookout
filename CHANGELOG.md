@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent-facing docs surface: the site now publishes `llms.txt`,
+  `llms-full.txt`, and `llms-small.txt` (llmstxt.org convention, via
+  starlight-llms-txt), a curated "Using k8s-lookout from an AI agent"
+  entry page (`/agents/`), and a ~20-minute end-to-end tutorial
+  (`/getting-started/tutorial/`) built on `examples/` with real
+  captured output — kind cluster, staged crashloop, user-invisible bad
+  deploy, and the verified `resolved` closing the loop.
+
 - `deploy/kustomization.yaml`: the sentinel now installs without a
   clone — `kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=vX.Y.Z"`.
   From a clone, use `kubectl apply -k deploy/` — `apply -f` on the

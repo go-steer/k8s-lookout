@@ -2,7 +2,7 @@
 title: Connect to core-agent
 description: The daemon contract — sessions and injects, per-incident vs shared routing, tokens and asserted callers, and what an inject looks like on the wire.
 sidebar:
-  order: 5
+  order: 6
 ---
 
 The sentinel speaks to a
