@@ -61,6 +61,10 @@
 
   /* Content measure + type scale */
   --sl-content-width: 62rem;
+  /* Width of the right "on this page" rail (see the rail rules below).
+   * Starlight has no dedicated variable for it — it reuses
+   * --sl-sidebar-width, which we leave at 18.75rem for the left nav. */
+  --toc-rail-width: 13.5rem;
   /* Anchor content to the left nav; spare width falls to the right
    * instead of pooling as a gutter between nav and content. */
   --sl-content-margin-inline: 0 auto;
@@ -243,18 +247,18 @@
 }
 
 /* --- Tables ---
- * Fix identifier wrapping in the first column: tool names like
- * `read_many_files` were breaking at underscores. Also prevent any
- * inline code inside a table cell from wrapping mid-token.
+ * Prevent inline code inside a table cell from wrapping mid-token:
+ * identifiers like `read_many_files` were breaking at underscores.
+ * This also keeps identifier-first reference tables tidy (their first
+ * column is a backticked code span). Prose cells — including prose
+ * first columns, as in the coverage map — stay free to wrap; a blanket
+ * first-column nowrap forced tables with sentence-length first cells
+ * into horizontal scrolling at every viewport width.
  */
 .sl-markdown-content table code {
   white-space: nowrap;
   word-break: keep-all;
   overflow-wrap: normal;
-}
-.sl-markdown-content table td:first-child,
-.sl-markdown-content table th:first-child {
-  white-space: nowrap;
 }
 .sl-markdown-content table {
   /* Scroll-contain wide tables instead of letting min-content width
@@ -293,7 +297,23 @@
   .right-sidebar-container {
     /* Flat width: Starlight's own formula grows the rail with the
      * viewport; a table of contents never needs more than this. */
-    width: 13.5rem;
+    width: var(--toc-rail-width);
+  }
+  /* The inner rail is position:fixed with Starlight's width:100% —
+   * which resolves against the VIEWPORT, not the container. Stock
+   * Starlight hides that by growing the container to the screen edge;
+   * our flat rail + capped pane leave whitespace to the right, so the
+   * viewport-wide fixed panel (and its border) would paint across it,
+   * making the TOC read as a column that swallows all spare width.
+   * Pin it to the rail's own width. */
+  .right-sidebar {
+    width: var(--toc-rail-width);
+  }
+  /* Starlight also hard-sizes the TOC's inner container from
+   * --sl-sidebar-width (18.75rem − padding = wider than our rail),
+   * which would clip the link text instead of wrapping it. */
+  .right-sidebar .sl-container {
+    width: calc(var(--toc-rail-width) - 2 * var(--sl-sidebar-pad-x));
   }
   /* Cap the pane holding the content column so the TOC rail sits
    * immediately to the content's right; spare viewport width falls
