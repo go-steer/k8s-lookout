@@ -66,7 +66,7 @@ no incident-class identity), and the §9.4 triage-status join has used
 this exact recipe since M4. Parity is pinned by
 `TestFingerprintParity_PushAndScan`.
 
-## Kind inventory (v1: 40 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, additive-only)
+## Kind inventory (v1: 41 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -81,6 +81,7 @@ Cross-cutting kinds, each with its own schema-stable struct
 | `watchboard.digest` | `WatchboardDigestPayload` | §7.7 warning batch |
 | `watchboard.rotated` | `WatchboardRotatedPayload` | §15 Q2 rotation pointer |
 | `triage.regressed` | `TriageRegressedPayload` | §9.4 regression evidence |
+| `family.member` | `FamilyMemberPayload` | §10.3 cross-source join notice (added post-M5, #132): a different source family attached to the session's incident — max one per source family per incident per window; never fanned out to storm sessions (§7.5). Carries the joining signal's identity, the canonical `family`, the `opened_by` source family, and `design_ref` |
 
 Source-namespaced kinds — all ride `Payload`: `objectstate.
 node_notready|node_flapping|progress_deadline|endpoints_empty|
@@ -128,9 +129,9 @@ outcome record, which always carries `fingerprint`.
 `reverted_after`\*, `context`. Durations are Go `time.Duration`
 strings (`"2m30s"`): fixed grammar, parseable without NLP (§9.3).
 
-Storm / watchboard / triage.regressed field sets: see the ledger in
-`schema_freeze_test.go` — reproduced there field-for-field with the
-same ordering the wire emits.
+Storm / watchboard / triage.regressed / family.member field sets: see
+the ledger in `schema_freeze_test.go` — reproduced there
+field-for-field with the same ordering the wire emits.
 
 ## §9.3 harvestability
 

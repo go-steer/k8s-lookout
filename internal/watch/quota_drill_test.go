@@ -412,7 +412,10 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 	}
 	followup := finalInjects[2]
 	for _, want := range []string{
-		`\"kind\":\"` + capacity.KindQuotaBlocked + `\"`,
+		`\"kind\":\"` + inject.KindFamilyMember + `\"`,
+		`\"member_kind\":\"` + capacity.KindQuotaBlocked + `\"`,
+		`\"family\":\"QuotaExhausted\"`,
+		`\"opened_by\":\"quota\"`,
 		`\"uid\":\"quota:CPUS/us-east1\"`,
 	} {
 		if !strings.Contains(followup, want) {

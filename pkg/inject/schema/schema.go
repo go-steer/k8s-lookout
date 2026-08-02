@@ -104,6 +104,10 @@ var kinds = []KindSpec{
 	{inject.KindTriageRegressed, inject.TriageRegressedPayload{}, "",
 		"§9.4 regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page."},
 
+	// §10.3 cross-source join notice.
+	{inject.KindFamilyMember, inject.FamilyMemberPayload{}, "",
+		"§10.3 cross-source join: a signal from a different source family attached to this session's incident (leading↔reactive) — at most one per source family per incident per dedup window; storm members never fan these out."},
+
 	// Source-namespaced kinds (§7.3): all ride inject.Payload with
 	// the full §8 identity stamped.
 	{objectstate.KindNodeNotReady, inject.Payload{}, "object-state",
