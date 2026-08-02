@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ingress` signal source (#135, half 1 — GCLB/Ingress health, event
+  reasons): the ingress-gce controller's failure events, today the
+  only in-cluster evidence that GCLB programming is failing while the
+  Ingress object looks fine. Three new kinds (signal-schema v1 grows
+  37 → 40, append-only): `ingress.sync_failed` /
+  `ingress.translate_failed` (Warning `Sync` / `Translate` on an
+  Ingress) and `ingress.neg_failed` (NEG sync/attach/detach/retry
+  failures on a Service). The source owns these reasons with its own
+  Warning-only Event informer (the capacity-source precedent) — a
+  default k8s-events allow-list entry was disqualified because
+  ingress-gce reuses reason `Sync` for Normal housekeeping events and
+  the reactive path carries no event type. Rides the existing events
+  grant (no new RBAC) and auto-enables under `--sources=auto`. The
+  metrics half of #135 (LB backend unhealthy ratios) stays open.
+
 ## [0.13.0] - 2026-07-31
 
 The adoption release, driven by feedback from the first outside users:

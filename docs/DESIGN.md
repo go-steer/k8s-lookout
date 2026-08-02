@@ -151,7 +151,8 @@ all `k8s.io/*` dependencies from its `go.mod`.
 cluster** — the entire `triage` group, `state edges|webhooks|volumes`,
 `stab drift|drain`, `bundle`, `health`, `net probe`, the topology index, and
 the sentinel sources `k8s-events`, `object-state`, `rollout`, `saturation`
-(metrics.k8s.io + kubelet stats), `degradation`, `expiry`, and `token-burn`.
+(metrics.k8s.io + kubelet stats), `degradation`, `expiry`, `ingress` (pure
+client-go — it reads the Events ingress-gce writes), and `token-burn`.
 The GKE/GCP surface is small and enumerable: the `cloud` command group,
 `state wi`, the `perf probe` backend, the `quota` source, and one of the three
 cluster-autoscaler sub-sources (§10.1).
@@ -515,6 +516,7 @@ type Source interface {
 | `degradation` | leading (trend) | EndpointSlice ready ratios, probe flaps below the `Unhealthy` threshold | "payment-backend capacity 5/5 → 3/5 over 10 min" |
 | `expiry` | leading (countdown) | TLS secrets, webhook CA bundles, SA key ages, cert-manager status | "cert expires in 72 h and last renewal failed" |
 | `capacity` | leading + reactive | CA events, `cluster-autoscaler-status` ConfigMap, GKE CA visibility logs (§10.1) | scaleup failed (`GCE_STOCKOUT` / `GCE_QUOTA_EXCEEDED`), pending-pod aging, headroom trend |
+| `ingress` | reactive | ingress-gce controller events, own Warning-only Event informer filter (post-M5 #135; the capacity-source reason-ownership precedent — ingress-gce reuses reason `Sync` for Normal housekeeping, so the k8s-events allow-list can never carry it) | GCLB programming failures while the Ingress object looks fine: `Sync`/`Translate` errors on an Ingress, NEG sync/attach failures on a Service |
 | `quota` | leading (countdown) | Cloud Quotas + Monitoring quota metrics, per **project** (§10.2) | "CPUS us-east1 at 91%, exhausted in ~6 days at current slope" |
 | `notifications` | reactive (provider announcements) | provider cluster-notification stream, per **project** (GKE notificationConfig Pub/Sub; post-M5 #130) | upgrade started on a node pool (info → store, correlates incident windows), security bulletin (warning → watchboard) |
 | `token-burn` | leading (trend) | `core-agent` cost-stack API (§12) | "session X burning 4× baseline; budget exhausted in ~20 min" |

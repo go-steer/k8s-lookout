@@ -47,6 +47,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
@@ -621,6 +622,13 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.PendingAge = f.pendingAge
 			bs.capacity = capacity.New(client, provider, cfg)
 			src = bs.capacity
+		case ingress.Name:
+			// Post-M5 #135: source-owned ingress-gce failure events
+			// (Warning-only, the capacity-source precedent). Pure
+			// client-go — no cloud provider, no typed handle: it
+			// registers no §7.4 clearance observer and rides no
+			// shared factory.
+			src = ingress.New(client)
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier
 			// deployment — quota.New fails LOUDLY (naming the source

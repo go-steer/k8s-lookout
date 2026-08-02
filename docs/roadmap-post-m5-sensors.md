@@ -107,10 +107,17 @@ list of things we keep deliberately saying no to.
    joined to PVC-backed workloads explains "app slow, Kubernetes
    healthy." `state volumes` already builds the attachment join the
    metric needs.
-5. **GCLB/Ingress health.** ingress-gce event reasons (`Sync`,
-   `Translate`, NEG attach failures) are not in the default
-   allow-list, and LB backend unhealthy-ratio metrics are untapped;
-   `cloud orphans` only catches rules with zero backends.
+5. **GCLB/Ingress health.** (Event-reason half done, #135: the
+   `ingress` source owns the ingress-gce failure reasons —
+   `Sync`/`Translate` on Ingresses, NEG sync/attach failures on
+   Services — with its own Warning-only Event informer, the
+   capacity-source ownership precedent; a default allow-list entry
+   was disqualified because ingress-gce reuses reason `Sync` for
+   Normal housekeeping and the reactive path carries no event type.
+   Remaining: LB backend unhealthy-ratio metrics.) ingress-gce event
+   reasons (`Sync`, `Translate`, NEG attach failures) are not in the
+   default allow-list, and LB backend unhealthy-ratio metrics are
+   untapped; `cloud orphans` only catches rules with zero backends.
 6. **Autopilot posture.** (Partially done post-#145: the probe
    reports platform denials in the authorizer's words, saturation
    degrades its PVC dimension instead of dying, and Autopilot is

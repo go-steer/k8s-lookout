@@ -134,7 +134,8 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source degradation: enabled",
 		"source expiry: enabled",
 		"source capacity: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
+		"source ingress: enabled",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity,ingress (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)
@@ -152,10 +153,16 @@ func TestResolveSourcesAuto_NamespaceTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	if !slices.Equal(res.enabled, []string{"k8s-events"}) {
-		t.Fatalf("enabled = %v, want [k8s-events]", res.enabled)
+	// ingress rides the events grant alone (its whole RBAC surface is
+	// events list+watch), so it resolves ON at the namespace tier
+	// right alongside k8s-events.
+	if !slices.Equal(res.enabled, []string{"k8s-events", "ingress"}) {
+		t.Fatalf("enabled = %v, want [k8s-events ingress]", res.enabled)
 	}
 	for _, name := range autoSourceNames[1:] {
+		if name == "ingress" {
+			continue // enabled above — no skip line to find
+		}
 		found := false
 		for _, l := range res.lines {
 			if strings.HasPrefix(l, fmt.Sprintf("source %s: disabled (missing ", name)) &&
@@ -193,7 +200,7 @@ func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	want := []string{"k8s-events", "object-state", "rollout", "workload", "degradation", "expiry", "capacity"}
+	want := []string{"k8s-events", "object-state", "rollout", "workload", "degradation", "expiry", "capacity", "ingress"}
 	if !slices.Equal(res.enabled, want) {
 		t.Errorf("enabled = %v, want %v (saturation off)", res.enabled, want)
 	}
@@ -371,7 +378,7 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 	if err := resolveAutoDefaults(context.Background(), f, client); err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
-	if want := "k8s-events,object-state,rollout,workload,degradation,expiry,capacity"; f.sources != want {
+	if want := "k8s-events,object-state,rollout,workload,degradation,expiry,capacity,ingress"; f.sources != want {
 		t.Errorf("resolved sources = %q, want %q (no metrics API in fake discovery)", f.sources, want)
 	}
 	if f.storm != stormOn {

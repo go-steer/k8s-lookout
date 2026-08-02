@@ -35,6 +35,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
@@ -147,6 +148,12 @@ var kinds = []KindSpec{
 		"A provider scale decision names IP exhaustion: new nodes/pods cannot get addresses."},
 	{capacity.KindPendingAged, inject.Payload{}, "capacity",
 		"A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m)."},
+	{ingress.KindSyncFailed, inject.Payload{}, "ingress",
+		"An ingress-gce Warning Sync event on an Ingress: GCLB programming is failing while the Ingress object looks fine."},
+	{ingress.KindTranslateFailed, inject.Payload{}, "ingress",
+		"An ingress-gce Warning Translate event on an Ingress: the spec could not be translated into GCLB resources."},
+	{ingress.KindNEGFailed, inject.Payload{}, "ingress",
+		"A NEG-controller failure on a Service (sync/attach/detach/retry): endpoints are not reaching the load balancer."},
 	{quota.KindForecast, inject.Payload{}, "quota",
 		"A GCP quota's usage slope projects exhaustion (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%), with a quota-increase draft attached."},
 	{notifications.KindUpgrade, inject.Payload{}, "notifications",

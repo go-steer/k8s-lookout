@@ -94,6 +94,11 @@
 # Role instead (14-role-watcher-capacity.yaml), pinned by
 # resourceNames rather than widening this ClusterRole.
 #
+# The ingress source (--sources=…,ingress, issue #135) rides the same
+# events grant with no new rule: its own Event informer filters the
+# ingress-gce controller's Warning failure events (Sync/Translate on
+# Ingresses, NEG sync/attach failures on Services).
+#
 #   - the enrichment read paths (DESIGN.md §7.6) — enrichment is
 #                       best-effort by design (failures become
 #                       enrichment_error trailers, never crashes),

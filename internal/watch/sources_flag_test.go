@@ -28,6 +28,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
@@ -457,6 +458,40 @@ func TestSourcesFlag_CapacityEnabled(t *testing.T) {
 	}
 	if bsDefault.capacity != nil {
 		t.Error("capacity must NOT be constructed without being named")
+	}
+}
+
+// TestSourcesFlag_IngressEnabled: the post-M5 #135 ingress source
+// registers under its §7.2 name (no cloud provider, no typed handle —
+// it declares no clearance observer and rides no shared factory), and
+// an explicit list without it must not construct it.
+func TestSourcesFlag_IngressEnabled(t *testing.T) {
+	t.Parallel()
+	f, err := parseFlags([]string{"--sources=k8s-events,ingress", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	bs, err := buildSources(f, "", fake.NewSimpleClientset(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildSources: %v", err)
+	}
+	if _, ok := bs.registry.Lookup(ingress.Name); !ok {
+		t.Error("ingress not registered")
+	}
+
+	fDefault, err := parseFlags([]string{"--sources=k8s-events", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	bsDefault, err := buildSources(fDefault, "", fake.NewSimpleClientset(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildSources(k8s-events only): %v", err)
+	}
+	if _, ok := bsDefault.registry.Lookup(ingress.Name); ok {
+		t.Error("ingress must NOT be constructed without being named")
 	}
 }
 

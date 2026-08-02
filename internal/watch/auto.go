@@ -33,6 +33,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
@@ -68,6 +69,7 @@ const (
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
 	saturation.Name, degradation.Name, expiry.Name, capacity.Name,
+	ingress.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -92,6 +94,7 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 		degradation.Name: degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
 		expiry.Name:      expiry.New(client, nil, expiryCfg).RequiredAccess(),
 		capacity.Name:    capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
+		ingress.Name:     ingress.New(client).RequiredAccess(),
 	}
 }
 

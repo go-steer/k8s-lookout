@@ -42,8 +42,8 @@ k8s-lookout/
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
 │   ├── sources/          # §7.2 signal sources, one package each: k8sevents, objectstate,
 │   │                     #   rollout, workload, saturation, degradation, expiry, capacity,
-│   │                     #   quota, notifications, tokenburn; rbac.go declares per-source
-│   │                     #   RBAC requirements
+│   │                     #   ingress, quota, notifications, tokenburn; rbac.go declares
+│   │                     #   per-source RBAC requirements
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
 ├── deploy/               # sentinel manifests: SA, read-only ClusterRole(+Binding),

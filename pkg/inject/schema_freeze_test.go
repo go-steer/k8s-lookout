@@ -198,12 +198,12 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 			t.Errorf("kind %q maps to %s, which has no frozen field ledger", kind, typ.Name())
 		}
 	}
-	// The inventory is complete: 11 cross-cutting + 26 source kinds
+	// The inventory is complete: 11 cross-cutting + 29 source kinds
 	// (21 at the M5 freeze; workload.* +2 in #129, notification.* +3
-	// in #130 — additive-only, ledger + docs updated in the same
-	// changes).
-	if len(shippedKinds) != 37 {
-		t.Errorf("shipped kind inventory has %d kinds, want 37 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	// in #130, ingress.* +3 in #135 — additive-only, ledger + docs
+	// updated in the same changes).
+	if len(shippedKinds) != 40 {
+		t.Errorf("shipped kind inventory has %d kinds, want 40 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 
