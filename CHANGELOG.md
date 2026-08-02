@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery loop when headroom recovers past hysteresis or the domain
   disappears. The source now also lists/watches nodes (already
   granted in the shipped ClusterRole). Part of #131.
+- New `autoscaling` watch source (#131): HPA leading indicators read
+  from `autoscaling/v2` status conditions, no events RBAC needed —
+  `autoscaling.hpa_pinned` when an HPA has sat at maxReplicas with its
+  metric still over target for 10 minutes (the autoscaler is out of
+  headroom; escalates to critical at 30 minutes), and
+  `autoscaling.hpa_metrics_dead` when the HPA's metrics pipeline
+  reports `FailedGet*` for 15 minutes (autoscaling silently dead;
+  warning-only). Both clear through the recovery loop when the HPA
+  scales back inside its range / the pipeline computes replicas again.
+  HPA *thrash* detection stays on the read path (`lookout triage
+  events`). Auto-enabled under `--sources=auto` when HPA list/watch is
+  granted; `deploy/12-clusterrole-watcher.yaml` grows the
+  `autoscaling`-group grant.
 
 ### Fixed
 

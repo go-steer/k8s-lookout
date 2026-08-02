@@ -32,6 +32,7 @@ package schema
 
 import (
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
@@ -132,6 +133,10 @@ var kinds = []KindSpec{
 		"A Job's Failed condition went True (BackoffLimitExceeded, DeadlineExceeded, ...) — batch failure with no crashlooping pod behind it."},
 	{workload.KindCronMissed, inject.Payload{}, "workload",
 		"An unsuspended CronJob passed a scheduled activation without lastScheduleTime advancing; consecutive misses escalate to critical."},
+	{autoscaling.KindPinned, inject.Payload{}, "autoscaling",
+		"An HPA sat at maxReplicas with its metric still over target past the sustain window — the autoscaler is out of headroom (escalates to critical when sustained longer)."},
+	{autoscaling.KindMetricsDead, inject.Payload{}, "autoscaling",
+		"An HPA's metrics pipeline is broken (ScalingActive=False with a FailedGet* reason, sustained) — autoscaling is silently dead."},
 	{saturation.KindForecast, inject.Payload{}, "saturation",
 		"A linear-regression forecast says a resource dimension exhausts within --saturation-warn (critical below 15m)."},
 	{degradation.KindCapacity, inject.Payload{}, "degradation",

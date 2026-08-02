@@ -44,6 +44,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/memory/distill"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
@@ -549,6 +550,7 @@ type builtSources struct {
 	objState    *objectstate.Source
 	rollout     *rollout.Source
 	workload    *workload.Source
+	autoscaling *autoscaling.Source
 	saturation  *saturation.Source
 	degradation *degradation.Source
 	expiry      *expiry.Source
@@ -591,6 +593,9 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 		case workload.Name:
 			bs.workload = workload.New(client, workload.DefaultConfig())
 			src = bs.workload
+		case autoscaling.Name:
+			bs.autoscaling = autoscaling.New(client, autoscaling.DefaultConfig())
+			src = bs.autoscaling
 		case saturation.Name:
 			if metricsClient == nil {
 				return nil, fmt.Errorf("--sources: %s requires a metrics.k8s.io client (programming error: buildSources called without one)", saturation.Name)
@@ -767,6 +772,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	if bs.workload != nil {
 		observers = append(observers, bs.workload.ClearanceObserver())
 		log.Printf("recovery: workload clearance observer registered (sibling cron run succeeded / schedule resumed / object deleted → cleared)")
+	}
+	if bs.autoscaling != nil {
+		observers = append(observers, bs.autoscaling.ClearanceObserver())
+		log.Printf("recovery: autoscaling clearance observer registered (HPA below max / cap lifted / metrics pipeline alive → cleared)")
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())

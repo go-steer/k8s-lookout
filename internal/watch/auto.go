@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
@@ -68,8 +69,8 @@ const (
 //     decision the operator makes explicitly.
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
-	saturation.Name, degradation.Name, expiry.Name, capacity.Name,
-	ingress.Name,
+	autoscaling.Name, saturation.Name, degradation.Name, expiry.Name,
+	capacity.Name, ingress.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -90,6 +91,7 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 		objectstate.Name: objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
 		rollout.Name:     rollout.New(client, rollout.DefaultConfig()).RequiredAccess(),
 		workload.Name:    workload.New(client, workload.DefaultConfig()).RequiredAccess(),
+		autoscaling.Name: autoscaling.New(client, autoscaling.DefaultConfig()).RequiredAccess(),
 		saturation.Name:  saturation.New(saturation.DefaultConfig(), nil, nil).RequiredAccess(),
 		degradation.Name: degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
 		expiry.Name:      expiry.New(client, nil, expiryCfg).RequiredAccess(),
