@@ -84,6 +84,17 @@ type nodeClearState struct {
 	// readySince is the Ready condition's LastTransitionTime.
 	// Meaningful when ready.
 	readySince time.Time
+	// pressure is whether ANY kubelet pressure condition
+	// (MemoryPressure/DiskPressure/PIDPressure) is True; a
+	// node_pressure incident clears only when all three read
+	// False/absent — a node can be Ready and under pressure, so
+	// Ready-ness must not judge it.
+	pressure bool
+	// pressureSince is the latest LastTransitionTime across the
+	// pressure conditions — the stability instant when they all read
+	// False (a mid-window pressure blip forwards it, restarting the
+	// tracker's window).
+	pressureSince time.Time
 }
 
 type nodeTombstone struct {
@@ -121,10 +132,14 @@ func (o *NodeClearance) clock() time.Time {
 // Upsert records/refreshes a live node's recovery-relevant state.
 func (o *NodeClearance) Upsert(n *corev1.Node) {
 	ready, since := nodeReadiness(n)
+	pressure, pressureSince := nodePressureStatus(n)
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.nodes[n.UID] = &nodeClearState{name: n.Name, ready: ready, readySince: since}
+	o.nodes[n.UID] = &nodeClearState{
+		name: n.Name, ready: ready, readySince: since,
+		pressure: pressure, pressureSince: pressureSince,
+	}
 	o.byName[n.Name] = n.UID
 	delete(o.tombstones, n.UID) // resurrection (informer replay) beats tombstone
 }
@@ -151,8 +166,12 @@ func (o *NodeClearance) Delete(n *corev1.Node) {
 
 // Clearance implements engine.ClearanceObserver for Node-scoped
 // incidents (objectstate.node_notready, the NodeNotReady reactive
-// family, node_flapping). ok=false when the incident isn't
-// Node-scoped or the feeding informer hasn't synced yet.
+// family, node_flapping, node_pressure). The judged symptom follows
+// the incident's reason: node_pressure incidents clear when every
+// kubelet pressure condition reads False/absent (a Ready node under
+// memory pressure is still symptomatic); everything else clears on
+// Ready-ness. ok=false when the incident isn't Node-scoped or the
+// feeding informer hasn't synced yet.
 func (o *NodeClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 	if !strings.EqualFold(inc.Ref.KindOfObject, "Node") {
 		return engine.Clearance{}, false
@@ -164,14 +183,11 @@ func (o *NodeClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) 
 	}
 	uid := types.UID(inc.Key.UID)
 
-	// Live node: Ready == symptom absent; readySince carries the
-	// blip-restart vouching (see type comment).
+	// Live node: symptom-absent per the incident's reason;
+	// readySince/pressureSince carry the blip-restart vouching (see
+	// type comment).
 	if ns, ok := o.nodes[uid]; ok {
-		return engine.Clearance{
-			Cleared:     ns.ready,
-			StableSince: ns.readySince,
-			Resolution:  engine.ResolutionRecovered,
-		}, true
+		return ns.verdict(inc.Key.Reason), true
 	}
 
 	// Node gone. A same-name replacement (recreated node, fresh UID)
@@ -186,11 +202,7 @@ func (o *NodeClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) 
 	}
 	if repUID, ok := o.byName[name]; ok {
 		if rep := o.nodes[repUID]; rep != nil {
-			return engine.Clearance{
-				Cleared:     rep.ready,
-				StableSince: rep.readySince,
-				Resolution:  engine.ResolutionRecovered,
-			}, true
+			return rep.verdict(inc.Key.Reason), true
 		}
 	}
 
@@ -204,6 +216,24 @@ func (o *NodeClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) 
 	}, true
 }
 
+// verdict judges a live node's state against the symptom the
+// incident's reason names: node_pressure by the pressure conditions,
+// everything else by Ready-ness.
+func (ns *nodeClearState) verdict(reason string) engine.Clearance {
+	if reason == reasonOf(KindNodePressure) {
+		return engine.Clearance{
+			Cleared:     !ns.pressure,
+			StableSince: ns.pressureSince,
+			Resolution:  engine.ResolutionRecovered,
+		}
+	}
+	return engine.Clearance{
+		Cleared:     ns.ready,
+		StableSince: ns.readySince,
+		Resolution:  engine.ResolutionRecovered,
+	}
+}
+
 // nodeReadiness returns whether the Ready condition is True and its
 // last transition time. Unknown counts as NOT ready, matching
 // nodeReady (the node controller losing contact IS the symptom).
@@ -214,4 +244,26 @@ func nodeReadiness(n *corev1.Node) (bool, time.Time) {
 		}
 	}
 	return false, time.Time{}
+}
+
+// nodePressureStatus reports whether ANY kubelet pressure condition
+// is True, plus the latest LastTransitionTime across the pressure
+// conditions present (the all-clear stability instant).
+func nodePressureStatus(n *corev1.Node) (bool, time.Time) {
+	active := false
+	var since time.Time
+	for _, cond := range n.Status.Conditions {
+		for _, want := range pressureConditions {
+			if cond.Type != want {
+				continue
+			}
+			if cond.Status == corev1.ConditionTrue {
+				active = true
+			}
+			if cond.LastTransitionTime.After(since) {
+				since = cond.LastTransitionTime.Time
+			}
+		}
+	}
+	return active, since
 }

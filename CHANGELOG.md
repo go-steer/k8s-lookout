@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window; storm-claimed members never fan these out into the storm
   session. Additive schema-v1 change (v1 grows 40 → 41); previously
   the join followup reused the joining signal's own kind.
+- Object-state now watches node pressure and eviction activity
+  (#134): `objectstate.node_pressure` fires when a Node's
+  MemoryPressure/DiskPressure/PIDPressure condition flips False→True
+  (warning; one escalation to critical per episode when pressure
+  sustains past 5m or an eviction burst hits the same node), and
+  `objectstate.eviction_burst` folds 3+ pod evictions on one node
+  within 10m into a single node-scoped signal instead of N pod-scoped
+  ones. Both clear through the §7.4 recovery tracker — pressure when
+  every pressure condition reads False, the burst when the eviction
+  window drains.
 
 ### Fixed
 
