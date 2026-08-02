@@ -72,6 +72,7 @@ func TestSourceContract(t *testing.T) {
 	}
 	var _ sources.Source = s
 	var _ sources.AccessDeclarer = s
+	var _ engine.ClearanceObserver = s
 }
 
 // TestRequiredAccess pins the §11 declaration, in particular the
@@ -86,6 +87,8 @@ func TestRequiredAccess(t *testing.T) {
 		"watch events cluster-wide": false,
 		"list pods cluster-wide":    false,
 		"watch pods cluster-wide":   false,
+		"list nodes cluster-wide":   false,
+		"watch nodes cluster-wide":  false,
 		"get configmaps cluster-autoscaler-status in namespace kube-system": false,
 	}
 	for _, r := range reqs {
@@ -327,14 +330,15 @@ func TestPollDecisions_QuotaBlockedReKeysToQuotaUID(t *testing.T) {
 func TestKindsAreFrozenStrings(t *testing.T) {
 	t.Parallel()
 	frozen := map[string]string{
-		KindPending:      "capacity.pending",
-		KindScaleUp:      "capacity.scaleup",
-		KindScaleDown:    "capacity.scaledown",
-		KindScaleUpGap:   "capacity.scaleup_gap",
-		KindStockout:     "capacity.stockout",
-		KindQuotaBlocked: "capacity.quota_blocked",
-		KindIPExhausted:  "capacity.ip_exhausted",
-		KindPendingAged:  "capacity.pending-aged",
+		KindPending:         "capacity.pending",
+		KindScaleUp:         "capacity.scaleup",
+		KindScaleDown:       "capacity.scaledown",
+		KindScaleUpGap:      "capacity.scaleup_gap",
+		KindStockout:        "capacity.stockout",
+		KindQuotaBlocked:    "capacity.quota_blocked",
+		KindIPExhausted:     "capacity.ip_exhausted",
+		KindPendingAged:     "capacity.pending-aged",
+		KindClusterForecast: "capacity.cluster_forecast",
 	}
 	for got, want := range frozen {
 		if got != want {
@@ -348,6 +352,9 @@ func TestKindsAreFrozenStrings(t *testing.T) {
 	}
 	if engine.CanonicalReason("scaleup_gap") != "scaleup_gap" {
 		t.Error("nodegroup-keyed reasons map to themselves")
+	}
+	if engine.CanonicalReason("cluster_forecast") != "cluster_forecast" {
+		t.Error("cluster_forecast is self-canonical (nodegroup-keyed, no k8s-event counterpart)")
 	}
 }
 

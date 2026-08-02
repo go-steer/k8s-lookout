@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones. Both clear through the §7.4 recovery tracker — pressure when
   every pressure condition reads False, the burst when the eviction
   window drains.
+- `capacity.cluster_forecast`: the capacity source now forecasts
+  schedulable headroom per scheduling domain (GKE nodepool label,
+  else zone, else the whole cluster) — the slope of summed pod
+  requests over summed node allocatable, per CPU and memory
+  independently, projected to "full in ~N hours" with the same
+  linear-window machinery as `saturation.forecast` (warning at ETA
+  ≤ 4h, critical at ≤ 1h, 3h regression window). Clears via the §7.4
+  recovery loop when headroom recovers past hysteresis or the domain
+  disappears. The source now also lists/watches nodes (already
+  granted in the shipped ClusterRole). Part of #131.
 
 ### Fixed
 
