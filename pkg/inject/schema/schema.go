@@ -36,6 +36,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
@@ -169,6 +170,10 @@ var kinds = []KindSpec{
 		"An ingress-gce Warning Translate event on an Ingress: the spec could not be translated into GCLB resources."},
 	{ingress.KindNEGFailed, inject.Payload{}, "ingress",
 		"A NEG-controller failure on a Service (sync/attach/detach/retry): endpoints are not reaching the load balancer."},
+	{gateway.KindProgrammingFailed, inject.Payload{}, "gateway",
+		"A Gateway (top-level or listener) held Programmed=False past the grace window: the load balancer/data plane is not being programmed. The Gateway-API analog of ingress.sync_failed."},
+	{gateway.KindRouteRejected, inject.Payload{}, "gateway",
+		"A Gateway/listener or HTTPRoute parent held Accepted=False/ResolvedRefs=False past the grace window: the route config never became routable. The analog of ingress.translate_failed."},
 	{quota.KindForecast, inject.Payload{}, "quota",
 		"A GCP quota's usage slope projects exhaustion (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%), with a quota-increase draft attached."},
 	{notifications.KindUpgrade, inject.Payload{}, "notifications",

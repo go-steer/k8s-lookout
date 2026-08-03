@@ -27,6 +27,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
@@ -69,6 +70,7 @@ type flags struct {
 	expiryNamespaces      string
 	capacityPoll          time.Duration
 	pendingAge            time.Duration
+	gatewayGrace          time.Duration
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -168,7 +170,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -197,6 +199,13 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// escalation (15m) is design-fixed, not a flag.
 	fs.DurationVar(&f.capacityPoll, "capacity-poll", 60*time.Second, "Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0.")
 	fs.DurationVar(&f.pendingAge, "pending-age", 5*time.Minute, "How long a pod must be Pending+Unschedulable before capacity.pending-aged fires at warning (critical at the design-fixed 15m, or at this value when set higher). Must be > 0.")
+
+	// Gateway source knobs (§7.2 gateway row, #168). ADDITIVE flag; only
+	// meaningful with --sources=…,gateway. The grace window absorbs
+	// normal load-balancer provisioning latency (a fresh Gateway sits at
+	// Programmed=False for minutes) before a sustained status-condition
+	// failure fires.
+	fs.DurationVar(&f.gatewayGrace, "gateway-grace", 5*time.Minute, "How long a Gateway/HTTPRoute status condition (Programmed/Accepted/ResolvedRefs=False, reason != Pending) must be sustained — timed from its lastTransitionTime — before gateway.programming_failed / gateway.route_rejected fires. Absorbs normal LB provisioning latency. Must be > 0.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -454,6 +463,11 @@ func (f *flags) validate() error {
 	if f.pendingAge <= 0 {
 		return errors.New("--pending-age must be > 0")
 	}
+	// Gateway knob (§7.2 gateway row, #168): config error in every mode,
+	// like the other source thresholds, even when the source is disabled.
+	if f.gatewayGrace <= 0 {
+		return errors.New("--gateway-grace must be > 0")
+	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.
 	if f.quotaPoll <= 0 {
@@ -590,7 +604,7 @@ func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow
 func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, quota.Name, notifications.Name, tokenburn.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, gateway.Name, quota.Name, notifications.Name, tokenburn.Name}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {

@@ -34,6 +34,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
@@ -67,10 +68,17 @@ const (
 //   - token-burn: reads the core-agent daemon's cost stack, a paid
 //     polling loop against the daemon — enabling it is a cost/topology
 //     decision the operator makes explicitly.
+//
+// gateway IS a candidate, but unlike the others its RBAC grant is inert
+// on clusters without the Gateway API CRDs (RBAC for an absent group is
+// legal and always "allowed"), so the probe alone would enable it
+// everywhere. It is gated on a discovery check (gatewayCheck →
+// gateway.GatewayAPIServed) instead — the CRD-presence analog of
+// saturation's metrics.k8s.io check.
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
 	autoscaling.Name, saturation.Name, degradation.Name, expiry.Name,
-	capacity.Name, ingress.Name,
+	capacity.Name, ingress.Name, gateway.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -97,6 +105,7 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 		expiry.Name:      expiry.New(client, nil, expiryCfg).RequiredAccess(),
 		capacity.Name:    capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
 		ingress.Name:     ingress.New(client).RequiredAccess(),
+		gateway.Name:     gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
 	}
 }
 
@@ -131,7 +140,7 @@ type autoResolution struct {
 //     there is no "auto" answer to that, only a fix.
 //   - a probe that cannot be evaluated (reviewer error): "could not
 //     verify" must not degrade into "assumed fine" (§11).
-func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interface, reviewer sources.AccessReviewer, metricsCheck func() error) (*autoResolution, error) {
+func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interface, reviewer sources.AccessReviewer, metricsCheck func() error, gatewayCheck func() bool) (*autoResolution, error) {
 	access := autoCandidateAccess(f, client)
 	res := &autoResolution{
 		lines: []string{
@@ -183,6 +192,8 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (%s — %s)", name, missClause, missTail))
 		case name == saturation.Name && metricsCheck != nil && metricsCheck() != nil:
 			res.lines = append(res.lines, "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)")
+		case name == gateway.Name && gatewayCheck != nil && !gatewayCheck():
+			res.lines = append(res.lines, "source gateway: disabled (Gateway API CRDs not served — install a GKE Gateway class or the upstream gateway.networking.k8s.io CRDs, or name gateway in --sources to make this fatal)")
 		case name == k8sevents.Name && len(degraded) == 0:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled (always on — a sentinel that cannot watch events is misdeployed)", name))
@@ -245,6 +256,8 @@ func resolveAutoDefaults(ctx context.Context, f *flags, client kubernetes.Interf
 		res, err := resolveSourcesAuto(ctx, f, client, reviewer, func() error {
 			_, derr := client.Discovery().ServerResourcesForGroupVersion(metricsAPIGroupVersion)
 			return derr
+		}, func() bool {
+			return gateway.GatewayAPIServed(client)
 		})
 		if err != nil {
 			return err
