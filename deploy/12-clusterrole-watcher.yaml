@@ -261,3 +261,12 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["list"]
+  # Gateway API (gateway source, #168): the Gateway-API sibling of the
+  # ingress source. Discovery-gated at runtime — these rules are inert
+  # on clusters without the Gateway API CRDs (RBAC for an absent group
+  # is legal and ignored), so under --sources=auto the source skips
+  # itself with one loud line where the CRDs are absent. The source
+  # only reads status conditions, so list+watch is the whole surface.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["list", "watch"]
