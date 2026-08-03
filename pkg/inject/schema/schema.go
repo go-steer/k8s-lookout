@@ -156,6 +156,8 @@ var kinds = []KindSpec{
 		"A provider scale decision names IP exhaustion: new nodes/pods cannot get addresses."},
 	{capacity.KindPendingAged, inject.Payload{}, "capacity",
 		"A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m)."},
+	{capacity.KindClusterForecast, inject.Payload{}, "capacity",
+		"A scheduling domain's pod-requests/node-allocatable ratio is on a linear trend to reach 1.0 — cluster full in ~N hours, before the first pod goes Pending."},
 	{ingress.KindSyncFailed, inject.Payload{}, "ingress",
 		"An ingress-gce Warning Sync event on an Ingress: GCLB programming is failing while the Ingress object looks fine."},
 	{ingress.KindTranslateFailed, inject.Payload{}, "ingress",

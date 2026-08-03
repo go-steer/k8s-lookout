@@ -66,7 +66,7 @@ no incident-class identity), and the §9.4 triage-status join has used
 this exact recipe since M4. Parity is pinned by
 `TestFingerprintParity_PushAndScan`.
 
-## Kind inventory (v1: 43 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, additive-only)
+## Kind inventory (v1: 44 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -91,7 +91,8 @@ job_failed|cron_missed` (added post-M5, #129 — kinds are
 append-only), `saturation.forecast`,
 `degradation.capacity|probe_flap`, `expiry.warning`, `capacity.
 pending|scaleup|scaledown|scaleup_gap|stockout|quota_blocked|
-ip_exhausted|pending-aged`, `ingress.
+ip_exhausted|pending-aged|cluster_forecast` (`cluster_forecast`
+added post-M5, #131), `ingress.
 sync_failed|translate_failed|neg_failed` (added post-M5, #135 —
 kinds are append-only), `quota.forecast`,
 `notification.upgrade|upgrade_available|security_bulletin` (added

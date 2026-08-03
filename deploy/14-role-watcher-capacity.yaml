@@ -19,8 +19,8 @@
 #
 # A namespaced Role — NOT a ClusterRole rule — on purpose: this is the
 # source's only read outside the informer grants the ClusterRole
-# already carries (events, pods), and it is one named object in one
-# namespace. The `get` rule is pinned with resourceNames to exactly
+# already carries (events, pods, nodes), and it is one named object in
+# one namespace. The `get` rule is pinned with resourceNames to exactly
 # that object; `list` cannot be name-scoped in RBAC (resourceNames
 # does not apply to list), so it is granted un-named — still confined
 # to kube-system by the Role itself. The source's §11 startup probe

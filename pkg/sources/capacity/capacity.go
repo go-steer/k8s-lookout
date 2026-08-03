@@ -44,6 +44,13 @@
 //     Config.PendingAge. This is the resident TRENDING counterpart
 //     of `triage delta`'s point-in-time pending-pod scan: the
 //     sentinel owns the wall clock, so it observes the aging itself.
+//  5. Cluster bin-packing forecast (forecast.go) — the slope of
+//     sum(pod requests)/sum(node allocatable) per scheduling domain,
+//     fitted over Config.ForecastWindow and projected to ratio 1.0:
+//     "cluster full in ~N hours", fired BEFORE the pending pods the
+//     reactive sub-sources are about. Saturation forecasts
+//     per-container, quota forecasts the cloud layer; this is the
+//     layer between — schedulable headroom.
 //
 // Sub-sources 1–2 are upstream cluster-autoscaler behavior and work
 // on any CA-running cluster (§2 portability); only sub-source 3 goes
@@ -71,6 +78,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -129,6 +137,13 @@ const (
 	// Warning at the configured age, critical once the pod has been
 	// stuck past CriticalPendingAge.
 	KindPendingAged = kindPrefix + "pending-aged"
+	// KindClusterForecast: a scheduling domain's bin-packing ratio —
+	// sum(bound pod requests) / sum(schedulable node allocatable),
+	// per CPU and memory independently — is on a linear trend to
+	// reach 1.0 within Config.ForecastWarnETA (warning) or
+	// Config.ForecastCritETA (critical). "Cluster full in ~N hours",
+	// before the first pod goes Pending.
+	KindClusterForecast = kindPrefix + "cluster_forecast"
 )
 
 // CriticalPendingAge is the design-fixed escalation threshold for
@@ -160,16 +175,42 @@ type Config struct {
 	// cluster-autoscaler-status (upstream CA's own defaults).
 	StatusNamespace string
 	StatusName      string
+
+	// The cluster-forecast knobs (forecast.go). Hardcoded defaults —
+	// deliberately no flag surface in this change, same posture as
+	// saturation's CritETA: the warn/crit/clear ratios are part of
+	// the hysteresis geometry. A future config surface can expose
+	// them once a deployment needs to move them.
+
+	// ForecastWindow is the regression window for the bin-packing
+	// ratio series: samples older than this are pruned, and a fit
+	// needs a span of at least ForecastWindow/2. Default 3h —
+	// cluster fill is slower than container fill (saturation uses
+	// 90m).
+	ForecastWindow time.Duration
+	// ForecastMinSamples is the minimum sample count for a fit.
+	// Default 10 (10 poll ticks ≈ 10m at the default PollInterval).
+	ForecastMinSamples int
+	// ForecastWarnETA: a projected time-to-full at or below it emits
+	// at severity warning. Default 4h.
+	ForecastWarnETA time.Duration
+	// ForecastCritETA: a projected time-to-full at or below it emits
+	// at severity critical. Default 1h.
+	ForecastCritETA time.Duration
 }
 
 // DefaultConfig returns the shipped knobs.
 func DefaultConfig() Config {
 	return Config{
-		PollInterval:    60 * time.Second,
-		PendingAge:      5 * time.Minute,
-		GapSustain:      3 * time.Minute,
-		StatusNamespace: "kube-system",
-		StatusName:      "cluster-autoscaler-status",
+		PollInterval:       60 * time.Second,
+		PendingAge:         5 * time.Minute,
+		GapSustain:         3 * time.Minute,
+		StatusNamespace:    "kube-system",
+		StatusName:         "cluster-autoscaler-status",
+		ForecastWindow:     3 * time.Hour,
+		ForecastMinSamples: 10,
+		ForecastWarnETA:    4 * time.Hour,
+		ForecastCritETA:    1 * time.Hour,
 	}
 }
 
@@ -191,8 +232,33 @@ func (c Config) normalize() Config {
 	if c.StatusName == "" {
 		c.StatusName = d.StatusName
 	}
+	if c.ForecastWindow <= 0 {
+		c.ForecastWindow = d.ForecastWindow
+	}
+	if c.ForecastMinSamples <= 0 {
+		c.ForecastMinSamples = d.ForecastMinSamples
+	}
+	if c.ForecastWarnETA <= 0 {
+		c.ForecastWarnETA = d.ForecastWarnETA
+	}
+	if c.ForecastCritETA <= 0 || c.ForecastCritETA >= c.ForecastWarnETA {
+		c.ForecastCritETA = d.ForecastCritETA
+	}
 	return c
 }
+
+// forecastMinSpan is the smallest sample span a bin-packing fit is
+// trusted over (saturation's minSpan geometry).
+func (c Config) forecastMinSpan() time.Duration { return c.ForecastWindow / 2 }
+
+// forecastReobserve is the §7.4 clearance re-observation period: how
+// long the ratio slope must stay non-positive before the symptom
+// counts as absent (and the hysteresis latch releases).
+func (c Config) forecastReobserve() time.Duration { return c.ForecastWindow / 2 }
+
+// forecastClearETA is the recede threshold: an ETA beyond 2×warn
+// releases the hysteresis latch and clears the incident.
+func (c Config) forecastClearETA() time.Duration { return 2 * c.ForecastWarnETA }
 
 // criticalPendingAge is the effective escalation threshold (see
 // CriticalPendingAge).
@@ -227,6 +293,19 @@ type Source struct {
 	// gaps tracks per-nodegroup scale-up gap episodes, keyed by
 	// nodegroup name.
 	gaps map[string]*gapEntry
+	// domains holds the cluster-forecast ring buffers + hysteresis
+	// state, one series per (scheduling domain, resource dimension)
+	// (forecast.go).
+	domains map[domainKey]*domainSeries
+	// forecastSampled flips true after the first bin-packing sample
+	// cycle; Clearance declines to judge before it (an empty domain
+	// map at startup must not read as "domain deleted").
+	forecastSampled bool
+	// podLister/nodeLister read the informer caches for the
+	// bin-packing sample; set by Run before the informers start, nil
+	// in unit tests that drive sampleCluster directly.
+	podLister  corelisters.PodLister
+	nodeLister corelisters.NodeLister
 	// statusMissing dedupes the "no status ConfigMap" log line.
 	statusMissing bool
 	// lastDecisions is the high-water mark of the provider
@@ -249,6 +328,7 @@ func New(client kubernetes.Interface, provider cloud.Provider, cfg Config) *Sour
 		cfg:     cfg.normalize(),
 		pending: make(map[string]*pendingEntry),
 		gaps:    make(map[string]*gapEntry),
+		domains: make(map[domainKey]*domainSeries),
 	}
 	if provider == nil {
 		provider = cloud.NoProvider
@@ -269,18 +349,22 @@ func (s *Source) Name() string { return Name }
 // source needs cluster RBAC (§11).
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 
-// RequiredAccess implements sources.AccessDeclarer (§11): the two
-// informers' list+watch, plus `get` on the status ConfigMap — that
-// one is namespace- AND name-scoped, so a deployment can grant it
-// with a kube-system Role pinned to cluster-autoscaler-status
-// (deploy/14-role-watcher-capacity.yaml) instead of widening the
-// ClusterRole; the probe verifies exactly that shape.
+// RequiredAccess implements sources.AccessDeclarer (§11): the three
+// informers' list+watch (events, pods, and — for the cluster
+// bin-packing forecast's allocatable sums — nodes), plus `get` on
+// the status ConfigMap — that one is namespace- AND name-scoped, so
+// a deployment can grant it with a kube-system Role pinned to
+// cluster-autoscaler-status (deploy/14-role-watcher-capacity.yaml)
+// instead of widening the ClusterRole; the probe verifies exactly
+// that shape.
 func (s *Source) RequiredAccess() []sources.Requirement {
 	return []sources.Requirement{
 		{Resource: "events", Verb: "list"},
 		{Resource: "events", Verb: "watch"},
 		{Resource: "pods", Verb: "list"},
 		{Resource: "pods", Verb: "watch"},
+		{Resource: "nodes", Verb: "list"},
+		{Resource: "nodes", Verb: "watch"},
 		{Resource: "configmaps", Verb: "get", Namespace: s.cfg.StatusNamespace, Name: s.cfg.StatusName},
 	}
 }
@@ -319,10 +403,10 @@ func (s *Source) send(sig engine.Signal) {
 }
 
 // Run implements sources.Source: states the provider posture once
-// (§2 — absent cloud is reported, never silent), starts the Event and
-// Pod informers, arms after their caches sync, then drives the poll
-// ticker (status ConfigMap, provider decisions, pending-age sweep)
-// until ctx is cancelled. The first status poll failing is NOT fatal
+// (§2 — absent cloud is reported, never silent), starts the Event,
+// Pod, and Node informers, arms after their caches sync, then drives
+// the poll ticker (status ConfigMap, provider decisions, pending-age
+// sweep, bin-packing forecast sample) until ctx is cancelled. The first status poll failing is NOT fatal
 // (clusters without a cluster autoscaler are legal deployments — the
 // absence is logged once); informer sync failure is.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
@@ -381,8 +465,17 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		return fmt.Errorf("capacity: register pod handler: %w", err)
 	}
 
+	// Node informer: no event handler — the cluster-forecast
+	// sub-source samples the cache on the poll tick (a per-tick sum,
+	// not an edge detector), so it only needs the synced lister.
+	nodeInformer := factory.Core().V1().Nodes().Informer()
+	s.mu.Lock()
+	s.podLister = factory.Core().V1().Pods().Lister()
+	s.nodeLister = factory.Core().V1().Nodes().Lister()
+	s.mu.Unlock()
+
 	factory.Start(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), eventH.HasSynced, podH.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), eventH.HasSynced, podH.HasSynced, nodeInformer.HasSynced) {
 		return fmt.Errorf("capacity: cache sync failed (informer stopped before initial list completed)")
 	}
 	s.arm()
@@ -414,4 +507,5 @@ func (s *Source) poll(ctx context.Context) {
 		}
 	}
 	s.sweepPending(now)
+	s.pollForecast(now)
 }

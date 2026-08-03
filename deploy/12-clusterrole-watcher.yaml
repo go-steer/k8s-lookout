@@ -36,7 +36,9 @@
 #   - get pods       — status enrichment for inject payloads (owner
 #                       ref, container statuses)
 #   - list/watch nodes, deployments, endpointslices,
-#     poddisruptionbudgets — the object-state source (DESIGN.md §7.2,
+#     poddisruptionbudgets — the object-state source (nodes also
+#     serve the capacity source's bin-packing forecast — see the
+#     capacity note below) (DESIGN.md §7.2,
 #                       enabled via --sources=k8s-events,object-state):
 #                       leading indicators from state transitions.
 #                       Harmless when the source is disabled;
@@ -89,10 +91,12 @@
 #                       note on the secrets rule below.
 #
 # The capacity source (--sources=…,capacity, DESIGN.md §10.1) rides
-# the events and pods grants above; its one extra read — `get` on the
-# cluster-autoscaler-status ConfigMap — is a kube-system-namespaced
-# Role instead (14-role-watcher-capacity.yaml), pinned by
-# resourceNames rather than widening this ClusterRole.
+# the events, pods, and nodes grants above (nodes list/watch feeds
+# the cluster bin-packing forecast's allocatable sums — the same rule
+# the object-state source already needs); its one extra read — `get`
+# on the cluster-autoscaler-status ConfigMap — is a
+# kube-system-namespaced Role instead (14-role-watcher-capacity.yaml),
+# pinned by resourceNames rather than widening this ClusterRole.
 #
 # The ingress source (--sources=…,ingress, issue #135) rides the same
 # events grant with no new rule: its own Event informer filters the

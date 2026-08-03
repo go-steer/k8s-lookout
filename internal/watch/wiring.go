@@ -756,6 +756,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 		observers = append(observers, bs.expiry.ClearanceObserver())
 		log.Printf("recovery: expiry clearance observer registered (certificate renewed → cleared)")
 	}
+	if bs.capacity != nil {
+		observers = append(observers, bs.capacity.ClearanceObserver())
+		log.Printf("recovery: capacity clearance observer registered (cluster-forecast headroom recovered / scheduling domain gone → cleared)")
+	}
 	if bs.tokenBurn != nil {
 		observers = append(observers, bs.tokenBurn.ClearanceObserver())
 		log.Printf("recovery: token-burn clearance observer registered (spend receded / session ended → cleared)")
