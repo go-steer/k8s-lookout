@@ -17,5 +17,10 @@
 require_examples_context
 
 echo "▸ verify failed-mount"
-await_inject failed-mount 300 'kind=k8s-event' 'FailedMount' 'mounter-'
+# No kind= constraint: crashloop runs just before this scenario on the
+# same node, so the FailedMount incident can land inside the storm
+# window and arrive as a kind=storm representative (or storm.member)
+# instead of a fresh k8s-event — run 30589722508 (#154). Both routings
+# carry the reason and pod name.
+await_inject failed-mount 300 'FailedMount' 'mounter-'
 await_finding 120 'missing-config' -- state edges --workload="Deployment/$DEMO_NS/mounter"
