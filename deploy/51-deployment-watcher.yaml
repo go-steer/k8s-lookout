@@ -110,7 +110,7 @@ spec:
             # (GKE Autopilot's Warden vs nodes/proxy, issue #145) —
             # an explicit list would make that miss fatal. Strict §11
             # fail-fast deployments pin the list explicitly instead:
-            #   - "--sources=k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity,token-burn"
+            #   - "--sources=k8s-events,object-state,rollout,workload,saturation,degradation,expiry,capacity,ingress,token-burn"
             # (token-burn is auto-excluded — add it explicitly when
             # the --daemon-url cost stack should be watched; quota
             # additionally needs the -gke image, see IMAGE FLAVORS.)
