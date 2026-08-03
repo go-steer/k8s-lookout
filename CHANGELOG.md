@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gateway` signal source (#168 — Gateway API health, status
+  conditions): the Gateway-API sibling of the `ingress` source. GKE
+  steers most users to the Gateway API, whose programming failures
+  never surface as the ingress-gce `Sync`/`Translate` events the
+  `ingress` source keys on — they surface as `Programmed` /
+  `Accepted` / `ResolvedRefs` status conditions reading `False` on
+  `Gateway` and `HTTPRoute` objects. Two new kinds (signal-schema v1
+  grows 46 → 48, append-only): `gateway.programming_failed` (a
+  Gateway or listener held `Programmed=False` past the grace window —
+  the load balancer/data plane is not being programmed; the analog of
+  `ingress.sync_failed`) and `gateway.route_rejected` (a
+  Gateway/listener or HTTPRoute parent held
+  `Accepted=False`/`ResolvedRefs=False` — the route config never
+  became routable; the analog of `ingress.translate_failed`). Fires
+  only on SUSTAINED failure (`reason != Pending`, condition
+  `observedGeneration` current, held past `--gateway-grace`, default
+  5m) so a Gateway that is merely mid-provisioning stays quiet. Reads
+  the CRs unstructured through a dynamic informer (no new dependency,
+  the expiry-source precedent) and gates on the Gateway API CRDs via
+  discovery: under `--sources=auto` it enables only where the CRDs are
+  served, skipping with one loud line elsewhere (the grant is inert on
+  clusters without the group). Shares the NEG half with `ingress`
+  (`ingress.neg_failed` already fires for Gateway-backed Services —
+  same NEG controller). New read-only `gateway.networking.k8s.io`
+  list+watch grant in `deploy/12-clusterrole-watcher.yaml`; registers
+  a §7.4 clearance observer (condition recovered / object deleted →
+  cleared).
 - `ingress` signal source (#135, half 1 — GCLB/Ingress health, event
   reasons): the ingress-gce controller's failure events, today the
   only in-cluster evidence that GCLB programming is failing while the

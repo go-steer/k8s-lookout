@@ -48,6 +48,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
+	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
@@ -313,12 +314,13 @@ func realMain(argv []string) error {
 	// Signal sources (§7.2), individually enabled via --sources
 	// (auto resolves to the supported portable set above; an explicit
 	// list is honored verbatim). The dynamic
-	// client exists only for the expiry source's discovery-gated
-	// cert-manager reads, and the saturation source's metrics.k8s.io
-	// dimension needs its own clientset — each built from the same
-	// kube options, only when its source is enabled.
+	// client serves the expiry source's discovery-gated cert-manager
+	// reads and the gateway source's Gateway/HTTPRoute informers; the
+	// saturation source's metrics.k8s.io dimension needs its own
+	// clientset — each built from the same kube options, only when its
+	// source is enabled.
 	var dyn dynamic.Interface
-	if f.sourceEnabled(expiry.Name) {
+	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) {
 		dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 		if err != nil {
 			return err
@@ -555,6 +557,7 @@ type builtSources struct {
 	degradation *degradation.Source
 	expiry      *expiry.Source
 	capacity    *capacity.Source
+	gateway     *gateway.Source
 	quota       *quota.Source
 	notes       *notifications.Source
 	tokenBurn   *tokenburn.Source
@@ -634,6 +637,21 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// registers no §7.4 clearance observer and rides no
 			// shared factory.
 			src = ingress.New(client)
+		case gateway.Name:
+			// Post-M5 #168: the Gateway-API sibling of ingress. Reads
+			// Gateway/HTTPRoute status conditions through the dynamic
+			// client (no new dependency, the expiry precedent), gates
+			// on the Gateway API CRDs via discovery, and registers a
+			// §7.4 clearance observer — hence a typed handle. dyn is
+			// non-nil here because the caller built it when this source
+			// (or expiry) was enabled.
+			if dyn == nil {
+				return nil, fmt.Errorf("--sources: %s requires a dynamic client (programming error: buildSources called without one)", gateway.Name)
+			}
+			cfg := gateway.DefaultConfig()
+			cfg.Grace = f.gatewayGrace
+			bs.gateway = gateway.New(client, dyn, cfg)
+			src = bs.gateway
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier
 			// deployment — quota.New fails LOUDLY (naming the source
@@ -764,6 +782,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 	if bs.capacity != nil {
 		observers = append(observers, bs.capacity.ClearanceObserver())
 		log.Printf("recovery: capacity clearance observer registered (cluster-forecast headroom recovered / scheduling domain gone → cleared)")
+	}
+	if bs.gateway != nil {
+		observers = append(observers, bs.gateway.ClearanceObserver())
+		log.Printf("recovery: gateway clearance observer registered (Programmed/Accepted/ResolvedRefs recovered / object deleted → cleared)")
 	}
 	if bs.tokenBurn != nil {
 		observers = append(observers, bs.tokenBurn.ClearanceObserver())

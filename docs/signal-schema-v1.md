@@ -66,7 +66,7 @@ no incident-class identity), and the §9.4 triage-status join has used
 this exact recipe since M4. Parity is pinned by
 `TestFingerprintParity_PushAndScan`.
 
-## Kind inventory (v1: 46 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, additive-only)
+## Kind inventory (v1: 48 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -95,7 +95,11 @@ pending|scaleup|scaledown|scaleup_gap|stockout|quota_blocked|
 ip_exhausted|pending-aged|cluster_forecast` (`cluster_forecast`
 added post-M5, #131), `ingress.
 sync_failed|translate_failed|neg_failed` (added post-M5, #135 —
-kinds are append-only), `quota.forecast`,
+kinds are append-only), `gateway.
+programming_failed|route_rejected` (added post-M5, #168 — the
+Gateway-API sibling of `ingress.*`: sustained `Programmed`/`Accepted`/
+`ResolvedRefs`=False status conditions on `Gateway`/`HTTPRoute`),
+`quota.forecast`,
 `notification.upgrade|upgrade_available|security_bulletin` (added
 post-M5, #130), `token.burn`.
 

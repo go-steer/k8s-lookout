@@ -67,6 +67,9 @@ func namespaceTier() grantReviewer {
 func metricsPresent() error { return nil }
 func metricsAbsent() error  { return errors.New("the server could not find the requested resource") }
 
+func gatewayServed() bool { return true }
+func gatewayAbsent() bool { return false }
+
 func autoFlags(t *testing.T, args ...string) *flags {
 	t.Helper()
 	f, err := parseFlags(append([]string{"--dry-run"}, args...))
@@ -85,7 +88,7 @@ func autoFlags(t *testing.T, args ...string) *flags {
 func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsPresent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -120,7 +123,7 @@ func TestAutoCandidatesExcludeExplicitOnlySources(t *testing.T) {
 func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsPresent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -136,7 +139,8 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source expiry: enabled",
 		"source capacity: enabled",
 		"source ingress: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
+		"source gateway: enabled",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)
@@ -150,7 +154,7 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 func TestResolveSourcesAuto_NamespaceTier(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), namespaceTier(), metricsPresent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), namespaceTier(), metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -181,7 +185,7 @@ func TestResolveSourcesAuto_NamespaceTier(t *testing.T) {
 	// the first miss is pods (ClusterRole)… so pin the hint routing on
 	// a configmaps-only miss instead.
 	cmOnly := grantReviewer{allow: func(req sources.Requirement) bool { return req.Resource != "configmaps" }}
-	res, err = resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), cmOnly, metricsPresent)
+	res, err = resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), cmOnly, metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -197,17 +201,38 @@ func TestResolveSourcesAuto_NamespaceTier(t *testing.T) {
 func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsAbsent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsAbsent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress"}
+	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress", "gateway"}
 	if !slices.Equal(res.enabled, want) {
 		t.Errorf("enabled = %v, want %v (saturation off)", res.enabled, want)
 	}
 	line := "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)"
 	if !slices.Contains(res.lines, line) {
 		t.Errorf("missing the exact saturation skip line %q in:\n%s", line, strings.Join(res.lines, "\n"))
+	}
+}
+
+// TestResolveSourcesAuto_GatewayAPIAbsent: RBAC all green but the
+// Gateway API CRDs are not served → gateway (and only gateway) skips,
+// with the exact install-the-CRDs line. The gateway grant is inert on
+// such a cluster (RBAC for an absent group always "allows"), so the
+// discovery gate — not the probe — is what keeps it off.
+func TestResolveSourcesAuto_GatewayAPIAbsent(t *testing.T) {
+	t.Parallel()
+	f := autoFlags(t)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), metricsPresent, gatewayAbsent)
+	if err != nil {
+		t.Fatalf("resolveSourcesAuto: %v", err)
+	}
+	if slices.Contains(res.enabled, "gateway") {
+		t.Errorf("gateway must not enable without the Gateway API CRDs; enabled = %v", res.enabled)
+	}
+	line := "source gateway: disabled (Gateway API CRDs not served — install a GKE Gateway class or the upstream gateway.networking.k8s.io CRDs, or name gateway in --sources to make this fatal)"
+	if !slices.Contains(res.lines, line) {
+		t.Errorf("missing the exact gateway skip line %q in:\n%s", line, strings.Join(res.lines, "\n"))
 	}
 }
 
@@ -218,7 +243,7 @@ func TestResolveSourcesAuto_EventsDeniedFatal(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
 	deny := grantReviewer{allow: func(req sources.Requirement) bool { return req.Resource != "events" }}
-	_, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), deny, metricsPresent)
+	_, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), deny, metricsPresent, gatewayServed)
 	if err == nil {
 		t.Fatal("events denied under auto must be FATAL, never a skip")
 	}
@@ -232,7 +257,7 @@ func TestResolveSourcesAuto_EventsDeniedFatal(t *testing.T) {
 func TestResolveSourcesAuto_ProbeErrorFatal(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	_, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), erroringReviewer{}, metricsPresent)
+	_, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), erroringReviewer{}, metricsPresent, gatewayServed)
 	if err == nil {
 		t.Fatal("a probe evaluation error must be fatal under auto")
 	}
@@ -253,7 +278,7 @@ func TestResolveSourcesAuto_ExpiryNamespacesScopeProbed(t *testing.T) {
 		}
 		return true
 	}}
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), scoped, metricsPresent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), scoped, metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -386,13 +411,16 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 		t.Errorf("resolved storm = %q, want on", f.storm)
 	}
 
-	client.Resources = []*metav1.APIResourceList{{GroupVersion: metricsAPIGroupVersion}}
+	client.Resources = []*metav1.APIResourceList{
+		{GroupVersion: metricsAPIGroupVersion},
+		{GroupVersion: "gateway.networking.k8s.io/v1", APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "httproutes"}}},
+	}
 	f2 := autoFlags(t)
 	if err := resolveAutoDefaults(context.Background(), f2, client); err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
 	if want := strings.Join(autoSourceNames, ","); f2.sources != want {
-		t.Errorf("resolved sources = %q, want the full set %q with metrics served", f2.sources, want)
+		t.Errorf("resolved sources = %q, want the full set %q with metrics + Gateway API served", f2.sources, want)
 	}
 
 	// Explicit values are untouched — auto resolution is a no-op.
@@ -426,7 +454,7 @@ func (autopilotReviewer) Allowed(_ context.Context, req sources.Requirement) (so
 func TestResolveSourcesAuto_AutopilotDegradesSaturation(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), autopilotReviewer{}, metricsPresent)
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), autopilotReviewer{}, metricsPresent, gatewayServed)
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
