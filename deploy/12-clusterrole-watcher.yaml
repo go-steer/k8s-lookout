@@ -80,6 +80,13 @@
 #                       resolves ON when this grant is present and
 #                       off (loudly) when it is not; --storm=on makes
 #                       the gap a fatal startup error instead.
+#   - list/watch horizontalpodautoscalers — the autoscaling source
+#                       (DESIGN.md §7.2, enabled via
+#                       --sources=…,autoscaling): HPA pinned-at-max
+#                       and metrics-pipeline-dead detection from
+#                       autoscaling/v2 status conditions. Harmless
+#                       when the source is disabled; verified loudly
+#                       by the §11 startup probe when enabled.
 #   - list secrets, serviceaccounts; list webhook configurations;
 #     list cert-manager certificates — the expiry source (DESIGN.md
 #                       §7.2 row 6, enabled via --sources=…,expiry):
@@ -198,6 +205,13 @@ rules:
     # through the node proxy.
     resources: ["nodes/proxy"]
     verbs: ["get"]
+  - apiGroups: ["autoscaling"]
+    # The autoscaling source's HPA informer (autoscaling.hpa_pinned /
+    # autoscaling.hpa_metrics_dead, issue #131). Condition-based on
+    # purpose: no events grant beyond the core one above is needed to
+    # watch the HPA controller's verdicts.
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "watch"]
