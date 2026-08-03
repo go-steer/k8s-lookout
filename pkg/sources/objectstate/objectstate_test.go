@@ -197,6 +197,388 @@ func TestNode_TransitionsOutsideWindowDontCountTowardFlap(t *testing.T) {
 	}
 }
 
+// pressureNode builds a Node with a Ready condition plus the given
+// kubelet pressure conditions.
+func pressureNode(uid, name string, ready corev1.ConditionStatus, pressures map[corev1.NodeConditionType]corev1.ConditionStatus) *corev1.Node {
+	n := node(uid, name, ready)
+	for _, c := range pressureConditions {
+		if st, ok := pressures[c]; ok {
+			n.Status.Conditions = append(n.Status.Conditions, corev1.NodeCondition{Type: c, Status: st})
+		}
+	}
+	return n
+}
+
+func TestNode_PressureFalseToTrue_EmitsWarning(t *testing.T) {
+	t.Parallel()
+	s, col, _ := newTestSource(t, Config{})
+
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue,
+		map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: corev1.ConditionFalse}))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue,
+		map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: corev1.ConditionTrue}))
+
+	sigs := col.all()
+	if len(sigs) != 1 {
+		t.Fatalf("signals = %v, want exactly one node_pressure", col.kinds())
+	}
+	sig := sigs[0]
+	if sig.Kind != KindNodePressure || sig.Severity != engine.SeverityWarning {
+		t.Errorf("got kind %q severity %q, want %q/warning", sig.Kind, sig.Severity, KindNodePressure)
+	}
+	if sig.Key.Reason != "node_pressure" {
+		t.Errorf("Reason = %q, want node_pressure (kind suffix)", sig.Key.Reason)
+	}
+	if sig.Key.UID != "n1" || sig.Name != "node-1" || sig.KindOfObject != "Node" || sig.Node != "node-1" || sig.Namespace != "" {
+		t.Errorf("object identity wrong: %+v", sig.TriageEvent)
+	}
+	if !strings.Contains(sig.Message, "MemoryPressure") {
+		t.Errorf("message must name the condition: %q", sig.Message)
+	}
+
+	// A second condition flipping True mid-episode is the SAME
+	// per-node episode: no new warning.
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, map[corev1.NodeConditionType]corev1.ConditionStatus{
+		corev1.NodeMemoryPressure: corev1.ConditionTrue,
+		corev1.NodeDiskPressure:   corev1.ConditionTrue,
+	}))
+	if got := col.kinds(); len(got) != 1 {
+		t.Errorf("second condition inside the episode re-fired: %v", got)
+	}
+}
+
+func TestNode_PressureTrueAtFirstObservation_Baseline(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{PressureSustainWindow: 5 * time.Minute})
+	mem := map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: corev1.ConditionTrue}
+
+	// First observed already under pressure (initial LIST): history,
+	// not a transition — and still True on the next update is no
+	// transition either.
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem))
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("baseline pressure fired: %v", got)
+	}
+
+	// A pre-existing episode never warned, so it must never escalate
+	// (no boot-time replay), no matter how long it sustains.
+	*clock = clock.Add(time.Hour)
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem))
+	s.send(s.sweep(*clock))
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("baseline episode escalated: %v", got)
+	}
+
+	// Once it clears, the NEXT onset is a real transition.
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue,
+		map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: corev1.ConditionFalse}))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem))
+	if got := col.kinds(); len(got) != 1 || got[0] != KindNodePressure {
+		t.Errorf("post-clear onset: signals = %v, want one node_pressure", got)
+	}
+}
+
+func TestNode_PressureSustained_SingleCriticalEscalation(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{PressureSustainWindow: 5 * time.Minute})
+	base := *clock
+	mem := func(st corev1.ConditionStatus) map[corev1.NodeConditionType]corev1.ConditionStatus {
+		return map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: st}
+	}
+
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionTrue))) // warn at base
+
+	s.send(s.sweep(base.Add(4 * time.Minute)))
+	if got := col.kinds(); len(got) != 1 {
+		t.Fatalf("escalated before the sustain window: %v", got)
+	}
+	s.send(s.sweep(base.Add(5 * time.Minute)))
+	sigs := col.all()
+	if len(sigs) != 2 || sigs[1].Kind != KindNodePressure {
+		t.Fatalf("signals = %v, want warn then critical escalation", col.kinds())
+	}
+	esc := sigs[1]
+	if esc.Severity != engine.SeverityCritical {
+		t.Errorf("escalation severity = %q, want critical", esc.Severity)
+	}
+	if esc.Key.UID != "n1" || esc.Key.Reason != "node_pressure" || esc.Node != "node-1" {
+		t.Errorf("escalation identity wrong: %+v", esc.TriageEvent)
+	}
+	if !strings.Contains(esc.Message, "sustained") {
+		t.Errorf("escalation message should say sustained: %q", esc.Message)
+	}
+
+	// Level latch: one escalation per episode.
+	s.send(s.sweep(base.Add(20 * time.Minute)))
+	if got := col.kinds(); len(got) != 2 {
+		t.Errorf("re-escalated within the same episode: %v", got)
+	}
+
+	// Episode ends, a new one starts: warn fires again and can
+	// escalate again.
+	*clock = base.Add(30 * time.Minute)
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionTrue)))
+	s.send(s.sweep(base.Add(36 * time.Minute)))
+	kinds := col.kinds()
+	if len(kinds) != 4 || kinds[2] != KindNodePressure || kinds[3] != KindNodePressure {
+		t.Errorf("new episode did not warn+escalate: %v", kinds)
+	}
+}
+
+func TestNode_ReadyFlappingDoesNotAffectPressure(t *testing.T) {
+	t.Parallel()
+	s, col, _ := newTestSource(t, Config{FlapTransitions: 100})
+	mem := func(st corev1.ConditionStatus) map[corev1.NodeConditionType]corev1.ConditionStatus {
+		return map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: st}
+	}
+
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionFalse, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	for _, k := range col.kinds() {
+		if k == KindNodePressure {
+			t.Fatalf("Ready flapping produced node_pressure: %v", col.kinds())
+		}
+	}
+	// And the pressure baseline survived the Ready churn: a real
+	// onset still fires exactly once.
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionTrue)))
+	got := col.kinds()
+	if got[len(got)-1] != KindNodePressure {
+		t.Errorf("pressure onset after Ready churn did not fire: %v", got)
+	}
+}
+
+// evictedPod builds a pod the kubelet evicted: phase=Failed,
+// status.reason=Evicted — how evictions surface on the pod informer.
+func evictedPod(uid, name, nodeName string) *corev1.Pod {
+	p := pod(uid, name, 0)
+	p.Spec.NodeName = nodeName
+	p.Status.Phase = corev1.PodFailed
+	p.Status.Reason = "Evicted"
+	return p
+}
+
+// evictAt observes a pod running, then evicted — one counted
+// transition on the pod's node.
+func evictAt(s *Source, clock *time.Time, at time.Time, uid, name, nodeName string) {
+	*clock = at
+	running := pod(uid, name, 0)
+	running.Spec.NodeName = nodeName
+	s.onPod(running)
+	s.onPod(evictedPod(uid, name, nodeName))
+}
+
+func TestPod_EvictionBurst(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{EvictionBurstThreshold: 3, EvictionBurstWindow: 10 * time.Minute})
+	base := *clock
+	s.onNode(node("n1", "node-1", corev1.ConditionTrue)) // known node → real UID on the signal
+
+	evictAt(s, clock, base.Add(1*time.Minute), "e1", "victim-1", "node-1")
+	evictAt(s, clock, base.Add(2*time.Minute), "e2", "victim-2", "node-1")
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("fired below threshold: %v", got)
+	}
+	// Update replays of an already-evicted pod must not double-count.
+	s.onPod(evictedPod("e2", "victim-2", "node-1"))
+	s.onPod(evictedPod("e2", "victim-2", "node-1"))
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("replayed eviction updates double-counted: %v", got)
+	}
+
+	evictAt(s, clock, base.Add(3*time.Minute), "e3", "victim-3", "node-1")
+	sigs := col.all()
+	if len(sigs) != 1 || sigs[0].Kind != KindEvictionBurst {
+		t.Fatalf("signals = %v, want ONE eviction_burst", col.kinds())
+	}
+	sig := sigs[0]
+	if sig.Severity != engine.SeverityWarning || sig.Key.Reason != "eviction_burst" {
+		t.Errorf("severity/reason = %q/%q, want warning/eviction_burst", sig.Severity, sig.Key.Reason)
+	}
+	// Node-scoped, NOT pod-scoped: the whole point of the fold.
+	if sig.KindOfObject != "Node" || sig.Name != "node-1" || sig.Node != "node-1" || sig.Namespace != "" || sig.Key.UID != "n1" {
+		t.Errorf("burst must be node-scoped with the node's UID: %+v", sig.TriageEvent)
+	}
+
+	// Latch: the next eviction inside the window does not re-fire.
+	evictAt(s, clock, base.Add(4*time.Minute), "e4", "victim-4", "node-1")
+	if got := col.kinds(); len(got) != 1 {
+		t.Errorf("latch failed, burst re-fired: %v", got)
+	}
+}
+
+func TestPod_EvictionBurst_WindowDrainResets(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{EvictionBurstThreshold: 3, EvictionBurstWindow: 10 * time.Minute})
+	base := *clock
+
+	evictAt(s, clock, base.Add(1*time.Minute), "e1", "v1", "node-1")
+	evictAt(s, clock, base.Add(2*time.Minute), "e2", "v2", "node-1")
+	evictAt(s, clock, base.Add(3*time.Minute), "e3", "v3", "node-1")
+	if got := col.kinds(); len(got) != 1 || got[0] != KindEvictionBurst {
+		t.Fatalf("signals = %v, want one eviction_burst", got)
+	}
+
+	// The window drains; the sweep re-arms the latch.
+	s.send(s.sweep(base.Add(20 * time.Minute)))
+	if got := col.kinds(); len(got) != 1 {
+		t.Fatalf("sweep emitted: %v", got)
+	}
+
+	// A fresh burst is a new episode.
+	evictAt(s, clock, base.Add(21*time.Minute), "e4", "v4", "node-1")
+	evictAt(s, clock, base.Add(22*time.Minute), "e5", "v5", "node-1")
+	evictAt(s, clock, base.Add(23*time.Minute), "e6", "v6", "node-1")
+	if got := col.kinds(); len(got) != 2 || got[1] != KindEvictionBurst {
+		t.Errorf("post-drain burst did not fire: %v", got)
+	}
+}
+
+func TestPod_EvictionsSpreadBeyondWindowDoNotFire(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{EvictionBurstThreshold: 3, EvictionBurstWindow: 10 * time.Minute})
+	base := *clock
+	evictAt(s, clock, base, "e1", "v1", "node-1")
+	evictAt(s, clock, base.Add(15*time.Minute), "e2", "v2", "node-1")
+	evictAt(s, clock, base.Add(30*time.Minute), "e3", "v3", "node-1")
+	if got := col.kinds(); len(got) != 0 {
+		t.Errorf("slow eviction trickle fired: %v", got)
+	}
+}
+
+func TestPod_FirstObservationEvicted_Baseline(t *testing.T) {
+	t.Parallel()
+	// Threshold 1: any COUNTED eviction fires — so silence proves the
+	// baseline discipline.
+	s, col, _ := newTestSource(t, Config{EvictionBurstThreshold: 1})
+	s.onPod(evictedPod("e1", "old-victim", "node-1"))
+	s.onPod(evictedPod("e1", "old-victim", "node-1"))
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("pod first observed Evicted was counted: %v", got)
+	}
+	// A live transition still counts.
+	s.onPod(pod("e2", "fresh-victim", 0))
+	s.onPod(evictedPod("e2", "fresh-victim", "node-1"))
+	if got := col.kinds(); len(got) != 1 || got[0] != KindEvictionBurst {
+		t.Errorf("live eviction transition: signals = %v, want one eviction_burst", got)
+	}
+}
+
+func TestPressurePlusEvictionBurst_EscalatesPressure(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{
+		PressureSustainWindow:  5 * time.Minute,
+		EvictionBurstThreshold: 3, EvictionBurstWindow: 10 * time.Minute,
+	})
+	base := *clock
+	mem := func(st corev1.ConditionStatus) map[corev1.NodeConditionType]corev1.ConditionStatus {
+		return map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: st}
+	}
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionTrue))) // warn
+
+	evictAt(s, clock, base.Add(1*time.Minute), "e1", "v1", "node-1")
+	evictAt(s, clock, base.Add(2*time.Minute), "e2", "v2", "node-1")
+	evictAt(s, clock, base.Add(3*time.Minute), "e3", "v3", "node-1")
+
+	kinds := col.kinds()
+	want := []string{KindNodePressure, KindEvictionBurst, KindNodePressure}
+	if fmt.Sprint(kinds) != fmt.Sprint(want) {
+		t.Fatalf("signals = %v, want %v (warn, burst, escalation)", kinds, want)
+	}
+	esc := col.all()[2]
+	if esc.Severity != engine.SeverityCritical || esc.Key.UID != "n1" {
+		t.Errorf("eviction-paired escalation = severity %q uid %q, want critical/n1", esc.Severity, esc.Key.UID)
+	}
+	if !strings.Contains(esc.Message, "eviction") {
+		t.Errorf("escalation message should cite eviction activity: %q", esc.Message)
+	}
+
+	// The episode already escalated: the sustain sweep must not
+	// double-escalate.
+	s.send(s.sweep(base.Add(10 * time.Minute)))
+	if got := col.kinds(); len(got) != 3 {
+		t.Errorf("sweep re-escalated an already-critical episode: %v", got)
+	}
+}
+
+func TestPressureAndEviction_PreArmSilence(t *testing.T) {
+	t.Parallel()
+	s, col, clock := newTestSource(t, Config{EvictionBurstThreshold: 3, PressureSustainWindow: 5 * time.Minute})
+	s.armed = false // handlers record, emission gated (§7.2)
+	base := *clock
+	mem := func(st corev1.ConditionStatus) map[corev1.NodeConditionType]corev1.ConditionStatus {
+		return map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: st}
+	}
+
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionFalse)))
+	s.onNode(pressureNode("n1", "node-1", corev1.ConditionTrue, mem(corev1.ConditionTrue)))
+	evictAt(s, clock, base.Add(1*time.Minute), "e1", "v1", "node-1")
+	evictAt(s, clock, base.Add(2*time.Minute), "e2", "v2", "node-1")
+	evictAt(s, clock, base.Add(3*time.Minute), "e3", "v3", "node-1")
+	if got := col.kinds(); len(got) != 0 {
+		t.Fatalf("pre-arm activity emitted: %v", got)
+	}
+
+	s.armed = true
+	// A pre-arm pressure episode never warned → never escalates.
+	s.send(s.sweep(base.Add(30 * time.Minute)))
+	if got := col.kinds(); len(got) != 0 {
+		t.Errorf("pre-arm pressure episode escalated after arming: %v", got)
+	}
+}
+
+// TestEvictionBurstClearance pins the §7.4 predicate the source
+// exposes through its composed ClearanceObserver: an eviction_burst
+// incident clears only when no eviction landed on the node within the
+// burst window.
+func TestEvictionBurstClearance(t *testing.T) {
+	t.Parallel()
+	s, _, clock := newTestSource(t, Config{EvictionBurstThreshold: 3, EvictionBurstWindow: 10 * time.Minute})
+	base := *clock
+	s.onNode(node("n1", "node-1", corev1.ConditionTrue))
+	obs := s.ClearanceObserver()
+
+	inc := engine.Incident{
+		Key: engine.EventKey{UID: "n1", Reason: "eviction_burst"},
+		Ref: engine.IncidentRef{KindOfObject: "Node", Name: "node-1"},
+	}
+
+	// Live node, no eviction memory: symptom absent.
+	if v, ok := obs.Clearance(inc); !ok || !v.Cleared {
+		t.Fatalf("no-eviction node: verdict = %+v ok=%v, want cleared", v, ok)
+	}
+
+	evictAt(s, clock, base.Add(1*time.Minute), "e1", "v1", "node-1")
+	v, ok := obs.Clearance(inc)
+	if !ok || v.Cleared {
+		t.Fatalf("eviction inside the window must keep the incident symptomatic (ok=%v, %+v)", ok, v)
+	}
+
+	// The window drains: cleared, vouched-stable from the drain
+	// instant (last eviction + window).
+	*clock = base.Add(12 * time.Minute)
+	v, ok = obs.Clearance(inc)
+	if !ok || !v.Cleared || v.Resolution != engine.ResolutionRecovered {
+		t.Fatalf("drained window must clear as recovered (ok=%v, %+v)", ok, v)
+	}
+	if want := base.Add(11 * time.Minute); !v.StableSince.Equal(want) {
+		t.Errorf("StableSince = %v, want drain instant %v", v.StableSince, want)
+	}
+
+	// Unarmed (caches not synced) the judge declines — but the
+	// composed observer falls through to NodeClearance, which judges
+	// Node incidents by Ready-ness only once ITS informer synced.
+	s.armed = false
+	if _, ok := (evictionClearance{s}).Clearance(inc); ok {
+		t.Error("unarmed eviction judge must decline")
+	}
+}
+
 // deploymentFixture builds a mid-rollout deployment.
 type deploymentFixture struct {
 	uid                string
@@ -585,8 +967,11 @@ func TestPod_FirstObservationWithHighRestartsIsBaseline(t *testing.T) {
 func TestArmAfterSync(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset(
-		node("n1", "node-1", corev1.ConditionFalse),            // already NotReady
+		node("n1", "node-1", corev1.ConditionFalse), // already NotReady
+		pressureNode("n2", "node-2", corev1.ConditionTrue, // already under pressure
+			map[corev1.NodeConditionType]corev1.ConditionStatus{corev1.NodeMemoryPressure: corev1.ConditionTrue}),
 		pod("u1", "crashy", 42),                                // already restart-heavy
+		evictedPod("u2", "victim", "node-2"),                   // already evicted
 		pdb("p1", "web-pdb", 0, 3, 2),                          // already gridlocked
 		slice("web-a", "prod", "web", "svc-1", boolPtr(false)), // already empty
 	)
@@ -705,6 +1090,7 @@ func TestStateTTL_PrunesStaleEntries(t *testing.T) {
 	s.onNode(node("n1", "node-1", corev1.ConditionTrue))
 	s.onPDB(pdb("p1", "web-pdb", 1, 3, 3))
 	s.onPod(pod("u1", "web-abc", 0))
+	s.onPod(evictedPod("u1", "web-abc", "node-1")) // creates the node's eviction bucket
 	s.onSlice(slice("web-a", "prod", "web", "svc-1", boolPtr(true)))
 
 	*clock = clock.Add(2 * time.Hour)
@@ -712,9 +1098,9 @@ func TestStateTTL_PrunesStaleEntries(t *testing.T) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.nodes)+len(s.pdbs)+len(s.restarts)+len(s.services) != 0 {
-		t.Errorf("TTL sweep left state behind: nodes=%d pdbs=%d restarts=%d services=%d",
-			len(s.nodes), len(s.pdbs), len(s.restarts), len(s.services))
+	if len(s.nodes)+len(s.pdbs)+len(s.restarts)+len(s.services)+len(s.evictions) != 0 {
+		t.Errorf("TTL sweep left state behind: nodes=%d pdbs=%d restarts=%d services=%d evictions=%d",
+			len(s.nodes), len(s.pdbs), len(s.restarts), len(s.services), len(s.evictions))
 	}
 }
 
@@ -779,6 +1165,8 @@ func TestKindInventoryFrozen(t *testing.T) {
 		"objectstate.endpoints_empty":   engine.SeverityCritical,
 		"objectstate.pdb_gridlocked":    engine.SeverityWarning,
 		"objectstate.restart_burst":     engine.SeverityWarning,
+		"objectstate.node_pressure":     engine.SeverityWarning,
+		"objectstate.eviction_burst":    engine.SeverityWarning,
 	}
 	if len(kindSeverity) != len(want) {
 		t.Errorf("kind inventory changed size: got %d kinds, want %d (append-only — update this pin deliberately)", len(kindSeverity), len(want))

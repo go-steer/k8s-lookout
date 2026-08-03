@@ -66,7 +66,7 @@ no incident-class identity), and the §9.4 triage-status join has used
 this exact recipe since M4. Parity is pinned by
 `TestFingerprintParity_PushAndScan`.
 
-## Kind inventory (v1: 41 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, additive-only)
+## Kind inventory (v1: 43 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -85,7 +85,8 @@ Cross-cutting kinds, each with its own schema-stable struct
 
 Source-namespaced kinds — all ride `Payload`: `objectstate.
 node_notready|node_flapping|progress_deadline|endpoints_empty|
-pdb_gridlocked|restart_burst`, `rollout.stall`, `workload.
+pdb_gridlocked|restart_burst|node_pressure|eviction_burst`
+(`node_pressure`/`eviction_burst` added post-M5, #134), `rollout.stall`, `workload.
 job_failed|cron_missed` (added post-M5, #129 — kinds are
 append-only), `saturation.forecast`,
 `degradation.capacity|probe_flap`, `expiry.warning`, `capacity.

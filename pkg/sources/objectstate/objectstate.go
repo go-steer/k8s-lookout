@@ -17,11 +17,12 @@
 // shared informers on Pods, Nodes, Deployments, EndpointSlices, and
 // PodDisruptionBudgets. Where k8s-events reacts to what the control
 // plane already reported, object-state fires on the transition itself
-// — a node flipping NotReady, a rollout approaching (not yet
-// exceeding) its progress deadline, a Service's ready-endpoint count
-// hitting zero, a PDB gridlocking, a pod's restart count climbing —
-// each of which precedes the corresponding event, when one exists at
-// all.
+// — a node flipping NotReady, a kubelet pressure condition setting
+// in, a burst of evictions on one node, a rollout approaching (not
+// yet exceeding) its progress deadline, a Service's ready-endpoint
+// count hitting zero, a PDB gridlocking, a pod's restart count
+// climbing — each of which precedes the corresponding event, when one
+// exists at all.
 //
 // Transition discipline: every emitted kind requires per-object
 // previous-state memory (in-memory, TTL-bounded, rebuilt from the
@@ -107,6 +108,27 @@ const (
 	// Config.RestartBurstWindow — the cheap leading edge of a crash
 	// loop, ahead of the kubelet's BackOff events.
 	KindRestartBurst = kindPrefix + "restart_burst"
+	// KindNodePressure: one of a Node's kubelet pressure conditions
+	// (MemoryPressure, DiskPressure, PIDPressure) transitioned
+	// False→True. Warning at onset; ONE escalation to critical per
+	// pressure episode when the sweep sees pressure still active past
+	// Config.PressureSustainWindow, or immediately when an eviction
+	// burst fires on the same node while pressure is active (the
+	// kubelet is already shedding load). One incident per node
+	// (UID=node UID, reason "node_pressure"); the message names the
+	// condition(s).
+	KindNodePressure = kindPrefix + "node_pressure"
+	// KindEvictionBurst: Config.EvictionBurstThreshold pod evictions
+	// on ONE node within Config.EvictionBurstWindow, folded into a
+	// single node-scoped signal instead of N pod-scoped ones.
+	// Deliberately "burst", mirroring restart_burst — kind=storm is
+	// §7.5's separate cross-incident mechanism. §7.5 coordination:
+	// the per-pod Evicted k8s-events still flow through the
+	// k8s-events source and, with --storm on, form a node-keyed
+	// storm; this signal is the storm-off fallback and, being
+	// node-scoped, itself joins/seeds the node storm (internal/watch
+	// graphfeed makes Node the ancestor) — no engine changes needed.
+	KindEvictionBurst = kindPrefix + "eviction_burst"
 )
 
 // kindSeverity is the default §7.7 severity per kind. Per-class
@@ -119,6 +141,8 @@ var kindSeverity = map[string]engine.Severity{
 	KindEndpointsEmpty:   engine.SeverityCritical,
 	KindPDBGridlocked:    engine.SeverityWarning,
 	KindRestartBurst:     engine.SeverityWarning,
+	KindNodePressure:     engine.SeverityWarning,
+	KindEvictionBurst:    engine.SeverityWarning,
 }
 
 // reasonOf derives the dedup/fingerprint reason from a kind: the
@@ -147,6 +171,16 @@ type Config struct {
 	// RestartBurstWindow is the sliding window for restart growth.
 	// Default 10m.
 	RestartBurstWindow time.Duration
+	// PressureSustainWindow is how long a node pressure condition
+	// must stay True before the warning-level KindNodePressure
+	// escalates to critical. Default 5m.
+	PressureSustainWindow time.Duration
+	// EvictionBurstThreshold is how many pod evictions on one node
+	// within EvictionBurstWindow fire KindEvictionBurst. Default 3.
+	EvictionBurstThreshold int
+	// EvictionBurstWindow is the sliding window for per-node
+	// eviction counting. Default 10m.
+	EvictionBurstWindow time.Duration
 	// TickInterval drives the deadline sweep (progress-deadline math
 	// needs a clock, not an informer update — a stuck rollout stops
 	// producing updates) and the state-TTL prune. Default 30s.
@@ -166,6 +200,9 @@ func DefaultConfig() Config {
 		FlapWindow:               10 * time.Minute,
 		RestartBurstThreshold:    3,
 		RestartBurstWindow:       10 * time.Minute,
+		PressureSustainWindow:    5 * time.Minute,
+		EvictionBurstThreshold:   3,
+		EvictionBurstWindow:      10 * time.Minute,
 		TickInterval:             30 * time.Second,
 		StateTTL:                 24 * time.Hour,
 	}
@@ -189,6 +226,15 @@ func (c Config) normalize() Config {
 	if c.RestartBurstWindow <= 0 {
 		c.RestartBurstWindow = d.RestartBurstWindow
 	}
+	if c.PressureSustainWindow <= 0 {
+		c.PressureSustainWindow = d.PressureSustainWindow
+	}
+	if c.EvictionBurstThreshold <= 0 {
+		c.EvictionBurstThreshold = d.EvictionBurstThreshold
+	}
+	if c.EvictionBurstWindow <= 0 {
+		c.EvictionBurstWindow = d.EvictionBurstWindow
+	}
 	if c.TickInterval <= 0 {
 		c.TickInterval = d.TickInterval
 	}
@@ -198,13 +244,64 @@ func (c Config) normalize() Config {
 	return c
 }
 
+// pressureLevel is the fired-level latch for a node pressure episode
+// (the capacity source's pending-aged pattern): one warning per
+// episode, one critical escalation per episode; monotonic within the
+// episode, reset when every pressure condition returns False.
+type pressureLevel int
+
+const (
+	pressureNone pressureLevel = iota
+	pressureWarn
+	pressureCritical
+)
+
+// pressureConditions are the kubelet pressure conditions
+// KindNodePressure watches. Absent counts as False.
+var pressureConditions = []corev1.NodeConditionType{
+	corev1.NodeMemoryPressure,
+	corev1.NodeDiskPressure,
+	corev1.NodePIDPressure,
+}
+
 // nodeState is the per-node transition memory.
 type nodeState struct {
+	name  string
 	ready bool
 	// transitions are the timestamps of recent Ready-condition
 	// changes (either direction), pruned to Config.FlapWindow.
 	transitions []time.Time
-	lastSeen    time.Time
+	// pressure is the last observed status of each kubelet pressure
+	// condition (absent = false).
+	pressure map[corev1.NodeConditionType]bool
+	// pressureSince is when the current pressure episode began (the
+	// instant any pressure condition was observed True from an
+	// all-False state). Zero when no episode is active.
+	pressureSince time.Time
+	// pressureFired is the per-episode emission latch. It advances
+	// past pressureNone only for episodes whose ONSET was observed
+	// while armed — a pre-existing episode (baseline, or pre-arm
+	// onset) never warned, so it never escalates either (§7.2: no
+	// boot-time replay).
+	pressureFired pressureLevel
+	lastSeen      time.Time
+}
+
+// evictionState is the per-node eviction-burst memory, keyed by node
+// NAME (evicted pods carry only spec.nodeName; a same-name node
+// replacement inherits the bucket, which is also what clearance
+// judges).
+type evictionState struct {
+	// times are the observed eviction transitions, pruned to
+	// Config.EvictionBurstWindow.
+	times []time.Time
+	// last is the most recent eviction regardless of pruning — the
+	// clearance predicate's input.
+	last time.Time
+	// fired latches one KindEvictionBurst per episode; the sweep
+	// resets it when the window drains.
+	fired    bool
+	lastSeen time.Time
 }
 
 // deploymentState is the per-deployment sweep subject: the last
@@ -248,12 +345,17 @@ type pdbState struct {
 	lastSeen time.Time
 }
 
-// restartState is the per-pod restart-growth memory.
+// restartState is the per-pod restart-growth memory (also the
+// per-pod eviction dedupe: informer update replays of an already-
+// counted Evicted pod must not double-count).
 type restartState struct {
 	total int32
 	// bumps are observed restart-count increments, pruned to
 	// Config.RestartBurstWindow.
-	bumps    []restartBump
+	bumps []restartBump
+	// evicted latches whether this pod's transition to
+	// Failed/Evicted was already observed (counted at most once).
+	evicted  bool
 	lastSeen time.Time
 }
 
@@ -294,6 +396,9 @@ type Source struct {
 	services    map[serviceKey]*serviceState
 	pdbs        map[types.UID]*pdbState
 	restarts    map[types.UID]*restartState
+	// evictions is the per-node eviction-burst memory, keyed by node
+	// name (see evictionState).
+	evictions map[string]*evictionState
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
@@ -312,6 +417,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		services:    make(map[serviceKey]*serviceState),
 		pdbs:        make(map[types.UID]*pdbState),
 		restarts:    make(map[types.UID]*restartState),
+		evictions:   make(map[string]*evictionState),
 	}
 }
 
@@ -337,15 +443,59 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 }
 
 // ClearanceObserver returns the §7.4 clearance predicate backed by
-// this source's informers: node-scoped incidents are judged by the
-// node informer's NodeClearance, pod-scoped ones by the pod
-// informer's PodClearance (each judges only its own object kind, so
-// composition order is immaterial). The recovery tracker uses it
-// instead of internal/watch's standalone pod observer when the source
-// is enabled — the same informers, no duplicates, and pod judging
-// behavior identical to before.
+// this source's informers: eviction_burst incidents are judged by the
+// source's own eviction memory (the symptom is eviction ACTIVITY, not
+// node readiness — only the source observes it), other node-scoped
+// incidents by the node informer's NodeClearance, pod-scoped ones by
+// the pod informer's PodClearance. The eviction judge precedes nc
+// because both claim Node-scoped incidents; nc and pc are disjoint.
+// The recovery tracker uses it instead of internal/watch's standalone
+// pod observer when the source is enabled — the same informers, no
+// duplicates, and pod judging behavior identical to before.
 func (s *Source) ClearanceObserver() engine.ClearanceObserver {
-	return composedClearance{s.nc, s.pc}
+	return composedClearance{evictionClearance{s}, s.nc, s.pc}
+}
+
+// evictionClearance judges Node-scoped eviction_burst incidents from
+// the Source's per-node eviction memory (§7.4: the source that
+// observes the symptom observes its absence): cleared when no
+// eviction was recorded for the node within EvictionBurstWindow,
+// StableSince = the instant the window drained. When the node is gone
+// AND no eviction memory remains it declines, so NodeClearance's
+// gone-node logic supplies the object_deleted / same-name-replacement
+// verdict.
+type evictionClearance struct{ s *Source }
+
+func (e evictionClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
+	if !strings.EqualFold(inc.Ref.KindOfObject, "Node") || inc.Key.Reason != reasonOf(KindEvictionBurst) {
+		return engine.Clearance{}, false
+	}
+	s := e.s
+	now := s.clock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.armed {
+		// Caches not synced: cannot judge yet (mirrors the
+		// SetSynced gate of the clearance state machines).
+		return engine.Clearance{}, false
+	}
+	ev := s.evictions[inc.Ref.Name]
+	if ev == nil {
+		for _, st := range s.nodes {
+			if st.name == inc.Ref.Name {
+				// Live node, no eviction memory: symptom absent
+				// (nothing recorded to vouch a later instant from).
+				return engine.Clearance{Cleared: true, Resolution: engine.ResolutionRecovered}, true
+			}
+		}
+		return engine.Clearance{}, false // node gone — nc decides
+	}
+	drained := ev.last.Add(s.cfg.EvictionBurstWindow)
+	return engine.Clearance{
+		Cleared:     !now.Before(drained),
+		StableSince: drained,
+		Resolution:  engine.ResolutionRecovered,
+	}, true
 }
 
 // composedClearance asks each observer in order; the first that can
@@ -552,7 +702,7 @@ func (s *Source) asPDB(obj any, fn func(*policyv1.PodDisruptionBudget)) {
 	}
 }
 
-// ---- Nodes: Ready flips and flap detection ----
+// ---- Nodes: Ready flips, flap detection, pressure onset ----
 
 // nodeReady reads the Ready condition. Unknown counts as NOT ready:
 // the node controller losing contact is exactly the outage the signal
@@ -570,6 +720,42 @@ func nodeReady(n *corev1.Node) (ready bool, msg string, ok bool) {
 	return false, "", false
 }
 
+// nodePressure reads the kubelet pressure conditions. Absent counts
+// as False (a condition the kubelet never reported is not pressure).
+func nodePressure(n *corev1.Node) map[corev1.NodeConditionType]bool {
+	p := make(map[corev1.NodeConditionType]bool, len(pressureConditions))
+	for _, cond := range n.Status.Conditions {
+		for _, want := range pressureConditions {
+			if cond.Type == want {
+				p[cond.Type] = cond.Status == corev1.ConditionTrue
+			}
+		}
+	}
+	return p
+}
+
+// anyPressure reports whether any pressure condition is True.
+func anyPressure(p map[corev1.NodeConditionType]bool) bool {
+	for _, v := range p {
+		if v {
+			return true
+		}
+	}
+	return false
+}
+
+// activePressureNames lists the True pressure conditions in the fixed
+// pressureConditions order (deterministic messages).
+func activePressureNames(p map[corev1.NodeConditionType]bool) []string {
+	var names []string
+	for _, c := range pressureConditions {
+		if p[c] {
+			names = append(names, string(c))
+		}
+	}
+	return names
+}
+
 func (s *Source) onNode(n *corev1.Node) {
 	// Clearance duties first (§7.4 node observer, mirroring onPod).
 	s.nc.Upsert(n)
@@ -578,6 +764,7 @@ func (s *Source) onNode(n *corev1.Node) {
 	if !ok {
 		return
 	}
+	pressure := nodePressure(n)
 	now := s.clock()
 
 	s.mu.Lock()
@@ -585,11 +772,19 @@ func (s *Source) onNode(n *corev1.Node) {
 	if !seen {
 		// First observation (initial LIST, or a node created mid-
 		// flight): record, never fire — a creation is not a
-		// transition.
-		s.nodes[n.UID] = &nodeState{ready: ready, lastSeen: now}
+		// transition. A node first seen WITH pressure active is
+		// history: the episode is recorded (pressureSince) but the
+		// fired latch stays pressureNone, so it neither warns nor
+		// escalates (§7.2: no boot-time replay).
+		st = &nodeState{name: n.Name, ready: ready, pressure: pressure, lastSeen: now}
+		if anyPressure(pressure) {
+			st.pressureSince = now
+		}
+		s.nodes[n.UID] = st
 		s.mu.Unlock()
 		return
 	}
+	st.name = n.Name
 	st.lastSeen = now
 	var out []engine.Signal
 	if ready != st.ready {
@@ -608,6 +803,29 @@ func (s *Source) onNode(n *corev1.Node) {
 			}
 		}
 	}
+	// Pressure episode tracking, independent of Ready (a node can be
+	// Ready and under memory pressure — which is why NodeClearance
+	// judges node_pressure incidents by the pressure conditions, not
+	// Ready-ness).
+	wasActive := anyPressure(st.pressure)
+	st.pressure = pressure
+	switch active := anyPressure(pressure); {
+	case active && !wasActive:
+		// Episode onset: some pressure condition flipped False→True.
+		st.pressureSince = now
+		st.pressureFired = pressureNone
+		if s.armed {
+			st.pressureFired = pressureWarn
+			out = append(out, newSignal(KindNodePressure, "Node", "", n.Name, string(n.UID), n.Name,
+				fmt.Sprintf("node pressure condition went False→True: %s", strings.Join(activePressureNames(pressure), ", ")), now))
+		}
+	case !active && wasActive:
+		// Episode over: every pressure condition back to False. The
+		// §7.4 resolve is NodeClearance's business; here only the
+		// latch resets so a NEW episode warns again.
+		st.pressureSince = time.Time{}
+		st.pressureFired = pressureNone
+	}
 	s.mu.Unlock()
 	s.send(out)
 }
@@ -616,6 +834,11 @@ func (s *Source) onNodeDelete(n *corev1.Node) {
 	s.nc.Delete(n)
 	s.mu.Lock()
 	delete(s.nodes, n.UID)
+	// The node's eviction bucket goes with it: a same-name
+	// replacement starts a fresh count, and a gone-node
+	// eviction_burst incident falls through to NodeClearance's
+	// object_deleted verdict.
+	delete(s.evictions, n.Name)
 	s.mu.Unlock()
 }
 
@@ -737,7 +960,8 @@ func assessProgress(d *appsv1.Deployment, fraction float64, now time.Time) (fire
 		d.Status.UpdatedReplicas, replicas, d.Status.AvailableReplicas)
 }
 
-// sweep is the ticker body: evaluates progress deadlines and prunes
+// sweep is the ticker body: evaluates progress deadlines and
+// sustained node pressure, maintains the eviction windows, and prunes
 // TTL-expired transition memory. Returns the signals to emit (the
 // caller sends them outside the lock).
 func (s *Source) sweep(now time.Time) []engine.Signal {
@@ -754,6 +978,31 @@ func (s *Source) sweep(now time.Time) []engine.Signal {
 				st.firedGeneration = d.Generation
 				out = append(out, newSignal(KindProgressDeadline, "Deployment", d.Namespace, d.Name, string(d.UID), "", msg, now))
 			}
+		}
+		// Sustained-pressure escalation: one critical per episode
+		// (level latch), and only for episodes that WARNED — an
+		// episode whose onset predates arming never emitted, so it
+		// never escalates either.
+		for uid, st := range s.nodes {
+			if st.pressureFired != pressureWarn || !anyPressure(st.pressure) {
+				continue
+			}
+			if held := now.Sub(st.pressureSince); held >= s.cfg.PressureSustainWindow {
+				st.pressureFired = pressureCritical
+				sig := newSignal(KindNodePressure, "Node", "", st.name, string(uid), st.name,
+					fmt.Sprintf("node pressure (%s) sustained for %s (threshold %s)",
+						strings.Join(activePressureNames(st.pressure), ", "), held.Truncate(time.Second), s.cfg.PressureSustainWindow), now)
+				sig.Severity = engine.SeverityCritical
+				out = append(out, sig)
+			}
+		}
+	}
+	// Eviction windows: prune, and re-arm the burst latch once the
+	// window drains (the next burst is a new episode).
+	for _, ev := range s.evictions {
+		ev.times = pruneTimes(ev.times, now.Add(-s.cfg.EvictionBurstWindow))
+		if len(ev.times) == 0 {
+			ev.fired = false
 		}
 	}
 	// TTL prune (safety net behind DeleteFunc — a missed delete must
@@ -782,6 +1031,11 @@ func (s *Source) sweep(now time.Time) []engine.Signal {
 	for uid, st := range s.restarts {
 		if st.lastSeen.Before(cutoff) {
 			delete(s.restarts, uid)
+		}
+	}
+	for name, ev := range s.evictions {
+		if ev.lastSeen.Before(cutoff) {
+			delete(s.evictions, name)
 		}
 	}
 	return out
@@ -919,7 +1173,14 @@ func (s *Source) onPDBDelete(p *policyv1.PodDisruptionBudget) {
 	s.mu.Unlock()
 }
 
-// ---- Pods: clearance mirror + restart-burst ----
+// ---- Pods: clearance mirror + restart-burst + eviction-burst ----
+
+// podEvicted reports the kubelet's eviction verdict: an evicted pod
+// surfaces on the pod informer as phase=Failed with status.reason
+// "Evicted" — no event informer needed.
+func podEvicted(p *corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodFailed && p.Status.Reason == "Evicted"
+}
 
 func (s *Source) onPod(p *corev1.Pod) {
 	// Clearance duties first (absorbed pod observer, §7.4).
@@ -927,13 +1188,15 @@ func (s *Source) onPod(p *corev1.Pod) {
 
 	now := s.clock()
 	total, _ := containerRestarts(p)
+	evicted := podEvicted(p)
 
 	s.mu.Lock()
 	st, seen := s.restarts[p.UID]
 	if !seen {
 		// Baseline only: a pod first observed with a high restart
-		// count is history, not observed growth.
-		s.restarts[p.UID] = &restartState{total: total, lastSeen: now}
+		// count — or already Evicted (initial LIST) — is history,
+		// not an observed transition.
+		s.restarts[p.UID] = &restartState{total: total, evicted: evicted, lastSeen: now}
 		s.mu.Unlock()
 		return
 	}
@@ -958,8 +1221,65 @@ func (s *Source) onPod(p *corev1.Pod) {
 		}
 	}
 	st.total = total
+	if evicted && !st.evicted {
+		// TRANSITION to Failed/Evicted, counted once per pod UID
+		// (update replays of the terminal state hit the latch).
+		st.evicted = true
+		if p.Spec.NodeName != "" {
+			out = append(out, s.recordEvictionLocked(p.Spec.NodeName, now)...)
+		}
+	}
 	s.mu.Unlock()
 	s.send(out)
+}
+
+// recordEvictionLocked buckets one observed eviction on nodeName
+// (called under s.mu) and, at Config.EvictionBurstThreshold within
+// Config.EvictionBurstWindow, fires ONE node-scoped
+// KindEvictionBurst — instead of N pod-scoped signals. §7.5
+// coordination: with --storm on, the per-pod Evicted k8s-events
+// (engine filter allow-list) still form a node-keyed storm; this
+// signal is the storm-off fallback, and being node-scoped it
+// joins/seeds that same node storm (graphfeed makes Node the
+// ancestor), so no engine changes are needed to avoid double
+// aggregation. An eviction burst while the node's pressure episode is
+// active also escalates that episode's KindNodePressure to critical
+// (the kubelet is shedding load — pressure is no longer speculative).
+func (s *Source) recordEvictionLocked(nodeName string, now time.Time) []engine.Signal {
+	ev, ok := s.evictions[nodeName]
+	if !ok {
+		ev = &evictionState{}
+		s.evictions[nodeName] = ev
+	}
+	ev.times = pruneTimes(append(ev.times, now), now.Add(-s.cfg.EvictionBurstWindow))
+	ev.last = now
+	ev.lastSeen = now
+	if !s.armed || ev.fired || len(ev.times) < s.cfg.EvictionBurstThreshold {
+		return nil
+	}
+	ev.fired = true // one burst per episode; the sweep re-arms on drain
+
+	// Node identity: evicted pods carry only spec.nodeName; recover
+	// the UID from the node informer's memory when it's there.
+	uid := "node:" + nodeName
+	var nst *nodeState
+	for u, st := range s.nodes {
+		if st.name == nodeName {
+			uid, nst = string(u), st
+			break
+		}
+	}
+	out := []engine.Signal{newSignal(KindEvictionBurst, "Node", "", nodeName, uid, nodeName,
+		fmt.Sprintf("%d pod evictions on the node within %s", len(ev.times), s.cfg.EvictionBurstWindow), now)}
+	if nst != nil && nst.pressureFired == pressureWarn && anyPressure(nst.pressure) {
+		nst.pressureFired = pressureCritical
+		sig := newSignal(KindNodePressure, "Node", "", nst.name, uid, nst.name,
+			fmt.Sprintf("node pressure (%s) paired with eviction activity: %d pod evictions within %s",
+				strings.Join(activePressureNames(nst.pressure), ", "), len(ev.times), s.cfg.EvictionBurstWindow), now)
+		sig.Severity = engine.SeverityCritical
+		out = append(out, sig)
+	}
+	return out
 }
 
 func (s *Source) onPodDelete(p *corev1.Pod) {

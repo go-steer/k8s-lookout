@@ -160,6 +160,65 @@ func TestNodeClearance_SameNameReplacement(t *testing.T) {
 	}
 }
 
+// pressureClearNode builds a Node that is Ready (transition at
+// readyAt) with a MemoryPressure condition of the given status
+// (transition at pressureAt).
+func pressureClearNode(uid, name string, mem corev1.ConditionStatus, readyAt, pressureAt time.Time) *corev1.Node {
+	n := clearNode(uid, name, corev1.ConditionTrue, readyAt)
+	n.Status.Conditions = append(n.Status.Conditions, corev1.NodeCondition{
+		Type: corev1.NodeMemoryPressure, Status: mem, LastTransitionTime: metav1.Time{Time: pressureAt},
+	})
+	return n
+}
+
+// TestNodeClearance_PressureAware pins the reason branch: a
+// node_pressure incident on a READY node is judged by the pressure
+// conditions, not Ready-ness — the §7.4 interaction that would
+// otherwise clear the incident the moment it opened.
+func TestNodeClearance_PressureAware(t *testing.T) {
+	t.Parallel()
+	nc := syncedNodeClearance()
+	readyAt := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	onset := readyAt.Add(40 * time.Minute)
+
+	inc := nodeIncident("n1", "worker-1")
+	inc.Key.Reason = "node_pressure"
+
+	// Ready node under memory pressure: still symptomatic.
+	nc.Upsert(pressureClearNode("n1", "worker-1", corev1.ConditionTrue, readyAt, onset))
+	v, ok := nc.Clearance(inc)
+	if !ok || v.Cleared {
+		t.Fatalf("Ready node under pressure must NOT clear a node_pressure incident (ok=%v, %+v)", ok, v)
+	}
+
+	// The Ready-based family on the same node still clears by
+	// Ready-ness, untouched by the pressure branch.
+	ready := nodeIncident("n1", "worker-1") // reason node_notready
+	if v, ok := nc.Clearance(ready); !ok || !v.Cleared || !v.StableSince.Equal(readyAt) {
+		t.Errorf("node_notready on the same node must clear by Ready-ness (ok=%v, %+v)", ok, v)
+	}
+
+	// Pressure lifts: cleared, vouched-stable from the pressure
+	// condition's transition time.
+	lifted := onset.Add(10 * time.Minute)
+	nc.Upsert(pressureClearNode("n1", "worker-1", corev1.ConditionFalse, readyAt, lifted))
+	v, ok = nc.Clearance(inc)
+	if !ok || !v.Cleared || v.Resolution != engine.ResolutionRecovered {
+		t.Fatalf("pressure-free node must clear as recovered (ok=%v, %+v)", ok, v)
+	}
+	if !v.StableSince.Equal(lifted) {
+		t.Errorf("StableSince = %v, want the pressure transition %v", v.StableSince, lifted)
+	}
+
+	// Same-name replacement path takes the branch too.
+	old := pressureClearNode("n1", "worker-1", corev1.ConditionFalse, readyAt, lifted)
+	nc.Delete(old)
+	nc.Upsert(pressureClearNode("n2", "worker-1", corev1.ConditionTrue, readyAt, lifted))
+	if v, _ := nc.Clearance(inc); v.Cleared {
+		t.Error("pressured same-name replacement must keep node_pressure symptomatic")
+	}
+}
+
 // TestNodeClearance_ResolvesThroughTracker drives the full §7.4 state
 // machine: fake NotReady→Ready sequence, tracker ticks across the
 // stability window, kind=resolved comes out — the drill A gap

@@ -509,7 +509,7 @@ type Source interface {
 | Source | Class | Watches | Emits (examples) |
 | --- | --- | --- | --- |
 | `k8s-events` | reactive | `core/v1 Event` informer (today's watcher, unchanged semantics) | `CrashLoopBackOff`, `FailedMount`, … per existing allow-list |
-| `object-state` | leading (transitions) | Pod/Node/Deployment/EndpointSlice informers | node `Ready→NotReady` flap, Deployment progress-deadline approaching, endpoints count → 0, PDB → `disruptionsAllowed=0` |
+| `object-state` | leading (transitions) | Pod/Node/Deployment/EndpointSlice informers | node `Ready→NotReady` flap, node Memory/Disk/PID pressure onset (sustained → critical), per-node eviction burst, Deployment progress-deadline approaching, endpoints count → 0, PDB → `disruptionsAllowed=0` |
 | `rollout` | leading (as-it-happens) | Deployments/StatefulSets with in-progress rollouts | "new RS 0/1 ready for 4 min, old RS healthy — probable bad deploy", fired well before `progressDeadlineSeconds` |
 | `workload` | reactive + leading (schedule) | `batch/v1` Job/CronJob informers (post-M5 #129) | Job `Failed` condition (`BackoffLimitExceeded`, `DeadlineExceeded`); CronJob activation passed with no run — batch failures leave no crashlooping pod for `k8s-events` to catch |
 | `saturation` | leading (trend) | `metrics.k8s.io` + kubelet volume stats, continuously sampled | "pod hits memory limit in ~14 min" (slope → ETA), "PVC full in ~3 h". This is where v2 `top-analyzer`'s regression math lives — a resident process owns the time series a one-shot never had. |
