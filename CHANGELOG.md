@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The failed-mount example scenario's verify no longer flakes when the
+  FailedMount incident is absorbed into a node storm (#154): crashloop
+  runs just before it on the same node, so inside the storm window the
+  incident arrives as a `kind=storm` representative instead of a fresh
+  `k8s-event`. The verify now accepts both routings, the same guard the
+  image-pull scenario already carries.
+
 ## [0.13.0] - 2026-07-31
 
 The adoption release, driven by feedback from the first outside users:
