@@ -107,6 +107,10 @@ var frozenFields = map[string][]string{
 		"cluster", "triage_status", "severity_override", "triage_session",
 		"baseline_count", "count", "factor", "first_seen", "last_seen",
 		"message", "context"},
+	"FamilyMemberPayload": {"kind", "member_kind", "reason", "severity",
+		"namespace", "kind_of_object", "name", "uid", "fingerprint",
+		"family", "opened_by", "cluster", "session_id", "message",
+		"design_ref"},
 	// Nested objects.
 	"PayloadContext":    {"controller_ref", "node", "labels"},
 	"PayloadForecast":   {"eta", "confidence_basis"},
@@ -146,6 +150,7 @@ func TestSchemaV1_FieldSetsFrozen(t *testing.T) {
 		"WatchboardDigestPayload":  reflect.TypeOf(inject.WatchboardDigestPayload{}),
 		"WatchboardRotatedPayload": reflect.TypeOf(inject.WatchboardRotatedPayload{}),
 		"TriageRegressedPayload":   reflect.TypeOf(inject.TriageRegressedPayload{}),
+		"FamilyMemberPayload":      reflect.TypeOf(inject.FamilyMemberPayload{}),
 		"PayloadContext":           reflect.TypeOf(inject.PayloadContext{}),
 		"PayloadForecast":          reflect.TypeOf(inject.PayloadForecast{}),
 		"PayloadEnrichment":        reflect.TypeOf(inject.PayloadEnrichment{}),
@@ -182,6 +187,7 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 		inject.KindStormMemberSuperseded: engine.KindStormMemberSuperseded,
 		inject.KindStormUpdate:           engine.KindStormUpdate,
 		inject.KindTriageRegressed:       engine.KindTriageRegressed,
+		inject.KindFamilyMember:          engine.KindFamilyMember,
 	}
 	for injectKind, engineKind := range pairs {
 		if injectKind != engineKind {
@@ -198,12 +204,12 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 			t.Errorf("kind %q maps to %s, which has no frozen field ledger", kind, typ.Name())
 		}
 	}
-	// The inventory is complete: 11 cross-cutting + 29 source kinds
+	// The inventory is complete: 12 cross-cutting + 29 source kinds
 	// (21 at the M5 freeze; workload.* +2 in #129, notification.* +3
-	// in #130, ingress.* +3 in #135 — additive-only, ledger + docs
-	// updated in the same changes).
-	if len(shippedKinds) != 40 {
-		t.Errorf("shipped kind inventory has %d kinds, want 40 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	// in #130, ingress.* +3 in #135, family.member +1 in #132 —
+	// additive-only, ledger + docs updated in the same changes).
+	if len(shippedKinds) != 41 {
+		t.Errorf("shipped kind inventory has %d kinds, want 41 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 
@@ -284,6 +290,14 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			SeverityOverride: "warning", TriageSession: "sess-1", BaselineCount: 3,
 			Count: 9, Factor: 3, FirstSeen: ts, LastSeen: ts, Message: "regressed",
 			Context: inject.PayloadContext{Node: "n1"},
+		},
+		inject.FamilyMemberPayload{
+			Kind: inject.KindFamilyMember, MemberKind: "capacity.quota_blocked",
+			Reason: "quota_blocked", Severity: "critical", Namespace: "",
+			KindOfObject: "Quota", Name: "CPUS", UID: "quota:CPUS/us-east1",
+			Fingerprint: "sha256:ee", Family: "QuotaExhausted", OpenedBy: "quota",
+			Cluster: "prod-east", SessionID: "sess-4", Message: "joined",
+			DesignRef: inject.FamilyMemberDesignRef,
 		},
 	}
 	for _, p := range payloads {

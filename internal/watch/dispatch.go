@@ -230,13 +230,22 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// signal that opened the incident (leading↔reactive — e.g.
 		// capacity's quota_blocked folding into the quota source's
 		// forecast session), the join must be audible inside the
-		// session, not only store-visible: route it as a compact
-		// followup instead of suppressing it. Bounded to one per
-		// source family per incident per window by CrossSourceJoin.
-		// Per-incident mode only, like every routing stage.
-		if d.mode == "per-incident" && result.SessionID != "" {
+		// session, not only store-visible: route it as a schema-stable
+		// kind=family.member followup instead of suppressing it.
+		// Bounded to one per source family per incident per window by
+		// CrossSourceJoin. Per-incident mode only, like every routing
+		// stage.
+		//
+		// STORM-CLAIMED entries are excluded (result.Storm != "": the
+		// bound session is the STORM's session, §7.5): a storm exists
+		// to collapse member-level chatter into one session, so a
+		// joined member of a storm must not fan out family.member
+		// injects there. The occurrence is still store-recorded below
+		// (route=suppressed, carrying the storm's session), just never
+		// injected.
+		if d.mode == "per-incident" && result.SessionID != "" && result.Storm == "" {
 			if openedBy, join := d.dedup.CrossSourceJoin(key, sig.Kind); join {
-				d.injectJoinFollowup(ctx, sig, result, openedBy)
+				d.injectJoinFollowup(ctx, sig, result, key, openedBy)
 				return
 			}
 		}
@@ -621,36 +630,33 @@ func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signa
 }
 
 // injectJoinFollowup makes a cross-source dedup join visible inside
-// the bound session (M4 observation 4): the frozen followup payload,
-// kind k8s-event-followup for k8s-event signals (frozen contract) and
-// the signal's own source kind otherwise, recorded as route=followup
-// instead of route=suppressed.
-func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, result engine.DedupResult, openedBy string) {
-	kind := sig.Kind
-	if kind == engine.KindK8sEvent {
-		kind = engine.KindK8sEventFollowup
-	}
-	payload := inject.Payload{
-		Kind:         kind,
+// the bound session (M4 observation 4): one schema-stable
+// kind=family.member payload (§10.3 correlation) carrying the joining
+// signal's identity, the canonical family both signals collapsed
+// into, and the design_ref for the join contract — recorded as
+// route=followup instead of route=suppressed. key is the canonical
+// pipeline key (key.Reason is the family the join landed on);
+// openedBy the source family whose signal opened the incident.
+func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, result engine.DedupResult, key engine.EventKey, openedBy string) {
+	payload := inject.FamilyMemberPayload{
+		Kind:         inject.KindFamilyMember,
+		MemberKind:   sig.Kind,
 		Reason:       sig.Key.Reason,
+		Severity:     string(sig.Severity),
 		Namespace:    sig.Namespace,
 		KindOfObject: sig.KindOfObject,
 		Name:         sig.Name,
-		Container:    sig.Container,
 		UID:          sig.Key.UID,
-		Message:      maskString(sig.Message), // §6.5 inject surface (issue #82)
-		Count:        result.Count,
-		FirstSeen:    sig.FirstSeen,
-		LastSeen:     sig.LastSeen,
+		Fingerprint:  sig.Fingerprint,
+		Family:       key.Reason,
+		OpenedBy:     openedBy,
 		Cluster:      sig.Cluster,
-		Context: inject.PayloadContext{
-			ControllerRef: sig.ControllerRef,
-			Node:          sig.Node,
-			Labels:        maskLabels(sig.Labels),
-		},
-		Type: sig.Type,
+		SessionID:    result.SessionID,
+		Message: fmt.Sprintf(
+			"cross-source join: %s (%s) attached to this session's %s incident, opened by the %s source — a second observation angle on the same incident; at most one family.member per source family per window",
+			sig.Kind, sig.Key.Reason, key.Reason, openedBy),
+		DesignRef: inject.FamilyMemberDesignRef,
 	}
-	stampIdentity(&payload, sig)
 	// §9.1: the occurrence row records the JOIN routing decision with
 	// the session it targeted, so lookback distinguishes "suppressed"
 	// from "announced into the session".
@@ -666,7 +672,7 @@ func (d *dispatcher) injectJoinFollowup(ctx context.Context, sig engine.Signal, 
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
-	log.Printf("followup %s %s/%s → sid=%s (cross-source join: %s joined a %s-opened incident)",
+	log.Printf("family.member %s %s/%s → sid=%s (cross-source join: %s joined a %s-opened incident)",
 		sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID,
 		engine.SourceFamily(sig.Kind), openedBy)
 }

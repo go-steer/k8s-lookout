@@ -172,10 +172,11 @@ func TestDispatch_IncidentPayloadLabelValuesMasked(t *testing.T) {
 }
 
 // TestDispatch_CrossSourceFollowupMessageMasked covers the second
-// assembly site (the cross-source join followup): the joining
-// signal's Message takes the same raw copy into inject.Payload, so a
-// secret-bearing duplicate from another source family lands in the
-// bound session unmasked.
+// assembly site (the cross-source join followup): the
+// kind=family.member payload composes its own message from signal
+// identity fields and deliberately carries NO free-text from the
+// joining signal — a secret-bearing duplicate from another source
+// family must not put its raw Message on the wire at all.
 func TestDispatch_CrossSourceFollowupMessageMasked(t *testing.T) {
 	t.Parallel()
 	tc := secretShapeCases[0] // url-password
@@ -202,14 +203,11 @@ func TestDispatch_CrossSourceFollowupMessageMasked(t *testing.T) {
 		t.Fatalf("cross-source join produced %d injects, want 2 (opener + followup)", len(*injects))
 	}
 	fu := payloadFields(t, (*injects)[1].Body)
-	if kind, _ := fu["kind"].(string); kind != "objectstate.restart_burst" {
+	if kind, _ := fu["kind"].(string); kind != "family.member" {
 		t.Fatalf("second inject is not the join followup (kind=%q)", kind)
 	}
-	got, _ := fu["message"].(string)
-	if got == tc.planted {
-		t.Errorf("followup: secret reached the wire UNMASKED — payload message = %q, want %q (issue #82)", got, tc.masked)
-	} else if got != tc.masked {
-		t.Errorf("followup payload message = %q, want the exact MaskString form %q", got, tc.masked)
+	if strings.Contains((*injects)[1].Body, tc.planted) {
+		t.Errorf("followup: secret reached the wire — family.member composes its message from identity fields and must never copy the joining signal's raw Message (issue #82); body = %q", (*injects)[1].Body)
 	}
 }
 

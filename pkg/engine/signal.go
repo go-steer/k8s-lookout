@@ -71,6 +71,15 @@ const (
 // contract test pins the pair to the same value.
 const KindTriageRegressed = "triage.regressed"
 
+// KindFamilyMember is the cross-source join followup (§10.3
+// correlation, generalized): a duplicate signal from a DIFFERENT
+// source family attached to an incident another source's signal
+// opened (leading↔reactive — capacity's quota_blocked folding into a
+// quota.forecast session). Cross-cutting like resolved — any pair of
+// source families can join. Mirrored by pkg/inject's wire constant;
+// the internal/watch contract test pins the pair to the same value.
+const KindFamilyMember = "family.member"
+
 // Values for Signal.Source (the §8 "source" field): which path
 // produced the signal. Not to be confused with a signal *source*
 // implementation (pkg/sources.Source), whose Name() namespaces new

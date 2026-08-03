@@ -220,6 +220,14 @@ func (i *Injector) InjectTriageRegressed(ctx context.Context, sessionID string, 
 	return i.injectJSON(ctx, sessionID, payload)
 }
 
+// InjectFamilyMember POSTs the kind=family.member cross-source join
+// notice (§10.3 correlation) into the incident's bound session: a
+// signal from a different source family attached to the incident
+// family this session owns.
+func (i *Injector) InjectFamilyMember(ctx context.Context, sessionID string, payload FamilyMemberPayload) error {
+	return i.injectJSON(ctx, sessionID, payload)
+}
+
 // InjectWatchboardDigest POSTs a §7.7 rolling digest of warning-class
 // signals into the shared watchboard session. Same envelope and
 // endpoint — only the payload differs.

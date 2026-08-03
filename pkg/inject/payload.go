@@ -314,6 +314,55 @@ type TriageRegressedPayload struct {
 	Context          PayloadContext `json:"context"`
 }
 
+// KindFamilyMember is the cross-source join followup: a dedup-window
+// duplicate from a DIFFERENT source family than the signal that
+// opened the incident (leading↔reactive — capacity's quota_blocked
+// folding into a quota.forecast session) is a join the bound session
+// must hear about, not silent suppression. Wire contract like the
+// storm kinds: playbook skills and fleet consumers match the exact string.
+const KindFamilyMember = "family.member"
+
+// FamilyMemberDesignRef is the design-doc section the family.member
+// followup implements: DESIGN.md §10.3's correlation requirement —
+// two observation angles on one incident arrive as ONE diagnosed
+// incident, "not two alerts a human joins". Carried on every
+// family.member payload (design_ref) so consumers can cite the
+// contract without repo archaeology.
+const FamilyMemberDesignRef = "DESIGN.md §10.3"
+
+// FamilyMemberPayload is the JSON body for kind=family.member: the
+// compact notice injected into an incident's bound session when a
+// cross-source dedup join attaches a new member to the incident
+// family (at most once per source family per incident per window —
+// engine.CrossSourceJoin's bound). SCHEMA-STABLE: pinned byte-exact
+// by TestFamilyMember_ExactWireShape in internal/watch.
+//
+// MemberKind/Reason/Severity and the object fields identify the
+// JOINING signal (MemberKind stays the signal's own frozen kind —
+// e.g. "k8s-event" when the reactive event catches up to a leading
+// indicator); Fingerprint is the joining signal's §8 class hash.
+// Family is the canonical reason family both signals collapsed into
+// (the dedup key — e.g. "QuotaExhausted"); OpenedBy the source family
+// whose signal opened the incident; SessionID the bound session the
+// payload rides in.
+type FamilyMemberPayload struct {
+	Kind         string `json:"kind"`
+	MemberKind   string `json:"member_kind"`
+	Reason       string `json:"reason"`
+	Severity     string `json:"severity,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	KindOfObject string `json:"kind_of_object"`
+	Name         string `json:"name"`
+	UID          string `json:"uid"`
+	Fingerprint  string `json:"fingerprint"`
+	Family       string `json:"family"`
+	OpenedBy     string `json:"opened_by"`
+	Cluster      string `json:"cluster"`
+	SessionID    string `json:"session_id,omitempty"`
+	Message      string `json:"message"`
+	DesignRef    string `json:"design_ref"`
+}
+
 // Watchboard wire kinds (DESIGN.md §7.7 + §15 Q2). Wire contract like
 // the storm kinds: playbook skills and fleet consumers match the exact strings.
 const (

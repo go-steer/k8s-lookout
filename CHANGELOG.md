@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reactive path carries no event type. Rides the existing events
   grant (no new RBAC) and auto-enables under `--sources=auto`. The
   metrics half of #135 (LB backend unhealthy ratios) stays open.
+- `kind=family.member` followup on cross-source dedup joins (#132):
+  when a signal from a different source family attaches to an
+  incident another source opened (e.g. capacity's `quota_blocked`
+  folding into a `quota.forecast` session), the bound session now
+  hears about it — a schema-stable followup carrying the joining
+  signal's kind/reason/severity, the canonical family, the source
+  family that opened the incident, and a `design_ref` for the join
+  contract. At most one per source family per incident per dedup
+  window; storm-claimed members never fan these out into the storm
+  session. Additive schema-v1 change (v1 grows 40 → 41); previously
+  the join followup reused the joining signal's own kind.
+
 ### Fixed
 
 - The failed-mount example scenario's verify no longer flakes when the
