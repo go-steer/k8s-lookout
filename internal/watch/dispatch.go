@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -57,6 +58,14 @@ type dispatcher struct {
 	mode      string // "per-incident" or "shared"
 	targetSid string // for shared mode
 	dryRun    bool
+	// injectMaxBytes is the per-inject wire-body ceiling
+	// (--inject-max-bytes, default the daemon's inject.MaxInjectBytes):
+	// a new incident's payload is fit under it before the open so an
+	// oversized enrichment bundle degrades gracefully instead of the
+	// daemon 400ing the whole inject and leaving an empty session
+	// (issue #198). Zero in tests that predate the guard disables it —
+	// fitInject treats <= 0 as "no ceiling".
+	injectMaxBytes int
 	// tracker, when non-nil, is the §7.4 recovery tracker: every new
 	// incident this dispatcher binds is handed to it for clearance
 	// watching, and the resolved signals it emits come back through
@@ -447,6 +456,15 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		}
 	}
 	payload := incidentPayload(sig, result)
+	// Fit under the sink's per-inject ceiling like the open path does
+	// (#198). This shared/dry-run branch reaches Append directly (not
+	// openSession), so it carries its own guard; fitting before the
+	// dry-run print keeps the printed payload the true wire.
+	if d.injectMaxBytes > 0 {
+		if shed := payload.FitTo(d.injectMaxBytes); len(shed) > 0 {
+			d.noteInjectShrunk(sig.Namespace, sig.Name, shed)
+		}
+	}
 	// §9.1: record the routing DECISION — see the per-incident branch.
 	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 	if d.dryRun {
@@ -520,6 +538,46 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 		}
 	}
 	return payload
+}
+
+// fitInject shrinks payload to the --inject-max-bytes wire ceiling
+// before it goes on the wire, logging and counting anything it sheds
+// (issue #198). It handles both open shapes — incident (inject.Payload)
+// and storm (inject.StormPayload) — so the single call in openSession
+// covers every enrichment-bearing open path; other, always-small
+// payloads pass through untouched. A ceiling of <= 0 (tests predating
+// the guard) is a no-op that returns payload unchanged.
+func (d *dispatcher) fitInject(payload any) any {
+	if d.injectMaxBytes <= 0 {
+		return payload
+	}
+	switch p := payload.(type) {
+	case inject.Payload:
+		if shed := p.FitTo(d.injectMaxBytes); len(shed) > 0 {
+			d.noteInjectShrunk(p.Namespace, p.Name, shed)
+		}
+		return p
+	case inject.StormPayload:
+		if shed := p.FitTo(d.injectMaxBytes); len(shed) > 0 {
+			d.noteInjectShrunk(p.AncestorNamespace, p.AncestorName, shed)
+		}
+		return p
+	default:
+		return payload
+	}
+}
+
+// noteInjectShrunk logs and counts a payload the fit guard shrank to
+// clear the sink's per-inject ceiling (issue #198). Loud on purpose: a
+// shrunk incident lost context (its enrichment bundle, or the tail of
+// its message), and a steady stream of them means --enrich-cap is set
+// too high for the sink's inject limit.
+func (d *dispatcher) noteInjectShrunk(ns, name string, shed []string) {
+	log.Printf("dispatcher: inject payload for %s/%s exceeded --inject-max-bytes=%d; shed %s to fit",
+		ns, name, d.injectMaxBytes, strings.Join(shed, ", "))
+	for _, what := range shed {
+		d.metrics.injectShrinks.WithLabelValues(what).Inc()
+	}
 }
 
 // retryIncidentOpen re-attempts the per-incident open for a duplicate

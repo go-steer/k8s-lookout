@@ -50,6 +50,7 @@ func MetricsInventory() []MetricDoc {
 		{m.eventsInjected, "counter", []string{"reason", "namespace"}},
 		{m.eventsDedupSuppress, "counter", []string{"reason", "namespace"}},
 		{m.injectErrors, "counter", []string{"reason", "http_code"}},
+		{m.injectShrinks, "counter", []string{"shed"}},
 		{m.sessionCreates, "counter", []string{"outcome"}},
 		{m.activeIncidents, "gauge", nil},
 		{m.recoveriesObserved, "counter", []string{"resolution"}},

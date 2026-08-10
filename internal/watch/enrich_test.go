@@ -269,8 +269,11 @@ func TestEnrichFlags_DefaultsAndValidation(t *testing.T) {
 	if f.enrich != "critical" {
 		t.Errorf("default --enrich = %q, want critical (§7.6: always for critical)", f.enrich)
 	}
-	if f.enrichCap != 16384 {
-		t.Errorf("default --enrich-cap = %d, want 16384 (§15 Q3 fixed budget)", f.enrichCap)
+	if f.enrichCap != 4096 {
+		t.Errorf("default --enrich-cap = %d, want 4096 (§15 Q3 fixed budget, kept under the inject ceiling — issue #198)", f.enrichCap)
+	}
+	if f.injectMaxBytes != inject.MaxInjectBytes {
+		t.Errorf("default --inject-max-bytes = %d, want %d (the daemon per-inject ceiling)", f.injectMaxBytes, inject.MaxInjectBytes)
 	}
 	if f.enrichLogLines != 200 {
 		t.Errorf("default --enrich-log-lines = %d, want 200", f.enrichLogLines)
@@ -285,6 +288,7 @@ func TestEnrichFlags_DefaultsAndValidation(t *testing.T) {
 		{"--dry-run", "--enrich-log-lines=0"},
 		{"--dry-run", "--enrich-timeout=0s"},
 		{"--dry-run", "--enrich-timeout=-1s"},
+		{"--dry-run", "--inject-max-bytes=512"},
 	}
 	for _, args := range bad {
 		f, err := parseFlags(args)

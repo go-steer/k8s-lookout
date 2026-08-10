@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
@@ -94,6 +95,7 @@ type flags struct {
 	watchboardRotate      int
 	enrich                string
 	enrichCap             int
+	injectMaxBytes        int
 	enrichLogLines        int
 	enrichTimeout         time.Duration
 	enrichLists           string
@@ -276,7 +278,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// deployments that set --enrich=off (or run --mode=shared) keep
 	// byte-identical payloads.
 	fs.StringVar(&f.enrich, "enrich", "critical", "Which severities get §7.6 enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off.")
-	fs.IntVar(&f.enrichCap, "enrich-cap", 16384, "Byte budget for the attached enrichment bundle (§15: fixed budget). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them.")
+	fs.IntVar(&f.enrichCap, "enrich-cap", 4096, "Byte budget for the attached enrichment bundle (§15: fixed budget). Kept under --inject-max-bytes so the bundle plus the rest of the payload clears the daemon's per-inject ceiling with headroom for the double-JSON envelope. Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them.")
+	fs.IntVar(&f.injectMaxBytes, "inject-max-bytes", inject.MaxInjectBytes, "Per-inject wire-body ceiling the dispatcher fits payloads to before POSTing (default matches the core-agent daemon's 8192-byte limit). An over-limit payload is shrunk least-signal-first — enrichment dropped, then message truncated — never identity, so the incident still routes; without this the daemon 400s the whole inject and a new incident lands as an empty session (issue #198).")
 	fs.IntVar(&f.enrichLogLines, "enrich-log-lines", 200, "Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1.")
 	fs.DurationVar(&f.enrichTimeout, "enrich-timeout", 5*time.Second, "Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0.")
 	fs.StringVar(&f.enrichLists, "enrich-lists", "all", "Which cluster resources the scoped-list enrichment fallback reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) to keep the watcher SA least-privilege. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never a resolve failure.")
@@ -546,6 +549,12 @@ func (f *flags) validate() error {
 	}
 	if f.enrichCap < 1 {
 		return errors.New("--enrich-cap must be >= 1")
+	}
+	// A floor well above any conceivable identity-only payload: below it
+	// the fit would truncate every message to nothing (or fail to fit at
+	// all), which is not a configuration anyone means to ask for.
+	if f.injectMaxBytes < 1024 {
+		return errors.New("--inject-max-bytes must be >= 1024")
 	}
 	if f.enrichLogLines < 1 {
 		return errors.New("--enrich-log-lines must be >= 1")
