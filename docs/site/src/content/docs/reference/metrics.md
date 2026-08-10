@@ -23,6 +23,7 @@ is added without an inventory row.
 | `k8s_event_watcher_events_injected_total` | counter | `reason`, `namespace` | Total events that survived filter + dedup and were POSTed to the daemon.", unit: " |
 | `k8s_event_watcher_events_deduped_total` | counter | `reason`, `namespace` | Total events suppressed by the rolling-window dedup cache.", unit: " |
 | `k8s_event_watcher_inject_errors_total` | counter | `reason`, `http_code` | Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Frozen name; counts sink operations regardless of --sink.", unit: " |
+| `k8s_event_watcher_inject_shrinks_total` | counter | `shed` | Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment\|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling.", unit: " |
 | `k8s_event_watcher_session_creates_total` | counter | `outcome` | Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Name frozen for predecessor compatibility.", unit: " |
 | `k8s_event_watcher_active_incidents` | gauge | — | Current number of incidents in the sidecar's dedup cache.", unit: " |
 | `k8s_event_watcher_recoveries_observed_total` | counter | `resolution` | Total kind=resolved outcome records emitted, by resolution (recovered\|object_deleted).", unit: " |

@@ -181,6 +181,8 @@ func realMain(argv []string) error {
 		mode:      f.mode,
 		targetSid: f.targetSession,
 		dryRun:    f.dryRun,
+
+		injectMaxBytes: f.injectMaxBytes,
 	}
 
 	// Occurrence store (§9.1): opt-in via --store. When unset, disp

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Oversized incident injects no longer silently lose their opening
+  context (#198): a new incident whose enrichment bundle pushed the
+  inject body past the core-agent daemon's 8192-byte per-inject limit
+  was rejected `400 request body too large`, leaving a bound-but-empty
+  session. The dispatcher now fits every payload under the ceiling
+  before delivery, shedding least-signal-first — enrichment bundle
+  dropped, then message truncated — while never touching identity, so a
+  shrunk incident still routes, dedups, and closes. Shrinks are logged
+  and counted (`k8s_event_watcher_inject_shrinks_total`).
+
+### Changed
+
+- `--enrich-cap` default lowered 16384 → 4096 so the enrichment bundle
+  leaves headroom under the inject ceiling for the rest of the payload
+  and the double-JSON envelope (#198).
+
+### Added
+
+- `--inject-max-bytes` (default 8192): the per-inject wire-body ceiling
+  the dispatcher fits payloads to, so operators can align it with their
+  daemon's limit without a rebuild (#198).
+
 ## [0.14.0] - 2026-08-10
 
 A signal-coverage and security-posture release. The sentinel gains new

@@ -50,6 +50,11 @@ import (
 //     error itself, because the paths differ on WHEN they do so (storm
 //     formation defers it past the member rebind loop).
 func (d *dispatcher) openSession(ctx context.Context, payload any, reason string) (sid string, err error, ok bool) {
+	// Fit the payload under the sink's per-inject wire ceiling before the
+	// open: an oversized enrichment bundle otherwise makes the daemon
+	// 400 the initial inject, leaving a bound-but-empty session (#198).
+	// Every open shape (incident + storm) routes through here.
+	payload = d.fitInject(payload)
 	sid, err = d.injector.OpenIncident(ctx, payload)
 	if sid == "" {
 		d.metrics.sessionCreates.WithLabelValues("error").Inc()

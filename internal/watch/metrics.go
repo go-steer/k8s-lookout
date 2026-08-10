@@ -44,6 +44,7 @@ type metrics struct {
 	eventsInjected       *prometheus.CounterVec
 	eventsDedupSuppress  *prometheus.CounterVec
 	injectErrors         *prometheus.CounterVec
+	injectShrinks        *prometheus.CounterVec
 	sessionCreates       *prometheus.CounterVec
 	activeIncidents      prometheus.Gauge
 	recoveriesObserved   *prometheus.CounterVec
@@ -107,6 +108,10 @@ func newMetrics() *metrics {
 			Name: "k8s_event_watcher_inject_errors_total",
 			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Frozen name; counts sink operations regardless of --sink.",
 		}, []string{"reason", "http_code"}),
+		injectShrinks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "k8s_event_watcher_inject_shrinks_total",
+			Help: "Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling.",
+		}, []string{"shed"}),
 		sessionCreates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_session_creates_total",
 			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Name frozen for predecessor compatibility.",
@@ -235,6 +240,7 @@ func newMetrics() *metrics {
 		m.eventsInjected,
 		m.eventsDedupSuppress,
 		m.injectErrors,
+		m.injectShrinks,
 		m.sessionCreates,
 		m.activeIncidents,
 		m.recoveriesObserved,
