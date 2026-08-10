@@ -225,7 +225,9 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`triage-status-write-design.md`](./triage-status-write-design.md),
   [`watchboard-rotation-design.md`](./watchboard-rotation-design.md),
   [`agent-sink-design.md`](./agent-sink-design.md),
-  [`graph-q5-gate.md`](./graph-q5-gate.md).
+  [`graph-q5-gate.md`](./graph-q5-gate.md),
+  [`fleet-audit-detectors-design.md`](./fleet-audit-detectors-design.md)
+  (proposal — re-basing the fleet audit onto deterministic `checks`).
 - [`milestones/`](./milestones/) — M0–M5 completion records with
   exit-check evidence and the post-M5 review backlog (M5.md).
 - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
