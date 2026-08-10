@@ -121,9 +121,16 @@
 #                         namespace-scoped state.LoadCluster pass —
 #                         `list` on every kind that pass pages
 #                         through. The requirement list is
-#                         state.LoadClusterListRequirements(), and
-#                         pkg/checks/state's RBAC test parses THIS
-#                         file against it so the two cannot drift.
+#                         state.LoadClusterListRequirements(). Since
+#                         issue #192 that pass is TOLERANT: a per-kind
+#                         Forbidden/NotFound is skipped (recorded as a
+#                         skipped= note on the bundle head), so a
+#                         narrower operator copy of this role degrades
+#                         to a partial, secret-free bundle instead of
+#                         failing. pkg/checks/state's RBAC test now
+#                         asserts this file grants no MORE list/watch
+#                         than the codebase reads (no privilege creep),
+#                         not that it covers every requirement.
 #                       * live path (--storm on): one API `get` of
 #                         the incident's top owner — any of the
 #                         workload kinds (deployments, replicasets,
@@ -227,10 +234,15 @@ rules:
   #      parsing tls.crt notAfter / token exp, retaining only
   #      (identity, notAfter, subject CN, issuer CN);
   #   2. enrichment's scoped-list fallback (state edges secret-KEY
-  #      verification, M4 observation 2) — guardian-enforced by
-  #      pkg/checks/state/rbac_test.go: the rule cannot be dropped
-  #      from THIS SHIPPED FILE while enrichment defaults on, because
-  #      the shipped manifest must match the shipped defaults.
+  #      verification, M4 observation 2). Since issue #192 this reader
+  #      DEGRADES GRACEFULLY: if the rule is dropped from an operator's
+  #      copy, the LoadCluster pass skips Secrets and enrichment/bundle
+  #      render a secret-free partial (skipped=secrets on the head)
+  #      instead of failing. The rule stays in THIS SHIPPED FILE for
+  #      reader #1 (the expiry source, on by default under
+  #      --sources=auto); rbac_test.go no longer forces it for
+  #      enrichment, only forbids write verbs and non-list secret
+  #      access.
   # No secret byte can reach a signal (the §6.5 sanitizer is the
   # second net, not the mechanism), and deploy/16's default-deny
   # NetworkPolicy removes co-tenant network access to the pod.

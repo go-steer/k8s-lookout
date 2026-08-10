@@ -105,10 +105,15 @@ func New(deps Deps) checks.Command {
 				Help: "report TLS certificates expiring within this window (edges section)"},
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override"},
+			{Name: "lists", Type: emit.FlagString, Default: "all",
+				Help: "which cluster resources the List pass reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) for a least-privilege posture. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never an error."},
+			{Name: "lists-preflight", Type: emit.FlagBool, Default: "false",
+				Help: "before listing, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s); falls back to reactive Forbidden-skip if SSAR is not permitted"},
 		},
 		Output: append([]checks.OutputField{
 			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
+			{Name: "skipped", Doc: "on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
 			{Name: "hop", Doc: "radius neighbor's BFS depth from the target (1 = direct edge)"},
 			{Name: memory.DetailTriageStatus, Doc: "triage state from the matched §9.4 record (investigating|triaged|actioned|escalated) — present only with --store on merged findings"},
@@ -183,7 +188,20 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
 	}
-	cluster, err := state.LoadCluster(ctx, client, listNS)
+	// Partial bundles (§7.6 least-privilege): --lists deselects
+	// resources, Tolerate skips ones this credential can't read, and
+	// either way the missing resources become a skipped= note on the
+	// head rather than an error — a bundle without secrets: list still
+	// renders every section that doesn't need Secrets.
+	lists, err := state.ParseListSelection(inv.Flags.String("lists"))
+	if err != nil {
+		return 0, emit.UsageErrorf("--lists: %v", err)
+	}
+	loadOpts := []state.LoadOption{state.Tolerate(), state.Lists(lists)}
+	if inv.Flags.Bool("lists-preflight") {
+		loadOpts = append(loadOpts, state.Preflight())
+	}
+	cluster, err := state.LoadCluster(ctx, client, listNS, loadOpts...)
 	if err != nil {
 		return 0, err
 	}
@@ -244,6 +262,9 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			{Key: "pods", Value: strconv.Itoa(len(pods))},
 			{Key: "sections", Value: strings.Join([]string{sectionSpec, sectionDelta, sectionEdges, sectionRadius, sectionLogs}, ",")},
 		},
+	}
+	if note := cluster.SkippedNote(); note != "" {
+		head.Details = append(head.Details, emit.Field{Key: "skipped", Value: note})
 	}
 	if joiner != nil {
 		joiner.Annotate(&head)

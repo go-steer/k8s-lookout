@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Partial bundles under least-privilege RBAC (#192): `state.LoadCluster`
+  — the one List pass behind `bundle` / the `k8s_triage_workload` MCP
+  tool and enrichment's scoped-list fallback — no longer fails
+  all-or-nothing when a single resource is denied. A per-resource
+  `Forbidden` or `NotFound` now skips that resource and continues, so a
+  watcher/daemon ServiceAccount can withhold the broad `secrets: list`
+  grant (which returns full Secret values at the API level) and still
+  get a useful, secret-free bundle instead of nothing. The dropped
+  resources are reported honestly as a `skipped=` note on the
+  `bundle.target` head finding (both `bundle` and enrichment), never a
+  silent gap. Two new flags select coverage explicitly: `--lists` on
+  `bundle` and `--enrich-lists` on `watch` take `all` (default), a
+  comma-separated allowlist (`pods,deployments`), or subtractions
+  (`all,-secrets`); an optional `--lists-preflight` /
+  `--enrich-lists-preflight` runs a `SelfSubjectAccessReview` per
+  resource to drop denied lists proactively (fewer 403s), falling back
+  to the reactive skip if SSAR itself is not permitted. Non-Forbidden,
+  non-NotFound errors still abort, and callers that pass no options
+  (every non-bundle `state`/`triage` command) keep the strict
+  all-or-nothing behavior unchanged.
 - `gateway` signal source (#168 — Gateway API health, status
   conditions): the Gateway-API sibling of the `ingress` source. GKE
   steers most users to the Gateway API, whose programming failures

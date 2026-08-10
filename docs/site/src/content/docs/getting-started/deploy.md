@@ -44,6 +44,41 @@ no watch, no get, no informer cache of secret material. Scope it with
 `--expiry-namespaces`, or remove the rule entirely if the expiry source
 stays disabled.
 
+### Narrowing the role — partial bundles, not errors
+
+`list` on `secrets` returns the full value of every Secret at the API
+level, so some operators would rather the sentinel's ServiceAccount
+never hold that grant — even given the masking guarantees. As of #192
+you can drop any resource from your copy of `deploy/12` and the bundle
+and enrichment paths **degrade to a documented partial** instead of
+failing: a per-resource `Forbidden` (or `NotFound`, e.g. a CRD that is
+not installed) is caught, the resource is left out of the topology
+pass, and the bundle's `bundle.target` head carries a `skipped=` note
+naming exactly what was dropped (`skipped=secrets` when you withhold the
+secrets grant). Nothing that reads a skipped resource errors; the rest
+of the bundle is unaffected and, without the secrets grant, provably
+secret-free at the source rather than only at the sanitizer. This is
+opt-in tolerance: the strict RBAC probe (`--sources`, above) and
+`state edges`/`triage` still fail loudly on a missing grant, so a
+narrowed role is a deliberate choice a bundle documents, never a
+silent hole in a signal source.
+
+You do not have to edit the role to try this. Two flags select, per
+run, which lists the pass reads — accepting `all` (default), a
+comma-separated allowlist (`pods,deployments`), or subtractions
+(`all,-secrets`):
+
+- **`--enrich-lists`** (on `lookout watch`) narrows the scoped-list
+  enrichment fallback; **`--enrich-lists-preflight`** SelfSubjectAccessReviews
+  each selected resource first and drops the denied ones proactively
+  (fewer 403s in the watcher log), falling back to the reactive
+  `Forbidden`-skip when SSAR itself is not permitted.
+- **`--lists`** / **`--lists-preflight`** are the same knobs on the
+  one-shot `lookout bundle` command.
+
+The [`lookout bundle` reference](/reference/bundle/) documents both, and
+the `skipped=` field, in full.
+
 ## Deployment tiers
 
 | Tier | Unit | Mechanism |
@@ -120,7 +155,9 @@ principal. The capability flags:
   their session's initial inject (`critical` by default; `warning`
   extends it; `off` disables). `--enrich-cap`, `--enrich-log-lines`,
   `--enrich-timeout` bound the work; failures become `enrichment_error`
-  trailers, never crashes.
+  trailers, never crashes. `--enrich-lists` (and `--enrich-lists-preflight`)
+  narrow which cluster resources the scoped-list fallback reads — see
+  [Narrowing the role](#narrowing-the-role--partial-bundles-not-errors).
 - **Severity and watchboard knobs** — `--severity kind=level`
   (repeatable) overrides the per-kind default routing;
   warning-class signals batch into the shared watchboard session

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
@@ -95,6 +96,8 @@ type flags struct {
 	enrichCap             int
 	enrichLogLines        int
 	enrichTimeout         time.Duration
+	enrichLists           string
+	enrichListsPreflight  bool
 	store                 string
 	storeTTL              time.Duration
 	storeMaxMB            int
@@ -276,6 +279,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.IntVar(&f.enrichCap, "enrich-cap", 16384, "Byte budget for the attached enrichment bundle (§15: fixed budget). Truncation happens at section boundaries; dropped sections become overflow trailers naming the lookout command that reproduces them.")
 	fs.IntVar(&f.enrichLogLines, "enrich-log-lines", 200, "Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1.")
 	fs.DurationVar(&f.enrichTimeout, "enrich-timeout", 5*time.Second, "Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0.")
+	fs.StringVar(&f.enrichLists, "enrich-lists", "all", "Which cluster resources the scoped-list enrichment fallback reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) to keep the watcher SA least-privilege. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never a resolve failure.")
+	fs.BoolVar(&f.enrichListsPreflight, "enrich-lists-preflight", false, "Before the scoped-list pass, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s in the watcher log); falls back to reactive Forbidden-skip if SSAR is not permitted.")
 
 	// Occurrence store (§9.1). ADDITIVE flags, default OFF: with no
 	// --store the sentinel behaves exactly as before (info-severity
@@ -547,6 +552,9 @@ func (f *flags) validate() error {
 	}
 	if f.enrichTimeout <= 0 {
 		return errors.New("--enrich-timeout must be > 0")
+	}
+	if _, err := state.ParseListSelection(f.enrichLists); err != nil {
+		return fmt.Errorf("--enrich-lists: %w", err)
 	}
 	// Occurrence store (§9.1): bounds are config errors in every mode,
 	// like the storm / watchboard / enrichment bounds, even when

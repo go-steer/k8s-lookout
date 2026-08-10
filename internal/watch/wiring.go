@@ -37,6 +37,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/internal/version"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
@@ -404,14 +405,19 @@ func realMain(argv []string) error {
 	// enrichment_error trailers + enrichment_failures_total, never as
 	// a crash-loop or a silent degrade.
 	if f.mode == "per-incident" && f.enrich != "off" {
+		// --enrich-lists already validated in f.validate(); parse for the
+		// scoped-list fallback's LoadCluster selection (§7.6).
+		enrichLists, _ := state.ParseListSelection(f.enrichLists)
 		e := &enricher{
-			client:   client,
-			now:      time.Now,
-			metrics:  m,
-			policy:   f.enrich,
-			cap:      f.enrichCap,
-			logLines: f.enrichLogLines,
-			timeout:  f.enrichTimeout,
+			client:         client,
+			now:            time.Now,
+			metrics:        m,
+			policy:         f.enrich,
+			cap:            f.enrichCap,
+			logLines:       f.enrichLogLines,
+			timeout:        f.enrichTimeout,
+			lists:          enrichLists,
+			listsPreflight: f.enrichListsPreflight,
 		}
 		path := "scoped-list"
 		if feed != nil {
