@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-10
+
+A signal-coverage and security-posture release. The sentinel gains new
+leading-indicator sources — Gateway API health (#168), GCLB/Ingress
+health (#135), HPA autoscaling (#131), and a cluster bin-packing
+capacity forecast — plus node-pressure/eviction watches in
+object-state and a `family.member` followup on cross-source dedup
+joins (#132); the signal schema grows 46 → 48 kinds, append-only. On
+the security side, bundles now degrade to a documented, secret-free
+partial under a narrowed role (#192): the one List pass behind
+`bundle`, the `k8s_triage_workload` MCP tool, and enrichment's
+scoped-list fallback tolerate a per-resource `Forbidden`/`NotFound`,
+report what they dropped as a `skipped=` note, and expose
+`--lists`/`--enrich-lists` knobs so an operator can withhold the broad
+`secrets: list` grant and still get a useful bundle.
+
 ### Added
 
 - Partial bundles under least-privilege RBAC (#192): `state.LoadCluster`
