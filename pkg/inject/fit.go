@@ -80,9 +80,9 @@ func (p *Payload) FitTo(maxBytes int) []string {
 		}
 	}
 	if p.Message != "" {
-		if _, changed := shrinkText(p.Message, maxBytes,
+		if shrinkText(p.Message, maxBytes,
 			func(s string) { p.Message = s },
-			func() int { return WireSize(p) }); changed {
+			func() int { return WireSize(p) }) {
 			shed = append(shed, "message")
 		}
 	}
@@ -107,9 +107,9 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 		}
 	}
 	if p.Message != "" {
-		if _, changed := shrinkText(p.Message, maxBytes,
+		if shrinkText(p.Message, maxBytes,
 			func(s string) { p.Message = s },
-			func() int { return WireSize(p) }); changed {
+			func() int { return WireSize(p) }) {
 			shed = append(shed, "message")
 		}
 	}
@@ -121,9 +121,9 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 // within maxBytes, appending truncMarker to any text it shortened. The
 // double-JSON escaping makes a rune's byte cost nonlinear, so it
 // converges by measurement (set/size reflect the surrounding payload)
-// rather than arithmetic. Returns the final text and whether it changed.
+// rather than arithmetic. Reports whether it changed the text.
 // Rune-sliced so it never cuts a multi-byte character in half.
-func shrinkText(text string, maxBytes int, set func(string), size func() int) (string, bool) {
+func shrinkText(text string, maxBytes int, set func(string), size func() int) bool {
 	runes := []rune(text)
 	lo, hi, best := 0, len(runes), -1
 	for lo <= hi {
@@ -140,9 +140,9 @@ func shrinkText(text string, maxBytes int, set func(string), size func() int) (s
 		// Even the marker alone won't fit — drop the text entirely and
 		// let the residual (identity only) go as-is.
 		set("")
-		return "", text != ""
+		return text != ""
 	}
 	out := string(runes[:best]) + truncMarker
 	set(out)
-	return out, out != text
+	return out != text
 }
