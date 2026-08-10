@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-10
+
+A reliability release for the incident-open path. A new incident whose
+enrichment bundle pushed the inject body past the core-agent daemon's
+8192-byte per-inject ceiling was rejected `400 request body too large`,
+leaving a bound-but-empty session with the loss visible only in
+`inject_errors_total`. The dispatcher now measures every payload at
+wire size and fits it under the ceiling before delivery — shedding the
+enrichment bundle first, then truncating the message, never touching
+identity or routing — so an oversized incident still opens with
+(trimmed) context instead of nothing. The `--enrich-cap` default drops
+16384 → 4096 to leave headroom under the double-JSON envelope, and a
+new `--inject-max-bytes` lets operators align the ceiling with their
+daemon without a rebuild.
+
 ### Fixed
 
 - Oversized incident injects no longer silently lose their opening
