@@ -114,7 +114,7 @@ func realMain(argv []string) error {
 	}
 
 	// Build components.
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount)
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount)
 	filter := engine.NewFilter(filterCfg)
 
 	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)

@@ -33,6 +33,7 @@ breaking change to running deployments, never a refactor.
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `--backoff-min-count` | int | `3` | Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is never gated (a bad tag is persistent). 1 fires on the first event. |
 | `--burn-eta` | duration | `30m0s` | Budget-exhaustion projection inside this window fires token.burn at critical (with the linear forecast); clearance requires the ETA to recede beyond 2x this threshold. Must be > 0. |
 | `--burn-multiple` | float | `4` | Session token rate at or above this multiple of the cross-session trailing-median baseline (sustained 2 polls) fires token.burn at warning. Must be > 1. |
 | `--capacity-poll` | duration | `1m0s` | Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0. |

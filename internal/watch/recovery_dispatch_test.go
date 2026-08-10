@@ -74,7 +74,7 @@ func newRecoveryDispatcher(t *testing.T, base string) *dispatcher {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -259,7 +259,7 @@ func TestDispatchResolved_BypassesFilterAndDedup(t *testing.T) {
 	orig := crashLoopSignal()
 	d.DispatchSignal(ctx, orig)
 	// Swap in a filter that rejects everything.
-	d.filter = engine.NewFilter(engine.NewFilterConfig([]string{"NothingMatches"}, nil, nil, 0))
+	d.filter = engine.NewFilter(engine.NewFilterConfig([]string{"NothingMatches"}, nil, nil, 0, 0))
 	before := d.dedup.Len()
 	d.DispatchSignal(ctx, resolvedSignalFor(orig, engine.KindResolved))
 	if len(*injects) != 2 {
