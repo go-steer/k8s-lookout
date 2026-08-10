@@ -70,3 +70,16 @@ recall limits are documented rather than papered over:
 
 If you need a secret's *value*, `lookout` will not give it to you — by
 design, on every surface.
+
+## Defense in depth — withhold the grant entirely
+
+Masking is the guarantee for what `lookout` reads. If you would rather
+it never read Secret values in the first place, withhold the
+`secrets: list` grant from the sentinel's role: the bundle and
+enrichment paths tolerate the resulting `Forbidden` and degrade to a
+documented partial (a `skipped=secrets` note on the head) instead of
+failing. The bundle is then secret-free *at the source* — the sanitizer
+never even has a value to mask. Run-time knobs (`--lists=all,-secrets`,
+`--enrich-lists=all,-secrets`) select the same posture without editing
+RBAC. See [Deploy the sentinel → Narrowing the
+role](/getting-started/deploy/#narrowing-the-role--partial-bundles-not-errors).

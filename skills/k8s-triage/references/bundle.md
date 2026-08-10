@@ -19,6 +19,8 @@ MCP tool: `k8s_triage_workload`
 | `--max-templates` | 15 | cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget) |
 | `--cert-warn` | 720h | report TLS certificates expiring within this window (edges section) |
 | `--store` | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override |
+| `--lists` | all | which cluster resources the List pass reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) for a least-privilege posture. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never an error. |
+| `--lists-preflight` | — | before listing, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s); falls back to reactive Forbidden-skip if SSAR is not permitted |
 
 ## Common flags (every lookout command)
 
@@ -39,6 +41,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | --- | --- |
 | `section` | which bundle section the finding belongs to: spec\|delta\|edges\|radius\|logs |
 | `sections` | on the bundle.target head finding: the sections that follow |
+| `skipped` | on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
 | `hop` | radius neighbor's BFS depth from the target (1 = direct edge) |
 | `triage_status` | triage state from the matched §9.4 record (investigating\|triaged\|actioned\|escalated) — present only with --store on merged findings |
