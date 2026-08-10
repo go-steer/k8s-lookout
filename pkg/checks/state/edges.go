@@ -33,6 +33,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -191,6 +192,13 @@ type index struct {
 	graphObjs []any // everything pkg/graph ingests, in list order
 	scanned   int   // all listed objects, including RBAC kinds
 
+	// skipped are the (group, resource) pairs the List pass did not
+	// read this run — under a tolerant load (LoadCluster with
+	// Tolerate/Preflight/Lists), a per-resource Forbidden/NotFound or a
+	// deselected list drops the step instead of aborting the pass, and
+	// the topology is a documented partial. Empty on a full pass.
+	skipped []ListRequirement
+
 	pods            map[string]*corev1.Pod       // ns/name
 	configMaps      map[string]*corev1.ConfigMap // ns/name
 	secrets         map[string]*corev1.Secret    // ns/name
@@ -244,7 +252,15 @@ func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, e
 // listCluster runs the paged Lists over the pod-nexus kinds in ns
 // (NamespaceAll with -A) plus the RBAC kinds the reference-integrity
 // checks need. RBAC objects are not graph kinds and are indexed only.
-func listCluster(ctx context.Context, client kubernetes.Interface, ns string) (*index, error) {
+//
+// opts controls partial loads (§7.6 least-privilege): a resource may
+// be dropped up front (Lists deselection, or an SSAR preflight denial)
+// or reactively (a per-step Forbidden/NotFound under Tolerate). Every
+// dropped (group, resource) lands in ix.skipped so consumers can be
+// honest about the gap. A default (zero-value) opts reproduces the
+// original all-or-nothing pass: nothing is deselected, tolerate is
+// off, so the first error aborts.
+func listCluster(ctx context.Context, client kubernetes.Interface, ns string, opts loadOptions) (*index, error) {
 	ix := &index{
 		pods:            map[string]*corev1.Pod{},
 		configMaps:      map[string]*corev1.ConfigMap{},
@@ -453,8 +469,52 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string) (*
 			}, func(r *rbacv1.ClusterRole) { ix.clusterRoles[r.Name] = true; ix.scanned++ })
 		},
 	}
-	for _, step := range steps {
+	// steps run in lockstep with LoadClusterListRequirements() so each
+	// closure is attributable to its (group, resource) for skip
+	// accounting; the two lists must stay the same length and order.
+	reqs := LoadClusterListRequirements()
+	if len(reqs) != len(steps) {
+		return nil, fmt.Errorf("listCluster: %d steps but %d requirements — keep listCluster and LoadClusterListRequirements in lockstep", len(steps), len(reqs))
+	}
+
+	// Preflight (§7.6 optional): one SelfSubjectAccessReview per
+	// still-selected list, so known-denied resources are dropped
+	// without a 403 in the logs. If SSAR itself is not permitted (or
+	// otherwise errors) we abandon the preflight and lean on the
+	// reactive Forbidden-skip below — "could not check" must not
+	// silently drop a resource the caller can actually read.
+	deniedUpFront := make([]bool, len(reqs))
+	if opts.preflight {
+		for i, req := range reqs {
+			if !opts.selects(req) {
+				continue // deselected below; no point reviewing it
+			}
+			allowed, err := canList(ctx, client, req)
+			if err != nil {
+				break // fall back to reactive skipping
+			}
+			if !allowed {
+				deniedUpFront[i] = true
+			}
+		}
+	}
+
+	for i, step := range steps {
+		req := reqs[i]
+		if !opts.selects(req) || deniedUpFront[i] {
+			// Deselected via Lists() or denied by the preflight — never
+			// attempted, recorded as a documented gap.
+			ix.skipped = append(ix.skipped, req)
+			continue
+		}
 		if err := step(); err != nil {
+			if opts.tolerate && (apierrors.IsForbidden(err) || apierrors.IsNotFound(err)) {
+				// Least-privilege posture: the caller may list the other
+				// resources but not this one. Drop it, record it, carry
+				// on — the returned topology is a partial bundle.
+				ix.skipped = append(ix.skipped, req)
+				continue
+			}
 			return nil, err
 		}
 	}

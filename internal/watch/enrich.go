@@ -136,6 +136,14 @@ type enricher struct {
 	cap      int
 	logLines int
 	timeout  time.Duration
+
+	// lists is the resolved --enrich-lists selection for the
+	// scoped-list fallback's LoadCluster pass (nil = all resources);
+	// listsPreflight adds the SSAR preflight. Denied/deselected lists
+	// degrade to a partial bundle with a skipped= note, never a resolve
+	// failure (§7.6 least-privilege).
+	lists          []state.ListRequirement
+	listsPreflight bool
 }
 
 // enabledFor reports whether the policy enriches sev.
@@ -325,7 +333,11 @@ func (e *enricher) scopedIncident(ctx context.Context, sig engine.Signal, b *enr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		c, err := state.LoadCluster(ctx, e.client, sig.Namespace)
+		loadOpts := []state.LoadOption{state.Tolerate(), state.Lists(e.lists)}
+		if e.listsPreflight {
+			loadOpts = append(loadOpts, state.Preflight())
+		}
+		c, err := state.LoadCluster(ctx, e.client, sig.Namespace, loadOpts...)
 		if err != nil {
 			return err
 		}
@@ -348,6 +360,13 @@ func (e *enricher) scopedIncident(ctx context.Context, sig engine.Signal, b *enr
 		return
 	}
 	b.setTarget(wl, len(pods))
+	// Partial load (§7.6): some lists were denied or deselected. The
+	// resolve stage still succeeded (the target's own resources were
+	// readable), so render every section we can and mark the gap on the
+	// head rather than failing the whole enrichment.
+	if note := cluster.SkippedNote(); note != "" {
+		b.head.Details = append(b.head.Details, emit.Field{Key: "skipped", Value: note})
+	}
 
 	b.stage(ctx, enrichSectionSpec, specCmd(wl), func() ([]emit.Finding, error) {
 		obj := cluster.WorkloadObject(wl)

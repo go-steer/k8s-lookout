@@ -46,6 +46,8 @@ breaking change to running deployments, never a refactor.
 | `--dry-run` | bool | — | Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run. |
 | `--enrich` | string | `critical` | Which severities get enrichment on their per-incident session's initial inject: critical (default), warning (critical+warning), or off. |
 | `--enrich-cap` | int | `16384` | Byte budget for the attached enrichment bundle (fixed budget). Truncation happens at section boundaries; dropped sections become overflow trailers naming the `lookout` command that reproduces them. |
+| `--enrich-lists` | string | `all` | Which cluster resources the scoped-list enrichment fallback reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) to keep the watcher SA least-privilege. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never a resolve failure. |
+| `--enrich-lists-preflight` | bool | — | Before the scoped-list pass, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s in the watcher log); falls back to reactive Forbidden-skip if SSAR is not permitted. |
 | `--enrich-log-lines` | int | `200` | Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1. |
 | `--enrich-timeout` | duration | `5s` | Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0. |
 | `--exclude-namespace` | string | — | Comma-separated deny-list of namespaces. |
