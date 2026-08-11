@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -267,6 +268,15 @@ type runner struct {
 	token       string               // resolved --token-env daemon bearer (sources reuse it)
 	metricsReg  *prometheus.Registry // process-global scrape registry
 	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
+
+	// restCfg, when set, is the fleet-minted rest.Config for this
+	// cluster (multi-cluster GKE-endpoint mode: ADC over the DNS
+	// endpoint; issue #208). Nil in the single-cluster default, where
+	// run resolves the config from --in-cluster/--kubeconfig. Set,
+	// project/zone override the §8 identity for this cluster.
+	restCfg *rest.Config
+	project string
+	zone    string
 }
 
 // run wires and drives this runner's cluster: it builds the dispatcher,
@@ -305,10 +315,24 @@ func (r *runner) run(ctx context.Context) error {
 	// §8 deployment identity: cluster is --cluster-name (M0);
 	// zone/project resolve by precedence — explicit flag > provider
 	// metadata > empty (never fatal; empty fields reproduce the
-	// zone-less fingerprints deployments hashed before this wiring).
-	idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
-	project, zone := resolveIdentity(idCtx, f)
-	cancelID()
+	// zone-less fingerprints deployments hashed before this wiring). In
+	// multi-cluster mode the fleet already knows each cluster's
+	// project/location (from the Container API), so a fleet runner's
+	// per-cluster values take precedence over the local provider
+	// metadata — the on-host metadata server describes the sentinel's
+	// own node, not the remote cluster it's watching.
+	project, zone := r.project, r.zone
+	if project == "" || zone == "" {
+		idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
+		p, z := resolveIdentity(idCtx, f)
+		cancelID()
+		if project == "" {
+			project = p
+		}
+		if zone == "" {
+			zone = z
+		}
+	}
 	if project != "" || zone != "" {
 		log.Printf("identity: stamping project=%q zone=%q (precedence: explicit flag > provider metadata > empty; zone participates in the §8 fingerprint hash)", project, zone)
 	}
@@ -430,7 +454,19 @@ func (r *runner) run(ctx context.Context) error {
 	if f.dryRun {
 		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", r.clusterName)
 	}
-	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+	// Resolve this runner's rest config once and share it across every
+	// client below. In the single-cluster default it comes from
+	// --in-cluster/--kubeconfig exactly as before; in multi-cluster
+	// GKE-endpoint mode (issue #208) the fleet already minted it per
+	// cluster (ADC over the DNS endpoint) and stored it on the runner.
+	restCfg := r.restCfg
+	if restCfg == nil {
+		restCfg, err = kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		if err != nil {
+			return err
+		}
+	}
+	client, err := kube.BuildClientFromConfig(restCfg)
 	if err != nil {
 		return err
 	}
@@ -456,17 +492,13 @@ func (r *runner) run(ctx context.Context) error {
 	// source is enabled.
 	var dyn dynamic.Interface
 	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) {
-		dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		dyn, err = kube.BuildDynamicClientFromConfig(restCfg)
 		if err != nil {
 			return err
 		}
 	}
 	var metricsClient metricsv.Interface
 	if f.sourceEnabled(saturation.Name) {
-		restCfg, cfgErr := kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
-		if cfgErr != nil {
-			return cfgErr
-		}
 		metricsClient, err = metricsv.NewForConfig(restCfg)
 		if err != nil {
 			return fmt.Errorf("metrics.k8s.io client: %w", err)
