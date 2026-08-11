@@ -206,16 +206,29 @@ case — not large production fleets, which keep the per-cluster sentinel.
   appearing/disappearing mid-run is a later iteration (re-discovery loop
   + runner add/remove), not v1.
 
-## Open questions
+## Resolved during implementation
 
-1. **Runner restart policy** — backoff-retry a dead runner, or leave it
-   down with a marker until the next process start? (Leaning: bounded
-   backoff, with the down state surfaced in metrics + a startup-style
-   marker.)
-2. **Which loops are per-runner vs. process-global** — dedup snapshot,
-   distill, watchboard are per-cluster; the HTTP/metrics server and sink
-   are global. Graph feed is per-runner (it wraps a cluster's factory).
-   Needs an explicit inventory before the refactor lands.
-3. **Config shape** — flag surface vs. a config file once the cluster
-   list grows. The scalar `--cluster-name`/`--project`/`--zone`
-   (`flags.go`) become per-runner; discovery mode derives them.
+1. **Runner restart policy** — bounded backoff. A runner that exits
+   while the process is up is logged, counted (`lookout_runner_up`,
+   `lookout_runner_restarts_total`), and restarted after a fixed backoff;
+   ctx cancellation (shutdown) is not a restart. At N=1 the single
+   runner's error is returned so the kubelet still owns the restart
+   (one-per-cluster behaviour is byte-identical).
+2. **Which loops are per-runner vs. process-global** — process-global:
+   the sink, the metrics registry, the signal context, and the
+   `--metrics-addr` HTTP server. Per-runner: clients, sources, informers,
+   dispatcher, store, recovery, and the graph feed (each wraps its
+   cluster's factory). Each runner gets a child context so a feed failure
+   cancels only that runner.
+3. **Config shape** — flags for now. `--clusters` takes `name=endpoint`
+   pairs; `--clusters-from` discovers from a `project` or
+   `project/location`. The scalar `--cluster-name`/`--project`/`--zone`
+   become per-runner (discovery derives them). A config file is deferred
+   until the cluster list outgrows a flag.
+
+## Still deferred
+
+- **Per-cluster store paths.** `--store` and `--dedup-persist` are single
+  file paths that would collide across runners, so they are rejected in
+  multi-cluster mode rather than silently shared. Per-cluster paths are
+  future work.
