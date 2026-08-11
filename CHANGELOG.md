@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-11
+
+A noise-reduction release for the watch path. A pod that lost a node
+scale-up race would flap `BackOff` for a minute or two and self-heal —
+but the sentinel canonicalized that first `BackOff` to
+`CrashLoopBackOff` and opened an incident before the recovery tracker
+could resolve it, firing an alert for a transient that no longer
+existed. `lookout watch` now debounces the crash-loop family on the
+leading edge, requiring the canonical `CrashLoopBackOff` reason to
+reach `--backoff-min-count` (default 3) before opening a session; a
+genuine crash loop climbs past it within seconds. The gate is
+message-aware, so the image-pull family (`ImagePullBackOff` /
+`ErrImagePull`) is deliberately not debounced — a bad tag is
+persistent and still fires on the first event.
+
 ### Added
 
 - Leading-edge debounce for the crash-loop family (#197): a transient

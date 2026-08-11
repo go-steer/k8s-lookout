@@ -90,7 +90,7 @@ spec:
           # this pin (docs/release-process.md), and the release
           # workflow's preflight guard refuses to tag when it is
           # stale.
-          image: ghcr.io/go-steer/lookout:v0.15.0
+          image: ghcr.io/go-steer/lookout:v0.16.0
           imagePullPolicy: IfNotPresent
           args:
             - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
