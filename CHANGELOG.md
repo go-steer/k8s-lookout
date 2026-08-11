@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-11
+
+A naming release: the transition scaffolding is gone. The watch-path
+sentinel began as core-agent's `k8s-event-watcher`, moved verbatim so an
+existing deployment could swap the image with zero config change, and
+kept that project's names — metric prefix, Kubernetes resource names,
+log prefix — frozen for the duration. That transition is complete, so
+everything now reads as `lookout`. This is a **breaking** change for
+anyone running the sentinel: Prometheus dashboards/alerts on the old
+`k8s_event_watcher_*` prefix and any tooling that addresses the
+`k8s-event-watcher` Kubernetes resources by name must be updated — see
+the migration note below. The flag surface, exit codes, RBAC rules,
+ports, and the `k8s-event` inject wire shape are unchanged.
+
 ### Changed
 
 - **BREAKING: retired the `k8s-event-watcher` transition naming.** The
