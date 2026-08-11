@@ -125,7 +125,7 @@ jobs:
         run: |
           mkdir -p _forensics
           kubectl -n agent-triage logs deploy/stub-daemon --tail=-1 >_forensics/stub-daemon.log 2>&1 || true
-          kubectl -n agent-triage logs deploy/k8s-event-watcher --tail=-1 >_forensics/sentinel.log 2>&1 || true
+          kubectl -n agent-triage logs deploy/lookout-watch --tail=-1 >_forensics/sentinel.log 2>&1 || true
           kubectl get pods -A -o wide >_forensics/pods.txt 2>&1 || true
           kubectl get events -A --sort-by=.lastTimestamp >_forensics/events.txt 2>&1 || true
           kubectl -n lookout-demo describe pods >_forensics/describe-lookout-demo.txt 2>&1 || true

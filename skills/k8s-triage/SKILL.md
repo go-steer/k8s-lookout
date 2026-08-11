@@ -266,7 +266,7 @@ lookout triage changes Deployment/prod/api --since=1h --at=2026-07-25T10:00:00Z 
   guessed).
 - The store is the SQLite file a `lookout watch` sentinel maintains via
   its `--store` flag. In a standard deployment it lives inside the
-  sentinel (`k8s-event-watcher`) pod at `/var/lib/lookout/lookout.db`,
+  sentinel (`lookout-watch`) pod at `/var/lib/lookout/lookout.db`,
   on the same persistent volume as `--dedup-persist`. Run lookout where
   that file is reachable — exec in the sentinel pod, or `kubectl cp`
   the file out first: history reads are fully offline, no cluster

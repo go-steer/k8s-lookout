@@ -17,7 +17,7 @@
 #   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=vX.Y.Z"
 #
 # Prerequisites (the manifests reference but do not create them): the
-# agent-triage namespace and the k8s-event-watcher-token Secret — see
+# agent-triage namespace and the lookout-watch-token Secret — see
 # the deploy page on the docs site.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

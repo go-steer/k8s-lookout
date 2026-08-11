@@ -35,7 +35,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: k8s-event-watcher-capacity
+  name: lookout-watch-capacity
   namespace: kube-system
 rules:
   - apiGroups: [""]

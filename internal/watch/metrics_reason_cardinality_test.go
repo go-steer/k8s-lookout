@@ -102,7 +102,7 @@ func TestBoundReason_CapsLabelCardinality(t *testing.T) {
 	for i := 0; i < reasonLabelCap*5; i++ {
 		m.eventsSeen.WithLabelValues(m.boundReason(fmt.Sprintf("wire-%d", i)), "ns").Inc()
 	}
-	if series := countSeries(t, m, "k8s_event_watcher_events_seen_total"); series > reasonLabelCap+1 {
+	if series := countSeries(t, m, "lookout_events_seen_total"); series > reasonLabelCap+1 {
 		t.Fatalf("eventsSeen series = %d, want <= %d (reasonLabelCap+1) — reason label is unbounded",
 			series, reasonLabelCap+1)
 	}

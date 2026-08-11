@@ -18,16 +18,12 @@
 # Mirrors core-agent's Dockerfile conventions (alpine builder,
 # distroless/static final stage, version stamped via -ldflags).
 #
-# ENTRYPOINT compatibility (M0 exit criterion): the predecessor image,
-# ghcr.io/go-steer/k8s-event-watcher, set ENTRYPOINT to the watcher
-# binary itself and its deployment manifests pass bare flags via
-# `args:` (no explicit `command:`). To let those deployments swap
-# images with ZERO config change, this image's ENTRYPOINT is
-# ["/lookout", "watch"] — the container-args flags splice in after
-# `watch` exactly as they used to splice in after the old binary.
-# Other subcommands (`lookout version`, and the M1 read-path verbs)
-# are reachable by overriding the entrypoint (`command:` in k8s,
-# `--entrypoint` in docker run).
+# ENTRYPOINT: the sentinel (`lookout watch`) is the container's default
+# command, so this image's ENTRYPOINT is ["/lookout", "watch"] and a
+# Deployment's bare-flag `args:` splice in after `watch` (no explicit
+# `command:` needed). Other subcommands (`lookout version`, and the
+# read-path verbs) are reachable by overriding the entrypoint
+# (`command:` in k8s, `--entrypoint` in docker run).
 #
 # The Go toolchain version is passed in from `go.mod` via GO_VERSION,
 # so the build image automatically tracks the project's Go version
@@ -122,8 +118,6 @@ WORKDIR /workspace
 # default change.
 USER nonroot:nonroot
 
-# ["/lookout", "watch"] — NOT bare ["/lookout"] — so existing
-# k8s-event-watcher deployments, whose `args:` are bare watcher flags,
-# keep working with only the image line changed. See the header
-# comment.
+# ["/lookout", "watch"] — NOT bare ["/lookout"] — so a Deployment's
+# bare-flag `args:` splice in behind `watch`. See the header comment.
 ENTRYPOINT ["/lookout", "watch"]

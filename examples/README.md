@@ -53,7 +53,7 @@ examples/scenarios/bad-rollout/revert                  # waits for the closed-lo
 
 Three surfaces to verify on, weakest to strongest:
 
-1. **Sentinel log** — `kubectl -n agent-triage logs deploy/k8s-event-watcher`
+1. **Sentinel log** — `kubectl -n agent-triage logs deploy/lookout-watch`
    (fire/route/dedup decisions, startup source probes).
 2. **Read-path CLI** — every command works from your kubeconfig with
    no deployment; `verify` scripts poll these too.
@@ -105,7 +105,7 @@ previous run, let the cluster settle (~10 minutes) and read the
 sentinel's own log — it records every fire/dedup/attach decision:
 
 ```sh
-kubectl -n agent-triage logs deploy/k8s-event-watcher
+kubectl -n agent-triage logs deploy/lookout-watch
 ```
 
 ## Safety

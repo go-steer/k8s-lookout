@@ -28,10 +28,9 @@ quota forecasts. Kinds are namespaced by source — `rollout.stall`, `workload.j
 `saturation.forecast`, `capacity.stockout`, `quota.forecast`, `token.burn` —
 plus cross-cutting kinds like `resolved`, `storm`, and `watchboard.digest`.
 
-One freeze sits inside the freeze: the original `k8s-event` /
-`k8s-event-followup` pair stays byte-identical to the pre-lookout
-`k8s-event-watcher` for playbook back-compat, and never gains the newer
-identity fields. Every other kind carries them.
+One freeze sits inside the freeze: the reactive `k8s-event` /
+`k8s-event-followup` pair stays byte-identical for playbook back-compat,
+and never gains the newer identity fields. Every other kind carries them.
 
 ## The fingerprint
 

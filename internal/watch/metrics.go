@@ -93,146 +93,146 @@ func newMetrics() *metrics {
 		registry:   reg,
 		reasonSeen: make(map[string]struct{}),
 		eventsSeen: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_events_seen_total",
+			Name: "lookout_events_seen_total",
 			Help: "Total k8s events observed by the informer, before filter.",
 		}, []string{"reason", "namespace"}),
 		eventsInjected: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_events_injected_total",
+			Name: "lookout_events_injected_total",
 			Help: "Total events that survived filter + dedup and were POSTed to the daemon.",
 		}, []string{"reason", "namespace"}),
 		eventsDedupSuppress: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_events_deduped_total",
+			Name: "lookout_events_deduped_total",
 			Help: "Total events suppressed by the rolling-window dedup cache.",
 		}, []string{"reason", "namespace"}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_inject_errors_total",
-			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Frozen name; counts sink operations regardless of --sink.",
+			Name: "lookout_inject_errors_total",
+			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Counts sink operations regardless of --sink.",
 		}, []string{"reason", "http_code"}),
 		injectShrinks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_inject_shrinks_total",
+			Name: "lookout_inject_shrinks_total",
 			Help: "Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling.",
 		}, []string{"shed"}),
 		sessionCreates: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_session_creates_total",
-			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. Name frozen for predecessor compatibility.",
+			Name: "lookout_session_creates_total",
+			Help: "Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome.",
 		}, []string{"outcome"}),
 		activeIncidents: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "k8s_event_watcher_active_incidents",
+			Name: "lookout_active_incidents",
 			Help: "Current number of incidents in the sidecar's dedup cache.",
 		}),
 		recoveriesObserved: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_recoveries_observed_total",
+			Name: "lookout_recoveries_observed_total",
 			Help: "Total kind=resolved outcome records emitted (§7.4), by resolution (recovered|object_deleted).",
 		}, []string{"resolution"}),
 		recoveriesReverted: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_recoveries_reverted_total",
+			Name: "lookout_recoveries_reverted_total",
 			Help: "Total kind=resolved.reverted records emitted: symptom recurred within the revert window after a resolve.",
 		}),
 		recoveryTracking: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "k8s_event_watcher_recovery_tracking",
+			Name: "lookout_recovery_tracking",
 			Help: "Current number of bound incidents the recovery tracker is watching for clearance.",
 		}),
 		recoveryDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_recovery_drops_total",
+			Name: "lookout_recovery_drops_total",
 			Help: "Total resolved signals dropped instead of injected, by cause (unknown_session: binding lost, e.g. restart without --dedup-persist).",
 		}, []string{"cause"}),
 		stormsFormed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_storms_formed_total",
+			Name: "lookout_storms_formed_total",
 			Help: "Total kind=storm incidents opened by blast-radius correlation (§7.5).",
 		}),
 		stormsResolved: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_storms_resolved_total",
+			Name: "lookout_storms_resolved_total",
 			Help: "Total storms resolved because every member incident cleared (§7.4 + §7.5).",
 		}),
 		stormsActive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "k8s_event_watcher_storms_active",
+			Name: "lookout_storms_active",
 			Help: "Currently open (unresolved) storms.",
 		}),
 		stormMembers: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_storm_members_total",
+			Name: "lookout_storm_members_total",
 			Help: "Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival).",
 		}, []string{"kind"}),
 		stormUpdates: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_storm_updates_total",
+			Name: "lookout_storm_updates_total",
 			Help: "Total kind=storm.update size refreshes injected into storm sessions (membership grew past a reporting threshold: doubling or +10, max one per minute).",
 		}),
 		watchboardEntries: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_watchboard_entries_total",
+			Name: "lookout_watchboard_entries_total",
 			Help: "Total warning-class signals buffered onto the shared watchboard digest (§7.7), by signal kind.",
 		}, []string{"kind"}),
 		watchboardDigests: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_watchboard_digests_total",
+			Name: "lookout_watchboard_digests_total",
 			Help: "Total kind=watchboard.digest injects flushed to the watchboard session.",
 		}),
 		watchboardRotations: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_watchboard_rotations_total",
+			Name: "lookout_watchboard_rotations_total",
 			Help: "Total size-based watchboard session rotations (§15 Q2): a fresh session opened after --watchboard-rotate digest injects.",
 		}),
 		watchboardBuffered: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "k8s_event_watcher_watchboard_buffered",
+			Name: "lookout_watchboard_buffered",
 			Help: "Warning-class signals currently buffered awaiting the next watchboard digest flush.",
 		}),
 		infoDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_info_dropped_total",
+			Name: "lookout_info_dropped_total",
 			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting.",
 		}, []string{"kind"}),
 		storeRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_store_records_total",
+			Name: "lookout_store_records_total",
 			Help: "Total occurrences committed to the §9.1 store, by routing outcome (injected|suppressed|storm|storm-member|watchboard|info-stored|resolved).",
 		}, []string{"route"}),
 		storeDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_store_write_drops_total",
+			Name: "lookout_store_write_drops_total",
 			Help: "Total occurrence records LOST by the §9.1 store's write path, by cause (buffer_full: the non-blocking writer buffer overflowed; write_error: a batch insert failed). The store is telemetry, not a system of record — drops are loud, never blocking.",
 		}, []string{"cause"}),
 		storePruned: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_store_pruned_rows_total",
+			Name: "lookout_store_pruned_rows_total",
 			Help: "Total occurrence rows deleted by the §9.1 prune loop, by cause (ttl: older than --store-ttl; size: oldest-first eviction after --store-max-mb was exceeded).",
 		}, []string{"cause"}),
 		enrichments: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_enrichments_total",
+			Name: "lookout_enrichments_total",
 			Help: "Total §7.6 enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers).",
 		}, []string{"outcome"}),
 		enrichmentBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "k8s_event_watcher_enrichment_bytes",
+			Name: "lookout_enrichment_bytes",
 			Help: "Size of the attached enrichment bundle in bytes, after the --enrich-cap prefix cut (the §15 Q3 telemetry that will inform the fixed-vs-model-aware cap revisit).",
 			// 512B .. 64KiB: brackets the 16KiB default cap from both sides.
 			Buckets: prometheus.ExponentialBuckets(512, 2, 8),
 		}),
 		enrichmentTruncated: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_enrichment_truncated_total",
+			Name: "lookout_enrichment_truncated_total",
 			Help: "Total enrichment bundles the --enrich-cap byte budget truncated at a section boundary (dropped sections become overflow trailers naming the follow-up command).",
 		}),
 		enrichmentFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_enrichment_failures_total",
+			Name: "lookout_enrichment_failures_total",
 			Help: "Total enrichment stage failures, by stage (resolve|spec|delta|edges|radius|logs). Failures never block the inject; they surface as enrichment_error trailers in the attached bundle.",
 		}, []string{"stage"}),
 		memoryFacts: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_memory_facts_total",
+			Name: "lookout_memory_facts_total",
 			Help: "Total §9.2 distilled facts written (upserts included) by the scheduled distiller pass, by fact class.",
 		}, []string{"class"}),
 		distillErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_distill_errors_total",
+			Name: "lookout_distill_errors_total",
 			Help: "Total failed §9.2 distiller passes. A failed pass loses freshness only — the next pass re-derives every fact from the occurrence window.",
 		}),
 		triageOverrides: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_triage_overrides_total",
+			Name: "lookout_triage_overrides_total",
 			Help: "Total §9.4 severity-routing decisions refined by an open triage-status record, by action (downgraded: agent's severity_override lowered the class; upgraded: it raised it; escalated: status=escalated pinned critical).",
 		}, []string{"action"}),
 		triageFlips: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_triage_resolved_flips_total",
+			Name: "lookout_triage_resolved_flips_total",
 			Help: "Total §9.4 triage-status records flipped to resolved by §7.4 recovery injects (the automatic lifecycle — resolved records join the §9.3 corpus).",
 		}),
 		triageRegressed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_triage_regressed_total",
+			Name: "lookout_triage_regressed_total",
 			Help: "Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time. Evidence only, never a re-page.",
 		}),
 		crossSourceFollowups: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "k8s_event_watcher_cross_source_followups_total",
+			Name: "lookout_cross_source_followups_total",
 			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (leading/reactive joins made session-visible), by joining source family.",
 		}, []string{"source"}),
 		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "k8s_event_watcher_sink_info",
-			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the frozen operation counters — existing scrapes keep their exact series identities.",
+			Name: "lookout_sink_info",
+			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.",
 		}, []string{"sink"}),
 	}
 	reg.MustRegister(

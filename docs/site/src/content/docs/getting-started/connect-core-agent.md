@@ -21,7 +21,7 @@ required on the daemon side.
   sentinels.
 - **`--token-env`** — the name of the environment variable holding the
   bearer token (the shipped manifest sources `WATCHER_TOKEN` from the
-  `k8s-event-watcher-token` Secret). Every request carries it as
+  `lookout-watch-token` Secret). Every request carries it as
   `Authorization`.
 - **`--cluster-name`** — stamped into every payload, so a daemon serving
   several clusters can tell the streams apart.

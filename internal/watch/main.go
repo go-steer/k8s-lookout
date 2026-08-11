@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command k8s-event-watcher is the v2.6 semi-autonomous-triage sidecar.
-// It watches Kubernetes Events via a client-go informer, filters to a
-// configured allow-list of Event.Reason values, dedupes duplicates
-// within a rolling window, and POSTs matched events to a core-agent
-// daemon's per-incident session endpoint. See
-// docs/k8s-event-agent-design.md for the full design.
+// Package watch implements `lookout watch`, the resident per-cluster
+// sentinel. It watches Kubernetes Events via a client-go informer,
+// filters to a configured allow-list of Event.Reason values, dedupes
+// duplicates within a rolling window, and POSTs matched events to a
+// core-agent daemon's per-incident session endpoint.
 package watch
 
 import (
@@ -31,14 +30,12 @@ import (
 )
 
 // Main is the `lookout watch` entry point; argv is the argument list
-// after the subcommand name. Everything below it is the k8s-event-watcher
-// moved verbatim from core-agent — flags, behavior, and exit codes are
-// preserved exactly (M0 contract: existing deployments swap images with
-// zero config change), including the standalone binary's 0/1 exit-code
-// convention and its "k8s-event-watcher:" stderr prefix.
+// after the subcommand name. It follows the standalone binary's 0/1
+// exit-code convention and prints errors with a "lookout watch:"
+// stderr prefix.
 func Main(argv []string) int {
 	if err := realMain(argv); err != nil {
-		fmt.Fprintln(os.Stderr, "k8s-event-watcher:", err)
+		fmt.Fprintln(os.Stderr, "lookout watch:", err)
 		return 1
 	}
 	return 0

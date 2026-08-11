@@ -33,15 +33,15 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: k8s-event-watcher
+  name: lookout-watch
   namespace: agent-triage
   labels:
-    app.kubernetes.io/name: k8s-event-watcher
+    app.kubernetes.io/name: lookout-watch
     app.kubernetes.io/component: watcher
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: k8s-event-watcher
+      app.kubernetes.io/name: lookout-watch
       app.kubernetes.io/component: watcher
   policyTypes: ["Ingress"]
   ingress:

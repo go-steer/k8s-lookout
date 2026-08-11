@@ -164,7 +164,7 @@ func loadWatcherClusterRole(t *testing.T) *rbacv1.ClusterRole {
 	if err := yaml.Unmarshal(data, &role); err != nil {
 		t.Fatalf("parsing deploy/12-clusterrole-watcher.yaml: %v", err)
 	}
-	if role.Kind != "ClusterRole" || role.Name != "k8s-event-watcher" {
+	if role.Kind != "ClusterRole" || role.Name != "lookout-watch" {
 		t.Fatalf("unexpected object %s/%s in deploy/12-clusterrole-watcher.yaml", role.Kind, role.Name)
 	}
 	return &role

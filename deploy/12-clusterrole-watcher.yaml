@@ -144,7 +144,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: k8s-event-watcher
+  name: lookout-watch
 rules:
   - apiGroups: [""]
     resources: ["events"]

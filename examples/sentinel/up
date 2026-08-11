@@ -18,7 +18,7 @@
 # RBAC and the watcher Deployment shape — only the image and args are
 # patched for the examples:
 #
-#   1. namespace agent-triage + the k8s-event-watcher-token Secret
+#   1. namespace agent-triage + the lookout-watch-token Secret
 #   2. stub daemon (dev/drills/stub-daemon.py) as Service core-agent:7777
 #   3. kubectl apply -k deploy/   (RBAC + watcher, exactly as shipped)
 #   4. patch the watcher image ($LOOKOUT_IMAGE, default GHCR latest)
@@ -38,7 +38,7 @@ echo "▸ namespace + token secret"
 kubectl create namespace "$SENTINEL_NS" --dry-run=client -o yaml | kubectl apply -f -
 # The stub does no auth validation (it only logs whether a bearer token
 # was present) — any value works; the manifest just requires the Secret.
-kubectl -n "$SENTINEL_NS" create secret generic k8s-event-watcher-token \
+kubectl -n "$SENTINEL_NS" create secret generic lookout-watch-token \
   --from-literal=token=examples-stub-token --dry-run=client -o yaml | kubectl apply -f -
 
 echo "▸ stub daemon (Service core-agent:7777 — the wire capture)"
@@ -60,7 +60,7 @@ if is_kind_context; then
   pin_node="${CLUSTER_NAME}-worker"
   if kubectl get node "$pin_node" >/dev/null 2>&1; then
     echo "▸ pinning sentinel + stub to $pin_node (node-failure scenario survivability)"
-    for d in stub-daemon k8s-event-watcher; do
+    for d in stub-daemon lookout-watch; do
       kubectl -n "$SENTINEL_NS" patch deployment "$d" --type=merge -p \
         "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$pin_node\"}}}}}"
     done
@@ -107,19 +107,19 @@ args=(
 )
 args_json="$(printf '"%s",' "${args[@]}")"
 args_json="[${args_json%,}]"
-kubectl -n "$SENTINEL_NS" patch deployment k8s-event-watcher --type=json -p "[
+kubectl -n "$SENTINEL_NS" patch deployment lookout-watch --type=json -p "[
   {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},
   {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$args_json}
 ]"
 
 echo "▸ waiting for rollouts"
 kubectl -n "$SENTINEL_NS" rollout status deploy/stub-daemon --timeout=180s
-kubectl -n "$SENTINEL_NS" rollout status deploy/k8s-event-watcher --timeout=180s
+kubectl -n "$SENTINEL_NS" rollout status deploy/lookout-watch --timeout=180s
 
 echo
 echo "▸ sentinel startup log (source probes + armed stages):"
 sleep 3
-kubectl -n "$SENTINEL_NS" logs deploy/k8s-event-watcher --tail=30 | sed 's/^/    /'
+kubectl -n "$SENTINEL_NS" logs deploy/lookout-watch --tail=30 | sed 's/^/    /'
 echo
 echo "Wire capture: kubectl -n $SENTINEL_NS logs deploy/stub-daemon -f"
 echo "Next: kubectl apply -f examples/workloads/   then pick a scenario."

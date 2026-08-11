@@ -48,7 +48,7 @@ a named line, not silence (abridged):
 ```console
 2026/07/31 12:18:37 recovery: tracking enabled (stable-for=1m0s, tick=15s)
 2026/07/31 12:18:37 storm: correlation enabled (window=1m0s, min=3)
-2026/07/31 12:18:37 k8s-event-watcher: starting on cluster "lookout-examples" → daemon http://core-agent.agent-triage.svc.cluster.local:7777 (mode=per-incident, owner=lookout-examples@local)
+2026/07/31 12:18:37 lookout watch: starting on cluster "lookout-examples" → daemon http://core-agent.agent-triage.svc.cluster.local:7777 (mode=per-incident, owner=lookout-examples@local)
 2026/07/31 12:18:37 capacity: provider scale-decision sub-source disabled: unavailable reason="no cloud provider configured" — Events + status-ConfigMap sub-sources still fire on scaleup failures, without the structured why
 2026/07/31 12:18:37 storm: topology graph ready (88 nodes, 115 edges) — blast-radius correlation armed
 ```
