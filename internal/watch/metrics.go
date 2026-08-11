@@ -75,6 +75,8 @@ type metrics struct {
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
 	sinkInfo             *prometheus.GaugeVec
+	runnerUp             prometheus.Gauge
+	runnerRestarts       prometheus.Counter
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -257,6 +259,14 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_sink_info",
 			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.",
 		}, []string{"sink"}),
+		runnerUp: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "lookout_runner_up",
+			Help: "1 while this cluster's watch loop is running, 0 otherwise. Always carries the cluster label; in a multi-cluster process (issue #208) one series per watched cluster reports that runner's liveness independently.",
+		}),
+		runnerRestarts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lookout_runner_restarts_total",
+			Help: "Total in-process restarts of this cluster's runner by the supervisor after it exited while the process stayed up (multi-cluster fate isolation, issue #208). Stays zero in the single-cluster default, where a runner exit ends the process and the kubelet owns restart.",
+		}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -294,6 +304,8 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.triageRegressed,
 		m.crossSourceFollowups,
 		m.sinkInfo,
+		m.runnerUp,
+		m.runnerRestarts,
 	)
 	return m
 }

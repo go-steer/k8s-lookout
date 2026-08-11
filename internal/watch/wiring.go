@@ -171,16 +171,87 @@ func realMain(argv []string) error {
 	// deployment (a founding design tenet). Today that means a single
 	// runner watching f.clusterName; multi-cluster support (issue #208)
 	// fans this into N runners sharing the sink, registry, and signal
-	// ctx above. This is the N=1 extraction — behavior is byte-identical
-	// to the pre-runner wiring.
-	r := &runner{
+	// ctx above. superviseRunners keeps the N=1 path byte-identical to
+	// the pre-runner wiring (runner error → process exit → kubelet
+	// restart) and supervises each runner independently once there are
+	// several.
+	runners := []*runner{newRunner(f, f.clusterName, inj, token, metricsReg)}
+	return superviseRunners(ctx, runners)
+}
+
+// newRunner builds a cluster runner and its metrics bundle. The bundle
+// is constructed ONCE here, not inside run: it registers into the shared
+// registry under this runner's cluster label, and re-registering the
+// same series on a supervisor restart would panic. run reuses it across
+// restarts; everything else (clients, informers, sources) it rebuilds
+// per run so a restarted runner reconnects fresh.
+func newRunner(f *flags, cluster string, sink inject.Sink, token string, reg *prometheus.Registry) *runner {
+	return &runner{
 		f:           f,
-		clusterName: f.clusterName,
-		sink:        inj,
+		clusterName: cluster,
+		sink:        sink,
 		token:       token,
-		metricsReg:  metricsReg,
+		metricsReg:  reg,
+		metrics:     newMetricsFor(reg, cluster),
 	}
-	return r.run(ctx)
+}
+
+// runnerRestartBackoff bounds how fast a crash-looping runner restarts
+// in a multi-cluster process. Fixed, not a flag: the goal is only to
+// keep a hot loop from pegging a core; the kubelet's CrashLoopBackoff
+// plays this role for the single-cluster default.
+const runnerRestartBackoff = 10 * time.Second
+
+// superviseRunners drives the process's cluster runners to completion.
+//
+// N=1 (the default — one sentinel per cluster) runs the single runner
+// inline and returns its error unchanged: the process exits and the
+// kubelet owns restart, exactly as before the runner refactor. With
+// multiple runners (issue #208) each is supervised independently so one
+// cluster's failure takes down neither its siblings nor the process —
+// supervise restarts it in place with backoff. Returns when every
+// runner has stopped (only reachable on ctx cancellation in the
+// multi-runner case).
+func superviseRunners(ctx context.Context, runners []*runner) error {
+	if len(runners) == 1 {
+		return runners[0].run(ctx)
+	}
+	var wg sync.WaitGroup
+	for _, r := range runners {
+		wg.Add(1)
+		go func(r *runner) {
+			defer wg.Done()
+			supervise(ctx, r.clusterName, runnerRestartBackoff, r.metrics.runnerRestarts, r.run)
+		}(r)
+	}
+	wg.Wait()
+	return ctx.Err()
+}
+
+// supervise runs one runner to exit and restarts it while the process
+// is up. A clean ctx cancellation (shutdown) ends supervision; any
+// other exit — error or nil — is a runner that stopped watching its
+// cluster, so it restarts after backoff, counted in restarts
+// (lookout_runner_restarts_total). run and the backoff are parameters
+// so the loop is testable without a live cluster.
+func supervise(ctx context.Context, name string, backoff time.Duration, restarts prometheus.Counter, run func(context.Context) error) {
+	for {
+		err := run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		restarts.Inc()
+		if err != nil {
+			log.Printf("runner[%s]: exited: %v; restarting in %s", name, err, backoff)
+		} else {
+			log.Printf("runner[%s]: watch loop returned while the process is up; restarting in %s", name, backoff)
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // runner is the per-cluster half of startup: everything from filter /
@@ -195,6 +266,7 @@ type runner struct {
 	sink        inject.Sink          // process-global: one sink for all runners
 	token       string               // resolved --token-env daemon bearer (sources reuse it)
 	metricsReg  *prometheus.Registry // process-global scrape registry
+	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
 }
 
 // run wires and drives this runner's cluster: it builds the dispatcher,
@@ -221,9 +293,9 @@ func (r *runner) run(ctx context.Context) error {
 		return fmt.Errorf("dedup cache: %w", err)
 	}
 
-	// This runner's metrics bundle registers into the process-global
-	// registry under its cluster="<name>" label (see newMetricsFor).
-	m := newMetricsFor(r.metricsReg, r.clusterName)
+	// This runner's metrics bundle (built once in newRunner; reused
+	// across supervisor restarts so its series aren't re-registered).
+	m := r.metrics
 
 	// Which sink this process delivers to, as a scrapeable info gauge
 	// (the frozen operation counters stay sink-agnostic — see
@@ -574,9 +646,11 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}
+	m.runnerUp.Set(1)
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
+	m.runnerUp.Set(0)
 	// Final snapshot on shutdown so any un-persisted dedup state
 	// isn't lost. Best-effort — failure is logged, not fatal.
 	if snapErr := dedup.Snapshot(); snapErr != nil {
