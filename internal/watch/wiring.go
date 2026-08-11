@@ -115,25 +115,11 @@ func realMain(argv []string) error {
 		}
 	}
 
-	// Build components.
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount)
-	filter := engine.NewFilter(filterCfg)
-
-	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
-	if err != nil {
-		return fmt.Errorf("dedup cache: %w", err)
-	}
-
-	// The Prometheus registry is process-global; each cluster runner's
-	// metrics bundle registers into it under a cluster="<name>" label
-	// (multi-cluster; single-cluster N=1 still carries the label so
-	// several sentinels stay filterable in one Prometheus).
-	metricsReg := prometheus.NewRegistry()
-	m := newMetricsFor(metricsReg, f.clusterName)
-
 	// Agent sink selection (docs/agent-sink-design.md): the core-agent
 	// daemon client by default — byte-identical wire to every release
-	// before the Sink extraction — or the generic webhook sink.
+	// before the Sink extraction — or the generic webhook sink. The
+	// sink is process-global: every cluster runner delivers through this
+	// one client (multi-cluster; issue #208).
 	var inj inject.Sink
 	if !f.dryRun {
 		switch f.sink {
@@ -161,6 +147,84 @@ func realMain(argv []string) error {
 			inj = ci
 		}
 	}
+
+	// The Prometheus registry is process-global; each cluster runner's
+	// metrics bundle registers into it under a cluster="<name>" label
+	// (multi-cluster; single-cluster N=1 still carries the label so
+	// several sentinels stay filterable in one Prometheus).
+	metricsReg := prometheus.NewRegistry()
+
+	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Start the metrics HTTP server (blocks on ctx in-goroutine). One
+	// server per process serves every runner's bundle from the shared
+	// registry.
+	go func() {
+		if err := serveMetrics(ctx, f.metricsAddr, metricsReg); err != nil {
+			log.Printf("metrics server: %v", err)
+		}
+	}()
+
+	// One sentinel per cluster stays the default and recommended
+	// deployment (a founding design tenet). Today that means a single
+	// runner watching f.clusterName; multi-cluster support (issue #208)
+	// fans this into N runners sharing the sink, registry, and signal
+	// ctx above. This is the N=1 extraction — behavior is byte-identical
+	// to the pre-runner wiring.
+	r := &runner{
+		f:           f,
+		clusterName: f.clusterName,
+		sink:        inj,
+		token:       token,
+		metricsReg:  metricsReg,
+	}
+	return r.run(ctx)
+}
+
+// runner is the per-cluster half of startup: everything from filter /
+// dedup / dispatcher through source registration, recovery wiring, and
+// the RunAll watch loop. One runner watches one cluster. The fields are
+// the process-global singletons it shares with any sibling runners
+// (multi-cluster; issue #208) plus this runner's own cluster identity;
+// everything else it builds and owns during run.
+type runner struct {
+	f           *flags
+	clusterName string
+	sink        inject.Sink          // process-global: one sink for all runners
+	token       string               // resolved --token-env daemon bearer (sources reuse it)
+	metricsReg  *prometheus.Registry // process-global scrape registry
+}
+
+// run wires and drives this runner's cluster: it builds the dispatcher,
+// store, sources, storm/graph feed, enrichment, and recovery, then
+// blocks in sources.RunAll until ctx is cancelled. Returns the watch
+// loop's error (or the graph feed's, if that failed first).
+func (r *runner) run(ctx context.Context) error {
+	f := r.f
+
+	// This runner's own cancel scope, derived from the process signal
+	// ctx: a fatal graph-feed failure cancels only this runner's watch
+	// loop (not the shared metrics server or sibling runners). At N=1
+	// the process exits immediately afterward anyway; the isolation
+	// matters once multiple runners share the process (issue #208).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Build components.
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount)
+	filter := engine.NewFilter(filterCfg)
+
+	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
+	if err != nil {
+		return fmt.Errorf("dedup cache: %w", err)
+	}
+
+	// This runner's metrics bundle registers into the process-global
+	// registry under its cluster="<name>" label (see newMetricsFor).
+	m := newMetricsFor(r.metricsReg, r.clusterName)
+
 	// Which sink this process delivers to, as a scrapeable info gauge
 	// (the frozen operation counters stay sink-agnostic — see
 	// metrics.go on why the sink dimension is not a new label).
@@ -180,9 +244,9 @@ func realMain(argv []string) error {
 	disp := &dispatcher{
 		filter:    filter,
 		dedup:     dedup,
-		injector:  inj,
+		injector:  r.sink,
 		metrics:   m,
-		cluster:   f.clusterName,
+		cluster:   r.clusterName,
 		project:   project,
 		zone:      zone,
 		mode:      f.mode,
@@ -238,9 +302,9 @@ func realMain(argv []string) error {
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
-			injector:      inj,
+			injector:      r.sink,
 			metrics:       m,
-			cluster:       f.clusterName,
+			cluster:       r.clusterName,
 			dryRun:        f.dryRun,
 			batch:         f.watchboardBatch,
 			flushInterval: f.watchboardFlush,
@@ -251,17 +315,6 @@ func realMain(argv []string) error {
 	} else {
 		log.Printf("severity routing: --mode=shared — all severities route to --target-session (watchboard disabled)")
 	}
-
-	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	// Start the metrics HTTP server (blocks on ctx in-goroutine).
-	go func() {
-		if err := serveMetrics(ctx, f.metricsAddr, metricsReg); err != nil {
-			log.Printf("metrics server: %v", err)
-		}
-	}()
 
 	// Start the periodic dedup-snapshot ticker if configured.
 	if f.dedupPersist != "" && f.snapshotInterval > 0 {
@@ -303,7 +356,7 @@ func realMain(argv []string) error {
 	// from kube-agents' watcher: a dry run you cannot point at a
 	// cluster and SEE payloads from is not a dry run.
 	if f.dryRun {
-		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", f.clusterName)
+		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", r.clusterName)
 	}
 	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 	if err != nil {
@@ -357,13 +410,13 @@ func realMain(argv []string) error {
 	// without a cloud makes no sense.
 	var provider cloud.Provider
 	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) || f.sourceEnabled(notifications.Name) {
-		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName, NotificationsSubscription: f.notificationsSub})
+		provider, err = cloud.New(ctx, cloud.Config{Cluster: r.clusterName, NotificationsSubscription: f.notificationsSub})
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}
 		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
-	bs, err := buildSources(f, token, client, dyn, metricsClient, provider)
+	bs, err := buildSources(f, r.token, client, dyn, metricsClient, provider)
 	if err != nil {
 		return err
 	}
@@ -516,10 +569,10 @@ func realMain(argv []string) error {
 
 	if f.sink == sinkWebhook {
 		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
-			f.clusterName, f.sinkURL)
+			r.clusterName, f.sinkURL)
 	} else {
 		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
-			f.clusterName, f.daemonURL, f.mode, f.owner)
+			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
