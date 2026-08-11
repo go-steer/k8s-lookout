@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (metrics):** every `lookout_*` series now carries a
+  `cluster` label whose value is `--cluster-name` (empty string when
+  unset). This is groundwork for optional multi-cluster support (one
+  sentinel watching N clusters, issue #208), but it lands for
+  single-cluster deployments too — several sentinels scraped into one
+  Prometheus are now filterable by cluster. **Migration:** dashboards
+  and alerts that match `lookout_*` series by an exact label set must
+  add/ignore the `cluster` label; set `--cluster-name` so the value is
+  meaningful. One-sentinel-per-cluster remains the default and
+  recommended deployment.
+
 ## [0.17.0] - 2026-08-11
 
 A naming release: the transition scaffolding is gone. The watch-path

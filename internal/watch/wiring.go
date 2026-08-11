@@ -33,6 +33,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
 	"github.com/go-steer/k8s-lookout/internal/version"
@@ -122,7 +124,12 @@ func realMain(argv []string) error {
 		return fmt.Errorf("dedup cache: %w", err)
 	}
 
-	m := newMetrics()
+	// The Prometheus registry is process-global; each cluster runner's
+	// metrics bundle registers into it under a cluster="<name>" label
+	// (multi-cluster; single-cluster N=1 still carries the label so
+	// several sentinels stay filterable in one Prometheus).
+	metricsReg := prometheus.NewRegistry()
+	m := newMetricsFor(metricsReg, f.clusterName)
 
 	// Agent sink selection (docs/agent-sink-design.md): the core-agent
 	// daemon client by default — byte-identical wire to every release
@@ -251,7 +258,7 @@ func realMain(argv []string) error {
 
 	// Start the metrics HTTP server (blocks on ctx in-goroutine).
 	go func() {
-		if err := serveMetrics(ctx, f.metricsAddr, m); err != nil {
+		if err := serveMetrics(ctx, f.metricsAddr, metricsReg); err != nil {
 			log.Printf("metrics server: %v", err)
 		}
 	}()

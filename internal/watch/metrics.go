@@ -85,12 +85,35 @@ type metrics struct {
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
-// and returns the bundle. Tests use this with an isolated registry;
-// main.go passes the resulting handler to promhttp.
+// and returns the bundle. Tests use this with an isolated registry and
+// no cluster label — the production per-runner constructor is
+// newMetricsFor.
 func newMetrics() *metrics {
 	reg := prometheus.NewRegistry()
+	m := buildMetrics(reg)
+	m.registry = reg
+	return m
+}
+
+// newMetricsFor builds a metrics bundle whose every series carries a
+// cluster="<name>" label, registered into the shared reg. One bundle
+// per runner: the same metric names register N times without collision
+// because the const-label VALUE differs per cluster (the Desc differs).
+// The cluster label is ALWAYS present — including the single-cluster
+// default — so several sentinels scraped into one Prometheus stay
+// filterable by cluster (docs/multi-cluster-design.md).
+func newMetricsFor(reg *prometheus.Registry, cluster string) *metrics {
+	m := buildMetrics(prometheus.WrapRegistererWith(prometheus.Labels{"cluster": cluster}, reg))
+	m.registry = reg
+	return m
+}
+
+// buildMetrics constructs and registers the bundle against reg — a bare
+// *prometheus.Registry (tests, no cluster label) or a
+// cluster-label-wrapping Registerer (a runner). Callers set m.registry
+// to the underlying *Registry that promhttp gathers from.
+func buildMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
-		registry:   reg,
 		reasonSeen: make(map[string]struct{}),
 		eventsSeen: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_events_seen_total",
@@ -300,13 +323,13 @@ func (m *metrics) boundReason(reason string) string {
 // When addr == "" the server is skipped entirely (metrics still get
 // collected in-process; just not exposed). Useful for tests + tiny
 // deployments that don't have a Prometheus scraper.
-func serveMetrics(ctx context.Context, addr string, m *metrics) error {
+func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry) error {
 	if addr == "" {
 		<-ctx.Done()
 		return nil
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	// Simple liveness probe — no /metrics dependency, so K8s can
 	// use it as a livenessProbe without conflating "prometheus is
 	// scraping" with "the process is up."
