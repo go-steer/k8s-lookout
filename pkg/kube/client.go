@@ -63,6 +63,30 @@ func BuildDynamicClient(opts Options) (dynamic.Interface, error) {
 	return client, nil
 }
 
+// BuildClientFromConfig constructs a kubernetes.Interface from a
+// rest.Config resolved elsewhere. It is the seam for multi-cluster
+// bootstrap (docs/multi-cluster-design.md): a cloud.Fleet provider
+// mints one config per cluster (GKE: ADC over the DNS endpoint), and
+// those configs run through the same client construction as the
+// kubeconfig/in-cluster path — pkg/kube stays cloud-free.
+func BuildClientFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	return client, nil
+}
+
+// BuildDynamicClientFromConfig is BuildClientFromConfig for the dynamic
+// client (CRDs, aggregated APIs), sharing one provider-supplied config.
+func BuildDynamicClientFromConfig(cfg *rest.Config) (dynamic.Interface, error) {
+	client, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic client: %w", err)
+	}
+	return client, nil
+}
+
 // BuildConfig resolves the rest.Config the clients share.
 // Precedence:
 //  1. Explicit Kubeconfig always wins (out-of-cluster ops).
