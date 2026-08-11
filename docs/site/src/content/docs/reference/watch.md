@@ -35,6 +35,8 @@ breaking change to running deployments, never a refactor.
 | `--burn-multiple` | float | `4` | Session token rate at or above this multiple of the cross-session trailing-median baseline (sustained 2 polls) fires token.burn at warning. Must be > 1. |
 | `--capacity-poll` | duration | `1m0s` | Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0. |
 | `--cluster-name` | string | — | Human-readable cluster name included in every inject payload. |
+| `--clusters` | string | — | Multi-cluster: comma-separated name=endpoint pairs to watch from one process, e.g. prod-us=abc.us-central1.gke.goog,prod-eu=def.europe-west1.gke.goog. A bare endpoint derives a short name from its first DNS label. Mutually exclusive with --clusters-from; needs a Fleet-capable provider (-tags gke). Leave empty for the one-sentinel-per-cluster default. |
+| `--clusters-from` | string | — | Multi-cluster: discover the clusters to watch instead of listing them. Value is a project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project). Mutually exclusive with --clusters; needs a Fleet-capable provider (-tags gke). |
 | `--daemon-url` | string | — | Base URL of the core-agent daemon (http://... or https://...). Required. |
 | `--dedup-persist` | string | — | Optional path to persist dedup cache across sidecar restart. |
 | `--dedup-window` | duration | `5m0s` | Rolling window for (uid,reason) dedup. |

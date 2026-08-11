@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -169,15 +170,171 @@ func realMain(argv []string) error {
 	}()
 
 	// One sentinel per cluster stays the default and recommended
-	// deployment (a founding design tenet). Today that means a single
-	// runner watching f.clusterName; multi-cluster support (issue #208)
-	// fans this into N runners sharing the sink, registry, and signal
-	// ctx above. superviseRunners keeps the N=1 path byte-identical to
-	// the pre-runner wiring (runner error → process exit → kubelet
-	// restart) and supervises each runner independently once there are
-	// several.
-	runners := []*runner{newRunner(f, f.clusterName, inj, token, metricsReg)}
+	// deployment (a founding design tenet). resolveRunners returns a
+	// single runner for --cluster-name in that default; with
+	// --clusters/--clusters-from it fans out to one runner per cluster,
+	// all sharing the sink, registry, and signal ctx above.
+	// superviseRunners keeps the N=1 path byte-identical to the
+	// pre-runner wiring (runner error → process exit → kubelet restart)
+	// and supervises each runner independently once there are several.
+	runners, err := resolveRunners(ctx, f, inj, token, metricsReg)
+	if err != nil {
+		return err
+	}
 	return superviseRunners(ctx, runners)
+}
+
+// resolveRunners builds the process's cluster runners. The default —
+// neither --clusters nor --clusters-from — is a single runner for
+// --cluster-name, byte-identical to the pre-multi-cluster wiring. In
+// multi-cluster mode (issue #208) it resolves a Fleet-capable cloud
+// provider, enumerates the target clusters (explicit --clusters pairs or
+// --clusters-from discovery), mints each cluster's kubeconfig-free
+// rest.Config, and returns one runner apiece — deduping the project-tier
+// sources to one runner per distinct project (they describe a project,
+// not a cluster).
+func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token string, reg *prometheus.Registry) ([]*runner, error) {
+	if f.clusters == "" && f.clustersFrom == "" {
+		return []*runner{newRunner(f, f.clusterName, sink, token, reg)}, nil
+	}
+
+	project, location := f.project, ""
+	if f.clustersFrom != "" {
+		project, location = parseClustersFrom(f.clustersFrom)
+	}
+	provider, err := cloud.New(ctx, cloud.Config{Project: project, Location: location})
+	if err != nil {
+		return nil, fmt.Errorf("multi-cluster: cloud provider: %w", err)
+	}
+	fleet, ok := provider.(cloud.Fleet)
+	if !ok {
+		return nil, fmt.Errorf("multi-cluster (--clusters/--clusters-from) needs a cloud provider that mints kubeconfig-free cluster credentials; provider %q does not — build with -tags gke", provider.Name())
+	}
+
+	var refs []cloud.ClusterRef
+	if f.clustersFrom != "" {
+		refs, err = fleet.DiscoverClusters(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("multi-cluster discovery: %w", err)
+		}
+		if len(refs) == 0 {
+			return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters", f.clustersFrom)
+		}
+	} else {
+		refs, err = parseClusters(f.clusters)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	runners := make([]*runner, 0, len(refs))
+	projectSeen := map[string]bool{}
+	for _, ref := range refs {
+		cfg, cfgErr := fleet.RESTConfig(ctx, ref)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("multi-cluster: cluster %q: %w", ref.Name, cfgErr)
+		}
+		// Per-runner flags: copy the shared flags, then dedup the
+		// §10 project-tier sources (quota, notifications) to the FIRST
+		// runner of each distinct project — N clusters in one project
+		// would otherwise open N identical project-scoped streams. A ref
+		// with no known project (explicit --clusters endpoints) keeps
+		// them; the runner's own provider then fails loudly if it can't
+		// resolve the project, the §11 posture.
+		rf := *f
+		keepProjectTier := ref.Project == "" || !projectSeen[ref.Project]
+		if ref.Project != "" {
+			projectSeen[ref.Project] = true
+		}
+		if !keepProjectTier {
+			rf.sources = dropProjectTierSources(rf.sources)
+		}
+		r := newRunner(&rf, ref.Name, sink, token, reg)
+		r.restCfg = cfg
+		r.project = ref.Project
+		r.zone = ref.Location
+		runners = append(runners, r)
+		log.Printf("multi-cluster: runner %q → %s (project=%q, location=%q, project-tier sources=%t)",
+			ref.Name, ref.Endpoint, ref.Project, ref.Location, keepProjectTier)
+	}
+	return runners, nil
+}
+
+// projectTierSources are the §10 project-scoped sources: they describe a
+// project, not a cluster, so a fleet runs them on one runner per project
+// (docs/multi-cluster-design.md — one runner per project).
+var projectTierSources = []string{quota.Name, notifications.Name}
+
+// dropProjectTierSources removes the project-tier sources from a
+// --sources value (a no-op on "auto", which never enables them).
+func dropProjectTierSources(sources string) string {
+	if sources == autoValue {
+		return sources
+	}
+	kept := make([]string, 0)
+	for _, name := range splitCSV(sources) {
+		if slices.Contains(projectTierSources, name) {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return strings.Join(kept, ",")
+}
+
+// parseClustersFrom splits --clusters-from into project and optional
+// location: "my-proj" → ("my-proj", ""), "my-proj/us-central1" →
+// ("my-proj", "us-central1"). An empty location discovers every location.
+func parseClustersFrom(s string) (project, location string) {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// parseClusters parses --clusters: comma-separated name=endpoint pairs
+// (or a bare endpoint, whose short name is its first DNS label). Refs
+// come back in listed order; a duplicate name, empty endpoint, or empty
+// name is a loud config error.
+func parseClusters(s string) ([]cloud.ClusterRef, error) {
+	items := splitCSV(s)
+	if len(items) == 0 {
+		return nil, errors.New("--clusters is empty")
+	}
+	refs := make([]cloud.ClusterRef, 0, len(items))
+	seen := map[string]bool{}
+	for _, it := range items {
+		var name, endpoint string
+		if i := strings.IndexByte(it, '='); i >= 0 {
+			name = strings.TrimSpace(it[:i])
+			endpoint = strings.TrimSpace(it[i+1:])
+		} else {
+			endpoint = strings.TrimSpace(it)
+			name = shortClusterName(endpoint)
+		}
+		if endpoint == "" {
+			return nil, fmt.Errorf("--clusters: entry %q has no endpoint", it)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("--clusters: entry %q has no cluster name", it)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("--clusters: duplicate cluster name %q", name)
+		}
+		seen[name] = true
+		refs = append(refs, cloud.ClusterRef{Name: name, Endpoint: endpoint})
+	}
+	return refs, nil
+}
+
+// shortClusterName derives a runner name from a bare endpoint: its first
+// DNS label (uid.us-central1.gke.goog → "uid"), or the whole string when
+// there's no dot. Use name=endpoint for a friendly name.
+func shortClusterName(endpoint string) string {
+	if i := strings.IndexByte(endpoint, '.'); i > 0 {
+		return endpoint[:i]
+	}
+	return endpoint
 }
 
 // newRunner builds a cluster runner and its metrics bundle. The bundle
@@ -514,7 +671,7 @@ func (r *runner) run(ctx context.Context) error {
 	// without a cloud makes no sense.
 	var provider cloud.Provider
 	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) || f.sourceEnabled(notifications.Name) {
-		provider, err = cloud.New(ctx, cloud.Config{Cluster: r.clusterName, NotificationsSubscription: f.notificationsSub})
+		provider, err = cloud.New(ctx, cloud.Config{Project: r.project, Cluster: r.clusterName, NotificationsSubscription: f.notificationsSub})
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}

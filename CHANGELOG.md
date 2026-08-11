@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Optional multi-cluster watch (issue #208).** One `lookout watch`
+  process can now watch several clusters. Two mutually-exclusive flags
+  select the fleet: `--clusters` takes comma-separated `name=endpoint`
+  pairs (a bare endpoint derives a short name from its first DNS label),
+  and `--clusters-from` discovers them from a `project` or
+  `project/location` via the cloud provider's cluster API. Both need a
+  Fleet-capable provider build (`-tags gke`); on GKE they authenticate
+  kubeconfig-free with Application Default Credentials over each
+  cluster's DNS control-plane endpoint (per-cluster RBAC still required).
+  Each cluster runs as an isolated *runner* — its own clients, informers,
+  sources, and store — supervised so one cluster's failure restarts only
+  that runner (bounded backoff) and never ends the process; the new
+  `lookout_runner_up` and `lookout_runner_restarts_total` metrics expose
+  this. Project-tier sources (quota, notifications) run once per distinct
+  project rather than once per cluster. **One sentinel per cluster
+  remains the default and recommended deployment** — leave both flags
+  unset and nothing changes. `--cluster-name`, `--kubeconfig`,
+  `--in-cluster`, `--store`, and `--dedup-persist` are rejected in
+  multi-cluster mode (they are inherently single-cluster).
+
 ### Changed
 
 - **Breaking (metrics):** every `lookout_*` series now carries a
