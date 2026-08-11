@@ -143,7 +143,7 @@ func parseFlags(args []string) (*flags, error) {
 // can walk the SAME declarations the sentinel parses — the docs-site
 // flag table is derived from this set, never maintained by hand.
 func newFlagSet() (*flag.FlagSet, *flags) {
-	fs := flag.NewFlagSet("k8s-event-watcher", flag.ContinueOnError)
+	fs := flag.NewFlagSet("lookout watch", flag.ContinueOnError)
 	f := &flags{}
 
 	// Required.
@@ -155,10 +155,9 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.targetSession, "target-session", "", "Required when --mode=shared: SessionID to post all injects to.")
 	fs.StringVar(&f.owner, "owner", "", "X-Asserted-Caller value for POST /sessions in per-incident mode. Sidecar must be in daemon's proxy_identities.")
 
-	// Agent sink (docs/agent-sink-design.md). ADDITIVE flags: the
-	// default is the core-agent daemon client the sentinel has always
-	// spoken — byte-identical wire — so existing deployments keep
-	// behaving identically with zero config change.
+	// Agent sink (docs/agent-sink-design.md). The default is the
+	// core-agent daemon client the sentinel has always spoken, so
+	// deployments that omit --sink keep behaving identically.
 	fs.StringVar(&f.sink, "sink", sinkCoreAgent, "Agent sink receiving incident payloads: core-agent (default: POST /sessions + /sessions/<sid>/inject against --daemon-url) or webhook (generic receiver: POST <sink-url>/incidents opens an incident with the schema-v1 payload JSON as the body; POST <sink-url>/incidents/<id>/events appends follow-ups).")
 	fs.StringVar(&f.sinkURL, "sink-url", "", "Base URL of the generic webhook receiver (no trailing slash). Required with --sink=webhook. https is STRONGLY recommended: plain http is allowed (remote receivers are the point) but warns loudly at startup — incident payloads and the bearer token ride unencrypted.")
 	fs.StringVar(&f.sinkTokenEnv, "sink-token-env", "", "Env var name holding the bearer token the webhook sink sends as Authorization: Bearer. Optional (unset = unauthenticated POSTs); only valid with --sink=webhook.")

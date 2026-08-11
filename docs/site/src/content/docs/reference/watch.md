@@ -7,10 +7,7 @@ description: "The resident per-cluster sentinel: every flag, derived from the li
 
 `lookout watch` is the watch-path half of the binary: a resident
 per-cluster sentinel that turns leading indicators into per-incident agent
-sessions on a core-agent daemon. It subsumes the predecessor
-`k8s-event-watcher`: that project's flag subset, metric names, and the
-`k8s-event`/`k8s-event-followup` wire shape
-are frozen, so a predecessor deployment swaps images with zero config change.
+sessions on a core-agent daemon.
 
 ## Usage
 
@@ -26,8 +23,8 @@ still validated — a nonsensical value is a config error in every mode.
 ## Flags
 
 The table is generated from the sentinel's real flag declarations
-(`internal/watch.FlagInventory`), sorted by name. The predecessor-frozen
-subset is
+(`internal/watch.FlagInventory`), sorted by name. The core flag
+surface is
 pinned by `TestFlagSurfaceFrozen`: removing or renaming one of those is a
 breaking change to running deployments, never a refactor.
 

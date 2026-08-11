@@ -73,10 +73,11 @@ func Kinds() []KindSpec {
 }
 
 var kinds = []KindSpec{
-	// Frozen M0 pair (byte-identical to the original watcher; the
-	// dispatcher never stamps §8 identity fields on these).
+	// Frozen reactive pair: the wire shape is byte-identical for
+	// playbook back-compat, and the dispatcher never stamps §8
+	// identity fields on these.
 	{inject.KindEvent, inject.Payload{}, "k8s-events",
-		"Frozen reactive kind: the opening inject of a per-incident session, byte-identical to the original k8s-event-watcher."},
+		"Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat."},
 	{inject.KindFollowup, inject.Payload{}, "k8s-events",
 		"Frozen reactive kind: a dedup-window recurrence injected into the already-open incident session."},
 

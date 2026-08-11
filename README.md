@@ -52,9 +52,8 @@ docker pull ghcr.io/go-steer/lookout:latest       # default: GCP-free, runs on a
 docker pull ghcr.io/go-steer/lookout:latest-gke   # same binary + GKE/GCP provider (-tags allproviders)
 ```
 
-The image's `ENTRYPOINT` is `lookout watch`, drop-in image-swap
-compatible with `ghcr.io/go-steer/k8s-event-watcher` deployments.
-Verify signatures with:
+The image's `ENTRYPOINT` is `lookout watch`, so a Deployment's
+bare-flag `args:` splice in behind `watch`. Verify signatures with:
 
 ```sh
 cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \

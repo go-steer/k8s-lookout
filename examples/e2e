@@ -57,7 +57,7 @@ for s in "${scenarios[@]}"; do
 done
 
 echo "▸ preflight"
-kubectl -n "$SENTINEL_NS" rollout status deploy/k8s-event-watcher --timeout=30s >/dev/null || {
+kubectl -n "$SENTINEL_NS" rollout status deploy/lookout-watch --timeout=30s >/dev/null || {
   echo "ERROR: sentinel not running — examples/sentinel/up first" >&2
   exit 1
 }

@@ -19,11 +19,11 @@ import (
 	"time"
 )
 
-// TestFlagSurfaceFrozen pins the exact flag surface of `lookout watch`
-// to the k8s-event-watcher it replaced. The M0 exit criterion is that
-// an existing watcher deployment swaps images with zero config change,
-// so every flag name here is load-bearing: removing or renaming one is
-// a breaking change to running deployments, not a refactor.
+// TestFlagSurfaceFrozen pins the core flag surface of `lookout watch`.
+// Every flag name here is load-bearing: an existing deployment must be
+// able to upgrade the image with zero config change, so removing or
+// renaming one is a breaking change to running deployments, not a
+// refactor.
 //
 // Adding a NEW flag is fine — add it to the list.
 func TestFlagSurfaceFrozen(t *testing.T) {

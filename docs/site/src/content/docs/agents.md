@@ -104,18 +104,18 @@ Then the install is three commands (no clone):
 
 ```sh
 kubectl create namespace agent-triage
-kubectl -n agent-triage create secret generic k8s-event-watcher-token \
+kubectl -n agent-triage create secret generic lookout-watch-token \
   --from-literal=token="$WATCHER_TOKEN"
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=main"
 ```
 
 Before walking away, edit the Deployment's `args:` for the environment
 (`--cluster-name`, `--daemon-url` or the webhook sink flags) —
-`kubectl -n agent-triage edit deploy/k8s-event-watcher` — and verify:
+`kubectl -n agent-triage edit deploy/lookout-watch` — and verify:
 
 ```sh
-kubectl -n agent-triage rollout status deploy/k8s-event-watcher
-kubectl -n agent-triage logs deploy/k8s-event-watcher | head -30
+kubectl -n agent-triage rollout status deploy/lookout-watch
+kubectl -n agent-triage logs deploy/lookout-watch | head -30
 ```
 
 Read that startup log, do not skip it. `--sources=auto` (the default)

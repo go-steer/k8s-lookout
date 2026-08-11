@@ -13,11 +13,9 @@
 // limitations under the License.
 
 // Package k8sevents is the first signal source (DESIGN.md §7.2): the
-// core/v1 Event informer that was internal/watch's watcher — the M0
-// k8s-event-watcher — refactored behind the pkg/sources.Source
-// interface with semantics unchanged. It emits kind=k8s-event Signals
-// per the existing Reason allow-list; filter/dedup/inject stay in the
-// shared pipeline downstream.
+// core/v1 Event informer behind the pkg/sources.Source interface. It
+// emits kind=k8s-event Signals per the configured Reason allow-list;
+// filter/dedup/inject stay in the shared pipeline downstream.
 package k8sevents
 
 import (
@@ -214,16 +212,12 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 // messages are supposed to be small but we've seen kubelet emit
 // multi-KB stack traces; playbook skills don't need more than a
 // few hundred bytes to categorize.
-//
-// The truncation marker still says "k8s-event-watcher": it appears
-// inside message text that shipped payloads carry, so it stays
-// byte-identical through the source refactor.
 func truncateMessage(msg string) string {
 	const max = 2048
 	if len(msg) <= max {
 		return msg
 	}
-	return msg[:max] + "... [truncated by k8s-event-watcher]"
+	return msg[:max] + "... [truncated by lookout]"
 }
 
 // nodeFromSource pulls the node name out of an Event's Source or

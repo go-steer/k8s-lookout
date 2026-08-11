@@ -16,8 +16,8 @@ schema doc in the same change.
 Every payload carries a stable incident-class `fingerprint` plus
 `cluster`/`project`/`zone` join dimensions — fleet rollup is a join, not a
 parsing project. The one exception is the frozen reactive pair
-(`k8s-event`, `k8s-event-followup`), which stays
-byte-identical to the original `k8s-event-watcher` and never gains the
+(`k8s-event`, `k8s-event-followup`), whose wire shape stays
+byte-identical for playbook back-compat and never gains the
 identity fields.
 
 ## Cross-cutting kinds
@@ -26,7 +26,7 @@ Emitted by the dispatcher itself (outcome records, storms, watchboard, triage ev
 
 | Kind | Wire struct | Role |
 | --- | --- | --- |
-| `k8s-event` | `Payload` | Frozen reactive kind: the opening inject of a per-incident session, byte-identical to the original k8s-event-watcher. |
+| `k8s-event` | `Payload` | Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat. |
 | `k8s-event-followup` | `Payload` | Frozen reactive kind: a dedup-window recurrence injected into the already-open incident session. |
 | `resolved` | `ResolvedPayload` | Outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered\|object_deleted. |
 | `resolved.reverted` | `ResolvedPayload` | Outcome record: the symptom recurred within the revert window after a resolve. |

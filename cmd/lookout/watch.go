@@ -23,10 +23,10 @@ import (
 func init() {
 	register(command{
 		name:    "watch",
-		summary: "resident per-cluster sentinel (the moved k8s-event-watcher)",
-		// watch manages its own signal handling and lifecycle —
-		// moved verbatim; the root context is intentionally unused
-		// until the M2 signal-engine generalization.
+		summary: "resident per-cluster sentinel",
+		// watch manages its own signal handling and lifecycle, so the
+		// root context is intentionally unused until the M2
+		// signal-engine generalization.
 		run: func(_ context.Context, args []string) int {
 			return watch.Main(args)
 		},

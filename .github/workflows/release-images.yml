@@ -17,8 +17,8 @@ name: Release images
 # Builds + publishes the multi-arch (amd64 + arm64) container image
 #
 #   ghcr.io/go-steer/lookout — the `lookout` multicall binary;
-#   ENTRYPOINT is `lookout watch` for drop-in compatibility with
-#   ghcr.io/go-steer/k8s-event-watcher deployments (see Dockerfile).
+#   ENTRYPOINT is `lookout watch` so a Deployment's bare-flag `args:`
+#   splice in behind `watch` (see Dockerfile).
 #
 # on every `v*.*.*` tag push. Structure mirrors core-agent's
 # release-images.yml (metadata-action tag pyramid, buildx + QEMU,
@@ -103,7 +103,7 @@ jobs:
             tag_suffix: ''
             latest_tag: latest
             oci_title: lookout
-            oci_description: 'k8s-lookout: deterministic Kubernetes/GKE reads for agent-driven troubleshooting, plus the resident per-cluster sentinel (lookout watch, the former k8s-event-watcher).'
+            oci_description: 'k8s-lookout: deterministic Kubernetes/GKE reads for agent-driven troubleshooting, plus the resident per-cluster sentinel (lookout watch).'
           # The GKE flavor (M4 drill observation 5): identical
           # pipeline, one extra build-arg (BUILD_TAGS=allproviders →
           # the gke cloud provider links in), every tag suffixed
@@ -346,10 +346,10 @@ jobs:
           echo "▸ smoke: docker run --entrypoint /lookout ${SMOKE_IMG} version"
           docker run --rm --entrypoint /lookout "${SMOKE_IMG}" version
 
-          # Confirm the drop-in ENTRYPOINT is intact — existing
-          # k8s-event-watcher deployments rely on ["/lookout","watch"]
-          # (their `args:` are bare watch flags). A regression here
-          # would silently break every such deployment on upgrade.
+          # Confirm the ENTRYPOINT is intact — deployments rely on
+          # ["/lookout","watch"] (their `args:` are bare watch flags).
+          # A regression here would silently break every such
+          # deployment on upgrade.
           ENTRYPOINT=$(docker inspect --format '{{json .Config.Entrypoint}}' "${SMOKE_IMG}")
           echo "▸ entrypoint: ${ENTRYPOINT}"
           if [[ "${ENTRYPOINT}" != '["/lookout","watch"]' ]]; then

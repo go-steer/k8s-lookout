@@ -102,16 +102,12 @@ build with tags — `-tags gke` for the GKE provider alone,
 go build -tags allproviders ./cmd/lookout
 ```
 
-## Entrypoint and image-swap compatibility
+## Entrypoint
 
 The image's entrypoint is `["/lookout", "watch"]`, so a Deployment's bare
-`args:` splice in behind `watch`. This is a frozen compatibility
-contract: the image is a drop-in swap for existing
-`ghcr.io/go-steer/k8s-event-watcher` deployments — same flags, same exit
-codes, same `k8s_event_watcher_*` metric names, byte-identical
-`k8s-event` inject payloads. The contract was verified against a live
-predecessor deployment with only the image line changed, and CI contract
-tests keep it frozen.
+`args:` splice in behind `watch` (no explicit `command:` needed). The
+sentinel's core flag surface is pinned by CI contract tests, so an
+existing deployment can upgrade the image with zero config change.
 
 To run a read-path command from the image (rather than the sentinel),
 override the entrypoint — e.g. `--entrypoint /lookout` with `docker run`,

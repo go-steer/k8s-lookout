@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: retired the `k8s-event-watcher` transition naming.** The
+  sentinel was moved verbatim from core-agent's `k8s-event-watcher` and
+  kept that project's names for a drop-in image-swap during the
+  transition; that period is over, so the names now read as `lookout`:
+  - **Prometheus metric prefix `k8s_event_watcher_*` → `lookout_*`.**
+    Every series is renamed (e.g. `k8s_event_watcher_events_seen_total`
+    → `lookout_events_seen_total`). Dashboards and alerts referencing
+    the old prefix must be updated — a scrape after upgrade shows only
+    the new names.
+  - **Kubernetes resource names `k8s-event-watcher` → `lookout-watch`**
+    (Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, the
+    `-capacity` Role/RoleBinding, NetworkPolicy) and the token Secret
+    `k8s-event-watcher-token` → `lookout-watch-token`. A `kubectl apply
+    -k` upgrade of an existing deployment creates the new-named
+    resources alongside the old ones — delete the old set after
+    cutover (`kubectl -n agent-triage delete deploy/k8s-event-watcher
+    sa/k8s-event-watcher …`), or redeploy fresh.
+  - The stderr log prefix is now `lookout watch:` (was
+    `k8s-event-watcher:`) and the inject truncation marker is now
+    `[truncated by lookout]`. The `--flag` surface, exit codes, RBAC
+    rules, ports, and the `k8s-event`/`k8s-event-followup` inject wire
+    shape are unchanged.
+
 ## [0.16.0] - 2026-08-11
 
 A noise-reduction release for the watch path. A pod that lost a node

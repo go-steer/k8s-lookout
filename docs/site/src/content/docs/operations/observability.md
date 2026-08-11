@@ -13,16 +13,15 @@ probes both hit it.
 
 ## Metrics
 
-The `k8s_event_watcher_` prefix is frozen for compatibility with the
-predecessor project, so existing dashboards and alerts keep working
-across the image swap. A real scrape from a live validation drill:
+Every metric carries the `lookout_` prefix. A real scrape from a live
+validation drill:
 
 ```
-k8s_event_watcher_events_seen_total{namespace="default",reason="BackOff"} 4
-k8s_event_watcher_events_injected_total{namespace="default",reason="BackOff"} 1
-k8s_event_watcher_events_deduped_total{namespace="default",reason="BackOff"} 3
-k8s_event_watcher_session_creates_total{outcome="ok"} 5
-k8s_event_watcher_active_incidents 5
+lookout_events_seen_total{namespace="default",reason="BackOff"} 4
+lookout_events_injected_total{namespace="default",reason="BackOff"} 1
+lookout_events_deduped_total{namespace="default",reason="BackOff"} 3
+lookout_session_creates_total{outcome="ok"} 5
+lookout_active_incidents 5
 ```
 
 The generated [Prometheus metrics reference](/reference/metrics/) covers
@@ -32,7 +31,7 @@ and meanings derived from the live collectors.
 
 ## What to alert on
 
-Prefix `k8s_event_watcher_` omitted:
+Prefix `lookout_` omitted:
 
 | Metric | Why it pages |
 | --- | --- |

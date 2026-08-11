@@ -240,9 +240,7 @@ func TestTruncateMessage_LongPayload(t *testing.T) {
 	if len(got) > 2200 { // 2048 + " [truncated by ...]" suffix ~ 30 chars
 		t.Errorf("truncated len = %d, expected <= ~2100", len(got))
 	}
-	// The marker text is frozen wire-message content from the M0
-	// watcher — it must survive the source refactor unchanged.
-	if !strings.Contains(got, "truncated by k8s-event-watcher") {
+	if !strings.Contains(got, "truncated by lookout") {
 		t.Errorf("truncation marker missing from truncated output")
 	}
 }

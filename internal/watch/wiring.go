@@ -296,7 +296,7 @@ func realMain(argv []string) error {
 	// from kube-agents' watcher: a dry run you cannot point at a
 	// cluster and SEE payloads from is not a dry run.
 	if f.dryRun {
-		log.Printf("k8s-event-watcher: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", f.clusterName)
+		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", f.clusterName)
 	}
 	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 	if err != nil {
@@ -508,10 +508,10 @@ func realMain(argv []string) error {
 	}
 
 	if f.sink == sinkWebhook {
-		log.Printf("k8s-event-watcher: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
+		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
 			f.clusterName, f.sinkURL)
 	} else {
-		log.Printf("k8s-event-watcher: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
+		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 			f.clusterName, f.daemonURL, f.mode, f.owner)
 	}
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {

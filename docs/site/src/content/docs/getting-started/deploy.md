@@ -14,7 +14,7 @@ its bearer token):
 
 ```sh
 kubectl create namespace agent-triage
-kubectl -n agent-triage create secret generic k8s-event-watcher-token \
+kubectl -n agent-triage create secret generic lookout-watch-token \
   --from-literal=token="$WATCHER_TOKEN"
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.16.0"
 ```
@@ -29,7 +29,7 @@ set (use `-k`, not `-f` — the directory carries the kustomization).
 
 | Manifest | What it is |
 | --- | --- |
-| `11-serviceaccount-watcher.yaml` | The sentinel's ServiceAccount (`k8s-event-watcher` — resource names kept for drop-in continuity with predecessor deployments). Bound to no GCP IAM role: the sentinel talks only to the local API server and the daemon. |
+| `11-serviceaccount-watcher.yaml` | The sentinel's ServiceAccount (`lookout-watch`). Bound to no GCP IAM role: the sentinel talks only to the local API server and the daemon. |
 | `12-clusterrole-watcher.yaml` | The minimum-necessary, **read-only** ClusterRole. No patch/update/delete on anything — the sentinel observes; mutations happen through the core-agent daemon's own permission gate. Each rule is annotated with the source that needs it; rules for disabled sources are harmless. |
 | `13-clusterrolebinding-watcher.yaml` | Binds the ServiceAccount to the ClusterRole. |
 | `14-role-watcher-capacity.yaml` | A `kube-system`-namespaced Role for the capacity source's one extra read: `get` on the `cluster-autoscaler-status` ConfigMap, pinned by `resourceNames` rather than widening the ClusterRole. Only the capacity source needs it — under `--sources=auto` its absence skips the source loudly; with capacity named explicitly it is fatal. |

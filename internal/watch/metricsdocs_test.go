@@ -56,8 +56,8 @@ func TestMetricsInventoryComplete(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, d := range inv {
-		if !strings.HasPrefix(d.Name, "k8s_event_watcher_") {
-			t.Errorf("metric %q: name not derived (missing the frozen k8s_event_watcher_ prefix)", d.Name)
+		if !strings.HasPrefix(d.Name, "lookout_") {
+			t.Errorf("metric %q: name not derived (missing the lookout_ prefix)", d.Name)
 		}
 		if seen[d.Name] {
 			t.Errorf("metric %q listed twice", d.Name)
