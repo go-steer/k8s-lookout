@@ -78,7 +78,7 @@ func TestDispatcher_EndToEnd_DuplicateSuppressed(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -108,7 +108,7 @@ func TestDispatcher_EndToEnd_FilterRejects(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -133,7 +133,7 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -145,6 +145,7 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 		Key:       engine.EventKey{UID: "u1", Reason: "CrashLoopBackOff"},
 		Namespace: "default",
 		Name:      "pod-1",
+		Count:     1,
 	})
 	if len(*injects) != 1 {
 		t.Fatalf("expected 1 inject in shared mode; got %d", len(*injects))
@@ -174,7 +175,7 @@ func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -232,7 +233,7 @@ func TestDispatcher_LogsFireOnSuccess(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -272,7 +273,7 @@ func TestDispatcher_LogsDedupOnSuppress(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -283,6 +284,7 @@ func TestDispatcher_LogsDedupOnSuppress(t *testing.T) {
 		Key:       engine.EventKey{UID: "u7", Reason: "CrashLoopBackOff"},
 		Namespace: "default",
 		Name:      "flappy-pod",
+		Count:     1,
 	}
 	ctx := context.Background()
 	// First fire → dispatch → inject (no dedup log)
@@ -304,6 +306,54 @@ func TestDispatcher_LogsDedupOnSuppress(t *testing.T) {
 	// Fire log must NOT appear on the suppressed second dispatch.
 	if strings.Contains(log, "fire CrashLoopBackOff") {
 		t.Errorf("suppressed dispatch should not emit a fire log; got: %q", log)
+	}
+}
+
+// TestDispatcher_BackoffDebounceSuppressesLeadingEdge is the issue
+// #197 regression at dispatcher scale: with the SHIPPED default
+// (backoff-min-count 3), a transient crash-loop event below the
+// threshold is suppressed end-to-end — no session, no inject — while
+// one that reaches the threshold fires. This proves the flag is wired
+// through to the filter, not just that Filter.Accept honors it.
+func TestDispatcher_BackoffDebounceSuppressesLeadingEdge(t *testing.T) {
+	t.Parallel()
+	base, injects, _ := newFakeDaemon(t)
+	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
+	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
+	disp := &dispatcher{
+		// Default config: backoff-min-count defaults to 3.
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 0)),
+		dedup:    dedup,
+		injector: inj,
+		metrics:  newMetrics(),
+		cluster:  "test-cluster",
+		mode:     "per-incident",
+	}
+	ctx := context.Background()
+
+	// A first, transient BackOff (Event.Count 1) — a startup blip that
+	// will self-heal. Below the threshold: suppressed.
+	disp.Dispatch(ctx, engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u-blip", Reason: "CrashLoopBackOff"},
+		Namespace: "default",
+		Name:      "blippy-pod",
+		Message:   "Back-off restarting failed container",
+		Count:     1,
+	})
+	if len(*injects) != 0 {
+		t.Fatalf("count=1 crash-loop should be debounced; got %d injects", len(*injects))
+	}
+
+	// A genuine crash loop climbs past the threshold: it fires.
+	disp.Dispatch(ctx, engine.TriageEvent{
+		Key:       engine.EventKey{UID: "u-real", Reason: "CrashLoopBackOff"},
+		Namespace: "default",
+		Name:      "crashy-pod",
+		Message:   "Back-off restarting failed container",
+		Count:     3,
+	})
+	if len(*injects) != 1 {
+		t.Fatalf("count=3 crash-loop should fire; got %d injects", len(*injects))
 	}
 }
 
@@ -419,7 +469,7 @@ func TestDispatcher_PullFamilyOneSession(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"Failed", "BackOff", "ErrImagePull"}, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"Failed", "BackOff", "ErrImagePull"}, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),

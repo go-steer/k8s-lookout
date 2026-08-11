@@ -56,7 +56,7 @@ func TestDispatchSignal_SourcePathWireShapeFrozen(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -112,7 +112,7 @@ func TestDispatchSignal_StampsPipelineFields(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),

@@ -53,6 +53,7 @@ func stormPodSignal(i int, ns string) engine.Signal {
 			KindOfObject: "Pod",
 			Name:         fmt.Sprintf("pay-%d", i),
 			Message:      "Back-off restarting failed container",
+			Count:        1,
 			FirstSeen:    ts,
 			LastSeen:     ts,
 			Node:         "gke-a",
@@ -86,7 +87,7 @@ func newStormDispatcher(t *testing.T, base string, n int) (*dispatcher, []engine
 		t.Fatalf("NewStormCorrelator: %v", err)
 	}
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),

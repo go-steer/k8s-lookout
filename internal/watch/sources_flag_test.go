@@ -210,7 +210,7 @@ func TestDispatchSignal_ForecastSerialized(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -282,7 +282,7 @@ func TestSetupRecovery_ObjectStateObserverAbsorbed(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset() // fake SSAR would DENY — proving no probe runs on this path
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
-	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)), dedup: dedup, metrics: newMetrics(), dryRun: true}
+	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)), dedup: dedup, metrics: newMetrics(), dryRun: true}
 	objState := objectstate.New(client, objectstate.DefaultConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -305,7 +305,7 @@ func TestSetupRecovery_FallbackKeepsZeroConfigBehavior(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset() // fake SSAR returns not-allowed
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
-	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)), dedup: dedup, metrics: newMetrics(), dryRun: true}
+	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)), dedup: dedup, metrics: newMetrics(), dryRun: true}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -406,7 +406,7 @@ func TestSetupRecovery_TrendObserversWithoutPodRBAC(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset() // fake SSAR returns not-allowed
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
-	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)), dedup: dedup, metrics: newMetrics(), dryRun: true}
+	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)), dedup: dedup, metrics: newMetrics(), dryRun: true}
 	bs := &builtSources{
 		rollout:    rollout.New(client, rollout.DefaultConfig()),
 		saturation: saturation.New(saturation.DefaultConfig(), nil, nil),

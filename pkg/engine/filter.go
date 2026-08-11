@@ -56,23 +56,43 @@ type FilterConfig struct {
 	// (k8s Event.Count, which repeats-per-source) to reach this
 	// value before we pass it. Default 3.
 	unhealthyMinCount int
+	// backoffMinCount is the leading-edge debounce for the
+	// crash-loop family (canonical CrashLoopBackOff — i.e. kubelet's
+	// repeating BackOff `Back-off restarting failed container …`
+	// cycle, and CrashLoopBackOff itself). A transient startup blip
+	// (a pod losing a scale-up race that self-heals in ~2m) emits a
+	// first BackOff and would open a noise session before the
+	// recovery tracker can resolve it; a genuine crash loop climbs
+	// Event.Count past this threshold within seconds. Require the
+	// event's own Count to reach this value before we pass it.
+	// Default 3 (issue #197). The image-pull family
+	// (ImagePullBackOff/ErrImagePull, incl. BackOff on a bad image)
+	// is deliberately NOT gated: a bad tag is persistent and should
+	// fire fast — which is why the check keys on the message-aware
+	// CANONICAL reason, not the raw one.
+	backoffMinCount int
 }
 
 // NewFilterConfig builds a FilterConfig from CLI-shaped inputs.
-// Empty slices default to the shipped values; positive counts
-// default to their shipped defaults.
-func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount int) FilterConfig {
+// Empty slices default to the shipped values; non-positive counts
+// default to their shipped defaults (0 means "use the default", so
+// callers that don't care pass 0 and get the shipped debounce).
+func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount, backoffMinCount int) FilterConfig {
 	if len(reasons) == 0 {
 		reasons = defaultReasons
 	}
 	if unhealthyMinCount <= 0 {
 		unhealthyMinCount = 3
 	}
+	if backoffMinCount <= 0 {
+		backoffMinCount = 3
+	}
 	fc := FilterConfig{
 		allowedReasons:     stringSet(reasons),
 		allowedNamespaces:  stringSet(allowNamespaces),
 		excludedNamespaces: stringSet(excludeNamespaces),
 		unhealthyMinCount:  unhealthyMinCount,
+		backoffMinCount:    backoffMinCount,
 	}
 	return fc
 }
@@ -120,8 +140,12 @@ func NewFilter(cfg FilterConfig) *Filter {
 //     allow-list scopes workload attention, and a node serves every
 //     namespace. k8s-event kinds keep the frozen M0 behavior exactly
 //     (an empty-namespace event is rejected by a set allow-list).
-//  4. Unhealthy special case (k8s-event kinds): repeat count must
-//     reach threshold.
+//  4. Leading-edge count debounce (k8s-event kinds): the Unhealthy
+//     probe-flap gate and the crash-loop-family gate both require the
+//     event's repeat count to reach their threshold. Keyed on the
+//     message-aware CANONICAL reason so a generic kubelet "BackOff"
+//     lands in the right family — crash-loop is debounced, image-pull
+//     backoff is not (a bad tag is persistent and should fire fast).
 func (f *Filter) Accept(sig Signal) bool {
 	eventKind := isK8sEventKind(sig.Kind)
 	if eventKind && f.cfg.allowedReasons != nil {
@@ -141,8 +165,17 @@ func (f *Filter) Accept(sig Signal) bool {
 			}
 		}
 	}
-	if eventKind && sig.Key.Reason == "Unhealthy" && sig.Count < f.cfg.unhealthyMinCount {
-		return false
+	if eventKind {
+		switch CanonicalReasonForEvent(sig.Key.Reason, sig.Message) {
+		case "Unhealthy":
+			if sig.Count < f.cfg.unhealthyMinCount {
+				return false
+			}
+		case "CrashLoopBackOff":
+			if sig.Count < f.cfg.backoffMinCount {
+				return false
+			}
+		}
 	}
 	return true
 }

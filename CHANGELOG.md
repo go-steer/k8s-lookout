@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Leading-edge debounce for the crash-loop family (#197): a transient
+  `BackOff` — e.g. a pod losing a node scale-up race that self-heals in
+  ~2 minutes — no longer opens a `CrashLoopBackOff` session and fires a
+  noise alert before the recovery tracker can resolve it. A new
+  `--backoff-min-count` (default 3) requires the crash-loop family
+  (canonical `CrashLoopBackOff` — kubelet's repeating `BackOff` cycle,
+  and `CrashLoopBackOff` itself) to reach that `Event.Count` before
+  firing; a genuine crash loop climbs past it within seconds. The gate
+  keys on the message-aware canonical reason, so the image-pull family
+  (`ImagePullBackOff`/`ErrImagePull`, and `BackOff` on a bad image) is
+  deliberately NOT debounced — a bad tag is persistent and should fire
+  fast. Mirrors the existing `--unhealthy-min-count` probe-flap gate.
+  Set `--backoff-min-count=1` to restore firing on the first event.
+
 ## [0.15.0] - 2026-08-10
 
 A reliability release for the incident-open path. A new incident whose

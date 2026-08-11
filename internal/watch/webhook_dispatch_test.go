@@ -88,7 +88,7 @@ func newWebhookDispatcher(t *testing.T, base, bearer string) *dispatcher {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
 		dedup:    dedup,
 		injector: ws,
 		metrics:  newMetrics(),
