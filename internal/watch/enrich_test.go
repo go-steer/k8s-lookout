@@ -224,7 +224,7 @@ func newEnrichedDispatcher(t *testing.T, base string, e *enricher) *dispatcher {
 		e.metrics = m
 	}
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  m,

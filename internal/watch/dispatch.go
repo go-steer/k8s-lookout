@@ -40,6 +40,18 @@ import (
 type dispatcher struct {
 	filter *engine.Filter
 	dedup  *engine.DedupCache
+	// pullClass, when non-nil, resolves an image-pull failure's cause
+	// class (issue #213) and stamps it on the signal before the filter
+	// stage, for the transient debounce and the registry-scoped storm
+	// key downstream. It is stateful on purpose: kubelet puts the CAUSE
+	// on a `Failed` event that the --reason allow-list rejects by
+	// default, and the "still failing" on a causeless `BackOff` event
+	// that it accepts, so the class has to carry across the two. That
+	// is also why the stamp happens BEFORE filter.Accept — a signal the
+	// allow-list drops is still evidence about the object. Nil in unit
+	// tests that predate the classifier: the class then stays
+	// PullClassNA and every gate below reads as it did before.
+	pullClass *engine.PullClassMemo
 	// injector is the agent sink (docs/agent-sink-design.md) every
 	// inject routes through: the core-agent daemon client by default
 	// (--sink=core-agent — the field keeps its historical name), or
@@ -179,6 +191,13 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// so they all agree on the incident's identity. The wire payload
 	// keeps sig.Key.Reason (the original event reason) untouched.
 	key := sig.CanonicalKey()
+	// Image-pull cause class (issue #213), stamped once per signal
+	// alongside the canonical key and for the same reason: two stages
+	// below — the transient debounce in filter.Accept and the
+	// registry-scoped blast-radius key in the storm correlator — must
+	// agree on whether kubelet's own retry cycle is expected to clear
+	// this. Nil-safe: an unset memo classifies from the message alone.
+	sig.PullClass = d.pullClass.Resolve(sig)
 	if sig.Fingerprint == "" {
 		sig.Fingerprint = engine.Fingerprint(sig.Kind, key.Reason, sig.KindOfObject, sig.Zone)
 	}
@@ -203,7 +222,8 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		sig.Severity, downgraded = d.triage.Apply(ctx, sig)
 	}
 	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
-	if !d.filter.Accept(sig) {
+	if ok, gate := d.filter.Decide(sig); !ok {
+		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
 		return
 	}
 	result := d.dedup.Observe(key, sig.LastSeen)

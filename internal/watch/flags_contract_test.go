@@ -74,6 +74,9 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 	if f.backoffMinCount != 3 {
 		t.Errorf("default backoff-min-count = %d, want 3", f.backoffMinCount)
 	}
+	if f.imagePullTransientMin != 3 {
+		t.Errorf("default imagepull-transient-min-count = %d, want 3", f.imagePullTransientMin)
+	}
 	if f.logLevel != "info" {
 		t.Errorf("default log-level = %q, want info", f.logLevel)
 	}

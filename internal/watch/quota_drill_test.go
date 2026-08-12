@@ -244,7 +244,7 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 
 	m := newMetrics()
 	d := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  m,

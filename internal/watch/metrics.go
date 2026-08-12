@@ -43,6 +43,7 @@ type metrics struct {
 	eventsSeen           *prometheus.CounterVec
 	eventsInjected       *prometheus.CounterVec
 	eventsDedupSuppress  *prometheus.CounterVec
+	eventsFiltered       *prometheus.CounterVec
 	injectErrors         *prometheus.CounterVec
 	injectShrinks        *prometheus.CounterVec
 	sessionCreates       *prometheus.CounterVec
@@ -104,6 +105,10 @@ func newMetrics() *metrics {
 			Name: "lookout_events_deduped_total",
 			Help: "Total events suppressed by the rolling-window dedup cache.",
 		}, []string{"reason", "namespace"}),
+		eventsFiltered: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_events_filtered_total",
+			Help: "Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed|namespace_excluded|namespace_not_allowed|unhealthy_debounce|crashloop_debounce|imagepull_transient_debounce). The leading-edge debounces deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.",
+		}, []string{"gate"}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_inject_errors_total",
 			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Counts sink operations regardless of --sink.",
@@ -239,6 +244,7 @@ func newMetrics() *metrics {
 		m.eventsSeen,
 		m.eventsInjected,
 		m.eventsDedupSuppress,
+		m.eventsFiltered,
 		m.injectErrors,
 		m.injectShrinks,
 		m.sessionCreates,

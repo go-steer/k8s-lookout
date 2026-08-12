@@ -114,7 +114,7 @@ func realMain(argv []string) error {
 	}
 
 	// Build components.
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount)
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
 	filter := engine.NewFilter(filterCfg)
 
 	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
@@ -173,6 +173,7 @@ func realMain(argv []string) error {
 	disp := &dispatcher{
 		filter:    filter,
 		dedup:     dedup,
+		pullClass: engine.NewPullClassMemo(),
 		injector:  inj,
 		metrics:   m,
 		cluster:   f.clusterName,

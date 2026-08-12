@@ -155,7 +155,7 @@ func TestSetupRecovery_TokenBurnObserverWithoutPodRBAC(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset() // fake SSAR returns not-allowed
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
-	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)), dedup: dedup, metrics: newMetrics(), dryRun: true}
+	disp := &dispatcher{filter: engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)), dedup: dedup, metrics: newMetrics(), dryRun: true}
 	bs := &builtSources{
 		tokenBurn: tokenburn.New(tokenburn.NewHTTPClient("http://daemon.local:8420", ""), tokenburn.DefaultConfig()),
 	}

@@ -87,7 +87,7 @@ func newStormDispatcher(t *testing.T, base string, n int) (*dispatcher, []engine
 		t.Fatalf("NewStormCorrelator: %v", err)
 	}
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),

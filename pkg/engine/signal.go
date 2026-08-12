@@ -193,6 +193,17 @@ type Signal struct {
 	// TriageEvent is the frozen per-object core; see type comment.
 	TriageEvent
 
+	// PullClass is the image-pull failure class (issue #213), stamped
+	// by the dispatcher's PullClassMemo before the filter stage and
+	// read by the two stages that must tell "kubelet will fix this"
+	// from "a human must": the leading-edge debounce (filter.go) and
+	// the registry-scoped blast-radius key (storm.go). PullClassNA on
+	// every signal that is not an image-pull failure, which is the
+	// zero value — sources leave it unset. Pipeline-internal: it does
+	// not ride the wire (Signal is never marshalled; the frozen inject
+	// payloads are composed field by field).
+	PullClass PullClass
+
 	// Forecast is set by trend sources only (§8); nil otherwise.
 	Forecast *Forecast
 	// Enrichment is the §7.6 attachment; nil until the enrichment

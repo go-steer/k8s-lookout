@@ -86,6 +86,7 @@ type flags struct {
 	dedupPersist          string
 	unhealthyMinCount     int
 	backoffMinCount       int
+	imagePullTransientMin int
 	recoveryStableFor     time.Duration
 	storm                 string
 	stormWindow           time.Duration
@@ -245,7 +246,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
 	fs.StringVar(&f.dedupPersist, "dedup-persist", "", "Optional path to persist dedup cache across sidecar restart.")
 	fs.IntVar(&f.unhealthyMinCount, "unhealthy-min-count", 3, "Require this many consecutive Unhealthy events before firing.")
-	fs.IntVar(&f.backoffMinCount, "backoff-min-count", 3, "Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is never gated (a bad tag is persistent). 1 fires on the first event.")
+	fs.IntVar(&f.backoffMinCount, "backoff-min-count", 3, "Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event.")
+	fs.IntVar(&f.imagePullTransientMin, "imagepull-transient-min-count", 3, "Require an image-pull failure whose cause is RETRYABLE (registry 429/quota, 5xx, timeout, connection reset) to reach this Event.Count before firing, so a rate limit kubelet clears on its own does not open a noise session. Terminal causes (bad tag, denied, no space) and unrecognized ones still fire on the first event. 1 fires on the first event.")
 
 	// Recovery injects (§7.4).
 	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")

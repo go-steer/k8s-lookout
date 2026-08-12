@@ -45,7 +45,7 @@ func TestDispatchSignal_QuotaDraftExactWireShape(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
