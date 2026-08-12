@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,7 +32,10 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/go-steer/core-agent/v2/pkg/telemetry"
 
@@ -113,20 +117,11 @@ func realMain(argv []string) error {
 		}
 	}
 
-	// Build components.
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
-	filter := engine.NewFilter(filterCfg)
-
-	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
-	if err != nil {
-		return fmt.Errorf("dedup cache: %w", err)
-	}
-
-	m := newMetrics()
-
 	// Agent sink selection (docs/agent-sink-design.md): the core-agent
 	// daemon client by default — byte-identical wire to every release
-	// before the Sink extraction — or the generic webhook sink.
+	// before the Sink extraction — or the generic webhook sink. The
+	// sink is process-global: every cluster runner delivers through this
+	// one client (multi-cluster; issue #208).
 	var inj inject.Sink
 	if !f.dryRun {
 		switch f.sink {
@@ -154,6 +149,321 @@ func realMain(argv []string) error {
 			inj = ci
 		}
 	}
+
+	// The Prometheus registry is process-global; each cluster runner's
+	// metrics bundle registers into it under a cluster="<name>" label
+	// (multi-cluster; single-cluster N=1 still carries the label so
+	// several sentinels stay filterable in one Prometheus).
+	metricsReg := prometheus.NewRegistry()
+
+	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Start the metrics HTTP server (blocks on ctx in-goroutine). One
+	// server per process serves every runner's bundle from the shared
+	// registry.
+	go func() {
+		if err := serveMetrics(ctx, f.metricsAddr, metricsReg); err != nil {
+			log.Printf("metrics server: %v", err)
+		}
+	}()
+
+	// One sentinel per cluster stays the default and recommended
+	// deployment (a founding design tenet). resolveRunners returns a
+	// single runner for --cluster-name in that default; with
+	// --clusters/--clusters-from it fans out to one runner per cluster,
+	// all sharing the sink, registry, and signal ctx above.
+	// superviseRunners keeps the N=1 path byte-identical to the
+	// pre-runner wiring (runner error → process exit → kubelet restart)
+	// and supervises each runner independently once there are several.
+	runners, err := resolveRunners(ctx, f, inj, token, metricsReg)
+	if err != nil {
+		return err
+	}
+	return superviseRunners(ctx, runners)
+}
+
+// resolveRunners builds the process's cluster runners. The default —
+// neither --clusters nor --clusters-from — is a single runner for
+// --cluster-name, byte-identical to the pre-multi-cluster wiring. In
+// multi-cluster mode (issue #208) it resolves a Fleet-capable cloud
+// provider, enumerates the target clusters (explicit --clusters pairs or
+// --clusters-from discovery), mints each cluster's kubeconfig-free
+// rest.Config, and returns one runner apiece — deduping the project-tier
+// sources to one runner per distinct project (they describe a project,
+// not a cluster).
+func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token string, reg *prometheus.Registry) ([]*runner, error) {
+	if f.clusters == "" && f.clustersFrom == "" {
+		return []*runner{newRunner(f, f.clusterName, sink, token, reg)}, nil
+	}
+
+	project, location := f.project, ""
+	if f.clustersFrom != "" {
+		project, location = parseClustersFrom(f.clustersFrom)
+	}
+	provider, err := cloud.New(ctx, cloud.Config{Project: project, Location: location})
+	if err != nil {
+		return nil, fmt.Errorf("multi-cluster: cloud provider: %w", err)
+	}
+	fleet, ok := provider.(cloud.Fleet)
+	if !ok {
+		return nil, fmt.Errorf("multi-cluster (--clusters/--clusters-from) needs a cloud provider that mints kubeconfig-free cluster credentials; provider %q does not — build with -tags gke", provider.Name())
+	}
+
+	var refs []cloud.ClusterRef
+	if f.clustersFrom != "" {
+		refs, err = fleet.DiscoverClusters(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("multi-cluster discovery: %w", err)
+		}
+		if len(refs) == 0 {
+			return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters", f.clustersFrom)
+		}
+	} else {
+		refs, err = parseClusters(f.clusters)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	runners := make([]*runner, 0, len(refs))
+	projectSeen := map[string]bool{}
+	for _, ref := range refs {
+		cfg, cfgErr := fleet.RESTConfig(ctx, ref)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("multi-cluster: cluster %q: %w", ref.Name, cfgErr)
+		}
+		// Per-runner flags: copy the shared flags, then dedup the
+		// §10 project-tier sources (quota, notifications) to the FIRST
+		// runner of each distinct project — N clusters in one project
+		// would otherwise open N identical project-scoped streams. A ref
+		// with no known project (explicit --clusters endpoints) keeps
+		// them; the runner's own provider then fails loudly if it can't
+		// resolve the project, the §11 posture.
+		rf := *f
+		keepProjectTier := ref.Project == "" || !projectSeen[ref.Project]
+		if ref.Project != "" {
+			projectSeen[ref.Project] = true
+		}
+		if !keepProjectTier {
+			rf.sources = dropProjectTierSources(rf.sources)
+		}
+		r := newRunner(&rf, ref.Name, sink, token, reg)
+		r.restCfg = cfg
+		r.project = ref.Project
+		r.zone = ref.Location
+		runners = append(runners, r)
+		log.Printf("multi-cluster: runner %q → %s (project=%q, location=%q, project-tier sources=%t)",
+			ref.Name, ref.Endpoint, ref.Project, ref.Location, keepProjectTier)
+	}
+	return runners, nil
+}
+
+// projectTierSources are the §10 project-scoped sources: they describe a
+// project, not a cluster, so a fleet runs them on one runner per project
+// (docs/multi-cluster-design.md — one runner per project).
+var projectTierSources = []string{quota.Name, notifications.Name}
+
+// dropProjectTierSources removes the project-tier sources from a
+// --sources value (a no-op on "auto", which never enables them).
+func dropProjectTierSources(sources string) string {
+	if sources == autoValue {
+		return sources
+	}
+	kept := make([]string, 0)
+	for _, name := range splitCSV(sources) {
+		if slices.Contains(projectTierSources, name) {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return strings.Join(kept, ",")
+}
+
+// parseClustersFrom splits --clusters-from into project and optional
+// location: "my-proj" → ("my-proj", ""), "my-proj/us-central1" →
+// ("my-proj", "us-central1"). An empty location discovers every location.
+func parseClustersFrom(s string) (project, location string) {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// parseClusters parses --clusters: comma-separated name=endpoint pairs
+// (or a bare endpoint, whose short name is its first DNS label). Refs
+// come back in listed order; a duplicate name, empty endpoint, or empty
+// name is a loud config error.
+func parseClusters(s string) ([]cloud.ClusterRef, error) {
+	items := splitCSV(s)
+	if len(items) == 0 {
+		return nil, errors.New("--clusters is empty")
+	}
+	refs := make([]cloud.ClusterRef, 0, len(items))
+	seen := map[string]bool{}
+	for _, it := range items {
+		var name, endpoint string
+		if i := strings.IndexByte(it, '='); i >= 0 {
+			name = strings.TrimSpace(it[:i])
+			endpoint = strings.TrimSpace(it[i+1:])
+		} else {
+			endpoint = strings.TrimSpace(it)
+			name = shortClusterName(endpoint)
+		}
+		if endpoint == "" {
+			return nil, fmt.Errorf("--clusters: entry %q has no endpoint", it)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("--clusters: entry %q has no cluster name", it)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("--clusters: duplicate cluster name %q", name)
+		}
+		seen[name] = true
+		refs = append(refs, cloud.ClusterRef{Name: name, Endpoint: endpoint})
+	}
+	return refs, nil
+}
+
+// shortClusterName derives a runner name from a bare endpoint: its first
+// DNS label (uid.us-central1.gke.goog → "uid"), or the whole string when
+// there's no dot. Use name=endpoint for a friendly name.
+func shortClusterName(endpoint string) string {
+	if i := strings.IndexByte(endpoint, '.'); i > 0 {
+		return endpoint[:i]
+	}
+	return endpoint
+}
+
+// newRunner builds a cluster runner and its metrics bundle. The bundle
+// is constructed ONCE here, not inside run: it registers into the shared
+// registry under this runner's cluster label, and re-registering the
+// same series on a supervisor restart would panic. run reuses it across
+// restarts; everything else (clients, informers, sources) it rebuilds
+// per run so a restarted runner reconnects fresh.
+func newRunner(f *flags, cluster string, sink inject.Sink, token string, reg *prometheus.Registry) *runner {
+	return &runner{
+		f:           f,
+		clusterName: cluster,
+		sink:        sink,
+		token:       token,
+		metricsReg:  reg,
+		metrics:     newMetricsFor(reg, cluster),
+	}
+}
+
+// runnerRestartBackoff bounds how fast a crash-looping runner restarts
+// in a multi-cluster process. Fixed, not a flag: the goal is only to
+// keep a hot loop from pegging a core; the kubelet's CrashLoopBackoff
+// plays this role for the single-cluster default.
+const runnerRestartBackoff = 10 * time.Second
+
+// superviseRunners drives the process's cluster runners to completion.
+//
+// N=1 (the default — one sentinel per cluster) runs the single runner
+// inline and returns its error unchanged: the process exits and the
+// kubelet owns restart, exactly as before the runner refactor. With
+// multiple runners (issue #208) each is supervised independently so one
+// cluster's failure takes down neither its siblings nor the process —
+// supervise restarts it in place with backoff. Returns when every
+// runner has stopped (only reachable on ctx cancellation in the
+// multi-runner case).
+func superviseRunners(ctx context.Context, runners []*runner) error {
+	if len(runners) == 1 {
+		return runners[0].run(ctx)
+	}
+	var wg sync.WaitGroup
+	for _, r := range runners {
+		wg.Add(1)
+		go func(r *runner) {
+			defer wg.Done()
+			supervise(ctx, r.clusterName, runnerRestartBackoff, r.metrics.runnerRestarts, r.run)
+		}(r)
+	}
+	wg.Wait()
+	return ctx.Err()
+}
+
+// supervise runs one runner to exit and restarts it while the process
+// is up. A clean ctx cancellation (shutdown) ends supervision; any
+// other exit — error or nil — is a runner that stopped watching its
+// cluster, so it restarts after backoff, counted in restarts
+// (lookout_runner_restarts_total). run and the backoff are parameters
+// so the loop is testable without a live cluster.
+func supervise(ctx context.Context, name string, backoff time.Duration, restarts prometheus.Counter, run func(context.Context) error) {
+	for {
+		err := run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		restarts.Inc()
+		if err != nil {
+			log.Printf("runner[%s]: exited: %v; restarting in %s", name, err, backoff)
+		} else {
+			log.Printf("runner[%s]: watch loop returned while the process is up; restarting in %s", name, backoff)
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runner is the per-cluster half of startup: everything from filter /
+// dedup / dispatcher through source registration, recovery wiring, and
+// the RunAll watch loop. One runner watches one cluster. The fields are
+// the process-global singletons it shares with any sibling runners
+// (multi-cluster; issue #208) plus this runner's own cluster identity;
+// everything else it builds and owns during run.
+type runner struct {
+	f           *flags
+	clusterName string
+	sink        inject.Sink          // process-global: one sink for all runners
+	token       string               // resolved --token-env daemon bearer (sources reuse it)
+	metricsReg  *prometheus.Registry // process-global scrape registry
+	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
+
+	// restCfg, when set, is the fleet-minted rest.Config for this
+	// cluster (multi-cluster GKE-endpoint mode: ADC over the DNS
+	// endpoint; issue #208). Nil in the single-cluster default, where
+	// run resolves the config from --in-cluster/--kubeconfig. Set,
+	// project/zone override the §8 identity for this cluster.
+	restCfg *rest.Config
+	project string
+	zone    string
+}
+
+// run wires and drives this runner's cluster: it builds the dispatcher,
+// store, sources, storm/graph feed, enrichment, and recovery, then
+// blocks in sources.RunAll until ctx is cancelled. Returns the watch
+// loop's error (or the graph feed's, if that failed first).
+func (r *runner) run(ctx context.Context) error {
+	f := r.f
+
+	// This runner's own cancel scope, derived from the process signal
+	// ctx: a fatal graph-feed failure cancels only this runner's watch
+	// loop (not the shared metrics server or sibling runners). At N=1
+	// the process exits immediately afterward anyway; the isolation
+	// matters once multiple runners share the process (issue #208).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Build components.
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
+	filter := engine.NewFilter(filterCfg)
+
+	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
+	if err != nil {
+		return fmt.Errorf("dedup cache: %w", err)
+	}
+
+	// This runner's metrics bundle (built once in newRunner; reused
+	// across supervisor restarts so its series aren't re-registered).
+	m := r.metrics
+
 	// Which sink this process delivers to, as a scrapeable info gauge
 	// (the frozen operation counters stay sink-agnostic — see
 	// metrics.go on why the sink dimension is not a new label).
@@ -162,10 +472,24 @@ func realMain(argv []string) error {
 	// §8 deployment identity: cluster is --cluster-name (M0);
 	// zone/project resolve by precedence — explicit flag > provider
 	// metadata > empty (never fatal; empty fields reproduce the
-	// zone-less fingerprints deployments hashed before this wiring).
-	idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
-	project, zone := resolveIdentity(idCtx, f)
-	cancelID()
+	// zone-less fingerprints deployments hashed before this wiring). In
+	// multi-cluster mode the fleet already knows each cluster's
+	// project/location (from the Container API), so a fleet runner's
+	// per-cluster values take precedence over the local provider
+	// metadata — the on-host metadata server describes the sentinel's
+	// own node, not the remote cluster it's watching.
+	project, zone := r.project, r.zone
+	if project == "" || zone == "" {
+		idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
+		p, z := resolveIdentity(idCtx, f)
+		cancelID()
+		if project == "" {
+			project = p
+		}
+		if zone == "" {
+			zone = z
+		}
+	}
 	if project != "" || zone != "" {
 		log.Printf("identity: stamping project=%q zone=%q (precedence: explicit flag > provider metadata > empty; zone participates in the §8 fingerprint hash)", project, zone)
 	}
@@ -174,9 +498,9 @@ func realMain(argv []string) error {
 		filter:    filter,
 		dedup:     dedup,
 		pullClass: engine.NewPullClassMemo(),
-		injector:  inj,
+		injector:  r.sink,
 		metrics:   m,
-		cluster:   f.clusterName,
+		cluster:   r.clusterName,
 		project:   project,
 		zone:      zone,
 		mode:      f.mode,
@@ -232,9 +556,9 @@ func realMain(argv []string) error {
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
-			injector:      inj,
+			injector:      r.sink,
 			metrics:       m,
-			cluster:       f.clusterName,
+			cluster:       r.clusterName,
 			dryRun:        f.dryRun,
 			batch:         f.watchboardBatch,
 			flushInterval: f.watchboardFlush,
@@ -245,17 +569,6 @@ func realMain(argv []string) error {
 	} else {
 		log.Printf("severity routing: --mode=shared — all severities route to --target-session (watchboard disabled)")
 	}
-
-	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	// Start the metrics HTTP server (blocks on ctx in-goroutine).
-	go func() {
-		if err := serveMetrics(ctx, f.metricsAddr, m); err != nil {
-			log.Printf("metrics server: %v", err)
-		}
-	}()
 
 	// Start the periodic dedup-snapshot ticker if configured.
 	if f.dedupPersist != "" && f.snapshotInterval > 0 {
@@ -297,9 +610,21 @@ func realMain(argv []string) error {
 	// from kube-agents' watcher: a dry run you cannot point at a
 	// cluster and SEE payloads from is not a dry run.
 	if f.dryRun {
-		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", f.clusterName)
+		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", r.clusterName)
 	}
-	client, err := kube.BuildClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+	// Resolve this runner's rest config once and share it across every
+	// client below. In the single-cluster default it comes from
+	// --in-cluster/--kubeconfig exactly as before; in multi-cluster
+	// GKE-endpoint mode (issue #208) the fleet already minted it per
+	// cluster (ADC over the DNS endpoint) and stored it on the runner.
+	restCfg := r.restCfg
+	if restCfg == nil {
+		restCfg, err = kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		if err != nil {
+			return err
+		}
+	}
+	client, err := kube.BuildClientFromConfig(restCfg)
 	if err != nil {
 		return err
 	}
@@ -325,17 +650,13 @@ func realMain(argv []string) error {
 	// source is enabled.
 	var dyn dynamic.Interface
 	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) {
-		dyn, err = kube.BuildDynamicClient(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
+		dyn, err = kube.BuildDynamicClientFromConfig(restCfg)
 		if err != nil {
 			return err
 		}
 	}
 	var metricsClient metricsv.Interface
 	if f.sourceEnabled(saturation.Name) {
-		restCfg, cfgErr := kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
-		if cfgErr != nil {
-			return cfgErr
-		}
 		metricsClient, err = metricsv.NewForConfig(restCfg)
 		if err != nil {
 			return fmt.Errorf("metrics.k8s.io client: %w", err)
@@ -351,13 +672,13 @@ func realMain(argv []string) error {
 	// without a cloud makes no sense.
 	var provider cloud.Provider
 	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) || f.sourceEnabled(notifications.Name) {
-		provider, err = cloud.New(ctx, cloud.Config{Cluster: f.clusterName, NotificationsSubscription: f.notificationsSub})
+		provider, err = cloud.New(ctx, cloud.Config{Project: r.project, Cluster: r.clusterName, NotificationsSubscription: f.notificationsSub})
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}
 		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
-	bs, err := buildSources(f, token, client, dyn, metricsClient, provider)
+	bs, err := buildSources(f, r.token, client, dyn, metricsClient, provider)
 	if err != nil {
 		return err
 	}
@@ -510,14 +831,16 @@ func realMain(argv []string) error {
 
 	if f.sink == sinkWebhook {
 		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
-			f.clusterName, f.sinkURL)
+			r.clusterName, f.sinkURL)
 	} else {
 		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
-			f.clusterName, f.daemonURL, f.mode, f.owner)
+			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}
+	m.runnerUp.Set(1)
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
+	m.runnerUp.Set(0)
 	// Final snapshot on shutdown so any un-persisted dedup state
 	// isn't lost. Best-effort — failure is logged, not fatal.
 	if snapErr := dedup.Snapshot(); snapErr != nil {

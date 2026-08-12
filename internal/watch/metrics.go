@@ -76,6 +76,8 @@ type metrics struct {
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
 	sinkInfo             *prometheus.GaugeVec
+	runnerUp             prometheus.Gauge
+	runnerRestarts       prometheus.Counter
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -86,12 +88,35 @@ type metrics struct {
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
-// and returns the bundle. Tests use this with an isolated registry;
-// main.go passes the resulting handler to promhttp.
+// and returns the bundle. Tests use this with an isolated registry and
+// no cluster label — the production per-runner constructor is
+// newMetricsFor.
 func newMetrics() *metrics {
 	reg := prometheus.NewRegistry()
+	m := buildMetrics(reg)
+	m.registry = reg
+	return m
+}
+
+// newMetricsFor builds a metrics bundle whose every series carries a
+// cluster="<name>" label, registered into the shared reg. One bundle
+// per runner: the same metric names register N times without collision
+// because the const-label VALUE differs per cluster (the Desc differs).
+// The cluster label is ALWAYS present — including the single-cluster
+// default — so several sentinels scraped into one Prometheus stay
+// filterable by cluster (docs/multi-cluster-design.md).
+func newMetricsFor(reg *prometheus.Registry, cluster string) *metrics {
+	m := buildMetrics(prometheus.WrapRegistererWith(prometheus.Labels{"cluster": cluster}, reg))
+	m.registry = reg
+	return m
+}
+
+// buildMetrics constructs and registers the bundle against reg — a bare
+// *prometheus.Registry (tests, no cluster label) or a
+// cluster-label-wrapping Registerer (a runner). Callers set m.registry
+// to the underlying *Registry that promhttp gathers from.
+func buildMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
-		registry:   reg,
 		reasonSeen: make(map[string]struct{}),
 		eventsSeen: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_events_seen_total",
@@ -239,6 +264,14 @@ func newMetrics() *metrics {
 			Name: "lookout_sink_info",
 			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.",
 		}, []string{"sink"}),
+		runnerUp: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "lookout_runner_up",
+			Help: "1 while this cluster's watch loop is running, 0 otherwise. Always carries the cluster label; in a multi-cluster process (issue #208) one series per watched cluster reports that runner's liveness independently.",
+		}),
+		runnerRestarts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lookout_runner_restarts_total",
+			Help: "Total in-process restarts of this cluster's runner by the supervisor after it exited while the process stayed up (multi-cluster fate isolation, issue #208). Stays zero in the single-cluster default, where a runner exit ends the process and the kubelet owns restart.",
+		}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -277,6 +310,8 @@ func newMetrics() *metrics {
 		m.triageRegressed,
 		m.crossSourceFollowups,
 		m.sinkInfo,
+		m.runnerUp,
+		m.runnerRestarts,
 	)
 	return m
 }
@@ -306,13 +341,13 @@ func (m *metrics) boundReason(reason string) string {
 // When addr == "" the server is skipped entirely (metrics still get
 // collected in-process; just not exposed). Useful for tests + tiny
 // deployments that don't have a Prometheus scraper.
-func serveMetrics(ctx context.Context, addr string, m *metrics) error {
+func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry) error {
 	if addr == "" {
 		<-ctx.Done()
 		return nil
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	// Simple liveness probe — no /metrics dependency, so K8s can
 	// use it as a livenessProbe without conflating "prometheus is
 	// scraping" with "the process is up."
