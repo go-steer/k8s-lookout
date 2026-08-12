@@ -452,7 +452,7 @@ func (r *runner) run(ctx context.Context) error {
 	defer cancel()
 
 	// Build components.
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount)
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
 	filter := engine.NewFilter(filterCfg)
 
 	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
@@ -497,6 +497,7 @@ func (r *runner) run(ctx context.Context) error {
 	disp := &dispatcher{
 		filter:    filter,
 		dedup:     dedup,
+		pullClass: engine.NewPullClassMemo(),
 		injector:  r.sink,
 		metrics:   m,
 		cluster:   r.clusterName,

@@ -442,3 +442,137 @@ func TestDedup_AttachToStorm(t *testing.T) {
 		t.Errorf("restored storm marker = %q, want sha256:storm", restored.entries[key].Storm)
 	}
 }
+
+// pullPodSignal fabricates one pod's retryable image-pull failure,
+// already classified (the shape the correlator sees post-dispatch
+// stamp). Each pod belongs to a DIFFERENT workload in a DIFFERENT
+// namespace — the shape of a registry-wide incident, and the shape
+// that topology-only correlation cannot group.
+func pullPodSignal(i int, host string) Signal {
+	ns := fmt.Sprintf("team-%d", i)
+	return Signal{
+		Kind:        KindK8sEvent,
+		Source:      SourceSentinel,
+		Severity:    SeverityCritical,
+		PullClass:   PullClassRetryable,
+		Fingerprint: Fingerprint(KindK8sEvent, "ImagePullBackOff", "Pod", ""),
+		TriageEvent: TriageEvent{
+			Key:          EventKey{UID: fmt.Sprintf("pull-uid-%d", i), Reason: "BackOff"},
+			Message:      fmt.Sprintf("Back-off pulling image %q", host+"/proj/app:v1"),
+			Namespace:    ns,
+			KindOfObject: "Pod",
+			Name:         fmt.Sprintf("app-%d", i),
+			FirstSeen:    time.Date(2026, 8, 12, 10, 0, i, 0, time.UTC),
+			LastSeen:     time.Date(2026, 8, 12, 10, 0, i, 0, time.UTC),
+		},
+	}
+}
+
+// TestStorm_RegistryKeyGroupsCrossWorkloadPullFailures is issue #213's
+// blast-radius half: a per-region registry quota hits every pod
+// pulling from that host, across workloads and namespaces. Topology
+// gives those pods no common ancestor, so without the synthetic
+// registry key they fan out into N per-incident sessions. With it,
+// they are ONE storm.
+func TestStorm_RegistryKeyGroupsCrossWorkloadPullFailures(t *testing.T) {
+	t.Parallel()
+	const host = "us-east1-artifactregistry.gcr.io"
+	// Each pod resolves to its OWN namespace ancestor and nothing
+	// shared — topology alone cannot correlate them.
+	res := &fakeResolver{byObject: map[ObjectRef][]Ancestor{}}
+	sigs := []Signal{pullPodSignal(1, host), pullPodSignal(2, host), pullPodSignal(3, host)}
+	for _, s := range sigs {
+		res.byObject[s.ref()] = []Ancestor{{Kind: "Namespace", Name: s.Namespace}}
+	}
+	c, _ := newTestCorrelator(t, time.Minute, 3, res)
+
+	if v := c.Observe(sigs[0]); v.Kind != StormNone {
+		t.Fatalf("incident 1: verdict %v, want StormNone", v.Kind)
+	}
+	if v := c.Observe(sigs[1]); v.Kind != StormNone {
+		t.Fatalf("incident 2: verdict %v, want StormNone", v.Kind)
+	}
+	v := c.Observe(sigs[2])
+	if v.Kind != StormFormed {
+		t.Fatalf("incident 3: verdict %v, want StormFormed (the registry is the shared ancestor)", v.Kind)
+	}
+	want := Ancestor{Kind: AncestorKindRegistry, Name: host}
+	if v.Storm.Ancestor != want {
+		t.Errorf("storm ancestor = %+v, want %+v", v.Storm.Ancestor, want)
+	}
+	if v.Storm.ID != "Registry//"+host {
+		t.Errorf("storm ID = %q, want %q", v.Storm.ID, "Registry//"+host)
+	}
+	if len(v.Members) != 3 {
+		t.Errorf("storm members = %d, want 3", len(v.Members))
+	}
+}
+
+// TestStorm_RegistryKeyOnlyForRetryable: two workloads with two
+// different BAD TAGS on one registry are two incidents, not a storm.
+// The registry key is scoped to the retryable class precisely so that
+// terminal failures keep grouping by topology as they always have.
+func TestStorm_RegistryKeyOnlyForRetryable(t *testing.T) {
+	t.Parallel()
+	const host = "us-east1-artifactregistry.gcr.io"
+	res := &fakeResolver{byObject: map[ObjectRef][]Ancestor{}}
+	var sigs []Signal
+	for i := 1; i <= 3; i++ {
+		s := pullPodSignal(i, host)
+		s.PullClass = PullClassTerminal
+		res.byObject[s.ref()] = []Ancestor{{Kind: "Namespace", Name: s.Namespace}}
+		sigs = append(sigs, s)
+	}
+	c, _ := newTestCorrelator(t, time.Minute, 3, res)
+	for i, s := range sigs {
+		if v := c.Observe(s); v.Kind != StormNone {
+			t.Fatalf("terminal incident %d: verdict %v, want StormNone (no registry grouping)", i+1, v.Kind)
+		}
+	}
+}
+
+// TestStorm_RegistryKeyOutranksTopology: a registry incident spans
+// workloads, so its key must be checked BEFORE the owner chain —
+// otherwise three pods of one Deployment plus three of another become
+// two storms instead of one.
+func TestStorm_RegistryKeyOutranksTopology(t *testing.T) {
+	t.Parallel()
+	const host = "gcr.io"
+	res := &fakeResolver{byObject: map[ObjectRef][]Ancestor{}}
+	shared := Ancestor{Kind: "ReplicaSet", Namespace: "shop", Name: "pay-7b9d"}
+	sigs := []Signal{pullPodSignal(1, host), pullPodSignal(2, host), pullPodSignal(3, host)}
+	for _, s := range sigs {
+		res.byObject[s.ref()] = []Ancestor{shared}
+	}
+	c, _ := newTestCorrelator(t, time.Minute, 3, res)
+	c.Observe(sigs[0])
+	c.Observe(sigs[1])
+	v := c.Observe(sigs[2])
+	if v.Kind != StormFormed {
+		t.Fatalf("verdict %v, want StormFormed", v.Kind)
+	}
+	if v.Storm.Ancestor.Kind != AncestorKindRegistry {
+		t.Errorf("storm ancestor = %+v, want the Registry key to outrank the ReplicaSet", v.Storm.Ancestor)
+	}
+}
+
+// TestStorm_RegistryKeyNeedsAnImageRef: a retryable class with no
+// parsable image reference in the message contributes no registry
+// key, and must not accidentally group under an empty host.
+func TestStorm_RegistryKeyNeedsAnImageRef(t *testing.T) {
+	t.Parallel()
+	res := &fakeResolver{byObject: map[ObjectRef][]Ancestor{}}
+	var sigs []Signal
+	for i := 1; i <= 3; i++ {
+		s := pullPodSignal(i, "gcr.io")
+		s.Message = "Error: ErrImagePull" // no quoted image ref
+		res.byObject[s.ref()] = []Ancestor{{Kind: "Namespace", Name: s.Namespace}}
+		sigs = append(sigs, s)
+	}
+	c, _ := newTestCorrelator(t, time.Minute, 3, res)
+	for i, s := range sigs {
+		if v := c.Observe(s); v.Kind != StormNone {
+			t.Fatalf("incident %d: verdict %v, want StormNone (no registry host to group on)", i+1, v.Kind)
+		}
+	}
+}

@@ -74,7 +74,7 @@ func newRetryDispatcher(t *testing.T, base string, window time.Duration, persist
 		t.Fatalf("NewDedupCache: %v", err)
 	}
 	return &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dc,
 		injector: inj,
 		metrics:  newMetrics(),

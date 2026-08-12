@@ -78,7 +78,7 @@ func TestDispatcher_EndToEnd_DuplicateSuppressed(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -108,7 +108,7 @@ func TestDispatcher_EndToEnd_FilterRejects(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"CrashLoopBackOff"}, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -133,7 +133,7 @@ func TestDispatcher_EndToEnd_SharedMode(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "t", AssertedCaller: "a@b"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -175,7 +175,7 @@ func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),
@@ -233,7 +233,7 @@ func TestDispatcher_LogsFireOnSuccess(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -273,7 +273,7 @@ func TestDispatcher_LogsDedupOnSuppress(t *testing.T) {
 	inj, _ := inject.NewInjector(inject.Config{DaemonURL: base, BearerToken: "tok", AssertedCaller: "sre@example.com"})
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -322,7 +322,7 @@ func TestDispatcher_BackoffDebounceSuppressesLeadingEdge(t *testing.T) {
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
 		// Default config: backoff-min-count defaults to 3.
-		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 0)),
+		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 0, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),
@@ -469,7 +469,7 @@ func TestDispatcher_PullFamilyOneSession(t *testing.T) {
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	disp := &dispatcher{
-		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"Failed", "BackOff", "ErrImagePull"}, nil, nil, 0, 1)),
+		filter:   engine.NewFilter(engine.NewFilterConfig([]string{"Failed", "BackOff", "ErrImagePull"}, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
 		injector: inj,
 		metrics:  newMetrics(),

@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image-pull failures are classified by error class, and the retryable
+  ones are debounced (#213). 0.16.0's crash-loop gate deliberately
+  exempted the whole image-pull family on the grounds that "a bad tag
+  is persistent" — true of a bad tag, but the same family also carries
+  registry rate limits (`429 toomanyrequests`, Artifact Registry
+  per-region quota), 5xx, and connection timeouts, which kubelet
+  clears by itself on its next retry (10s → 20s → 40s → …). Those were
+  opening a session and firing an alert for an incident that no longer
+  existed by the time anyone looked. The sentinel now reads the failure
+  cause out of the message and sorts it into **terminal** (bad tag,
+  `manifest unknown`, denied/unauthorized, `no space left on device`),
+  **retryable** (429/quota, 5xx, i/o and TLS timeouts, connection
+  reset), or **unknown**, and applies a new `--imagepull-transient-min-count`
+  (default 3) to the retryable class only. Terminal and unknown causes
+  still fire on the first event, so the gate can only ever delay a
+  failure it positively recognizes as self-clearing. Set
+  `--imagepull-transient-min-count=1` to restore 0.16.0 behavior.
+
+  Because kubelet splits the incident across two events — the cause
+  rides `reason=Failed`, which the default `--reason` allow-list drops,
+  while the allow-listed `reason=BackOff` message carries no cause at
+  all — the class is resolved per object ahead of the allow-list and
+  remembered for 10 minutes, so the causeless back-off inherits the
+  cause the `Failed` event named. This carry-forward is what makes the
+  gate real rather than decorative; it applies to terminal causes too,
+  which is why a bad tag keeps firing on its first back-off.
+
+- Registry-wide pull failures correlate into one storm (#213). A
+  retryable pull failure now contributes a synthetic `Registry/<host>`
+  ancestor (e.g. `Registry/us-east1-artifactregistry.gcr.io`) to storm
+  correlation, ranked ahead of the owner chain, so a quota exhaustion
+  that hits pods across unrelated Deployments and namespaces forms a
+  single registry-scoped storm instead of N unrelated sessions.
+  Topology-only correlation could not group these: the members share
+  nothing but the registry they pull from. Terminal failures do not get
+  the key — two workloads with independently bad tags are two
+  incidents.
+
+- `lookout_events_filtered_total{gate}` counts every signal the filter
+  drops, labelled by which rule dropped it (`reason_not_allowed`,
+  `namespace_excluded`, `namespace_not_allowed`, `unhealthy_debounce`,
+  `crashloop_debounce`, `imagepull_transient_debounce`) — so the new
+  gates, and the pre-existing ones, are observable instead of silent.
+
 - **Optional multi-cluster watch (issue #208).** One `lookout watch`
   process can now watch several clusters. Two mutually-exclusive flags
   select the fleet: `--clusters` takes comma-separated `name=endpoint`
@@ -41,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   add/ignore the `cluster` label; set `--cluster-name` so the value is
   meaningful. One-sentinel-per-cluster remains the default and
   recommended deployment.
+
+### Fixed
+
+- Every row of the docs-site metrics reference rendered with a
+  trailing `", unit: "` glued to its description. The generator
+  derives names and help text by parsing `prometheus.Desc.String()`
+  (its fields are unexported and it exposes no accessors), and
+  client_golang v1.24 added a `unit` field between `help` and
+  `constLabels` — which the greedy help match swallowed. The parse now
+  matches each field exactly and treats `unit` as optional, so it
+  survives both client_golang layouts. Docs-only; the metrics
+  themselves were never affected. The bug was invisible because every
+  existing guard compares generated output against generator output,
+  making a parse bug self-consistent, so the parser now has a
+  round-trip test against a real collector.
 
 ### Docs
 

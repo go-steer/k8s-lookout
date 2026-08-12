@@ -126,7 +126,7 @@ func identityDispatcher(t *testing.T, project, zone string) (*dispatcher, *[]str
 	}
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	return &dispatcher{
-		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1)),
+		filter:    engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:     dedup,
 		injector:  inj,
 		metrics:   newMetrics(),

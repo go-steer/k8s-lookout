@@ -354,6 +354,9 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 	c.prune(now)
 
 	cands := c.resolver.Ancestors(ObjectRef{Kind: sig.KindOfObject, Namespace: sig.Namespace, Name: sig.Name})
+	if reg, ok := registryAncestor(sig); ok {
+		cands = append([]Ancestor{reg}, cands...)
+	}
 
 	// 1. Late arrival: best-priority candidate owned by an open storm
 	// wins (dedup's retry safety net can re-fire an existing member —
@@ -427,6 +430,43 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		}
 	}
 	return StormVerdict{Kind: StormNone}
+}
+
+// AncestorKindRegistry is the synthetic Ancestor.Kind for the
+// registry-scoped blast radius (issue #213). Not a Kubernetes kind and
+// not in the topology graph: a registry lives outside the cluster, but
+// it is unmistakably a shared ancestor of every pod pulling from it.
+// Same synthetic-identity move the capacity source makes for its
+// nodegroup-keyed reasons (dedup.go).
+const AncestorKindRegistry = "Registry"
+
+// registryAncestor returns the registry-host blast-radius key for a
+// signal, when one applies. A per-region registry quota or outage does
+// not hit one pod — it hits every pod pulling from that host, across
+// workloads and namespaces. Suppressing the singleton (the
+// --imagepull-transient-min-count gate) is only half an answer; the
+// systemic case has to arrive as ONE incident rather than N sessions.
+//
+// Scoped to PullClassRetryable on purpose. Two workloads with two
+// different bad tags on the same registry are two incidents and must
+// not be folded together; a registry rate-limiting everything is one.
+// Terminal and unrecognized causes therefore get no registry key and
+// group exactly as they do today.
+//
+// The caller PREPENDS this candidate, ahead of the resolver's
+// topology keys, which is also deliberate: a registry incident spans
+// workloads, so letting the owner-chain or namespace candidate win
+// first would shatter one cluster-wide incident into per-workload
+// storms — the exact fan-out §7.5 exists to prevent.
+func registryAncestor(sig Signal) (Ancestor, bool) {
+	if sig.PullClass != PullClassRetryable {
+		return Ancestor{}, false
+	}
+	host := RegistryHost(sig.Message)
+	if host == "" {
+		return Ancestor{}, false
+	}
+	return Ancestor{Kind: AncestorKindRegistry, Name: host}, true
 }
 
 // form opens a storm over key with the grouped window entries as

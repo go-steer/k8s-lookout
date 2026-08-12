@@ -67,17 +67,33 @@ type FilterConfig struct {
 	// event's own Count to reach this value before we pass it.
 	// Default 3 (issue #197). The image-pull family
 	// (ImagePullBackOff/ErrImagePull, incl. BackOff on a bad image)
-	// is deliberately NOT gated: a bad tag is persistent and should
-	// fire fast — which is why the check keys on the message-aware
-	// CANONICAL reason, not the raw one.
+	// is deliberately NOT gated HERE: a bad tag is persistent and
+	// should fire fast — which is why the check keys on the
+	// message-aware CANONICAL reason, not the raw one. The retryable
+	// half of that family has its own gate below.
 	backoffMinCount int
+	// imagePullTransientMinCount is the leading-edge debounce for the
+	// RETRYABLE half of the image-pull family (issue #213). The
+	// family-wide exclusion above is right about bad tags and wrong
+	// about registries: an Artifact Registry per-region request quota
+	// answers 429 for the rest of the minute and then serves the pull,
+	// so the incident is over before anyone reads the alert. Require
+	// the event's own Count to reach this value before firing, but
+	// ONLY when the failure classifies PullClassRetryable — terminal
+	// and unrecognized causes still fire on event #1, so this can only
+	// ever delay a failure we positively recognize as self-clearing.
+	// Default 3; kubelet's pull backoff (10s/20s/40s/80s, capped 300s)
+	// puts that at roughly 1-2 minutes of CONTINUED failure, which a
+	// rolling quota window does not reach and a real registry outage
+	// does.
+	imagePullTransientMinCount int
 }
 
 // NewFilterConfig builds a FilterConfig from CLI-shaped inputs.
 // Empty slices default to the shipped values; non-positive counts
 // default to their shipped defaults (0 means "use the default", so
 // callers that don't care pass 0 and get the shipped debounce).
-func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount, backoffMinCount int) FilterConfig {
+func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []string, unhealthyMinCount, backoffMinCount, imagePullTransientMinCount int) FilterConfig {
 	if len(reasons) == 0 {
 		reasons = defaultReasons
 	}
@@ -87,12 +103,16 @@ func NewFilterConfig(reasons []string, allowNamespaces, excludeNamespaces []stri
 	if backoffMinCount <= 0 {
 		backoffMinCount = 3
 	}
+	if imagePullTransientMinCount <= 0 {
+		imagePullTransientMinCount = 3
+	}
 	fc := FilterConfig{
-		allowedReasons:     stringSet(reasons),
-		allowedNamespaces:  stringSet(allowNamespaces),
-		excludedNamespaces: stringSet(excludeNamespaces),
-		unhealthyMinCount:  unhealthyMinCount,
-		backoffMinCount:    backoffMinCount,
+		allowedReasons:             stringSet(reasons),
+		allowedNamespaces:          stringSet(allowNamespaces),
+		excludedNamespaces:         stringSet(excludeNamespaces),
+		unhealthyMinCount:          unhealthyMinCount,
+		backoffMinCount:            backoffMinCount,
+		imagePullTransientMinCount: imagePullTransientMinCount,
 	}
 	return fc
 }
@@ -122,6 +142,19 @@ func NewFilter(cfg FilterConfig) *Filter {
 	return &Filter{cfg: cfg}
 }
 
+// Gate names the rule that rejected a signal — the label Decide hands
+// back so operators can see WHICH rule is eating their events, not
+// just that something did. A closed, low-cardinality set: safe as a
+// Prometheus label value.
+const (
+	GateReasonNotAllowed    = "reason_not_allowed"
+	GateNamespaceExcluded   = "namespace_excluded"
+	GateNamespaceNotAllowed = "namespace_not_allowed"
+	GateUnhealthyDebounce   = "unhealthy_debounce"
+	GateCrashLoopDebounce   = "crashloop_debounce"
+	GatePullTransient       = "imagepull_transient_debounce"
+)
+
 // Accept returns true if the signal passes every filter rule. The
 // decision order is deliberate:
 //
@@ -141,27 +174,41 @@ func NewFilter(cfg FilterConfig) *Filter {
 //     namespace. k8s-event kinds keep the frozen M0 behavior exactly
 //     (an empty-namespace event is rejected by a set allow-list).
 //  4. Leading-edge count debounce (k8s-event kinds): the Unhealthy
-//     probe-flap gate and the crash-loop-family gate both require the
-//     event's repeat count to reach their threshold. Keyed on the
-//     message-aware CANONICAL reason so a generic kubelet "BackOff"
-//     lands in the right family — crash-loop is debounced, image-pull
-//     backoff is not (a bad tag is persistent and should fire fast).
+//     probe-flap gate, the crash-loop-family gate, and the transient
+//     image-pull gate each require the event's repeat count to reach
+//     their threshold. Keyed on the message-aware CANONICAL reason so
+//     a generic kubelet "BackOff" lands in the right family. Within
+//     the image-pull family the gate narrows again, on Signal.PullClass
+//     (issue #213): only a RETRYABLE cause — a registry rate limit, a
+//     5xx, a timeout — is debounced. A bad tag is persistent, classifies
+//     terminal, and still fires on the first event.
 func (f *Filter) Accept(sig Signal) bool {
+	ok, _ := f.Decide(sig)
+	return ok
+}
+
+// Decide is Accept plus the name of the rule that rejected the signal
+// (one of the Gate* constants; empty when accepted). Same rules, same
+// order — Accept delegates here, so the two can never disagree. The
+// gate name exists for the metric: a debounce that silently eats
+// events an operator expected is indistinguishable from a broken
+// watcher unless the suppression is countable per rule.
+func (f *Filter) Decide(sig Signal) (bool, string) {
 	eventKind := isK8sEventKind(sig.Kind)
 	if eventKind && f.cfg.allowedReasons != nil {
 		if _, ok := f.cfg.allowedReasons[sig.Key.Reason]; !ok {
-			return false
+			return false, GateReasonNotAllowed
 		}
 	}
 	if len(f.cfg.excludedNamespaces) > 0 {
 		if _, excluded := f.cfg.excludedNamespaces[sig.Namespace]; excluded {
-			return false
+			return false, GateNamespaceExcluded
 		}
 	}
 	if len(f.cfg.allowedNamespaces) > 0 {
 		if _, allowed := f.cfg.allowedNamespaces[sig.Namespace]; !allowed {
 			if eventKind || sig.Namespace != "" {
-				return false
+				return false, GateNamespaceNotAllowed
 			}
 		}
 	}
@@ -169,15 +216,19 @@ func (f *Filter) Accept(sig Signal) bool {
 		switch CanonicalReasonForEvent(sig.Key.Reason, sig.Message) {
 		case "Unhealthy":
 			if sig.Count < f.cfg.unhealthyMinCount {
-				return false
+				return false, GateUnhealthyDebounce
 			}
 		case "CrashLoopBackOff":
 			if sig.Count < f.cfg.backoffMinCount {
-				return false
+				return false, GateCrashLoopDebounce
+			}
+		case "ImagePullBackOff":
+			if sig.PullClass == PullClassRetryable && sig.Count < f.cfg.imagePullTransientMinCount {
+				return false, GatePullTransient
 			}
 		}
 	}
-	return true
+	return true, ""
 }
 
 // isK8sEventKind reports whether the signal is the frozen k8s-event

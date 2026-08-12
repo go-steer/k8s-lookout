@@ -74,6 +74,54 @@ func TestMetricsInventoryComplete(t *testing.T) {
 	}
 }
 
+// TestDescRegexpParsesHelp round-trips a known help string through a
+// real collector, which is the check that was missing: every guard
+// above (and the sitedoc drift test) compares generated output to
+// generator output, so a parse bug is self-consistent and invisible.
+// One did ship — client_golang v1.24 added a `unit` field between
+// help and constLabels, the greedy help match swallowed the
+// delimiter, and every row on the docs-site metrics page rendered
+// with a trailing `", unit: "`.
+func TestDescRegexpParsesHelp(t *testing.T) {
+	// Punctuation mirrors the real help strings in metrics.go: commas,
+	// parens, pipe-separated label values, a colon-brace sequence that
+	// looks like the Desc format's own delimiters.
+	const help = "Total signals rejected, by rule (a|b|c), fqName: {x}, constLabels: none."
+	for _, tc := range []struct {
+		name string
+		c    prometheus.Collector
+	}{
+		{"unlabeled", prometheus.NewCounter(prometheus.CounterOpts{Name: "lookout_probe_total", Help: help})},
+		{"vector", prometheus.NewCounterVec(prometheus.CounterOpts{Name: "lookout_probe_vec_total", Help: help}, []string{"gate"})},
+		{"histogram", prometheus.NewHistogram(prometheus.HistogramOpts{Name: "lookout_probe_seconds", Help: help})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotHelp := describeCollector(tc.c)
+			if !strings.HasPrefix(gotName, "lookout_probe") {
+				t.Errorf("name = %q, want the fqName", gotName)
+			}
+			if gotHelp != help {
+				t.Errorf("help round-trip lost fidelity:\n got %q\nwant %q", gotHelp, help)
+			}
+		})
+	}
+}
+
+// TestMetricsHelpIsQuoteFree enforces the invariant descRe depends
+// on. A double quote in a help string is escaped by Desc.String()'s
+// %q, which would truncate the parse mid-string — silently, since a
+// truncated help is still non-empty.
+func TestMetricsHelpIsQuoteFree(t *testing.T) {
+	for _, d := range MetricsInventory() {
+		if strings.Contains(d.Help, `"`) {
+			t.Errorf("metric %q: help contains a double quote, which descRe cannot parse — reword it", d.Name)
+		}
+		if strings.Contains(d.Help, "unit:") || strings.HasSuffix(d.Help, ", ") {
+			t.Errorf("metric %q: help carries Desc-format debris, descRe mis-parsed: %q", d.Name, d.Help)
+		}
+	}
+}
+
 // TestFlagInventoryCoversFrozenSurface ties the derived flag
 // inventory back to the M0 freeze: every flag TestFlagSurfaceFrozen
 // pins must appear in FlagInventory (the docs page can gain flags,

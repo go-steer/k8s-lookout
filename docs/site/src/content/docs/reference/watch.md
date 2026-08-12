@@ -30,7 +30,7 @@ breaking change to running deployments, never a refactor.
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `--backoff-min-count` | int | `3` | Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is never gated (a bad tag is persistent). 1 fires on the first event. |
+| `--backoff-min-count` | int | `3` | Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event. |
 | `--burn-eta` | duration | `30m0s` | Budget-exhaustion projection inside this window fires token.burn at critical (with the linear forecast); clearance requires the ETA to recede beyond 2x this threshold. Must be > 0. |
 | `--burn-multiple` | float | `4` | Session token rate at or above this multiple of the cross-session trailing-median baseline (sustained 2 polls) fires token.burn at warning. Must be > 1. |
 | `--capacity-poll` | duration | `1m0s` | Poll interval for the capacity source's cluster-autoscaler-status ConfigMap read, provider scale-decision query, and pending-pod age sweep. Must be > 0. |
@@ -56,6 +56,7 @@ breaking change to running deployments, never a refactor.
 | `--expiry-warn` | duration | `336h0m0s` | Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h. |
 | `--gateway-grace` | duration | `5m0s` | How long a Gateway/HTTPRoute status condition (Programmed/Accepted/ResolvedRefs=False, reason != Pending) must be sustained — timed from its lastTransitionTime — before gateway.programming_failed / gateway.route_rejected fires. Absorbs normal LB provisioning latency. Must be > 0. |
 | `--graph-snapshot-interval` | duration | `5m0s` | How often to persist a compressed topology snapshot to --store (the per-delta change log is written continuously). Effective only with --store AND storm correlation on (the graph feed). Must be > 0. |
+| `--imagepull-transient-min-count` | int | `3` | Require an image-pull failure whose cause is RETRYABLE (registry 429/quota, 5xx, timeout, connection reset) to reach this Event.Count before firing, so a rate limit kubelet clears on its own does not open a noise session. Terminal causes (bad tag, denied, no space) and unrecognized ones still fire on the first event. 1 fires on the first event. |
 | `--in-cluster` | bool | — | Use in-cluster service account credentials. Auto-detected inside a pod. |
 | `--inject-max-bytes` | int | `8192` | Per-inject wire-body ceiling the dispatcher fits payloads to before POSTing (default matches the core-agent daemon's 8192-byte limit). An over-limit payload is shrunk least-signal-first — enrichment dropped, then message truncated — never identity, so the incident still routes; without this the daemon 400s the whole inject and a new incident lands as an empty session (issue #198). |
 | `--kubeconfig` | string | — | Explicit kubeconfig path. Used outside a pod. |
