@@ -93,8 +93,17 @@ var pullTerminalMarkers = []string{
 // The motivating case (issue #213) is Artifact Registry's per-region
 // per-minute request quota: the quota window rolls over and the pull
 // succeeds, but the sentinel has already alerted.
+//
+// EVERY MARKER IS A PHRASE, never a bare status number (issue #216).
+// `429` alone matched digits anywhere in the message — inside a sha256
+// digest, a tag like `:v429`, an Artifact Registry
+// `project_number:235545413903` — and a false retryable is the
+// expensive direction: it holds a real failure for three events. The
+// registries that rate-limit say so in words ("429 Too Many Requests",
+// `toomanyrequests:`, `quota exceeded`), so the phrases carry the
+// signal on their own. A naked `: 429` with no reason phrase now
+// classifies Unknown and fires immediately, which is the safe miss.
 var pullRetryableMarkers = []string{
-	"429",
 	"toomanyrequests",
 	"too many requests",
 	"quota exceeded",
@@ -122,6 +131,14 @@ var pullRetryableMarkers = []string{
 // those to terminal keeps the gate purely subtractive: it can delay
 // only failures it recognizes as nothing-but-transient.
 //
+// The image reference is REMOVED before matching (issue #216). Its
+// every component is operator-chosen text that kubelet echoes back
+// several times — in the quoted ref, in `failed to resolve reference
+// "…"`, in the registry URL — so a repository called `denied-team` or
+// `not-found-yet` reads as a permission failure, and a tag or digest
+// reads as whatever digits it happens to contain. Only the error the
+// registry actually returned gets a vote.
+//
 // HONESTY NOTE — this is a dependency on containerd/registry error
 // STRINGS, which are not API, and it is the same bargain
 // CanonicalReasonForEvent already takes (see dedup.go). An unmatched
@@ -130,7 +147,7 @@ var pullRetryableMarkers = []string{
 // we needed. The tests pin the real observed shapes so a matcher
 // change is visible rather than silent.
 func ClassifyPullFailure(message string) PullClass {
-	m := strings.ToLower(message)
+	m := classificationText(message)
 	for _, marker := range pullTerminalMarkers {
 		if strings.Contains(m, marker) {
 			return PullClassTerminal
@@ -142,6 +159,63 @@ func ClassifyPullFailure(message string) PullClass {
 		}
 	}
 	return PullClassUnknown
+}
+
+// classificationText lowercases the message and blanks out every
+// occurrence of the image reference and of its parts, so that only the
+// registry's own error wording is left for the markers to match.
+//
+// Blanking is a substring replace rather than a cut of the quoted span
+// because kubelet quotes the reference once but repeats its pieces:
+// `failed to resolve reference "HOST/repo@sha256:…"`, and the registry
+// URL `https://HOST/v2/repo/manifests/sha256:…`, where the repository
+// path and the digest appear again without the surrounding quotes.
+// Replacing with a space (not "") keeps two words that straddled a
+// removal from fusing into a marker that neither of them contained.
+func classificationText(message string) string {
+	m := strings.ToLower(message)
+	ref, ok := quotedImageRef(message)
+	if !ok {
+		return m
+	}
+	for _, tok := range refTokens(strings.ToLower(ref)) {
+		// Below three characters a token is more likely to shred
+		// unrelated text than to hide a marker — and no marker is
+		// reachable by a one- or two-character tag anyway.
+		if len(tok) >= 3 {
+			m = strings.ReplaceAll(m, tok, " ")
+		}
+	}
+	return m
+}
+
+// refTokens decomposes a lowercased image reference into the
+// substrings that can show up on their own elsewhere in the message,
+// longest first: the whole reference, it without the digest, it
+// without the tag, the repository path with the host dropped, and the
+// digest and tag by themselves.
+func refTokens(ref string) []string {
+	name, digest := ref, ""
+	if i := strings.IndexByte(ref, '@'); i >= 0 {
+		name, digest = ref[:i], ref[i+1:]
+	}
+	repo, tag := name, ""
+	// A colon is the tag separator only after the last slash; before it
+	// the colon belongs to a host:port.
+	if i := strings.LastIndexByte(name, ':'); i > strings.LastIndexByte(name, '/') {
+		repo, tag = name[:i], name[i+1:]
+	}
+	toks := []string{ref, name, repo}
+	if i := strings.IndexByte(repo, '/'); i >= 0 {
+		toks = append(toks, repo[i+1:])
+	}
+	if digest != "" {
+		toks = append(toks, digest)
+	}
+	if tag != "" {
+		toks = append(toks, tag)
+	}
+	return toks
 }
 
 // dockerHubHost is the canonical registry host for an image reference
@@ -197,22 +271,25 @@ func quotedImageRef(message string) (string, bool) {
 // PullClassMemo resolves a signal's PullClass, remembering per object
 // what the last CAUSE-BEARING message for that object said.
 //
-// The memo exists because kubelet splits the two halves of an
-// image-pull incident across two events with different reasons:
+// The memo exists because kubelet states the cause exactly once and
+// then keeps reporting the failure without it. One failed pull on GKE
+// v1.36 (containerd) emits FOUR events, in order:
 //
-//   - `Failed` / `Failed to pull image "…": <the actual error>` says
-//     WHY, and is not in the shipped --reason allow-list
-//     (filter.go defaultReasons) — but it still reaches the pipeline,
-//     because the k8s-events source emits every event and the engine
+//  1. `Failed` / `Failed to pull image "…": <the actual error>` — the
+//     only one that says WHY, and it is not in the shipped --reason
+//     allow-list (filter.go defaultReasons). It still reaches the
+//     pipeline: the k8s-events source emits every event and the engine
 //     filter is what rejects it.
-//   - `BackOff` / `Back-off pulling image "…"` says IT IS STILL
-//     HAPPENING, is allow-listed, and carries no cause whatsoever.
+//  2. `Failed` / `Error: ErrImagePull` — causeless.
+//  3. `BackOff` / `Back-off pulling image "…"` — allow-listed, and
+//     causeless.
+//  4. `Failed` / `Error: ImagePullBackOff` — causeless.
 //
 // Classifying only the message in hand would therefore gate nothing in
-// a default deployment: every 429 would be held on the `Failed` event
-// and then fire ten seconds later on the causeless `BackOff` one.
-// Joining the two — which is precisely the "wait, why is this
-// failing?" step a human does — is what makes the gate real.
+// a default deployment: a 429 would be held on event 1 and then fire
+// seconds later on the first causeless one behind it. Joining them —
+// which is precisely the "wait, why is this failing?" step a human
+// does — is what makes the gate real.
 //
 // Bounded and self-expiring: entries live for ttl and the map is
 // capped, so a cluster churning through thousands of pods cannot grow

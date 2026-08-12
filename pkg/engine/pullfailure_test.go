@@ -16,6 +16,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +28,17 @@ import (
 // succeeds — nobody needs to be paged for it.
 const artifactRegistry429 = `Failed to pull image "us-east1-artifactregistry.gcr.io/gke-release/gke-release/gke-distroless/bash:gke_distroless_20260615.00_p0@sha256:b98f4278dc5123fbad96c54ba8301c512d32f4716528ab30faea15108c68c52e": [failed to pull and unpack image "us-east1-artifactregistry.gcr.io/gke-release/gke-release/gke-distroless/bash@sha256:b98f4278dc5123fbad96c54ba8301c512d32f4716528ab30faea15108c68c52e": failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://us-east1-artifactregistry.gcr.io/v2/gke-release/gke-release/gke-distroless/bash/manifests/sha256:4e2ffa754250cb4d4d68fa5c2dd7a592c78edbbedc3a3b9428810c4bdf0c438b: 429 Too Many Requests
 toomanyrequests: Quota exceeded for quota metric 'Requests per project per region' and limit 'Requests per project per region per minute per region' of service 'artifactregistry.googleapis.com' for consumer 'project_number:235545413903'., failed to pull and unpack image "us-east1-artifactregistry.gcr.io/gke-release/gke-release/gke-distroless/bash@sha256:b98f4278dc5123fbad96c54ba8301c512d32f4716528ab30faea15108c68c52e": failed to resolve reference "us-east1-artifactregistry.gcr.io/gke-release/gke-release/gke-distroless/bash@sha256:b98f4278dc5123fbad96c54ba8301c512d32f4716528ab30faea15108c68c52e": unexpected status from HEAD request to https://us-east1-artifactregistry.gcr.io/v2/gke-release/gke-release/gke-distroless/bash/manifests/sha256:b98f4278dc5123fbad96c54ba8301c512d32f4716528ab30faea15108c68c52e: 429 Too Many Requests]`
+
+// gkeMissingRepo and gkeUnreachableRegistry are verbatim from a GKE
+// v1.36.2-gke.2064000 (containerd) cluster, contributed on issue #216
+// while the classifier was being ported elsewhere. They pin the two
+// ends of the classification against a real emitter: a repository that
+// does not exist is terminal — note that it lands on the generic `not
+// found` marker, the specific "repository does not exist" wording
+// never appears — and a registry that will not answer is retryable.
+const gkeMissingRepo = `Failed to pull image "us-docker.pkg.dev/PROJECT/does-not-exist/nope:v1": failed to pull and unpack image "us-docker.pkg.dev/PROJECT/does-not-exist/nope:v1": failed to resolve reference "us-docker.pkg.dev/PROJECT/does-not-exist/nope:v1": unexpected status from HEAD request to https://us-docker.pkg.dev/v2/PROJECT/does-not-exist/nope/manifests/v1: 404 Not Found`
+
+const gkeUnreachableRegistry = `Failed to pull image "10.255.255.1:5000/app/nope:v1": failed to pull and unpack image "10.255.255.1:5000/app/nope:v1": failed to resolve reference "10.255.255.1:5000/app/nope:v1": failed to do request: Head "https://10.255.255.1:5000/v2/app/nope/manifests/v1": dial tcp 10.255.255.1:5000: i/o timeout`
 
 // TestClassifyPullFailure pins the classifier against the real
 // containerd/registry error strings. Like the CanonicalReasonForEvent
@@ -49,6 +61,7 @@ func TestClassifyPullFailure(t *testing.T) {
 		{"connection reset", `Failed to pull image "reg.example.com/app:v1": read tcp: connection reset by peer`, PullClassRetryable},
 		{"truncated layer", `Failed to pull image "reg.example.com/app:v1": failed to copy: unexpected EOF`, PullClassRetryable},
 		{"context deadline", `Failed to pull image "reg.example.com/app:v1": context deadline exceeded`, PullClassRetryable},
+		{"unreachable registry (GKE 1.36, issue #216)", gkeUnreachableRegistry, PullClassRetryable},
 
 		// Terminal: retrying cannot help. These keep firing on event #1.
 		{"bad tag / manifest unknown", `Failed to pull image "nginx:nope": manifest unknown`, PullClassTerminal},
@@ -58,6 +71,7 @@ func TestClassifyPullFailure(t *testing.T) {
 		{"malformed reference", `Failed to pull image "NOT A REF": invalid reference format`, PullClassTerminal},
 		{"never-pull policy", "Container image \"nginx:1.25\" is not present with pull policy of Never: ErrImageNeverPull", PullClassTerminal},
 		{"disk full is node-terminal, not transient", `Failed to pull image "nginx:1.25": write /var/lib/containerd/x: no space left on device`, PullClassTerminal},
+		{"missing repository (GKE 1.36, issue #216)", gkeMissingRepo, PullClassTerminal},
 
 		// Terminal wins ties: an aggregated message naming a bad tag
 		// AND a timeout must not be suppressed as merely transient.
@@ -75,6 +89,67 @@ func TestClassifyPullFailure(t *testing.T) {
 				t.Errorf("ClassifyPullFailure(%.60q…) = %v, want %v", tc.message, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifyPullFailure_ReferenceTextDoesNotVote is issue #216: the
+// image reference is operator-chosen text that kubelet echoes back
+// several times, so before the fix a digest, a tag or a repository
+// path could decide the class on its own. The two directions are not
+// equally bad — a false terminal fires an incident that was going to
+// clear (noise), while a false RETRYABLE holds a real failure for
+// three events (a miss) — so both are pinned here.
+func TestClassifyPullFailure_ReferenceTextDoesNotVote(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		message string
+		want    PullClass
+	}{
+		// Digits that are not a status code. A sha256 digest contains
+		// "429" about 1.5% of the time, and the real Artifact Registry
+		// quota error quotes a project number in the same message.
+		{"digest containing 429", `Failed to pull image "us-docker.pkg.dev/p/r/app@sha256:b98f4290c1d2e3f4a5b6c7d8e9f0112233445566778899aabbccddeeff00112233": rpc error: code = Unknown desc = failed to commit snapshot`, PullClassUnknown},
+		{"tag containing 429", `Failed to pull image "reg.example.com/team/app:v429": rpc error: code = Unknown desc = failed to commit snapshot`, PullClassUnknown},
+		{"project number containing 429", `Failed to pull image "us-docker.pkg.dev/p/r/app:v1": rpc error: code = Unknown desc = unrecognized failure for consumer 'project_number:429551413903'`, PullClassUnknown},
+
+		// Words in the repository path. `denied` reads as a permission
+		// failure and would have fired this timeout immediately —
+		// worse, terminal signals get no Registry storm ancestor, so a
+		// registry-wide outage would not have correlated either.
+		{"repository path containing denied", `Failed to pull image "reg.example.com/denied-team/app:v1": failed to resolve reference "reg.example.com/denied-team/app:v1": failed to do request: Head "https://reg.example.com/v2/denied-team/app/manifests/v1": dial tcp 10.0.0.1:443: i/o timeout`, PullClassRetryable},
+		{"repository path containing unauthorized", `Failed to pull image "reg.example.com/unauthorized-probe/app:v1": read tcp: connection reset by peer`, PullClassRetryable},
+
+		// Stripping the reference must not disarm a genuine failure
+		// whose repository path happens to say the same thing.
+		{"genuine denial in a denied-named repo", `Failed to pull image "reg.example.com/denied-team/app:v1": denied: requested access to the resource is denied`, PullClassTerminal},
+		{"genuine 429 keeps its phrase", `Failed to pull image "reg.example.com/app@sha256:aaaa": unexpected status from HEAD request: 429 Too Many Requests`, PullClassRetryable},
+
+		// Accepted regression from dropping the bare "429" marker: a
+		// status code with no reason phrase is no longer recognized.
+		// Unknown fires immediately, which is the safe direction.
+		{"bare 429 with no reason phrase", `Failed to pull image "gcr.io/p/app:v1": unexpected status from HEAD request to https://gcr.io/v2/p/app/manifests/v1: 429`, PullClassUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClassifyPullFailure(tc.message); got != tc.want {
+				t.Errorf("ClassifyPullFailure(%.80q…) = %v, want %v", tc.message, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPullRetryableMarkersArePhrases guards the #216 rule directly: a
+// marker made only of digits matches any message that happens to
+// contain those digits, and the retryable list is the one where a
+// false positive costs a suppressed incident.
+func TestPullRetryableMarkersArePhrases(t *testing.T) {
+	t.Parallel()
+	for _, marker := range pullRetryableMarkers {
+		if strings.IndexFunc(marker, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+			t.Errorf("retryable marker %q is bare digits — pair it with the reason phrase (issue #216)", marker)
+		}
 	}
 }
 
