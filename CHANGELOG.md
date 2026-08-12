@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Optional multi-cluster watch (issue #208).** One `lookout watch`
+  process can now watch several clusters. Two mutually-exclusive flags
+  select the fleet: `--clusters` takes comma-separated `name=endpoint`
+  pairs (a bare endpoint derives a short name from its first DNS label),
+  and `--clusters-from` discovers them from a `project` or
+  `project/location` via the cloud provider's cluster API. Both need a
+  Fleet-capable provider build (`-tags gke`); on GKE they authenticate
+  kubeconfig-free with Application Default Credentials over each
+  cluster's DNS control-plane endpoint (per-cluster RBAC still required).
+  Each cluster runs as an isolated *runner* — its own clients, informers,
+  sources, and store — supervised so one cluster's failure restarts only
+  that runner (bounded backoff) and never ends the process; the new
+  `lookout_runner_up` and `lookout_runner_restarts_total` metrics expose
+  this. Project-tier sources (quota, notifications) run once per distinct
+  project rather than once per cluster. **One sentinel per cluster
+  remains the default and recommended deployment** — leave both flags
+  unset and nothing changes. `--cluster-name`, `--kubeconfig`,
+  `--in-cluster`, `--store`, and `--dedup-persist` are rejected in
+  multi-cluster mode (they are inherently single-cluster).
+
+### Changed
+
+- **Breaking (metrics):** every `lookout_*` series now carries a
+  `cluster` label whose value is `--cluster-name` (empty string when
+  unset). This is groundwork for optional multi-cluster support (one
+  sentinel watching N clusters, issue #208), but it lands for
+  single-cluster deployments too — several sentinels scraped into one
+  Prometheus are now filterable by cluster. **Migration:** dashboards
+  and alerts that match `lookout_*` series by an exact label set must
+  add/ignore the `cluster` label; set `--cluster-name` so the value is
+  meaningful. One-sentinel-per-cluster remains the default and
+  recommended deployment.
+
 ### Docs
 
 - **Assessment of LangChain's `sre-agent` sample against k8s-lookout**

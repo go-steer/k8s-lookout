@@ -118,6 +118,8 @@ type flags struct {
 	inCluster           bool
 	kubeconfig          string
 	clusterName         string
+	clusters            string
+	clustersFrom        string
 	project             string
 	zone                string
 	logLevel            string
@@ -320,6 +322,15 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "Explicit kubeconfig path. Used outside a pod.")
 	fs.StringVar(&f.clusterName, "cluster-name", "", "Human-readable cluster name included in every inject payload.")
 
+	// Multi-cluster (issue #208): opt one process into watching several
+	// clusters. Off by default — one sentinel per cluster stays the
+	// recommended deployment. Both paths reach each cluster
+	// kubeconfig-free via the cloud provider's own credentials (GKE: ADC
+	// over the control-plane DNS endpoint), so they need a Fleet-capable
+	// provider (-tags gke); on a default build they fail loudly.
+	fs.StringVar(&f.clusters, "clusters", "", "Multi-cluster: comma-separated name=endpoint pairs to watch from one process, e.g. prod-us=abc.us-central1.gke.goog,prod-eu=def.europe-west1.gke.goog. A bare endpoint derives a short name from its first DNS label. Mutually exclusive with --clusters-from; needs a Fleet-capable provider (-tags gke). Leave empty for the one-sentinel-per-cluster default.")
+	fs.StringVar(&f.clustersFrom, "clusters-from", "", "Multi-cluster: discover the clusters to watch instead of listing them. Value is a project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project). Mutually exclusive with --clusters; needs a Fleet-capable provider (-tags gke).")
+
 	// Deployment identity (§8). ADDITIVE flags: zone/project complete
 	// the (fingerprint, cluster/project/zone) fleet-rollup join on
 	// source-namespaced payloads, and zone participates in the
@@ -401,6 +412,37 @@ func (f *flags) validate() error {
 	}
 	if strings.HasSuffix(f.daemonURL, "/") {
 		return fmt.Errorf("--daemon-url must not end with '/' (got %q)", f.daemonURL)
+	}
+	// Multi-cluster (issue #208): --clusters / --clusters-from opt one
+	// process into watching several clusters. Mutually exclusive; the
+	// per-cluster identity comes from the pair name or discovery, so the
+	// scalar single-cluster flags don't apply, and the per-cluster
+	// stores/snapshots would collide on one path (deferred — run one
+	// sentinel per cluster for those).
+	if f.clusters != "" && f.clustersFrom != "" {
+		return errors.New("--clusters and --clusters-from are mutually exclusive: list endpoints OR discover them, not both")
+	}
+	if f.clusters != "" || f.clustersFrom != "" {
+		if f.clusterName != "" {
+			return errors.New("--cluster-name is per-cluster in multi-cluster mode: names come from --clusters pairs or discovery, not this flag")
+		}
+		if f.kubeconfig != "" {
+			return errors.New("--kubeconfig is not used in multi-cluster mode: clusters are reached kubeconfig-free via the cloud provider (GKE: ADC over the DNS endpoint)")
+		}
+		if f.inCluster {
+			return errors.New("--in-cluster is not used in multi-cluster mode: clusters are reached via the cloud provider's own credentials, not the local service account")
+		}
+		if f.store != "" {
+			return errors.New("--store is per-cluster and not yet supported in multi-cluster mode (the SQLite path would collide across runners): run one sentinel per cluster for the occurrence store, or leave --store unset")
+		}
+		if f.dedupPersist != "" {
+			return errors.New("--dedup-persist is per-cluster and not yet supported in multi-cluster mode (the snapshot path would collide across runners): leave it unset")
+		}
+		if f.clusters != "" {
+			if _, err := parseClusters(f.clusters); err != nil {
+				return err
+			}
+		}
 	}
 	// Sources are validated before the mode switch's dry-run early
 	// return: a typo'd source name is a config error in every mode.
