@@ -104,8 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registries that rate-limit say `429 Too Many Requests` or
   `toomanyrequests:` in words. A naked `: 429` with no reason phrase
   now classifies unknown and fires immediately, which is the safe
-  direction. Two verbatim GKE 1.36 messages (a missing Artifact
-  Registry repository, an unreachable registry) are pinned as tests.
+  direction. Blanking covers the percent-encoded copy too: a registry
+  that authenticates per repository puts the path in a token-URL query
+  (`?scope=repository%3Aproj%2Fteam%2Fapp%3Apull`), where only the
+  delimiters are escaped and the path segments survive verbatim — so
+  an Artifact Registry repository named `denied-team` still leaked the
+  marker until the encoded form was blanked as well. Four verbatim GKE
+  1.36 messages are pinned as tests, two of them captured from a live
+  drill that also confirmed the end-to-end behaviour: a repository
+  named `denied-team` behind an unreachable registry is now held by
+  `--imagepull-transient-min-count` instead of firing on the first
+  event, while a missing repository still fires immediately.
 
 - Every row of the docs-site metrics reference rendered with a
   trailing `", unit: "` glued to its description. The generator
