@@ -88,6 +88,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The image-pull classifier could read a failure class out of the
+  image reference instead of out of the error (#216, follow-up to
+  #213). Two ways: `429` was matched as a bare marker, so any digits
+  in a sha256 digest (about a 1.5% chance per pull), a tag like
+  `:v429`, or an Artifact Registry `project_number` classified the
+  failure retryable — holding a real, non-transient failure for three
+  events; and a repository path such as `registry/denied-team/app`
+  matched the terminal `denied` marker, firing a registry timeout
+  immediately and denying it a `Registry/<host>` storm ancestor. The
+  classifier now blanks the reference and all of its parts (path,
+  tag, digest, and the copies kubelet repeats in `failed to resolve
+  reference` and in the registry URL) before matching, and every
+  retryable marker is a phrase rather than a status number — the
+  registries that rate-limit say `429 Too Many Requests` or
+  `toomanyrequests:` in words. A naked `: 429` with no reason phrase
+  now classifies unknown and fires immediately, which is the safe
+  direction. Two verbatim GKE 1.36 messages (a missing Artifact
+  Registry repository, an unreachable registry) are pinned as tests.
+
 - Every row of the docs-site metrics reference rendered with a
   trailing `", unit: "` glued to its description. The generator
   derives names and help text by parsing `prometheus.Desc.String()`
