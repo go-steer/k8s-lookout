@@ -42,6 +42,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meaningful. One-sentinel-per-cluster remains the default and
   recommended deployment.
 
+### Docs
+
+- **Assessment of LangChain's `sre-agent` sample against k8s-lookout**
+  (`docs/assessments/langchain-sre-agent.md`, a new `docs/assessments/`
+  home for external comparisons). That project's Python utility layer
+  serves roughly the purpose lookout serves for core-agent, so it is a
+  useful mirror. Covers its agent topology (nine subagents over 56
+  tools, dispatched only by LLM `task` calls), the finding that its
+  production monitoring path bypasses those subagents entirely for a
+  30-minute poll plus one Haiku call, a capability-by-capability
+  head-to-head, and the architectural trade. Conclusion: lookout is a
+  strict superset on incident detection; six capabilities are worth
+  adopting (a missing-`Resources.Requests` census with LimitRange
+  awareness ranks first), two are posture checks parked behind
+  `fleet-audit-detectors-design.md` Open Question 1, and its 19
+  mutating tools are a counterexample rather than a candidate — the
+  sample's writer ClusterRole is effectively cluster-admin, gated only
+  by an approval prompt.
+
+- **`docs/roadmap-post-m5-sensors.md` status refreshed** — it was stale
+  as a gap list and had been cited as a live one. Every Tier A–C item
+  now carries ✅ shipped / ◐ partial / ○ open, verified against the
+  tree: ten of twenty have shipped (#128, #129, #130, #131, #132, #134,
+  plus §7.7 severity routing and the `--cluster-name` half of A.4).
+  The shortlist table gains a status column; C.5 is marked event-half
+  only, and C.2's audit-log attribution is noted as now unblocked by
+  A.1 having landed. Tier D is unchanged as policy, with a
+  clarification that the Gateway API *source* (#168) shipping does not
+  touch its "no" on Gateway-API **graph kinds** — `pkg/graph` still has
+  no gateway node or edge type.
+
 ## [0.17.0] - 2026-08-11
 
 A naming release: the transition scaffolding is gone. The watch-path
