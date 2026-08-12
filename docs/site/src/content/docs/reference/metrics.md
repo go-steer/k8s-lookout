@@ -17,40 +17,40 @@ is added without an inventory row.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `lookout_events_seen_total` | counter | `reason`, `namespace` | Total k8s events observed by the informer, before filter.", unit: " |
-| `lookout_events_injected_total` | counter | `reason`, `namespace` | Total events that survived filter + dedup and were POSTed to the daemon.", unit: " |
-| `lookout_events_deduped_total` | counter | `reason`, `namespace` | Total events suppressed by the rolling-window dedup cache.", unit: " |
-| `lookout_events_filtered_total` | counter | `gate` | Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed\|namespace_excluded\|namespace_not_allowed\|unhealthy_debounce\|crashloop_debounce\|imagepull_transient_debounce). The leading-edge debounces deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.", unit: " |
-| `lookout_inject_errors_total` | counter | `reason`, `http_code` | Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Counts sink operations regardless of --sink.", unit: " |
-| `lookout_inject_shrinks_total` | counter | `shed` | Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment\|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling.", unit: " |
-| `lookout_session_creates_total` | counter | `outcome` | Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome.", unit: " |
-| `lookout_active_incidents` | gauge | — | Current number of incidents in the sidecar's dedup cache.", unit: " |
-| `lookout_recoveries_observed_total` | counter | `resolution` | Total kind=resolved outcome records emitted, by resolution (recovered\|object_deleted).", unit: " |
-| `lookout_recoveries_reverted_total` | counter | — | Total kind=resolved.reverted records emitted: symptom recurred within the revert window after a resolve.", unit: " |
-| `lookout_recovery_tracking` | gauge | — | Current number of bound incidents the recovery tracker is watching for clearance.", unit: " |
-| `lookout_recovery_drops_total` | counter | `cause` | Total resolved signals dropped instead of injected, by cause (unknown_session: binding lost, e.g. restart without --dedup-persist).", unit: " |
-| `lookout_storms_formed_total` | counter | — | Total kind=storm incidents opened by blast-radius correlation.", unit: " |
-| `lookout_storms_resolved_total` | counter | — | Total storms resolved because every member incident cleared.", unit: " |
-| `lookout_storms_active` | gauge | — | Currently open (unresolved) storms.", unit: " |
-| `lookout_storm_members_total` | counter | `kind` | Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival).", unit: " |
-| `lookout_storm_updates_total` | counter | — | Total kind=storm.update size refreshes injected into storm sessions (membership grew past a reporting threshold: doubling or +10, max one per minute).", unit: " |
-| `lookout_watchboard_entries_total` | counter | `kind` | Total warning-class signals buffered onto the shared watchboard digest, by signal kind.", unit: " |
-| `lookout_watchboard_digests_total` | counter | — | Total kind=watchboard.digest injects flushed to the watchboard session.", unit: " |
-| `lookout_watchboard_rotations_total` | counter | — | Total size-based watchboard session rotations: a fresh session opened after --watchboard-rotate digest injects.", unit: " |
-| `lookout_watchboard_buffered` | gauge | — | Warning-class signals currently buffered awaiting the next watchboard digest flush.", unit: " |
-| `lookout_info_dropped_total` | counter | `kind` | Total info-severity signals routed to the stored-only class (no inject anywhere), by signal kind. With --store set they are persisted; without it they are dropped after counting.", unit: " |
-| `lookout_store_records_total` | counter | `route` | Total occurrences committed to the store, by routing outcome (injected\|suppressed\|storm\|storm-member\|watchboard\|info-stored\|resolved).", unit: " |
-| `lookout_store_write_drops_total` | counter | `cause` | Total occurrence records LOST by the store's write path, by cause (buffer_full: the non-blocking writer buffer overflowed; write_error: a batch insert failed). The store is telemetry, not a system of record — drops are loud, never blocking.", unit: " |
-| `lookout_store_pruned_rows_total` | counter | `cause` | Total occurrence rows deleted by the prune loop, by cause (ttl: older than --store-ttl; size: oldest-first eviction after --store-max-mb was exceeded).", unit: " |
-| `lookout_enrichments_total` | counter | `outcome` | Total enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers).", unit: " |
-| `lookout_enrichment_bytes` | histogram | — | Size of the attached enrichment bundle in bytes, after the --enrich-cap prefix cut (the telemetry that will inform the fixed-vs-model-aware cap revisit).", unit: " |
-| `lookout_enrichment_truncated_total` | counter | — | Total enrichment bundles the --enrich-cap byte budget truncated at a section boundary (dropped sections become overflow trailers naming the follow-up command).", unit: " |
-| `lookout_enrichment_failures_total` | counter | `stage` | Total enrichment stage failures, by stage (resolve\|spec\|delta\|edges\|radius\|logs). Failures never block the inject; they surface as enrichment_error trailers in the attached bundle.", unit: " |
-| `lookout_memory_facts_total` | counter | `class` | Total distilled facts written (upserts included) by the scheduled distiller pass, by fact class.", unit: " |
-| `lookout_distill_errors_total` | counter | — | Total failed distiller passes. A failed pass loses freshness only — the next pass re-derives every fact from the occurrence window.", unit: " |
-| `lookout_triage_overrides_total` | counter | `action` | Total severity-routing decisions refined by an open triage-status record, by action (downgraded: agent's severity_override lowered the class; upgraded: it raised it; escalated: status=escalated pinned critical).", unit: " |
-| `lookout_triage_resolved_flips_total` | counter | — | Total triage-status records flipped to resolved by recovery injects (the automatic lifecycle — resolved records join the corpus).", unit: " |
-| `lookout_triage_regressed_total` | counter | — | Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time. Evidence only, never a re-page.", unit: " |
-| `lookout_cross_source_followups_total` | counter | `source` | Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (leading/reactive joins made session-visible), by joining source family.", unit: " |
-| `lookout_sink_info` | gauge | `sink` | The configured agent sink (--sink), value fixed at 1 on the active label (core-agent\|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.", unit: " |
+| `lookout_events_seen_total` | counter | `reason`, `namespace` | Total k8s events observed by the informer, before filter. |
+| `lookout_events_injected_total` | counter | `reason`, `namespace` | Total events that survived filter + dedup and were POSTed to the daemon. |
+| `lookout_events_deduped_total` | counter | `reason`, `namespace` | Total events suppressed by the rolling-window dedup cache. |
+| `lookout_events_filtered_total` | counter | `gate` | Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed\|namespace_excluded\|namespace_not_allowed\|unhealthy_debounce\|crashloop_debounce\|imagepull_transient_debounce). The leading-edge debounces deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher. |
+| `lookout_inject_errors_total` | counter | `reason`, `http_code` | Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Counts sink operations regardless of --sink. |
+| `lookout_inject_shrinks_total` | counter | `shed` | Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment\|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling. |
+| `lookout_session_creates_total` | counter | `outcome` | Total incident-open attempts against the configured sink (core-agent: POST /sessions; webhook: POST /incidents), labeled by outcome. |
+| `lookout_active_incidents` | gauge | — | Current number of incidents in the sidecar's dedup cache. |
+| `lookout_recoveries_observed_total` | counter | `resolution` | Total kind=resolved outcome records emitted, by resolution (recovered\|object_deleted). |
+| `lookout_recoveries_reverted_total` | counter | — | Total kind=resolved.reverted records emitted: symptom recurred within the revert window after a resolve. |
+| `lookout_recovery_tracking` | gauge | — | Current number of bound incidents the recovery tracker is watching for clearance. |
+| `lookout_recovery_drops_total` | counter | `cause` | Total resolved signals dropped instead of injected, by cause (unknown_session: binding lost, e.g. restart without --dedup-persist). |
+| `lookout_storms_formed_total` | counter | — | Total kind=storm incidents opened by blast-radius correlation. |
+| `lookout_storms_resolved_total` | counter | — | Total storms resolved because every member incident cleared. |
+| `lookout_storms_active` | gauge | — | Currently open (unresolved) storms. |
+| `lookout_storm_members_total` | counter | `kind` | Total incidents folded into storms, by how they joined (suppressed: per-incident session never opened; superseded: pre-storm session pointed at the storm; attached: late arrival). |
+| `lookout_storm_updates_total` | counter | — | Total kind=storm.update size refreshes injected into storm sessions (membership grew past a reporting threshold: doubling or +10, max one per minute). |
+| `lookout_watchboard_entries_total` | counter | `kind` | Total warning-class signals buffered onto the shared watchboard digest, by signal kind. |
+| `lookout_watchboard_digests_total` | counter | — | Total kind=watchboard.digest injects flushed to the watchboard session. |
+| `lookout_watchboard_rotations_total` | counter | — | Total size-based watchboard session rotations: a fresh session opened after --watchboard-rotate digest injects. |
+| `lookout_watchboard_buffered` | gauge | — | Warning-class signals currently buffered awaiting the next watchboard digest flush. |
+| `lookout_info_dropped_total` | counter | `kind` | Total info-severity signals routed to the stored-only class (no inject anywhere), by signal kind. With --store set they are persisted; without it they are dropped after counting. |
+| `lookout_store_records_total` | counter | `route` | Total occurrences committed to the store, by routing outcome (injected\|suppressed\|storm\|storm-member\|watchboard\|info-stored\|resolved). |
+| `lookout_store_write_drops_total` | counter | `cause` | Total occurrence records LOST by the store's write path, by cause (buffer_full: the non-blocking writer buffer overflowed; write_error: a batch insert failed). The store is telemetry, not a system of record — drops are loud, never blocking. |
+| `lookout_store_pruned_rows_total` | counter | `cause` | Total occurrence rows deleted by the prune loop, by cause (ttl: older than --store-ttl; size: oldest-first eviction after --store-max-mb was exceeded). |
+| `lookout_enrichments_total` | counter | `outcome` | Total enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers). |
+| `lookout_enrichment_bytes` | histogram | — | Size of the attached enrichment bundle in bytes, after the --enrich-cap prefix cut (the telemetry that will inform the fixed-vs-model-aware cap revisit). |
+| `lookout_enrichment_truncated_total` | counter | — | Total enrichment bundles the --enrich-cap byte budget truncated at a section boundary (dropped sections become overflow trailers naming the follow-up command). |
+| `lookout_enrichment_failures_total` | counter | `stage` | Total enrichment stage failures, by stage (resolve\|spec\|delta\|edges\|radius\|logs). Failures never block the inject; they surface as enrichment_error trailers in the attached bundle. |
+| `lookout_memory_facts_total` | counter | `class` | Total distilled facts written (upserts included) by the scheduled distiller pass, by fact class. |
+| `lookout_distill_errors_total` | counter | — | Total failed distiller passes. A failed pass loses freshness only — the next pass re-derives every fact from the occurrence window. |
+| `lookout_triage_overrides_total` | counter | `action` | Total severity-routing decisions refined by an open triage-status record, by action (downgraded: agent's severity_override lowered the class; upgraded: it raised it; escalated: status=escalated pinned critical). |
+| `lookout_triage_resolved_flips_total` | counter | — | Total triage-status records flipped to resolved by recovery injects (the automatic lifecycle — resolved records join the corpus). |
+| `lookout_triage_regressed_total` | counter | — | Total kind=triage.regressed evidence followups: a downgraded incident's dedup-window count reached --triage-regress-factor times its count at downgrade time. Evidence only, never a re-page. |
+| `lookout_cross_source_followups_total` | counter | `source` | Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (leading/reactive joins made session-visible), by joining source family. |
+| `lookout_sink_info` | gauge | `sink` | The configured agent sink (--sink), value fixed at 1 on the active label (core-agent\|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities. |
 

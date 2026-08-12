@@ -92,10 +92,21 @@ func MetricsInventory() []MetricDoc {
 }
 
 // descRe extracts fqName and help from prometheus.Desc's String()
-// form: Desc{fqName: "...", help: "...", constLabels: {...}, ...}.
-// Help strings registered in metrics.go contain no double quotes;
-// the anchored ", constLabels:" delimiter keeps the match exact.
-var descRe = regexp.MustCompile(`^Desc\{fqName: "([^"]+)", help: "(.*)", constLabels: `)
+// form, which is client_golang's only way out: Desc's fields are
+// unexported and it exposes no accessors.
+//
+//	Desc{fqName: "...", help: "...", unit: "", constLabels: {...}, ...}
+//
+// The `unit` field is optional here because client_golang added it
+// between v1.19 and v1.24; matching it optionally means the parse
+// survives both. Each field is matched as a run of non-quote
+// characters rather than greedily to the last delimiter — a greedy
+// help match swallows the intervening `", unit: "` and appends it to
+// every rendered help string (which is exactly what happened when
+// the unit field appeared). Help strings registered in metrics.go
+// contain no double quotes, an invariant TestDescRegexpParsesHelp
+// enforces so this stays exact.
+var descRe = regexp.MustCompile(`^Desc\{fqName: "([^"]*)", help: "([^"]*)"(?:, unit: "[^"]*")?, constLabels: `)
 
 // describeCollector returns the single Desc a sentinel collector
 // declares (every metric here is one Desc — vectors included).

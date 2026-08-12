@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crashloop_debounce`, `imagepull_transient_debounce`) — so the new
   gates, and the pre-existing ones, are observable instead of silent.
 
+### Fixed
+
+- Every row of the docs-site metrics reference rendered with a
+  trailing `", unit: "` glued to its description. The generator
+  derives names and help text by parsing `prometheus.Desc.String()`
+  (its fields are unexported and it exposes no accessors), and
+  client_golang v1.24 added a `unit` field between `help` and
+  `constLabels` — which the greedy help match swallowed. The parse now
+  matches each field exactly and treats `unit` as optional, so it
+  survives both client_golang layouts. Docs-only; the metrics
+  themselves were never affected. The bug was invisible because every
+  existing guard compares generated output against generator output,
+  making a parse bug self-consistent, so the parser now has a
+  round-trip test against a real collector.
+
 ## [0.17.0] - 2026-08-11
 
 A naming release: the transition scaffolding is gone. The watch-path
