@@ -432,7 +432,7 @@ correctness of blast-radius answers during churn.
 | `triage radius` | BFS up (routes), lateral (shared node/volume/config), down (dependents) with depth limit |
 | `triage events` / `triage changes` | owner-chain resolution; neighborhood scoping for change filters |
 | `bundle` / enrichment (§7.6) | radius + edges + owner chain in one pass |
-| storm correlation (§7.5) | blast-radius key: given N incident objects, find the shared ancestor (node, owner, config) |
+| storm correlation (§7.5) | blast-radius key: given N incident objects, find the shared ancestor (node, owner, config) — one of three tiers, the other two read the signal rather than the graph |
 | `triage spec --diff` | previous revision lookup from history (§6.6) |
 
 ### 6.5 Sanitizer
@@ -555,12 +555,37 @@ of code in this document; ships in M2 before any new source.**
 
 Today's dedup key is `(uid, reason)`: a node failure opens ~30 sessions for 30
 evicted pods. A second-level correlation window (default 60 s) groups new
-incidents sharing a blast-radius key — resolved via the topology index: the
-nearest common ancestor of the affected objects (node, owner chain, shared
-ConfigMap/PVC, namespace; at fleet tier, zone) — into one `kind=storm`
-incident: *"Node X NotReady; 30 pods affected across 6 namespaces; 3
-representative incidents attached."* Member signals are recorded but don't
-open sessions. Severity of the storm is the max of members + a size escalator.
+incidents sharing a blast-radius key into one `kind=storm` incident: *"Node X
+NotReady; 30 pods affected across 6 namespaces; 3 representative incidents
+attached."* Member signals are recorded but don't open sessions. Severity of
+the storm is the max of members + a size escalator.
+
+A blast-radius key comes from one of three tiers, tried in order. Every storm
+records which tier produced its key (`StormInfo.KeySource`), so a grouping can
+be explained rather than asserted.
+
+| Tier | Key source | Example | Threshold |
+| --- | --- | --- | --- |
+| **External** | an extractor reading the *signal*, for dependencies with no vertex in the graph | registry host (`registry-host`) | `--storm-min` |
+| **Topology** | the topology index: nearest common ancestor of the affected objects — node, owner chain, shared ConfigMap/PVC, namespace; at fleet tier, zone (`topology`) | `Node/gke-node-3` | `--storm-min` |
+| **Mined** | an exact value shared by enough windowed incidents, discovered rather than declared (`mined:<attribute>`) | one bad image digest across unrelated Deployments | `--storm-mine-min`, opt-in |
+
+External keys are consulted *first* and outrank every topology ancestor: an
+external dependency spans workloads, so letting an owner-chain or namespace
+candidate win would shatter one cluster-wide incident into per-workload
+storms. They read the signal rather than the graph for two reasons — the
+dependency is not in the graph by definition, and an extractor can *decline*
+(the registry key applies only to retryable pull failures, since two bad tags
+on one host are two incidents), which a graph edge could not express.
+
+Mining is the fallback for blast radii nobody modelled, and is off by default.
+A mined key is circumstantial where a declared one is causal, so it is tried
+only after every declared key has failed to form, needs more members
+(`--storm-mine-min` ≥ `--storm-min`), matches exact values only, and is
+subject to an **explainability gate**: a mined attribute may key a storm only
+if it has a human-readable name, so the payload can always state *why* these N
+are one incident. Absent attributes never correlate — incidents with no node
+recorded do not become "the same node".
 
 ### 7.6 Enrichment (warm sessions)
 

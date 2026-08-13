@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--storm-mine` correlates on *discovered* keys, for blast radii nobody
+  modelled (#225). Storm correlation has always grouped incidents by
+  something declared in advance: a topology ancestor from the graph, or
+  — new in this release — a named external dependency such as the
+  registry host. Both mean a code change before a new kind of fault can
+  be seen as one incident. With `--storm-mine`, incidents in the window
+  that share an exact image reference, node or container group into one
+  storm even when nothing connects them in the cluster: one bad digest
+  rolled out to five unrelated Deployments is one session, not five.
+
+  Off by default, and deliberately so — a mined key is circumstantial
+  where a modelled one is causal. It needs more members than a declared
+  key to form (`--storm-mine-min`, which can never be set below
+  `--storm-min`), it matches exact values only, and every mined storm
+  names the attribute it grouped on, so the payload can always say *why*
+  these N are one incident. Absent attributes never correlate: incidents
+  with no node recorded do not become "the same node".
+
+- Blast-radius keys for dependencies outside the cluster are now a
+  documented extension point rather than a special case in the
+  correlator (#225). A registry host, a cloud API endpoint, a DNS
+  resolver — none has a vertex in the topology graph, and the registry
+  key added in 0.18.0 was hardcoded because of it. Storms now record
+  which source produced their key (`topology`, `registry-host`, or
+  `mined:<attribute>`), so a grouping can be explained rather than just
+  asserted.
+
+### Fixed
+
+- A registry-wide fault now correlates into one incident even when most
+  of its events never say what went wrong (#225). The registry-scoped
+  storm added in 0.18.0 (#213) keyed only off failures whose message
+  named a retryable cause — but kubelet states the cause once per object
+  and then repeats itself causelessly, so on a real GKE cluster a
+  region-wide Artifact Registry 429 hit seven workloads across two
+  namespaces and only *two* of them ever reached the correlator with a
+  registry key. Two is below the formation threshold, so no storm formed
+  and each dug its own root cause. Cause evidence is now remembered per
+  registry host as well as per object: a causeless `Back-off pulling
+  image` inherits the host's known-retryable state, and the seven arrive
+  as one incident.
+
+  Only retryable causes propagate host-wide, and on a much shorter clock
+  than per-object evidence — a bad tag is a statement about one image
+  reference, not about the registry serving it, so it stays with the
+  object that reported it. Objects keep their own evidence ahead of the
+  host's, so a pod failing terminally during a rate limit still fires
+  immediately.
+
 ## [0.18.0] - 2026-08-13
 
 A correlation release, with one breaking change for anyone scraping the

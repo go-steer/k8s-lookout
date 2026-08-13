@@ -406,3 +406,59 @@ func TestStormFlags(t *testing.T) {
 		t.Error("negative --storm-window must be rejected")
 	}
 }
+
+// TestStormMineFlags covers the third correlation tier's surface
+// (issue #225). Mining groups on a coincidence rather than a modelled
+// blast radius, so the two properties worth pinning are that it stays
+// off unless asked for, and that its threshold can never fall below
+// the threshold a modelled key has to clear.
+func TestStormMineFlags(t *testing.T) {
+	t.Parallel()
+
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.stormMine {
+		t.Error("--storm-mine must default off: a mined key is circumstantial")
+	}
+
+	// 0 resolves at validate time, so --print-config and the docs show
+	// the threshold that will really apply.
+	auto, _ := parseFlags([]string{"--dry-run", "--storm=on", "--storm-mine"})
+	if err := auto.validate(); err != nil {
+		t.Fatalf("validate --storm-mine: %v", err)
+	}
+	if want := max(engine.DefaultMinedMin, engine.DefaultStormMin); auto.stormMineMin != want {
+		t.Errorf("auto --storm-mine-min = %d, want %d", auto.stormMineMin, want)
+	}
+
+	// A --storm-min above the mined default must raise the mined
+	// threshold with it, not error and not silently invert the rank.
+	raised, _ := parseFlags([]string{"--dry-run", "--storm=on", "--storm-min=9", "--storm-mine"})
+	if err := raised.validate(); err != nil {
+		t.Fatalf("validate --storm-min=9 --storm-mine: %v", err)
+	}
+	if raised.stormMineMin != 9 {
+		t.Errorf("--storm-mine-min tracked --storm-min to %d, want 9", raised.stormMineMin)
+	}
+
+	explicit, _ := parseFlags([]string{"--dry-run", "--storm=on", "--storm-mine", "--storm-mine-min=12"})
+	if err := explicit.validate(); err != nil {
+		t.Fatalf("validate explicit --storm-mine-min: %v", err)
+	}
+	if explicit.stormMineMin != 12 {
+		t.Errorf("explicit --storm-mine-min = %d, want 12", explicit.stormMineMin)
+	}
+
+	cheaper, _ := parseFlags([]string{"--dry-run", "--storm=on", "--storm-min=6", "--storm-mine-min=4"})
+	if err := cheaper.validate(); err == nil {
+		t.Error("--storm-mine-min below --storm-min must be rejected: a discovered key " +
+			"must not be cheaper to form than a modelled one")
+	}
+
+	negMine, _ := parseFlags([]string{"--dry-run", "--storm-mine-min=-1"})
+	if err := negMine.validate(); err == nil {
+		t.Error("negative --storm-mine-min must be rejected")
+	}
+}

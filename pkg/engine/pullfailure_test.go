@@ -240,9 +240,76 @@ func TestPullClassMemo_CarriesCauseToCauselessBackOff(t *testing.T) {
 	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
 		t.Errorf("causeless BackOff for the same pod: class = %v, want the inherited PullClassRetryable", got)
 	}
-	// A DIFFERENT pod has no evidence of its own: unknown, fires.
-	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassUnknown {
-		t.Errorf("causeless BackOff for an unseen pod: class = %v, want PullClassUnknown", got)
+	// A DIFFERENT pod with no evidence of its own, pulling from the
+	// SAME host: it inherits the host's retryable cause (issue #225).
+	// The 429 was never a fact about pod-1 — it is a fact about the
+	// registry, and pod-2 is pulling from the same one.
+	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
+		t.Errorf("causeless BackOff on a rate-limited host: class = %v, want the host-inherited PullClassRetryable", got)
+	}
+	// A pod pulling from an UNRELATED host has no evidence at any
+	// scope: unknown, fires. The host scope must not leak sideways.
+	if got := m.Resolve(pullSignal("pod-3", "BackOff", `Back-off pulling image "docker.io/library/nginx:1.25"`)); got != PullClassUnknown {
+		t.Errorf("causeless BackOff on an unrelated host: class = %v, want PullClassUnknown", got)
+	}
+}
+
+// TestPullClassMemo_TerminalCauseDoesNotPropagateHostWide: the host
+// scope carries registry-side faults only. A bad tag is a statement
+// about one image reference, not about the registry serving it — if it
+// propagated, one typo'd tag would hold every unrelated pull on that
+// host for the debounce.
+func TestPullClassMemo_TerminalCauseDoesNotPropagateHostWide(t *testing.T) {
+	t.Parallel()
+	m := NewPullClassMemo()
+	if got := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "gcr.io/team/app:nope": manifest unknown`)); got != PullClassTerminal {
+		t.Fatalf("bad tag: class = %v, want PullClassTerminal", got)
+	}
+	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "gcr.io/team/other:v1"`)); got != PullClassUnknown {
+		t.Errorf("unrelated pod on a host with one bad tag: class = %v, want PullClassUnknown", got)
+	}
+}
+
+// TestPullClassMemo_ObjectScopeBeatsHostScope: evidence about this
+// exact pod outranks evidence about the registry it pulls from, so a
+// pod failing terminally during a host-wide rate limit still fires
+// immediately on its own cause.
+func TestPullClassMemo_ObjectScopeBeatsHostScope(t *testing.T) {
+	t.Parallel()
+	m := NewPullClassMemo()
+	// The host is known to be throttling...
+	m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429))
+	// ...but pod-2 stated a terminal cause of its own.
+	if got := m.Resolve(pullSignal("pod-2", "Failed", `Failed to pull image "us-east1-artifactregistry.gcr.io/gke-release/x:nope": manifest unknown`)); got != PullClassTerminal {
+		t.Fatalf("pod-2 own cause: class = %v, want PullClassTerminal", got)
+	}
+	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:nope"`)); got != PullClassTerminal {
+		t.Errorf("pod-2 back-off during a host-wide 429: class = %v, want its OWN PullClassTerminal", got)
+	}
+}
+
+// TestPullClassMemo_HostScopeExpiresFasterThanObject: the host scope is
+// the one that can speak for an object that never reported a cause, so
+// it is deliberately short-lived (hostPullMemoTTL). Past that bound a
+// causeless failure on the host is unknown again, while the object that
+// actually reported the cause still inherits it.
+func TestPullClassMemo_HostScopeExpiresFasterThanObject(t *testing.T) {
+	t.Parallel()
+	m := NewPullClassMemo()
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now }
+
+	m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429))
+	now = now.Add(hostPullMemoTTL + time.Second)
+
+	backOff := `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`
+	if got := m.Resolve(pullSignal("pod-2", "BackOff", backOff)); got != PullClassUnknown {
+		t.Errorf("stale host evidence: class = %v, want PullClassUnknown", got)
+	}
+	// Still inside defaultPullMemoTTL: the reporting object keeps its
+	// own cause well after the host scope has lapsed.
+	if got := m.Resolve(pullSignal("pod-1", "BackOff", backOff)); got != PullClassRetryable {
+		t.Errorf("object scope at the same instant: class = %v, want PullClassRetryable", got)
 	}
 }
 
@@ -285,11 +352,13 @@ func TestPullClassMemo_Expires(t *testing.T) {
 
 	m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429))
 	now = now.Add(defaultPullMemoTTL + time.Second)
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "gcr.io/x/y:v1"`)); got != PullClassUnknown {
+	// Same host as artifactRegistry429, so this one lookup probes —
+	// and so drops — both the object and the host scope it wrote.
+	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassUnknown {
 		t.Errorf("expired cause: class = %v, want PullClassUnknown", got)
 	}
 	if m.Len() != 0 {
-		t.Errorf("expired entry should be dropped on lookup; Len = %d", m.Len())
+		t.Errorf("expired entries should be dropped on lookup; Len = %d", m.Len())
 	}
 }
 

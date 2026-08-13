@@ -91,6 +91,8 @@ type flags struct {
 	storm                 string
 	stormWindow           time.Duration
 	stormMin              int
+	stormMine             bool
+	stormMineMin          int
 	severity              severityFlag
 	watchboardBatch       int
 	watchboardFlush       time.Duration
@@ -265,6 +267,13 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.storm, "storm", stormAuto, "Storm correlation (§7.5): auto (the default — probe the graph informers' grants at startup: pods/nodes/replicasets list+watch; all present resolves on, a miss resolves off with one loud line naming the grant), on (fatal at startup when a grant is missing), or off. true/false are aliases for on/off; bare --storm is no longer valid syntax. When on, new incidents sharing a blast-radius key (nearest common topology ancestor) group into one kind=storm session.")
 	fs.DurationVar(&f.stormWindow, "storm-window", engine.DefaultStormWindow, "Second-level correlation window for storm formation. 0 disables correlation even with --storm=on.")
 	fs.IntVar(&f.stormMin, "storm-min", engine.DefaultStormMin, "Minimum incidents sharing a blast-radius key within --storm-window to form a storm. Must be >= 2.")
+	// Off by default, deliberately. A declared key means somebody
+	// modelled that blast radius; a mined one means the sentinel noticed
+	// a coincidence and decided it was a cause. That is the right trade
+	// on a cluster whose faults nobody has modelled yet, and the wrong
+	// one to make on an operator's behalf without being asked.
+	fs.BoolVar(&f.stormMine, "storm-mine", false, "Also correlate on DISCOVERED keys (issue #225): when --storm-mine-min incidents in the window share an exact image reference, node or container, group them into one storm even though no topology ancestor or external dependency connects them. Off by default — a mined key is circumstantial, so it needs more members than a modelled one, and every mined storm names what it grouped on. Requires storm correlation on.")
+	fs.IntVar(&f.stormMineMin, "storm-mine-min", 0, fmt.Sprintf("Minimum incidents sharing a mined attribute value to form a storm. 0 (the default) means auto: the larger of %d and --storm-min. An explicit value must be >= --storm-min — a discovered key must never be cheaper to form than a modelled one. Effective only with --storm-mine.", engine.DefaultMinedMin))
 
 	// Severity routing (§7.7). ADDITIVE flags: with no --severity
 	// overrides the routes follow the source-stamped defaults, and the
@@ -568,6 +577,17 @@ func (f *flags) validate() error {
 	}
 	if f.stormMin < 2 {
 		return errors.New("--storm-min must be >= 2 (a storm of one is an incident)")
+	}
+	// Mined-key bounds (#225). 0 resolves here rather than at the
+	// correlator so --print-config and the docs generator show the
+	// threshold that will actually apply.
+	if f.stormMineMin < 0 {
+		return errors.New("--storm-mine-min must be >= 0 (0 means auto)")
+	}
+	if f.stormMineMin == 0 {
+		f.stormMineMin = max(engine.DefaultMinedMin, f.stormMin)
+	} else if f.stormMineMin < f.stormMin {
+		return fmt.Errorf("--storm-mine-min (%d) must be >= --storm-min (%d): a discovered key must not be cheaper to form than a modelled one", f.stormMineMin, f.stormMin)
 	}
 	// Severity routing (§7.7): overrides and watchboard bounds are
 	// config errors in every mode, like --sources and the storm
