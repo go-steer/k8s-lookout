@@ -29,17 +29,23 @@ import (
 
 const arHost = "us-east1-artifactregistry.gcr.io"
 
-// gkeRegistryStorm is the observed incident, verbatim in shape from a
+// gkeRegistryStorm is a real event corpus, verbatim in shape, from a
 // GKE cluster whose region-wide Artifact Registry quota rolled over:
 // SEVEN objects across two namespaces failing on one registry, of
 // which only TWO ever said why. kubelet emits the cause-bearing
 // `Failed` event once per object and then falls back to the causeless
-// `Back-off pulling image "…"` — and for five of these objects the
-// sentinel only ever saw the causeless form.
+// `Back-off pulling image "…"` — and for five of these objects only
+// the causeless form was ever emitted.
 //
-// Before #225 this arrived as seven root-cause investigations. The two
-// cause-bearing events were the only ones carrying a registry
-// blast-radius key, and two is below DefaultStormMin.
+// Provenance, because it shapes what this file can and cannot claim:
+// the corpus was captured by k8s-event-watcher, lookout's predecessor,
+// which has no storm correlation at all — so the seven separate
+// investigations it produced are not evidence about lookout. What the
+// corpus IS evidence of is kubelet's cause-attribution pattern, which
+// is observer-independent, and that is the whole defect: replayed
+// through lookout's own correlator below, only the two cause-bearing
+// events carry a registry blast-radius key, and two is below
+// DefaultStormMin.
 var gkeRegistryStorm = []struct {
 	uid, ns, name string
 	reason        string
@@ -154,20 +160,20 @@ func TestRegistryStorm_CauselessBackOffsJoinTheStorm(t *testing.T) {
 	}
 }
 
-// TestRegistryStorm_FormsWithNoTopologyAtAll is the faithful repro of
-// the reported cluster, where the seven incidents did not correlate on
-// ANYTHING — not even the namespace six of them shared. That points at
-// the resolver returning no candidates for these objects (an unready
-// or non-matching topology index; graphfeed.Ancestors yields nil when
-// Snapshot.Lookup misses), which is a separate defect.
+// TestRegistryStorm_FormsWithNoTopologyAtAll pins the registry key's
+// independence from the graph. graphfeed.Ancestors yields nil whenever
+// Snapshot.Lookup misses — an informer still warming up, an object
+// evicted from the index — and a burst is exactly when that is most
+// likely, since the pods failing to pull may never have become Ready
+// enough to be indexed.
 //
-// The registry key must survive it regardless: it is prepended in
-// Observe from the signal's own message, so it does not depend on the
-// object being resolvable in the graph. That independence is load
-// bearing and this test exists to keep it — a future refactor that
-// sources the registry key from the topology instead would pass every
-// other test in this file and silently regress this cluster back to
-// seven sessions.
+// The registry key must survive it: it comes from the signal's own
+// message (external.go), so it does not depend on the object being
+// resolvable. That independence is load bearing and this test exists
+// to keep it — a future refactor that sources the registry key from
+// the topology instead would pass every other test in this file and
+// silently regress a cold-start registry outage back to one session
+// per pod.
 func TestRegistryStorm_FormsWithNoTopologyAtAll(t *testing.T) {
 	t.Parallel()
 

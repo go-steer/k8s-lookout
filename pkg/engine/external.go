@@ -32,11 +32,10 @@ package engine
 //
 //   - It cannot be sourced from the graph. An external dependency is
 //     not in the graph by definition, and even the objects that depend
-//     on it are only in the graph while the index is populated and its
-//     Lookup matches. The reported incident on #225 correlated on
-//     nothing at all — evidence that Ancestors() can return empty on a
-//     live cluster — and the registry key kept working there precisely
-//     because it never consulted the resolver.
+//     on it are only in the graph while the index is populated and
+//     its Lookup matches — neither of which holds during informer
+//     warm-up, so a key that consults the resolver is a key that can
+//     go missing exactly when a burst arrives.
 //   - It must be able to decline. The registry key applies only to
 //     retryable pull failures: two workloads with two different bad
 //     tags on one host are two incidents (see registryAncestor). A

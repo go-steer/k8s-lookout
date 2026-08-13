@@ -80,11 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of its events never say what went wrong (#225). The registry-scoped
   storm added in 0.18.0 (#213) keyed only off failures whose message
   named a retryable cause — but kubelet states the cause once per object
-  and then repeats itself causelessly, so on a real GKE cluster a
-  region-wide Artifact Registry 429 hit seven workloads across two
-  namespaces and only *two* of them ever reached the correlator with a
-  registry key. Two is below the formation threshold, so no storm formed
-  and each dug its own root cause. Cause evidence is now remembered per
+  and then repeats itself causelessly. Replaying a real region-wide
+  Artifact Registry 429 that hit seven workloads across two namespaces,
+  only *two* of the seven carry a registry key. Two is below the
+  formation threshold, so no storm formed and each would dig its own
+  root cause. Cause evidence is now remembered per
   registry host as well as per object: a causeless `Back-off pulling
   image` inherits the host's known-retryable state, and the seven arrive
   as one incident.
