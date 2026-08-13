@@ -36,6 +36,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mined:<attribute>`), so a grouping can be explained rather than just
   asserted.
 
+- `lookout findings diff` — a run-to-run transition surface, so a
+  scheduled scan reports what CHANGED instead of re-listing every open
+  finding every time (#212). Pipe a report in
+  (`lookout health | lookout findings diff --report=- --store=… --cluster=…`)
+  and each subject comes back classified `new`, `ongoing`,
+  `escalated`, `resolved`, or `suppressed`, with the previous
+  severity and a `first_seen` that survives across runs. Add
+  `--transitions=new,escalated,resolved` for the digest view: the
+  summary line then reads `scanned=40 findings=3`. Either wire format
+  is accepted on stdin, so the upstream command does not need
+  `--format=json`. `--dry-run` classifies without consuming the report.
+
+  A rescheduled pod stays one ongoing finding: subjects are keyed on
+  `(cluster, namespace, kind, normalized-name, canonical-reason)`,
+  with Kubernetes' generated name suffixes stripped. This is a second,
+  instance-grain key — the §8 class fingerprint is unchanged and still
+  drives fleet rollup.
+
+- `lookout findings ack <subject-key> --for 4h --by …` — suppress one
+  finding for a window after an operator has taken it (#212). Later
+  diffs report it `suppressed` rather than re-raising it, and it comes
+  back on its own when the window expires; a severity bump that
+  happened inside the window fires as an `escalated` transition at
+  expiry rather than being swallowed. `--clear` ends a window early.
+  Distinct from a §9.4 `severity_override`, which is a standing
+  judgment backed by a diagnosis; an ack is time-boxed and asserts
+  nothing. Lookout is the store of record for the ack; the caller
+  owns identity — `--by` is recorded verbatim, not authenticated.
+
+  Finding state is durable, in the sentinel's existing `--store` file
+  (schema v6, table `finding_state`): a diff with nowhere to persist
+  would report everything `new` forever, so `--store` is required.
+  State is cluster-scoped, so several clusters can share one store
+  file: each run diffs and rewrites only the cluster named by
+  `--cluster`. The multi-cluster watch path (#208) keeps its own
+  in-memory state and does not feed this table yet. Design note:
+  `docs/findings-diff-design.md`, summarized as DESIGN.md §9.5.
+
 ### Fixed
 
 - A registry-wide fault now correlates into one incident even when most

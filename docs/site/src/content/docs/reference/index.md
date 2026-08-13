@@ -32,6 +32,13 @@ GCP-side reads: stockouts, orphaned resources, IP space, quota
 - [`lookout cloud quota`](/reference/cloud-quota/) — Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings from --quota-warn (default 80%), critical at 95% — quota is incompressible (scale-ups fail at the limit) and increases need lead time. Trend/ETA lives in the quota source.
 - [`lookout cloud stockout`](/reference/cloud-stockout/) — GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.
 
+### `lookout findings`
+
+run-to-run finding state: diff two scans into transitions (new/ongoing/escalated/resolved), ack a subject for a window
+
+- [`lookout findings ack`](/reference/findings-ack/) — Suppress one finding for a window after an operator has taken it — later diffs report it `suppressed` instead of re-raising it, and it comes back on its own when the window expires; the "I'm on this, stop paging me until lunch" surface.
+- [`lookout findings diff`](/reference/findings-diff/) — Diff a health report against the previous run and report what CHANGED — new, ongoing, escalated, resolved, suppressed — instead of re-listing every open finding; the command that makes a scheduled scan produce a digest an operator will keep reading.
+
 ### `lookout net`
 
 active DNS/TCP/HTTP probes from inside the cluster

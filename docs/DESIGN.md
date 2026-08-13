@@ -223,12 +223,13 @@ lookout mcp          # serve read-path checks as MCP tools (§4.3)
 lookout bundle       # correlated incident snapshot (§5, first call of every incident)
 lookout health       # composed cluster scorecard: live checks + open findings + triage state (§5)
 
-lookout triage  delta|logs|events|top|radius|changes|spec
-lookout state   edges|webhooks|wi|volumes
-lookout stab    drift|drain
-lookout perf    probe --pack=apiserver|apf|etcd|startup
-lookout cloud   stockout|orphans|ipspace|quota
-lookout net     probe --dns|--tcp|--http     # active checks (§5, phase M3)
+lookout triage   delta|logs|events|top|radius|changes|spec
+lookout findings diff|ack           # run-to-run transitions + ack windows (§9.5)
+lookout state    edges|webhooks|wi|volumes
+lookout stab     drift|drain
+lookout perf     probe --pack=apiserver|apf|etcd|startup
+lookout cloud    stockout|orphans|ipspace|quota
+lookout net      probe --dns|--tcp|--http    # active checks (§5, phase M3)
 ```
 
 One release, one image, shared informer/client bootstrap, one output-envelope
@@ -806,6 +807,38 @@ infrastructure. Cross-agent contention only exists at fleet tier, which is
 the fleet layer's coordination problem by the settled boundary (§3). And storage tiering is
 already decided by the shared-memory design (FTS5-over-eventlog in-tree, Redis
 AMS extras adapter) — we add a record type, not a database.
+
+### 9.5 Finding state — run-to-run transitions
+
+§9.4 gives triaged reality at a point in time. It does not say what CHANGED
+between two scans, and an unattended agent that re-lists forty unchanged
+findings every fifteen minutes trains its reader to stop looking. The
+`finding_state` table (one row per currently-open subject) closes that gap:
+`lookout findings diff` reads a §4.2 report, classifies each subject against
+the stored row as **new | ongoing | escalated | resolved | suppressed**, and
+swaps the state for the next run. `lookout findings ack` opens a time-boxed
+suppression window on one subject.
+
+Two things make this a §9 concern rather than a check-local cache:
+
+- **The state is the answer.** A diff with nowhere to persist reports
+  everything `new` forever, so the surface is durable by construction —
+  generalizing the §9.1 store, not standing a second tracker beside it.
+- **A second key grain.** The diff needs *instance* identity, and §8's
+  `Fingerprint` is deliberately a hash of the incident **class**. So it gets a
+  **subject key** — `(cluster, namespace, kind_of_object, normalize(name),
+  canonical_reason)`, with generated pod suffixes stripped so a rescheduled
+  pod stays one ongoing finding — alongside the frozen fingerprint, which
+  continues to drive fleet rollup untouched.
+
+Rows are deleted when their subject resolves, which is what makes a later
+recurrence read as genuinely `new`; the table is therefore exempt from the
+§9.1 TTL prune. Reads and the whole-set swap are both cluster-scoped, so one
+store file holds several clusters and a run can only resolve its own; what
+waits on the multi-cluster watch path is feeding this table from the
+sentinel, whose per-cluster state is in-memory today. Full rationale, including the ack
+semantics and the wire contract with `go-steer/mast`, is in
+[findings-diff-design.md](findings-diff-design.md).
 
 ---
 

@@ -35,15 +35,20 @@ const (
 
 // Invocation is everything a check receives: the parsed common-flag
 // Scope, its own typed flags, the positional arguments (only for
-// commands that declare RunConfig.MaxArgs > 0), and the output
-// Writer. Checks emit findings as they discover them (streaming —
-// payloads can be large) and return only the scanned count; the
-// runner owns the summary line and the exit code.
+// commands that declare RunConfig.MaxArgs > 0), the input stream, and
+// the output Writer. Checks emit findings as they discover them
+// (streaming — payloads can be large) and return only the scanned
+// count; the runner owns the summary line and the exit code.
 type Invocation struct {
 	Scope Scope
 	Flags FlagValues
 	Args  []string
-	Out   *Writer
+	// In is the process input stream, for the few commands that
+	// consume a piped report rather than querying a cluster (the
+	// `--report -` convention). Never nil: the runner defaults it to
+	// os.Stdin, so a check that reads it can do so unconditionally.
+	In  io.Reader
+	Out *Writer
 }
 
 // CheckFunc is one read-path check. scanned is the number of objects
@@ -85,6 +90,10 @@ type RunConfig struct {
 	// Stdout and Stderr default to the process streams.
 	Stdout io.Writer
 	Stderr io.Writer
+	// Stdin defaults to the process stream, and reaches the check as
+	// Invocation.In. Only commands that consume a piped report use
+	// it; tests inject a buffer.
+	Stdin io.Reader
 	// Now defaults to time.Now. It is called exactly twice (start
 	// and finish), so a fake clock makes the summary's elapsed
 	// value deterministic for golden tests. (Graph-backed commands
@@ -105,6 +114,10 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	}
 	if stderr == nil {
 		stderr = os.Stderr
+	}
+	stdin := cfg.Stdin
+	if stdin == nil {
+		stdin = os.Stdin
 	}
 	now := cfg.Now
 	if now == nil {
@@ -178,7 +191,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	defer cancel()
 
 	start := now()
-	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, Out: writer})
+	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, In: stdin, Out: writer})
 	if err != nil {
 		if IsUsageError(err) {
 			return usageError(stderr, cfg.Name, err)
