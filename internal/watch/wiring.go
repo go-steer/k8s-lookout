@@ -693,6 +693,14 @@ func (r *runner) run(ctx context.Context) error {
 	// feed, so pods/nodes are watched once.
 	var sharedFactory informers.SharedInformerFactory
 	var feed *graphFeed
+	if f.stormMine && !f.stormEnabled() {
+		// Not fatal: --storm=auto can resolve to off from a missing
+		// grant, and a sentinel that refuses to start over a stage it
+		// chose to disable is worse than one that says so. Loud, though
+		// — asking for mined keys and silently getting none is the
+		// failure mode this line exists to prevent.
+		log.Printf("storm: --storm-mine ignored — it is a third correlation tier on top of storm correlation, which is off (issue #225)")
+	}
 	if f.stormEnabled() {
 		sharedFactory = informers.NewSharedInformerFactory(client, 0)
 		if objState != nil {
@@ -811,6 +819,15 @@ func (r *runner) run(ctx context.Context) error {
 		if cerr != nil {
 			return cerr
 		}
+		if f.stormMine {
+			// Validation is the correlator's, not the flag layer's: the
+			// dimension list is a library concern (engine.mined.go owns
+			// the explainability gate), and a bad one is a config error
+			// like any other.
+			if merr := correlator.EnableMining(engine.DefaultMinedDimensions, f.stormMineMin); merr != nil {
+				return fmt.Errorf("--storm-mine: %w", merr)
+			}
+		}
 		disp.storm = correlator
 		go func() {
 			if ferr := feed.Run(ctx); ferr != nil && ctx.Err() == nil {
@@ -821,6 +838,9 @@ func (r *runner) run(ctx context.Context) error {
 			}
 		}()
 		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
+		if f.stormMine {
+			log.Printf("storm: mined keys enabled (--storm-mine, min=%d) — incidents sharing an exact image, node or container may group into one storm with no topology ancestor between them; every such storm names the attribute it grouped on (issue #225)", f.stormMineMin)
+		}
 		// §7.7 ancestor reattachment (issue #220) rides the same
 		// topology index. Wired here, not at the board's construction
 		// above, because the graph feed does not exist until this

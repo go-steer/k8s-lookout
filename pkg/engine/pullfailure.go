@@ -284,8 +284,9 @@ func quotedImageRef(message string) (string, bool) {
 	return rest[:j], true
 }
 
-// PullClassMemo resolves a signal's PullClass, remembering per object
-// what the last CAUSE-BEARING message for that object said.
+// PullClassMemo resolves a signal's PullClass, remembering what the
+// last CAUSE-BEARING message said — per object, and for retryable
+// causes per registry host as well (see causeScope).
 //
 // The memo exists because kubelet states the cause exactly once and
 // then keeps reporting the failure without it. One failed pull on GKE
@@ -307,21 +308,54 @@ func quotedImageRef(message string) (string, bool) {
 // which is precisely the "wait, why is this failing?" step a human
 // does — is what makes the gate real.
 //
-// Bounded and self-expiring: entries live for ttl and the map is
-// capped, so a cluster churning through thousands of pods cannot grow
-// it without limit. Safe for concurrent use.
+// Bounded and self-expiring: every entry carries its scope's TTL and
+// the map is capped, so a cluster churning through thousands of pods
+// cannot grow it without limit. Safe for concurrent use.
 type PullClassMemo struct {
 	mu      sync.Mutex
-	entries map[string]pullMemoEntry
-	ttl     time.Duration
+	entries map[causeScope]pullMemoEntry
 	max     int
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
 }
 
+// scopeKind names the breadth of one piece of cause evidence: how far
+// beyond the object that reported it the cause is allowed to speak.
+type scopeKind uint8
+
+const (
+	// scopeObject: evidence about ONE object, keyed on its UID. The
+	// original behaviour — kubelet's causeless follow-on events for
+	// the same pod inherit the cause its `Failed` event stated.
+	scopeObject scopeKind = iota
+	// scopeRegistryHost: evidence about a REGISTRY, keyed on the host
+	// in the image reference. A per-region quota or a registry outage
+	// is not a property of the pod that happened to report it — it is
+	// a property of the host, and every pod pulling from that host is
+	// experiencing the same fault. Without this scope the fault is
+	// only visible on the events that happen to name a cause, which
+	// on a real GKE cluster is a small minority of them (issue #225):
+	// seven pods hit one Artifact Registry 429 and only the two that
+	// emitted a `Failed …429` reached the correlator with a registry
+	// key — below DefaultStormMin, so no storm formed and each dug
+	// its own root cause.
+	scopeRegistryHost
+)
+
+// causeScope is one memo key: a scope kind plus its identity. A struct
+// key rather than a prefixed string so a UID that looks like a
+// hostname can never collide with one.
+type causeScope struct {
+	kind scopeKind
+	id   string
+}
+
 type pullMemoEntry struct {
 	class PullClass
 	at    time.Time
+	// ttl is the scope's freshness bound, carried per entry because
+	// the scopes expire at very different rates.
+	ttl time.Duration
 }
 
 const (
@@ -332,16 +366,24 @@ const (
 	// pod which later fails for a DIFFERENT reason is not judged on
 	// stale evidence.
 	defaultPullMemoTTL = 10 * time.Minute
+	// hostPullMemoTTL bounds how long a retryable cause observed on
+	// ONE object speaks for OTHER objects pulling from the same
+	// registry host. Deliberately far shorter than the per-object TTL:
+	// this is the scope that can be wrong about an object that never
+	// reported a cause of its own, so it is sized to cover a burst
+	// (rate limits arrive in a clump and clear in a clump) and not
+	// much more. A host that is genuinely still throttling keeps
+	// re-arming it — every fresh `Failed …429` rewrites the entry.
+	hostPullMemoTTL = 2 * time.Minute
 	// maxPullMemoEntries caps the memo. Pull failures are a small
 	// fraction of a cluster's objects; this is generous.
 	maxPullMemoEntries = 4096
 )
 
-// NewPullClassMemo constructs a memo with the shipped TTL and bound.
+// NewPullClassMemo constructs a memo with the shipped TTLs and bound.
 func NewPullClassMemo() *PullClassMemo {
 	return &PullClassMemo{
-		entries: make(map[string]pullMemoEntry),
-		ttl:     defaultPullMemoTTL,
+		entries: make(map[causeScope]pullMemoEntry),
 		max:     maxPullMemoEntries,
 	}
 }
@@ -357,6 +399,30 @@ func (m *PullClassMemo) clock() time.Time {
 // signal carries one. Non-image-pull signals answer PullClassNA
 // without touching the memo. A nil memo resolves message-only (no
 // carry-forward), so callers may leave it unset.
+//
+// Causeless messages inherit from the NARROWEST fresh scope that
+// matches: the object's own evidence first, the registry host's only
+// if the object has none. Evidence about this exact pod always beats
+// evidence about the registry it pulls from.
+//
+// ONLY RETRYABLE CAUSES PROPAGATE HOST-WIDE. A terminal cause is a
+// statement about one image reference — `manifest unknown` for a bad
+// tag says nothing about the next pod's pull — whereas a rate limit or
+// a 503 is a statement about the registry itself. Keeping the host
+// scope retryable-only also keeps its blast radius bounded: the worst
+// it can do is delay a firing by --imagepull-transient-min-count
+// events, never suppress one outright.
+//
+// HONESTY NOTE — the exposure this buys is real and worth stating. A
+// pod whose pull is failing TERMINALLY, whose own cause-bearing event
+// we never saw, and which pulls from a host that is concurrently rate
+// limiting, will inherit retryable and be held for the debounce. That
+// needs all three to coincide; the cause-bearing event for the
+// terminal failure normally arrives first and wins the object scope
+// (terminal also wins ties inside ClassifyPullFailure). Weighed
+// against the alternative — a cluster-wide registry fault arriving as
+// N separate incidents, which is the thing that actually happens —
+// this is the cheaper mistake.
 func (m *PullClassMemo) Resolve(sig Signal) PullClass {
 	if CanonicalReasonForEvent(sig.Key.Reason, sig.Message) != "ImagePullBackOff" {
 		return PullClassNA
@@ -365,26 +431,50 @@ func (m *PullClassMemo) Resolve(sig Signal) PullClass {
 	if m == nil {
 		return class
 	}
-	uid := sig.Key.UID
+	object := causeScope{kind: scopeObject, id: sig.Key.UID}
+	host, hasHost := causeScope{}, false
+	if h := RegistryHost(sig.Message); h != "" {
+		host, hasHost = causeScope{kind: scopeRegistryHost, id: h}, true
+	}
 	now := m.clock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if class != PullClassUnknown {
 		// This message names a cause: it is the new evidence of
-		// record for the object.
+		// record for the object, and — when the registry itself is
+		// what is unhappy — for the host.
 		m.evictIfFull(now)
-		m.entries[uid] = pullMemoEntry{class: class, at: now}
+		m.entries[object] = pullMemoEntry{class: class, at: now, ttl: defaultPullMemoTTL}
+		if hasHost && class == PullClassRetryable {
+			m.entries[host] = pullMemoEntry{class: class, at: now, ttl: hostPullMemoTTL}
+		}
 		return class
 	}
 	// Causeless message (the bare back-off, a sync-result error):
-	// inherit the object's last known cause while it is fresh.
-	if prior, ok := m.entries[uid]; ok {
-		if now.Sub(prior.at) <= m.ttl {
-			return prior.class
+	// inherit from the narrowest fresh scope.
+	if prior, ok := m.lookup(object, now); ok {
+		return prior
+	}
+	if hasHost {
+		if prior, ok := m.lookup(host, now); ok {
+			return prior
 		}
-		delete(m.entries, uid)
 	}
 	return PullClassUnknown
+}
+
+// lookup reads one scope's evidence, dropping it if it has aged out.
+// Caller holds mu.
+func (m *PullClassMemo) lookup(s causeScope, now time.Time) (PullClass, bool) {
+	prior, ok := m.entries[s]
+	if !ok {
+		return PullClassNA, false
+	}
+	if now.Sub(prior.at) > prior.ttl {
+		delete(m.entries, s)
+		return PullClassNA, false
+	}
+	return prior.class, true
 }
 
 // evictIfFull is called under lock: drops expired entries, and if that
@@ -393,23 +483,23 @@ func (m *PullClassMemo) evictIfFull(now time.Time) {
 	if len(m.entries) < m.max {
 		return
 	}
-	for uid, e := range m.entries {
-		if now.Sub(e.at) > m.ttl {
-			delete(m.entries, uid)
+	for s, e := range m.entries {
+		if now.Sub(e.at) > e.ttl {
+			delete(m.entries, s)
 		}
 	}
 	if len(m.entries) < m.max {
 		return
 	}
-	var oldestUID string
+	var oldest causeScope
 	var oldestAt time.Time
 	first := true
-	for uid, e := range m.entries {
+	for s, e := range m.entries {
 		if first || e.at.Before(oldestAt) {
-			oldestUID, oldestAt, first = uid, e.at, false
+			oldest, oldestAt, first = s, e.at, false
 		}
 	}
-	delete(m.entries, oldestUID)
+	delete(m.entries, oldest)
 }
 
 // Len reports the memo size. Test helper.

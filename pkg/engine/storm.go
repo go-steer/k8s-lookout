@@ -119,6 +119,12 @@ type StormInfo struct {
 	// promoted to critical (info and critical are unchanged).
 	Severity  Severity
 	SessionID string
+	// KeySource names what produced the correlation key:
+	// KeySourceTopology for a Kubernetes ancestor out of the graph, or
+	// the Name of the ExternalAncestor extractor that supplied it
+	// (issue #225). This is the storm's answer to "why are these one
+	// incident?" — a closed vocabulary, safe as a metric label.
+	KeySource string
 	// AffectedCount is the member count; NamespaceCount the distinct
 	// (non-empty) member namespaces.
 	AffectedCount      int
@@ -227,10 +233,17 @@ type pendingIncident struct {
 	// — wall clock only drives the window), feeding the storm's
 	// last_seen field.
 	seen time.Time
+	// mined holds this incident's value per mining dimension, snapped
+	// at window time so the window can be compared without retaining
+	// Signals. Absent attributes are simply not present.
+	mined map[string]string
 	// keys indexes the candidate set; order preserves the resolver's
-	// priority order.
-	keys  map[string]Ancestor
-	order []string
+	// priority order. source records what produced each key
+	// (KeySourceTopology or an extractor Name), so a formed storm can
+	// say why its members are one incident.
+	keys   map[string]Ancestor
+	source map[string]string
+	order  []string
 }
 
 // stormState is one open storm.
@@ -239,6 +252,7 @@ type stormState struct {
 	ancestor    Ancestor
 	fingerprint string
 	reason      string
+	keySource   string
 	sessionID   string
 	maxSeverity Severity
 	firstSeen   time.Time
@@ -269,6 +283,15 @@ type StormCorrelator struct {
 	window   time.Duration
 	min      int
 	resolver AncestorResolver
+	// external are the signal-derived key extractors (external.go),
+	// consulted ahead of the resolver. Defaults to
+	// DefaultExternalAncestors.
+	external []ExternalAncestor
+	// mined are the discovered-key dimensions (mined.go), tried only
+	// after every declared key has failed to form. Empty = mining
+	// off, which is the default; EnableMining turns it on.
+	mined    []MinedDimension
+	minedMin int
 
 	pending []*pendingIncident
 	storms  map[string]*stormState
@@ -294,9 +317,32 @@ func NewStormCorrelator(window time.Duration, min int, resolver AncestorResolver
 		window:   window,
 		min:      min,
 		resolver: resolver,
+		external: DefaultExternalAncestors,
 		storms:   make(map[string]*stormState),
 		byKey:    make(map[EventKey]string),
 	}, nil
+}
+
+// EnableMining turns on the discovered-key tier (mined.go) with the
+// given dimensions and formation threshold. Off unless called: mining
+// groups on a coincidence rather than on a modelled relationship, so
+// an operator opts into it. min must be >= the correlator's own min —
+// a mined key must never be EASIER to form than a declared one.
+func (c *StormCorrelator) EnableMining(dims []MinedDimension, min int) error {
+	if len(dims) == 0 {
+		return fmt.Errorf("storm: mining needs at least one dimension")
+	}
+	if err := ValidateMinedDimensions(dims); err != nil {
+		return fmt.Errorf("storm: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if min < c.min {
+		return fmt.Errorf("storm: mined min must be >= --storm-min (%d), got %d", c.min, min)
+	}
+	c.mined = dims
+	c.minedMin = min
+	return nil
 }
 
 func (c *StormCorrelator) clock() time.Time {
@@ -353,15 +399,28 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 	defer c.mu.Unlock()
 	c.prune(now)
 
-	cands := c.resolver.Ancestors(ObjectRef{Kind: sig.KindOfObject, Namespace: sig.Namespace, Name: sig.Name})
-	if reg, ok := registryAncestor(sig); ok {
-		cands = append([]Ancestor{reg}, cands...)
+	// External keys first, in extractor order, then the topology's.
+	// Both the order and the independence matter: an external
+	// dependency spans workloads, and it must still key a storm on a
+	// cluster whose topology index answers nothing (see external.go).
+	cands, sources := externalKeys(c.external, sig)
+	topo := c.resolver.Ancestors(ObjectRef{Kind: sig.KindOfObject, Namespace: sig.Namespace, Name: sig.Name})
+	for _, a := range topo {
+		cands = append(cands, a)
+		sources = append(sources, KeySourceTopology)
 	}
+
+	minedVals := minedValues(c.mined, sig)
 
 	// 1. Late arrival: best-priority candidate owned by an open storm
 	// wins (dedup's retry safety net can re-fire an existing member —
 	// addMember is idempotent by key and re-arms its clearance).
-	for _, a := range cands {
+	// Declared keys are offered before mined ones, so an incident that
+	// could join either lands in the modelled storm.
+	attach := make([]Ancestor, 0, len(cands)+len(minedVals))
+	attach = append(attach, cands...)
+	attach = append(attach, minedAncestors(c.mined, minedVals)...)
+	for _, a := range attach {
 		st, ok := c.storms[a.Key()]
 		if !ok {
 			continue
@@ -373,10 +432,16 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		return v
 	}
 
-	if len(cands) == 0 {
+	if len(cands) == 0 && len(minedVals) == 0 {
 		// Unresolvable (topology index not ready, or the object is
-		// not in it): per-incident, and not windowed — an incident
-		// with no key can never correlate.
+		// not in it) AND carrying no minable attribute: per-incident,
+		// and not windowed — an incident with no key of any kind can
+		// never correlate.
+		//
+		// With mining on, "the index answered nothing" is no longer
+		// the end of the road: the incident still knows its own image,
+		// node and container, so it is windowed and can yet be
+		// grouped by what it turns out to share (issue #225).
 		return StormVerdict{Kind: StormNone}
 	}
 
@@ -390,13 +455,19 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		zone:     sig.Zone,
 		seen:     seen,
 		keys:     make(map[string]Ancestor, len(cands)),
+		source:   make(map[string]string, len(cands)),
+		mined:    minedVals,
 	}
-	for _, a := range cands {
+	for i, a := range cands {
 		k := a.Key()
 		if _, dup := p.keys[k]; dup {
+			// First wins, which keeps the higher-priority source: an
+			// extractor key that the topology also happens to yield
+			// is still attributed to the extractor.
 			continue
 		}
 		p.keys[k] = a
+		p.source[k] = sources[i]
 		p.order = append(p.order, k)
 	}
 	replaced := false
@@ -421,7 +492,21 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		if len(group) < c.min {
 			continue
 		}
-		st := c.form(p.keys[k], group, now)
+		st := c.form(p.keys[k], p.source[k], group, now)
+		return StormVerdict{
+			Kind:    StormFormed,
+			Storm:   st.info(),
+			Members: append([]StormMember(nil), st.members...),
+			Member:  member,
+		}
+	}
+
+	// 3. Discovered keys, tried ONLY once every declared key has
+	// failed to form. A modelled blast radius is always the better
+	// explanation when one is available; mining is what happens when
+	// nobody modelled this failure (mined.go).
+	if a, dim, group, ok := c.mineKey(p); ok {
+		st := c.form(a, MinedKeySource(dim), group, now)
 		return StormVerdict{
 			Kind:    StormFormed,
 			Storm:   st.info(),
@@ -430,6 +515,49 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		}
 	}
 	return StormVerdict{Kind: StormNone}
+}
+
+// mineKey looks for a discovered key covering the observed incident:
+// the first dimension (most specific first) whose value p carries is
+// shared by at least minedMin windowed incidents. Returns the
+// synthesized ancestor, the dimension name, and the group. Caller
+// holds mu.
+func (c *StormCorrelator) mineKey(p *pendingIncident) (Ancestor, string, []*pendingIncident, bool) {
+	if len(c.mined) == 0 {
+		return Ancestor{}, "", nil, false
+	}
+	for _, d := range c.mined {
+		v, ok := p.mined[d.Name]
+		if !ok || v == "" {
+			continue
+		}
+		var group []*pendingIncident
+		for _, q := range c.pending {
+			if q.mined[d.Name] == v {
+				group = append(group, q)
+			}
+		}
+		if len(group) < c.minedMin {
+			continue
+		}
+		return Ancestor{Kind: d.Kind, Name: v}, d.Name, group, true
+	}
+	return Ancestor{}, "", nil, false
+}
+
+// minedAncestors renders a signal's mined values as candidate keys, in
+// dimension order.
+func minedAncestors(dims []MinedDimension, vals map[string]string) []Ancestor {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]Ancestor, 0, len(vals))
+	for _, d := range dims {
+		if v, ok := vals[d.Name]; ok && v != "" {
+			out = append(out, Ancestor{Kind: d.Kind, Name: v})
+		}
+	}
+	return out
 }
 
 // AncestorKindRegistry is the synthetic Ancestor.Kind for the
@@ -453,11 +581,12 @@ const AncestorKindRegistry = "Registry"
 // Terminal and unrecognized causes therefore get no registry key and
 // group exactly as they do today.
 //
-// The caller PREPENDS this candidate, ahead of the resolver's
-// topology keys, which is also deliberate: a registry incident spans
-// workloads, so letting the owner-chain or namespace candidate win
-// first would shatter one cluster-wide incident into per-workload
-// storms — the exact fan-out §7.5 exists to prevent.
+// Registered as the first entry in DefaultExternalAncestors (#225), so
+// the correlator ranks it ahead of every topology key. That ordering is
+// deliberate: a registry incident spans workloads, so letting the
+// owner-chain or namespace candidate win first would shatter one
+// cluster-wide incident into per-workload storms — the exact fan-out
+// §7.5 exists to prevent.
 func registryAncestor(sig Signal) (Ancestor, bool) {
 	if sig.PullClass != PullClassRetryable {
 		return Ancestor{}, false
@@ -472,12 +601,13 @@ func registryAncestor(sig Signal) (Ancestor, bool) {
 // form opens a storm over key with the grouped window entries as
 // members (arrival order) and removes them from the window. Caller
 // holds mu.
-func (c *StormCorrelator) form(ancestor Ancestor, group []*pendingIncident, now time.Time) *stormState {
+func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pendingIncident, now time.Time) *stormState {
 	first := group[0]
 	st := &stormState{
 		id:          ancestor.Key(),
 		ancestor:    ancestor,
 		reason:      first.member.Key.Reason,
+		keySource:   keySource,
 		fingerprint: Fingerprint(KindStorm, first.member.Key.Reason, ancestor.Kind, first.zone),
 		maxSeverity: SeverityInfo,
 		firstSeen:   first.member.FirstSeen,
@@ -594,6 +724,7 @@ func (st *stormState) info() StormInfo {
 		Fingerprint:        st.fingerprint,
 		Reason:             st.reason,
 		Severity:           sev,
+		KeySource:          st.keySource,
 		SessionID:          st.sessionID,
 		AffectedCount:      len(st.members),
 		NamespaceCount:     len(nss),

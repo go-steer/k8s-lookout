@@ -34,7 +34,14 @@ func TestSuperviseRestartsUntilCancelled(t *testing.T) {
 
 	runs := make(chan struct{}, 16)
 	run := func(context.Context) error {
-		runs <- struct{}{}
+		// Non-blocking: with zero backoff the loop spins far faster than
+		// the test drains, and a run wedged on a full buffer can never
+		// reach supervise's ctx check — the supervisor would hang rather
+		// than return, which is a defect in the harness, not in it.
+		select {
+		case runs <- struct{}{}:
+		default:
+		}
 		return errors.New("boom") // exit immediately; supervisor should restart
 	}
 
@@ -46,7 +53,11 @@ func TestSuperviseRestartsUntilCancelled(t *testing.T) {
 		close(done)
 	}()
 
-	for i := 0; i < 3; i++ {
+	// Drain FOUR starts to guarantee THREE counted restarts. run sends
+	// on entry but supervise increments only after run returns, so the
+	// Nth start proves just N-1 increments have happened — the Nth races
+	// with the cancel below.
+	for i := 0; i < 4; i++ {
 		select {
 		case <-runs:
 		case <-time.After(2 * time.Second):
