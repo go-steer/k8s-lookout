@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-13
+
+A correlation release, with one breaking change for anyone scraping the
+sentinel's metrics. Three of the changes below attack the same failure
+mode from different angles: one root cause producing more than one thing
+to triage. A missing secret opened an enriched per-incident session for
+the pod *and* a separate watchboard session for its Deployment — a
+buffered warning now reattaches to a live incident sharing its
+blast-radius ancestor instead (#220). A registry rate limit opened a
+session per affected pod across unrelated namespaces, for a failure
+kubelet clears by itself on its next retry — retryable pull failures are
+now recognized as such, debounced rather than fired on sight, and
+correlated into a single registry-scoped storm (#213, #216). Each is
+strictly subtractive on the wire: no signal is lost, it lands somewhere
+that already has the context.
+
+Separately, one `lookout watch` process can now optionally watch several
+clusters (#208) — `--clusters` or `--clusters-from`, each cluster an
+independently supervised runner whose failure restarts only itself. One
+sentinel per cluster remains the default and the recommendation; leave
+both flags unset and nothing changes.
+
+**Breaking (metrics):** every `lookout_*` series now carries a `cluster`
+label. Dashboards and alerts that match those series by an exact label
+set must add or ignore it — see the migration note under *Changed*.
+
 ### Added
 
 - A watchboard warning now reattaches to a live incident sharing its
