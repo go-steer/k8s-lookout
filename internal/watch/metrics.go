@@ -61,6 +61,7 @@ type metrics struct {
 	watchboardDigests    prometheus.Counter
 	watchboardRotations  prometheus.Counter
 	watchboardBuffered   prometheus.Gauge
+	watchboardReattached *prometheus.CounterVec
 	infoDropped          *prometheus.CounterVec
 	storeRecords         *prometheus.CounterVec
 	storeDrops           *prometheus.CounterVec
@@ -202,6 +203,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_watchboard_buffered",
 			Help: "Warning-class signals currently buffered awaiting the next watchboard digest flush.",
 		}),
+		watchboardReattached: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_watchboard_reattached_total",
+			Help: "Total buffered warnings delivered as a kind=family.member followup into an existing per-incident session sharing their blast-radius ancestor, instead of a digest entry (§7.7, issue #220), by signal kind.",
+		}, []string{"kind"}),
 		infoDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_info_dropped_total",
 			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting.",
@@ -295,6 +300,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.watchboardDigests,
 		m.watchboardRotations,
 		m.watchboardBuffered,
+		m.watchboardReattached,
 		m.infoDropped,
 		m.storeRecords,
 		m.storeDrops,
