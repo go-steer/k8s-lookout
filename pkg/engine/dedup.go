@@ -85,7 +85,28 @@ type dedupEntry struct {
 	// cross-source join followup in this window — the "max 1 per
 	// source per incident per window" bound. Reset when the window
 	// rolls (a fresh entry is created).
+	//
+	// SHARED with the §7.7 ancestor reattachment bound
+	// (SessionForAncestors): both mechanisms answer the same question
+	// — "has this source family already spoken into this incident's
+	// session this window?" — and one budget per family is the
+	// intended semantics, not an accident of reuse.
 	FollowupSources []string `json:"followup_sources,omitempty"`
+	// AncestorKeys are the §7.5 blast-radius keys this incident's
+	// object resolved to when it was bound (Ancestor.Key() values,
+	// best-priority first). They make the cache answer the REVERSE
+	// question SessionForAncestors needs: not "where is this key
+	// bound?" but "is any live incident bound under this ancestor?" —
+	// the join that lets a watchboard warning reattach to the
+	// per-incident session already working the same workload
+	// (issue #220).
+	//
+	// Version tolerance both ways like Incident/Storm/SourceKind: a
+	// snapshot written before this field existed loads with it empty,
+	// and that entry simply never matches a reattachment until its
+	// window rolls — degrading to the pre-#220 digest behavior rather
+	// than mis-binding.
+	AncestorKeys []string `json:"ancestor_keys,omitempty"`
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -521,6 +542,86 @@ func (c *DedupCache) NoteIncidentKind(key EventKey, kind string) {
 		entry.SourceKind = kind
 		entry.FollowupSources = nil
 	}
+}
+
+// NoteAncestors stamps the §7.5 blast-radius keys key's object
+// resolved to, so SessionForAncestors can find this incident's
+// session from a RELATED object's ancestors later (issue #220).
+// Called by the dispatcher alongside BindIncident — an unbound
+// incident is never a reattachment target, so there is nothing to
+// index until the session exists. No-op when the entry is missing
+// (evicted — harmless race, like BindSession) or when keys is empty
+// (no resolver, or a topology index that has not synced: the
+// reattachment stage is simply inert, never a gate on delivery).
+func (c *DedupCache) NoteAncestors(key EventKey, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok {
+		entry.AncestorKeys = slices.Clone(keys)
+	}
+}
+
+// SessionForAncestors answers the §7.7 reattachment question (issue
+// #220): does any LIVE incident, other than self, sit under one of
+// these blast-radius keys with a session of its own? candidates are
+// Ancestor.Key() values in priority order (nearest/strongest first —
+// the order graphfeed.Ancestors returns), and the first candidate
+// with a match wins, so a shared Node or owner chain beats a weaker
+// key.
+//
+// family bounds the answer exactly as CrossSourceJoin does: at most
+// one positive per source family per target incident per window,
+// marked on the TARGET's entry (the shared FollowupSources budget).
+// A flapping warning stream therefore cannot spray followups into a
+// live incident — beyond the bound it digests normally.
+//
+// Storm-claimed incidents are never targets. A storm exists to
+// collapse member chatter into ONE session (§7.5); fanning
+// reattachment followups into it re-creates the very fan-out it
+// prevents.
+//
+// Ties within one candidate key resolve to the most recently active
+// incident, then by UID — the incident a related warning is most
+// likely about, and deterministic for the wire pins either way.
+func (c *DedupCache) SessionForAncestors(self EventKey, candidates []string, family string) (sessionID, matched string, ok bool) {
+	if len(candidates) == 0 {
+		return "", "", false
+	}
+	self.Reason = CanonicalReason(self.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, cand := range candidates {
+		var bestKey EventKey
+		var best *dedupEntry
+		for k, entry := range c.entries {
+			if k == self || entry.SessionID == "" || entry.Storm != "" {
+				continue
+			}
+			if !slices.Contains(entry.AncestorKeys, cand) {
+				continue
+			}
+			if best == nil || entry.LastSeen.After(best.LastSeen) ||
+				(entry.LastSeen.Equal(best.LastSeen) && k.UID < bestKey.UID) {
+				bestKey, best = k, entry
+			}
+		}
+		if best == nil {
+			continue
+		}
+		if slices.Contains(best.FollowupSources, family) {
+			// This family already spoke into that incident this
+			// window. Weaker candidates are not a way around the
+			// bound — the incident is found, the budget is spent.
+			return "", "", false
+		}
+		best.FollowupSources = append(best.FollowupSources, family)
+		return best.SessionID, cand, true
+	}
+	return "", "", false
 }
 
 // CrossSourceJoin reports whether a duplicate signal of the given

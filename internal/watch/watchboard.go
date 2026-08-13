@@ -87,6 +87,14 @@ type watchboard struct {
 	// Called with the watchboard's lock held — must not call back
 	// into the watchboard.
 	bind func(sig engine.Signal, sessionID string)
+	// reattach, when non-nil, is the §7.7 ancestor-reattachment stage
+	// (issue #220), consulted per entry at the TOP of a flush: a true
+	// return means the dispatcher delivered the warning into an
+	// existing per-incident session sharing its blast-radius ancestor,
+	// and the entry must not become a digest entry. Nil when no
+	// topology resolver is available — every entry then digests as it
+	// did pre-#220. Same lock contract as bind.
+	reattach func(ctx context.Context, sig engine.Signal, count int) bool
 
 	mu sync.Mutex
 	// sid is the current watchboard session ("" until the first
@@ -197,6 +205,15 @@ func startBoard(ctx context.Context, board *watchboard) (wait func()) {
 // holds b.mu.
 func (b *watchboard) flushLocked(ctx context.Context) {
 	now := b.clock()
+	// §7.7 ancestor reattachment (issue #220), BEFORE the session
+	// decision below: entries that found a live per-incident session
+	// under their blast-radius ancestor were delivered there as
+	// followups and leave the buffer. A flush whose every entry
+	// reattached has nothing left to digest — and must not create a
+	// watchboard session to say so.
+	if b.reattachLocked(ctx); len(b.buffer) == 0 {
+		return
+	}
 	if b.dryRun {
 		if b.generation == 0 {
 			b.generation = 1
@@ -354,6 +371,25 @@ func (b *watchboard) openStatelessLocked(ctx context.Context, now time.Time) {
 		return
 	}
 	b.finishFlushLocked()
+}
+
+// reattachLocked offers each buffered entry to the §7.7 reattachment
+// stage and keeps only those it declined (issue #220). Order is
+// preserved, so a partially reattached flush digests its survivors in
+// arrival order exactly as before. Caller holds b.mu.
+func (b *watchboard) reattachLocked(ctx context.Context) {
+	if b.reattach == nil || len(b.buffer) == 0 {
+		return
+	}
+	kept := b.buffer[:0]
+	for _, e := range b.buffer {
+		if b.reattach(ctx, e.sig, e.count) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	b.buffer = kept
+	b.metrics.watchboardBuffered.Set(float64(len(b.buffer)))
 }
 
 // finishFlushLocked is the common success tail of a digest delivery:

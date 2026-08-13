@@ -566,6 +566,9 @@ func (r *runner) run(ctx context.Context) error {
 		})
 		board.bind = disp.bindWatchboardIncident
 		disp.board = board
+		if !f.stormEnabled() {
+			log.Printf("watchboard: ancestor reattachment disabled (§7.7, issue #220: it rides the --storm topology graph, which is off) — every warning digests")
+		}
 	} else {
 		log.Printf("severity routing: --mode=shared — all severities route to --target-session (watchboard disabled)")
 	}
@@ -818,6 +821,17 @@ func (r *runner) run(ctx context.Context) error {
 			}
 		}()
 		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
+		// §7.7 ancestor reattachment (issue #220) rides the same
+		// topology index. Wired here, not at the board's construction
+		// above, because the graph feed does not exist until this
+		// point — and it only exists under --storm, which is therefore
+		// a de-facto precondition. Announced either way so the stage is
+		// never silently absent.
+		if disp.board != nil {
+			disp.resolver = feed
+			disp.board.reattach = disp.reattachWatchboardEntry
+			log.Printf("watchboard: ancestor reattachment enabled — a buffered warning whose blast-radius ancestor already owns a live incident is delivered there as a kind=family.member followup instead of a digest entry (§7.7)")
+		}
 		// Graph history (§6.6): periodic compressed snapshots into the
 		// store, alongside the continuously logged deltas above. Only
 		// when BOTH the graph feed and the store run — one-shot CLI

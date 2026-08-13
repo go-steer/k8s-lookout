@@ -112,6 +112,20 @@ type dispatcher struct {
 	// opening their own. Nil when storm correlation is disabled
 	// (--storm absent — the default).
 	storm *engine.StormCorrelator
+	// resolver, when non-nil, is the topology index the §7.5
+	// blast-radius keys come from — the SAME graph feed the storm
+	// correlator uses. The dispatcher holds it directly (rather than
+	// reaching through d.storm) for the §7.7 ancestor reattachment
+	// stage, which is a separate mechanism from correlation: it binds
+	// a watchboard warning to an EXISTING per-incident session instead
+	// of forming an aggregate one (issue #220).
+	//
+	// Nil when the graph feed is not running — the feed is built only
+	// under --storm (wiring.go), so storm is a de-facto precondition
+	// for reattachment. A nil resolver makes the stage inert: every
+	// warning digests exactly as it did pre-#220. Correlation is an
+	// optimization of session count, never a gate on delivery.
+	resolver engine.AncestorResolver
 	// store, when non-nil, is the §9.1 raw-occurrence store: every
 	// signal that survives the filter is recorded post-dedup with the
 	// routing outcome it received. Nil when --store is unset — all
@@ -417,6 +431,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// BindIncident = BindSession + the identity the recovery
 		// tracker needs to survive a restart (rides on dedup-persist).
 		d.dedup.BindIncident(key, sid, sig.IncidentRef())
+		// Index the bound incident by its §7.5 blast-radius keys so a
+		// later watchboard warning under the same ancestor reattaches
+		// here instead of opening a digest entry (issue #220).
+		d.noteAncestors(key, sig)
 		if d.storm != nil {
 			// Remember the session for a possible later supersede:
 			// if this incident becomes a founding storm member, the
@@ -633,6 +651,7 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		return
 	}
 	d.dedup.BindIncident(key, sid, sig.IncidentRef())
+	d.noteAncestors(key, sig)
 	// The session's actual opener is THIS signal's source family —
 	// re-stamp so cross-source join followups reference reality.
 	d.dedup.NoteIncidentKind(key, sig.Kind)

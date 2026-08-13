@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A watchboard warning now reattaches to a live incident sharing its
+  blast-radius ancestor, instead of becoming a second session (#220).
+  A missing secret on a live cluster produced exactly two things to
+  triage for one root cause: a critical `FailedMount` on the pod, which
+  opened an enriched per-incident session naming the missing secret,
+  and an `objectstate.progress_deadline` on its Deployment — same
+  failure, one level up — which §7.7 routed to the watchboard, where it
+  became a digest entry in a *different* session with no pointer back
+  to the diagnosis. `rollout.stall` followed and made it three signals
+  across two sessions.
+
+  At flush time the sentinel now asks whether a buffered warning's
+  blast-radius ancestor (§7.5 classes 0–2: placement, owner chain,
+  shared config/PVC) already owns a live per-incident session. If it
+  does, the warning is delivered there as a `kind=family.member`
+  followup — the §10.3 shape a cross-source dedup join already uses —
+  and never becomes a digest entry. A flush whose every entry
+  reattached creates no watchboard session at all. Strictly subtractive
+  on the wire: one `Append` replaces a session create plus a digest
+  inject.
+
+  Flush time rather than route time is the whole trick. In the trace
+  above the warning was buffered 60ms *before* the critical event
+  opened its session, so a check at buffering would have found nothing;
+  the batching delay the watchboard already imposes is what makes the
+  correlation possible.
+
+  Bounded and conservative by construction: at most one reattachment
+  per source family per target incident per dedup window (the existing
+  cross-source join budget), namespace-class ancestors never match (every
+  incident in a namespace shares one), and storm-claimed sessions are
+  never targets (§7.5 exists to collapse fan-out, not receive it). The
+  reattached incident is bound to the session, so its §7.4 recovery
+  outcome closes where its evidence landed. A failed followup inject
+  falls back to the digest — never to silence.
+
+  The stage rides the `--storm` topology graph and is inert without it:
+  with `--storm-window=0` every warning digests exactly as it did
+  before, and startup says which of the two is in effect. New metric
+  `lookout_watchboard_reattached_total{kind}`.
+
 - Image-pull failures are classified by error class, and the retryable
   ones are debounced (#213). 0.16.0's crash-loop gate deliberately
   exempted the whole image-pull family on the grounds that "a bad tag
