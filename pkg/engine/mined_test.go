@@ -21,7 +21,8 @@ import (
 )
 
 // minedCorrelator builds a correlator with mining on and a topology
-// that knows nothing — the state the reported cluster was in.
+// that knows nothing — the hardest case for mining, and the one where
+// it earns its keep, since every declared key is unavailable.
 func minedCorrelator(t *testing.T, min int) (*StormCorrelator, *time.Time) {
 	t.Helper()
 	c, now := newTestCorrelator(t, DefaultStormWindow, DefaultStormMin, &fakeResolver{byObject: map[ObjectRef][]Ancestor{}})
