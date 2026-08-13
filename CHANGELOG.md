@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-13
+
+Two themes: correlation that no longer needs a code change per fault
+class, and a run-to-run view of what actually changed.
+
+Storm correlation used to answer "are these one incident?" from the
+topology graph alone, so every blast radius that lives outside the
+cluster — a registry, a cloud API, a DNS resolver — arrived either as a
+hardcoded special case or not at all. A correlation key now comes from
+one of three sources and every storm records which: the graph
+(`topology`), a named external dependency (`registry-host`, now a
+documented extension point), or an attribute discovered in the window
+itself (`mined:<attribute>`, behind `--storm-mine` and off by default,
+since a mined key is circumstantial where a modelled one is causal).
+The same release fixes the reason the registry key kept missing its
+evidence: kubelet names a pull failure's cause once per object and then
+repeats itself causelessly, so a replayed region-wide Artifact Registry
+429 across seven workloads carried a usable cause on only two of them —
+below the formation threshold, and seven separate root causes to dig
+(#225).
+
+On the reporting side, `lookout findings diff` turns a scheduled scan
+into a transition surface — each subject `new`, `ongoing`, `escalated`,
+`resolved`, or `suppressed` — instead of the same open findings
+re-listed in full every run, and `lookout findings ack` time-boxes one
+an operator has already picked up (#212). Finding state is durable and
+cluster-scoped in the sentinel's existing `--store` file (schema v6),
+so several clusters can share one store.
+
 ### Added
 
 - `--storm-mine` correlates on *discovered* keys, for blast radii nobody
