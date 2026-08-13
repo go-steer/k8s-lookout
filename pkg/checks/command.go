@@ -119,12 +119,13 @@ func (c Command) Sub() string {
 // summaries. Registering a command under an unknown group is an
 // error: new groups are a design-doc change first.
 var groupDocs = map[string]string{
-	"triage": "incident reads: everything abnormal, condensed logs/events, blast radius, what changed",
-	"state":  "dependency + configuration verification: edges, webhooks, workload identity, volumes",
-	"stab":   "stability reads: GitOps drift, node-drain blockers",
-	"perf":   "control-plane and startup performance via Cloud Monitoring query packs",
-	"cloud":  "GCP-side reads: stockouts, orphaned resources, IP space, quota",
-	"net":    "active DNS/TCP/HTTP probes from inside the cluster",
+	"triage":   "incident reads: everything abnormal, condensed logs/events, blast radius, what changed",
+	"findings": "run-to-run finding state: diff two scans into transitions (new/ongoing/escalated/resolved), ack a subject for a window",
+	"state":    "dependency + configuration verification: edges, webhooks, workload identity, volumes",
+	"stab":     "stability reads: GitOps drift, node-drain blockers",
+	"perf":     "control-plane and startup performance via Cloud Monitoring query packs",
+	"cloud":    "GCP-side reads: stockouts, orphaned resources, IP space, quota",
+	"net":      "active DNS/TCP/HTTP probes from inside the cluster",
 }
 
 // GroupSummary returns the listing summary for a §4.1 group.
@@ -200,6 +201,10 @@ func (c Command) Validate() error {
 // under the §4.2 envelope. Both the CLI wiring and the test
 // scaffolding go through here so there is exactly one place a
 // command's metadata is bound to the runner.
+//
+// Stdin is left at its zero value (the runner defaults it to
+// os.Stdin); callers that pipe a report in — checktest, and any
+// future in-process host — set it on the returned config.
 func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
 	maxArgs := 0
 	if c.Positional != nil {

@@ -212,6 +212,41 @@ var migrations = []string{
 	ALTER TABLE graph_changes ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
 	CREATE INDEX graph_snapshots_epoch_taken_at ON graph_snapshots (epoch, taken_at);
 	CREATE INDEX graph_changes_epoch_generation ON graph_changes (epoch, generation);`,
+
+	// v6: the run-to-run transition surface (issue #212, see
+	// pkg/findings). One row per OPEN subject — the durable half of
+	// `lookout findings diff`, generalizing this store rather than
+	// standing a second tracker beside it.
+	//
+	// Keyed by subject_key, which is INSTANCE identity
+	// (cluster/namespace/kind/normalized-name/canonical-reason), a
+	// deliberately different grain from the class-level fingerprint
+	// column that rides alongside it: the class fingerprint keeps
+	// driving fleet rollup, the subject key drives the diff. See
+	// pkg/findings/subject.go for why both are needed and why
+	// engine.Fingerprint was NOT widened for this.
+	//
+	// Volume is bounded by "how many things are broken right now", not
+	// by time: a resolved subject's row is DELETED by the differ (that
+	// deletion is what makes a later recurrence read as `new`). So
+	// like memory_facts and triage_status, and unlike occurrences,
+	// this table is exempt from the §9.1 TTL/size prune — there is no
+	// backlog for a prune to trim.
+	`CREATE TABLE finding_state (
+		subject_key    TEXT PRIMARY KEY,
+		fingerprint    TEXT NOT NULL DEFAULT '',
+		cluster        TEXT NOT NULL DEFAULT '',
+		namespace      TEXT NOT NULL DEFAULT '',
+		kind_of_object TEXT NOT NULL DEFAULT '',
+		name           TEXT NOT NULL DEFAULT '',
+		reason         TEXT NOT NULL DEFAULT '',
+		severity       TEXT NOT NULL DEFAULT '',
+		first_seen     INTEGER NOT NULL,
+		last_seen      INTEGER NOT NULL,
+		ack_until      INTEGER,
+		ack_by         TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX finding_state_last_seen ON finding_state (last_seen);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

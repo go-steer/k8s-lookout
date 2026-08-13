@@ -49,8 +49,17 @@ type Result struct {
 // "100ms" and output is golden-testable).
 func Run(t *testing.T, c checks.Command, args ...string) Result {
 	t.Helper()
+	return RunStdin(t, c, "", args...)
+}
+
+// RunStdin is Run with stdin wired to a fixed string, for the
+// commands that consume a piped report (`--report -`). An empty
+// stdin still reads as EOF, never as the test process's terminal.
+func RunStdin(t *testing.T, c checks.Command, stdin string, args ...string) Result {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
 	cfg := c.RunConfig(&stdout, &stderr)
+	cfg.Stdin = strings.NewReader(stdin)
 	cfg.Now = FakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 100*time.Millisecond)
 	code := emit.Run(context.Background(), cfg, args)
 	return Result{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
@@ -75,8 +84,16 @@ func FakeClock(base time.Time, step time.Duration) func() time.Time {
 // --format.
 func VerifyContract(t *testing.T, c checks.Command, args ...string) {
 	t.Helper()
+	VerifyContractStdin(t, c, "", args...)
+}
+
+// VerifyContractStdin is VerifyContract for commands that consume a
+// piped report. The same stdin is replayed for each format, so the
+// two runs see identical input.
+func VerifyContractStdin(t *testing.T, c checks.Command, stdin string, args ...string) {
+	t.Helper()
 	for _, format := range []emit.Format{emit.FormatLogfmt, emit.FormatJSON} {
-		res := Run(t, c, append([]string{"--format=" + string(format)}, args...)...)
+		res := RunStdin(t, c, stdin, append([]string{"--format=" + string(format)}, args...)...)
 		if res.Code != emit.ExitData {
 			t.Fatalf("lookout %s (%s): exit %d, stderr: %s", c.Name, format, res.Code, res.Stderr)
 		}

@@ -88,13 +88,35 @@ func TestSkillDocGoldenSnippetsMatchFixtures(t *testing.T) {
 	t.Logf("validated %d output lines against golden fixtures", total)
 }
 
-// validateCommandLine parses one `lookout …` invocation against the
+// validateCommandLine parses one documented command line against the
 // registry using the production runner with a stubbed Run.
+//
+// A line may be a PIPELINE of lookout invocations (`lookout health |
+// lookout findings diff --report=-`, the canonical shape of the
+// §4.2-report-consuming commands); every stage is validated, so a
+// stale flag on either side of the pipe fails here. The pipe must be
+// its own whitespace-separated token.
 func validateCommandLine(t *testing.T, line string) error {
 	toks, err := shellSplit(line)
 	if err != nil {
 		return err
 	}
+	var stage []string
+	for _, tok := range toks {
+		if tok == "|" {
+			if err := validateInvocation(t, stage); err != nil {
+				return err
+			}
+			stage = nil
+			continue
+		}
+		stage = append(stage, tok)
+	}
+	return validateInvocation(t, stage)
+}
+
+// validateInvocation validates one `lookout …` stage.
+func validateInvocation(t *testing.T, toks []string) error {
 	if len(toks) < 2 || toks[0] != "lookout" {
 		return fmt.Errorf("not a `lookout <command>` line")
 	}

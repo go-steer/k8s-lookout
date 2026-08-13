@@ -47,7 +47,7 @@ var SkillCommands = map[string][]string{
 		"net probe"},
 	"cluster-health": {"health", "triage delta", "state edges", "bundle",
 		"triage radius", "triage changes", "state webhooks", "stab drain",
-		"perf probe"},
+		"perf probe", "findings diff", "findings ack"},
 	"gitops-drift": {"stab drift", "triage changes", "triage spec",
 		"triage status"},
 	"k8s-capacity": {"cloud stockout", "cloud quota", "cloud ipspace",
