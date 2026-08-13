@@ -182,12 +182,28 @@ func classificationText(message string) string {
 		// Below three characters a token is more likely to shred
 		// unrelated text than to hide a marker — and no marker is
 		// reachable by a one- or two-character tag anyway.
-		if len(tok) >= 3 {
-			m = strings.ReplaceAll(m, tok, " ")
+		if len(tok) < 3 {
+			continue
+		}
+		m = strings.ReplaceAll(m, tok, " ")
+		// Registries that authenticate per-repository echo the
+		// repository back inside a URL query, percent-encoded:
+		// Artifact Registry's token fetch appends
+		// `?scope=repository%3Aproj%2Fteam%2Fapp%3Apull`. Only the
+		// delimiters are escaped, so the path SEGMENTS survive
+		// verbatim and would still be matched — observed on a real
+		// GKE 1.36 pull failure.
+		if enc := refPathEscaper.Replace(tok); enc != tok {
+			m = strings.ReplaceAll(m, enc, " ")
 		}
 	}
 	return m
 }
+
+// refPathEscaper mirrors the percent-encoding a registry applies to a
+// repository path it puts in a query parameter. Lowercase because the
+// text being searched has already been lowercased.
+var refPathEscaper = strings.NewReplacer("/", "%2f", ":", "%3a", "@", "%40")
 
 // refTokens decomposes a lowercased image reference into the
 // substrings that can show up on their own elsewhere in the message,

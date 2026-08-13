@@ -40,6 +40,24 @@ const gkeMissingRepo = `Failed to pull image "us-docker.pkg.dev/PROJECT/does-not
 
 const gkeUnreachableRegistry = `Failed to pull image "10.255.255.1:5000/app/nope:v1": failed to pull and unpack image "10.255.255.1:5000/app/nope:v1": failed to resolve reference "10.255.255.1:5000/app/nope:v1": failed to do request: Head "https://10.255.255.1:5000/v2/app/nope/manifests/v1": dial tcp 10.255.255.1:5000: i/o timeout`
 
+// The next two are verbatim from a drill on a live GKE
+// v1.36.2-gke.2064000 cluster (Autopilot, containerd), captured while
+// validating the #213 gate end to end against real kubelet output.
+//
+// gkeDeniedPathTimeout is the #216 repository-path collision as it
+// actually arrives: an unreachable registry, three copies of a
+// repository named `denied-team`, and the word `denied` nowhere else.
+// Before #217 this classified terminal and fired on the first event.
+const gkeDeniedPathTimeout = `Failed to pull image "10.255.255.1:5000/denied-team/app:v1": rpc error: code = DeadlineExceeded desc = failed to pull and unpack image "10.255.255.1:5000/denied-team/app:v1": failed to resolve reference "10.255.255.1:5000/denied-team/app:v1": failed to do request: Head "https://10.255.255.1:5000/v2/denied-team/app/manifests/v1": dial tcp 10.255.255.1:5000: i/o timeout`
+
+// gkeArTokenScope404 is a missing Artifact Registry repository. It is
+// the message that showed reference-blanking was incomplete: AR
+// authenticates per repository, so the repository path comes back a
+// FOURTH time inside the token URL's query, percent-encoded
+// (`scope=repository%3A…%2F…%3Apull`). Only the delimiters are
+// escaped, so the path segments survive verbatim.
+const gkeArTokenScope404 = `Failed to pull image "us-docker.pkg.dev/gke-demos-345619/does-not-exist/nope:v1": failed to pull and unpack image "us-docker.pkg.dev/gke-demos-345619/does-not-exist/nope:v1": failed to resolve reference "us-docker.pkg.dev/gke-demos-345619/does-not-exist/nope:v1": failed to authorize: failed to fetch oauth token: unexpected status from GET request to https://us-docker.pkg.dev/v2/token?scope=repository%3Agke-demos-345619%2Fdoes-not-exist%2Fnope%3Apull&service=us-docker.pkg.dev: 404 Not Found`
+
 // TestClassifyPullFailure pins the classifier against the real
 // containerd/registry error strings. Like the CanonicalReasonForEvent
 // table in dedup_test.go, this is a DELIBERATE dependency on wording
@@ -72,6 +90,7 @@ func TestClassifyPullFailure(t *testing.T) {
 		{"never-pull policy", "Container image \"nginx:1.25\" is not present with pull policy of Never: ErrImageNeverPull", PullClassTerminal},
 		{"disk full is node-terminal, not transient", `Failed to pull image "nginx:1.25": write /var/lib/containerd/x: no space left on device`, PullClassTerminal},
 		{"missing repository (GKE 1.36, issue #216)", gkeMissingRepo, PullClassTerminal},
+		{"missing AR repository, live GKE capture", gkeArTokenScope404, PullClassTerminal},
 
 		// Terminal wins ties: an aggregated message naming a bad tag
 		// AND a timeout must not be suppressed as merely transient.
@@ -119,6 +138,14 @@ func TestClassifyPullFailure_ReferenceTextDoesNotVote(t *testing.T) {
 		// registry-wide outage would not have correlated either.
 		{"repository path containing denied", `Failed to pull image "reg.example.com/denied-team/app:v1": failed to resolve reference "reg.example.com/denied-team/app:v1": failed to do request: Head "https://reg.example.com/v2/denied-team/app/manifests/v1": dial tcp 10.0.0.1:443: i/o timeout`, PullClassRetryable},
 		{"repository path containing unauthorized", `Failed to pull image "reg.example.com/unauthorized-probe/app:v1": read tcp: connection reset by peer`, PullClassRetryable},
+		{"denied-named repo, live GKE capture", gkeDeniedPathTimeout, PullClassRetryable},
+
+		// Percent-encoded repeat of the path. Artifact Registry
+		// authenticates per repository and puts the path in the token
+		// URL query, where only the delimiters are escaped — so a
+		// blanking pass that only removes the raw form leaves the
+		// segments, and the marker, behind.
+		{"denied-named repo in an AR token scope", `Failed to pull image "us-docker.pkg.dev/proj/denied-team/app:v1": failed to authorize: failed to fetch oauth token: unexpected status from GET request to https://us-docker.pkg.dev/v2/token?scope=repository%3Aproj%2Fdenied-team%2Fapp%3Apull&service=us-docker.pkg.dev: 503 Service Unavailable`, PullClassRetryable},
 
 		// Stripping the reference must not disarm a genuine failure
 		// whose repository path happens to say the same thing.
