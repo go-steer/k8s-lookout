@@ -28,6 +28,7 @@ Composed entry points:
 best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group
 
 - [`lookout audit exemptions`](/reference/audit-exemptions/) — Audit the exemption file itself: which reviewed exemptions have lapsed (and are therefore no longer annotating anything) and which are about to. The mechanism that keeps an exemption file from becoming a permanent, unread list of things nobody checks any more.
+- [`lookout audit workloads`](/reference/audit-workloads/) — Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
 
 ### `lookout cloud`
 

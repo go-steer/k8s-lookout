@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lookout audit workloads`** — the first posture detectors (#190).
+  Five claims about workloads that are healthy right now, from one API
+  pass over Deployments, StatefulSets, DaemonSets and PDBs:
+  `audit.no_pdb`, `audit.single_replica`, `audit.no_spread` (warning /
+  warning / info), and `audit.no_readiness_probe` /
+  `audit.no_liveness_probe`. This is the standing question `stab drain`
+  cannot answer: `drain.singleton` fires only for a workload whose pod
+  happens to sit on the node being drained, so the same workload is
+  invisible from every other node. No new RBAC — every resource it
+  lists was already granted. Scope with `--namespace`, `-A`, or
+  `--workload`.
 - `triage top` now censuses missing **requests** alongside missing
   limits: `top.unrequested` (aggregate) and `top.unrequested_container`
   (per container, behind `--show-unrequested`), mirroring the existing

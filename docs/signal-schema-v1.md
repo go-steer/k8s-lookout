@@ -107,6 +107,28 @@ pinned vector above are untouched, because they are the recipe every
 open §9.4 triage-status record was joined under. Posture vectors are
 pinned alongside them in `pkg/engine/fingerprint_test.go`.
 
+`objectClass` earns its place in the recipe: the same claim about a
+Deployment and about a StatefulSet are different classes, because the
+remedies differ enough that a fleet rollup merging them would be
+reporting a number nobody can act on. The kinds shipped so far, all
+from `audit workloads` (#190) and `audit exemptions` (#234):
+
+| Kind | Reason | Object classes |
+| --- | --- | --- |
+| `audit.no_pdb` | `NoPodDisruptionBudget` | `Deployment`, `StatefulSet` |
+| `audit.single_replica` | `SingleReplica` | `Deployment`, `StatefulSet` |
+| `audit.no_spread` | `NoTopologySpread` | `Deployment`, `StatefulSet` |
+| `audit.no_readiness_probe` | `NoReadinessProbe` | `Deployment`, `StatefulSet`, `DaemonSet` |
+| `audit.no_liveness_probe` | `NoLivenessProbe` | `Deployment`, `StatefulSet`, `DaemonSet` |
+| `audit.exemption_expired` | `ExemptionExpired` | — (the subject is a file entry) |
+| `audit.exemption_expiring` | `ExemptionExpiring` | — |
+
+Like every other check-local `kind`, these are documented where they
+are produced — the emitting command's output glossary — and are
+deliberately absent from the wire-kind inventory below. The table here
+exists only to pin the fingerprint INPUTS, which are a cross-cluster
+contract in a way a glossary entry is not.
+
 ## Kind inventory (v1: 48 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct

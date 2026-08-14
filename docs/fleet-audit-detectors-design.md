@@ -64,8 +64,11 @@ same signal:
 
 | SOP check                        | Existing signal                                                  |
 | -------------------------------- | --------------------------------------------------------------- |
-| `single-replica`                 | `stab drain` → `drain.singleton`                                 |
+| `single-replica`                 | `stab drain` → `drain.singleton` (node-scoped); `audit workloads` → `audit.single_replica` (posture, #190) |
 | `blocking-pdb`                   | `stab drain` → `drain.pdb_gridlock` / `pdb.gridlocked`          |
+| `no-pdb`                         | `audit workloads` → `audit.no_pdb` (#190)                        |
+| `probes-readiness` / `probes-liveness` | `audit workloads` → `audit.no_readiness_probe` / `audit.no_liveness_probe` (#190) |
+| `no-spread`                      | `audit workloads` → `audit.no_spread` (#190)                     |
 | `no-memory-limit`                | `triage top` → `top.unlimited` / `top.unlimited_container`       |
 | `no-requests`                    | `triage top` → `top.unrequested` / `top.unrequested_container` (#235) |
 | `overrequest`-adjacent headroom  | `triage top` → `top.saturation`                                 |
@@ -81,11 +84,50 @@ same signal:
 | `scaledown-blocked` | partial — `stab drain` blockers        |
 | `overrequest`     | partial — `triage top` → `top.saturation` |
 
-The remainder of these two streams (`no-pdb`, `probes-*`,
-`rigid-scheduling`, `no-spread`; `orphan-pv`, `unconsumed-pvc`, `idle-nodepool`,
-`idle-namespace`, `terminal-pods`) is net-new but small, and lives in the same
-packages (`pkg/checks/top`, `stab`, `cloudcheck`) alongside the checks it
-extends. The mapping table above is the starting point, not the finished audit.
+The remainder of these two streams (`no-hpa` / `hpa-cannot-scale`,
+`rigid-scheduling`; `orphan-pv`, `unconsumed-pvc`, `idle-nodepool`,
+`idle-namespace`, `terminal-pods`) is net-new but small. The mapping table
+above is the starting point, not the finished audit.
+
+#### As built (#190): the first posture detectors
+
+`audit workloads` ships five kinds in one API pass over Deployments,
+StatefulSets, DaemonSets and PodDisruptionBudgets. Four judgment calls are
+worth recording, because each of them is a place where the obvious
+implementation reports something true and useless:
+
+- **A single-replica workload does not also get `audit.no_pdb`.** The claim
+  would be true, but the remedy it implies is wrong: a PDB over one replica is
+  a drain gridlock (`drain.pdb_gridlock`), not protection. One outage, one
+  finding, pointing at the fix that works.
+- **A workload scaled to zero makes no availability claim.** It has nothing to
+  keep available. Its probes are still judged — the template is what runs when
+  it is scaled back up.
+- **A DaemonSet is probes-only.** Its replica count is the node count, a drain
+  skips its pods (`--ignore-daemonsets`), and one-pod-per-node is the spread.
+- **PDB coverage is matched against the pod TEMPLATE's labels, not live pods.**
+  Posture is a property of the spec, so the answer must not change while a
+  workload is mid-rollout or momentarily podless — and it costs no pod List.
+
+Nothing is skipped by namespace. `kube-system` posture is noisy and mostly not
+the operator's to fix, but silently omitting it would reintroduce exactly the
+unverifiable coverage this note argues against; a namespace-scoped entry in the
+exemption file is the reviewed way to say so.
+
+Two slugs from #190 are deliberately still open, and neither is blocked on
+plumbing:
+
+- **`no-hpa` / `hpa-cannot-scale`.** Listing HPAs and matching `scaleTargetRef`
+  is trivial; deciding when the ABSENCE of an HPA is a defect is not. Most
+  workloads legitimately do not autoscale, so a bare `no-hpa` would fire on
+  nearly everything. `hpa-cannot-scale` (pinned at `maxReplicas`, or with a
+  dead metric) is the half with a real claim behind it, and it overlaps
+  `autoscaling.hpa_pinned` from the sentinel side — which needs resolving
+  first, or the two surfaces will disagree.
+- **`rigid-scheduling`.** Without node inventory, a `nodeSelector` pinning a
+  workload to a 40-node pool is indistinguishable from one pinning it to a
+  single node, and only the second is a finding. It needs the node labels in
+  hand, which is a different API pass from the one this command makes.
 
 **A charter caveat worth stating plainly.** `k8s-lookout`'s existing detectors
 find what is _abnormal now_ — a workload that is crashing, a disk that is
