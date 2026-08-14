@@ -95,7 +95,11 @@ posture, not incident. It is a deliberate design decision whether such
 best-practice-posture checks belong in `k8s-lookout` proper or in a sibling
 surface that imports the same `emit`/`engine`/`cloud` packages. The two config
 streams below do not have this tension; the reliability and cost streams
-partially do. Open question 1 pins this down.
+partially do. Decision 1 below resolves it: posture ships here, in its own
+`audit` command group, so the two philosophies stay separable by which group a
+consumer calls. One slug named above moved as a result — `no-requests` was
+classified as incident work, not posture, and belongs beside the `top.unlimited`
+census in `triage top`.
 
 ## The two gaps
 
@@ -189,22 +193,149 @@ its id; a detector that ran is its own coverage proof.
   (`available bool`) is the honest way to express "this posture check has no
   answer on provider X."
 
-## Open questions
+## Decisions
 
-1. **Charter.** Do best-practice _posture_ checks (`no-pdb`, `no-hpa`,
-   cluster-config gaps) belong in `k8s-lookout` proper, or in an `audit`-tagged
-   surface that imports `emit`/`engine`/`cloud` but ships as its own binary?
-   This is the "abnormality vs. posture" tension above.
-2. **Fan-out home.** Does the multi-cluster loop + rollup live here (`lookout
-   fleet`) or in the consumer? §14 M5 implies the latter; `fleet-consistency-drift`
-   pushes toward the former.
-3. **Cohort model.** `fleet-consistency-drift` needs a notion of "which clusters
-   should match." Where does the cohort definition live — a label convention, a
-   consumer-supplied manifest, or inferred?
-4. **RBAC/security workload checks vs. `state edges`.** Should
-   `cluster-admin-binding` / `wildcard-rbac` extend the existing `state edges`
-   detector family (which already walks RBAC for `edge.rbac_dangling`) or form a
-   new `sec`/`rbac` group?
+The four questions this note left open were decided on 2026-08-14. Each is
+recorded here with the reasoning, because in every case the reasoning constrains
+the implementation more than the verdict does.
+
+### 1. Charter — an `audit` command group, in this binary
+
+Posture checks ship inside `k8s-lookout`, separated from incident checks by
+**command group** rather than by binary. `triage`/`health`/`state` keep today's
+semantics; `audit …` opts into the other kind of claim. The mechanism already
+exists — a group entry in `groupDocs` (`pkg/checks/command.go`) — and this note
+anticipated the shape when it suggested "a new `checks` group — call it `audit`
+or `posture`."
+
+The sibling binary was rejected on recurring cost: a second release artifact,
+image, RBAC surface, deploy and version-fallback test, plus a fork of the three
+metadata-driven doc generators. The isolation ladder also runs one way. Group →
+build tag → separate binary can be climbed later if group separation proves too
+weak; starting at "separate binary" cannot be reversed cheaply.
+
+This resolves the "abnormality vs. posture" tension above by scoping it. Silence
+still means something precise, but what it means now depends on which group you
+called — and every command's terminating `scanned=`/`findings=` line already
+says which one ran.
+
+**All five streams ship here**, including the workload-level security detectors.
+This reverses DESIGN.md §5's "security-detection scope creep" cut for _config_
+posture; runtime exec spying (`exec-spy`) stays cut. It also supersedes
+`docs/assessments/langchain-sre-agent.md` §6.3, which argued for taking
+cloud-config posture only and leaving workload hardening, RBAC rules and
+NetworkPolicy coverage to Kyverno/Gatekeeper/PSA. That recommendation is
+recorded as considered and not taken; §6.3 should not be read as live guidance
+on those rows.
+
+### 2. Fan-out home — the consumer orchestrates, lookout derives
+
+The original question bundled three things that do not share an answer:
+fan-out (running a check against N clusters), rollup (reducing findings onto
+`(Fingerprint, cluster)`), and cross-cluster detection (a finding that exists
+only relative to a cohort).
+
+**Fan-out belongs to the consumer**, as §14 M5 implies — it already owns cron,
+credentials and scheduling. The `cloud.Fleet` seam that shipped with
+multi-cluster watch is weaker evidence for "here" than it looks:
+`docs/multi-cluster-design.md` scopes that work to "many small/dev clusters, one
+pane — not large production fleets, which keep the per-cluster sentinel," and
+audit is the production-fleet case.
+
+**Rollup and cross-cluster derivation belong here**, as a read-path command
+whose input is finding streams rather than a cluster. `lookout findings diff`
+established that shape after this note was written: a `checks.Command` taking
+`--report=<scan output>` and reducing it against stored state. A fleet rollup is
+the same shape with a different reducer — no credentials, no cluster access,
+testable from fixtures, and the comparison logic stays deterministic Go instead
+of migrating into consumer Python, which is the outcome this whole note argues
+against.
+
+Consistency drift then decomposes cleanly: per-cluster detectors emit their
+facet values as **inventory records** — `emit.Finding` with no `Fingerprint`, a
+shape §8 already reserves for "scorecard lines, inventory records, probe
+results" — and the rollup layer derives `drift` findings by comparing the set.
+
+One seam is created and should be closed by the consumer contract: "a detector
+that ran is its own coverage proof" becomes two-stage, so a rollup must assert
+how many reports it expected against how many it received, or a short rollup
+looks identical to a clean one.
+
+### 3. Cohort model — invocation-scoped
+
+A cohort is **the set of reports passed to the rollup**. No roster, no label
+convention, no discovery, and no cohort state that can drift out of sync with
+the real fleet — a roster that lags reality produces confidently wrong drift
+findings, which is worse than none. The consumer knows its own topology;
+"compare these five" is a shell loop, not a data model.
+
+This costs nothing, because `uncohorted` is an outlier guard derived from the
+comparison itself (a cluster differing on ≥6 facets is a different _kind_ of
+cluster), not a roster-membership test. A roster would only answer a different
+question — "which clusters were never scanned at all" — which is the consumer's
+to answer.
+
+### 4. RBAC checks — `audit rbac`, sharing the loader
+
+`cluster-admin-binding` and `wildcard-rbac` land in the `audit` group, not in
+`state edges` and not in a separate `sec`/`rbac` group.
+
+The existing RBAC walk in `state edges` is a _correctness_ check:
+`edge.rbac_dangling` fires when a binding points at a missing role — something
+is broken now. These two slugs are the opposite shape: bindings that work
+perfectly and grant too much. The deciding axis is therefore the posture/incident
+split from decision 1, not which package happens to already list the objects.
+Adding posture kinds to `state edges` would mean a consumer calling it for
+incident triage starts receiving posture findings — precisely the leak group
+separation exists to prevent.
+
+The RBAC index builder in `pkg/checks/state/edges.go` should be **reused** by
+`audit rbac` rather than duplicated. Share the loader, not the group.
+
+A distinct `sec` group was rejected because it splits posture across two groups
+— `audit` for cluster config, `sec` for workload and RBAC — forcing users to
+learn which family a check belongs to. One `audit` group with roughly five
+commands is the same order as `state`'s four.
+
+## Exemptions
+
+Posture checks are unusable without an opt-out: `no-pdb` on a deliberately
+single-replica batch worker, a privileged container that is the CNI. But the
+mechanism is constrained by the argument this note opens with. An opt-out that
+makes a finding _disappear_ reintroduces unverifiable coverage through the front
+door — "the audit found nothing" becomes unfalsifiable again, with the omission
+now in a YAML file nobody reads instead of a model's transcript.
+
+So **exempt must not mean absent**:
+
+- **Annotate, never drop.** An exempted finding is still emitted, carrying its
+  reason and expiry, and the terminating summary line gains an exemption count
+  through the existing §6.6 `Writer.Note` seam — "the one place that cannot be
+  missed." Consumers filter; lookout does not hide.
+- **A git-reviewable config file**, not an in-cluster ConfigMap (edits bypass
+  review) and not object annotations (they let the team requesting an exemption
+  grant it to itself). An exemption should be reviewable by someone other than
+  its beneficiary.
+- **Mandatory reason and expiry.** A permanent exemption is indistinguishable
+  from a check nobody wrote. Expired and expiring exemptions are themselves
+  findings.
+
+This is a third suppression axis and must stay distinct from the two that
+exist: `findings ack` is operator-owned, transient and expiring ("known, I'm on
+it"), and §9.4's `severity_override` is agent-owned and standing (it asserts a
+diagnosis). A config exemption is owner-owned, durable and reviewed in git ("by
+design, here").
+
+An exemption is also **not** the remedy for a LimitRange false positive. An
+exemption says "we accept this finding"; a defaulting LimitRange means the
+finding is factually wrong, because the namespace supplied the request. That is
+a correctness prerequisite for any missing-requests or missing-limits census,
+not something the opt-out absorbs.
+
+Because exemption state rides on `emit.Finding`, it is an additive §8 schema
+change and must land with the first `audit` detector rather than after the
+stream — retrofitting it across a built-out roster means re-cutting every golden
+fixture.
 
 ## Tracking
 
