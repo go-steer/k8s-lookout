@@ -178,8 +178,29 @@ The audit consumer replaces "model runs `jq`, model writes findings.json" with
 
 The prize on the consumer side is deleting the machinery that only exists to
 police an LLM: `FINDING_ID_RE`, `derive_finding_id`, `ID_SCHEME` versioning, the
-attestation-not-verification command validators. A detector's `Fingerprint` is
-its id; a detector that ran is its own coverage proof.
+attestation-not-verification command validators. A detector's finding is its own
+id; a detector that ran is its own coverage proof.
+
+**The seam is specified in full in
+[`audit-ingestion-contract.md`](./audit-ingestion-contract.md)** (#191), written
+before the detector roster so ~55 detectors are not authored against an unstated
+contract. Three points in the sketch above are refined there rather than
+restated, and the refinements are the reason the note exists:
+
+- The ledger's stable id is the **subject key**
+  (`findings.SubjectKey`, instance grain), not the `Fingerprint` (class grain).
+  Step 2's "`Fingerprint` → stable id" collapses two keys that answer different
+  questions: the fingerprint deliberately excludes the object, so using it as a
+  ledger id merges every workload sharing a posture gap into one untrackable
+  row. The fingerprint remains the *rollup* join key, exactly as §8 intends.
+- An **empty `Fingerprint` is a shape, not a gap** — the one §8 reserves for
+  scorecard lines, inventory records and probe results, which is precisely what
+  decision 2 makes consistency drift's per-cluster output. A consumer must not
+  reject those records or synthesize a substitute id.
+- **The absence of a terminating summary line is a failed run**, and a consumer
+  must refuse to compute a delta against a stream that lacks one. Ingesting a
+  truncated stream converts every unreported finding into a `resolved`
+  transition — rename-as-resolution through a different door.
 
 ## Non-goals & trade-offs
 
