@@ -45,8 +45,62 @@
 // ingests what comes out.
 package audit
 
-import "github.com/go-steer/k8s-lookout/pkg/checks"
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
+)
+
+// Deps are the injectable dependencies of the audit commands. The
+// zero value gives production behavior; tests inject a fake clientset
+// (§13). Not every command needs one — `audit exemptions` reads a
+// file, not a cluster — which is the "no shared runtime" point above
+// made concrete.
+type Deps struct {
+	// Client builds the Kubernetes client. Nil means kube.BuildClient
+	// with default resolution (in-cluster autodetect, then
+	// $KUBECONFIG / ~/.kube/config).
+	Client func(ctx context.Context) (kubernetes.Interface, error)
+}
+
+func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
+	if d.Client != nil {
+		return d.Client(ctx)
+	}
+	return kube.BuildClient(kube.Options{})
+}
 
 func init() {
 	checks.Register(ExemptionsCommand())
+	checks.Register(WorkloadsCommand(Deps{}))
+}
+
+// maxListItems caps rendered name lists inside a single detail value;
+// the count beside it always carries the full total.
+const maxListItems = 8
+
+// cappedList joins items with commas, truncating past maxListItems
+// with an explicit ",+N more" tail so the value stays one readable
+// token rather than an unbounded blob.
+func cappedList(items []string) string {
+	if len(items) <= maxListItems {
+		return strings.Join(items, ",")
+	}
+	return strings.Join(items[:maxListItems], ",") +
+		fmt.Sprintf(",+%d more", len(items)-maxListItems)
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
 }
