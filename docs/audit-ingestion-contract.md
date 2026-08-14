@@ -26,6 +26,7 @@ guarantees and what it deliberately does not.
 | What does an empty `fingerprint` mean? | The finding has no incident class. It is not an error and not a gap. See §5. |
 | Which cluster is a finding from? | Not in the record. The consumer supplies it. See §6. |
 | How does a consumer know a run completed? | The terminating summary line, and only that. See §7. |
+| What does an exempt finding mean? | It fired and it is real; the owners have accepted it until `exempt_expires`. Ingest it, suppress it in the UI if you like, never drop it. See §3. |
 | What must a consumer do with a field it does not recognize? | Carry it as evidence, never reject the record. See §8. |
 
 ## 1. Invocation
@@ -97,6 +98,7 @@ normative reference, in particular for:
 | `reason` | Yes | Machine-matchable cause, CamelCase, mirroring `Event.Reason` where one exists. Part of subject identity (§4) — a subject whose reason changed is a *different* finding, not a continuing one. |
 | `message` | Evidence only | Human/agent-readable one-liner. **Never** parse it, and never derive an id from it. Message wording is not a contract and will change. |
 | `fingerprint` | Conditionally | The §8 incident-class hash when the finding has an incident class; absent otherwise (§5). |
+| `exempt_reason`, `exempt_expires` | Yes, when present | Present together or not at all. The finding is covered by a reviewed entry in the operator's `--exemptions` file: it is real, it fired, and someone has accepted it until `exempt_expires`. |
 | *`Details` keys* | Evidence | Check-specific fields, `[a-z][a-z0-9_]*`, each declared in the owning command's output glossary and therefore visible in `--help`, the MCP tool schema, and the generated reference page. |
 
 The `Details` keys are exactly the evidence an SOP used to paste by hand. They
@@ -106,6 +108,36 @@ through as an opaque key/value bag rather than modelling each detector's keys.
 `kind` and `Details` keys are additive-only in practice — a command's output
 glossary is contract-tested, and every emitted key must appear in it — but a
 consumer must still tolerate keys it has never seen (§8).
+
+### Exempt findings are annotated, never withheld
+
+An exemption is an assertion by the cluster's owners that a finding is
+*intentional*, recorded in a git-reviewed file with a mandatory reason and a
+mandatory expiry. It is not a filter. The finding is emitted, counted in
+`findings=<n>`, and carries `exempt_reason=` and `exempt_expires=` — so the
+ledger can always answer "what is actually true about this cluster" separately
+from "what have we agreed to live with." A tool that dropped exempt findings at
+the source would make coverage unverifiable, which is the failure this whole
+surface exists to prevent.
+
+For the consumer this means three things:
+
+- **Ingest exempt findings like any other.** Same subject key, same
+  fingerprint, same ledger row. Exemption is an attribute of the row, not a
+  reason to skip it.
+- **Suppress at presentation, not at ingestion.** Hiding exempt rows from a
+  dashboard is fine and expected; never hiding them from the store.
+- **`exempt_expires` is a deadline, not decoration.** It is RFC 3339. Once it
+  passes the annotation simply stops appearing — nothing in the stream announces
+  the lapse. A consumer that wants to chase renewals should either watch for the
+  annotation disappearing or ingest `lookout audit exemptions`, which reports
+  lapsed and soon-to-lapse entries as findings in their own right.
+
+Exemption is one of three suppression axes and the only one carried on the wire
+here. `findings ack` is operator-driven, transient, and lives in lookout's own
+store; §9.4 `severity_override` is agent-driven and asserts a diagnosis. An
+exemption is owner-driven, durable, and reviewed in git. A consumer should not
+collapse them into one "muted" boolean.
 
 ## 4. The two identity grains
 
@@ -232,9 +264,25 @@ means nothing at all is known.
 
 **Notes.** Keys after `elapsed` are §6.6 annotations — the "one place that
 cannot be missed" seam. Graph-backed commands already stamp `source=live|history`
-and a resolved `at=`; the exemption count from #234 lands here too. A consumer
-must read the notes it knows about and carry the rest, not reject the line for
-carrying a key it has not seen.
+and a resolved `at=`. A consumer must read the notes it knows about and carry
+the rest, not reject the line for carrying a key it has not seen.
+
+**`exempt=<n>`.** When the invocation was given `--exemptions`, the Writer
+appends `exempt=<n>` as the last note: how many of the `findings=<n>` just
+emitted were covered by a reviewed entry. Three properties the consumer can
+rely on:
+
+- **`exempt` is a subset of `findings`, always.** Both counters move on the
+  same successful write, so `exempt` can never exceed what `findings` accounts
+  for. `findings=12 exempt=3` means nine unexempted findings, computable
+  without reading a single record.
+- **`exempt=0` is meaningful and is not the same as the key being absent.**
+  Present-and-zero says an exemption file was in effect and nothing matched —
+  a file that has aged out of relevance. Absent says no file was supplied, so
+  nothing about exemption state is known for that run.
+- **It is Writer-owned.** No command can set, shadow, or forget it, for the
+  same reason the sanitizer lives on that path: there is no output path that
+  bypasses it.
 
 **Two-stage coverage.** Decision 2 splits detection from rollup, which splits
 "a detector that ran is its own coverage proof" in two. Per-cluster, the
