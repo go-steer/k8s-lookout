@@ -62,6 +62,7 @@ func CommonFlags() []FlagSpec {
 		{Name: "since", Type: FlagDuration, Default: "0s", Help: "how far back to look (0 = command default)"},
 		{Name: "format", Type: FlagString, Default: "logfmt", Help: "output format: logfmt|json (one record per line either way)"},
 		{Name: "timeout", Type: FlagDuration, Default: "10s", Help: "abort the invocation after this long (exit 1)"},
+		{Name: "exemptions", Type: FlagString, Default: "", Help: "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped"},
 	}
 }
 

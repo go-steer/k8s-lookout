@@ -23,6 +23,12 @@ Composed entry points:
 - [`lookout bundle`](/reference/bundle/) — The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.
 - [`lookout health`](/reference/health/) — "Any issues with this cluster?" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records: a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
+### `lookout audit`
+
+best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group
+
+- [`lookout audit exemptions`](/reference/audit-exemptions/) — Audit the exemption file itself: which reviewed exemptions have lapsed (and are therefore no longer annotating anything) and which are about to. The mechanism that keeps an exemption file from becoming a permanent, unread list of things nobody checks any more.
+
 ### `lookout cloud`
 
 GCP-side reads: stockouts, orphaned resources, IP space, quota

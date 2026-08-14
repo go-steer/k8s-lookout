@@ -73,6 +73,18 @@ type Finding struct {
 	// with no incident-class identity: scorecard lines, inventory
 	// records, probe results.
 	Fingerprint string
+	// ExemptReason and ExemptExpires are stamped by the Writer, not
+	// by the check, when a reviewed exemption covers this finding
+	// (--exemptions, issue #234). They ANNOTATE: an exempted finding
+	// is still emitted, still counted, and still carries everything
+	// it otherwise would. Filtering is the consumer's job — an
+	// opt-out that made findings disappear would reintroduce the
+	// unverifiable coverage this whole surface exists to eliminate.
+	//
+	// Both are empty (and omitted) on an unexempted finding, which is
+	// every finding when no exemption file was supplied.
+	ExemptReason  string
+	ExemptExpires string
 	// Details carries check-specific fields, emitted after the
 	// named fields in declared order. Keys must match keyPattern
 	// and be declared in the owning command's output glossary
@@ -98,14 +110,26 @@ var keyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // itself, in emission order. Contract tests treat these as
 // implicitly declared for every command; only Details keys must
 // appear in a command's output glossary.
+//
+// exempt_reason/exempt_expires are envelope fields rather than
+// per-command ones because the Writer stamps them, not the check: any
+// finding from any command can carry them, and there is no output
+// path that could emit them without going through Emit.
 func EnvelopeFields() []string {
-	return []string{"kind", "severity", "namespace", "kind_of_object", "name", "reason", "message", "fingerprint"}
+	return []string{"kind", "severity", "namespace", "kind_of_object", "name", "reason", "message", "fingerprint", "exempt_reason", "exempt_expires"}
+}
+
+// SummaryNoteFields returns the summary-line note keys the Writer
+// owns. Like EnvelopeFields these are implicitly declared for every
+// command, and a command may not redeclare them.
+func SummaryNoteFields() []string {
+	return []string{"exempt"}
 }
 
 // pairs flattens the finding into its ordered key=value records,
 // omitting empty values (zero nominal state applies to fields too).
 func (f Finding) pairs() []Field {
-	out := make([]Field, 0, 8+len(f.Details))
+	out := make([]Field, 0, len(EnvelopeFields())+len(f.Details))
 	add := func(k, v string) {
 		if v != "" {
 			out = append(out, Field{Key: k, Value: v})
@@ -119,6 +143,8 @@ func (f Finding) pairs() []Field {
 	add("reason", f.Reason)
 	add("message", f.Message)
 	add("fingerprint", f.Fingerprint)
+	add("exempt_reason", f.ExemptReason)
+	add("exempt_expires", f.ExemptExpires)
 	for _, d := range f.Details {
 		add(d.Key, d.Value)
 	}

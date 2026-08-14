@@ -23,8 +23,8 @@ k8s-lookout/
 ├── pkg/
 │   ├── checks/           # read-path check implementations, one package per group
 │   │   │                 #   (delta, logs, events, top, triage, state, stab, perf,
-│   │   │                 #   cloudcheck, netprobe, bundle, health) — shared by CLI, MCP,
-│   │   │                 #   and in-process enrichment
+│   │   │                 #   cloudcheck, netprobe, bundle, health, findings, audit)
+│   │   │                 #   — shared by CLI, MCP, and in-process enrichment
 │   │   ├── command.go    # Command metadata: flags, when-to-use line, output-field glossary
 │   │   ├── registry.go   # the metadata registry all generated surfaces read from
 │   │   └── checktest/    # §13 contract-test scaffold every command suite runs
@@ -32,6 +32,8 @@ k8s-lookout/
 │   │                     #   only implementation, compiled in via build tags only
 │   ├── corpus/           # §9.3 harvester: labeled trajectories from inject captures, no NLP
 │   ├── emit/             # output envelope: logfmt/JSON findings, summary line, SANITIZER
+│   ├── exempt/           # --exemptions loader: reviewed, expiring opt-outs that ANNOTATE
+│   │                     #   findings (via the emit Writer seam) rather than drop them
 │   ├── engine/           # source-agnostic pipeline pieces: filter, dedup, storm, severity
 │   │                     #   routing, recovery, fingerprint recipe, quota-draft
 │   ├── graph/            # in-memory topology index (COW snapshots) + LKGH history/replay
@@ -102,8 +104,10 @@ Violating any of these is a bug, not a test update
 | Signal-schema v1 ledger (the fleet-rollup contract) | [`signal-schema-v1.md`](./signal-schema-v1.md) | same freeze tests; removal/rename is a v2 negotiation with fleet consumers, additions extend ledger + doc together |
 | engine↔inject kind constants stay one value | `pkg/engine/signal.go`, `pkg/inject` | `internal/watch/signal_contract_test.go` |
 | Fingerprint recipe (the §8/§9.4 join key; recipe untouched — the reason-class INPUT for pull-shaped `BackOff`/`Failed` events was corrected 2026-07-27, `signal-schema-v1.md` §Amendments) | `pkg/engine/fingerprint.go` | `pkg/engine/fingerprint_test.go` + `TestFingerprintParity_PushAndScan` (`internal/watch/m5_corpus_rollup_test.go`) |
+| Posture fingerprint recipe (the `audit` group's class key: detector kind, uncanonicalized reason, empty zone — an ADDITION, `ScanFingerprint` unchanged) | `pkg/engine/fingerprint.go` | `pkg/engine/fingerprint_test.go` (`TestPostureFingerprint_PinnedVectors`, `TestScanFingerprint_Unchanged`) |
 | LKGH graph-snapshot format (magic + version byte + gzip body) | `pkg/graph/history.go` | `pkg/graph/history_test.go` (golden v1 blob, `TestRestore_V1Compat`) |
 | Sanitizer: no secret value on any surface | `pkg/emit/sanitize.go` | `pkg/emit/sanitize_test.go` golden fixtures (`pkg/emit/testdata/sanitize/`) — an unmasked credential fixture fails CI |
+| Exempt annotates, never drops: a covered finding is still emitted and counted, and the summary reports `exempt=<n>` | `pkg/exempt/`, `pkg/emit/writer.go` | `pkg/exempt/exempt_test.go`, `pkg/emit/exempt_test.go` (`TestExemptAnnotatesNeverDrops`) |
 | Shipped ClusterRole covers the enrichment read paths | `deploy/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
 | Command output schema ↔ declared metadata | each `pkg/checks/*` | `pkg/checks/checktest.VerifyContract` in every command's suite |
 | Bundle section identifiers/order across CLI and enrichment ("the enrichment bundle IS a bundle") | `pkg/checks/bundle/bundle.go` + `internal/watch/enrich.go` | `internal/watch/enrich_bundle_contract_test.go` (`TestBundleSectionContractFrozen`; pins both heads' `sections=` joins and both bodies' emission order) |

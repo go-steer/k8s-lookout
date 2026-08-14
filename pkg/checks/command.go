@@ -119,6 +119,7 @@ func (c Command) Sub() string {
 // summaries. Registering a command under an unknown group is an
 // error: new groups are a design-doc change first.
 var groupDocs = map[string]string{
+	"audit":    "best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group",
 	"triage":   "incident reads: everything abnormal, condensed logs/events, blast radius, what changed",
 	"findings": "run-to-run finding state: diff two scans into transitions (new/ongoing/escalated/resolved), ack a subject for a window",
 	"state":    "dependency + configuration verification: edges, webhooks, workload identity, volumes",
@@ -181,6 +182,9 @@ func (c Command) Validate() error {
 	seen := map[string]bool{}
 	for _, e := range emit.EnvelopeFields() {
 		seen[e] = true
+	}
+	for _, n := range emit.SummaryNoteFields() {
+		seen[n] = true
 	}
 	for _, f := range c.Output {
 		if !outKeyPattern.MatchString(f.Name) {

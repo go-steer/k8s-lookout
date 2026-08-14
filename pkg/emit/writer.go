@@ -54,6 +54,19 @@ type Sanitizer func(Finding) Finding
 // every Emit, on every surface, not opt-in per check.
 var DefaultSanitizer Sanitizer = SanitizeFinding
 
+// Exempter answers whether a reviewed exemption covers a finding
+// (issue #234). It is deliberately narrow — three strings in, an
+// annotation out — so the loader (pkg/exempt) stays free of any
+// dependency on this package and the Writer stays free of YAML.
+//
+// The contract is ANNOTATE, never drop: a true result adds the reason
+// and expiry to the finding and increments the exemption count on the
+// summary line. Nothing is withheld. A consumer that wants the quiet
+// view filters on data it can see; lookout does not hide.
+type Exempter interface {
+	Exempt(kind, namespace, name string) (reason, expires string, ok bool)
+}
+
 // Writer encodes sanitized findings to one output stream and counts
 // them for the summary line. Not safe for concurrent use; checks are
 // single-goroutine emitters by design (deterministic output order).
@@ -61,7 +74,9 @@ type Writer struct {
 	out      io.Writer
 	format   Format
 	sanitize Sanitizer
+	exempt   Exempter
 	findings int
+	exempted int
 	notes    []Field
 }
 
@@ -72,6 +87,17 @@ type WriterOption func(*Writer)
 // every production surface runs DefaultSanitizer (SanitizeFinding).
 func WithSanitizer(s Sanitizer) WriterOption {
 	return func(w *Writer) { w.sanitize = s }
+}
+
+// WithExemptions makes the Writer annotate findings covered by a
+// reviewed exemption and report the count in the summary line. Passing
+// a nil Exempter is the same as not passing one at all.
+//
+// This sits on the Writer for the same reason the sanitizer does: it
+// is the one place every finding passes through, so no command can
+// forget to apply it and no output path can bypass it.
+func WithExemptions(e Exempter) WriterOption {
+	return func(w *Writer) { w.exempt = e }
 }
 
 // NewWriter returns a Writer emitting the given format to out.
@@ -86,9 +112,22 @@ func NewWriter(out io.Writer, format Format, opts ...WriterOption) (*Writer, err
 	return w, nil
 }
 
-// Emit sanitizes, validates, and writes one finding as one line.
+// Emit sanitizes, annotates, validates, and writes one finding as one
+// line.
+//
+// Exemption annotation happens AFTER sanitizing, so a check cannot
+// launder a secret through an exemption reason, and BEFORE validation,
+// so a malformed annotation fails in the same place a malformed
+// finding does.
 func (w *Writer) Emit(f Finding) error {
 	f = w.sanitize(f)
+	exempted := false
+	if w.exempt != nil {
+		if reason, expires, ok := w.exempt.Exempt(f.Kind, f.Namespace, f.Name); ok {
+			f.ExemptReason, f.ExemptExpires = reason, expires
+			exempted = true
+		}
+	}
 	if err := f.validate(); err != nil {
 		return err
 	}
@@ -102,12 +141,22 @@ func (w *Writer) Emit(f Finding) error {
 	if _, err := w.out.Write(line); err != nil {
 		return err
 	}
+	// Both counters move only on a finding that actually reached the
+	// stream, so exempt=<n> can never claim more than findings=<n>
+	// accounts for.
 	w.findings++
+	if exempted {
+		w.exempted++
+	}
 	return nil
 }
 
 // Findings reports how many findings have been emitted so far.
 func (w *Writer) Findings() int { return w.findings }
+
+// Exempted reports how many emitted findings carried an exemption
+// annotation.
+func (w *Writer) Exempted() int { return w.exempted }
 
 // Note records one summary-line annotation, appended after the
 // mandatory scanned/findings/elapsed keys in the order first set
@@ -127,6 +176,11 @@ func (w *Writer) Note(key, value string) error {
 	case "scanned", "findings", "elapsed":
 		return fmt.Errorf("summary note key %q shadows a mandatory summary key", key)
 	}
+	for _, reserved := range SummaryNoteFields() {
+		if key == reserved {
+			return fmt.Errorf("summary note key %q is owned by the Writer and must not be set by a check", key)
+		}
+	}
 	for i := range w.notes {
 		if w.notes[i].Key == key {
 			w.notes[i].Value = value
@@ -144,14 +198,23 @@ func (w *Writer) Note(key, value string) error {
 // line-oriented consumer handles both formats identically. The
 // findings count comes from the Writer itself — it cannot drift from
 // what was actually emitted.
+//
+// When an exemption file was supplied, `exempt=<n>` is appended last,
+// ALWAYS — including exempt=0. That is the point of the §6.6 seam:
+// "this scan ran with exemptions in effect, and none of them fired" is
+// a fact a reader needs, and it is not the same fact as "no exemptions
+// were configured", which emits no key at all.
 func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
-	pairs := make([]Field, 0, 3+len(w.notes))
+	pairs := make([]Field, 0, 4+len(w.notes))
 	pairs = append(pairs,
 		Field{Key: "scanned", Value: strconv.Itoa(scanned)},
 		Field{Key: "findings", Value: strconv.Itoa(w.findings)},
 		Field{Key: "elapsed", Value: elapsed.String()},
 	)
 	pairs = append(pairs, w.notes...)
+	if w.exempt != nil {
+		pairs = append(pairs, Field{Key: "exempt", Value: strconv.Itoa(w.exempted)})
+	}
 	var line []byte
 	switch w.format {
 	case FormatJSON:
