@@ -97,3 +97,44 @@ func Fingerprint(kind, reasonClass, objectClass, zone string) string {
 func ScanFingerprint(reason, objectClass, zone string) string {
 	return Fingerprint(KindK8sEvent, CanonicalReason(reason), objectClass, zone)
 }
+
+// PostureFingerprint is the incident-class hash for a POSTURE finding
+// — the `audit` group's claim that a currently-healthy workload lacks
+// a safety net (issue #182). It is a §8 ADDITION, not a change:
+// ScanFingerprint keeps its exact behaviour, because it is the recipe
+// every open §9.4 triage-status record was joined under.
+//
+//	PostureFingerprint(kind, reason, objectClass)
+//	  = Fingerprint(kind, reason, objectClass, "")
+//
+// Three deliberate differences from the scan recipe, each of which
+// would be a bug if copied from it:
+//
+//   - kind is the DETECTOR's kind ("audit.no_pdb"), not "k8s-event".
+//     A posture finding is not the pull-path view of a symptom the
+//     sentinel could push; there is no event for "this Deployment has
+//     no PodDisruptionBudget", so there is nothing to dedupe against
+//     and no reason to borrow the reactive kind. For posture the check
+//     slug IS the incident class.
+//
+//   - reason is passed through UNCANONICALIZED. CanonicalReason maps
+//     k8s event reasons onto their families; a posture reason is not
+//     an event reason, so running it through that table can only
+//     mis-map (a posture reason that happened to collide with a table
+//     key would be silently rewritten into someone else's class) and
+//     can never merge two classes that should be merged. Including the
+//     reason at all is a superset of "kind + objectClass": it costs
+//     nothing when a detector has one reason and keeps classes
+//     distinct for a detector that grows a second.
+//
+//   - zone is EMPTY. Zone scopes a reactive incident to the failure
+//     domain it happened in — a stockout in us-central1-a is not the
+//     one in -b. Posture is a property of a spec, identical in every
+//     zone the workload lands in, so stamping a zone would fragment
+//     the #189 fleet rollup into one class per zone and defeat the
+//     join it exists for. Instance identity (which cluster, which
+//     object) is the SUBJECT KEY's job, not the fingerprint's — see
+//     docs/audit-ingestion-contract.md §4.
+func PostureFingerprint(kind, reason, objectClass string) string {
+	return Fingerprint(kind, reason, objectClass, "")
+}

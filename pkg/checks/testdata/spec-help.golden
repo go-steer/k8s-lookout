@@ -9,14 +9,15 @@ Flags:
   --diff  diff against the previous graph-history revision — requires a sentinel store; not yet implemented (§6.6)
 
 Common flags (every lookout command):
-  --namespace=<string>  limit the scan to one namespace
-  -A                    scan all namespaces
-  --workload=<string>   target one workload as <Kind>/<namespace>/<name>, e.g. Deployment/prod/api
-  --since=<duration>    how far back to look (0 = command default)
-  --format=logfmt       output format: logfmt|json (one record per line either way)
-  --timeout=10s         abort the invocation after this long (exit 1)
+  --namespace=<string>   limit the scan to one namespace
+  -A                     scan all namespaces
+  --workload=<string>    target one workload as <Kind>/<namespace>/<name>, e.g. Deployment/prod/api
+  --since=<duration>     how far back to look (0 = command default)
+  --format=logfmt        output format: logfmt|json (one record per line either way)
+  --timeout=10s          abort the invocation after this long (exit 1)
+  --exemptions=<string>  path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped
 
-Output fields (beyond the shared envelope fields kind, severity, namespace, kind_of_object, name, reason, message, fingerprint):
+Output fields (beyond the shared envelope fields kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires):
   labels            resource labels as sorted k=v pairs
   owner             controlling owner as Kind/name
   phase             status.phase, only when abnormal for the kind (zero nominal state)

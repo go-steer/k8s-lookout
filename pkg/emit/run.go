@@ -23,6 +23,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/go-steer/k8s-lookout/pkg/exempt"
 )
 
 // Exit codes per the §4.2 contract. The multicall dispatcher and
@@ -49,6 +51,13 @@ type Invocation struct {
 	// os.Stdin, so a check that reads it can do so unconditionally.
 	In  io.Reader
 	Out *Writer
+	// Exemptions is the loaded --exemptions file, nil when none was
+	// given. Checks do not need it to have their findings annotated —
+	// the Writer does that for every command — but a check that
+	// reports ON the exemption file itself (`audit exemptions`) reads
+	// the entries from here rather than loading the file twice and
+	// risking a different clock.
+	Exemptions *exempt.Set
 }
 
 // CheckFunc is one read-path check. scanned is the number of objects
@@ -181,7 +190,26 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		return usageError(stderr, cfg.Name, fmt.Errorf("--timeout must be positive, got %s", timeout))
 	}
 
-	writer, err := NewWriter(stdout, format)
+	// Exemptions load before the scan starts and are bound to one
+	// instant, so every finding in a run is judged against the same
+	// "now" and a long scan cannot annotate its first finding and
+	// decline its last. A bad file is a USAGE error: the operator
+	// passed it, and the alternative — proceeding with exemptions
+	// silently not in effect — is the failure mode the whole design
+	// is built to avoid.
+	var exemptions *exempt.Set
+	if path := values.String("exemptions"); path != "" {
+		exemptions, err = exempt.Load(path, now())
+		if err != nil {
+			return usageError(stderr, cfg.Name, err)
+		}
+	}
+
+	var writerOpts []WriterOption
+	if exemptions != nil {
+		writerOpts = append(writerOpts, WithExemptions(exemptions))
+	}
+	writer, err := NewWriter(stdout, format, writerOpts...)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime
@@ -191,7 +219,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	defer cancel()
 
 	start := now()
-	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, In: stdin, Out: writer})
+	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, In: stdin, Out: writer, Exemptions: exemptions})
 	if err != nil {
 		if IsUsageError(err) {
 			return usageError(stderr, cfg.Name, err)

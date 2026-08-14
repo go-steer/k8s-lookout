@@ -33,6 +33,7 @@ lookout triage changes <Kind>/[<namespace>/]<name> [flags]
 | `--since` | duration | — | how far back to look (0 = command default) |
 | `--format` | string | `logfmt` | output format: logfmt\|json (one record per line either way) |
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
+| `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
 ## Point-in-time flags (graph-backed commands)
 
@@ -45,7 +46,7 @@ This command answers from the topology graph and accepts the point-in-time flags
 
 ## Output fields
 
-Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`):
+Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):
 
 | Field | Meaning |
 | --- | --- |

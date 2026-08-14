@@ -3,7 +3,7 @@
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint): target — the positional argument as received; grace — the parsed --grace value.",
+    "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): target — the positional argument as received; grace — the parsed --grace value.",
     "inputSchema": {
       "properties": {
         "all_namespaces": {
@@ -17,6 +17,10 @@
         "diff": {
           "description": "diff against the previous revision",
           "type": "boolean"
+        },
+        "exemptions": {
+          "description": "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\u003cn\u003e in the summary, never dropped",
+          "type": "string"
         },
         "format": {
           "default": "logfmt",
@@ -66,7 +70,7 @@
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint): index — 1-based ordinal of the synthetic finding.",
+    "description": "Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): index — 1-based ordinal of the synthetic finding.",
     "inputSchema": {
       "properties": {
         "all_namespaces": {
@@ -77,6 +81,10 @@
           "default": 2,
           "description": "number of synthetic findings to emit",
           "type": "integer"
+        },
+        "exemptions": {
+          "description": "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\u003cn\u003e in the summary, never dropped",
+          "type": "string"
         },
         "fail": {
           "description": "return a runtime error after emitting",

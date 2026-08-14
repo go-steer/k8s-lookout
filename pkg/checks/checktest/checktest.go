@@ -129,6 +129,12 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 	for _, k := range emit.EnvelopeFields() {
 		declared[k] = true
 	}
+	// Writer-owned summary notes (exempt=) are implicitly declared for
+	// the same reason envelope fields are: the Writer appends them, so
+	// no command can be held responsible for glossing them.
+	for _, k := range emit.SummaryNoteFields() {
+		declared[k] = true
+	}
 	for _, f := range c.Output {
 		declared[f.Name] = true
 	}

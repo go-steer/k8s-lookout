@@ -23,6 +23,7 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/sitedoc"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"

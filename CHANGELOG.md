@@ -27,6 +27,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LimitRanger mutates at admission and never touches running pods — so
   the finding stays, correctly, with the note that recreating the pod
   picks the value up (#235).
+- **Reviewed, expiring exemptions on every command (`--exemptions`).** A
+  git-reviewable YAML file marks a finding as intentional, with a mandatory
+  reason and expiry per entry. Exempt does **not** mean absent: a covered
+  finding is still emitted and still counted, annotated with
+  `exempt_reason=`/`exempt_expires=`, and the summary line reports
+  `exempt=<n>` — including `exempt=0`, which says the file was in effect and
+  nothing matched. Filtering is the consumer's job; an opt-out that hid
+  findings would reintroduce exactly the unverifiable coverage the audit
+  surface exists to eliminate. This is a common flag, so it applies to every
+  command in the tree, not just the new group (#234).
+- **`lookout audit exemptions`** — the first command in the new `audit`
+  posture group. It audits the exemption file itself, reporting lapsed entries
+  (`audit.exemption_expired`) and ones about to lapse
+  (`audit.exemption_expiring`, `--within`, default 14 days), so a file cannot
+  quietly become a permanent list of unexamined opt-outs (#234).
+- **The `audit` command group.** Best-practice posture — the absence of a
+  safety net around something currently healthy — as a distinct claim from the
+  incident groups, shipped in this binary and separated by group (#182).
+- **`engine.PostureFingerprint`** — the incident-class hash for posture
+  findings: the detector's own kind, an uncanonicalized reason, and no zone.
+  An addition to the §8 contract; `engine.ScanFingerprint` is unchanged
+  (docs/signal-schema-v1.md § "Posture-source mapping").
 
 ## [0.19.0] - 2026-08-13
 

@@ -78,6 +78,35 @@ are documented where they are produced — the emitting command's
 and the generated reference page — and adding one is additive there,
 not here.
 
+### Posture-source mapping (the `audit` group, #182)
+
+An `audit` posture finding is not the pull-path view of a symptom the
+sentinel could also push — there is no k8s event for "this Deployment
+has no PodDisruptionBudget" — so it does not borrow the reactive
+recipe. `engine.PostureFingerprint(kind, reason, objectClass)` ≡
+`Fingerprint(kind, reason, objectClass, "")`, differing from
+`ScanFingerprint` in exactly three ways, each deliberate:
+
+- **`kind` is the detector's own** (`audit.no_pdb`), not
+  `"k8s-event"`. For posture the check slug IS the incident class;
+  there is nothing on the push path to dedupe against.
+- **`reason` is NOT canonicalized.** `CanonicalReason` maps k8s event
+  reasons onto their families. A posture reason is not an event
+  reason, so running it through that table can only mis-map — a
+  posture reason colliding with a table key would be silently
+  rewritten into someone else's class — and can never merge two
+  classes that should merge.
+- **`zone` is empty.** Posture is a property of a spec, identical in
+  every zone the workload lands in; stamping a zone would fragment the
+  fleet rollup into one class per zone. Instance identity is the
+  subject key's job (`docs/audit-ingestion-contract.md` §4), not the
+  fingerprint's.
+
+This is an **addition**, not an amendment: `ScanFingerprint` and every
+pinned vector above are untouched, because they are the recipe every
+open §9.4 triage-status record was joined under. Posture vectors are
+pinned alongside them in `pkg/engine/fingerprint_test.go`.
+
 ## Kind inventory (v1: 48 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct
@@ -203,3 +232,20 @@ first external consumer deploys.
   fleet consumers and a coordinated fleet upgrade — a unilateral change silently
   splits every fleet-wide rollup into disjoint halves during a
   rolling upgrade.
+
+**Envelope vs. wire.** The §4.2 finding envelope
+(`emit.EnvelopeFields`) and the §8 wire `Payload` are different field
+sets that happen to share most of their names, and they evolve
+independently. Two examples, in both directions:
+
+- `type` (2026-07-27) was added to `Payload` and deliberately NOT to
+  `emit.Finding` — a scan observes object state, and there is no
+  `Event.Type` to report.
+- `exempt_reason` / `exempt_expires` (#234) were added to
+  `emit.Finding` and deliberately NOT to `Payload`. They are stamped
+  by the Writer when an operator's `--exemptions` file covers a
+  finding; they annotate a REPORT, they do not describe the cluster.
+  Nothing about the pinned field sets, byte pins, or fingerprint
+  recipe changes, and a consumer that ignores them sees exactly the
+  stream it saw before. Both are empty and omitted unless
+  `--exemptions` was passed.

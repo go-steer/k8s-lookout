@@ -250,6 +250,35 @@ NetworkPolicy coverage to Kyverno/Gatekeeper/PSA. That recommendation is
 recorded as considered and not taken; §6.3 should not be read as live guidance
 on those rows.
 
+#### As built (#234): the group, and the posture fingerprint recipe
+
+The group is `pkg/checks/audit`, registered in `groupDocs` as above, with
+`audit exemptions` as its first command. Nothing else about the group is shared
+machinery: unlike `triage` there is no common cluster client or single scan
+pass, because a posture detector reads whatever API objects its own claim needs.
+What the group does share is the §4.2 envelope, the exemption seam, and one new
+fingerprint recipe.
+
+That recipe needed deciding here rather than at the first detector, because it
+is a §8 addition that costs two fixtures now and ~55 later. Both this note
+(above) and the epic say posture findings carry `ScanFingerprint` values —
+**they do not, and cannot**. `engine.ScanFingerprint` hardcodes the reactive
+kind `k8s-event` and runs its input through `CanonicalReason`, an event-reason
+canonicalizer; a posture finding has no event reason and no push-path twin to
+dedupe against. Read those references as "a class-derived fingerprint, not an
+object-identity one" — which is the property the argument actually rests on.
+
+The posture recipe is `engine.PostureFingerprint(kind, reason, objectClass)` ≡
+`Fingerprint(kind, reason, objectClass, "")`: the **detector's own kind** (for
+posture the check slug is the class), the reason **uncanonicalized** (running a
+posture reason through the event table can only mis-map, never merge), and an
+**empty zone** (posture is a property of a spec, so a zone would fragment the
+Gap 2 rollup into one class per zone). `ScanFingerprint` is untouched — it is
+the recipe every open §9.4 triage-status record was joined under, and widening
+it would desynchronize all of them. Full rationale and pinned vectors:
+`docs/signal-schema-v1.md` § "Posture-source mapping" and
+`pkg/engine/fingerprint_test.go`.
+
 ### 2. Fan-out home — the consumer orchestrates, lookout derives
 
 The original question bundled three things that do not share an answer:
@@ -358,6 +387,63 @@ Because exemption state rides on `emit.Finding`, it is an additive §8 schema
 change and must land with the first `audit` detector rather than after the
 stream — retrofitting it across a built-out roster means re-cutting every golden
 fixture.
+
+### As built (#234)
+
+`pkg/exempt` loads the file; `emit.Writer` applies it. Two decisions the
+implementation had to settle that this section left open:
+
+**Scope: tree-wide, not `audit`-only.** `--exemptions` is a §4.2 **common
+flag**, so every command in the tree accepts one and the two `top.unrequested*`
+kinds from #235 got exemption support with no retrofit. Three reasons this beat
+an `audit`-group flag: the matcher is keyed on a finding's `kind` and knows
+nothing about groups, so an audit-only restriction would have been an artificial
+gate on a general mechanism; #234 itself flags audit-only as "possibly a false
+economy"; and putting the seam on the Writer — where the §6.5 sanitizer already
+lives, precisely because "no output path exists that bypasses it" — means no
+command can quietly ignore an exemption file the operator passed. The cost, paid
+once here, is that every command's `--help`, reference page, and skill ref
+regenerated.
+
+**File format.** One top-level `exemptions:` list. Per entry: `kind` (the
+finding kind, matched exactly), optional `namespace` and `name` narrowing
+(`name` matched EXACTLY — no globbing, no generated-suffix normalization, because
+an exemption names what a reviewer actually approved and a pattern silently
+widens over time), mandatory `reason` and `expires`, optional `owner`.
+
+```yaml
+exemptions:
+  - kind: audit.no_pdb
+    namespace: batch
+    reason: batch jobs are restartable by design
+    expires: 2026-12-01
+    owner: data-platform
+```
+
+`expires` is `YYYY-MM-DD` (00:00:00Z at the START of that day) or RFC 3339.
+Validation is strict and total — `UnmarshalStrict`, and the first bad entry
+fails the load with a usage error rather than being skipped, because a
+silently-dropped exemption is worse than no exemption file: the operator
+believes a finding is annotated when it is not. The most specific matching entry
+wins (name > namespace > cluster-wide) so a broad entry and a narrow one can
+coexist and the reader sees the justification that actually applies. Label
+selectors were rejected: the matcher sees a finding, not a live object, and
+honoring one would mean a cluster read on surfaces that have no cluster.
+
+An expired entry simply stops matching — not an error, and the finding it used
+to cover emits unqualified, which is correct once the statement backing it has
+lapsed. `lookout audit exemptions` reports lapsed entries as
+`audit.exemption_expired` (warning) and soon-to-lapse ones as
+`audit.exemption_expiring` (info, `--within`, default 14d). Those findings pass
+through the same seam as everything else, so an entry covering
+`audit.exemption_expired` annotates them — not a loop, since that entry must
+carry an expiry too.
+
+On the wire: `exempt_reason` / `exempt_expires` are §4.2 envelope fields stamped
+by the Writer (never by a check), and the summary line gains `exempt=<n>`
+whenever a file was supplied — **including `exempt=0`**, because "exemptions
+were in effect and none fired" is not the same fact as "no exemptions were
+configured", which emits no key at all.
 
 ## Tracking
 
