@@ -67,6 +67,7 @@ same signal:
 | `single-replica`                 | `stab drain` → `drain.singleton`                                 |
 | `blocking-pdb`                   | `stab drain` → `drain.pdb_gridlock` / `pdb.gridlocked`          |
 | `no-memory-limit`                | `triage top` → `top.unlimited` / `top.unlimited_container`       |
+| `no-requests`                    | `triage top` → `top.unrequested` / `top.unrequested_container` (#235) |
 | `overrequest`-adjacent headroom  | `triage top` → `top.saturation`                                 |
 | `no-hpa` / `hpa-cannot-scale`    | partial — `triage events` → `event.hpa_thrash` (thrash, not absence) |
 
@@ -80,7 +81,7 @@ same signal:
 | `scaledown-blocked` | partial — `stab drain` blockers        |
 | `overrequest`     | partial — `triage top` → `top.saturation` |
 
-The remainder of these two streams (`no-requests`, `no-pdb`, `probes-*`,
+The remainder of these two streams (`no-pdb`, `probes-*`,
 `rigid-scheduling`, `no-spread`; `orphan-pv`, `unconsumed-pvc`, `idle-nodepool`,
 `idle-namespace`, `terminal-pods`) is net-new but small, and lives in the same
 packages (`pkg/checks/top`, `stab`, `cloudcheck`) alongside the checks it

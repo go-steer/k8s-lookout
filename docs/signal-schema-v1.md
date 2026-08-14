@@ -66,6 +66,18 @@ no incident-class identity), and the §9.4 triage-status join has used
 this exact recipe since M4. Parity is pinned by
 `TestFingerprintParity_PushAndScan`.
 
+A consequence worth stating, because it decides where a new check's
+`kind=` gets documented: a scan finding's own `kind` value
+(`top.unlimited`, `top.unrequested`, `health.*`, …) is a **check-local
+label**, not a v1 signal kind, and is deliberately absent from the
+inventory below. The inventory enumerates the wire kinds that carry a
+`pkg/inject` payload struct and participate in fingerprinting; it is
+pinned at its exact size by `TestSchemaV1_KindInventory`. Scan kinds
+are documented where they are produced — the emitting command's
+`Output` field glossary, rendered into `--help`, the MCP tool schema,
+and the generated reference page — and adding one is additive there,
+not here.
+
 ## Kind inventory (v1: 48 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, additive-only)
 
 Cross-cutting kinds, each with its own schema-stable struct

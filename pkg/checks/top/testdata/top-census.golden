@@ -1,0 +1,8 @@
+kind=top.unlimited severity=info reason=NoLimits message="3 container(s) in 3 pod(s) have no cpu or memory limit — invisible to saturation-vs-limit analysis (--show-unlimited lists them); 3 of them sit in a namespace whose LimitRange now defaults the missing dimension — those pods predate it and pick the value up on recreation" pods=3 containers=3 limitrange_defaulted=3
+kind=top.unlimited_container severity=info namespace=prod kind_of_object=Pod name=besteffort-1 reason=NoLimits container=app missing=cpu,memory limitrange=defaults
+kind=top.unlimited_container severity=info namespace=prod kind_of_object=Pod name=burstable-1 reason=NoLimits container=app missing=cpu,memory limitrange=defaults
+kind=top.unlimited_container severity=info namespace=prod kind_of_object=Pod name=halfway-1 reason=NoLimits container=app missing=memory limitrange=defaults
+kind=top.unrequested severity=info reason=NoRequests message="2 container(s) in 2 pod(s) have no cpu or memory request — the scheduler bin-packs them as zero, the cause behind FailedScheduling churn, noisy-neighbour eviction and bad packing (--show-unrequested lists them); 2 of them sit in a namespace whose LimitRange now defaults the missing dimension — those pods predate it and pick the value up on recreation" pods=2 containers=2 limitrange_defaulted=2
+kind=top.unrequested_container severity=info namespace=prod kind_of_object=Pod name=besteffort-1 reason=NoRequests container=app missing=cpu,memory limitrange=defaults
+kind=top.unrequested_container severity=info namespace=prod kind_of_object=Pod name=halfway-1 reason=NoRequests container=app missing=memory limitrange=defaults
+scanned=5 findings=7 elapsed=100ms

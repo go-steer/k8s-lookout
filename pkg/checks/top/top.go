@@ -41,6 +41,38 @@
 // them). With -A the node dimension is added: usage vs allocatable
 // per node, the node-pressure precursor.
 //
+// # The two censuses, and why one contains the other
+//
+// Two aggregate info findings count containers missing a resource
+// spec, on the same walk (#235):
+//
+//   - top.unlimited — no cpu/memory LIMIT. These cannot be judged
+//     against a ceiling, so they are invisible to everything above.
+//   - top.unrequested — no cpu/memory REQUEST. The scheduler
+//     bin-packs these as zero, which is the direct cause of the
+//     FailedScheduling churn, noisy-neighbour eviction and bad
+//     packing this command otherwise reports only as symptoms.
+//
+// unrequested is a strict SUBSET of unlimited, and not by accident:
+// the apiserver copies a limit down into an unset request, so a
+// container with no request necessarily has no limit either. The
+// subset is the worse half — no ceiling AND no floor.
+//
+// # LimitRange
+//
+// A namespace LimitRange can supply both values at admission, so
+// either census could be qualified by one. It is loaded (the only
+// LimitRange read in the tree) and applied as an ANNOTATION, not a
+// suppression, because this command reads LIVE PODS: LimitRanger is a
+// mutating plugin that writes its defaults into the spec at CREATE
+// and never touches existing pods. A live pod still missing a request
+// in a defaulting namespace therefore genuinely has none — it
+// predates the LimitRange — and dropping it would hide a real
+// problem. Naming the LimitRange instead says what the fix is:
+// recreate the pod. See pkg/checks/state/limitrange.go for the case
+// where suppression IS correct (pod templates, which admission has
+// not touched).
+//
 // --history=<dur> goes through the pkg/cloud provider boundary
 // (Metrics capability): max/avg/p95 usage-vs-limit over the window
 // per container finding. No provider → the §2 explicit unavailable
@@ -162,6 +194,8 @@ func New(deps Deps) checks.Command {
 				Help: "row cap for the --all container dump"},
 			{Name: "show-unlimited", Type: emit.FlagBool, Default: "false",
 				Help: "list each container missing a cpu or memory limit individually (default: one aggregate count)"},
+			{Name: "show-unrequested", Type: emit.FlagBool, Default: "false",
+				Help: "list each container missing a cpu or memory request individually (default: one aggregate count); a missing request is the scheduler-side half of the census, always a subset of --show-unlimited"},
 			{Name: "history", Type: emit.FlagDuration, Default: "0s",
 				Help: "enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected"},
 		},
@@ -173,9 +207,11 @@ func New(deps Deps) checks.Command {
 			{Name: "pct", Doc: "usage as a percent of the limit/allocatable, one decimal"},
 			{Name: "container", Doc: "container name within the pod"},
 			{Name: "node", Doc: "node the pod runs on (top.saturation; top.node carries the node as name)"},
-			{Name: "pods", Doc: "top.unlimited: pods in scope with at least one container missing a cpu or memory limit"},
-			{Name: "containers", Doc: "top.unlimited: containers in scope missing a cpu or memory limit"},
-			{Name: "missing", Doc: "top.unlimited_container: which limit dimensions are absent (cpu, memory, or both)"},
+			{Name: "pods", Doc: "top.unlimited/top.unrequested: pods in scope with at least one container missing a cpu or memory limit (resp. request)"},
+			{Name: "containers", Doc: "top.unlimited/top.unrequested: containers in scope missing a cpu or memory limit (resp. request)"},
+			{Name: "missing", Doc: "top.unlimited_container/top.unrequested_container: which dimensions are absent (cpu, memory, or both)"},
+			{Name: "limitrange", Doc: "top.unlimited_container/top.unrequested_container: the namespace LimitRange(s) that default a dimension this container is missing — the pod predates them, so recreating it picks the value up"},
+			{Name: "limitrange_defaulted", Doc: "top.unlimited/top.unrequested: how many of the counted containers sit in a namespace whose LimitRange now defaults the dimension they lack"},
 			{Name: "max_pct", Doc: "--history: highest usage-vs-limit percent observed in the window"},
 			{Name: "avg_pct", Doc: "--history: mean usage-vs-limit percent over the window"},
 			{Name: "p95_pct", Doc: "--history: 95th-percentile usage-vs-limit percent over the window"},
@@ -190,6 +226,7 @@ func New(deps Deps) checks.Command {
 			"lookout triage top --workload=Deployment/prod/api",
 			"lookout triage top --namespace=prod --all --limit=20",
 			"lookout triage top -A --top-warn=90 --show-unlimited",
+			"lookout triage top -A --show-unrequested",
 			"lookout triage top --namespace=prod --history=1h --format=json",
 		},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
@@ -247,6 +284,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	all := inv.Flags.Bool("all")
 	showUnlimited := inv.Flags.Bool("show-unlimited")
+	showUnrequested := inv.Flags.Bool("show-unrequested")
 
 	wl := inv.Scope.Workload
 	switch {
@@ -313,7 +351,8 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	var entries []rated
-	missing := map[containerKey][]string{}
+	noLimit := map[containerKey][]string{}
+	noRequest := map[containerKey][]string{}
 	seen := map[containerKey]bool{}
 	for _, s := range samples {
 		if podSet != nil && !podSet[s.Namespace+"/"+s.Pod] {
@@ -321,13 +360,33 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 		key := containerKey{s.Namespace, s.Pod, s.Container}
 		seen[key] = true
+		// The request census is independent of the limit judgment:
+		// a container can be judged against its limit and still have
+		// no request (the apiserver only copies limits DOWN into
+		// requests, never up), so this is recorded before the
+		// unlimited short-circuit below.
+		if s.Request <= 0 {
+			noRequest[key] = append(noRequest[key], s.Resource)
+		}
 		if s.Limit <= 0 {
-			missing[key] = append(missing[key], s.Resource)
+			noLimit[key] = append(noLimit[key], s.Resource)
 			continue
 		}
 		entries = append(entries, rated{s: s, pct: s.Used / s.Limit * 100})
 	}
 	scanned += len(seen)
+
+	// LimitRange, over the same scope: the annotation input for both
+	// censuses (package comment). Only read when there is something
+	// to qualify — a clean scope should not pay for the List.
+	limitRanges := &state.LimitRangeDefaults{}
+	if len(noLimit) > 0 || len(noRequest) > 0 {
+		lr, examined, err := state.LoadLimitRanges(ctx, client, listNS)
+		if err != nil {
+			return 0, err
+		}
+		limitRanges, scanned = lr, scanned+examined
+	}
 
 	sort.Slice(entries, func(i, j int) bool { return ratedLess(entries[i], entries[j]) })
 
@@ -425,7 +484,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			return 0, err
 		}
 	}
-	if err := emitUnlimited(inv.Out, missing, showUnlimited); err != nil {
+	if err := emitCensus(inv.Out, unlimitedCensus, noLimit, showUnlimited, limitRanges); err != nil {
+		return 0, err
+	}
+	if err := emitCensus(inv.Out, unrequestedCensus, noRequest, showUnrequested, limitRanges); err != nil {
 		return 0, err
 	}
 	return scanned, nil
@@ -511,30 +573,87 @@ func nodeFinding(n nodeRated, severity string, above bool) emit.Finding {
 	return f
 }
 
-// emitUnlimited emits the no-limits census: always the one aggregate
-// info finding when anything is unlimited (these containers are
-// invisible to a usage-vs-limit judgment — saying so is the honest
-// answer), plus the per-container listing under --show-unlimited.
-func emitUnlimited(out *emit.Writer, missing map[containerKey][]string, list bool) error {
+// censusSpec is one missing-resource-spec census. The two differ only
+// in which dimension they count and which LimitRange default would
+// have supplied it, so they share the emission shape: always one
+// aggregate info finding, plus the per-container listing behind the
+// census's own --show-* flag.
+type censusSpec struct {
+	kind          string // aggregate finding kind
+	containerKind string // per-container finding kind
+	reason        string
+	flag          string // the --show-* flag that lists containers
+	dimension     string // the word for what is absent: "limit"/"request"
+	// consequence completes "N container(s) in M pod(s) have no cpu
+	// or memory ⟨dimension⟩ — ⟨consequence⟩".
+	consequence string
+	// defaults asks the index whether ns supplies an admission
+	// default for this census's dimension of resource.
+	defaults func(*state.LimitRangeDefaults, string, string) (string, bool)
+}
+
+var unlimitedCensus = censusSpec{
+	kind:          "top.unlimited",
+	containerKind: "top.unlimited_container",
+	reason:        "NoLimits",
+	flag:          "--show-unlimited",
+	dimension:     "limit",
+	consequence:   "invisible to saturation-vs-limit analysis",
+	defaults:      (*state.LimitRangeDefaults).DefaultsLimit,
+}
+
+var unrequestedCensus = censusSpec{
+	kind:          "top.unrequested",
+	containerKind: "top.unrequested_container",
+	reason:        "NoRequests",
+	flag:          "--show-unrequested",
+	dimension:     "request",
+	consequence:   "the scheduler bin-packs them as zero, the cause behind FailedScheduling churn, noisy-neighbour eviction and bad packing",
+	defaults:      (*state.LimitRangeDefaults).DefaultsRequest,
+}
+
+// emitCensus emits one census: the aggregate info finding whenever
+// anything is missing (saying so is the honest answer — a silent
+// census is indistinguishable from a clean one), plus the
+// per-container listing when the census's flag is set.
+//
+// LimitRange annotates, never suppresses (package comment): these are
+// live pods, so a defaulting namespace means the pod predates the
+// LimitRange, not that the finding is wrong.
+func emitCensus(out *emit.Writer, spec censusSpec, missing map[containerKey][]string, list bool, lr *state.LimitRangeDefaults) error {
 	if len(missing) == 0 {
 		return nil
 	}
 	pods := map[string]bool{}
 	keys := make([]containerKey, 0, len(missing))
-	for k := range missing {
+	defaulted := 0
+	// annotations[k] names the LimitRange(s) that would have supplied
+	// a dimension k is missing; empty when none applies.
+	annotations := make(map[containerKey]string, len(missing))
+	for k, dims := range missing {
 		pods[k.namespace+"/"+k.pod] = true
 		keys = append(keys, k)
+		if names := censusAnnotation(spec, lr, k.namespace, dims); names != "" {
+			annotations[k] = names
+			defaulted++
+		}
+	}
+	message := fmt.Sprintf("%d container(s) in %d pod(s) have no cpu or memory %s — %s (%s lists them)",
+		len(missing), len(pods), spec.dimension, spec.consequence, spec.flag)
+	details := []emit.Field{
+		{Key: "pods", Value: strconv.Itoa(len(pods))},
+		{Key: "containers", Value: strconv.Itoa(len(missing))},
+	}
+	if defaulted > 0 {
+		message += fmt.Sprintf("; %d of them sit in a namespace whose LimitRange now defaults the missing dimension — those pods predate it and pick the value up on recreation", defaulted)
+		details = append(details, emit.Field{Key: "limitrange_defaulted", Value: strconv.Itoa(defaulted)})
 	}
 	if err := out.Emit(emit.Finding{
-		Kind:     "top.unlimited",
+		Kind:     spec.kind,
 		Severity: emit.SeverityInfo,
-		Reason:   "NoLimits",
-		Message: fmt.Sprintf("%d container(s) in %d pod(s) have no cpu or memory limit — invisible to saturation-vs-limit analysis (--show-unlimited lists them)",
-			len(missing), len(pods)),
-		Details: []emit.Field{
-			{Key: "pods", Value: strconv.Itoa(len(pods))},
-			{Key: "containers", Value: strconv.Itoa(len(missing))},
-		},
+		Reason:   spec.reason,
+		Message:  message,
+		Details:  details,
 	}); err != nil {
 		return err
 	}
@@ -554,22 +673,37 @@ func emitUnlimited(out *emit.Writer, missing map[containerKey][]string, list boo
 	for _, k := range keys {
 		dims := missing[k]
 		sort.Strings(dims)
-		if err := out.Emit(emit.Finding{
-			Kind:         "top.unlimited_container",
+		f := emit.Finding{
+			Kind:         spec.containerKind,
 			Severity:     emit.SeverityInfo,
 			Namespace:    k.namespace,
 			KindOfObject: "Pod",
 			Name:         k.pod,
-			Reason:       "NoLimits",
+			Reason:       spec.reason,
 			Details: []emit.Field{
 				{Key: "container", Value: k.container},
 				{Key: "missing", Value: strings.Join(dims, ",")},
 			},
-		}); err != nil {
+		}
+		if names := annotations[k]; names != "" {
+			f.Details = append(f.Details, emit.Field{Key: "limitrange", Value: names})
+		}
+		if err := out.Emit(f); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// censusAnnotation names the LimitRange(s) defaulting any dimension
+// this container lacks, or "" when none does.
+func censusAnnotation(spec censusSpec, lr *state.LimitRangeDefaults, namespace string, dims []string) string {
+	for _, d := range dims {
+		if names, ok := spec.defaults(lr, namespace, d); ok {
+			return names
+		}
+	}
+	return ""
 }
 
 // fetchNodeUsage joins metrics.k8s.io node usage with allocatable
