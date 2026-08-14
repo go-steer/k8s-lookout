@@ -227,7 +227,9 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`agent-sink-design.md`](./agent-sink-design.md),
   [`graph-q5-gate.md`](./graph-q5-gate.md),
   [`fleet-audit-detectors-design.md`](./fleet-audit-detectors-design.md)
-  (proposal — re-basing the fleet audit onto deterministic `checks`).
+  (proposal — re-basing the fleet audit onto deterministic `checks`),
+  [`audit-ingestion-contract.md`](./audit-ingestion-contract.md)
+  (its consumer seam: `emit.Finding` → an audit ledger).
 - [`milestones/`](./milestones/) — M0–M5 completion records with
   exit-check evidence and the post-M5 review backlog (M5.md).
 - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
