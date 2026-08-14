@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `triage top` now censuses missing **requests** alongside missing
+  limits: `top.unrequested` (aggregate) and `top.unrequested_container`
+  (per container, behind `--show-unrequested`), mirroring the existing
+  `top.unlimited` pair. A missing limit hides a container from
+  saturation analysis; a missing request is the scheduler-side half —
+  the pod is bin-packed as zero, which is what sits behind
+  `FailedScheduling` churn, noisy-neighbour eviction and bad packing.
+  The request is read from the same pod-spec pass the limit already
+  came from, so the census costs no extra API calls. Because the
+  apiserver copies an unset request down from the limit, the
+  unrequested census is always a subset of the unlimited one (#235).
+- Both censuses are now LimitRange-aware. A container missing a
+  dimension that its namespace's LimitRange defaults carries
+  `limitrange=<names>`, and the aggregate line reports
+  `limitrange_defaulted=<n>`. These pods predate the LimitRange —
+  LimitRanger mutates at admission and never touches running pods — so
+  the finding stays, correctly, with the note that recreating the pod
+  picks the value up (#235).
+
 ## [0.19.0] - 2026-08-13
 
 Two themes: correlation that no longer needs a code change per fault

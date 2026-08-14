@@ -23,6 +23,7 @@ lookout triage top [flags]
 | `--all` | bool | — | exploratory dump: emit every sampled row regardless of --top-warn (info severity below it), sorted by pct descending; containers capped at --limit |
 | `--limit` | int | `50` | row cap for the --all container dump |
 | `--show-unlimited` | bool | — | list each container missing a cpu or memory limit individually (default: one aggregate count) |
+| `--show-unrequested` | bool | — | list each container missing a cpu or memory request individually (default: one aggregate count); a missing request is the scheduler-side half of the census, always a subset of --show-unlimited |
 | `--history` | duration | — | enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected |
 
 ## Common flags (every `lookout` command)
@@ -49,9 +50,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pct` | usage as a percent of the limit/allocatable, one decimal |
 | `container` | container name within the pod |
 | `node` | node the pod runs on (top.saturation; top.node carries the node as name) |
-| `pods` | top.unlimited: pods in scope with at least one container missing a cpu or memory limit |
-| `containers` | top.unlimited: containers in scope missing a cpu or memory limit |
-| `missing` | top.unlimited_container: which limit dimensions are absent (cpu, memory, or both) |
+| `pods` | top.unlimited/top.unrequested: pods in scope with at least one container missing a cpu or memory limit (resp. request) |
+| `containers` | top.unlimited/top.unrequested: containers in scope missing a cpu or memory limit (resp. request) |
+| `missing` | top.unlimited_container/top.unrequested_container: which dimensions are absent (cpu, memory, or both) |
+| `limitrange` | top.unlimited_container/top.unrequested_container: the namespace LimitRange(s) that default a dimension this container is missing — the pod predates them, so recreating it picks the value up |
+| `limitrange_defaulted` | top.unlimited/top.unrequested: how many of the counted containers sit in a namespace whose LimitRange now defaults the dimension they lack |
 | `max_pct` | --history: highest usage-vs-limit percent observed in the window |
 | `avg_pct` | --history: mean usage-vs-limit percent over the window |
 | `p95_pct` | --history: 95th-percentile usage-vs-limit percent over the window |
@@ -77,5 +80,6 @@ lookout triage top -A
 lookout triage top --workload=Deployment/prod/api
 lookout triage top --namespace=prod --all --limit=20
 lookout triage top -A --top-warn=90 --show-unlimited
+lookout triage top -A --show-unrequested
 lookout triage top --namespace=prod --history=1h --format=json
 ```

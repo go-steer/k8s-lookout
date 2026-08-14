@@ -120,6 +120,18 @@ type ContainerSample struct {
 	Resource  string // ResourceCPU | ResourceMemory
 	Used      float64
 	Limit     float64
+	// Request is the container's configured request in the same unit,
+	// 0 when none is set. This source does not forecast against it —
+	// a request is a scheduling promise, not a ceiling — but `triage
+	// top`'s missing-requests census reads it from the same fetcher
+	// pass, so the pod-spec walk stays in one place.
+	//
+	// Read from the LIVE pod, so it is the effective value after
+	// admission: a container that set a limit but no request carries
+	// the limit here (the apiserver copies it), and a namespace
+	// LimitRange's defaultRequest is already materialized in the spec.
+	// 0 therefore means the scheduler really is treating it as zero.
+	Request float64
 }
 
 // VolumeSample is one PVC usage observation from the volume fetcher.

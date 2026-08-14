@@ -6,4 +6,6 @@ kind=top.node severity=warning kind_of_object=Node name=node-1 reason=NodeCPUPre
 kind=top.node severity=warning kind_of_object=Node name=node-1 reason=NodeMemoryPressure message="node memory at 87.5% of allocatable — kubelet eviction precursor" resource=memory usage=7.0GiB allocatable=8.0GiB pct=87.5
 kind=top.unlimited severity=info reason=NoLimits message="1 container(s) in 1 pod(s) have no cpu or memory limit — invisible to saturation-vs-limit analysis (--show-unlimited lists them)" pods=1 containers=1
 kind=top.unlimited_container severity=info namespace=prod kind_of_object=Pod name=batch-1 reason=NoLimits container=job missing=cpu,memory
-scanned=6 findings=8 elapsed=100ms unavailable="no cloud provider configured"
+kind=top.unrequested severity=info reason=NoRequests message="1 container(s) in 1 pod(s) have no cpu or memory request — the scheduler bin-packs them as zero, the cause behind FailedScheduling churn, noisy-neighbour eviction and bad packing (--show-unrequested lists them)" pods=1 containers=1
+kind=top.unrequested_container severity=info namespace=prod kind_of_object=Pod name=batch-1 reason=NoRequests container=job missing=cpu,memory
+scanned=6 findings=10 elapsed=100ms unavailable="no cloud provider configured"

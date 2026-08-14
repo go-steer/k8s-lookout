@@ -63,24 +63,35 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
-	type limits struct {
-		cpu, mem float64
+	// One walk of each container's resource block yields both
+	// dimensions: limits (the saturation denominator) and requests
+	// (`triage top`'s missing-requests census). Reading them together
+	// keeps the pod-spec join to a single pass over one List.
+	type resources struct {
+		cpuLim, memLim float64
+		cpuReq, memReq float64
 	}
 	type podRef struct {
 		uid, node string
-		byName    map[string]limits
+		byName    map[string]resources
 	}
 	pods := make(map[string]podRef, len(podList.Items))
 	for i := range podList.Items {
 		p := &podList.Items[i]
-		byName := make(map[string]limits)
+		byName := make(map[string]resources)
 		for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
-			var l limits
+			var l resources
 			if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
-				l.cpu = float64(q.MilliValue())
+				l.cpuLim = float64(q.MilliValue())
 			}
 			if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
-				l.mem = float64(q.Value())
+				l.memLim = float64(q.Value())
+			}
+			if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				l.cpuReq = float64(q.MilliValue())
+			}
+			if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				l.memReq = float64(q.Value())
 			}
 			byName[c.Name] = l
 		}
@@ -104,9 +115,9 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 				Node:      ref.node,
 			}
 			cpu := base
-			cpu.Resource, cpu.Used, cpu.Limit = ResourceCPU, float64(c.Usage.Cpu().MilliValue()), l.cpu
+			cpu.Resource, cpu.Used, cpu.Limit, cpu.Request = ResourceCPU, float64(c.Usage.Cpu().MilliValue()), l.cpuLim, l.cpuReq
 			mem := base
-			mem.Resource, mem.Used, mem.Limit = ResourceMemory, float64(c.Usage.Memory().Value()), l.mem
+			mem.Resource, mem.Used, mem.Limit, mem.Request = ResourceMemory, float64(c.Usage.Memory().Value()), l.memLim, l.memReq
 			out = append(out, cpu, mem)
 		}
 	}
