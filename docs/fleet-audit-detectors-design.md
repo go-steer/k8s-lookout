@@ -72,7 +72,9 @@ same signal:
 | `no-memory-limit`                | `triage top` → `top.unlimited` / `top.unlimited_container`       |
 | `no-requests`                    | `triage top` → `top.unrequested` / `top.unrequested_container` (#235) |
 | `overrequest`-adjacent headroom  | `triage top` → `top.saturation`                                 |
-| `no-hpa` / `hpa-cannot-scale`    | partial — `triage events` → `event.hpa_thrash` (thrash, not absence) |
+| `rigid-scheduling`               | `audit workloads` → `audit.rigid_scheduling` (#190)              |
+| `hpa-cannot-scale`               | `audit workloads` → `audit.hpa_cannot_scale` (structural, #190); `autoscaling` source → `autoscaling.hpa_pinned` / `autoscaling.hpa_metrics_dead` (sustained, #131); `triage events` → `event.hpa_thrash` (oscillation) |
+| `no-hpa`                         | re-filed to #188 (fleet consistency drift) — see below           |
 
 ### Cost / waste (`fleet-wide-cost-analysis`)
 
@@ -84,17 +86,16 @@ same signal:
 | `scaledown-blocked` | partial — `stab drain` blockers        |
 | `overrequest`     | partial — `triage top` → `top.saturation` |
 
-The remainder of these two streams (`no-hpa` / `hpa-cannot-scale`,
-`rigid-scheduling`; `orphan-pv`, `unconsumed-pvc`, `idle-nodepool`,
-`idle-namespace`, `terminal-pods`) is net-new but small. The mapping table
-above is the starting point, not the finished audit.
+The remainder of the cost stream (`orphan-pv`, `unconsumed-pvc`,
+`idle-nodepool`, `idle-namespace`, `terminal-pods`) is net-new but small. The
+mapping table above is the starting point, not the finished audit.
 
 #### As built (#190): the first posture detectors
 
-`audit workloads` ships five kinds in one API pass over Deployments,
-StatefulSets, DaemonSets and PodDisruptionBudgets. Four judgment calls are
-worth recording, because each of them is a place where the obvious
-implementation reports something true and useless:
+`audit workloads` ships seven kinds in one API pass over Deployments,
+StatefulSets, DaemonSets, PodDisruptionBudgets, HorizontalPodAutoscalers and
+Nodes. Four judgment calls are worth recording, because each of them is a
+place where the obvious implementation reports something true and useless:
 
 - **A single-replica workload does not also get `audit.no_pdb`.** The claim
   would be true, but the remedy it implies is wrong: a PDB over one replica is
@@ -114,20 +115,62 @@ the operator's to fix, but silently omitting it would reintroduce exactly the
 unverifiable coverage this note argues against; a namespace-scoped entry in the
 exemption file is the reviewed way to say so.
 
-Two slugs from #190 are deliberately still open, and neither is blocked on
-plumbing:
+#### The autoscaling split, and where `no-hpa` went
 
-- **`no-hpa` / `hpa-cannot-scale`.** Listing HPAs and matching `scaleTargetRef`
-  is trivial; deciding when the ABSENCE of an HPA is a defect is not. Most
-  workloads legitimately do not autoscale, so a bare `no-hpa` would fire on
-  nearly everything. `hpa-cannot-scale` (pinned at `maxReplicas`, or with a
-  dead metric) is the half with a real claim behind it, and it overlaps
-  `autoscaling.hpa_pinned` from the sentinel side — which needs resolving
-  first, or the two surfaces will disagree.
-- **`rigid-scheduling`.** Without node inventory, a `nodeSelector` pinning a
-  workload to a 40-node pool is indistinguishable from one pinning it to a
-  single node, and only the second is a finding. It needs the node labels in
-  hand, which is a different API pass from the one this command makes.
+`hpa-cannot-scale` looked at first like a duplicate of `autoscaling.hpa_pinned`
+on the sentinel side. It is not, and the sentinel's own package doc is what
+settles it: `hpa_pinned` and `hpa_metrics_dead` are SUSTAINED states, judged
+over 10-30 minute windows with episode memory, and — its words — invisible to a
+point-in-time scan without history. A one-shot audit cannot reproduce either,
+so there is no overlap to divide. There are three surfaces on one object, each
+answering a question the others cannot:
+
+| Surface | Question | Needs |
+| --- | --- | --- |
+| `audit.hpa_cannot_scale` (posture) | can this HPA ever scale? | the spec |
+| `autoscaling.hpa_pinned` / `hpa_metrics_dead` (sentinel) | is it out of headroom or blind right now, and has it been for a while? | a resident watch |
+| `event.hpa_thrash` (read-path) | did it oscillate? | rescale history |
+
+The structural half is the one nothing reported. All three of its reasons are
+derived from the spec alone, are permanent until someone edits the object, and
+are invisible to the sentinel BY DESIGN — the source explicitly declines the
+`minReplicas == maxReplicas` case, because such an HPA reports
+`ScalingLimited=False` and must not fire its pinned predicate. So a cluster
+could carry an autoscaler that can never autoscale and no surface would say so.
+`HPATargetMissingRequests` is the same shape one level down: utilization is a
+percentage OF the request, so a utilization target over a container with no
+request is arithmetic the controller can never do, and it composes with the
+`top.unrequested` census (#235) that finds the missing request itself.
+
+**`no-hpa` moved to #188.** It is not undecidable, it was filed under the wrong
+stream. No fact inside one cluster makes "this workload has no HPA" wrong —
+most workloads legitimately do not autoscale, and a bare detector fires on
+nearly everything, which is precisely the noise that trains people to ignore a
+group. Against a cohort it becomes a real claim: eleven clusters autoscale
+`checkout` and the twelfth does not. That is fleet-consistency drift, it needs
+the cohort model Decision 3 already settled, and it belongs with the other 19
+facets rather than here. The same move `no-requests` made to `triage top`.
+
+#### `rigid-scheduling`: the node List is what makes it a claim
+
+A `nodeSelector` is not a defect — it is how anyone targets a node class. The
+defect is a selector whose arithmetic does not work, and that is undecidable
+from the spec alone: `pool=gpu` over a 40-node pool and `pool=gpu` over one
+surviving node are the same three lines of YAML. Resolving the required
+constraint (`nodeSelector` ANDed with required `nodeAffinity`; preferred
+affinity is a weight, not a restriction, and cannot strand anything) against
+the live node labels is what turns the slug into a claim, and `nodes: list` was
+already granted for the object-state source.
+
+Two deliberate limits. **Zero eligible nodes is its own reason, at info.** A
+node pool scaled to zero by the cluster autoscaler reports exactly that, and on
+a cluster that uses one it is the normal resting state; folding it into the
+worst case would make the check flap with the autoscaler. **Taints and cordons
+are not subtracted.** Both would make a matching node ineligible in practice,
+so the eligible count is an upper bound — the error is one-directional, the
+check under-reports rather than inventing findings, and the alternative is
+reimplementing the taint/toleration matcher to sharpen a posture claim
+marginally.
 
 **A charter caveat worth stating plainly.** `k8s-lookout`'s existing detectors
 find what is _abnormal now_ — a workload that is crashing, a disk that is
@@ -140,9 +183,12 @@ surface that imports the same `emit`/`engine`/`cloud` packages. The two config
 streams below do not have this tension; the reliability and cost streams
 partially do. Decision 1 below resolves it: posture ships here, in its own
 `audit` command group, so the two philosophies stay separable by which group a
-consumer calls. One slug named above moved as a result — `no-requests` was
+consumer calls. Two slugs named above moved as a result — `no-requests` was
 classified as incident work, not posture, and belongs beside the `top.unlimited`
-census in `triage top`.
+census in `triage top`; `no-hpa` turned out to be a cohort question rather than
+a cluster one, and moved to the drift stream (#188). Absence is a defect only
+where something makes it wrong, and each of these two found that something
+somewhere other than where the SOP filed it.
 
 ## The two gaps
 

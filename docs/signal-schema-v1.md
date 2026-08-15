@@ -120,8 +120,25 @@ from `audit workloads` (#190) and `audit exemptions` (#234):
 | `audit.no_spread` | `NoTopologySpread` | `Deployment`, `StatefulSet` |
 | `audit.no_readiness_probe` | `NoReadinessProbe` | `Deployment`, `StatefulSet`, `DaemonSet` |
 | `audit.no_liveness_probe` | `NoLivenessProbe` | `Deployment`, `StatefulSet`, `DaemonSet` |
+| `audit.rigid_scheduling` | `NoEligibleNodes`, `SingleEligibleNode`, `FewerEligibleNodesThanReplicas` | `Deployment`, `StatefulSet` |
+| `audit.hpa_cannot_scale` | `HPAMinEqualsMax`, `HPATargetMissingRequests`, `HPATargetMissing` | `HorizontalPodAutoscaler` |
 | `audit.exemption_expired` | `ExemptionExpired` | — (the subject is a file entry) |
 | `audit.exemption_expiring` | `ExemptionExpiring` | — |
+
+Two of these carry more than one reason, which is the recipe working
+as intended rather than an exception to it. `audit.rigid_scheduling`
+and `audit.hpa_cannot_scale` each name one condition with several
+distinct causes, and the cause is what an operator acts on: "no node
+satisfies the constraint" and "exactly one does" are the same kind and
+different classes, so they fingerprint apart and a rollup counts them
+apart. Splitting them into six kinds instead would have said the same
+thing with six entries in the consumer's kind table.
+
+`audit.hpa_cannot_scale` is also the first `audit` kind whose subject
+is not the workload. Its `objectClass` is `HorizontalPodAutoscaler`
+and its `name` is the autoscaler's, because that is the object an
+operator edits — even though the finding is produced by the same
+`audit workloads` pass that judges the workload behind it.
 
 Like every other check-local `kind`, these are documented where they
 are produced — the emitting command's output glossary — and are

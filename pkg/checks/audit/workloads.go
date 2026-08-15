@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +33,9 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
-// The five posture kinds this command emits (issue #190).
+// The posture kinds this command emits (issue #190). The other two,
+// audit.hpa_cannot_scale and audit.rigid_scheduling, are declared
+// beside their detectors in hpa.go and placement.go.
 const (
 	kindNoPDB       = "audit.no_pdb"
 	kindSingle      = "audit.single_replica"
@@ -62,22 +65,36 @@ const (
 //
 // # One API pass, several claims
 //
-// Every claim here reads either the workload spec or the PDB set, so
-// they share one listing rather than one command per slug. The kinds
-// stay separate: a consumer suppressing probe noise must not thereby
-// lose disruption-budget coverage.
+// Every claim here reads the workload spec against one of three sets
+// listed alongside it — the PDBs, the HPAs, the nodes — so they share
+// one pass rather than one command per slug. The kinds stay separate:
+// a consumer suppressing probe noise must not thereby lose
+// disruption-budget coverage.
+//
+// Two subjects, therefore. Most findings are about a workload; the
+// audit.hpa_cannot_scale ones are about an autoscaler, and carry
+// kind_of_object=HorizontalPodAutoscaler with the HPA's own name.
 func WorkloadsCommand(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "audit workloads",
 		MCPName: "k8s_audit_workloads",
-		Summary: "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Summary: "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, and autoscalers that structurally cannot scale. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
 		Output: []checks.OutputField{
 			{Name: "replicas", Doc: "the workload's spec.replicas (nil defaults to 1, matching the API server); absent on DaemonSets, whose replica count is the node count"},
 			{Name: "namespace_pdbs", Doc: "PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed"},
-			{Name: "containers", Doc: "containers in the pod template missing the probe in question"},
+			{Name: "containers", Doc: "containers implicated by the finding: those missing the probe, or missing the request the autoscaler's utilization target divides by"},
 			{Name: "container_names", Doc: "their names, capped at 8 with a +N more tail"},
 			{Name: "total_containers", Doc: "containers in the pod template, so `containers` reads as a fraction"},
+			{Name: "min_replicas", Doc: "the HPA's spec.minReplicas (nil defaults to 1, matching the API server)"},
+			{Name: "max_replicas", Doc: "the HPA's spec.maxReplicas"},
+			{Name: "metric", Doc: "the utilization metric the HPA cannot compute, comma-separated if more than one"},
+			{Name: "scale_target", Doc: "the HPA's scaleTargetRef as Kind/name"},
+			{Name: "eligible_nodes", Doc: "nodes satisfying the workload's REQUIRED placement constraint; an upper bound, since taints and cordons are not subtracted"},
+			{Name: "cluster_nodes", Doc: "nodes in the cluster, so `eligible_nodes` reads as a fraction"},
+			{Name: "constraint", Doc: "the label and field keys that narrow placement, sorted and capped at 8"},
 			{Name: "pdbs", Doc: "summary note: PodDisruptionBudgets seen in scope"},
+			{Name: "hpas", Doc: "summary note: HorizontalPodAutoscalers seen in scope"},
+			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against"},
 			{Name: "workloads", Doc: "summary note: workloads examined, broken down as deployments/statefulsets/daemonsets"},
 		},
 		Examples: []string{
@@ -157,18 +174,32 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		return 0, fmt.Errorf("workload %s not found", wl)
 	}
 
+	// The autoscaler findings are indexed by their own subject, so they
+	// are gathered separately; under --workload scope the ones worth
+	// showing are those attached to the workload asked about.
+	for _, h := range ix.hpas {
+		if !wl.IsZero() && !hpaTargets(h, wl.Kind, wl.Namespace, wl.Name) {
+			continue
+		}
+		findings = append(findings, ix.hpaFindings(h)...)
+	}
+
 	sortFindings(findings)
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
 		}
 	}
-	if err := inv.Out.Note("pdbs", itoa(len(ix.pdbs))); err != nil {
-		return 0, err
+	notes := [][2]string{
+		{"pdbs", itoa(len(ix.pdbs))},
+		{"hpas", itoa(len(ix.hpas))},
+		{"nodes", itoa(len(ix.nodes))},
+		{"workloads", fmt.Sprintf("%d/%d/%d", counts[0], counts[1], counts[2])},
 	}
-	breakdown := fmt.Sprintf("%d/%d/%d", counts[0], counts[1], counts[2])
-	if err := inv.Out.Note("workloads", breakdown); err != nil {
-		return 0, err
+	for _, n := range notes {
+		if err := inv.Out.Note(n[0], n[1]); err != nil {
+			return 0, err
+		}
 	}
 	return scanned, nil
 }
@@ -195,10 +226,17 @@ func (w workload) wantReplicas() int32 {
 }
 
 // workloadIndex holds the listed objects a posture pass needs: the
-// pod-template owners and the PDBs that may or may not cover them.
+// pod-template owners, the PDBs that may or may not cover them, the
+// HPAs that may or may not be able to scale them, and the nodes their
+// placement constraints resolve against.
 type workloadIndex struct {
 	workloads []workload
 	pdbs      []*policyv1.PodDisruptionBudget
+	hpas      []*autoscalingv2.HorizontalPodAutoscaler
+	// nodes are cluster-scoped, so this is the whole inventory even
+	// under --namespace: a placement constraint does not stop at a
+	// namespace boundary.
+	nodes []*corev1.Node
 	// pdbsByNS counts PDBs per namespace, so a no-PDB finding can say
 	// whether the namespace uses PDBs at all.
 	pdbsByNS map[string]int
@@ -261,6 +299,28 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 				ix.pdbsByNS[p.Namespace]++
 			})
 		},
+		func() error {
+			return listPages("horizontalpodautoscalers", func(o metav1.ListOptions) ([]autoscalingv2.HorizontalPodAutoscaler, string, error) {
+				l, err := client.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(h *autoscalingv2.HorizontalPodAutoscaler) {
+				ix.hpas = append(ix.hpas, h)
+			})
+		},
+		func() error {
+			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
+				l, err := client.CoreV1().Nodes().List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(n *corev1.Node) {
+				ix.nodes = append(ix.nodes, n)
+			})
+		},
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -277,12 +337,21 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 		}
 		return a.name < b.name
 	})
+	sort.Slice(ix.hpas, func(i, j int) bool {
+		a, b := ix.hpas[i], ix.hpas[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
 	return ix, nil
 }
 
-// judge applies every posture claim to one workload.
+// judge applies every workload-subject posture claim to one workload.
+// The autoscaler claims are not here: their subject is the HPA.
 func (ix *workloadIndex) judge(w workload) []emit.Finding {
 	out := append(ix.availability(w), probeFindings(w)...)
+	out = append(out, ix.placement(w)...)
 	for i := range out {
 		out[i].Namespace = w.namespace
 		out[i].KindOfObject = w.kind
