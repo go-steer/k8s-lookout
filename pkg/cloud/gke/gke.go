@@ -165,6 +165,12 @@ func (p *Provider) capabilityStatus(c cloud.Capability) cloud.CapabilityStatus {
 		if p.project == "" || p.location == "" || p.cluster == "" {
 			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
 		}
+	case cloud.CapabilityClusterConfig:
+		// Cluster-scoped read (#186): clusters.get, the same call
+		// ipspace makes — the full GKE identity names the record.
+		if p.project == "" || p.location == "" || p.cluster == "" {
+			return cloud.CapabilityStatus{Capability: c, Reason: reasonNoClusterIdentity}
+		}
 	case cloud.CapabilityNotifications:
 		// Subscription read (post-M5 #130): needs the explicitly
 		// configured subscription first (there is no default — the
@@ -269,6 +275,15 @@ func (p *Provider) Notifications() (cloud.NotificationsAPI, bool) {
 		return nil, false
 	}
 	return newNotificationsAPI(p), true
+}
+
+// ClusterConfig implements cloud.Provider (#186, clusterconfig.go).
+// The GKE client is dialed lazily on first Config call.
+func (p *Provider) ClusterConfig() (cloud.ClusterConfigAPI, bool) {
+	if !p.available(cloud.CapabilityClusterConfig) {
+		return nil, false
+	}
+	return newClusterConfigAPI(p), true
 }
 
 // firstEnv returns the first non-empty value among the named

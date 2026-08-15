@@ -343,6 +343,115 @@ type NotificationsAPI interface {
 	Receive(ctx context.Context, handle func(ClusterNotification)) error
 }
 
+// MetadataMode* are the values of NodePoolConfig.MetadataServerMode:
+// how a pod on the pool reaches instance metadata, and therefore
+// whether it can read the NODE's identity credentials.
+const (
+	// MetadataModeUnset: the pool states no mode. What that resolves
+	// to is the provider's default and depends on cluster-level
+	// settings, so consumers must not read it as either of the other
+	// two.
+	MetadataModeUnset = ""
+	// MetadataModeProviderServer: a provider-run metadata server sits
+	// in front of the instance metadata and serves each pod only its
+	// own workload identity (GKE: GKE_METADATA).
+	MetadataModeProviderServer = "provider-metadata-server"
+	// MetadataModeNodeIdentity: pods reach the raw instance metadata
+	// endpoint, so any of them can mint tokens for the NODE's service
+	// account — the identity the whole pool shares (GKE: GCE_METADATA).
+	MetadataModeNodeIdentity = "node-identity"
+)
+
+// LegacyEndpoints* are the values of NodePoolConfig.LegacyEndpoints:
+// whether the pool's nodes still answer the provider's pre-v1 metadata
+// endpoints, which serve credentials without the request header the
+// current endpoint requires — so any SSRF in any pod on the node can
+// reach them.
+const (
+	// LegacyEndpointsUnset: the pool carries no setting either way,
+	// which on GKE leaves the legacy endpoints reachable. Recorded
+	// distinctly from Enabled because nobody chose it.
+	LegacyEndpointsUnset = "unset"
+	// LegacyEndpointsDisabled: the legacy endpoints are turned off
+	// (GKE: the disable-legacy-endpoints=true node metadata key).
+	LegacyEndpointsDisabled = "disabled"
+	// LegacyEndpointsEnabled: they are deliberately turned back on.
+	LegacyEndpointsEnabled = "enabled"
+)
+
+// AuthorizedNetworks is the source allow-list in front of a public
+// control-plane endpoint (GKE: masterAuthorizedNetworksConfig).
+type AuthorizedNetworks struct {
+	// Enabled reports whether the allow-list is in force at all. When
+	// false, the public endpoint accepts connections from any address
+	// on the internet and only authentication stands behind it.
+	Enabled bool
+	// CIDRs are the permitted source ranges. A list containing
+	// 0.0.0.0/0 is an allow-list that allows everything — enabled and
+	// empty of effect, which reads as restricted to anything counting
+	// configuration objects rather than reading them.
+	CIDRs []string
+	// GCPPublicCIDRs reports the provider-managed bypass admitting
+	// every one of the provider's own public ranges in ADDITION to
+	// CIDRs (GKE: gcpPublicCidrsAccessEnabled). Anyone who can rent a
+	// VM from the provider is inside it.
+	GCPPublicCIDRs bool
+}
+
+// NodePoolConfig is one node pool's security-relevant configuration.
+type NodePoolConfig struct {
+	Name string
+	// MetadataServerMode is one of the MetadataMode* values.
+	MetadataServerMode string
+	// LegacyEndpoints is one of the LegacyEndpoints* values.
+	LegacyEndpoints string
+}
+
+// ClusterConfig is the provider's own record of how the cluster is
+// configured: control-plane exposure, cluster-level identity, and the
+// per-pool settings that decide what a pod can reach from the node
+// under it. It is CONFIG, not live state — every field is something an
+// operator set or left unset — which is what makes it answerable
+// one-shot by the posture group (`audit cluster`, epic #182) rather
+// than by a resident watcher.
+//
+// The shape is deliberately the subset the shipped posture claims read.
+// The remaining `*container.Cluster` surface (release channel, node
+// versions, maintenance policy, upgrade settings) arrives with the
+// checks that consume it.
+type ClusterConfig struct {
+	// Name and Location identify the cluster the record describes,
+	// echoed back so a finding can name its subject without the
+	// consumer re-resolving the identity.
+	Name     string
+	Location string
+
+	// WorkloadIdentityPool is the cluster-wide identity pool workloads
+	// exchange their ServiceAccount tokens through (GKE:
+	// workloadIdentityConfig.workloadPool, "PROJECT.svc.id.goog").
+	// Empty means the feature is off for the entire cluster, so no pod
+	// can hold an identity of its own and every workload that needs
+	// one falls back to the node's or to a mounted key.
+	WorkloadIdentityPool string
+
+	// PublicEndpoint is the control plane's internet-facing address,
+	// empty when the cluster exposes only a private endpoint.
+	PublicEndpoint string
+	// AuthorizedNetworks is what may reach PublicEndpoint. Meaningless
+	// when PublicEndpoint is empty.
+	AuthorizedNetworks AuthorizedNetworks
+
+	// NodePools are the cluster's node pools in the provider's order.
+	NodePools []NodePoolConfig
+}
+
+// ClusterConfigAPI reads the provider-side cluster configuration the
+// posture group audits. One call, one record: the whole point is that
+// these fields are consistent with each other only when read together.
+type ClusterConfigAPI interface {
+	Config(ctx context.Context) (ClusterConfig, error)
+}
+
 // WorkloadIdentityAPI verifies KSA↔cloud-identity bindings.
 type WorkloadIdentityAPI interface {
 	// VerifyBinding verifies that the cluster identity

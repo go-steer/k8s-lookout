@@ -54,19 +54,26 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // Deps are the injectable dependencies of the audit commands. The
 // zero value gives production behavior; tests inject a fake clientset
-// (§13). Not every command needs one — `audit exemptions` reads a
-// file, not a cluster — which is the "no shared runtime" point above
-// made concrete.
+// and a fake provider (§13). Not every command needs either —
+// `audit exemptions` reads a file, `audit cluster` reads the cloud and
+// no cluster objects at all — which is the "no shared runtime" point
+// above made concrete.
 type Deps struct {
 	// Client builds the Kubernetes client. Nil means kube.BuildClient
 	// with default resolution (in-cluster autodetect, then
 	// $KUBECONFIG / ~/.kube/config).
 	Client func(ctx context.Context) (kubernetes.Interface, error)
+	// Provider yields the cloud provider. Nil means cloud.New default
+	// detection (the NoProvider sentinel on vanilla builds — the
+	// cloud-backed commands then report unavailable, never silence,
+	// §2).
+	Provider func(ctx context.Context) (cloud.Provider, error)
 }
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
@@ -76,7 +83,15 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 	return kube.BuildClient(kube.Options{})
 }
 
+func (d Deps) provider(ctx context.Context) (cloud.Provider, error) {
+	if d.Provider != nil {
+		return d.Provider(ctx)
+	}
+	return cloud.New(ctx, cloud.Config{})
+}
+
 func init() {
+	checks.Register(ClusterCommand(Deps{}))
 	checks.Register(ExemptionsCommand())
 	checks.Register(HardeningCommand(Deps{}))
 	checks.Register(NetpolCommand(Deps{}))

@@ -324,6 +324,63 @@ no policy an operator could write would fix it. They are counted in
 and `audit hardening` already reports every one of them as
 `audit.host_namespace` with exactly this consequence in its message.
 
+#### As built (#186): the cluster-config half of `compliance-audit`
+
+`audit cluster` ships the three slugs that are settings of the cluster rather
+than of anything inside it — `workload-identity-off`, `legacy-metadata`,
+`public-control-plane`. It is the first `audit` command that reads the cloud,
+and it reads it the way §2 prescribes: a new `cluster-config` capability on the
+`Provider` boundary, implemented in `pkg/cloud/gke` over the same `clusters.get`
+call `cloud ipspace` already makes, with `pkg/checks` seeing a plain
+`cloud.ClusterConfig` and no SDK type. On a vanilla build, or a GKE build that
+cannot resolve the cluster's identity, the command emits the standard explicit
+`cloud.unavailable` record and exits 0 with `scanned=0` — the same degradation
+`state wi` and the `cloud` group already have, because "we could not look" and
+"nothing is wrong" must not render identically.
+
+The projection preserves tri-states rather than flattening them, and that is
+load-bearing twice. A node pool with no `workloadMetadataConfig` and a node pool
+with no `disable-legacy-endpoints` key are both "unset", and unset means
+something different from either explicit value: the first resolves against
+cluster-level defaults this read cannot see, so **an unset metadata mode is not
+judged at all**; the second leaves the legacy endpoints serving, so it **is**
+judged, under the same reason as an explicit `false` with the raw state in a
+detail field. Deciding either of those inside the SDK adapter would have buried
+the reasoning where nobody reviewing the check can see it.
+
+Two claims are narrowed against what the cluster actually is, in the shape #183
+narrowed `default-sa-automount`:
+
+- **The per-pool metadata claim fires only when cluster-level Workload Identity
+  is on.** With it off, every pool serves the node's identity by definition and
+  one cluster-subject finding says so once; the alternative multiplies a single
+  setting by the pool count. With it on, a pool still on the node metadata
+  server is the finding worth having — the cluster reads as configured and that
+  pool's pods quietly bypass it.
+- **A restricted public endpoint is silent.** A control plane on a public
+  address is the GKE default and, behind an authorized-network allow-list that
+  means something, is a deliberate and ordinary configuration. What is reported
+  is the endpoint nothing narrows, and the allow-list containing `0.0.0.0/0` —
+  enabled, empty of effect, and reading as restricted to any inventory that
+  counts configuration objects instead of reading them. That is the same defect
+  shape as #185's "policies exist and select nothing".
+
+One reason is deliberately info rather than warning.
+`AuthorizedNetworksAllowProviderCIDRs` — the bypass admitting every one of the
+provider's own public ranges alongside the allow-list — is on by default, so a
+warning would fire on most clusters that did the right thing. It is still
+reported: an operator who wrote a two-office allow-list did not write "and
+anyone who can rent a VM here", and posture is exactly the severity for a true
+statement that is not on its own a defect.
+
+**`private-nodes` is not here.** Whether nodes carry public IPs is one of the 19
+`fleet-consistency-drift` facets, answerable only against a cohort, and folding
+it in would have made this command the config inventory rather than the three
+security claims #186 asked for. The remaining `*container.Cluster` surface —
+release channel, node versions, maintenance policy, upgrade settings — arrives
+with `security-patch-orchestrator` (#187), which grows `cloud.ClusterConfig`
+with the fields its checks read.
+
 ### Gap 2 — fleet fan-out & rollup
 
 `k8s-lookout` is one-process-per-cluster by design: `lookout watch` is "the
