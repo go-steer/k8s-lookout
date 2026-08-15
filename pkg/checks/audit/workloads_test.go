@@ -17,14 +17,18 @@ package audit_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -120,23 +124,104 @@ func matching(l map[string]string) *metav1.LabelSelector {
 	return &metav1.LabelSelector{MatchLabels: l}
 }
 
+func node(name string, labels map[string]string) *corev1.Node {
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels["kubernetes.io/hostname"] = name
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+}
+
+func hpa(ns, name, targetKind, targetName string, min, max int32, metrics ...autoscalingv2.MetricSpec) *autoscalingv2.HorizontalPodAutoscaler {
+	h := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1", Kind: targetKind, Name: targetName,
+			},
+			MaxReplicas: max,
+			Metrics:     metrics,
+		},
+	}
+	if min > 0 {
+		h.Spec.MinReplicas = ptr(min)
+	}
+	return h
+}
+
+func cpuUtil(pct int32) autoscalingv2.MetricSpec {
+	return autoscalingv2.MetricSpec{
+		Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{
+			Name:   corev1.ResourceCPU,
+			Target: autoscalingv2.MetricTarget{Type: autoscalingv2.UtilizationMetricType, AverageUtilization: ptr(pct)},
+		},
+	}
+}
+
+// requests attaches a cpu request, the denominator a utilization
+// target divides by.
+func requests(c corev1.Container, cpu string) corev1.Container {
+	c.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)}
+	return c
+}
+
+// pinned adds a spec.nodeSelector, the simplest required placement
+// constraint.
+func pinned(t corev1.PodTemplateSpec, sel map[string]string) corev1.PodTemplateSpec {
+	t.Spec.NodeSelector = sel
+	return t
+}
+
+// requiredAffinity adds required node affinity, preserving any pod
+// anti-affinity already on the template.
+func requiredAffinity(t corev1.PodTemplateSpec, terms ...corev1.NodeSelectorTerm) corev1.PodTemplateSpec {
+	if t.Spec.Affinity == nil {
+		t.Spec.Affinity = &corev1.Affinity{}
+	}
+	t.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: terms},
+	}
+	return t
+}
+
+func term(rs ...corev1.NodeSelectorRequirement) corev1.NodeSelectorTerm {
+	return corev1.NodeSelectorTerm{MatchExpressions: rs}
+}
+
+func expr(key string, op corev1.NodeSelectorOperator, vals ...string) corev1.NodeSelectorRequirement {
+	return corev1.NodeSelectorRequirement{Key: key, Operator: op, Values: vals}
+}
+
 // postureCluster is the shared fixture: one workload per posture
 // shape the command has to get right.
 //
 //	prod/Deployment/checkout     3 replicas, PDB, spread, one bare sidecar
 //	prod/Deployment/legacy-api   1 replica, fully probed
 //	prod/Deployment/paused       0 replicas, no probes
+//	prod/Deployment/inference    3 replicas, otherwise clean, pinned to the one GPU node
 //	prod/StatefulSet/cache       3 replicas, no PDB, no spread, no liveness
 //	batch/Deployment/worker      2 replicas, no PDB, anti-affinity, fully probed
 //	batch/DaemonSet/log-shipper  no probes
+//
+// Four nodes, only one of them in the gpu pool; and two autoscalers —
+// one pinned min==max over a template with no cpu requests (both
+// defects at once, on one object), one pointed at a workload that
+// does not exist.
 func postureCluster() []runtime.Object {
 	return []runtime.Object{
+		node("node-a", map[string]string{"pool": "general"}),
+		node("node-b", map[string]string{"pool": "general"}),
+		node("node-c", map[string]string{"pool": "general"}),
+		node("node-gpu", map[string]string{"pool": "gpu", "accelerator": "nvidia-t4"}),
+
 		deploy("prod", "checkout", 3, spread(template(
 			map[string]string{"app": "checkout"},
 			container("app", true, true),
 			container("envoy", false, false),
 		))),
 		pdb("prod", "checkout-pdb", matching(map[string]string{"app": "checkout"})),
+		hpa("prod", "checkout-hpa", "Deployment", "checkout", 3, 3, cpuUtil(70)),
 		deploy("prod", "legacy-api", 1, template(
 			map[string]string{"app": "legacy-api"},
 			container("api", true, true),
@@ -145,6 +230,11 @@ func postureCluster() []runtime.Object {
 			map[string]string{"app": "paused"},
 			container("app", false, false),
 		)),
+		deploy("prod", "inference", 3, pinned(spread(template(
+			map[string]string{"app": "inference"},
+			requests(container("server", true, true), "2"),
+		)), map[string]string{"pool": "gpu"})),
+		pdb("prod", "inference-pdb", matching(map[string]string{"app": "inference"})),
 		sts("prod", "cache", 3, template(
 			map[string]string{"app": "cache"},
 			container("redis", true, false),
@@ -153,6 +243,7 @@ func postureCluster() []runtime.Object {
 			map[string]string{"app": "worker"},
 			container("worker", true, true),
 		))),
+		hpa("batch", "worker-hpa", "Deployment", "ghost", 1, 5, cpuUtil(80)),
 		daemon("batch", "log-shipper", template(
 			map[string]string{"app": "log-shipper"},
 			container("fluentd", false, false),
@@ -350,11 +441,16 @@ func TestWorkloadsProbeFindingsAreWorkloadGrained(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	recs := findingLines(t, res.Stdout)
-	if len(recs) != 2 {
+	var probes []map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if strings.HasSuffix(r["kind"], "_probe") {
+			probes = append(probes, r)
+		}
+	}
+	if len(probes) != 2 {
 		t.Fatalf("want one finding per missing probe, not per container, got:\n%s", res.Stdout)
 	}
-	for _, r := range recs {
+	for _, r := range probes {
 		if r["containers"] != "1" || r["container_names"] != "envoy" || r["total_containers"] != "2" {
 			t.Errorf("finding = %v, want the sidecar named as 1 of 2", r)
 		}
@@ -402,7 +498,7 @@ func TestWorkloadsScopes(t *testing.T) {
 		args        []string
 		wantScanned string
 	}{
-		{"all-namespaces", []string{"-A"}, "scanned=6"},
+		{"all-namespaces", []string{"-A"}, "scanned=7"},
 		{"one-namespace", []string{"--namespace=batch"}, "scanned=2"},
 		{"one-workload", []string{"--workload=StatefulSet/prod/cache"}, "scanned=1"},
 	} {
@@ -479,6 +575,435 @@ func TestWorkloadsExemptionAnnotatesNeverDrops(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "findings=1") || !strings.Contains(res.Stdout, "exempt=1") {
 		t.Errorf("summary should report findings=1 exempt=1:\n%s", res.Stdout)
+	}
+}
+
+// --- autoscaler posture (audit.hpa_cannot_scale) ---
+
+// The claim that motivates the kind: the sentinel source
+// (autoscaling.hpa_pinned) deliberately does NOT fire on min==max,
+// because such an HPA reports ScalingLimited=False. Without this,
+// nothing in the tree reports an autoscaler that cannot autoscale.
+func TestWorkloadsHPAMinEqualsMax(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		min, max int32
+		want     bool
+	}{
+		{"equal", 3, 3, true},
+		{"nil-min-defaults-to-one", 0, 1, true},
+		{"a-range-is-fine", 2, 10, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []runtime.Object{
+				deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"},
+					requests(container("app", true, true), "1")))),
+				pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+				hpa("prod", "x-hpa", "Deployment", "x", tc.min, tc.max, cpuUtil(70)),
+			}
+			res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+			if got := kindSet(t, res.Stdout)["audit.hpa_cannot_scale"]; got != tc.want {
+				t.Errorf("hpa_cannot_scale present = %v, want %v:\n%s", got, tc.want, res.Stdout)
+			}
+		})
+	}
+}
+
+// The subject of an autoscaler finding is the autoscaler. An operator
+// fixes it by editing the HPA, and a fleet rollup counts it against
+// HorizontalPodAutoscaler, not against the workload behind it.
+func TestWorkloadsHPASubjectIsTheAutoscaler(t *testing.T) {
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(postureCluster()...)), "--namespace=batch")
+	var got map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.hpa_cannot_scale" {
+			got = r
+		}
+	}
+	if got == nil {
+		t.Fatalf("want the dangling-target finding:\n%s", res.Stdout)
+	}
+	if got["kind_of_object"] != "HorizontalPodAutoscaler" || got["name"] != "worker-hpa" {
+		t.Errorf("subject = %s/%s, want HorizontalPodAutoscaler/worker-hpa", got["kind_of_object"], got["name"])
+	}
+	if got["reason"] != "HPATargetMissing" || got["scale_target"] != "Deployment/ghost" {
+		t.Errorf("finding = %v", got)
+	}
+}
+
+// The three defects are independent: one HPA can be both pinned at
+// min==max and pointed at a template it cannot measure, and fixing
+// one has not fixed the other. Distinct reasons, so distinct classes.
+func TestWorkloadsHPADefectsAreIndependent(t *testing.T) {
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(postureCluster()...)),
+		"--workload=Deployment/prod/checkout")
+	var hpaFindings []map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.hpa_cannot_scale" {
+			hpaFindings = append(hpaFindings, r)
+		}
+	}
+	if len(hpaFindings) != 2 {
+		t.Fatalf("want both autoscaler defects, got %d:\n%s", len(hpaFindings), res.Stdout)
+	}
+	if hpaFindings[0]["fingerprint"] == hpaFindings[1]["fingerprint"] {
+		t.Errorf("two remedies must not share a class: %s", hpaFindings[0]["fingerprint"])
+	}
+}
+
+// Utilization is a percentage OF the request, so a target without one
+// is arithmetic the controller can never do. Absolute targets need no
+// request and must stay quiet.
+func TestWorkloadsHPAUtilizationNeedsRequests(t *testing.T) {
+	averageValue := autoscalingv2.MetricSpec{
+		Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{
+			Name: corev1.ResourceCPU,
+			Target: autoscalingv2.MetricTarget{
+				Type: autoscalingv2.AverageValueMetricType, AverageValue: ptr(resource.MustParse("500m")),
+			},
+		},
+	}
+	containerUtil := func(name string) autoscalingv2.MetricSpec {
+		return autoscalingv2.MetricSpec{
+			Type: autoscalingv2.ContainerResourceMetricSourceType,
+			ContainerResource: &autoscalingv2.ContainerResourceMetricSource{
+				Name: corev1.ResourceCPU, Container: name,
+				Target: autoscalingv2.MetricTarget{Type: autoscalingv2.UtilizationMetricType, AverageUtilization: ptr[int32](70)},
+			},
+		}
+	}
+	// app has a cpu request, the sidecar does not.
+	tpl := spread(template(map[string]string{"app": "x"},
+		requests(container("app", true, true), "1"),
+		container("sidecar", true, true),
+	))
+
+	for _, tc := range []struct {
+		name    string
+		metrics []autoscalingv2.MetricSpec
+		want    bool
+		names   string
+	}{
+		// The pod-wide form sums requests across the pod, so one bare
+		// sidecar disables autoscaling for the whole workload.
+		{"pod-wide-utilization-one-bare-sidecar", []autoscalingv2.MetricSpec{cpuUtil(70)}, true, "sidecar"},
+		{"absolute-target-needs-no-request", []autoscalingv2.MetricSpec{averageValue}, false, ""},
+		{"per-container-target-that-has-one", []autoscalingv2.MetricSpec{containerUtil("app")}, false, ""},
+		{"per-container-target-that-does-not", []autoscalingv2.MetricSpec{containerUtil("sidecar")}, true, "sidecar"},
+		{"per-container-target-naming-nothing", []autoscalingv2.MetricSpec{containerUtil("typo")}, true, "typo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []runtime.Object{
+				deploy("prod", "x", 3, tpl),
+				pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+				hpa("prod", "x-hpa", "Deployment", "x", 2, 10, tc.metrics...),
+			}
+			res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+			var got map[string]string
+			for _, r := range findingLines(t, res.Stdout) {
+				if r["reason"] == "HPATargetMissingRequests" {
+					got = r
+				}
+			}
+			if (got != nil) != tc.want {
+				t.Fatalf("finding present = %v, want %v:\n%s", got != nil, tc.want, res.Stdout)
+			}
+			if tc.want && got["container_names"] != tc.names {
+				t.Errorf("container_names = %q, want %q", got["container_names"], tc.names)
+			}
+		})
+	}
+}
+
+// An HPA with no metrics is not inert: the API server defaults it to
+// 80% CPU utilization, and every autoscaling/v1 object converts to
+// exactly that. Judging it as unconstrained would miss the commonest
+// shape of this defect.
+func TestWorkloadsHPAEmptyMetricsDefaultsToCPUUtilization(t *testing.T) {
+	objs := []runtime.Object{
+		deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, container("app", true, true)))),
+		pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		hpa("prod", "x-hpa", "Deployment", "x", 2, 10),
+	}
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+	if !strings.Contains(res.Stdout, "reason=HPATargetMissingRequests") {
+		t.Errorf("an HPA with no metrics still divides by the cpu request:\n%s", res.Stdout)
+	}
+}
+
+// A scaleTargetRef into a kind this pass never listed gets silence,
+// not a dangling-target claim: the check did not look for an Argo
+// Rollout, so it cannot report one absent.
+func TestWorkloadsHPAForeignTargetMakesNoClaim(t *testing.T) {
+	h := hpa("prod", "x-hpa", "Rollout", "x", 2, 10, cpuUtil(70))
+	h.Spec.ScaleTargetRef.APIVersion = "argoproj.io/v1alpha1"
+	objs := []runtime.Object{
+		deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"},
+			requests(container("app", true, true), "1")))),
+		pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		h,
+	}
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+	if !strings.HasPrefix(res.Stdout, "scanned=1 findings=0 ") {
+		t.Errorf("an unlisted target kind must produce no claim, got:\n%s", res.Stdout)
+	}
+}
+
+// Under --workload scope the autoscaler attached to that workload is
+// in scope, and other namespaces' autoscalers are not.
+func TestWorkloadsHPAFollowsWorkloadScope(t *testing.T) {
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(postureCluster()...)),
+		"--workload=Deployment/prod/checkout")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.hpa_cannot_scale" && r["name"] != "checkout-hpa" {
+			t.Errorf("out-of-scope autoscaler reported: %v", r)
+		}
+	}
+	if !strings.Contains(res.Stdout, "name=checkout-hpa") {
+		t.Errorf("the workload's own autoscaler should be in scope:\n%s", res.Stdout)
+	}
+}
+
+// --- placement posture (audit.rigid_scheduling) ---
+
+// cleanPinned builds a workload whose only defect can be its
+// placement: probed, spread, and covered by a PDB.
+func cleanPinned(replicas int32, constrain func(corev1.PodTemplateSpec) corev1.PodTemplateSpec, nodes ...*corev1.Node) []runtime.Object {
+	tpl := spread(template(map[string]string{"app": "x"}, container("app", true, true)))
+	objs := []runtime.Object{
+		deploy("prod", "x", replicas, constrain(tpl)),
+		pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+	}
+	for _, n := range nodes {
+		objs = append(objs, n)
+	}
+	return objs
+}
+
+func gpuPool(n int) []*corev1.Node {
+	var out []*corev1.Node
+	for i := 0; i < n; i++ {
+		out = append(out, node(fmt.Sprintf("gpu-%d", i), map[string]string{"pool": "gpu"}))
+	}
+	return out
+}
+
+// The whole point of resolving the constraint against real nodes: the
+// same three lines of YAML are fine over a pool and fatal over one
+// node, and only the node count tells them apart.
+func TestWorkloadsPlacementCountsEligibleNodes(t *testing.T) {
+	toGPU := func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+		return pinned(t, map[string]string{"pool": "gpu"})
+	}
+	for _, tc := range []struct {
+		name     string
+		replicas int32
+		pool     int
+		want     string // "" = no finding
+	}{
+		{"enough-nodes", 3, 5, ""},
+		{"exactly-enough", 3, 3, ""},
+		{"fewer-than-replicas", 3, 2, "FewerEligibleNodesThanReplicas"},
+		{"one-node", 3, 1, "SingleEligibleNode"},
+		{"no-nodes", 3, 0, "NoEligibleNodes"},
+		// A single-replica workload already has audit.single_replica
+		// saying it dies with its node; saying it twice would name two
+		// remedies for one outage. Zero nodes is still worth a word.
+		{"single-replica-on-one-node", 1, 1, ""},
+		{"single-replica-on-no-nodes", 1, 0, "NoEligibleNodes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The general pool exists throughout, so a wrong matcher that
+			// counted every node would be caught.
+			nodes := append(gpuPool(tc.pool),
+				node("general-0", map[string]string{"pool": "general"}),
+				node("general-1", map[string]string{"pool": "general"}))
+			res := checktest.Run(t, audit.WorkloadsCommand(
+				testDeps(cleanPinned(tc.replicas, toGPU, nodes...)...)), "-A")
+			var got string
+			for _, r := range findingLines(t, res.Stdout) {
+				if r["kind"] == "audit.rigid_scheduling" {
+					got = r["reason"]
+					if want := strconv.Itoa(tc.pool); r["eligible_nodes"] != want {
+						t.Errorf("eligible_nodes = %q, want %q", r["eligible_nodes"], want)
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("reason = %q, want %q:\n%s", got, tc.want, res.Stdout)
+			}
+		})
+	}
+}
+
+// Node affinity is a richer language than nodeSelector, and getting
+// any operator wrong changes the node count the whole claim rests on.
+func TestWorkloadsPlacementNodeAffinityOperators(t *testing.T) {
+	nodes := []*corev1.Node{
+		node("a", map[string]string{"pool": "gpu", "gen": "4"}),
+		node("b", map[string]string{"pool": "gpu", "gen": "5"}),
+		node("c", map[string]string{"pool": "general", "gen": "5"}),
+	}
+	for _, tc := range []struct {
+		name     string
+		terms    []corev1.NodeSelectorTerm
+		eligible string
+	}{
+		{"In", []corev1.NodeSelectorTerm{term(expr("pool", corev1.NodeSelectorOpIn, "gpu"))}, "2"},
+		{"NotIn", []corev1.NodeSelectorTerm{term(expr("pool", corev1.NodeSelectorOpNotIn, "gpu"))}, "1"},
+		{"Exists", []corev1.NodeSelectorTerm{term(expr("gen", corev1.NodeSelectorOpExists))}, "3"},
+		{"DoesNotExist", []corev1.NodeSelectorTerm{term(expr("missing", corev1.NodeSelectorOpDoesNotExist))}, "3"},
+		{"Gt", []corev1.NodeSelectorTerm{term(expr("gen", corev1.NodeSelectorOpGt, "4"))}, "2"},
+		{"Lt", []corev1.NodeSelectorTerm{term(expr("gen", corev1.NodeSelectorOpLt, "5"))}, "1"},
+		{"expressions-within-a-term-are-ANDed",
+			[]corev1.NodeSelectorTerm{term(expr("pool", corev1.NodeSelectorOpIn, "gpu"), expr("gen", corev1.NodeSelectorOpIn, "5"))}, "1"},
+		{"terms-are-ORed", []corev1.NodeSelectorTerm{
+			term(expr("pool", corev1.NodeSelectorOpIn, "gpu")),
+			term(expr("pool", corev1.NodeSelectorOpIn, "general")),
+		}, "3"},
+		// Since k8s 1.13 an entirely empty term matches NOTHING, where
+		// an empty label selector matches everything.
+		{"empty-term-matches-nothing", []corev1.NodeSelectorTerm{{}}, "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			constrain := func(tpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return requiredAffinity(tpl, tc.terms...)
+			}
+			// 4 replicas, so any eligible count below 4 produces a
+			// finding and the node count is always visible.
+			res := checktest.Run(t, audit.WorkloadsCommand(
+				testDeps(cleanPinned(4, constrain, nodes...)...)), "-A")
+			var got string
+			for _, r := range findingLines(t, res.Stdout) {
+				if r["kind"] == "audit.rigid_scheduling" {
+					got = r["eligible_nodes"]
+				}
+			}
+			if got != tc.eligible {
+				t.Errorf("eligible_nodes = %q, want %q:\n%s", got, tc.eligible, res.Stdout)
+			}
+		})
+	}
+}
+
+// matchFields addresses the node object, not its labels, and
+// metadata.name is the one field the scheduler supports. A pod pinned
+// to a named node is the most rigid placement there is.
+func TestWorkloadsPlacementMatchFields(t *testing.T) {
+	constrain := func(tpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+		return requiredAffinity(tpl, corev1.NodeSelectorTerm{
+			MatchFields: []corev1.NodeSelectorRequirement{
+				expr("metadata.name", corev1.NodeSelectorOpIn, "a"),
+			},
+		})
+	}
+	nodes := []*corev1.Node{node("a", nil), node("b", nil), node("c", nil)}
+	res := checktest.Run(t, audit.WorkloadsCommand(
+		testDeps(cleanPinned(3, constrain, nodes...)...)), "-A")
+	var got map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.rigid_scheduling" {
+			got = r
+		}
+	}
+	if got == nil || got["reason"] != "SingleEligibleNode" {
+		t.Fatalf("want SingleEligibleNode, got:\n%s", res.Stdout)
+	}
+	if got["constraint"] != "metadata.name" || got["cluster_nodes"] != "3" {
+		t.Errorf("finding = %v", got)
+	}
+}
+
+// A preference is not a restriction: the scheduler places the pod
+// anywhere if it must, so preferred affinity can never strand
+// anything and must not be counted as a constraint.
+func TestWorkloadsPlacementIgnoresPreferredAffinity(t *testing.T) {
+	constrain := func(tpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+		if tpl.Spec.Affinity == nil {
+			tpl.Spec.Affinity = &corev1.Affinity{}
+		}
+		tpl.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{
+				Weight:     100,
+				Preference: term(expr("pool", corev1.NodeSelectorOpIn, "gpu")),
+			}},
+		}
+		return tpl
+	}
+	res := checktest.Run(t, audit.WorkloadsCommand(
+		testDeps(cleanPinned(3, constrain, node("a", map[string]string{"pool": "general"}))...)), "-A")
+	if !strings.HasPrefix(res.Stdout, "scanned=1 findings=0 ") {
+		t.Errorf("a preference is not a placement constraint, got:\n%s", res.Stdout)
+	}
+}
+
+// A DaemonSet's nodeSelector IS its replica count — "few eligible
+// nodes" would restate the spec rather than fault it — and a workload
+// scaled to zero has nothing to strand.
+func TestWorkloadsPlacementExclusions(t *testing.T) {
+	nodes := []runtime.Object{node("a", map[string]string{"pool": "gpu"})}
+	tpl := pinned(template(map[string]string{"app": "x"}, container("app", true, true)),
+		map[string]string{"pool": "gpu"})
+
+	for _, tc := range []struct {
+		name string
+		objs []runtime.Object
+	}{
+		{"daemonset", append(nodes, daemon("prod", "x", tpl))},
+		{"scaled-to-zero", append(nodes, deploy("prod", "x", 0, tpl))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := checktest.Run(t, audit.WorkloadsCommand(testDeps(tc.objs...)), "-A")
+			if kindSet(t, res.Stdout)["audit.rigid_scheduling"] {
+				t.Errorf("no placement claim belongs here:\n%s", res.Stdout)
+			}
+		})
+	}
+}
+
+// A requirement the scheduler itself would reject produces no claim:
+// guessing at a partial constraint would report a node count the
+// cluster will never use.
+func TestWorkloadsPlacementMalformedConstraintIsQuiet(t *testing.T) {
+	constrain := func(tpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+		// Gt takes exactly one integer value.
+		return requiredAffinity(tpl, term(expr("gen", corev1.NodeSelectorOpGt, "not-a-number")))
+	}
+	res := checktest.Run(t, audit.WorkloadsCommand(
+		testDeps(cleanPinned(3, constrain, node("a", nil))...)), "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if kindSet(t, res.Stdout)["audit.rigid_scheduling"] {
+		t.Errorf("a malformed constraint must not produce a node count:\n%s", res.Stdout)
+	}
+}
+
+// Placement findings are workload-subject, and the two new kinds join
+// the posture recipe like the rest: class, not instance.
+func TestWorkloadsNewKindsUsePostureFingerprint(t *testing.T) {
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(postureCluster()...)), "-A")
+	seen := map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] != "audit.rigid_scheduling" && r["kind"] != "audit.hpa_cannot_scale" {
+			continue
+		}
+		key := r["kind"] + "/" + r["reason"] + "/" + r["kind_of_object"]
+		if prev, ok := seen[key]; ok && prev != r["fingerprint"] {
+			t.Errorf("%s got two fingerprints: %s and %s", key, prev, r["fingerprint"])
+		}
+		seen[key] = r["fingerprint"]
+		if !strings.HasPrefix(r["fingerprint"], "sha256:") {
+			t.Errorf("%s has no fingerprint: %v", key, r)
+		}
+	}
+	// All three autoscaler reasons plus one placement reason.
+	if len(seen) != 4 {
+		t.Errorf("fixture should exercise 4 new classes, saw %d: %v", len(seen), seen)
 	}
 }
 

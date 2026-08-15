@@ -10,16 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`lookout audit workloads`** — the first posture detectors (#190).
-  Five claims about workloads that are healthy right now, from one API
-  pass over Deployments, StatefulSets, DaemonSets and PDBs:
-  `audit.no_pdb`, `audit.single_replica`, `audit.no_spread` (warning /
-  warning / info), and `audit.no_readiness_probe` /
-  `audit.no_liveness_probe`. This is the standing question `stab drain`
+  Seven claims about workloads that are healthy right now, from one API
+  pass over Deployments, StatefulSets, DaemonSets, PDBs, HPAs and
+  Nodes: `audit.no_pdb`, `audit.single_replica`, `audit.no_spread`
+  (warning / warning / info), `audit.no_readiness_probe` /
+  `audit.no_liveness_probe`, `audit.rigid_scheduling` and
+  `audit.hpa_cannot_scale`. This is the standing question `stab drain`
   cannot answer: `drain.singleton` fires only for a workload whose pod
   happens to sit on the node being drained, so the same workload is
   invisible from every other node. No new RBAC — every resource it
   lists was already granted. Scope with `--namespace`, `-A`, or
   `--workload`.
+- `audit.rigid_scheduling` resolves a workload's required placement
+  (`nodeSelector` ANDed with required `nodeAffinity`) against the live
+  node labels, which is what separates `pool=gpu` over a 40-node pool
+  from the same three lines of YAML over one surviving node:
+  `SingleEligibleNode` and `FewerEligibleNodesThanReplicas` at warning,
+  `NoEligibleNodes` at info, because a node pool scaled to zero by the
+  cluster autoscaler reports exactly that and it is a normal resting
+  state. Taints and cordons are not subtracted, so `eligible_nodes` is
+  an upper bound and the check under-reports rather than inventing
+  findings (#190).
+- `audit.hpa_cannot_scale` reports autoscalers that structurally never
+  can: `HPAMinEqualsMax`, `HPATargetMissingRequests` (a utilization
+  target is a percentage OF a request, so one without a request is
+  arithmetic the controller can never do), and `HPATargetMissing`. It
+  does not overlap the `autoscaling.hpa_pinned` /
+  `autoscaling.hpa_metrics_dead` sentinel kinds, which are sustained
+  states needing a resident watch — in fact the sentinel deliberately
+  declines the `min == max` case, so until now nothing reported it. The
+  subject is the HPA: these findings carry
+  `kind_of_object=HorizontalPodAutoscaler` and the autoscaler's own
+  name (#190).
 - `triage top` now censuses missing **requests** alongside missing
   limits: `top.unrequested` (aggregate) and `top.unrequested_container`
   (per container, behind `--show-unrequested`), mirroring the existing
