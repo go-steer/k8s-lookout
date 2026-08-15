@@ -381,6 +381,62 @@ release channel, node versions, maintenance policy, upgrade settings — arrives
 with `security-patch-orchestrator` (#187), which grows `cloud.ClusterConfig`
 with the fields its checks read.
 
+#### As built (#187): `security-patch-orchestrator`
+
+`audit upgrades` ships nine of the stream's ten slugs — `master-behind`,
+`pool-skew`, `no-channel`, `no-autoupgrade`, `no-autorepair`,
+`no-maintenance-window`, `blocking-exclusion`, `stale-image-type`,
+`no-notifications` — as four kinds grouped by what an operator does about
+them: the cluster is behind (`audit.version_behind`), nothing is driving it
+forward (`audit.upgrade_unmanaged`), something is holding it back
+(`audit.upgrade_blocked`), or it moves with nobody watching
+(`audit.upgrade_unattended`). **`fleet-spread` is deferred**: "are these
+clusters on the same version" is a cohort question, unanswerable from one
+invocation, and it belongs with the #189 fan-out layer alongside the 19
+`fleet-consistency-drift` facets.
+
+The capability grew rather than the check reaching for the SDK. `cluster-config`
+gained the cluster's version, release channel, maintenance policy and
+notification setting, and per-pool version, image type and management block —
+plus a second interface method, `UpgradeTargets(ctx, channel)`. That method is a
+distinct API call (`getServerConfig`, not the cluster record), and keeping it
+separate means `audit cluster` still pays for exactly one read while the
+question it answers stays a pure one: what would the provider move a cluster on
+*this* channel to? An unrecognized channel yields a zero value and no error, so
+the caller makes no claim rather than comparing against nothing.
+
+**The comparison is against the cluster's own channel, and the build suffix
+counts.** Asking for the default channel's versions would report a
+stable-channel cluster as behind for running exactly what stable publishes;
+asking for the channel's *upgrade target* rather than its default catches the
+cluster sitting still mid-rollout. Discarding the `-gke.N` suffix would have
+been worse than either: that is where most GKE security patches land, so a
+cluster months behind on patches would have read as current.
+
+Three narrowings, in the group's usual shape:
+
+- **Node pools are judged at the supported skew, not at any difference.** One
+  minor behind the control plane is what a rolling upgrade looks like from the
+  outside; two is the limit, and the pool stops being a supported configuration
+  the next time the control plane advances — which, on a channel-subscribed
+  cluster, is not something anyone in the cluster schedules.
+- **An unset management toggle is not a disabled one.** Auto-upgrade and
+  auto-repair default differently depending on how and when a pool was created,
+  so a pool that states neither gets no claim — the same call #186 made for the
+  node metadata mode. The two settings are separate findings when both are off,
+  because they have separate remedies.
+- **Only an exclusion in force right now blocks anything.** One that has not
+  started is a plan and one that has ended is history. This is the first audit
+  claim that is about a moment, which is why `Deps` gained a clock.
+
+The severity split follows #186's. A maintenance exclusion scoped to *all*
+upgrades is a warning — for as long as it stands the provider will not patch
+the cluster even when it has the fix — while one scoped to minor upgrades is
+info, because patches still flow and holding minors during a freeze is what the
+setting is for. `no-maintenance-window` and `no-notifications` are info for the
+`AuthorizedNetworksAllowProviderCIDRs` reason: both are provider defaults, so a
+warning would fire on most clusters that have done nothing wrong.
+
 ### Gap 2 — fleet fan-out & rollup
 
 `k8s-lookout` is one-process-per-cluster by design: `lookout watch` is "the

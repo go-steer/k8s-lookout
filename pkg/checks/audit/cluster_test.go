@@ -47,17 +47,33 @@ func (p clusterConfigProvider) ClusterConfig() (cloud.ClusterConfigAPI, bool) { 
 type fakeClusterConfig struct {
 	cfg cloud.ClusterConfig
 	err error
+
+	targets    cloud.UpgradeTargets
+	targetsErr error
+	// askedChannel records what the command asked targets FOR, which is
+	// the contract `audit upgrades` has to honour: the comparison is
+	// against this cluster's own channel, not a default one.
+	askedChannel string
 }
 
 func (f *fakeClusterConfig) Config(context.Context) (cloud.ClusterConfig, error) {
 	return f.cfg, f.err
 }
 
-func clusterDeps(cfg cloud.ClusterConfig) audit.Deps {
-	p := clusterConfigProvider{Provider: cloud.NoProvider, api: &fakeClusterConfig{cfg: cfg}}
+func (f *fakeClusterConfig) UpgradeTargets(_ context.Context, channel string) (cloud.UpgradeTargets, error) {
+	f.askedChannel = channel
+	return f.targets, f.targetsErr
+}
+
+func providerFor(api cloud.ClusterConfigAPI) audit.Deps {
+	p := clusterConfigProvider{Provider: cloud.NoProvider, api: api}
 	return audit.Deps{
 		Provider: func(context.Context) (cloud.Provider, error) { return p, nil },
 	}
+}
+
+func clusterDeps(cfg cloud.ClusterConfig) audit.Deps {
+	return providerFor(&fakeClusterConfig{cfg: cfg})
 }
 
 // exposedCluster is the shared fixture: one node pool per shape the
@@ -79,9 +95,9 @@ func exposedCluster() cloud.ClusterConfig {
 			GCPPublicCIDRs: true,
 		},
 		NodePools: []cloud.NodePoolConfig{
-			{Name: "default-pool", MetadataServerMode: cloud.MetadataModeProviderServer, LegacyEndpoints: cloud.LegacyEndpointsDisabled},
-			{Name: "legacy-pool", MetadataServerMode: cloud.MetadataModeNodeIdentity, LegacyEndpoints: cloud.LegacyEndpointsEnabled},
-			{Name: "old-pool", MetadataServerMode: cloud.MetadataModeUnset, LegacyEndpoints: cloud.LegacyEndpointsUnset},
+			{Name: "default-pool", MetadataServerMode: cloud.MetadataModeProviderServer, LegacyEndpoints: cloud.ToggleDisabled},
+			{Name: "legacy-pool", MetadataServerMode: cloud.MetadataModeNodeIdentity, LegacyEndpoints: cloud.ToggleEnabled},
+			{Name: "old-pool", MetadataServerMode: cloud.MetadataModeUnset, LegacyEndpoints: cloud.ToggleUnset},
 		},
 	}
 }
@@ -175,7 +191,7 @@ func TestClusterNodePoolBypassesWorkloadIdentity(t *testing.T) {
 func TestClusterUnsetMetadataModeMakesNoClaim(t *testing.T) {
 	cfg := exposedCluster()
 	cfg.NodePools = []cloud.NodePoolConfig{
-		{Name: "old-pool", MetadataServerMode: cloud.MetadataModeUnset, LegacyEndpoints: cloud.LegacyEndpointsDisabled},
+		{Name: "old-pool", MetadataServerMode: cloud.MetadataModeUnset, LegacyEndpoints: cloud.ToggleDisabled},
 	}
 	res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
 	for _, r := range findingLines(t, res.Stdout) {

@@ -1,0 +1,62 @@
+{
+  "//": "Recorded-shape fixture: container.googleapis.com/v1 projects.locations.clusters.get response for a cluster that HAS every upgrade-governance block populated — a release channel, a recurring maintenance window, three exclusions covering all three scopes and both end-time behaviors, and Pub/Sub notifications on. The counterpart to container-cluster-posture.json, whose finding is that these blocks are missing. Authored from the GKE Cluster resource API reference — not captured from a live project (§13).",
+  "name": "governed",
+  "location": "us-east1",
+  "endpoint": "203.0.113.20",
+  "currentMasterVersion": "1.30.5-gke.1443001",
+  "releaseChannel": { "channel": "REGULAR" },
+  "maintenancePolicy": {
+    "resourceVersion": "e3b0c442",
+    "window": {
+      "recurringWindow": {
+        "window": {
+          "startTime": "2026-01-05T02:00:00Z",
+          "endTime": "2026-01-05T06:00:00Z"
+        },
+        "recurrence": "FREQ=WEEKLY;BYDAY=SA,SU"
+      },
+      "maintenanceExclusions": {
+        "retail-freeze": {
+          "startTime": "2026-11-20T00:00:00Z",
+          "endTime": "2027-01-05T00:00:00Z",
+          "maintenanceExclusionOptions": { "scope": "NO_UPGRADES" }
+        },
+        "minor-hold": {
+          "startTime": "2026-08-01T00:00:00Z",
+          "endTime": "2026-09-01T00:00:00Z",
+          "maintenanceExclusionOptions": { "scope": "NO_MINOR_UPGRADES" }
+        },
+        "migration": {
+          "startTime": "2026-07-01T00:00:00Z",
+          "endTime": "2026-12-31T00:00:00Z",
+          "maintenanceExclusionOptions": {
+            "scope": "NO_MINOR_OR_NODE_UPGRADES",
+            "endTimeBehavior": "UNTIL_END_OF_SUPPORT"
+          }
+        },
+        "unscoped": {
+          "startTime": "2026-03-01T00:00:00Z",
+          "endTime": "2026-03-08T00:00:00Z"
+        }
+      }
+    }
+  },
+  "notificationConfig": {
+    "pubsub": {
+      "enabled": true,
+      "topic": "projects/acme-prod/topics/gke-upgrades"
+    }
+  },
+  "nodePools": [
+    {
+      "name": "default-pool",
+      "status": "RUNNING",
+      "version": "1.30.5-gke.1443001",
+      "management": { "autoUpgrade": true, "autoRepair": true },
+      "config": {
+        "machineType": "e2-standard-4",
+        "imageType": "COS_CONTAINERD"
+      }
+    }
+  ]
+}

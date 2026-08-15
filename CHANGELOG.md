@@ -105,6 +105,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.0.0.0/0` is a warning, the same defect shape as a NetworkPolicy
   that selects nothing (#186).
 
+- **`lookout audit upgrades`** — upgrade and patch readiness (#187).
+  Four kinds, grouped by what an operator does about them:
+  `audit.version_behind` (the control plane is a release line behind
+  what its channel publishes, `ControlPlaneMinorBehind`, or a patch
+  behind, `ControlPlanePatchBehind`; a node pool at the 2-minor
+  supported skew, `NodePoolVersionSkew`), `audit.upgrade_unmanaged`
+  (`NoReleaseChannel`, `NodeAutoUpgradeOff`, `NodeAutoRepairOff`),
+  `audit.upgrade_blocked` (a maintenance exclusion in force,
+  `MaintenanceExclusionBlocksPatches` / `MaintenanceExclusionActive`;
+  a node image built around the removed Docker runtime,
+  `StaleNodeImageType`) and `audit.upgrade_unattended`
+  (`NoMaintenanceWindow`, `NoUpgradeNotifications`). The subject is the
+  `Cluster` or the `NodePool`, whichever an operator edits.
+  `--namespace`, `-A` and `--workload` are rejected.
+- The `cluster-config` capability now also carries the cluster's
+  version, release channel, maintenance policy and upgrade
+  notifications, and each node pool's version, image type and
+  management block — plus `UpgradeTargets`, which reads the provider's
+  published versions for a given channel. `audit upgrades` compares
+  against the cluster's **own** channel, so a stable-channel cluster is
+  not reported as behind for running exactly what stable publishes, and
+  against that channel's rolling upgrade target where it has one. The
+  `-gke.N` build suffix is part of the comparison: most GKE security
+  patches land there, and ignoring it reports a months-behind cluster
+  as current (#187).
+- Node pools are judged only at the supported 2-minor skew, not at any
+  difference from the control plane — one minor behind is what a
+  rolling upgrade looks like from outside. An unset auto-upgrade or
+  auto-repair toggle makes no claim, since the provider's default
+  depends on how the pool was created; both being off is two findings,
+  because they have two remedies. Only a maintenance exclusion in force
+  right now is reported, and one scoped to all upgrades is a warning
+  while one scoped to minors is info, because patches still flow
+  through it (#187).
+- Cluster-wide version consistency across a cohort (`fleet-spread`) is
+  not part of this command: it is a question about a fleet, not about
+  one cluster, and arrives with the fan-out layer (#189).
+
 ### Changed
 
 - Findings now sort by reason as the final key, after namespace, kind

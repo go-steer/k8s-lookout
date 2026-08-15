@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -74,6 +75,10 @@ type Deps struct {
 	// cloud-backed commands then report unavailable, never silence,
 	// §2).
 	Provider func(ctx context.Context) (cloud.Provider, error)
+	// Now is the clock. Nil means time.Now. Only the claims that are
+	// about a moment need it: `audit upgrades` asks which maintenance
+	// exclusions are in force right now.
+	Now func() time.Time
 }
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
@@ -90,11 +95,19 @@ func (d Deps) provider(ctx context.Context) (cloud.Provider, error) {
 	return cloud.New(ctx, cloud.Config{})
 }
 
+func (d Deps) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
+}
+
 func init() {
 	checks.Register(ClusterCommand(Deps{}))
 	checks.Register(ExemptionsCommand())
 	checks.Register(HardeningCommand(Deps{}))
 	checks.Register(NetpolCommand(Deps{}))
+	checks.Register(UpgradesCommand(Deps{}))
 	checks.Register(WorkloadsCommand(Deps{}))
 }
 
