@@ -16,7 +16,7 @@ its bearer token):
 kubectl create namespace agent-triage
 kubectl -n agent-triage create secret generic lookout-watch-token \
   --from-literal=token="$WATCHER_TOKEN"
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.19.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.20.0"
 ```
 
 Pin `?ref=` to the release you are deploying — each tag's manifest
