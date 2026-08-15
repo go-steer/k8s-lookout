@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-15
+
+One theme: lookout starts answering a second question. Every group
+until now reported what is broken right now. The new `audit` group
+reports what has no safety net while it is still healthy — a claim
+with a different truth condition, a different fingerprint recipe and
+a different consumer, which is why it is a group rather than more
+kinds bolted onto an existing one.
+
+`audit workloads` is the first detector, and makes seven claims from
+a single API pass: no PodDisruptionBudget, a single replica, no
+spread, no readiness or liveness probe, placement pinned to too few
+nodes, and autoscalers that structurally cannot scale. This is the
+standing question `stab drain` cannot answer — `drain.singleton`
+fires only for a workload whose pod happens to sit on the node being
+drained, so the same workload is invisible from every other node.
+Nothing here needs new RBAC.
+
+Posture findings are only worth reading if the opt-outs are
+auditable, so exemptions shipped with the first detector rather than
+after the sixtieth. `--exemptions` is a common flag across the whole
+tree: a git-reviewable file with a mandatory reason and expiry on
+every entry, where an exempt finding is annotated and counted, never
+dropped. `audit exemptions` then audits the file itself, so it cannot
+quietly become a permanent list of things nobody re-reads.
+
+Also here: `triage top` censuses missing requests beside missing
+limits, both now LimitRange-aware, closing the scheduler-side half of
+a gap that previously only covered saturation. And a Go toolchain
+bump to 1.26.6 clears six standard-library advisories the published
+images were still being built against — hidden until now because CI
+resolved a floating Go version while the release images read
+`go.mod`. Those two now agree by construction.
+
 ### Added
 
 - **`lookout audit workloads`** — the first posture detectors (#190).
