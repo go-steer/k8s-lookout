@@ -232,6 +232,50 @@ The workload-level compliance checks (`privileged-container`, `host-namespace`,
 `podsecurity-gaps`) read from the Kubernetes API, not the cloud provider, and so
 resemble the existing `state edges` detectors in shape.
 
+#### As built (#183): the workload half of `compliance-audit`
+
+`audit hardening` ships five of those seven slugs in one pass —
+`privileged-container`, `host-namespace`, `hostpath-mount`,
+`default-sa-automount`, `podsecurity-gaps`. The two left out are the ones that
+go somewhere else: RBAC has its own loader and its own command (Decision 4), and
+`netpol-missing` is #185. They are one command rather than five because they
+share the pass that builds them — every pod template in scope, from Deployments,
+StatefulSets, DaemonSets, CronJobs, Jobs and unowned Pods — and because an
+operator reading "this namespace is unguarded" wants the workloads it failed to
+guard in the same output.
+
+Two of the five would be wallpaper implemented literally, and both were narrowed
+until they made a claim:
+
+- **`default-sa-automount` fires only when the token is both offered and taken.**
+  Every namespace has a `default` ServiceAccount and it automounts unless someone
+  says otherwise, so the literal check fires once per namespace in every cluster
+  forever. The finding needs a workload that actually runs as `default` and does
+  not set `automountServiceAccountToken: false` itself; the subject is the
+  ServiceAccount, since that is the single edit that fixes all of them.
+- **`privileged-container` also matches `capabilities.add: ALL` and `SYS_ADMIN`.**
+  These are not `privileged: true` and are equivalent to it, so a check reading
+  only the boolean reports a `CAP_SYS_ADMIN` container as clean — the false
+  negative that makes the whole claim untrustworthy. Separate reason, same kind.
+
+Three more judgment calls, in the shape of #190's:
+
+- **A `Job` or `Pod` with an `ownerReference` is skipped.** It is judged at the
+  CronJob or the controller that generated it, so a namespace with 200 completed
+  Jobs reports the one template that is wrong, not 200 copies of it.
+- **`hostpath-mount` splits read-write from read-only, at different severities**,
+  and only counts volumes some container actually mounts. A declared-unmounted
+  hostPath volume is inert, and a read-only mount is a real but lesser claim —
+  collapsing them would either lose the escape hatch or drown it.
+- **Init containers are judged.** A privileged init container is privileged on
+  the node for as long as it runs, and it is the classic place to hide one.
+
+One limit is stated rather than hidden: PSA's cluster-level default lives in the
+API server's `AdmissionConfiguration` file, which is unreadable from the API, so
+`audit.podsecurity_gaps` over-reports on a cluster that sets one. A reviewed
+cluster-wide exemption is the way to say so — the same answer #190 gave for
+`kube-system`, and for the same reason.
+
 ### Gap 2 — fleet fan-out & rollup
 
 `k8s-lookout` is one-process-per-cluster by design: `lookout watch` is "the
