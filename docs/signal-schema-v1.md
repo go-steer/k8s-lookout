@@ -110,8 +110,9 @@ pinned alongside them in `pkg/engine/fingerprint_test.go`.
 `objectClass` earns its place in the recipe: the same claim about a
 Deployment and about a StatefulSet are different classes, because the
 remedies differ enough that a fleet rollup merging them would be
-reporting a number nobody can act on. The kinds shipped so far, all
-from `audit workloads` (#190) and `audit exemptions` (#234):
+reporting a number nobody can act on. The kinds shipped so far, from
+`audit workloads` (#190), `audit exemptions` (#234) and
+`audit hardening` (#183):
 
 | Kind | Reason | Object classes |
 | --- | --- | --- |
@@ -124,21 +125,37 @@ from `audit workloads` (#190) and `audit exemptions` (#234):
 | `audit.hpa_cannot_scale` | `HPAMinEqualsMax`, `HPATargetMissingRequests`, `HPATargetMissing` | `HorizontalPodAutoscaler` |
 | `audit.exemption_expired` | `ExemptionExpired` | — (the subject is a file entry) |
 | `audit.exemption_expiring` | `ExemptionExpiring` | — |
+| `audit.privileged_container` | `PrivilegedContainer`, `DangerousCapability` | `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `Pod` |
+| `audit.host_namespace` | `HostNetwork`, `HostPID`, `HostIPC` | as above |
+| `audit.hostpath_mount` | `WritableHostPath`, `ReadOnlyHostPath` | as above |
+| `audit.default_sa_automount` | `DefaultServiceAccountAutomount` | `ServiceAccount` |
+| `audit.podsecurity_gaps` | `NoPodSecurityEnforce`, `PodSecurityEnforcePrivileged` | `Namespace` |
 
-Two of these carry more than one reason, which is the recipe working
-as intended rather than an exception to it. `audit.rigid_scheduling`
-and `audit.hpa_cannot_scale` each name one condition with several
-distinct causes, and the cause is what an operator acts on: "no node
-satisfies the constraint" and "exactly one does" are the same kind and
-different classes, so they fingerprint apart and a rollup counts them
-apart. Splitting them into six kinds instead would have said the same
-thing with six entries in the consumer's kind table.
+Several of these carry more than one reason, which is the recipe
+working as intended rather than an exception to it. `audit.rigid_scheduling`,
+`audit.hpa_cannot_scale` and `audit.host_namespace` each name one
+condition with several distinct causes, and the cause is what an
+operator acts on: "no node satisfies the constraint" and "exactly one
+does" are the same kind and different classes, so they fingerprint
+apart and a rollup counts them apart. Splitting them into one kind per
+reason instead would have said the same thing with three times the
+entries in the consumer's kind table.
 
-`audit.hpa_cannot_scale` is also the first `audit` kind whose subject
-is not the workload. Its `objectClass` is `HorizontalPodAutoscaler`
-and its `name` is the autoscaler's, because that is the object an
-operator edits — even though the finding is produced by the same
-`audit workloads` pass that judges the workload behind it.
+Not every `audit` kind's subject is the workload. `audit.hpa_cannot_scale`
+sets `objectClass` to `HorizontalPodAutoscaler` and `name` to the
+autoscaler's, `audit.default_sa_automount` addresses the
+`ServiceAccount`, and `audit.podsecurity_gaps` addresses the
+`Namespace` — in each case because that is the object an operator
+edits, even though the finding comes out of the same pass that judges
+the workloads behind it.
+
+The pod-template kinds share one object-class set on purpose: the six
+workload kinds that carry a pod template are all judged by reading
+that template, so the same claim about a `DaemonSet` and about a bare
+`Pod` differ only in what an operator has to edit to fix it — which is
+exactly what `objectClass` is for. A `Job` or `Pod` with an
+`ownerReference` is not judged in its own right; the finding is
+reported once, against the owner that generated it.
 
 Like every other check-local `kind`, these are documented where they
 are produced — the emitting command's output glossary — and are

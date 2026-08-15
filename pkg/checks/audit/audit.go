@@ -78,6 +78,7 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 
 func init() {
 	checks.Register(ExemptionsCommand())
+	checks.Register(HardeningCommand(Deps{}))
 	checks.Register(WorkloadsCommand(Deps{}))
 }
 

@@ -535,11 +535,17 @@ func severityRank(sev string) int {
 // sortFindings orders by namespace/name first, then severity: a
 // posture report is read workload by workload, unlike an incident
 // report, where the worst thing in the cluster leads.
+//
+// The reason is the last key rather than an afterthought: one subject
+// can carry several findings of the same kind at the same severity —
+// an HPA that is both pinned and unmeasurable, a pod template in all
+// three host namespaces — and without it those tie, leaving their
+// order to the sort's internals and the goldens to luck.
 func sortFindings(fs []emit.Finding) {
 	key := func(f emit.Finding) string {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%d\x00%s",
-			f.Namespace, f.KindOfObject, f.Name, severityRank(f.Severity), f.Kind)
+		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%d\x00%s\x00%s",
+			f.Namespace, f.KindOfObject, f.Name, severityRank(f.Severity), f.Kind, f.Reason)
 		return b.String()
 	}
 	sort.Slice(fs, func(i, j int) bool { return key(fs[i]) < key(fs[j]) })

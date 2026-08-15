@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`lookout audit hardening`** — workload security posture (#183).
+  Five claims from one pass over every pod template in scope
+  (Deployments, StatefulSets, DaemonSets, CronJobs, Jobs, unowned
+  Pods) plus the namespaces holding them:
+  `audit.privileged_container`, `audit.host_namespace`,
+  `audit.hostpath_mount`, `audit.default_sa_automount` and
+  `audit.podsecurity_gaps`. Init containers are judged alongside
+  regular ones. A Job or Pod with an `ownerReference` is judged at its
+  owner, so a namespace with 200 completed Jobs reports the one
+  template that is wrong rather than 200 copies of it. No new RBAC.
+  Scope with `--namespace` or `-A`; `--workload` is rejected, because
+  two of the five claims are about a namespace, not a workload.
+- `audit.privileged_container` matches `capabilities.add: ALL` or
+  `SYS_ADMIN` (reason `DangerousCapability`) as well as
+  `securityContext.privileged` (reason `PrivilegedContainer`). Neither
+  form is `privileged: true` and both are equivalent to it, so a check
+  reading only that flag reports a `CAP_SYS_ADMIN` container as clean
+  (#183).
+- `audit.default_sa_automount` fires only where the `default`
+  ServiceAccount's token is both offered and taken — some workload
+  actually runs as `default` and does not set
+  `automountServiceAccountToken: false` itself. The subject is the
+  ServiceAccount, since disabling automount there is the single edit
+  that fixes every workload listed in `mounting_workload_names` (#183).
+- `audit.hostpath_mount` counts only volumes a container actually
+  mounts, and splits `WritableHostPath` (warning) from
+  `ReadOnlyHostPath` (info). `audit.host_namespace` reports
+  `HostNetwork`, `HostPID` and `HostIPC` as separate findings, since
+  each grants a different thing and each is separately removable
+  (#183).
+- `audit.podsecurity_gaps` reports a namespace with no
+  `pod-security.kubernetes.io/enforce` label (`NoPodSecurityEnforce`)
+  or one set to `privileged` (`PodSecurityEnforcePrivileged`), with
+  the count of workloads it covers. PSA's cluster-level default lives
+  in the API server's admission config and is unreadable from the API,
+  so on a cluster that sets one this over-reports; a reviewed
+  cluster-wide `--exemptions` entry is the way to record that (#183).
+
+### Changed
+
+- Findings now sort by reason as the final key, after namespace, kind
+  of object, name, severity and kind. One subject can carry several
+  findings that tie on all of the earlier keys — a pod template in all
+  three host namespaces, an HPA that is both pinned and unmeasurable —
+  and without it their order was left to the sort's internals (#183).
+
 ## [0.20.0] - 2026-08-15
 
 One theme: lookout starts answering a second question. Every group
