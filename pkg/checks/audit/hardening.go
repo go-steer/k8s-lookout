@@ -20,10 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -184,16 +181,6 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	return len(ix.templates), nil
 }
 
-// podTemplate is one pod template with the object an operator would
-// edit to change it. Flattened so the judgments do not each switch on
-// the concrete apps/v1 or batch/v1 type.
-type podTemplate struct {
-	kind      string
-	namespace string
-	name      string
-	spec      corev1.PodSpec
-}
-
 // hardeningIndex holds one pass's worth of listed objects: the pod
 // templates to judge, the namespaces around them, and each namespace's
 // default ServiceAccount.
@@ -219,119 +206,29 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 		templatesByNS:  map[string]int{},
 		defaultSAUsers: map[string][]string{},
 	}
-	add := func(kind, namespace, name string, spec corev1.PodSpec) {
-		ix.templates = append(ix.templates, podTemplate{
-			kind: kind, namespace: namespace, name: name, spec: spec,
-		})
+	templates, err := listPodTemplates(ctx, client, ns)
+	if err != nil {
+		return nil, err
 	}
-	steps := []func() error{
-		func() error {
-			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
-				l, err := client.AppsV1().Deployments(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) {
-				add("Deployment", d.Namespace, d.Name, d.Spec.Template.Spec)
-			})
-		},
-		func() error {
-			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
-				l, err := client.AppsV1().StatefulSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(s *appsv1.StatefulSet) {
-				add("StatefulSet", s.Namespace, s.Name, s.Spec.Template.Spec)
-			})
-		},
-		func() error {
-			return listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
-				l, err := client.AppsV1().DaemonSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.DaemonSet) {
-				add("DaemonSet", d.Namespace, d.Name, d.Spec.Template.Spec)
-			})
-		},
-		func() error {
-			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
-				l, err := client.BatchV1().CronJobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(c *batchv1.CronJob) {
-				add("CronJob", c.Namespace, c.Name, c.Spec.JobTemplate.Spec.Template.Spec)
-			})
-		},
-		func() error {
-			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
-				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(j *batchv1.Job) {
-				// A Job spawned by a CronJob repeats its owner's template;
-				// the CronJob is the object an operator edits.
-				if len(j.OwnerReferences) > 0 {
-					return
-				}
-				add("Job", j.Namespace, j.Name, j.Spec.Template.Spec)
-			})
-		},
-		func() error {
-			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-				l, err := client.CoreV1().Pods(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(p *corev1.Pod) {
-				// Every pod with an owner is a copy of a template judged
-				// above; only hand-rolled pods are their own subject.
-				if len(p.OwnerReferences) > 0 {
-					return
-				}
-				add("Pod", p.Namespace, p.Name, p.Spec)
-			})
-		},
-		func() error {
-			return listPages("serviceaccounts", func(o metav1.ListOptions) ([]corev1.ServiceAccount, string, error) {
-				l, err := client.CoreV1().ServiceAccounts(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(sa *corev1.ServiceAccount) {
-				if sa.Name == defaultServiceAccount {
-					ix.defaultSAs[sa.Namespace] = sa
-				}
-			})
-		},
-		func() error { return ix.listNamespaces(ctx, client, ns) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+	ix.templates = templates
+
+	if err := listPages("serviceaccounts", func(o metav1.ListOptions) ([]corev1.ServiceAccount, string, error) {
+		l, err := client.CoreV1().ServiceAccounts(ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
 		}
+		return l.Items, l.Continue, nil
+	}, func(sa *corev1.ServiceAccount) {
+		if sa.Name == defaultServiceAccount {
+			ix.defaultSAs[sa.Namespace] = sa
+		}
+	}); err != nil {
+		return nil, err
+	}
+	if ix.namespaces, err = listNamespacesInScope(ctx, client, ns); err != nil {
+		return nil, err
 	}
 
-	sort.Slice(ix.templates, func(i, j int) bool {
-		a, b := ix.templates[i], ix.templates[j]
-		if a.namespace != b.namespace {
-			return a.namespace < b.namespace
-		}
-		if a.kind != b.kind {
-			return a.kind < b.kind
-		}
-		return a.name < b.name
-	})
 	for _, t := range ix.templates {
 		ix.templatesByNS[t.namespace]++
 		if mountsDefaultToken(t.spec) {
@@ -339,33 +236,6 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 		}
 	}
 	return ix, nil
-}
-
-// listNamespaces resolves the namespace population the
-// namespace-subject claims are made about: every namespace under -A,
-// exactly the one asked for otherwise. A --namespace that does not
-// exist is an error, not an empty clean scan.
-func (ix *hardeningIndex) listNamespaces(ctx context.Context, client kubernetes.Interface, ns string) error {
-	if ns != metav1.NamespaceAll {
-		got, err := client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("namespace %q not found", ns)
-			}
-			return fmt.Errorf("getting namespace %s: %w", ns, err)
-		}
-		ix.namespaces = append(ix.namespaces, got)
-		return nil
-	}
-	return listPages("namespaces", func(o metav1.ListOptions) ([]corev1.Namespace, string, error) {
-		l, err := client.CoreV1().Namespaces().List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(n *corev1.Namespace) {
-		ix.namespaces = append(ix.namespaces, n)
-	})
 }
 
 // judgeTemplate applies every pod-template-subject claim to one

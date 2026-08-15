@@ -47,6 +47,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so on a cluster that sets one this over-reports; a reviewed
   cluster-wide `--exemptions` entry is the way to record that (#183).
 
+- **`lookout audit netpol`** — NetworkPolicy coverage posture (#185).
+  One kind, `audit.netpol_missing`, with three reasons per direction:
+  a namespace where no policy restricts ingress (`NoIngressPolicies`,
+  warning) or egress (`NoEgressPolicies`, info); a namespace whose
+  policies exist and select none of its workloads
+  (`IngressPoliciesSelectNothing` / `EgressPoliciesSelectNothing`,
+  warning in both directions, since a selector that matches nothing is
+  a mistake and not a posture); and an individual workload that fell
+  out of the selectors covering its neighbours (`UnselectedIngress` /
+  `UnselectedEgress`). The subject follows the remedy — the Namespace
+  where nothing is covered, the workload where the namespace is
+  policed and one object is the hole in it.
+- Coverage means **isolation**: some policy selects the pod and names
+  the direction. A namespace with one default-deny (`podSelector: {}`,
+  which selects every pod in it) is fully covered and reports nothing.
+  A policy whose rule is `ingress: [{}]` isolates the pod and then
+  allows the cluster back in; `audit netpol` counts that as coverage
+  rather than calling a deliberate, reviewed policy absent. `policyTypes`
+  is treated as the API server defaults it — Ingress always, Egress
+  only where egress rules exist — so a policy read from a manifest with
+  the field unset does not read as covering nothing (#185).
+- hostNetwork pod templates are excluded from `audit netpol`'s
+  arithmetic, since NetworkPolicy selects pods and cannot constrain a
+  pod on the node's network stack. The exclusion is visible in
+  `host_network_workloads` rather than silent, and `audit hardening`
+  reports those templates as `audit.host_namespace` (#185).
+
 ### Changed
 
 - Findings now sort by reason as the final key, after namespace, kind
