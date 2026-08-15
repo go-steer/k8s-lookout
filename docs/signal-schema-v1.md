@@ -112,7 +112,8 @@ Deployment and about a StatefulSet are different classes, because the
 remedies differ enough that a fleet rollup merging them would be
 reporting a number nobody can act on. The kinds shipped so far, from
 `audit workloads` (#190), `audit exemptions` (#234),
-`audit hardening` (#183) and `audit netpol` (#185):
+`audit hardening` (#183), `audit netpol` (#185) and `audit cluster`
+(#186):
 
 | Kind | Reason | Object classes |
 | --- | --- | --- |
@@ -132,6 +133,10 @@ reporting a number nobody can act on. The kinds shipped so far, from
 | `audit.podsecurity_gaps` | `NoPodSecurityEnforce`, `PodSecurityEnforcePrivileged` | `Namespace` |
 | `audit.netpol_missing` | `NoIngressPolicies`, `NoEgressPolicies`, `IngressPoliciesSelectNothing`, `EgressPoliciesSelectNothing` | `Namespace` |
 | `audit.netpol_missing` | `UnselectedIngress`, `UnselectedEgress` | `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `Pod` |
+| `audit.workload_identity_off` | `WorkloadIdentityDisabled` | `Cluster` |
+| `audit.workload_identity_off` | `NodePoolMetadataServerOff` | `NodePool` |
+| `audit.legacy_metadata` | `LegacyMetadataEndpoints` | `NodePool` |
+| `audit.public_control_plane` | `PublicEndpointUnrestricted`, `AuthorizedNetworksAllowAll`, `AuthorizedNetworksAllowProviderCIDRs` | `Cluster` |
 
 Several of these carry more than one reason, which is the recipe
 working as intended rather than an exception to it. `audit.rigid_scheduling`,
@@ -160,6 +165,18 @@ labels are the defect. The kind is shared deliberately — a consumer
 counting "how much of the fleet is unpoliced" wants one number, and
 the `objectClass` in the fingerprint keeps the two shapes apart in the
 rollup without a second kind in the table.
+
+`Cluster` and `NodePool` are the last two rows' object classes, and
+neither is a Kubernetes kind. The three `audit cluster` claims (#186)
+are about settings no object in the API server records — Workload
+Identity, the node metadata server, what may reach the control plane —
+so their subject is the provider's object, read through the pkg/cloud
+capability boundary. `objectClass` means "the class of thing an
+operator edits to fix this", which is the same job whether the thing
+is a `StatefulSet` or a node pool, and the split it makes here is the
+one that matters: the cluster-wide Workload Identity setting and a
+single pool opting out of it are one kind and two classes, because one
+is a cluster edit and the other is a pool edit.
 
 The pod-template kinds share one object-class set on purpose: the six
 workload kinds that carry a pod template are all judged by reading

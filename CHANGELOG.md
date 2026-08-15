@@ -74,6 +74,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `host_network_workloads` rather than silent, and `audit hardening`
   reports those templates as `audit.host_namespace` (#185).
 
+- **`lookout audit cluster`** — GKE cluster security configuration
+  (#186). Three kinds read from the provider rather than from the
+  Kubernetes API: `audit.workload_identity_off` (the cluster has no
+  workload-identity pool, `WorkloadIdentityDisabled`; or a node pool
+  runs the node-identity metadata server and so bypasses a pool the
+  cluster does have, `NodePoolMetadataServerOff`),
+  `audit.legacy_metadata` (a node pool that does not set
+  `disable-legacy-endpoints=true`, `LegacyMetadataEndpoints`) and
+  `audit.public_control_plane` (`PublicEndpointUnrestricted`,
+  `AuthorizedNetworksAllowAll`, `AuthorizedNetworksAllowProviderCIDRs`).
+  The subject is the `Cluster` for the cluster-wide claims and the
+  `NodePool` for the per-pool ones — the object an operator edits to
+  fix it. `--namespace`, `-A` and `--workload` are rejected: nothing
+  here is namespaced.
+- New provider capability `cluster-config`, read over the same
+  `clusters.get` call `state ipspace` already makes. On a build without
+  the provider — or a cluster whose provider identity is not fully
+  resolved — `audit cluster` emits one `cloud.unavailable` finding and
+  exits 0, the §2 degradation contract, rather than reporting a clean
+  cluster (#186).
+- `audit cluster` preserves the provider's tri-states instead of
+  flattening them. A node pool whose metadata mode is unset or unknown
+  makes no claim at all, since the default varies by cluster version
+  and node image; an absent `disable-legacy-endpoints` key is reported
+  as `unset` and still fires, because the legacy endpoints are on until
+  something turns them off. A public endpoint restricted to a
+  non-trivial allow-list is silent — the claim is exposure, not the
+  existence of a public endpoint — but an allow-list containing
+  `0.0.0.0/0` is a warning, the same defect shape as a NetworkPolicy
+  that selects nothing (#186).
+
 ### Changed
 
 - Findings now sort by reason as the final key, after namespace, kind

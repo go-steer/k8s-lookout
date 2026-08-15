@@ -15,10 +15,10 @@
 // Package cloud is the provider boundary of DESIGN.md §2: everything
 // cloud-touching in lookout (capacity explanations, quota inventory,
 // orphan sweeps, metrics queries, IP-space utilization, stockout
-// extraction, workload-identity verification) goes through the
-// Provider interface defined here. pkg/checks and pkg/sources never
-// import cloud SDKs (AGENTS.md hard rule) — they import this package
-// and ask for capabilities.
+// extraction, workload-identity verification, cluster-config posture)
+// goes through the Provider interface defined here. pkg/checks and
+// pkg/sources never import cloud SDKs (AGENTS.md hard rule) — they
+// import this package and ask for capabilities.
 //
 // # Build tags
 //
@@ -83,6 +83,10 @@ const (
 	// stream (GKE: the notificationConfig Pub/Sub topic — upgrade
 	// events and security bulletins; the `notifications` source).
 	CapabilityNotifications Capability = "notifications"
+	// CapabilityClusterConfig is the provider's cluster-configuration
+	// record — control-plane exposure, cluster identity, node-pool
+	// settings — read by the posture group (`audit cluster`, #182).
+	CapabilityClusterConfig Capability = "cluster-config"
 )
 
 // AllCapabilities returns every Capability the boundary defines, in
@@ -99,6 +103,7 @@ func AllCapabilities() []Capability {
 		CapabilityWorkloadIdentity,
 		CapabilityAudit,
 		CapabilityNotifications,
+		CapabilityClusterConfig,
 	}
 }
 
@@ -170,4 +175,7 @@ type Provider interface {
 	// Notifications is the cluster notification stream
 	// (CapabilityNotifications).
 	Notifications() (NotificationsAPI, bool)
+	// ClusterConfig reads the cluster's provider-side configuration
+	// (CapabilityClusterConfig).
+	ClusterConfig() (ClusterConfigAPI, bool)
 }

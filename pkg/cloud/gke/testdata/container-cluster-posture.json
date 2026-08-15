@@ -1,0 +1,49 @@
+{
+  "//": "Recorded-shape fixture: container.googleapis.com/v1 projects.locations.clusters.get response for a cluster with the posture gaps `audit cluster` reports (fields the clusterconfig read consumes, current controlPlaneEndpointsConfig surface). Authored from the GKE Cluster resource API reference — not captured from a live project (§13).",
+  "name": "exposed",
+  "location": "us-central1",
+  "endpoint": "203.0.113.10",
+  "controlPlaneEndpointsConfig": {
+    "ipEndpointsConfig": {
+      "enabled": true,
+      "enablePublicEndpoint": true,
+      "publicEndpoint": "203.0.113.10",
+      "privateEndpoint": "10.0.0.2",
+      "authorizedNetworksConfig": {
+        "enabled": true,
+        "gcpPublicCidrsAccessEnabled": true,
+        "cidrBlocks": [
+          { "displayName": "office", "cidrBlock": "198.51.100.0/24" },
+          { "displayName": "everywhere", "cidrBlock": "0.0.0.0/0" }
+        ]
+      }
+    }
+  },
+  "nodePools": [
+    {
+      "name": "default-pool",
+      "status": "RUNNING",
+      "config": {
+        "machineType": "e2-standard-4",
+        "metadata": { "disable-legacy-endpoints": "true" },
+        "workloadMetadataConfig": { "mode": "GKE_METADATA" }
+      }
+    },
+    {
+      "name": "legacy-pool",
+      "status": "RUNNING",
+      "config": {
+        "machineType": "n1-standard-8",
+        "metadata": { "disable-legacy-endpoints": "false" },
+        "workloadMetadataConfig": { "mode": "GCE_METADATA" }
+      }
+    },
+    {
+      "name": "unconfigured-pool",
+      "status": "RUNNING",
+      "config": {
+        "machineType": "e2-standard-2"
+      }
+    }
+  ]
+}
