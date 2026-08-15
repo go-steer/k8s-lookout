@@ -14,13 +14,50 @@
 # limitations under the License.
 
 # Fail when go.mod / go.sum are not in `go mod tidy` form.
+#
+# The tidy runs against a COPY, via `go mod tidy -modfile`, and the
+# result is compared to the working tree. Two reasons, both learned
+# the hard way:
+#
+#   1. The obvious implementation — tidy in place, then `git diff` —
+#      compares against HEAD, not against tidy form. That reports any
+#      *uncommitted* go.mod edit as "not tidy", which is a confusing
+#      lie while you are editing go.mod (bumping the Go version, say)
+#      and have simply not committed yet.
+#   2. Tidying in place mutates the working tree as a side effect of
+#      a read-only-sounding check, and leaves it mutated when the
+#      check fails.
+#
+# Comparing the working tree against its own tidy form answers the
+# question actually being asked, and answers it without writing
+# anything outside a temp dir.
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
 
-go mod tidy
-if ! git diff --quiet -- go.mod go.sum; then
+tidydir="$(mktemp -d)"
+trap 'rm -rf "$tidydir"' EXIT
+
+# -modfile redirects both the module file and its sum file (same
+# basename, .sum extension) into the temp dir. Seeding it with the
+# current go.sum keeps the tidy offline for already-verified modules.
+cp go.mod "$tidydir/go.mod"
+cp go.sum "$tidydir/go.sum"
+
+go mod tidy -modfile="$tidydir/go.mod"
+
+untidy=0
+for f in go.mod go.sum; do
+  if ! diff -u "$f" "$tidydir/$f" >/dev/null 2>&1; then
+    untidy=1
+  fi
+done
+
+if [[ "$untidy" -eq 1 ]]; then
   echo "go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result." >&2
-  git diff -- go.mod go.sum >&2
+  echo "Diff below is current (-) vs tidied (+):" >&2
+  for f in go.mod go.sum; do
+    diff -u "$f" "$tidydir/$f" >&2 || true
+  done
   exit 1
 fi

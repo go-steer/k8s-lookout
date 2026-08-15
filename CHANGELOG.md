@@ -105,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now agree by construction, restoring the invariant `.github/workflows/ci.yml`
   already claimed: a green local run is the same green run as remote CI.
 
+### Fixed
+
+- **`dev/tools/verify-mod-tidy` no longer reports uncommitted-but-tidy `go.mod`
+  edits as untidy**, and no longer rewrites the working tree as a side effect
+  of a check. It tidied in place and then ran `git diff`, which compares
+  against HEAD rather than against tidy form — so any in-progress `go.mod` edit
+  failed the check with a misleading message, and a failing run left the tree
+  mutated. It now tidies a copy via `go mod tidy -modfile` and diffs that
+  against the working tree, which is the question actually being asked.
+
 ## [0.19.0] - 2026-08-13
 
 Two themes: correlation that no longer needs a code change per fault
