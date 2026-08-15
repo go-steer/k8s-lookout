@@ -1,8 +1,6 @@
 module github.com/go-steer/k8s-lookout
 
-go 1.26.3
-
-toolchain go1.26.5
+go 1.26.6
 
 require (
 	cloud.google.com/go/cloudquotas v1.12.0

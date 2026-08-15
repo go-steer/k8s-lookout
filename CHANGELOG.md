@@ -83,6 +83,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An addition to the §8 contract; `engine.ScanFingerprint` is unchanged
   (docs/signal-schema-v1.md § "Posture-source mapping").
 
+### Security
+
+- **Go toolchain 1.26.6**, up from the 1.26.3 language pin and the 1.26.5
+  toolchain directive, clearing six standard-library advisories that release
+  images were still being built against: GO-2026-6218 (`net/url`),
+  GO-2026-6091 (`html/template`), GO-2026-6090 (`crypto/tls`), GO-2026-6089
+  (`net/http`), GO-2026-5972 (`encoding/asn1`) and GO-2026-5026 (`x/net/idna`
+  via `net/http`). No source change — the reachable paths are the HTTP server
+  behind `serve`, the inject client, corpus scanning, and x509 parsing in
+  `state edges`. `govulncheck` now reports zero.
+
+### Changed
+
+- **CI now takes its Go version from `go.mod`** (`go-version-file`) in every
+  `setup-go` step, instead of a floating `go-version: '1.26'` with
+  `check-latest`. The float is what hid the advisories above: CI resolved to
+  whatever the newest 1.26.x was that day and its `govulncheck` passed, while
+  the local runner and the release image — which reads `go.mod` — built
+  against an affected toolchain. CI, `dev/tools/ci`, and the published images
+  now agree by construction, restoring the invariant `.github/workflows/ci.yml`
+  already claimed: a green local run is the same green run as remote CI.
+
 ## [0.19.0] - 2026-08-13
 
 Two themes: correlation that no longer needs a code change per fault
