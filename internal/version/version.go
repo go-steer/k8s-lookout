@@ -51,7 +51,7 @@ var (
 	// Version is the semver tag for released builds, or vX.Y.Z-dev
 	// for in-development builds. Bump this manually on main right
 	// after cutting a release (verify-version-fallback enforces it).
-	Version = "v0.20.0-dev"
+	Version = "v0.21.0-dev"
 
 	// Commit is the git SHA the binary was built from. Defaults to
 	// "none" so the debug.BuildInfo fallback can detect that nothing
