@@ -111,8 +111,8 @@ pinned alongside them in `pkg/engine/fingerprint_test.go`.
 Deployment and about a StatefulSet are different classes, because the
 remedies differ enough that a fleet rollup merging them would be
 reporting a number nobody can act on. The kinds shipped so far, from
-`audit workloads` (#190), `audit exemptions` (#234) and
-`audit hardening` (#183):
+`audit workloads` (#190), `audit exemptions` (#234),
+`audit hardening` (#183) and `audit netpol` (#185):
 
 | Kind | Reason | Object classes |
 | --- | --- | --- |
@@ -130,6 +130,8 @@ reporting a number nobody can act on. The kinds shipped so far, from
 | `audit.hostpath_mount` | `WritableHostPath`, `ReadOnlyHostPath` | as above |
 | `audit.default_sa_automount` | `DefaultServiceAccountAutomount` | `ServiceAccount` |
 | `audit.podsecurity_gaps` | `NoPodSecurityEnforce`, `PodSecurityEnforcePrivileged` | `Namespace` |
+| `audit.netpol_missing` | `NoIngressPolicies`, `NoEgressPolicies`, `IngressPoliciesSelectNothing`, `EgressPoliciesSelectNothing` | `Namespace` |
+| `audit.netpol_missing` | `UnselectedIngress`, `UnselectedEgress` | `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `Pod` |
 
 Several of these carry more than one reason, which is the recipe
 working as intended rather than an exception to it. `audit.rigid_scheduling`,
@@ -148,6 +150,16 @@ autoscaler's, `audit.default_sa_automount` addresses the
 `Namespace` — in each case because that is the object an operator
 edits, even though the finding comes out of the same pass that judges
 the workloads behind it.
+
+`audit.netpol_missing` takes that furthest: it has two rows above
+because its subject depends on which reason fired. Where nothing in a
+namespace is covered there is one decision and one remedy, so the
+`Namespace` is the subject; where the namespace is policed and one
+workload fell out of the selectors, the workload is, because its
+labels are the defect. The kind is shared deliberately — a consumer
+counting "how much of the fleet is unpoliced" wants one number, and
+the `objectClass` in the fingerprint keeps the two shapes apart in the
+rollup without a second kind in the table.
 
 The pod-template kinds share one object-class set on purpose: the six
 workload kinds that carry a pod template are all judged by reading

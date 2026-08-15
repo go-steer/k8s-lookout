@@ -276,6 +276,54 @@ API server's `AdmissionConfiguration` file, which is unreadable from the API, so
 cluster-wide exemption is the way to say so — the same answer #190 gave for
 `kube-system`, and for the same reason.
 
+#### As built (#185): `netpol-missing`, and what "covered" means
+
+`audit netpol` is the sixth of the seven, in its own command because it reads a
+different object and asks a question with a shape the other five do not have: a
+workload's answer depends on the policies around it, not on its own spec.
+
+**Coverage is isolation, not restriction.** A pod is isolated for a direction
+when some NetworkPolicy in its namespace selects it and names that direction in
+`policyTypes`. That is the whole of the Kubernetes model — an unisolated pod
+accepts from anywhere and dials anywhere, and no amount of policy on the OTHER
+pods changes it — so it is the question worth asking one-shot. The stated limit
+is the other side of the same coin: a policy whose rule is `ingress: [{}]`
+isolates the pod and then lets the cluster back in, and this check counts it as
+coverage. Judging rule CONTENT means modelling CIDRs, namespace selectors and
+ports, and getting it wrong in the direction that matters — reporting a
+deliberate, reviewed policy as absent.
+
+**Three reasons per direction, because there are three different defects.**
+
+| Situation | Subject | Why |
+| --- | --- | --- |
+| no policy for the direction | `Namespace` | one decision, one remedy — a finding per workload would multiply a single missing object by the namespace's Deployment count |
+| policies exist and select nothing | `Namespace` | a typo with the blast radius of an outage; nobody chose it, and the namespace reads as policed to anything counting objects |
+| some covered, this one not | the workload | the gap is specific to that template's labels, and the fix is a selector |
+
+The third is the high-value one: a namespace that believes it is locked down
+with one workload that is not. The first is where the default-deny case lands —
+`podSelector: {}` selects every pod in the namespace, so a namespace with one
+default-deny is fully covered and silent, which is the acceptance criterion of
+the issue and the one shape a naive "does a policy name this workload"
+implementation gets backwards.
+
+**Ingress absence is a warning, egress absence is info.** Unrestricted inbound
+is the lateral-movement path that turns one compromised pod into a cluster-wide
+problem. Egress policy is far less widely adopted and breaks DNS and webhook
+callouts when applied carelessly, so a fleet that has deliberately not adopted
+it should not read as a fleet of warnings — but the claim is still made, since
+a namespace locked down inbound and wide open outbound is worth knowing about.
+Both "selects nothing" reasons are warnings in either direction: that one is a
+mistake, not a posture.
+
+**hostNetwork templates are excluded from the arithmetic.** NetworkPolicy
+selects pods, and a pod on the node's network stack is not one it can reach, so
+no policy an operator could write would fix it. They are counted in
+`host_network_workloads` on the namespace finding rather than skipped silently,
+and `audit hardening` already reports every one of them as
+`audit.host_namespace` with exactly this consequence in its message.
+
 ### Gap 2 — fleet fan-out & rollup
 
 `k8s-lookout` is one-process-per-cluster by design: `lookout watch` is "the
