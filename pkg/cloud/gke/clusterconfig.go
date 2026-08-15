@@ -16,9 +16,10 @@
 
 package gke
 
-// ClusterConfigAPI implementation (`audit cluster`, epic #182): the
-// security-relevant fields of the GKE clusters.get record, projected
-// onto the provider-neutral cloud.ClusterConfig shape.
+// ClusterConfigAPI implementation (`audit cluster` #186,
+// `audit upgrades` #187, epic #182): the posture-relevant fields of the
+// GKE clusters.get record, projected onto the provider-neutral
+// cloud.ClusterConfig shape.
 //
 // It is the same one API call `cloud ipspace` already makes — the
 // clusters.get response carries the whole cluster, and the posture
@@ -26,20 +27,28 @@ package gke
 // rather than in pkg/checks because that is the AGENTS.md boundary:
 // container.Cluster is an SDK type and pkg/checks may not see one.
 //
+// UpgradeTargets is the one thing not in that record: what the provider
+// would upgrade a cluster TO is a property of the release channel, not
+// of the cluster, and comes from getServerConfig for the location.
+//
 // # Tri-states are preserved, not flattened
 //
-// Two of the three fields the posture checks read are absent-able, and
+// Several of the fields the posture checks read are absent-able, and
 // absent means something different from either explicit value:
-// workloadMetadataConfig unset resolves to the cluster default, and a
-// node pool with no disable-legacy-endpoints metadata key was never
-// configured either way. Collapsing those to a bool here would decide
-// the check's question inside the SDK adapter, where the reasoning
-// cannot be read. They are carried across as the documented
-// cloud.MetadataMode* / cloud.LegacyEndpoints* values instead.
+// workloadMetadataConfig unset resolves to the cluster default, a node
+// pool with no disable-legacy-endpoints metadata key was never
+// configured either way, and a pool with no management block states
+// nothing about auto-upgrade. Collapsing those to a bool here would
+// decide the check's question inside the SDK adapter, where the
+// reasoning cannot be read. They are carried across as the documented
+// cloud.MetadataMode* / cloud.Toggle values instead.
 
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
+	"time"
 
 	container "google.golang.org/api/container/v1"
 
@@ -58,12 +67,27 @@ const (
 	gceMetadataMode = "GCE_METADATA"
 )
 
-// clusterConfigGetter is the §13 small client interface over the one
-// GKE API call this capability makes (clusters.get). Production uses
-// the same adapter `cloud ipspace` does; tests replay a recorded
-// response fixture.
+// The GKE releaseChannel, maintenance-exclusion and image-type enum
+// values this projection recognizes.
+const (
+	unspecifiedChannel    = "UNSPECIFIED"
+	noMinorUpgrades       = "NO_MINOR_UPGRADES"
+	noMinorOrNodeUpgrades = "NO_MINOR_OR_NODE_UPGRADES"
+	untilEndOfSupport     = "UNTIL_END_OF_SUPPORT"
+	containerdImageSuffix = "_CONTAINERD"
+)
+
+// clusterConfigGetter is the §13 small client interface over the GKE
+// API calls this capability makes: clusters.get for the cluster record
+// and getServerConfig for the location's published versions.
+// Production uses the same clusters.get adapter `cloud ipspace` does;
+// tests replay recorded response fixtures.
 type clusterConfigGetter interface {
 	GetCluster(ctx context.Context) (*container.Cluster, error)
+}
+
+type serverConfigGetter interface {
+	GetServerConfig(ctx context.Context) (*container.ServerConfig, error)
 }
 
 // clusterConfigAPI implements cloud.ClusterConfigAPI.
@@ -71,6 +95,7 @@ type clusterConfigAPI struct {
 	location string
 	cluster  string
 	clusters clusterConfigGetter
+	server   serverConfigGetter
 }
 
 func newClusterConfigAPI(p *Provider) *clusterConfigAPI {
@@ -78,6 +103,7 @@ func newClusterConfigAPI(p *Provider) *clusterConfigAPI {
 		location: p.location,
 		cluster:  p.cluster,
 		clusters: newGKEClusterClient(p.project, p.location, p.cluster),
+		server:   newGKEServerConfigClient(p.project, p.location),
 	}
 }
 
@@ -89,8 +115,12 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 	}
 
 	out := cloud.ClusterConfig{
-		Name:     firstNonEmpty(c.Name, a.cluster),
-		Location: firstNonEmpty(c.Location, a.location),
+		Name:                 firstNonEmpty(c.Name, a.cluster),
+		Location:             firstNonEmpty(c.Location, a.location),
+		Version:              c.CurrentMasterVersion,
+		ReleaseChannel:       releaseChannel(c),
+		Maintenance:          maintenance(c),
+		UpgradeNotifications: upgradeNotifications(c),
 	}
 	if c.WorkloadIdentityConfig != nil {
 		out.WorkloadIdentityPool = c.WorkloadIdentityConfig.WorkloadPool
@@ -105,11 +135,173 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 		}
 		out.NodePools = append(out.NodePools, cloud.NodePoolConfig{
 			Name:               np.Name,
+			Version:            np.Version,
+			ImageType:          imageType(np),
+			NodeRuntime:        nodeRuntime(np),
 			MetadataServerMode: metadataServerMode(np),
 			LegacyEndpoints:    legacyEndpoints(np),
+			AutoUpgrade:        nodeManagement(np, func(m *container.NodeManagement) bool { return m.AutoUpgrade }),
+			AutoRepair:         nodeManagement(np, func(m *container.NodeManagement) bool { return m.AutoRepair }),
 		})
 	}
 	return out, nil
+}
+
+// UpgradeTargets implements cloud.ClusterConfigAPI. The versions GKE
+// publishes are per-location and per-channel, so this is a second call
+// (getServerConfig) and not a corner of the cluster record.
+//
+// A cluster on no channel is compared against the location's default
+// cluster version: it is what a new cluster created today would run,
+// and the only published "current" GKE offers such a cluster. There is
+// no upgrade target for it, because nothing is going to upgrade it.
+func (a *clusterConfigAPI) UpgradeTargets(ctx context.Context, channel string) (cloud.UpgradeTargets, error) {
+	sc, err := a.server.GetServerConfig(ctx)
+	if err != nil {
+		return cloud.UpgradeTargets{}, fmt.Errorf("reading published versions: %w", err)
+	}
+	if channel == "" {
+		return cloud.UpgradeTargets{DefaultVersion: sc.DefaultClusterVersion}, nil
+	}
+	for _, ch := range sc.Channels {
+		if ch == nil || releaseChannelName(ch.Channel) != channel {
+			continue
+		}
+		return cloud.UpgradeTargets{
+			Channel:              channel,
+			DefaultVersion:       ch.DefaultVersion,
+			UpgradeTargetVersion: ch.UpgradeTargetVersion,
+		}, nil
+	}
+	// A channel the location publishes nothing for. Reporting zero is
+	// the honest answer: the caller has no target and makes no claim.
+	return cloud.UpgradeTargets{}, nil
+}
+
+// releaseChannel projects the cluster's subscription. UNSPECIFIED is
+// GKE's own name for "no channel" and is deprecated in favour of
+// omitting the block, so both arrive as empty.
+func releaseChannel(c *container.Cluster) string {
+	if c.ReleaseChannel == nil {
+		return ""
+	}
+	return releaseChannelName(c.ReleaseChannel.Channel)
+}
+
+func releaseChannelName(channel string) string {
+	if channel == "" || channel == unspecifiedChannel {
+		return ""
+	}
+	return strings.ToLower(channel)
+}
+
+// maintenance projects the maintenance policy: whether a window exists
+// at all, and every exclusion the policy carries. Which exclusions are
+// in force is not decided here — that needs a clock, and the adapter
+// has no business owning the check's "now".
+func maintenance(c *container.Cluster) cloud.Maintenance {
+	if c.MaintenancePolicy == nil || c.MaintenancePolicy.Window == nil {
+		return cloud.Maintenance{}
+	}
+	w := c.MaintenancePolicy.Window
+	out := cloud.Maintenance{
+		Scheduled: w.DailyMaintenanceWindow != nil ||
+			w.RecurringWindow != nil ||
+			w.RecurringMaintenanceWindow != nil,
+	}
+	for name, tw := range w.MaintenanceExclusions {
+		ex := cloud.MaintenanceExclusion{
+			Name:  name,
+			Start: parseAPITime(tw.StartTime),
+			End:   parseAPITime(tw.EndTime),
+			Scope: cloud.ExclusionScopeAll,
+		}
+		if o := tw.MaintenanceExclusionOptions; o != nil {
+			ex.Scope = exclusionScope(o.Scope)
+			ex.UntilEndOfSupport = o.EndTimeBehavior == untilEndOfSupport
+		}
+		out.Exclusions = append(out.Exclusions, ex)
+	}
+	// Map iteration order is random and the record has to be stable.
+	sort.Slice(out.Exclusions, func(i, j int) bool {
+		return out.Exclusions[i].Name < out.Exclusions[j].Name
+	})
+	return out
+}
+
+// exclusionScope projects the exclusion scope enum. An exclusion that
+// names no scope blocks everything — that is the documented API
+// default, not a guess this code is making.
+func exclusionScope(scope string) string {
+	switch scope {
+	case noMinorUpgrades:
+		return cloud.ExclusionScopeMinor
+	case noMinorOrNodeUpgrades:
+		return cloud.ExclusionScopeMinorAndNodes
+	default:
+		return cloud.ExclusionScopeAll
+	}
+}
+
+// parseAPITime reads an RFC 3339 timestamp, yielding the zero time for
+// anything it cannot parse. An exclusion with an unreadable bound is
+// left for the caller to notice rather than dropped.
+func parseAPITime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// upgradeNotifications projects notificationConfig.pubsub. The block
+// being absent and the block being present-but-off are the same claim
+// — nobody is told — so unlike the node-pool toggles this one has no
+// third state to preserve.
+func upgradeNotifications(c *container.Cluster) cloud.Toggle {
+	if c.NotificationConfig == nil || c.NotificationConfig.Pubsub == nil {
+		return cloud.ToggleDisabled
+	}
+	if c.NotificationConfig.Pubsub.Enabled {
+		return cloud.ToggleEnabled
+	}
+	return cloud.ToggleDisabled
+}
+
+// nodeManagement projects one boolean out of the pool's management
+// block, preserving the block's absence as unset.
+func nodeManagement(np *container.NodePool, get func(*container.NodeManagement) bool) cloud.Toggle {
+	if np.Management == nil {
+		return cloud.ToggleUnset
+	}
+	if get(np.Management) {
+		return cloud.ToggleEnabled
+	}
+	return cloud.ToggleDisabled
+}
+
+func imageType(np *container.NodePool) string {
+	if np.Config == nil {
+		return ""
+	}
+	return np.Config.ImageType
+}
+
+// nodeRuntime classifies the node image. GKE's image types are the
+// runtime: everything current carries the _CONTAINERD suffix, and the
+// ones that do not are the Docker images whose shim Kubernetes removed
+// in 1.24. An unnamed image type is left unset — the pool takes the
+// provider's default, which this read cannot see.
+func nodeRuntime(np *container.NodePool) string {
+	t := imageType(np)
+	switch {
+	case t == "":
+		return cloud.NodeRuntimeUnset
+	case strings.HasSuffix(strings.ToUpper(t), containerdImageSuffix):
+		return cloud.NodeRuntimeContainerd
+	default:
+		return cloud.NodeRuntimeDockershim
+	}
 }
 
 // ipEndpointsConfig returns the cluster's current-surface IP endpoint
@@ -195,18 +387,18 @@ func metadataServerMode(np *container.NodePool) string {
 // legacyEndpoints projects the disable-legacy-endpoints node metadata
 // key. The value is a string in the API ("true"/"false"), and a pool
 // carrying no key at all is its own state.
-func legacyEndpoints(np *container.NodePool) string {
+func legacyEndpoints(np *container.NodePool) cloud.Toggle {
 	if np.Config == nil {
-		return cloud.LegacyEndpointsUnset
+		return cloud.ToggleUnset
 	}
 	v, ok := np.Config.Metadata[legacyEndpointsKey]
 	if !ok {
-		return cloud.LegacyEndpointsUnset
+		return cloud.ToggleUnset
 	}
 	if v == "true" {
-		return cloud.LegacyEndpointsDisabled
+		return cloud.ToggleDisabled
 	}
-	return cloud.LegacyEndpointsEnabled
+	return cloud.ToggleEnabled
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -216,4 +408,26 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// gkeServerConfigClient is the production serverConfigGetter.
+type gkeServerConfigClient struct {
+	project, location string
+	svc               func(ctx context.Context) (*container.Service, error)
+}
+
+func newGKEServerConfigClient(project, location string) *gkeServerConfigClient {
+	return &gkeServerConfigClient{
+		project: project, location: location,
+		svc: lazyClient(func(ctx context.Context) (*container.Service, error) { return container.NewService(ctx) }),
+	}
+}
+
+func (c *gkeServerConfigClient) GetServerConfig(ctx context.Context) (*container.ServerConfig, error) {
+	svc, err := c.svc(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s", c.project, c.location)
+	return svc.Projects.Locations.GetServerConfig(name).Context(ctx).Do()
 }

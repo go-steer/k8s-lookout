@@ -362,21 +362,21 @@ const (
 	MetadataModeNodeIdentity = "node-identity"
 )
 
-// LegacyEndpoints* are the values of NodePoolConfig.LegacyEndpoints:
-// whether the pool's nodes still answer the provider's pre-v1 metadata
-// endpoints, which serve credentials without the request header the
-// current endpoint requires — so any SSRF in any pod on the node can
-// reach them.
+// Toggle is a provider setting that is a boolean once resolved but has
+// three states as READ: on, off, or never stated. Absent is its own
+// answer — it resolves against a provider default that varies by
+// cluster version, node image and creation date, none of which a
+// config read can see — so the projection preserves it and each check
+// decides for itself whether its claim survives not knowing.
+type Toggle string
+
 const (
-	// LegacyEndpointsUnset: the pool carries no setting either way,
-	// which on GKE leaves the legacy endpoints reachable. Recorded
-	// distinctly from Enabled because nobody chose it.
-	LegacyEndpointsUnset = "unset"
-	// LegacyEndpointsDisabled: the legacy endpoints are turned off
-	// (GKE: the disable-legacy-endpoints=true node metadata key).
-	LegacyEndpointsDisabled = "disabled"
-	// LegacyEndpointsEnabled: they are deliberately turned back on.
-	LegacyEndpointsEnabled = "enabled"
+	// ToggleUnset: the record carries no setting either way.
+	ToggleUnset Toggle = "unset"
+	// ToggleEnabled: the setting is explicitly on.
+	ToggleEnabled Toggle = "enabled"
+	// ToggleDisabled: the setting is explicitly off.
+	ToggleDisabled Toggle = "disabled"
 )
 
 // AuthorizedNetworks is the source allow-list in front of a public
@@ -398,33 +398,152 @@ type AuthorizedNetworks struct {
 	GCPPublicCIDRs bool
 }
 
-// NodePoolConfig is one node pool's security-relevant configuration.
+// NodeRuntime* are the values of NodePoolConfig.NodeRuntime: which
+// container runtime the pool's node image ships.
+const (
+	// NodeRuntimeUnset: the record names no image, so the runtime is
+	// whatever the provider defaults to.
+	NodeRuntimeUnset = ""
+	// NodeRuntimeContainerd: the current runtime.
+	NodeRuntimeContainerd = "containerd"
+	// NodeRuntimeDockershim: a node image built around the Docker
+	// daemon, reached through the dockershim Kubernetes removed in
+	// 1.24. Such a pool cannot be upgraded past the last version that
+	// still carried the shim (GKE: the non-*_CONTAINERD image types).
+	NodeRuntimeDockershim = "dockershim"
+)
+
+// NodePoolConfig is one node pool's configuration, as the posture
+// group reads it: what a pod on the pool can reach from the node under
+// it, and whether the pool is signed up to be kept current.
 type NodePoolConfig struct {
 	Name string
+	// Version is the pool's node version, in the provider's own format
+	// (GKE: "1.30.5-gke.1443001"). Compared against the control plane's
+	// to find a pool the upgrade left behind.
+	Version string
+	// ImageType is the provider's name for the node image
+	// (GKE: "COS_CONTAINERD"), carried verbatim so a finding can name
+	// what an operator would have to change.
+	ImageType string
+	// NodeRuntime is ImageType classified into one of the NodeRuntime*
+	// values — the part of the image choice a check can reason about.
+	NodeRuntime string
 	// MetadataServerMode is one of the MetadataMode* values.
 	MetadataServerMode string
-	// LegacyEndpoints is one of the LegacyEndpoints* values.
-	LegacyEndpoints string
+	// LegacyEndpoints reports whether the pool's nodes still answer the
+	// provider's pre-v1 metadata endpoints, which serve credentials
+	// without the request header the current endpoint requires — so any
+	// SSRF in any pod on the node can reach them. Disabled is the safe
+	// state; unset leaves them reachable on GKE but is recorded
+	// distinctly, because nobody chose it.
+	LegacyEndpoints Toggle
+	// AutoUpgrade reports whether the provider moves this pool's nodes
+	// to new versions on its own. Off means a human is the patch
+	// mechanism.
+	AutoUpgrade Toggle
+	// AutoRepair reports whether the provider recreates a node that
+	// stops reporting healthy — the thing that keeps a half-finished
+	// upgrade from leaving a broken node in the pool.
+	AutoRepair Toggle
+}
+
+// ExclusionScope* are the values of MaintenanceExclusion.Scope: how
+// much of the upgrade stream the exclusion holds back.
+const (
+	// ExclusionScopeAll: nothing is upgraded, patches included. This is
+	// what an exclusion that names no scope means.
+	ExclusionScopeAll = "all-upgrades"
+	// ExclusionScopeMinor: minor upgrades are held; patches still flow.
+	ExclusionScopeMinor = "minor-upgrades"
+	// ExclusionScopeMinorAndNodes: minor upgrades and all node upgrades
+	// are held; only control-plane patches flow.
+	ExclusionScopeMinorAndNodes = "minor-and-node-upgrades"
+)
+
+// MaintenanceExclusion is a window during which the provider will not
+// upgrade the cluster. It is a legitimate tool — a retail freeze, a
+// migration — and a common way for a cluster to sit unpatched for
+// months because nobody removed one.
+type MaintenanceExclusion struct {
+	// Name is the operator's own label for the window.
+	Name string
+	// Start and End bound it. A zero End with UntilEndOfSupport set is
+	// an exclusion with no fixed end.
+	Start time.Time
+	End   time.Time
+	// Scope is one of the ExclusionScope* values.
+	Scope string
+	// UntilEndOfSupport reports that the exclusion runs until the
+	// cluster's current version goes out of support rather than to a
+	// date the operator picked.
+	UntilEndOfSupport bool
+}
+
+// Maintenance is when the provider is allowed to touch the cluster.
+type Maintenance struct {
+	// Scheduled reports whether any maintenance window is configured at
+	// all. False means maintenance may start at any hour of any day —
+	// the provider default, and not the same claim as an exclusion.
+	Scheduled bool
+	// Exclusions are the configured no-upgrade windows, past, present
+	// and future. Deciding which are in force is the caller's job: it
+	// owns the clock.
+	Exclusions []MaintenanceExclusion
+}
+
+// UpgradeTargets is what the provider would move a cluster to — the
+// other half of every "how far behind is this?" question, and the half
+// that cannot be answered from the cluster record alone.
+type UpgradeTargets struct {
+	// Channel echoes the release channel the targets describe, empty
+	// for a cluster subscribed to none.
+	Channel string
+	// DefaultVersion is the version the provider gives a NEW cluster on
+	// this channel.
+	DefaultVersion string
+	// UpgradeTargetVersion is the version the provider is actively
+	// moving EXISTING clusters on this channel to. Empty when the
+	// provider publishes no such target, in which case DefaultVersion
+	// is the best available answer.
+	UpgradeTargetVersion string
 }
 
 // ClusterConfig is the provider's own record of how the cluster is
-// configured: control-plane exposure, cluster-level identity, and the
-// per-pool settings that decide what a pod can reach from the node
-// under it. It is CONFIG, not live state — every field is something an
-// operator set or left unset — which is what makes it answerable
-// one-shot by the posture group (`audit cluster`, epic #182) rather
-// than by a resident watcher.
+// configured: control-plane exposure, cluster-level identity, how it
+// is kept current, and the per-pool settings that decide what a pod
+// can reach from the node under it. It is CONFIG, not live state —
+// every field is something an operator set or left unset — which is
+// what makes it answerable one-shot by the posture group (`audit
+// cluster`, `audit upgrades`, epic #182) rather than by a resident
+// watcher.
 //
-// The shape is deliberately the subset the shipped posture claims read.
-// The remaining `*container.Cluster` surface (release channel, node
-// versions, maintenance policy, upgrade settings) arrives with the
-// checks that consume it.
+// The shape is deliberately the subset the shipped posture claims
+// read, and it grows with the checks that consume it rather than
+// mirroring the provider's cluster object.
 type ClusterConfig struct {
 	// Name and Location identify the cluster the record describes,
 	// echoed back so a finding can name its subject without the
 	// consumer re-resolving the identity.
 	Name     string
 	Location string
+
+	// Version is the control plane's current version, in the provider's
+	// own format (GKE: "1.30.5-gke.1443001", where the trailing build
+	// number is where most security patches land).
+	Version string
+	// ReleaseChannel is the channel the cluster is subscribed to,
+	// lower-cased ("rapid", "regular", "stable", "extended"). Empty
+	// means it is subscribed to none, and therefore that nothing
+	// upgrades the control plane unless a human does.
+	ReleaseChannel string
+	// Maintenance is when the provider may act on the cluster, and what
+	// currently forbids it.
+	Maintenance Maintenance
+	// UpgradeNotifications reports whether the provider publishes this
+	// cluster's upgrade events anywhere an operator could subscribe
+	// (GKE: notificationConfig.pubsub).
+	UpgradeNotifications Toggle
 
 	// WorkloadIdentityPool is the cluster-wide identity pool workloads
 	// exchange their ServiceAccount tokens through (GKE:
@@ -446,10 +565,19 @@ type ClusterConfig struct {
 }
 
 // ClusterConfigAPI reads the provider-side cluster configuration the
-// posture group audits. One call, one record: the whole point is that
-// these fields are consistent with each other only when read together.
+// posture group audits. Config is one call and one record: the whole
+// point is that these fields are consistent with each other only when
+// read together. UpgradeTargets is separate because it is a question
+// about the PROVIDER's published versions rather than about this
+// cluster, and only the version checks need it.
 type ClusterConfigAPI interface {
 	Config(ctx context.Context) (ClusterConfig, error)
+	// UpgradeTargets reports what the provider would move a cluster on
+	// the given release channel to; pass ClusterConfig.ReleaseChannel,
+	// empty for a cluster on no channel. An unrecognized channel yields
+	// a zero UpgradeTargets and no error — the caller then has no
+	// target to compare against and must not invent one.
+	UpgradeTargets(ctx context.Context, channel string) (UpgradeTargets, error)
 }
 
 // WorkloadIdentityAPI verifies KSA↔cloud-identity bindings.

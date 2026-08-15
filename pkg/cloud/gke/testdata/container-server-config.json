@@ -1,0 +1,30 @@
+{
+  "//": "Recorded-shape fixture: container.googleapis.com/v1 projects.locations.getServerConfig response — the versions GKE publishes for one location, per release channel. `defaultVersion` is what a NEW cluster on the channel gets; `upgradeTargetVersion` is what EXISTING clusters on it are being moved to, and the two differ during a rollout. Authored from the GKE ServerConfig resource API reference — not captured from a live project (§13).",
+  "defaultClusterVersion": "1.30.5-gke.1443001",
+  "defaultImageType": "COS_CONTAINERD",
+  "validImageTypes": ["COS_CONTAINERD", "UBUNTU_CONTAINERD"],
+  "validMasterVersions": [
+    "1.31.1-gke.1146000",
+    "1.30.5-gke.1443001",
+    "1.29.9-gke.1496000"
+  ],
+  "channels": [
+    {
+      "channel": "RAPID",
+      "defaultVersion": "1.31.1-gke.1146000",
+      "upgradeTargetVersion": "1.31.1-gke.1146000",
+      "validVersions": ["1.31.1-gke.1146000", "1.30.5-gke.1443001"]
+    },
+    {
+      "channel": "REGULAR",
+      "defaultVersion": "1.30.5-gke.1443001",
+      "upgradeTargetVersion": "1.30.6-gke.1125000",
+      "validVersions": ["1.30.6-gke.1125000", "1.30.5-gke.1443001"]
+    },
+    {
+      "channel": "STABLE",
+      "defaultVersion": "1.29.9-gke.1496000",
+      "validVersions": ["1.29.9-gke.1496000", "1.29.7-gke.1104000"]
+    }
+  ]
+}

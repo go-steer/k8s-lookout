@@ -112,8 +112,8 @@ Deployment and about a StatefulSet are different classes, because the
 remedies differ enough that a fleet rollup merging them would be
 reporting a number nobody can act on. The kinds shipped so far, from
 `audit workloads` (#190), `audit exemptions` (#234),
-`audit hardening` (#183), `audit netpol` (#185) and `audit cluster`
-(#186):
+`audit hardening` (#183), `audit netpol` (#185), `audit cluster`
+(#186) and `audit upgrades` (#187):
 
 | Kind | Reason | Object classes |
 | --- | --- | --- |
@@ -137,6 +137,13 @@ reporting a number nobody can act on. The kinds shipped so far, from
 | `audit.workload_identity_off` | `NodePoolMetadataServerOff` | `NodePool` |
 | `audit.legacy_metadata` | `LegacyMetadataEndpoints` | `NodePool` |
 | `audit.public_control_plane` | `PublicEndpointUnrestricted`, `AuthorizedNetworksAllowAll`, `AuthorizedNetworksAllowProviderCIDRs` | `Cluster` |
+| `audit.version_behind` | `ControlPlaneMinorBehind`, `ControlPlanePatchBehind` | `Cluster` |
+| `audit.version_behind` | `NodePoolVersionSkew` | `NodePool` |
+| `audit.upgrade_unmanaged` | `NoReleaseChannel` | `Cluster` |
+| `audit.upgrade_unmanaged` | `NodeAutoUpgradeOff`, `NodeAutoRepairOff` | `NodePool` |
+| `audit.upgrade_blocked` | `MaintenanceExclusionBlocksPatches`, `MaintenanceExclusionActive` | `Cluster` |
+| `audit.upgrade_blocked` | `StaleNodeImageType` | `NodePool` |
+| `audit.upgrade_unattended` | `NoMaintenanceWindow`, `NoUpgradeNotifications` | `Cluster` |
 
 Several of these carry more than one reason, which is the recipe
 working as intended rather than an exception to it. `audit.rigid_scheduling`,
@@ -166,17 +173,30 @@ counting "how much of the fleet is unpoliced" wants one number, and
 the `objectClass` in the fingerprint keeps the two shapes apart in the
 rollup without a second kind in the table.
 
-`Cluster` and `NodePool` are the last two rows' object classes, and
-neither is a Kubernetes kind. The three `audit cluster` claims (#186)
-are about settings no object in the API server records — Workload
-Identity, the node metadata server, what may reach the control plane —
-so their subject is the provider's object, read through the pkg/cloud
-capability boundary. `objectClass` means "the class of thing an
-operator edits to fix this", which is the same job whether the thing
+`Cluster` and `NodePool` close the table, and neither is a Kubernetes
+kind. The `audit cluster` (#186) and `audit upgrades` (#187) claims are
+about settings no object in the API server records — Workload Identity,
+the node metadata server, what may reach the control plane, what
+version the provider will move this cluster to and when it is allowed
+to — so their subject is the provider's object, read through the
+pkg/cloud capability boundary. `objectClass` means "the class of thing
+an operator edits to fix this", which is the same job whether the thing
 is a `StatefulSet` or a node pool, and the split it makes here is the
 one that matters: the cluster-wide Workload Identity setting and a
 single pool opting out of it are one kind and two classes, because one
 is a cluster edit and the other is a pool edit.
+
+Three of the four `audit upgrades` kinds split the same way, for the
+same reason. A control plane a release line behind and a node pool at
+the supported skew limit are both `audit.version_behind`, because a
+consumer asking "how much of the fleet is running unpatched Kubernetes"
+wants one number; but the first is fixed by letting the channel
+advance the cluster and the second by upgrading a pool, so they
+fingerprint apart. `audit.upgrade_blocked` covers both a maintenance
+exclusion holding patches off the whole cluster and a node image that
+cannot be upgraded past the version that carried the Docker shim: one
+condition — "an upgrade that should be happening is not" — with a
+cluster-level and a pool-level cause.
 
 The pod-template kinds share one object-class set on purpose: the six
 workload kinds that carry a pod template are all judged by reading

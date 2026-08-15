@@ -198,7 +198,7 @@ func workloadIdentityFindings(cfg cloud.ClusterConfig) []emit.Finding {
 func legacyMetadataFindings(cfg cloud.ClusterConfig) []emit.Finding {
 	var out []emit.Finding
 	for _, np := range cfg.NodePools {
-		if np.LegacyEndpoints == cloud.LegacyEndpointsDisabled {
+		if np.LegacyEndpoints == cloud.ToggleDisabled {
 			continue
 		}
 		out = append(out, nodePoolFinding(cfg, np, emit.Finding{
@@ -207,7 +207,7 @@ func legacyMetadataFindings(cfg cloud.ClusterConfig) []emit.Finding {
 			Reason:   reasonLegacyMetadata,
 			Message:  "the node pool still serves the legacy metadata endpoints: they answer without the header the current endpoint requires, so any request a pod can be tricked into making — a URL in a webhook field, an SSRF in a proxy — reaches the node's credentials",
 			Details: []emit.Field{
-				{Key: "disable_legacy_endpoints", Value: np.LegacyEndpoints},
+				{Key: "disable_legacy_endpoints", Value: string(np.LegacyEndpoints)},
 			},
 		}))
 	}
