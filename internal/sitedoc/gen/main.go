@@ -41,6 +41,7 @@ import (
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/findings"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/inventory"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/perf"
