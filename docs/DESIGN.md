@@ -127,9 +127,17 @@ k8s-lookout/
 ```
 
 **Dependencies:** `k8s.io/client-go`, GCP SDKs (Logging, Monitoring, Compute,
-Cloud Quotas), and `github.com/go-steer/core-agent/v2` as an ordinary library
-dependency (telemetry setup; inject payload types if we promote them to a
-shared contract package). `core-agent` never imports `lookout`.
+Cloud Quotas), and the OpenTelemetry SDK. This module does **not** import
+`github.com/go-steer/core-agent/v2`: the sentinel talks to the daemon over
+HTTP (`pkg/inject`, `pkg/sources/tokenburn`), which is a wire contract, not a
+build-time one. The one library dependency that did exist — core-agent's
+`pkg/telemetry` for OTel setup — was ported to `internal/telemetry`, because
+going through core-agent pulled its whole agent-framework stack
+(`google.golang.org/adk`, `google.golang.org/genai`) into this binary's
+dependency graph for ~100 lines of standard SDK wiring. Inject payload types
+stay in-tree for the same reason; a shared contract package would be a
+deliberate, separately-argued decision. `core-agent` never imports `lookout`,
+and now the reverse holds too.
 
 **What moves here from `core-agent`:** `cmd/k8s-event-watcher` in its entirety
 (it becomes `lookout watch`, §7), plus `docs/dataplane-intelligence-tools.md`

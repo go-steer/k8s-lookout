@@ -37,8 +37,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/go-steer/core-agent/v2/pkg/telemetry"
-
+	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
@@ -86,11 +85,12 @@ func realMain(argv []string) error {
 	// build from `kubectl logs` alone — version, commit, build date.
 	log.Printf("%s", version.String("lookout"))
 
-	// OpenTelemetry init. Registers the W3C traceparent propagator
-	// globally (so otelhttp-wrapped outbound POSTs carry trace
-	// context to the daemon) and, when --otel-exporter=console|otlp
-	// is set, wires the exporter so this watcher's own spans (fire /
-	// dedup / metrics-server) get shipped too. See #217.
+	// OpenTelemetry init (internal/telemetry). Registers the W3C
+	// traceparent propagator globally (so otelhttp-wrapped outbound
+	// POSTs carry trace context to the daemon) and, when
+	// --otel-exporter=console|otlp is set, wires the exporter so this
+	// watcher's own spans (fire / dedup / metrics-server) get shipped
+	// too. See #217.
 	otelCtx := context.Background()
 	otelShutdown, err := telemetry.Setup(otelCtx, f.otelExporter)
 	if err != nil {

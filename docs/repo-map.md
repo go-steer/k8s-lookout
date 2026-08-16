@@ -19,6 +19,8 @@ k8s-lookout/
 │   │                     #   watchboard, enrichment, recovery/storm/triage dispatch, distiller,
 │   │                     #   graph feed — plus the scripted end-to-end drill tests
 │   ├── mcpserver/        # `lookout mcp`: MCP tool schemas generated from command metadata
+│   ├── telemetry/        # OTel bootstrap for --otel-exporter (propagator always, exporter
+│   │                     #   on opt-in); in-tree so no agent framework rides in for it
 │   └── skilldoc/         # skill references/ generator + ```lookout doc-example contract tests
 ├── pkg/
 │   ├── checks/           # read-path check implementations, one package per group
@@ -178,9 +180,10 @@ required checks for docs-only changes.
 Where the tree deliberately differs from DESIGN.md, in one place:
 
 - **Layout:** the §2 tree predates M1+. Not in it but real:
-  `internal/{watch,mcpserver,skilldoc}` (the sentinel wiring and
-  serving layers live under `internal/`, not `cmd/lookout/`),
-  `pkg/memory`, `pkg/corpus`, `pkg/checks/checktest`.
+  `internal/{watch,mcpserver,skilldoc,telemetry,version}` (the
+  sentinel wiring and serving layers live under `internal/`, not
+  `cmd/lookout/`), `pkg/memory`, `pkg/corpus`,
+  `pkg/checks/checktest`.
 - **Build tags:** §2 sketched an optional `nogcp` tag on a
   GCP-linked default. Implementation inverted it: the default build
   is GCP-free and providers are opt-in (`gke`/`allproviders`).

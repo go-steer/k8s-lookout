@@ -65,5 +65,28 @@ expiry: cert-manager CRD not found — Certificate renewal-state scanning disabl
 
 A missing "enabled/ready" line for a stage you configured, or any
 startup RBAC-probe error, is a misconfiguration — see
-[Troubleshooting](/operations/troubleshooting/). The sentinel also
-exports OpenTelemetry spans with `--otel-exporter=console|otlp`.
+[Troubleshooting](/operations/troubleshooting/).
+
+## Traces
+
+The sentinel exports OpenTelemetry spans with
+`--otel-exporter=console|otlp`; `none` (the default) makes no outbound
+tracing calls at all. Three things are worth knowing:
+
+- **`OTEL_TRACES_EXPORTER` overrides the flag** — the OTel-standard
+  env var wins, so one shared Deployment can carry per-Pod exporter
+  targets without forking the manifest.
+- **`otlp` is OTLP over HTTP** and reads the standard env vars:
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, then the spec default
+  `http://localhost:4318`. The resolved target is logged at startup.
+  Set `GOOGLE_CLOUD_PROJECT` when shipping to Cloud Trace — its OTLP
+  ingress rejects batches with no `gcp.project_id` resource attribute.
+- **Export failures are loud.** An unreachable collector, TLS
+  mismatch, or wrong port prints `lookout: otel-export: …` on stderr
+  rather than silently dropping spans; `OTEL_LOG_LEVEL=debug` raises
+  SDK diagnostics too.
+
+The W3C `traceparent` propagator is registered in every mode,
+including `none`, so outbound POSTs to the daemon carry trace context
+the moment an operator flips the exporter on.
