@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-16
+
+The `audit` group arrives in full. v0.20.0 shipped the posture claim
+with a single detector; this release adds four more, so "what has no
+safety net while it is still healthy" now spans workload security,
+network isolation, cluster configuration and upgrade readiness:
+`audit hardening` (privileged containers, host namespaces, hostPath
+mounts, default-ServiceAccount tokens something actually uses,
+namespaces with no Pod Security Admission), `audit netpol`
+(namespaces nothing isolates, and the individual workload that fell
+through the selectors covering its neighbours), `audit cluster`
+(Workload Identity off or bypassed, legacy metadata endpoints, a
+control plane the internet can reach) and `audit upgrades` (how far
+behind the control plane and its node pools are, and whether
+anything is set up to close that gap on its own).
+
+The last two read the cloud provider's cluster record rather than
+Kubernetes objects, and they set the convention every cloud-backed
+detector after them follows: a tri-state the provider leaves unset
+makes no claim at all, an unavailable capability emits one explicit
+`cloud.unavailable` and exits 0 rather than reporting a clean
+cluster, and a version is judged against the cluster's own release
+channel — including the `-gke.N` build suffix, where most GKE
+security patches land, and without which a months-behind cluster
+reads as current.
+
+`triage list` closes a hole in the read surface. Every
+detail-returning command takes a `<Kind>/<namespace>/<name>` target
+and nothing produced one: the health scans report only what is
+abnormal and correctly name nothing when a namespace is clean, so an
+agent dropped into an unfamiliar namespace had to guess object names.
+It is `kubectl get` across every kind an incident normally involves,
+in one pass, one line per object, each leading with a paste-ready
+target — an inventory and not a diagnosis, which is why a kind's
+fields are the columns `kubectl get <kind>` prints in its own default
+table and nothing else.
+
+Finally, the sentinel stops linking an agent framework. OTel setup
+was this module's one library import of `core-agent`, and it reached
+`google.golang.org/adk` underneath — an agent framework's model,
+session and tool packages, plus `google.golang.org/genai`, in every
+shipped binary in service of about a hundred lines of standard SDK
+wiring. That wiring now lives in `internal/telemetry`; the build
+closure drops from 1074 packages to 966. The daemon relationship is
+unchanged, because it was always HTTP. One fix rides along:
+`--otel-exporter=otlp` previously built no exporter at all unless an
+endpoint env var was set, while still printing one at startup — an
+operator who asked for OTLP and set no endpoint got a boot line and
+zero spans.
+
 ### Added
 
 - **`lookout triage list`** (MCP `k8s_list_resources`) — the discovery
