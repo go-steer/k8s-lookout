@@ -61,6 +61,7 @@ command takes a positional argument). The current surface:
 | --- | --- |
 | `k8s_cluster_health` | [`health`](/reference/health/) |
 | `k8s_triage_workload` | [`bundle`](/reference/bundle/) |
+| `k8s_list_resources` | [`triage list`](/reference/triage-list/) |
 | `k8s_triage_delta` | [`triage delta`](/reference/triage-delta/) |
 | `k8s_triage_logs` | [`triage logs`](/reference/triage-logs/) |
 | `k8s_event_timeline` | [`triage events`](/reference/triage-events/) |
@@ -69,6 +70,8 @@ command takes a positional argument). The current surface:
 | `k8s_recent_changes` | [`triage changes`](/reference/triage-changes/) |
 | `k8s_resource_spec` | [`triage spec`](/reference/triage-spec/) |
 | `k8s_triage_status` | [`triage status`](/reference/triage-status/) |
+| `k8s_findings_diff` | [`findings diff`](/reference/findings-diff/) |
+| `k8s_findings_ack` | [`findings ack`](/reference/findings-ack/) |
 | `k8s_state_edges` | [`state edges`](/reference/state-edges/) |
 | `k8s_admission_webhooks` | [`state webhooks`](/reference/state-webhooks/) |
 | `k8s_workload_identity` | [`state wi`](/reference/state-wi/) |
@@ -81,10 +84,18 @@ command takes a positional argument). The current surface:
 | `k8s_cloud_ipspace` | [`cloud ipspace`](/reference/cloud-ipspace/) |
 | `k8s_cloud_quota` | [`cloud quota`](/reference/cloud-quota/) |
 | `k8s_net_probe` | [`net probe`](/reference/net-probe/) |
+| `k8s_audit_workloads` | [`audit workloads`](/reference/audit-workloads/) |
+| `k8s_audit_hardening` | [`audit hardening`](/reference/audit-hardening/) |
+| `k8s_audit_netpol` | [`audit netpol`](/reference/audit-netpol/) |
+| `k8s_audit_cluster` | [`audit cluster`](/reference/audit-cluster/) |
+| `k8s_audit_upgrades` | [`audit upgrades`](/reference/audit-upgrades/) |
+| `k8s_audit_exemptions` | [`audit exemptions`](/reference/audit-exemptions/) |
 
-Commands added later appear automatically — the tool list, schemas, and
-descriptions are generated from the same command metadata as `--help`
-and this site's Reference section, so the surfaces cannot drift apart.
+Commands added later become tools with no extra wiring — the list the
+server serves, its schemas and its descriptions are generated from the
+same command metadata as `--help` and this site's Reference section, so
+`tools/list` is always the authoritative surface. The table above is a
+hand-maintained copy of it, held to the registry by a test.
 Tool descriptions are written as micro-skills ("when to reach for
 this"), which is most of what an agent needs; the workflow-level
 decision tree ships as skills in
