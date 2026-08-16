@@ -171,6 +171,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The sentinel no longer depends on `core-agent` (or on an agent
+  framework) at build time.** OTel setup was the module's one library
+  import of `github.com/go-steer/core-agent/v2`, and it reached
+  `google.golang.org/adk` underneath — so every `lookout` binary
+  linked in an agent framework's model, session, and tool packages,
+  plus `google.golang.org/genai`, for about a hundred lines of
+  standard OpenTelemetry SDK wiring. That wiring now lives in
+  `internal/telemetry`, and the module requires neither. The daemon
+  relationship is unchanged: it was always HTTP (`pkg/inject`, the
+  token-burn cost stack), which is a wire contract, not a build one
+  (#255).
+- `--otel-exporter=otlp` now always exports. It previously built no
+  tracer provider at all unless `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` was set — while still logging
+  an endpoint at startup, so an operator who asked for OTLP and set no
+  endpoint got a boot line claiming `localhost:4318` and zero spans.
+  The exporter now honors the OTel spec's own default
+  (`http://localhost:4318`), and an unreachable collector reports
+  itself as `lookout: otel-export: …` on stderr (#255).
+- Spans now carry `service.name=lookout` and `service.version=<build
+  semver>` instead of the SDK's `unknown_service:lookout` placeholder.
+  `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` still win when set.
+  `gcp.project_id` is stamped from `GOOGLE_CLOUD_PROJECT` as before,
+  but only when that variable is non-empty (#255).
+- `--otel-exporter`'s help text pointed at `docs/otel.md`, which does
+  not exist; it now names the `OTEL_TRACES_EXPORTER` override, which
+  is what an operator reaching for that doc was likely after (#255).
 - The two hand-written command tables — README's "Command surface" and
   the docs site's MCP tool list — were nine commands behind the
   registry (the whole `audit` group, both `findings` commands and

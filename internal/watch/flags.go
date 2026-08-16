@@ -365,7 +365,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// of this setting so outbound POSTs carry trace context to a
 	// tracing-enabled daemon even when the watcher itself isn't
 	// exporting spans locally (rare but useful during phased rollouts).
-	fs.StringVar(&f.otelExporter, "otel-exporter", "none", "OpenTelemetry span exporter: none | console | otlp. See docs/otel.md.")
+	fs.StringVar(&f.otelExporter, "otel-exporter", "none", "OpenTelemetry span exporter: none | console | otlp. The OTEL_TRACES_EXPORTER env var overrides this.")
 
 	return fs, f
 }

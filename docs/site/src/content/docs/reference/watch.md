@@ -65,7 +65,7 @@ breaking change to running deployments, never a refactor.
 | `--mode` | string | `per-incident` | Session routing mode: per-incident (create per (uid,reason)) or shared (all to --target-session). |
 | `--namespace` | string | — | Comma-separated allow-list of namespaces. Empty = all namespaces. |
 | `--notifications-subscription` | string | — | Subscription the notifications source reads (GKE: a Pub/Sub subscription on the cluster's notificationConfig topic) — either projects/\<p>/subscriptions/\<name> or a bare name resolved against the provider project. Required when the notifications source is enabled. |
-| `--otel-exporter` | string | `none` | OpenTelemetry span exporter: none \| console \| otlp. See docs/otel.md. |
+| `--otel-exporter` | string | `none` | OpenTelemetry span exporter: none \| console \| otlp. The OTEL_TRACES_EXPORTER env var overrides this. |
 | `--owner` | string | — | X-Asserted-Caller value for POST /sessions in per-incident mode. Sidecar must be in daemon's proxy_identities. |
 | `--pending-age` | duration | `5m0s` | How long a pod must be Pending+Unschedulable before capacity.pending-aged fires at warning (critical at the design-fixed 15m, or at this value when set higher). Must be > 0. |
 | `--project` | string | — | Cloud project/account the cluster runs in, stamped into payloads. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly. |
