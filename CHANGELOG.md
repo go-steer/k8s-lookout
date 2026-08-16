@@ -171,6 +171,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The two hand-written command tables — README's "Command surface" and
+  the docs site's MCP tool list — were nine commands behind the
+  registry (the whole `audit` group, both `findings` commands and
+  `triage list`). Both now list the full surface, README's compressed
+  `cloud` row is one row per command, and a test holds them to the
+  registry so the next command cannot land without a row. Everything
+  else that enumerates commands is generated; these two were the only
+  places the surface could silently fall behind.
 - Findings now sort by reason as the final key, after namespace, kind
   of object, name, severity and kind. One subject can carry several
   findings that tie on all of the earlier keys — a pod template in all

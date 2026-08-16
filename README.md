@@ -124,6 +124,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `mcp` | serve every read command 1:1 as MCP tools (stdio or localhost HTTP) — how a distroless daemon calls lookout |
 | `bundle` | first call of every incident: sanitized spec + abnormal objects + broken edges + blast radius + distilled logs, one payload |
 | `health` | ten-category cluster scorecard, merged with open sentinel findings and triage-status records |
+| `triage list` | what *exists*: `kubectl get` across every kind at once, one line per object, each leading with the `<Kind>/<namespace>/<name>` target the other reads take |
 | `triage delta` | one scan → everything abnormal: broken workloads, aged Pending, node pressure, gridlocked PDBs, degraded add-ons, hit quotas |
 | `triage logs` | template-fingerprint log dedup: ~150k tokens of logs → ~350 |
 | `triage events` | deduped chronological event timeline over the owner-reference tree |
@@ -132,6 +133,8 @@ testing the CLI through agent harnesses via skills or MCP.
 | `triage changes` | "what changed before onset": rollouts, config updates, rescales, scoped to the graph neighborhood |
 | `triage spec` | kubectl describe for agents: sanitized, token-dense, `--diff` against graph history |
 | `triage status` | read/write §9.4 triage-status records so later scans report triaged reality, not a fresh unknown |
+| `findings diff` | what *changed* since the previous scan — new, ongoing, escalated, resolved, suppressed — instead of the whole open list again |
+| `findings ack` | suppress one finding for a window after someone has taken it; it comes back on its own when the window expires |
 | `state edges` | dependency-graph verification: config/secret keys, selectors, endpoints, TLS expiry |
 | `state webhooks` | admission webhooks failing closed with dead backends |
 | `state wi` † | GKE Workload Identity KSA↔GSA binding verification |
@@ -139,8 +142,22 @@ testing the CLI through agent harnesses via skills or MCP.
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |
-| `cloud stockout\|orphans\|ipspace\|quota` † | GCP-side reads: zonal stockouts, orphaned disks/LBs, CIDR utilization, quota headroom |
+| `cloud stockout` † | zonal GCE capacity stockouts, with event-derived reroute candidates — the cloud-side why behind pods stuck Pending |
+| `cloud orphans` † | billing-active leftovers: unattached disks, forwarding rules routing to zero endpoints |
+| `cloud ipspace` † | pod/service/node CIDR utilization per subnet — IP space is incompressible |
+| `cloud quota` † | per-project quota usage vs limit, ranked nearest-to-exhaustion |
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |
+| `audit workloads` | healthy workloads with no safety net: no PDB, single replica, no probes, no spread, autoscalers that structurally cannot scale |
+| `audit hardening` | workload security posture: privileged containers, host namespaces, hostPath mounts, used default-SA tokens, namespaces with no PSA |
+| `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |
+| `audit cluster` † | GKE cluster security configuration: Workload Identity, legacy metadata endpoints, an internet-reachable control plane |
+| `audit upgrades` † | upgrade and patch readiness: how far behind the control plane and node pools are, and whether anything closes the gap on its own |
+| `audit exemptions` | the `--exemptions` file itself: which reviewed opt-outs have lapsed, and which are about to |
+
+The `audit` rows answer a different question from everything above
+them: not "what is broken now" but "what has no safety net while it is
+still healthy" — a standing claim, `--exemptions`-auditable, meant for
+a scheduled sweep rather than an incident.
 
 † needs a cloud provider (the `-gke` image / `-tags gke` build). ~80%
 of the suite is pure client-go and runs on any conformant cluster; the
