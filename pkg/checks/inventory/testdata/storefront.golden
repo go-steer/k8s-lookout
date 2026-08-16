@@ -1,0 +1,23 @@
+kind=inventory.object severity=info namespace=storefront kind_of_object=Deployment name=web target=Deployment/storefront/web ready=2/2 up_to_date=2 available=2 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=Deployment name=worker target=Deployment/storefront/worker ready=0/3 up_to_date=3 available=0 age=3h
+kind=inventory.object severity=info namespace=storefront kind_of_object=StatefulSet name=cache target=StatefulSet/storefront/cache ready=1/1 age=40d
+kind=inventory.object severity=info namespace=storefront kind_of_object=DaemonSet name=log-agent target=DaemonSet/storefront/log-agent ready=3/4 up_to_date=4 available=3 age=40d
+kind=inventory.object severity=info namespace=storefront kind_of_object=CronJob name=nightly-reindex target=CronJob/storefront/nightly-reindex schedule="0 2 * * *" timezone=UTC suspend=true active=0 last_schedule=22h age=90d
+kind=inventory.object severity=info namespace=storefront kind_of_object=Job name=nightly-reindex-29001600 target=Job/storefront/nightly-reindex-29001600 status=Complete completions=1/1 age=22h
+kind=inventory.object severity=info namespace=storefront kind_of_object=Pod name=web-6f4c9d7b8-2xqzt target=Pod/storefront/web-6f4c9d7b8-2xqzt ready=2/2 status=Running restarts=2 age=1h30m
+kind=inventory.object severity=info namespace=storefront kind_of_object=Pod name=worker-59d4f7c66-nq8vl target=Pod/storefront/worker-59d4f7c66-nq8vl ready=0/1 status=ImagePullBackOff restarts=0 age=45s
+kind=inventory.object severity=info namespace=storefront kind_of_object=Service name=edge target=Service/storefront/edge type=LoadBalancer cluster_ip=10.4.1.99 external_ip=pending ports=443:31443/TCP age=2h
+kind=inventory.object severity=info namespace=storefront kind_of_object=Service name=web target=Service/storefront/web type=ClusterIP cluster_ip=10.4.1.17 ports=80/TCP age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=Endpoints name=edge target=Endpoints/storefront/edge addresses=0 age=2h
+kind=inventory.object severity=info namespace=storefront kind_of_object=Endpoints name=web target=Endpoints/storefront/web addresses=2 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=Ingress name=site target=Ingress/storefront/site class=gce hosts=shop.example.com address=34.120.8.9 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=ConfigMap name=web-config target=ConfigMap/storefront/web-config keys=2 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=Secret name=web-tls target=Secret/storefront/web-tls type=kubernetes.io/tls keys=2 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=PersistentVolumeClaim name=data-cache-0 target=PersistentVolumeClaim/storefront/data-cache-0 phase=Bound volume=pvc-8c2f capacity=20Gi access_modes=RWO class=standard-rwo age=40d
+kind=inventory.object severity=info namespace=storefront kind_of_object=HorizontalPodAutoscaler name=web target=HorizontalPodAutoscaler/storefront/web scale_target=Deployment/web min=2 max=10 replicas=2 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=PodDisruptionBudget name=web target=PodDisruptionBudget/storefront/web min_available=50% allowed_disruptions=1 age=12d
+kind=inventory.object severity=info namespace=storefront kind_of_object=ServiceAccount name=default target=ServiceAccount/storefront/default age=90d
+kind=inventory.object severity=info namespace=storefront kind_of_object=NetworkPolicy name=default-deny target=NetworkPolicy/storefront/default-deny pod_selector=all age=90d
+kind=inventory.object severity=info namespace=storefront kind_of_object=ResourceQuota name=compute target=ResourceQuota/storefront/compute age=90d
+kind=inventory.object severity=info namespace=storefront kind_of_object=LimitRange name=defaults target=LimitRange/storefront/defaults age=90d
+scanned=22 findings=22 elapsed=100ms kinds=18

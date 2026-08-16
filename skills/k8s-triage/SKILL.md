@@ -71,6 +71,7 @@ MCP tool with the same payload:
 
 | You are asking | Run | Notes |
 | --- | --- | --- |
+| what is even *in* this namespace? | `lookout triage list --namespace=prod` | kubectl get across every kind at once, one line per object, each leading with the `<Kind>/<namespace>/<name>` target every other command takes — run it before you guess an object's name, and to catch what is *missing* (a workload with no Service, a Service with no Endpoints) |
 | anything wrong in this cluster / namespace? | `lookout triage delta` | whole cluster by default; `--namespace=X` to scope; `--only=pods,nodes,pdb,system,quota` to trim classes |
 | what is this container actually logging? | `lookout triage logs --workload=Deployment/prod/api --since=30m` | Drain-clustered templates with counts, not raw lines; `--previous` reads what a crashed container said before it died |
 | is its config/dependency wiring broken? | `lookout state edges --workload=Deployment/prod/api` | verifies ConfigMap/Secret keys, Service selectors + endpoints, Ingress backends, RBAC refs, TLS expiry — emits only broken edges |

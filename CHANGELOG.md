@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lookout triage list`** (MCP `k8s_list_resources`) — the discovery
+  call the read surface was missing: `kubectl get` across every kind
+  an incident normally involves, in one pass, one line per object
+  (#252). Every other detail-returning command takes a
+  `<Kind>/<namespace>/<name>` target and nothing produced one — the
+  health scans report only what is *abnormal* and correctly name
+  nothing when a namespace is clean, so an agent dropped into an
+  unfamiliar namespace had to guess object names. Every line now leads
+  with a paste-ready target. Defaults to 18 namespaced kinds ordered
+  workloads → routing → configuration; `--kinds` takes kubectl
+  spellings (`pods`, `deploy`, `certificates.cert-manager.io`) and
+  resolves anything outside the built-in table through discovery.
+- `triage list` is an inventory, not a check: a kind's fields are the
+  columns `kubectl get <kind>` prints in its own default table and
+  nothing else, every finding is `severity=info` with no reason and no
+  message. An Endpoints object's address count is in; a Service's
+  selector is out, because "this selector matches no pods" is
+  `state edges`' answer and it is a better one (#252).
+- `triage list` treats a refusal as a result: a kind the caller may
+  not list is reported as `skipped=Secret:forbidden` on the summary
+  line rather than failing the run, `--max` truncation reports
+  `truncated=<n>`, and an empty listing for a namespace that does not
+  exist is marked `namespace_absent=true` — an empty listing alone
+  cannot tell that from an empty namespace (#252).
+- Secrets are counted, never read: a Secret's line is its type and its
+  key count (#252).
 - **`lookout audit hardening`** — workload security posture (#183).
   Five claims from one pass over every pod template in scope
   (Deployments, StatefulSets, DaemonSets, CronJobs, Jobs, unowned
