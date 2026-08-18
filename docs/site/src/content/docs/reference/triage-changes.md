@@ -44,6 +44,20 @@ This command answers from the topology graph and accepts the point-in-time flags
 | `--at` | string | — | answer as of this instant instead of live: RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m). Requires --store. |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); source for --at point-in-time topology |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `change.rollout` | info | a workload's pod template changed — a new image, container or mount, or a controller churn event |
+| `change.scale` | info | a workload's replica count changed |
+| `change.config` | info | a ConfigMap in the neighborhood changed |
+| `change.secret` | info | a Secret in the neighborhood changed (names and shortened hashes only, never values —) |
+| `change.node` | info | a Node in the neighborhood changed |
+| `change.label` | info | only labels changed on a neighborhood object — enough to move it in or out of a selector |
+| `change.topology` | info | a neighborhood object appeared, disappeared, or changed in a way none of the other classes name |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

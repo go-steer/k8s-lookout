@@ -29,6 +29,16 @@ MCP tool: `k8s_event_timeline`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `event.warning` | warning | one collapsed timeline entry for a Warning-type event family on a subject |
+| `event.normal` | info | one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own |
+| `event.hpa_thrash` | warning | an HPA changed scale direction at least --hpa-flips times inside --hpa-window: the autoscaler is fighting itself |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

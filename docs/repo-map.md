@@ -27,8 +27,10 @@ k8s-lookout/
 │   │   │                 #   (delta, logs, events, top, triage, state, stab, perf,
 │   │   │                 #   cloudcheck, netprobe, bundle, health, findings, audit)
 │   │   │                 #   — shared by CLI, MCP, and in-process enrichment
-│   │   ├── command.go    # Command metadata: flags, when-to-use line, output-field glossary
-│   │   ├── registry.go   # the metadata registry all generated surfaces read from
+│   │   ├── command.go    # Command metadata: flags, when-to-use line, output-field glossary,
+│   │   │                 #   and the ledger of finding kinds the command may emit
+│   │   ├── registry.go   # the metadata registry all generated surfaces read from; also
+│   │   │                 #   KindGlossary(), the finding-kind union across every command
 │   │   └── checktest/    # §13 contract-test scaffold every command suite runs
 │   ├── cloud/            # Provider interface + capability registry; pkg/cloud/gke is the
 │   │                     #   only implementation, compiled in via build tags only
@@ -112,6 +114,7 @@ Violating any of these is a bug, not a test update
 | Exempt annotates, never drops: a covered finding is still emitted and counted, and the summary reports `exempt=<n>` | `pkg/exempt/`, `pkg/emit/writer.go` | `pkg/exempt/exempt_test.go`, `pkg/emit/exempt_test.go` (`TestExemptAnnotatesNeverDrops`) |
 | Shipped ClusterRole covers the enrichment read paths | `deploy/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
 | Command output schema ↔ declared metadata | each `pkg/checks/*` | `pkg/checks/checktest.VerifyContract` in every command's suite |
+| Finding kinds ↔ the ledger each command declares (an emitted `kind=` must be declared, at a severity the declaration lists) | `Command.Kinds` in each `pkg/checks/*`; the glossary union in `pkg/checks/registry.go` (`KindGlossary`) | `pkg/checks/checktest.Verify` (every kind a test run produces) + `pkg/checks/all/kinds_test.go` (`TestEveryEmittedKindIsDeclared` resolves the kind at every emit site in `pkg/checks/**`, so a branch no fixture reaches cannot slip through) |
 | Every registered check reaches the binary and both doc generators | `pkg/checks/all/all.go` (the one blank-import list; the binary, `internal/sitedoc/gen`, `internal/skilldoc/gen`, and their drift tests import only it) | `pkg/checks/all/all_test.go` (`TestAllImportsEveryRegisteringPackage` walks `pkg/checks/**` for `checks.Register` calls) |
 | Bundle section identifiers/order across CLI and enrichment ("the enrichment bundle IS a bundle") | `pkg/checks/bundle/bundle.go` + `internal/watch/enrich.go` | `internal/watch/enrich_bundle_contract_test.go` (`TestBundleSectionContractFrozen`; pins both heads' `sections=` joins and both bodies' emission order) |
 

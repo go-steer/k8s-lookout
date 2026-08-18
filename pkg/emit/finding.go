@@ -40,6 +40,31 @@ const (
 	SeverityCritical = "critical"
 )
 
+// Severities are the three levels, worst first. Anything that has to
+// order or render the whole set reads it from here rather than
+// rebuilding the order, which is easy to get backwards.
+func Severities() []string {
+	return []string{SeverityCritical, SeverityWarning, SeverityInfo}
+}
+
+// SeverityRank orders severities worst-first for sorting: critical 0,
+// warning 1, info 2, anything else last.
+func SeverityRank(s string) int {
+	switch s {
+	case SeverityCritical:
+		return 0
+	case SeverityWarning:
+		return 1
+	case SeverityInfo:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// ValidSeverity reports whether s is one of the three levels.
+func ValidSeverity(s string) bool { return SeverityRank(s) < 3 }
+
 // Finding is one abnormal observation: a flat, ordered key=value
 // record. The named fields mirror the §8 Signal schema
 // (kind_of_object, reason, message, …) because read-path findings

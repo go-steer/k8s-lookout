@@ -35,6 +35,47 @@ lookout health [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `health.category` | critical, warning, info | one scorecard line: how this category answered — healthy, degraded, or unavailable. The scorecard always answers, so healthy is explicit rather than silent; the line carries the worst severity found inside the category |
+| `pvc.pending` | warning | a PersistentVolumeClaim is not bound; pods mounting it cannot start |
+| `pvc.lost` | critical | a PersistentVolumeClaim's bound volume is lost |
+| `cert.expired` | critical | a TLS secret's certificate has expired |
+| `cert.expiring` | warning | a TLS secret's certificate expires within --cert-warn |
+| `cert.invalid` | warning | a TLS secret's tls.crt does not contain a parseable X.509 certificate |
+| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.imagepull` | critical | a container cannot pull its image |
+| `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
+| `pod.oomkilled` | warning | a container's last termination was an OOM kill |
+| `pod.restarts` | warning | a container has restarted at least --restarts times |
+| `pod.notready` | warning | a container in a Running pod has been not-ready past the --pending-age grace |
+| `pod.failed` | warning | the pod reached phase Failed |
+| `pod.pending` | critical, warning | the pod has been Pending longer than --pending-age with no container-level diagnosis; critical when the scheduler has declared it Unschedulable, which is a capacity or constraint problem rather than latency |
+| `workload.replicafailure` | critical | the controller cannot create pods at all (quota, PodSecurity, admission) — no pod exists to diagnose |
+| `workload.stalled` | critical | a Deployment's Progressing condition is False: the rollout has given up |
+| `workload.rollout` | critical, warning | replicas are short of desired; critical when nothing is serving at all |
+| `job.failed` | warning | a Job's Failed condition is set |
+| `node.notready` | critical | the node's Ready condition is not True |
+| `node.pressure` | critical | the node reports Memory/Disk/PID pressure |
+| `node.condition` | critical, warning | a non-standard node condition is True — NPD and its cousins publish problems that way |
+| `node.cordoned` | warning | the node is unschedulable but still holds pods: a stuck drain or a forgotten maintenance step |
+| `node.preempt` | critical, warning, info | a reclaim taint marks the node for termination; severity tracks how imminent |
+| `pdb.gridlocked` | critical, warning | the budget permits no disruptions; critical when healthy pods are already below the required minimum |
+| `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
+| `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
+| `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
+| `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
+| `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
+| `webhook.ca_expiring` | warning | the webhook's caBundle expires within --cert-warn |
+| `perf.apiserver_p99` | critical, warning | apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s |
+| `perf.pack_unavailable` | warning | a metric the requested pack needs is not in the metrics workspace, so part of the pack could not run; the rest still did (no coverage lies) |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

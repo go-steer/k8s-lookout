@@ -134,6 +134,9 @@ func newCommand(deps Deps, now func() time.Time) checks.Command {
 			{Name: "max", Type: emit.FlagInt, Default: strconv.Itoa(defaultMax),
 				Help: "stop after this many objects; the summary line reports how many were left out (pass --kinds to narrow instead)"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("inventory.object", "one object in scope, rendered as kubectl's default columns for its kind — an aggregated `kubectl get`, so every row is emitted, healthy or not", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "target", Doc: "the object as <Kind>/<namespace>/<name> (<Kind>/<name> when cluster-scoped) — paste it into triage spec, state edges, triage radius or triage workload unchanged"},
 			{Name: "ready", Doc: "ready over desired, as kubectl's READY column: containers for a Pod, replicas for a workload"},

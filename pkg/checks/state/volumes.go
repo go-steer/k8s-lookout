@@ -79,6 +79,12 @@ func VolumesCommand(deps Deps) checks.Command {
 		Name:    "state volumes",
 		MCPName: "k8s_volume_conflicts",
 		Summary: "When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume events — join VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO claims wanted on two nodes, attachments stuck in error, cross-zone PV locks, orphaned attachments.",
+		Kinds: []checks.KindField{
+			checks.Kind("volume.multi_attach", "an RWO claim is wanted by pods on more than one node — the second pod never starts", emit.SeverityCritical),
+			checks.Kind("volume.zone_conflict", "the PV is locked to a zone the pod's node is not in", emit.SeverityCritical),
+			checks.Kind("volume.attach_error", "the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("volume.orphaned_attachment", "a VolumeAttachment survives its PV or its node", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "pods", Doc: "scheduled pods referencing the conflicted claim, sorted (list capped, then +K more)"},
 			{Name: "nodes", Doc: "distinct nodes those pods are scheduled on, sorted"},

@@ -33,6 +33,14 @@ import (
 // second-order co-tenants without dragging in half the cluster.
 const defaultRadiusDepth = 3
 
+// The radius kinds live in bundle, which emits them too from its own
+// traversal of the same graph and sits below this package in the
+// import order. Both render the claim from one declaration.
+const (
+	kindRadiusNeighbor = bundle.KindRadiusNeighbor
+	kindRadiusMissing  = bundle.KindRadiusMissing
+)
+
 // RadiusCommand builds `lookout triage radius` (DESIGN.md §5): the
 // blast radius of one pod/workload as a pure topology-index query
 // (§6.4). It complements `state edges` — edges verifies *correctness*
@@ -54,6 +62,7 @@ func RadiusCommand(deps Deps) checks.Command {
 			{Name: "depth", Type: emit.FlagInt, Default: strconv.Itoa(defaultRadiusDepth),
 				Help: "graph edges followed per direction from the target's pods"},
 		},
+		Kinds: bundle.RadiusKinds(),
 		Output: []checks.OutputField{
 			{Name: "direction", Doc: "neighbor's direction from the target: upstream (routes/owns/governs it), lateral (shares a node/volume/config), downstream (the target points at it)"},
 			{Name: "relation", Doc: "how the neighbor attaches: the edge kind (RoutesTo, Owns, Selects, Governs, RunsOn, Mounts) for upstream/downstream, shared-node|shared-zone|shared-config|shared-secret|shared-pvc for lateral"},
@@ -172,7 +181,7 @@ func neighborFinding(nb bundle.Neighbor, snap *graph.Snapshot, cluster *state.Cl
 		}
 	}
 	f := emit.Finding{
-		Kind:         "radius.neighbor",
+		Kind:         kindRadiusNeighbor,
 		Severity:     emit.SeverityInfo,
 		Namespace:    nb.Ref.Namespace,
 		KindOfObject: nb.Ref.Kind.String(),
@@ -181,7 +190,7 @@ func neighborFinding(nb bundle.Neighbor, snap *graph.Snapshot, cluster *state.Cl
 	}
 	if !nb.Ref.Observed {
 		if snap.Watches(nb.Ref.Kind) {
-			f.Kind = "radius.missing"
+			f.Kind = kindRadiusMissing
 			f.Severity = emit.SeverityWarning
 			f.Reason = "ReferencedNotFound"
 			f.Message = "referenced by the neighborhood but not observed"

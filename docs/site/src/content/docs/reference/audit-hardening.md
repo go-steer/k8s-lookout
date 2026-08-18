@@ -27,6 +27,18 @@ lookout audit hardening [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
+| `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
+| `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
+| `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

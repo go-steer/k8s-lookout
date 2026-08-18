@@ -38,6 +38,20 @@ lookout triage top [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `top.saturation` | critical, warning, info | a container's usage is close to its limit — critical near the limit, info for an --all row below the threshold |
+| `top.node` | critical, warning, info | a node's allocatable is close to committed — critical near the limit, info for an --all row below the threshold |
+| `top.unlimited` | info | how many containers in scope set no cpu/memory limit, and are therefore invisible to saturation analysis |
+| `top.unlimited_container` | info | one container that sets no cpu/memory limit (--show-unlimited) |
+| `top.unrequested` | info | how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero |
+| `top.unrequested_container` | info | one container that sets no cpu/memory request (--show-unrequested) |
+| `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

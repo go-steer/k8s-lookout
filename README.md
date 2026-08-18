@@ -177,6 +177,13 @@ kind=cloud.unavailable severity=info reason=CapabilityUnavailable message="cloud
 scanned=0 findings=1 elapsed=0s unavailable="no cloud provider configured"
 ```
 
+Every finding these commands emit carries a `kind=`, and every kind
+they can emit is declared on the command itself — the whole vocabulary,
+with its claim and its severities, is one table:
+[Finding kinds](https://k8s-lookout.dev/reference/finding-kinds/). A
+kind missing from a run means the check looked and found nothing; a
+check that could not run says so instead.
+
 Agent education ships in [`skills/`](./skills/README.md): `k8s-triage`,
 `cluster-health`, `gitops-drift`, and per-symptom `playbooks/` — skills
 teach the decision tree across commands and install into the consuming

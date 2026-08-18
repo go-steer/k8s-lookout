@@ -209,6 +209,7 @@ func New(deps Deps) checks.Command {
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window (drill-down stage; same meaning as `state edges --cert-warn`)"},
 		},
+		Kinds:    kindLedger(deps.registry()),
 		Output:   outputGlossary(deps.registry()),
 		Examples: []string{"lookout scan", "lookout scan --namespace=prod", "lookout scan --include=audit --format=json", "lookout scan --max-drilldown=0"},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
@@ -228,6 +229,57 @@ func ownFields() []checks.OutputField {
 		{Name: "drilldown", Doc: "summary-line note: workloads the stage-2 dependency-edge drill-down covered"},
 		{Name: "truncated", Doc: "summary-line note: drill-down candidates dropped by --max-drilldown"},
 	}
+}
+
+// ownKinds are the three claims scan makes in its own voice. Every
+// other kind in the stream belongs to the stage that emitted it.
+func ownKinds() []checks.KindField {
+	return []checks.KindField{
+		checks.Kind(KindCheckSkipped,
+			"a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks (§11)",
+			emit.SeverityInfo),
+		checks.Kind(KindCheckFailed,
+			"a stage errored; the scan continued without it, so this run saw less than a whole cluster",
+			emit.SeverityWarning),
+		checks.Kind(KindIncomplete,
+			"the --timeout expired with stages still to run; not_run names them",
+			emit.SeverityWarning),
+	}
+}
+
+// kindLedger is scan's own kinds plus the union of every command it
+// can run, read out of the registry exactly the way outputGlossary
+// reads their fields. A check that gains a kind gains it here on the
+// next build; a check scan runs cannot emit a kind scan has not
+// declared.
+func kindLedger(reg *checks.Registry) []checks.KindField {
+	out := ownKinds()
+	seen := map[string]bool{}
+	for _, k := range out {
+		seen[k.Name] = true
+	}
+	add := func(kinds []checks.KindField) {
+		for _, k := range kinds {
+			if seen[k.Name] {
+				continue
+			}
+			seen[k.Name] = true
+			out = append(out, k)
+		}
+	}
+	names := append([]string{}, stage1...)
+	for _, g := range optionalGroups {
+		names = append(names, groupStages(reg, g)...)
+	}
+	for _, name := range names {
+		if c, ok := reg.Lookup(name); ok {
+			add(c.Kinds)
+		}
+	}
+	// Stage 2 is `state edges` called in memory, past the registry —
+	// same reason outputGlossary reaches for the constructor directly.
+	add(state.EdgesCommand(state.Deps{}).Kinds)
+	return out
 }
 
 // outputGlossary is scan's own fields plus the union of every command

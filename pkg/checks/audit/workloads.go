@@ -79,6 +79,15 @@ func WorkloadsCommand(deps Deps) checks.Command {
 		Name:    "audit workloads",
 		MCPName: "k8s_audit_workloads",
 		Summary: "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, and autoscalers that structurally cannot scale. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Kinds: []checks.KindField{
+			checks.Kind(kindNoPDB, "the workload has no PodDisruptionBudget: a drain can take every replica at once", emit.SeverityWarning),
+			checks.Kind(kindSingle, "the workload runs a single replica, so any disruption is an outage", emit.SeverityWarning),
+			checks.Kind(kindNoReadiness, "a container has no readiness probe, so traffic reaches it before it can serve", emit.SeverityWarning),
+			checks.Kind(kindNoLiveness, "a container has no liveness probe, so a wedged process is never restarted", emit.SeverityInfo),
+			checks.Kind(kindNoSpread, "the workload's replicas are not spread across nodes or zones", emit.SeverityInfo),
+			checks.Kind(kindRigidScheduling, "placement constraints pin the workload to too few nodes to survive losing one", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "replicas", Doc: "the workload's spec.replicas (nil defaults to 1, matching the API server); absent on DaemonSets, whose replica count is the node count"},
 			{Name: "namespace_pdbs", Doc: "PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed"},

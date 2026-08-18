@@ -88,6 +88,16 @@ func Command(deps Deps) checks.Command {
 			{Name: "pack", Type: emit.FlagString, Default: "",
 				Help: "which query pack to run (required): " + packNames()},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("perf.apiserver_p99", "apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.apf_saturation", "an API Priority and Fairness level is holding a sustained queue — warning from 10 queued, critical from 100", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.apf_rejects", "APF is shedding load: the apiserver is returning 429s at a priority level", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.etcd_fsync", "etcd WAL fsync p99 crossed the pack threshold — warning from 10ms, critical from 100ms", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.etcd_db_size", "the etcd database is approaching its quota — warning from 4 GiB, critical from 5.5 GiB", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.startup_p95", "pod first-ready p95 crossed the pack threshold — warning from 60s, critical from 300s", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("perf.pack_unavailable", "a metric the requested pack needs is not in the metrics workspace, so part of the pack could not run; the rest still did (§11: no coverage lies)", emit.SeverityWarning),
+			checks.CloudUnavailableKind(),
+		},
 		Output: []checks.OutputField{
 			{Name: "pack", Doc: "the pack this finding belongs to; also the summary-line note naming the pack that ran"},
 			{Name: "metric", Doc: "the backend-neutral metric the query measured (pack_unavailable: the absent metric)"},

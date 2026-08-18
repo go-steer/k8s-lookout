@@ -32,6 +32,7 @@ func TestInputSchema_GraphBackedGetsHistoryFlags(t *testing.T) {
 		Name:    "fake-graph",
 		MCPName: "k8s_fake_graph",
 		Summary: "Synthetic graph-backed command; test scaffolding only.",
+		Kinds:   []checks.KindField{checks.Kind("fake.graph", "synthetic; test scaffolding only", emit.SeverityInfo)},
 		Run:     func(context.Context, emit.Invocation) (int, error) { return 0, nil },
 	}
 

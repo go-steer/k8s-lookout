@@ -44,6 +44,15 @@ This command answers from the topology graph and accepts the point-in-time flags
 | `--at` | string | — | answer as of this instant instead of live: RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m). Requires --store. |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); source for --at point-in-time topology |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `radius.neighbor` | info | one object in the target's neighborhood, with its direction, relation, and hop distance — an enumeration of impact, not a defect |
+| `radius.missing` | warning | a neighbor the graph references but never observed, in a kind the snapshot does watch: the reference is dangling |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

@@ -27,6 +27,20 @@ lookout audit workloads [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
+| `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
+| `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
+| `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
+| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

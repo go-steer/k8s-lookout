@@ -199,6 +199,15 @@ func New(deps Deps) checks.Command {
 			{Name: "history", Type: emit.FlagDuration, Default: "0s",
 				Help: "enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("top.saturation", "a container's usage is close to its limit — critical near the limit, info for an --all row below the threshold", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("top.node", "a node's allocatable is close to committed — critical near the limit, info for an --all row below the threshold", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("top.unlimited", "how many containers in scope set no cpu/memory limit, and are therefore invisible to saturation analysis", emit.SeverityInfo),
+			checks.Kind("top.unlimited_container", "one container that sets no cpu/memory limit (--show-unlimited)", emit.SeverityInfo),
+			checks.Kind("top.unrequested", "how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero", emit.SeverityInfo),
+			checks.Kind("top.unrequested_container", "one container that sets no cpu/memory request (--show-unrequested)", emit.SeverityInfo),
+			checks.CloudUnavailableKind(),
+		},
 		Output: []checks.OutputField{
 			{Name: "resource", Doc: "the judged dimension: cpu or memory"},
 			{Name: "usage", Doc: "current usage in the dimension's natural unit (millicores for cpu, IEC bytes for memory)"},

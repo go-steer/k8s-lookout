@@ -54,6 +54,10 @@ type Command struct {
 	// flags are implicit on every command and must not be
 	// redeclared.
 	Flags []emit.FlagSpec
+	// Kinds is the ledger of finding kinds this command may emit
+	// (issue #278). Contract tests fail a command that emits an
+	// undeclared kind, or one at a severity it did not declare.
+	Kinds []KindField
 	// Output is the glossary of Details keys this command may
 	// emit. The envelope fields (emit.EnvelopeFields) are
 	// implicit. Contract tests fail a command that emits an
@@ -94,6 +98,63 @@ type Command struct {
 type OutputField struct {
 	Name string
 	Doc  string
+}
+
+// KindField documents one finding kind a command may emit.
+//
+// The kind is the most load-bearing string lookout writes. `findings
+// diff` keys transitions on it, an operator writes an exemption
+// against it, the sentinel routes on the signal it converts to, and a
+// downstream consumer switches on it — so it is a public contract
+// whether or not anything declares it. Before this ledger nothing
+// did: a typo was a silent new kind, a rename broke every consumer
+// with nothing failing in CI, and a new contributor could learn the
+// vocabulary only by grep.
+//
+// Declaring kinds with the command is the same pattern Output already
+// uses, applied to a second field: one declaration, validated at
+// registration, enforced against emitted output by the §13 contract
+// tests, and rendered into every documentation surface.
+type KindField struct {
+	// Name is the kind, "<owner>.<slug>" in lowercase snake_case
+	// (e.g. "pod.crashloop"). The owner prefix names the family of
+	// claims, not the command: `triage delta` and `health` both emit
+	// pod.* on purpose, because a crashloop is a crashloop whichever
+	// command found it.
+	Name string
+	// Doc is the one-line claim — what is true of the subject when
+	// this kind appears. Written for a reader deciding whether to
+	// act, not as a restatement of the name.
+	Doc string
+	// Severity is every severity this kind is emitted at, worst
+	// first. Most kinds have exactly one; a kind whose level depends
+	// on a threshold ("expiring" vs "expired", a saturation band)
+	// declares each, and emitting one it did not declare fails the
+	// contract test. Declaring the set rather than a single worst
+	// value is what lets an operator tell "this can page you" from
+	// "this is always informational".
+	Severity []string
+}
+
+// Kind builds a KindField. It exists because the severity list reads
+// far better variadic than as a slice literal, and a ledger is read
+// far more often than it is written:
+//
+//	checks.Kind("edge.cert_expiring", "a TLS certificate expires inside the --cert-warn window", emit.SeverityWarning)
+func Kind(name, doc string, severity ...string) KindField {
+	return KindField{Name: name, Doc: doc, Severity: severity}
+}
+
+// CloudUnavailableKind is the ledger entry for the §2 degradation
+// record every cloud-backed command emits when the provider
+// capability it needs is not there. It lives here, rather than beside
+// an emitter, because there is no single emitter: five packages
+// hand-roll the same finding. One declaration keeps them saying the
+// same thing.
+func CloudUnavailableKind() KindField {
+	return Kind("cloud.unavailable",
+		"the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence (§2, §11)",
+		emit.SeverityInfo)
 }
 
 // Positional documents a command's positional argument for the
@@ -165,10 +226,60 @@ var groupDocs = map[string]string{
 func GroupSummary(group string) string { return groupDocs[group] }
 
 var (
-	namePattern    = regexp.MustCompile(`^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)?$`)
-	mcpNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	outKeyPattern  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	namePattern     = regexp.MustCompile(`^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)?$`)
+	mcpNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	outKeyPattern   = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	kindNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 )
+
+// validateKinds checks the finding-kind ledger: a well-formed
+// <owner>.<slug> name, a real one-line claim, and a non-empty
+// worst-first severity set drawn from the three levels.
+func (c Command) validateKinds() error {
+	if len(c.Kinds) == 0 {
+		return fmt.Errorf("command %q: no Kinds declared — every command must name the finding kinds it emits (issue #278); "+
+			"add checks.Kind(<kind>, <one-line claim>, <severities…>) for each", c.Name)
+	}
+	seen := map[string]bool{}
+	for _, k := range c.Kinds {
+		if !kindNamePattern.MatchString(k.Name) {
+			return fmt.Errorf("command %q: finding kind %q must be <owner>.<slug> in lowercase snake_case", c.Name, k.Name)
+		}
+		if seen[k.Name] {
+			return fmt.Errorf("command %q: finding kind %q declared twice", c.Name, k.Name)
+		}
+		seen[k.Name] = true
+		if k.Doc == "" || strings.ContainsRune(k.Doc, '\n') {
+			return fmt.Errorf("command %q: finding kind %q must have a one-line doc", c.Name, k.Name)
+		}
+		if len(k.Severity) == 0 {
+			return fmt.Errorf("command %q: finding kind %q declares no severity", c.Name, k.Name)
+		}
+		for i, s := range k.Severity {
+			if !emit.ValidSeverity(s) {
+				return fmt.Errorf("command %q: finding kind %q declares severity %q, which is not one of %s",
+					c.Name, k.Name, s, strings.Join(emit.Severities(), "/"))
+			}
+			if i > 0 && emit.SeverityRank(k.Severity[i-1]) >= emit.SeverityRank(s) {
+				return fmt.Errorf("command %q: finding kind %q lists severities %s — they must be worst first and distinct",
+					c.Name, k.Name, strings.Join(k.Severity, ","))
+			}
+		}
+	}
+	return nil
+}
+
+// EmitsKind reports whether the command declared kind, and at what
+// severities. Consumers of the ledger (the contract tests, the
+// generated glossary) go through here rather than scanning Kinds.
+func (c Command) EmitsKind(kind string) (KindField, bool) {
+	for _, k := range c.Kinds {
+		if k.Name == kind {
+			return k, true
+		}
+	}
+	return KindField{}, false
+}
 
 // Validate checks a Command declaration for the mistakes that would
 // otherwise surface at an operator's terminal: malformed names,
@@ -213,6 +324,9 @@ func (c Command) Validate() error {
 	}
 	if err := validateSpecs(c.Flags); err != nil {
 		return fmt.Errorf("command %q: %w", c.Name, err)
+	}
+	if err := c.validateKinds(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, e := range emit.EnvelopeFields() {

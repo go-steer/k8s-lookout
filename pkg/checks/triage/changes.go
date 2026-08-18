@@ -72,6 +72,15 @@ func ChangesCommand(deps Deps) checks.Command {
 			{Name: "depth", Type: emit.FlagInt, Default: strconv.Itoa(defaultChangesDepth),
 				Help: "neighborhood radius: graph edges followed per direction to decide which objects' changes are in scope"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind(kindRollout, "a workload's pod template changed — a new image, container or mount, or a controller churn event", emit.SeverityInfo),
+			checks.Kind(kindScale, "a workload's replica count changed", emit.SeverityInfo),
+			checks.Kind(kindConfig, "a ConfigMap in the neighborhood changed", emit.SeverityInfo),
+			checks.Kind(kindSecret, "a Secret in the neighborhood changed (names and shortened hashes only, never values — §6.5)", emit.SeverityInfo),
+			checks.Kind(kindNode, "a Node in the neighborhood changed", emit.SeverityInfo),
+			checks.Kind(kindLabel, "only labels changed on a neighborhood object — enough to move it in or out of a selector", emit.SeverityInfo),
+			checks.Kind(kindTopology, "a neighborhood object appeared, disappeared, or changed in a way none of the other classes name", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "at", Doc: "when the change happened, RFC 3339 (also the summary-line note for the resolved --at instant)"},
 			{Name: "relation", Doc: "the changed object's place in the target's neighborhood: self (the target or its pods), upstream, lateral, downstream"},
@@ -286,7 +295,7 @@ func logEntries(rows []store.GraphChange, hood map[string]string) []changeEntry 
 			at:  rec.At,
 			seq: i,
 			f: emit.Finding{
-				Kind:         "change." + classify(rec),
+				Kind:         classify(rec),
 				Severity:     emit.SeverityInfo,
 				Namespace:    rec.Namespace,
 				KindOfObject: rec.Kind,
@@ -299,6 +308,20 @@ func logEntries(rows []store.GraphChange, hood map[string]string) []changeEntry 
 	return out
 }
 
+// The change classes. classify returns one of these whole rather
+// than a suffix to concatenate: the emitter, the ledger, and the
+// generated glossary then all read the same spelling, and a class
+// cannot be added to the classifier without appearing in the ledger.
+const (
+	kindRollout  = "change.rollout"
+	kindScale    = "change.scale"
+	kindConfig   = "change.config"
+	kindSecret   = "change.secret"
+	kindNode     = "change.node"
+	kindLabel    = "change.label"
+	kindTopology = "change.topology"
+)
+
 // workloadChurnKinds classify adds/deletes of pod-bearing kinds as
 // rollout churn.
 var workloadChurnKinds = map[string]bool{
@@ -306,8 +329,9 @@ var workloadChurnKinds = map[string]bool{
 	"DaemonSet": true, "Job": true, "CronJob": true,
 }
 
-// classify buckets one delta-log record into the change classes the
-// finding kind is namespaced by. ConfigMap/Secret/Node classify by
+// classify buckets one delta-log record into the change class it is
+// reported as, and returns that class's finding kind whole.
+// ConfigMap/Secret/Node classify by
 // kind; everything else by what changed: replicas → scale,
 // image/mount references → rollout, labels alone → label; adds and
 // deletes of pod-bearing kinds are rollout churn, of anything else
@@ -315,22 +339,22 @@ var workloadChurnKinds = map[string]bool{
 func classify(rec store.GraphChange) string {
 	switch rec.Kind {
 	case "Node":
-		return "node"
+		return kindNode
 	case "ConfigMap":
-		return "config"
+		return kindConfig
 	case "Secret":
-		return "secret"
+		return kindSecret
 	}
 	if rec.Op == "update" {
 		class := ""
 		for _, fc := range rec.FieldChanges {
 			switch {
 			case fc.Path == "replicas":
-				return "scale"
+				return kindScale
 			case strings.HasPrefix(fc.Path, "container/") || strings.HasPrefix(fc.Path, "mount/"):
-				class = "rollout"
+				class = kindRollout
 			case strings.HasPrefix(fc.Path, "label/") && class == "":
-				class = "label"
+				class = kindLabel
 			}
 		}
 		if class != "" {
@@ -338,9 +362,9 @@ func classify(rec store.GraphChange) string {
 		}
 	}
 	if workloadChurnKinds[rec.Kind] {
-		return "rollout"
+		return kindRollout
 	}
-	return "topology"
+	return kindTopology
 }
 
 // renderFieldChanges renders the changed-field summary compactly:
@@ -397,7 +421,7 @@ func rolloutEntries(cluster *state.Cluster, hood map[string]string, from, to tim
 			at:  created,
 			seq: i,
 			f: emit.Finding{
-				Kind:         "change.rollout",
+				Kind:         kindRollout,
 				Severity:     emit.SeverityInfo,
 				Namespace:    rs.Namespace,
 				KindOfObject: "ReplicaSet",
@@ -442,7 +466,7 @@ func eventEntries(ctx context.Context, client kubernetes.Interface, namespace st
 			at:  at,
 			seq: i,
 			f: emit.Finding{
-				Kind:         "change.scale",
+				Kind:         kindScale,
 				Severity:     emit.SeverityInfo,
 				Namespace:    ev.InvolvedObject.Namespace,
 				KindOfObject: ev.InvolvedObject.Kind,

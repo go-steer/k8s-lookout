@@ -113,6 +113,13 @@ func HardeningCommand(deps Deps) checks.Command {
 		Name:    "audit hardening",
 		MCPName: "k8s_audit_hardening",
 		Summary: "Workload security posture: containers running privileged or holding node-root capabilities, pods sharing the host network/PID/IPC namespaces, hostPath mounts, default-ServiceAccount tokens that something actually uses, and namespaces with no Pod Security Admission enforcement. Judges every pod-template owner in scope — Deployments, StatefulSets, DaemonSets, CronJobs, unowned Jobs and unowned Pods — plus the namespaces around them. Scope with --namespace or -A; scanned counts pod templates examined, the namespaces note counts namespaces.",
+		Kinds: []checks.KindField{
+			checks.Kind(kindPrivileged, "a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise", emit.SeverityWarning),
+			checks.Kind(kindHostNamespace, "the pod shares the node's network, PID, or IPC namespace", emit.SeverityWarning),
+			checks.Kind(kindHostPath, "the pod mounts a host path; warning when it is writable, info when read-only", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindDefaultSAMount, "the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it", emit.SeverityWarning),
+			checks.Kind(kindPodSecurity, "the namespace enforces no Pod Security Admission level, so none of the above is prevented", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "containers", Doc: "containers implicated by the finding — those running privileged, or holding a node-root capability"},
 			{Name: "container_names", Doc: "their names, capped at 8 with a +N more tail"},

@@ -57,6 +57,10 @@ func IPSpaceCommand(deps Deps) checks.Command {
 			{Name: "all", Type: emit.FlagBool, Default: "false",
 				Help: "exploratory dump: emit every range regardless of utilization (info severity below 80%), sorted by pct descending"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("ipspace.range", "a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.CloudUnavailableKind(),
+		},
 		Output: append([]checks.OutputField{
 			{Name: "cidr", Doc: "the range's CIDR block"},
 			{Name: "purpose", Doc: "what the range allocates: pods, services, or nodes"},

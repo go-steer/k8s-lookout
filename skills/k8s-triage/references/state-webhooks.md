@@ -28,6 +28,18 @@ MCP tool: `k8s_admission_webhooks`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
+| `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
+| `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
+| `webhook.ca_expiring` | warning | the webhook's caBundle expires within --cert-warn |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

@@ -41,6 +41,9 @@ func DemoCommand() checks.Command {
 			{Name: "fail", Type: emit.FlagBool, Default: "false", Help: "return a runtime error after emitting"},
 			{Name: "hang", Type: emit.FlagBool, Default: "false", Help: "block until the --timeout context fires"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("demo.finding", "a synthetic finding; carries no claim about any cluster", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "index", Doc: "1-based ordinal of the synthetic finding"},
 		},

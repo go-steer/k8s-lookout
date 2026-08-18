@@ -114,10 +114,15 @@ func VerifyContractStdin(t *testing.T, c checks.Command, stdin string, args ...s
 //   - the summary's findings count equals the number of finding
 //     lines;
 //   - every finding key is either an envelope field or declared in
-//     the command's Output glossary.
+//     the command's Output glossary;
+//   - every finding's kind= is declared in the command's Kinds ledger
+//     (issue #278) and its severity= is one the ledger allows for that
+//     kind.
 //
-// It deliberately does not require every declared field to appear —
-// most fields are conditional on what the scan found.
+// It deliberately does not require every declared field or kind to
+// appear — most are conditional on what the scan found. Declaring a
+// kind no run produces is honest; emitting one no declaration covers
+// is the drift this catches.
 func Verify(c checks.Command, stdout string, format emit.Format) error {
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	if len(lines) == 0 || lines[len(lines)-1] == "" {
@@ -152,20 +157,66 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 		return fmt.Errorf("summary reports findings=%d but %d finding lines precede it", reported, len(findings))
 	}
 	for _, line := range findings {
-		keys, err := lineKeys(line, format)
+		fields, err := lineFields(line, format)
 		if err != nil {
 			return fmt.Errorf("finding line %q: %w", line, err)
 		}
-		if len(keys) == 0 {
+		if len(fields) == 0 {
 			return fmt.Errorf("finding line %q: empty record", line)
 		}
-		for _, k := range keys {
-			if !declared[k] {
-				return fmt.Errorf("finding line %q: field %q is not an envelope field and not declared in the output glossary", line, k)
+		var kind, severity string
+		for _, f := range fields {
+			if !declared[f.Key] {
+				return fmt.Errorf("finding line %q: field %q is not an envelope field and not declared in the output glossary", line, f.Key)
 			}
+			switch f.Key {
+			case "kind":
+				kind = f.Value
+			case "severity":
+				severity = f.Value
+			}
+		}
+		if err := verifyKind(c, kind, severity); err != nil {
+			return fmt.Errorf("finding line %q: %w", line, err)
 		}
 	}
 	return nil
+}
+
+// verifyKind holds one emitted finding to the command's Kinds ledger.
+// The ledger is the vocabulary the command's docs, glossary page and
+// consumers are generated from, so a kind that never reaches it is a
+// claim nobody downstream can read.
+func verifyKind(c checks.Command, kind, severity string) error {
+	if kind == "" {
+		return fmt.Errorf("no kind= field")
+	}
+	k, ok := c.EmitsKind(kind)
+	if !ok {
+		return fmt.Errorf("kind %q is not declared in the Kinds ledger (issue #278); add checks.Kind(%q, <one-line claim>, %s) to `%s`",
+			kind, kind, severityConst(severity), c.Name)
+	}
+	for _, s := range k.Severity {
+		if s == severity {
+			return nil
+		}
+	}
+	return fmt.Errorf("kind %q emitted at severity %q, but its ledger entry declares only %s — widen the declaration or fix the emitter",
+		kind, severity, strings.Join(k.Severity, "|"))
+}
+
+// severityConst spells a severity back as the emit constant, so the
+// failure message is the line the contributor can paste.
+func severityConst(severity string) string {
+	switch severity {
+	case emit.SeverityCritical:
+		return "emit.SeverityCritical"
+	case emit.SeverityWarning:
+		return "emit.SeverityWarning"
+	case emit.SeverityInfo:
+		return "emit.SeverityInfo"
+	}
+	return "<severity>"
 }
 
 // parseSummary validates the summary line's shape and returns its
@@ -206,28 +257,22 @@ func parseSummary(line string, format emit.Format) (findings int, notes []string
 	}
 }
 
-// lineKeys returns the ordered keys of one finding line.
-func lineKeys(line string, format emit.Format) ([]string, error) {
+// lineFields returns the fields of one finding line. Order is
+// preserved for logfmt and arbitrary for JSON; nothing here depends on
+// it, only on the set of keys and on kind/severity's values.
+func lineFields(line string, format emit.Format) ([]emit.Field, error) {
 	if format == emit.FormatJSON {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			return nil, err
 		}
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
+		fields := make([]emit.Field, 0, len(m))
+		for k, v := range m {
+			fields = append(fields, emit.Field{Key: k, Value: fmt.Sprint(v)})
 		}
-		return keys, nil
+		return fields, nil
 	}
-	pairs, err := parseLogfmt(line)
-	if err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		keys = append(keys, p.Key)
-	}
-	return keys, nil
+	return parseLogfmt(line)
 }
 
 // parseLogfmt splits one emitted logfmt line back into ordered

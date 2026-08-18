@@ -102,6 +102,9 @@ func NetpolCommand(deps Deps) checks.Command {
 		Name:    "audit netpol",
 		MCPName: "k8s_audit_netpol",
 		Summary: "NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.",
+		Kinds: []checks.KindField{
+			checks.Kind(kindNetpolMissing, "nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default", emit.SeverityWarning, emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "policies", Doc: "NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one"},
 			{Name: "total_policies", Doc: "NetworkPolicies in the namespace in either direction, so an egress-only namespace does not read as an empty one"},

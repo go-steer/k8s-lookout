@@ -28,6 +28,27 @@ MCP tool: `k8s_state_edges`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `edge.missing_ref` | critical | a referenced ConfigMap, Secret, ServiceAccount, TLS secret, IngressClass, StorageClass, or governing Service does not exist |
+| `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
+| `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
+| `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
+| `edge.selector_empty` | critical | a Service selector aimed at this workload selects zero pods |
+| `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
+| `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
+| `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |
+| `edge.endpoints_unready` | critical, warning | the endpoint ready-count disagrees with the selected pods (stale or lagging slices); critical at zero ready |
+| `edge.backend_missing` | critical | an Ingress backend service, or the port it names, does not exist |
+| `edge.cert_expired` | critical | a TLS certificate's NotAfter is in the past |
+| `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn |
+| `edge.cert_invalid` | warning | tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls |
+| `edge.rbac_dangling` | warning | a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

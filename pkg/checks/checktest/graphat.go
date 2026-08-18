@@ -37,6 +37,9 @@ func GraphAtCommand() checks.Command {
 		Summary:     "Resolve the topology graph as of --at from a sentinel store; test scaffolding only.",
 		Hidden:      true,
 		GraphBacked: true,
+		Kinds: []checks.KindField{
+			checks.Kind("graph.at", "the shape of the topology graph as of --at — a measurement of the resolution, not a defect", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "nodes", Doc: "node count of the resolved point-in-time graph"},
 			{Name: "edges", Doc: "edge count of the resolved point-in-time graph"},

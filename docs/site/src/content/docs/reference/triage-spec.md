@@ -35,6 +35,16 @@ lookout triage spec <Kind>/[<namespace>/]<name> [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `spec.resource` | info | the object itself: metadata, owner, and the kind-specific highlights (one per target) |
+| `spec.container` | info | one container of the target: image, resources, ports, probes, env (one per container) |
+| `spec.condition` | warning | a status condition of the target that is not in its nominal state |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

@@ -17,6 +17,8 @@ package checks
 import (
 	"sort"
 	"sync"
+
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
 // Registry holds Command declarations. The package-level Default
@@ -117,6 +119,65 @@ func (r *Registry) TopLevel() []Command {
 	for _, c := range r.All() {
 		if c.Group() == "" && !c.Hidden {
 			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// KindEntry is one row of the cluster-wide finding-kind glossary: the
+// claim, every severity it can carry, and every command that emits it.
+// Commands is plural because compositions re-emit their stages'
+// findings verbatim — `scan`, `health` and `bundle` all speak kinds
+// they do not own — and a reader hitting an unfamiliar kind in a
+// report wants the full list of commands that could have produced it.
+type KindEntry struct {
+	KindField
+	Commands []string
+}
+
+// KindGlossary is the union of every registered command's Kinds
+// ledger, sorted by name: the whole vocabulary lookout can emit, in
+// one list, derived from the declarations rather than restated
+// alongside them (issue #278). It is what the generated glossary page
+// renders and what a consumer building a kind-aware pipeline reads.
+//
+// Hidden commands are included. A kind is a kind whether or not the
+// command that emits it is advertised, and a report carrying one is no
+// less in need of an explanation.
+func (r *Registry) KindGlossary() []KindEntry {
+	byName := map[string]*KindEntry{}
+	for _, c := range r.All() {
+		for _, k := range c.Kinds {
+			e, ok := byName[k.Name]
+			if !ok {
+				e = &KindEntry{KindField: k}
+				byName[k.Name] = e
+			}
+			e.Severity = mergeSeverities(e.Severity, k.Severity)
+			e.Commands = append(e.Commands, c.Name)
+		}
+	}
+	out := make([]KindEntry, 0, len(byName))
+	for _, e := range byName {
+		sort.Strings(e.Commands)
+		out = append(out, *e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// mergeSeverities unions two severity sets back into the ledger's
+// worst-first order, so a kind two commands declare differently still
+// reads the way a single declaration would.
+func mergeSeverities(a, b []string) []string {
+	have := map[string]bool{}
+	for _, s := range append(append([]string{}, a...), b...) {
+		have[s] = true
+	}
+	var out []string
+	for _, s := range emit.Severities() {
+		if have[s] {
+			out = append(out, s)
 		}
 	}
 	return out
