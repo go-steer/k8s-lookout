@@ -167,10 +167,11 @@ func TestDriftStatusOnlyCoManagersIgnored(t *testing.T) {
 	}
 }
 
-// TestDriftMajorityTieBreak: equal spec-leaf totals resolve to the
-// lexicographically smallest manager, deterministically, and the
-// resolved manager is never reported as drift.
-func TestDriftMajorityTieBreak(t *testing.T) {
+// TestDriftTiedLeadIsNotAMajority: a 50/50 split has no majority
+// owner, so nothing is emitted — but the named candidate still breaks
+// to the lexicographically smallest manager, deterministically, so the
+// summary tells the operator the same thing on every run.
+func TestDriftTiedLeadIsNotAMajority(t *testing.T) {
 	cmd := stab.DriftCommand(testDeps(
 		deployment("prod", "api",
 			entry("b-manager", metav1.ManagedFieldsOperationApply, ptr(ago(time.Hour)), termGraceSpec),
@@ -178,13 +179,101 @@ func TestDriftMajorityTieBreak(t *testing.T) {
 		),
 	))
 	res := checktest.Run(t, cmd)
-	recs := findingLines(t, res.Stdout)
-	if len(recs) != 1 || recs[0]["manager"] != "b-manager" {
-		t.Fatalf("want exactly one finding for b-manager (a-manager wins the tie), got %v", recs)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if recs := findingLines(t, res.Stdout); len(recs) != 0 {
+		t.Fatalf("a tied lead is not a majority — want no findings, got %v", recs)
 	}
 	sum := summaryLine(t, res.Stdout)
-	if sum["manager"] != "a-manager" || sum["detection"] != "majority" {
-		t.Errorf("summary = %v, want manager=a-manager detection=majority", sum)
+	want := map[string]string{
+		"scanned":          "1",
+		"detection":        "none",
+		"detection_reason": "no-majority-manager",
+		"candidate":        "a-manager",
+		"share":            "50%",
+	}
+	for k, v := range want {
+		if sum[k] != v {
+			t.Errorf("summary[%s] = %q, want %q (summary: %v)", k, sum[k], v, sum)
+		}
+	}
+	if _, ok := sum["manager"]; ok {
+		t.Errorf("summary must not name a resolved manager when detection=none: %v", sum)
+	}
+}
+
+// TestDriftPluralityIsNotAMajority (#286): the leading manager on a
+// cluster with no GitOps controller is a plurality, not a majority.
+// Before the floor, whoever happened to own the most fields was
+// crowned the manager and every other owner was reported as drift
+// against it — the check was most confidently wrong exactly where it
+// had the least evidence. Now it declines, and names the candidate.
+func TestDriftPluralityIsNotAMajority(t *testing.T) {
+	// 4 leaves for the leader, 3 + 3 for the others: 40%, a clear
+	// plurality and nowhere near a majority.
+	cmd := stab.DriftCommand(testDeps(
+		deployment("prod", "api",
+			entry("m-leader", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)),
+				`{"f:spec":{"f:paused":{},"f:replicas":{},"f:minReadySeconds":{},"f:revisionHistoryLimit":{}}}`),
+			entry("z-second", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)),
+				`{"f:spec":{"f:progressDeadlineSeconds":{},"f:strategy":{"f:type":{}},"f:selector":{}}}`),
+			entry("a-third", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)),
+				`{"f:spec":{"f:template":{"f:spec":{"f:dnsPolicy":{},"f:restartPolicy":{},"f:schedulerName":{}}}}}`),
+		),
+	))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if recs := findingLines(t, res.Stdout); len(recs) != 0 {
+		t.Fatalf("a plurality is not a majority — want no findings, got %v", recs)
+	}
+	sum := summaryLine(t, res.Stdout)
+	// The candidate is the field leader, not the lexicographic
+	// winner — the tie-break only applies to an actual tie.
+	if sum["detection"] != "none" || sum["detection_reason"] != "no-majority-manager" ||
+		sum["candidate"] != "m-leader" || sum["share"] != "40%" {
+		t.Errorf("summary = %v, want detection=none detection_reason=no-majority-manager candidate=m-leader share=40%%", sum)
+	}
+}
+
+// TestDriftBareMajorityIsAccepted: the floor is strict — one field
+// past half is enough, and the accepted share rides the summary.
+func TestDriftBareMajorityIsAccepted(t *testing.T) {
+	// 6 gitops leaves against 5 others: 55%.
+	cmd := stab.DriftCommand(testDeps(
+		deployment("prod", "api",
+			entry("argocd-controller", metav1.ManagedFieldsOperationApply, ptr(ago(time.Hour)), gitopsSpec),
+			entry("rogue-operator", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Minute)),
+				`{"f:spec":{"f:paused":{},"f:minReadySeconds":{},"f:revisionHistoryLimit":{},"f:progressDeadlineSeconds":{},"f:strategy":{"f:type":{}}}}`),
+		),
+	))
+	res := checktest.Run(t, cmd)
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 1 || recs[0]["manager"] != "rogue-operator" {
+		t.Fatalf("want one finding for rogue-operator, got %v", recs)
+	}
+	sum := summaryLine(t, res.Stdout)
+	if sum["manager"] != "argocd-controller" || sum["detection"] != "majority" || sum["share"] != "55%" {
+		t.Errorf("summary = %v, want manager=argocd-controller detection=majority share=55%%", sum)
+	}
+}
+
+// TestDriftDeclaredManagerShare: --manager skips the floor entirely —
+// the operator's declaration is authoritative — but the share is
+// still reported, because a declared manager owning almost nothing is
+// itself the warning that the findings are mostly legitimate owners.
+func TestDriftDeclaredManagerShare(t *testing.T) {
+	cmd := stab.DriftCommand(testDeps(driftMixed()...))
+	res := checktest.Run(t, cmd, "--manager=flux-controller")
+	sum := summaryLine(t, res.Stdout)
+	// flux-controller owns nothing in the fixture at all.
+	if sum["detection"] != "declared" || sum["share"] != "0%" {
+		t.Errorf("summary = %v, want detection=declared share=0%%", sum)
+	}
+	if _, ok := sum["detection_reason"]; ok {
+		t.Errorf("detection_reason belongs to detection=none only: %v", sum)
 	}
 }
 
@@ -330,11 +419,16 @@ func TestDriftDetectionNone(t *testing.T) {
 				t.Fatalf("want no findings, got %v", recs)
 			}
 			sum := summaryLine(t, res.Stdout)
-			if sum["detection"] != "none" {
-				t.Errorf("summary = %v, want detection=none", sum)
+			if sum["detection"] != "none" || sum["detection_reason"] != "no-spec-fields-in-scope" {
+				t.Errorf("summary = %v, want detection=none detection_reason=no-spec-fields-in-scope", sum)
 			}
 			if _, ok := sum["manager"]; ok {
 				t.Errorf("no manager note when nothing was resolved, got %v", sum)
+			}
+			// No candidate to name when nobody owns anything —
+			// the no-majority case is the only one that has one.
+			if _, ok := sum["candidate"]; ok {
+				t.Errorf("no candidate note when nothing owns a spec field, got %v", sum)
 			}
 		})
 	}

@@ -1,3 +1,3 @@
 kind=drift.manual_edit severity=critical namespace=prod kind_of_object=Deployment name=api reason=KubectlManualEdit message="manager \"kubectl-edit\" (Update) owns 2 drifted spec fields: spec.replicas +1 more, last write 3h20m ago" manager=kubectl-edit operation=Update tool=kubectl fields=spec.replicas,spec.template.spec.containers[app].image field_count=2 age=3h20m
 kind=drift.manual_edit severity=warning namespace=prod kind_of_object=Deployment name=worker reason=OutOfBandManager message="manager \"helm-legacy\" (Update) owns 1 drifted spec field: spec.template.spec.terminationGracePeriodSeconds" manager=helm-legacy operation=Update fields=spec.template.spec.terminationGracePeriodSeconds field_count=1
-scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority
+scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority share=86%
