@@ -27,15 +27,16 @@ lookout stab drift
 lookout stab drift --namespace=prod --manager=argocd-controller
 ```
 
-The GitOps manager is auto-detected (majority owner of spec fields)
-unless `--manager` declares it; the summary line reports which
-(`manager=… detection=declared|majority|none`). Findings name the
-foreign manager, the operation, and the exact spec paths it owns:
+The GitOps manager is auto-detected (owner of a strict majority of the
+spec fields in scope) unless `--manager` declares it; the summary line
+reports which (`manager=… detection=declared|majority share=…`).
+Findings name the foreign manager, the operation, and the exact spec
+paths it owns:
 
 ```lookout-golden
 kind=drift.manual_edit severity=critical namespace=prod kind_of_object=Deployment name=api reason=KubectlManualEdit message="manager \"kubectl-edit\" (Update) owns 2 drifted spec fields: spec.replicas +1 more, last write 3h20m ago" manager=kubectl-edit operation=Update tool=kubectl fields=spec.replicas,spec.template.spec.containers[app].image field_count=2 age=3h20m
 kind=drift.manual_edit severity=warning namespace=prod kind_of_object=Deployment name=worker reason=OutOfBandManager message="manager \"helm-legacy\" (Update) owns 1 drifted spec field: spec.template.spec.terminationGracePeriodSeconds" manager=helm-legacy operation=Update fields=spec.template.spec.terminationGracePeriodSeconds field_count=1
-scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority
+scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority share=86%
 ```
 
 - `reason=KubectlManualEdit` (a kubectl-shaped manager string,
@@ -54,8 +55,17 @@ scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority
 - `fields` are the drifted spec paths — names, never values. Diff
   the paths against the Git manifest to see the intended state.
 - `findings=0` with `detection=majority|declared` on the summary
-  means the scope is clean; `detection=none` means the scope owns no
-  GitOps-managed spec fields at all — not the same thing.
+  means the scope is clean. `detection=none` is a different answer:
+  no manager was resolved, so nothing was measured. Read
+  `detection_reason` — `no-spec-fields-in-scope` (nothing in scope
+  owns a spec field) or `no-majority-manager` (the leading owner,
+  named in `candidate` with its `share`, holds 50% or less; the
+  normal shape of a cluster with no GitOps controller). If the
+  candidate *is* the GitOps controller, re-run with
+  `--manager=<candidate>`.
+- `share` rides every run. On a declared manager it is the sanity
+  check: `detection=declared share=4%` means most of the findings are
+  other legitimate owners, not drift.
 
 ## What changed: `triage changes`
 

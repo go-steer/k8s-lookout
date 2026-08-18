@@ -337,6 +337,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed once per process rather than once per `Run`, so a restart
   loop no longer multiplies the log line for every informer error.
 
+- `stab drift`'s auto-detected GitOps manager must now own a real
+  majority (>50%) of the spec fields in scope, and the summary says
+  what actually happened. It used to crown whichever manager owned the
+  most fields with no floor at all and label the result
+  `detection=majority` — so on a cluster with no GitOps controller,
+  where every manager owns a small slice, the "manager" resolved to
+  whatever happened to be ahead (often `kubectl-client-side-apply`) and
+  every other owner was reported as drift against it. The check was at
+  its most confident exactly where it had the least evidence. Below the
+  floor it now resolves to `detection=none` and emits nothing, the same
+  shape a scope with no spec fields already had, and names what it
+  found: `detection_reason=no-majority-manager candidate=<manager>
+  share=<pct>`. If the candidate is your GitOps controller, pass it to
+  `--manager` — the declared path is unchanged and still authoritative.
+
+  New summary notes on every run: `share` (the resolved manager's
+  percentage of the spec fields in scope — a *declared* manager at
+  `share=3%` means the findings are mostly other legitimate owners) and
+  `detection_reason` on `detection=none`.
+
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),
   as §4.2 has always specified. `state edges`, `state wi`, `triage
   delta`, `triage logs`, and the `triage` positional-target parser

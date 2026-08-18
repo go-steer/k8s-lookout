@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +39,41 @@ var driftKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "Daemo
 
 const driftKindNames = "Deployment|StatefulSet|DaemonSet"
 
+// managerMinShare is the floor an auto-detected GitOps manager must
+// clear: a strict majority of every spec leaf field owned in scope.
+// Not a tunable — `--manager` is already the escape hatch for a
+// cluster whose real GitOps controller does not own half the fields,
+// and a knob that lowers the bar for believing a guess is a knob for
+// manufacturing drift.
+const managerMinShare = 0.5
+
+// The detection_reason values: why auto-detection resolved to nothing.
+// Explicit sentinels (§2), never empty-and-silent.
+const (
+	// detectionNoSpecFields: nothing in scope owns any spec field —
+	// an empty namespace, or objects the API server has no
+	// managedFields for.
+	detectionNoSpecFields = "no-spec-fields-in-scope"
+	// detectionNoMajority: a leading candidate exists but does not
+	// clear managerMinShare, so there is no manager to measure drift
+	// against. The candidate and its share ride the summary.
+	detectionNoMajority = "no-majority-manager"
+)
+
+// managerShare is one manager's fraction of every spec leaf field
+// owned across the scanned objects.
+func managerShare(ownedByManager, ownedTotal int) float64 {
+	if ownedTotal <= 0 {
+		return 0
+	}
+	return float64(ownedByManager) / float64(ownedTotal)
+}
+
+// formatShare renders a share as a rounded whole percent.
+func formatShare(share float64) string {
+	return fmt.Sprintf("%d%%", int(math.Round(share*100)))
+}
+
 // DriftCommand builds `lookout stab drift` (§5 tool matrix row,
 // RESPECCED): out-of-band drift vs the GitOps manager, read from
 // managedFields. The honesty constraint is structural, not stylistic:
@@ -53,7 +89,7 @@ func DriftCommand(deps Deps) checks.Command {
 		Summary: "Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers. Reports manager strings (tool names, not people); --identity additionally resolves each drift write to the audited principal via the cloud provider's audit trail (GKE Cloud Audit Logs), reporting an explicit unavailable on clusters without one. Default scope: all namespaces; scanned counts workload objects examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "manager", Type: emit.FlagString, Default: "",
-				Help: "the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning the most spec leaf fields summed across the scanned objects, ties broken to the lexicographically smallest"},
+				Help: "the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning a strict majority (>50%) of the spec leaf fields summed across the scanned objects. No manager clears the majority — the usual shape of a cluster with no GitOps controller at all — and the scan resolves to detection=none and emits nothing rather than measuring drift against a guess; the summary then names the leading candidate (ties to the lexicographically smallest) and its share, to pass back here if it is in fact the GitOps controller"},
 			{Name: "identity", Type: emit.FlagBool, Default: "false",
 				Help: "resolve each finding's last drift write to the audited principal (who ran it) via the cloud provider's audit trail; requires a provider with the audit capability (GKE: Cloud Audit Logs admin-activity read), otherwise the summary line reports an explicit unavailable"},
 		},
@@ -62,7 +98,10 @@ func DriftCommand(deps Deps) checks.Command {
 		},
 		Output: []checks.OutputField{
 			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager"},
-			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected), or none (scope owns no spec fields)"},
+			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected owner of >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted)"},
+			{Name: "detection_reason", Doc: "summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field) or no-majority-manager (a leading candidate exists but owns 50% or less)"},
+			{Name: "candidate", Doc: "summary note on detection=none/no-majority-manager: the leading manager that fell short of the majority — pass it to --manager if it is in fact the GitOps controller"},
+			{Name: "share", Doc: "summary note: the resolved manager's (or, on detection=none, the candidate's) percentage of every spec leaf field owned across the scanned objects, rounded. A declared manager with a low share means most findings are other legitimate owners"},
 			{Name: "operation", Doc: "managedFields operation of the foreign manager's last write: Apply or Update"},
 			{Name: "tool", Doc: "client tool recognized from the manager string (kubectl for kubectl-edit/kubectl-patch/kubectl-*)"},
 			{Name: "fields", Doc: "compact spec paths the foreign manager owns (e.g. spec.template.spec.containers[app].image), capped at 8 with a +N more tail"},
@@ -142,31 +181,53 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	}
 
 	// Resolve the GitOps manager: declared wins; otherwise the
-	// manager owning the most spec leaf fields summed across the
-	// scanned objects, ties to the lexicographically smallest. A
-	// scope owning no spec fields at all resolves to nothing —
-	// detection=none, no findings, no guessing.
+	// manager owning a MAJORITY of the spec leaf fields summed across
+	// the scanned objects. A scope owning no spec fields at all
+	// resolves to nothing — detection=none, no findings, no guessing.
 	totals := map[string]int{}
+	owned := 0
 	for _, o := range objs {
 		for mgr, own := range o.owners {
 			totals[mgr] += len(own.paths)
+			owned += len(own.paths)
 		}
 	}
 	if len(totals) == 0 {
-		if err := inv.Out.Note("detection", "none"); err != nil {
-			return 0, err
-		}
-		return len(objs), nil
+		return len(objs), undetectedManager(inv, detectionNoSpecFields, "", 0)
 	}
 	manager, detection := inv.Flags.String("manager"), "declared"
 	if manager == "" {
-		detection = "majority"
+		// Ties break to the lexicographically smallest manager. Since
+		// the floor below is a STRICT majority, a tie for the lead can
+		// never be accepted — two managers tied at the top are 50% at
+		// best. The tie-break therefore only decides which candidate
+		// the detection=none summary names, which still has to be
+		// deterministic run to run.
 		for mgr, n := range totals {
 			if manager == "" || n > totals[manager] || (n == totals[manager] && mgr < manager) {
 				manager = mgr
 			}
 		}
+		// The floor (#286). Without one the winner needed only to be
+		// first past the other candidates, so on a cluster with no
+		// GitOps controller at all the "manager" resolved to whatever
+		// happened to own the most fields — kubectl-client-side-apply,
+		// or a controller — and everything owned by anything else was
+		// reported as drift against it. The check was most confidently
+		// wrong exactly where it had the least evidence, and the note
+		// called the result a majority when it was a plurality.
+		//
+		// Below the floor we resolve to none and emit nothing: the
+		// same shape the no-spec-fields case already had for "we
+		// cannot tell". The leading candidate and its share ride the
+		// summary so the answer stays actionable — it is precisely
+		// what to pass to --manager if it is in fact the right one.
+		if share := managerShare(totals[manager], owned); share <= managerMinShare {
+			return len(objs), undetectedManager(inv, detectionNoMajority, manager, share)
+		}
+		detection = "majority"
 	}
+	share := managerShare(totals[manager], owned)
 
 	now := deps.now()
 	var hits []driftHit
@@ -215,7 +276,34 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if err := inv.Out.Note("detection", detection); err != nil {
 		return 0, err
 	}
+	// The share rides the accepted cases too. Under --manager it is
+	// the one number that says whether the declared manager is really
+	// running the show: a declared manager at share=3% means the
+	// findings are mostly other legitimate owners, not drift.
+	if err := inv.Out.Note("share", formatShare(share)); err != nil {
+		return 0, err
+	}
 	return len(objs), nil
+}
+
+// undetectedManager writes the detection=none summary: the reason
+// always, plus the leading candidate and its share when there was one.
+// No findings are emitted — with no manager to measure against, every
+// owner would be drift.
+func undetectedManager(inv emit.Invocation, reason, candidate string, share float64) error {
+	if err := inv.Out.Note("detection", "none"); err != nil {
+		return err
+	}
+	if err := inv.Out.Note("detection_reason", reason); err != nil {
+		return err
+	}
+	if candidate == "" {
+		return nil
+	}
+	if err := inv.Out.Note("candidate", candidate); err != nil {
+		return err
+	}
+	return inv.Out.Note("share", formatShare(share))
 }
 
 // driftHit pairs one rendered finding with the object and ownership
