@@ -131,8 +131,11 @@ UAT cases that don't need the full stub-daemon loop:
   `/metrics` exposes Prometheus counters.
 - **`/readyz` is not `/healthz`** — poll both from the first instant the
   port answers. `/healthz` must be 200 throughout; `/readyz` must return
-  **503** with a body naming what it is waiting on (`… (syncing)` or
-  `… (not started)`) until the informers sync, then 200. A run where
+  **503** with a body naming what it is waiting on — `informer caches
+  syncing` / `cluster runner not started` for the unnamed single
+  cluster, `… (syncing)` / `… (not started)` once `--cluster-name` or
+  `--clusters` gives the clusters names — until the informers sync,
+  then 200. A run where
   `/readyz` is 200 on the very first poll proves nothing — restart
   against a cluster with enough objects that the initial LIST is
   observable, or the case is not testing the gate.

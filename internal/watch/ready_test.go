@@ -68,6 +68,45 @@ func TestReadiness_LifecycleOfOneRunner(t *testing.T) {
 	}
 }
 
+// TestReadiness_UnnamedSingleClusterReadsAsAPhase (#321): the default
+// deployment — one sentinel, one cluster, no --cluster-name — has no
+// name for its cluster, and the per-cluster list rendered the hole:
+// `waiting on 1 of 1 cluster(s): [ (not started)]`. The phase is the
+// whole answer there, so say only that.
+func TestReadiness_UnnamedSingleClusterReadsAsAPhase(t *testing.T) {
+	t.Parallel()
+	rd := newReadiness()
+	rd.expect([]string{""})
+
+	ok, why := rd.ready()
+	if ok || why != "cluster runner not started" {
+		t.Fatalf("unstarted: ready=%v why=%q, want the bare phase", ok, why)
+	}
+
+	var synced atomic.Bool
+	rd.set("", synced.Load)
+	if ok, why := rd.ready(); ok || why != "informer caches syncing" {
+		t.Fatalf("unsynced: ready=%v why=%q, want the bare phase", ok, why)
+	}
+
+	synced.Store(true)
+	if ok, why := rd.ready(); !ok || why != "" {
+		t.Fatalf("synced: ready=%v why=%q, want ready with no reason", ok, why)
+	}
+}
+
+// TestReadiness_NamedSingleClusterStillListsIt: --cluster-name is the
+// operator saying the name matters — a one-cluster fleet is still a
+// fleet — so the list form stays. Only the *unnamed* case collapses.
+func TestReadiness_NamedSingleClusterStillListsIt(t *testing.T) {
+	t.Parallel()
+	rd := newReadiness()
+	rd.expect([]string{"prod-east"})
+	if ok, why := rd.ready(); ok || !strings.Contains(why, "1 of 1") || !strings.Contains(why, "prod-east (not started)") {
+		t.Errorf("ready=%v why=%q, want the named list form", ok, why)
+	}
+}
+
 // TestReadiness_PartialFleetIsNotReady is the multi-cluster case the
 // naive "every registered probe is happy" implementation gets wrong: a
 // process responsible for three clusters that has started one is not
