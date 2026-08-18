@@ -140,6 +140,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `state wi` † | GKE Workload Identity KSA↔GSA binding verification |
 | `state volumes` | RWO multi-attach / cross-zone PV locks |
 | `state storage` | why a PersistentVolumeClaim will never bind: missing StorageClass, no cluster default, static-only class, stranded volumes |
+| `state gateway` ‡ | the Gateway API path end to end: GatewayClass → Gateway → listener → HTTPRoute → Service, and every hop that is rejected, unprogrammed, or points at nothing |
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |
@@ -159,6 +160,11 @@ The `audit` rows answer a different question from everything above
 them: not "what is broken now" but "what has no safety net while it is
 still healthy" — a standing claim, `--exemptions`-auditable, meant for
 a scheduled sweep rather than an incident.
+
+‡ reads an optional API group. Discovery decides: the check auto-enables
+where the CRDs are installed, and on a cluster without them emits one
+`crd.unavailable` finding and exits 0 rather than reporting a clean bill
+of health it did not earn.
 
 † needs a cloud provider (the `-gke` image / `-tags gke` build). ~80%
 of the suite is pure client-go and runs on any conformant cluster; the
