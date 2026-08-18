@@ -155,13 +155,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: Install kustomize
+      - name: Install kustomize, if the runner image stops shipping it
         run: |
           set -euo pipefail
+          if command -v kustomize >/dev/null 2>&1; then
+            kustomize version
+            exit 0
+          fi
           cd /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | sudo bash
       - name: Chart matches deploy/*.yaml
-        # verify-helm-parity skips silently when helm or kustomize is
-        # missing, so a contributor without them isn't blocked. Both
-        # are installed above precisely so it can never skip here.
+        # HELM_PARITY_REQUIRE=1 turns the tool-missing skip into a
+        # failure. Without it, a runner image that dropped kustomize
+        # would leave this job green while checking nothing, which is
+        # the exact failure this job exists to prevent.
+        env:
+          HELM_PARITY_REQUIRE: '1'
         run: dev/ci/presubmits/verify-helm-parity
