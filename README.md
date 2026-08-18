@@ -61,6 +61,10 @@ cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+Each image also carries an SPDX SBOM attestation per platform, signed
+with the same keyless identity — swap `verify` for
+`verify-attestation --type spdxjson` to read it back.
+
 **From source** (Go 1.26+):
 
 ```sh

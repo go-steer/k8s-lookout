@@ -74,9 +74,32 @@ cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-`cosign verify` works identically against the `-gke` tags. Release
-binaries are covered by a keyless-signed checksums file attached to
-each release:
+`cosign verify` works identically against the `-gke` tags.
+
+### Read the bill of materials
+
+Every image carries an SPDX SBOM attestation per platform, signed
+keyless with the same identity as the signature — so the "who built
+this" and "what is in it" questions verify through one flow and one
+trust root:
+
+```sh
+cosign verify-attestation ghcr.io/go-steer/lookout:vX.Y.Z \
+  --type spdxjson \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload | @base64d | fromjson | .predicate' > sbom.spdx.json
+```
+
+Two attestations come back, one per platform (`linux/amd64`,
+`linux/arm64`) — a multi-arch index scanned without a platform
+silently describes whichever child matched the scanner's host. This is
+also the checkable form of the [GCP-free
+guarantee](/concepts/portability/): the default flavor's SBOM contains
+no cloud SDK, and the `-gke` flavor's does.
+
+Release binaries are covered by a keyless-signed checksums file
+attached to each release:
 
 ```sh
 cosign verify-blob lookout_vX.Y.Z_SHA256SUMS \

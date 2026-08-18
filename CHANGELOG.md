@@ -327,6 +327,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ServiceMonitor` is a CRD and the base bundle must still apply
   cleanly on a cluster without prometheus-operator.
 
+- Published images now carry an SPDX SBOM attestation, signed keyless
+  with the same Fulcio identity as the image signature — so "who built
+  this" and "what is in it" verify through one flow and one trust
+  root:
+
+  ```sh
+  cosign verify-attestation ghcr.io/go-steer/lookout:vX.Y.Z \
+    --type spdxjson \
+    --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  One attestation per platform, both flavors. A multi-arch index
+  scanned without a platform silently describes whichever child
+  matched the scanner's own host, so an index-level SBOM would be
+  wrong for half its users; the release job verifies that exactly two
+  attestations come back before it declares the release good. Doing
+  both flavors makes the GCP-free guarantee externally checkable for
+  the first time: the default image's SBOM contains no cloud SDK, and
+  the `-gke` image's does.
+
 ### Fixed
 
 - The sentinel serves a real readiness probe. `--metrics-addr` now
