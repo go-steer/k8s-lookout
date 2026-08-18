@@ -131,7 +131,7 @@ jobs:
             oci_description: 'k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # #146 guard: deploy/51's image pin must be the version being
       # released — it sat at v0.1.0 for eleven releases because
@@ -166,13 +166,13 @@ jobs:
       # runner. Without this, buildx --platform fails for non-native
       # architectures.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -201,7 +201,7 @@ jobs:
       # from a release tag to the image it produced.
       - name: Compute image tags + labels + annotations
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         env:
           # For MULTI-ARCH images, GHCR pulls its package-page
           # description from manifest INDEX annotations, not from
@@ -285,7 +285,7 @@ jobs:
       # for the default flavor (GCP-free) and `allproviders` for -gke.
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -447,9 +447,9 @@ jobs:
     if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -538,7 +538,7 @@ jobs:
             --bundle "dist/lookout_${VERSION}_SHA256SUMS.sigstore.json" \
             "dist/lookout_${VERSION}_SHA256SUMS"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-binaries
           path: dist/*
@@ -591,8 +591,8 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
       - uses: sigstore/cosign-installer@v3
       - name: Chart version matches the tag
         run: |
@@ -659,8 +659,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-binaries
           path: dist
