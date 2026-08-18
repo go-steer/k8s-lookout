@@ -17,6 +17,7 @@ package emit
 import (
 	"flag"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -51,17 +52,37 @@ type FlagSpec struct {
 	Help    string
 }
 
+// DefaultTimeout is the --timeout every command gets unless it
+// declares its own (RunConfig.TimeoutDefault / checks.Command
+// .TimeoutDefault). It is deliberately short: a single check is one
+// or two List passes, and a read that has not answered in ten seconds
+// is more useful as a timeout than as a hang.
+const DefaultTimeout = 10 * time.Second
+
 // CommonFlags returns the §4.2 flags every command accepts. They are
 // parsed once by Run into a Scope; checks never see them as raw
 // flags.
-func CommonFlags() []FlagSpec {
+func CommonFlags() []FlagSpec { return CommonFlagsWith(0) }
+
+// CommonFlagsWith is CommonFlags with the --timeout default replaced
+// by timeout when it is positive. A composition that runs a dozen
+// checks in one invocation cannot live inside the single-check budget,
+// and the honest place to say so is the default rendered in --help,
+// the MCP schema, and the reference docs — not a value the runner
+// substitutes behind the documentation's back. Every surface that
+// renders a command's common flags goes through
+// checks.Command.CommonFlags, which calls this.
+func CommonFlagsWith(timeout time.Duration) []FlagSpec {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
 	return []FlagSpec{
 		{Name: "namespace", Type: FlagString, Default: "", Help: "limit the scan to one namespace"},
 		{Name: "A", Type: FlagBool, Default: "false", Help: "scan all namespaces"},
 		{Name: "workload", Type: FlagString, Default: "", Help: "target one workload as <Kind>/<namespace>/<name>, e.g. Deployment/prod/api"},
 		{Name: "since", Type: FlagDuration, Default: "0s", Help: "how far back to look (0 = command default)"},
 		{Name: "format", Type: FlagString, Default: "logfmt", Help: "output format: logfmt|json (one record per line either way)"},
-		{Name: "timeout", Type: FlagDuration, Default: "10s", Help: "abort the invocation after this long (exit 1)"},
+		{Name: "timeout", Type: FlagDuration, Default: timeout.String(), Help: "abort the invocation after this long (exit 1)"},
 		{Name: "exemptions", Type: FlagString, Default: "", Help: "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped"},
 	}
 }
@@ -182,6 +203,42 @@ func ValidateGraphBackedSpecs(specs []FlagSpec) error {
 		return err
 	}
 	return registerSpecs(fs, specs)
+}
+
+// DefaultFlags returns the FlagValues a command sees when it is
+// invoked with no flags at all: every spec registered, each at its
+// declared default. specs must be the command's COMPLETE set (common
+// flags included, history flags too when it is graph-backed) —
+// checks.Command.DefaultFlags assembles that and is what callers
+// should use.
+//
+// This exists for compositions. `lookout scan` runs registered
+// commands by building a child emit.Invocation and calling
+// Command.Run directly, which means it has to supply a FlagValues the
+// child can read any of its own flags out of. It supplies the
+// defaults because the composition, not the operator, chose to run
+// that check: there is no argv for a stage.
+// Overrides set individual flags to a non-default value, parsed
+// exactly as `--name=value` would be — for the few values a
+// composition genuinely passes down rather than defaulting.
+func DefaultFlags(specs []FlagSpec, overrides ...Field) (FlagValues, error) {
+	fs := flag.NewFlagSet("defaults", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := registerSpecs(fs, specs); err != nil {
+		return FlagValues{}, err
+	}
+	if err := fs.Parse(nil); err != nil {
+		return FlagValues{}, err
+	}
+	for _, o := range overrides {
+		if fs.Lookup(o.Key) == nil {
+			return FlagValues{}, fmt.Errorf("flag --%s was not declared", o.Key)
+		}
+		if err := fs.Set(o.Key, o.Value); err != nil {
+			return FlagValues{}, fmt.Errorf("flag --%s=%s: %w", o.Key, o.Value, err)
+		}
+	}
+	return FlagValues{fs: fs}, nil
 }
 
 // FlagValues gives checks typed access to their command-specific

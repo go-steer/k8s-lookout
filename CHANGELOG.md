@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New command `scan` (MCP `k8s_scan`): the zero-argument entry point.
+  "Something is wrong with this cluster" is the question people and
+  agents actually arrive with, and until now answering it required
+  already knowing which of thirty-odd commands to reach for. `lookout
+  scan` needs nothing but a kubeconfig.
+
+  Stage 1 runs every target-free incident check — `triage delta`,
+  `state webhooks`, `state volumes`, `state storage`, `state gateway`,
+  `state wi`, `stab drift` — into one stream under one envelope, each
+  finding stamped `check=<command>`, which is also the command to run
+  for the detail behind it. Stage 2 then drills into the dependency
+  edges of every workload stage 1 flagged at warning or above: one
+  cluster List pass and N in-memory `state edges` evaluations, with
+  each finding rolled up to its outermost controller so twenty
+  crashlooping pods of one Deployment are one drill-down, not twenty.
+  `--max-drilldown` bounds it (default 20) and reports what it
+  dropped. The output is the standard §4.2 envelope, so `lookout scan
+  | lookout findings diff --store=...` works with no glue.
+
+  `scan` reports **incidents** — things that are broken now and that
+  clear themselves when fixed. The posture groups are one flag away
+  (`--include=audit`, `cloud`, `perf`, or `all`) and the groups left
+  out are named in the summary's `skipped=` note so they stay
+  discoverable while off. They are off by default because posture
+  findings never self-clear: defaulting them on would both flood a
+  healthy cluster's first run and swamp the `findings diff` transition
+  stream with a flat backlog.
+
+  A scan that could not run something says so rather than reporting a
+  clean bill of health it did not earn: a check that declines the
+  invocation becomes an info `scan.check_skipped`, one that errors
+  becomes a warning `scan.check_failed` without voiding the other
+  twelve's findings, a timeout emits `scan.incomplete` naming the
+  checks left unrun, and stages that degraded (no cloud provider, no
+  Gateway API) are rolled up into the `unavailable=` summary note.
+
+  Unlike `bundle` and `health`, which compose a hand-written list of
+  Go calls and have therefore never picked up a check added after they
+  were written, `scan` composes the command **registry**. A contract
+  test requires every visible command to be either in scan's default
+  set or in its exclusion table with a stated reason, so adding a
+  check without deciding whether a bare scan should run it fails CI.
+
 - New command `state gateway` (MCP `k8s_gateway_routes`): the Gateway
   API path end to end — GatewayClass → Gateway → listener → HTTPRoute
   → Service — reporting every hop that is rejected, unprogrammed, or

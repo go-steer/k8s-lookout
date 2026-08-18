@@ -59,6 +59,7 @@ command takes a positional argument). The current surface:
 
 | Tool | Command |
 | --- | --- |
+| `k8s_scan` | [`scan`](/reference/scan/) |
 | `k8s_cluster_health` | [`health`](/reference/health/) |
 | `k8s_triage_workload` | [`bundle`](/reference/bundle/) |
 | `k8s_list_resources` | [`triage list`](/reference/triage-list/) |

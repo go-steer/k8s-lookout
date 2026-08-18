@@ -96,6 +96,12 @@ type RunConfig struct {
 	// commands leave it false and reject --at as an unknown flag
 	// (§4.2: graph-backed commands ADDITIONALLY accept --at).
 	GraphBacked bool
+	// TimeoutDefault overrides the --timeout default (DefaultTimeout)
+	// for this command. Zero keeps the shared default. A composition
+	// that runs a dozen checks in one invocation raises it; the value
+	// is rendered in --help and the MCP schema, so the documented
+	// default and the effective one are the same number.
+	TimeoutDefault time.Duration
 	// Stdout and Stderr default to the process streams.
 	Stdout io.Writer
 	Stderr io.Writer
@@ -138,7 +144,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	fs := flag.NewFlagSet(cfg.Name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
-	if err := registerSpecs(fs, CommonFlags()); err != nil {
+	if err := registerSpecs(fs, CommonFlagsWith(cfg.TimeoutDefault)); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime // broken command definition, not user error
 	}

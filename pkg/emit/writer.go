@@ -78,6 +78,8 @@ type Writer struct {
 	findings int
 	exempted int
 	notes    []Field
+	stamps   []Field
+	watchers []func(Finding)
 }
 
 // WriterOption customizes a Writer.
@@ -121,6 +123,7 @@ func NewWriter(out io.Writer, format Format, opts ...WriterOption) (*Writer, err
 // finding does.
 func (w *Writer) Emit(f Finding) error {
 	f = w.sanitize(f)
+	f = w.stamp(f)
 	exempted := false
 	if w.exempt != nil {
 		if reason, expires, ok := w.exempt.Exempt(f.Kind, f.Namespace, f.Name); ok {
@@ -148,7 +151,87 @@ func (w *Writer) Emit(f Finding) error {
 	if exempted {
 		w.exempted++
 	}
+	for _, watch := range w.watchers {
+		watch(f)
+	}
 	return nil
+}
+
+// Stamp fixes key=value onto every finding emitted from now on,
+// inserted ahead of the check's own Details. Setting a key again
+// replaces its value; setting it to "" removes the stamp. A finding
+// that already carries the key keeps its own value — a stamp
+// annotates, it never overwrites what a check said.
+//
+// This is the composition seam. `lookout scan` hands its own Writer
+// to each registered command it runs, so every stage's findings land
+// in one stream with one envelope; the stamp is what tells a reader
+// (and `lookout <that command>` afterwards) which check produced a
+// given line. It sits on the Writer for the same reason the sanitizer
+// and the exemption annotator do: it is the one place every finding
+// passes through, so no stage can bypass it.
+func (w *Writer) Stamp(key, value string) error {
+	if !keyPattern.MatchString(key) {
+		return fmt.Errorf("stamp key %q does not match %s", key, keyPattern)
+	}
+	for _, e := range EnvelopeFields() {
+		if key == e {
+			return fmt.Errorf("stamp key %q shadows an envelope field", key)
+		}
+	}
+	for i := range w.stamps {
+		if w.stamps[i].Key != key {
+			continue
+		}
+		if value == "" {
+			w.stamps = append(w.stamps[:i], w.stamps[i+1:]...)
+		} else {
+			w.stamps[i].Value = value
+		}
+		return nil
+	}
+	if value != "" {
+		w.stamps = append(w.stamps, Field{Key: key, Value: value})
+	}
+	return nil
+}
+
+// stamp prefixes the active stamps onto f.Details, skipping any key
+// the finding already carries.
+func (w *Writer) stamp(f Finding) Finding {
+	if len(w.stamps) == 0 {
+		return f
+	}
+	have := make(map[string]bool, len(f.Details))
+	for _, d := range f.Details {
+		have[d.Key] = true
+	}
+	out := make([]Field, 0, len(w.stamps)+len(f.Details))
+	for _, s := range w.stamps {
+		if !have[s.Key] {
+			out = append(out, s)
+		}
+	}
+	f.Details = append(out, f.Details...)
+	return f
+}
+
+// Watch registers an observer called with every finding that reaches
+// the stream, in emission order, exactly as it was written (sanitized,
+// stamped, annotated). It cannot change or suppress anything.
+//
+// Compositions need this for the same reason they need Stamp: a
+// composition hands its Writer to the checks it runs, so the findings
+// never pass through its own code. Without a tap, a composition that
+// wants to ACT on what a stage found — scan's edge drill-down over the
+// workloads its first stage flagged — would have to re-derive that
+// stage's conclusions from a List pass of its own, which is precisely
+// the re-composition of internal Go seams that left `bundle` and
+// `health` blind to every check added after them.
+func (w *Writer) Watch(fn func(Finding)) {
+	if fn != nil {
+		w.watchers = append(w.watchers, fn)
+	}
 }
 
 // Findings reports how many findings have been emitted so far.

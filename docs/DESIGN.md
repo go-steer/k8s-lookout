@@ -228,6 +228,7 @@ surface is subcommands:
 ```
 lookout watch        # resident sentinel (§7) — the evolved k8s-event-watcher
 lookout mcp          # serve read-path checks as MCP tools (§4.3)
+lookout scan         # zero-argument entry point: every target-free incident check, then edge drill-down
 lookout bundle       # correlated incident snapshot (§5, first call of every incident)
 lookout health       # composed cluster scorecard: live checks + open findings + triage state (§5)
 
@@ -247,7 +248,9 @@ implementation, and the agent discovers the whole surface from one `--help`.
 
 - **Common flags:** `--namespace=<ns>|-A`, `--workload=<Kind>/<ns>/<name>`,
   `--since=<dur>`, `--format=logfmt|json` (default logfmt), `--timeout=10s`
-  (every command wraps `context.WithTimeout`). Graph-backed commands
+  (every command wraps `context.WithTimeout`; a command that composes many
+  checks may declare a larger default — `scan` uses 60s — and every surface
+  renders the default actually in force). Graph-backed commands
   additionally accept `--at=<RFC3339|dur-ago>` for point-in-time queries
   (§6.6).
 - **Exit 0:** pure token-dense payload on stdout — no banners, no progress —

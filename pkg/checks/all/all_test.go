@@ -108,9 +108,15 @@ func registeringPackages(t *testing.T) []string {
 		if err != nil {
 			return err
 		}
-		if rel == "." {
+		switch rel {
+		case ".":
 			// pkg/checks itself defines Register; it cannot import
 			// the packages that call it.
+			return nil
+		case "all":
+			// This package registers `scan` directly — see all.go on
+			// why that one command cannot register itself. It plainly
+			// does not need to blank-import itself.
 			return nil
 		}
 		seen[path.Join(modPath, "pkg/checks", filepath.ToSlash(rel))] = true

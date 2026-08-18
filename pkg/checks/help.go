@@ -54,7 +54,7 @@ func (c Command) Help() string {
 		writeFlagTable(&b, c.Flags)
 	}
 	b.WriteString("\nCommon flags (every lookout command):\n")
-	writeFlagTable(&b, emit.CommonFlags())
+	writeFlagTable(&b, c.CommonFlags())
 	if c.GraphBacked {
 		b.WriteString("\nGraph history flags (graph-backed commands, §6.6):\n")
 		writeFlagTable(&b, emit.GraphHistoryFlags())

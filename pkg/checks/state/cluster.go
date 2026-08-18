@@ -347,6 +347,44 @@ func (c *Cluster) WorkloadNode(wl emit.WorkloadRef) (graph.NodeID, error) {
 	return id, nil
 }
 
+// TopWorkload rolls one finding's subject up to the workload an edge
+// drill-down should target: the outermost controller that owns it
+// (Pod → ReplicaSet → Deployment yields the Deployment), or the
+// subject itself when nothing above it is a workload. It reports
+// false for a kind `state edges` cannot target and for an object this
+// List pass never observed — a drill-down on either would be a
+// guaranteed lookup failure.
+//
+// `lookout scan` uses it so that twenty crashlooping pods of one
+// Deployment become one drill-down rather than twenty identical ones.
+func (c *Cluster) TopWorkload(kind, namespace, name string) (emit.WorkloadRef, bool) {
+	nk, ok := workloadKinds[kind]
+	if !ok {
+		return emit.WorkloadRef{}, false
+	}
+	id, ok := c.snap.Lookup(nk, namespace, name)
+	if !ok {
+		return emit.WorkloadRef{}, false
+	}
+	if ref, resolved := c.snap.Resolve(id); !resolved || !ref.Observed {
+		return emit.WorkloadRef{}, false
+	}
+	out := emit.WorkloadRef{Kind: kind, Namespace: namespace, Name: name}
+	// OwnerChain is immediate-owner-first, so the last workload-kind
+	// entry is the outermost controller.
+	for _, owner := range c.snap.OwnerChain(id) {
+		ref, resolved := c.snap.Resolve(owner)
+		if !resolved || !ref.Observed {
+			continue
+		}
+		if _, ok := workloadKinds[ref.Kind.String()]; !ok {
+			continue
+		}
+		out = emit.WorkloadRef{Kind: ref.Kind.String(), Namespace: ref.Namespace, Name: ref.Name}
+	}
+	return out, true
+}
+
 // WorkloadPods resolves wl to its live pods via the graph's
 // owner-chain traversal (PodsUnder), sorted by name.
 func (c *Cluster) WorkloadPods(wl emit.WorkloadRef) ([]*corev1.Pod, error) {
