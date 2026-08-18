@@ -55,6 +55,25 @@ Flags:
                         Non-loopback binds are refused: this server
                         has no auth story, so it never listens on a
                         routable interface (§4.3).
+  --profile=<name>      advertise only one curated tool surface
+                        instead of all of them (see below).
+  --tools=<selection>   adjust the surface tool by tool, left to
+                        right: "all" adds every tool, a profile name
+                        adds its members, a tool name adds one, and a
+                        "-" prefix removes. Combines with --profile,
+                        which is evaluated first — so
+                        "--profile=triage --tools=-k8s_triage_logs"
+                        is the triage surface minus the logs tool.
+  --list-tools          print the tools this selection would
+                        advertise, with the JSON schema bytes each
+                        costs on every model call, and exit.
+
+Profiles:
+%s
+Every tool advertised is paid for on every model call, in tokens and
+in the model's accuracy at choosing among near-identical options — the
+full surface is well over a hundred kilobytes of JSON schema. Serve
+the smallest surface that answers the questions the agent asks.
 
 With no flags the transport is stdio: JSON-RPC on stdin/stdout, the
 transport a daemon uses when it spawns "lookout mcp" as a child
@@ -71,9 +90,13 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	listen := fs.String("listen", "", "loopback host:port for streamable HTTP; empty for stdio")
+	profile := fs.String("profile", "", "advertise one curated tool surface instead of all of them")
+	tools := fs.String("tools", "", "adjust the advertised tools: all,<profile>,<tool>,-<tool>, left to right")
+	listTools := fs.Bool("list-tools", false, "print the selected tools and their schema cost, then exit")
+	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprint(stdout, mcpHelp)
+			fmt.Fprintf(stdout, mcpHelp, mcpserver.ProfileHelp(reg))
 			return 0
 		}
 		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
@@ -89,8 +112,17 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	selected, err := mcpserver.ResolveTools(reg, *profile, *tools)
+	if err != nil {
+		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
+		return 2
+	}
+	if *listTools {
+		fmt.Fprint(stdout, mcpserver.ToolListing(reg, selected))
+		return 0
+	}
 
-	server := mcpserver.New(checks.Default(), version.Semver())
+	server := mcpserver.New(reg, version.Semver(), mcpserver.WithTools(selected))
 	if err := mcpserver.Serve(ctx, server, *listen, nil); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1

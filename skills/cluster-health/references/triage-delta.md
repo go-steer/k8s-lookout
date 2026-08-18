@@ -4,7 +4,7 @@
 
 Every abnormal object in one scan — the first call for "anything wrong in this cluster?": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.
 
-MCP tool: `k8s_triage_delta`
+MCP tool: `k8s_triage_delta` (MCP profile: `triage`)
 
 ## Usage
 

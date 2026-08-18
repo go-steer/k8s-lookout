@@ -95,7 +95,7 @@ func GenerateAll(reg *checks.Registry) (map[string]string, error) {
 func ReferenceDoc(c checks.Command) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\n# lookout %s\n\n%s\n\n", Header, c.Name, c.Summary)
-	fmt.Fprintf(&b, "MCP tool: `%s`\n\n", c.MCPName)
+	fmt.Fprintf(&b, "MCP tool: `%s`%s\n\n", c.MCPName, c.MCPProfileNote())
 
 	b.WriteString("## Usage\n\n")
 	if c.Positional != nil {

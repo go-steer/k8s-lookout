@@ -7,7 +7,7 @@ description: "NetworkPolicy coverage posture: namespaces where nothing restricts
 
 NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.
 
-MCP tool: `k8s_audit_netpol`
+MCP tool: `k8s_audit_netpol` (MCP profile: `audit`)
 
 ## Usage
 

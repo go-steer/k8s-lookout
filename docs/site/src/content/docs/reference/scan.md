@@ -7,7 +7,7 @@ description: "Start here when you know something is wrong but not what: one call
 
 Start here when you know something is wrong but not what: one call runs every target-free incident check across the cluster — broken workloads, dead admission webhooks, stuck volumes and PVCs, rejected Gateway routes, config drift — then drills into the dependency edges of whatever it flagged. Needs no target; `--include=audit` adds the posture sweep.
 
-MCP tool: `k8s_scan`
+MCP tool: `k8s_scan` (MCP profile: `triage`, `audit`)
 
 ## Usage
 

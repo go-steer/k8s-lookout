@@ -76,9 +76,10 @@ const (
 // kind_of_object=HorizontalPodAutoscaler with the HPA's own name.
 func WorkloadsCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "audit workloads",
-		MCPName: "k8s_audit_workloads",
-		Summary: "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, and autoscalers that structurally cannot scale. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Name:        "audit workloads",
+		MCPName:     "k8s_audit_workloads",
+		MCPProfiles: []string{"audit"},
+		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, and autoscalers that structurally cannot scale. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindNoPDB, "the workload has no PodDisruptionBudget: a drain can take every replica at once", emit.SeverityWarning),
 			checks.Kind(kindSingle, "the workload runs a single replica, so any disruption is an outage", emit.SeverityWarning),

@@ -50,6 +50,38 @@ the checks you expect agents to call; the sentinel's shipped ClusterRole
 (`deploy/12-clusterrole-watcher.yaml`) is a working superset for the
 common ones.
 
+## Profiles: don't advertise what the agent will never call
+
+Every advertised tool is paid for on **every** model call, whether or
+not it is ever invoked. The full surface is over 130 KB of JSON schema
+— roughly 35k tokens per turn — and the cost is not only tokens: an
+agent choosing among thirty similar-sounding tools chooses worse than
+one choosing among seven.
+
+So the surface is selectable. The default is unchanged — every command,
+for every client that asks for nothing — and the saving is opt-in:
+
+```sh
+lookout mcp --profile=triage              # the incident surface
+lookout mcp --profile=audit               # the posture surface
+lookout mcp --tools=all,-k8s_perf_probe   # everything but one tool
+lookout mcp --profile=triage --tools=-k8s_triage_logs
+
+lookout mcp --list-tools                  # what a selection costs, per tool
+```
+
+`--profile` and `--tools` are one left-to-right selection, `--profile`
+first, in the same `all,-x` syntax as `bundle --lists`: `all` (or
+`full`) adds every tool, a profile name adds its members, a tool name
+adds one, and a `-` prefix removes. A selection that resolves to zero
+tools is a usage error — a server with an empty tool list is
+indistinguishable from a missing one.
+
+`lookout mcp --help` prints the profiles with their sizes; each
+command's Reference page names the profiles it belongs to. Membership
+is declared on the command itself, so a new check joins a profile in
+the same edit that creates it.
+
 ## The tools
 
 Tool names are the commands' MCP names — `triage delta` →

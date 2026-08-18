@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,6 +64,18 @@ type Command struct {
 	// implicit. Contract tests fail a command that emits an
 	// undeclared key.
 	Output []OutputField
+	// MCPProfiles names the curated MCP tool profiles this command
+	// belongs to (issue #280), e.g. "triage". A profile is a subset
+	// of the tool surface an agent can ask for
+	// (`lookout mcp --profile=triage`) so it does not pay for — and
+	// choose among — every tool on every turn.
+	//
+	// Membership is declared here, with the command, for the same
+	// reason its flags and output glossary are: a second registry
+	// listing tool names by profile would be a list to forget to
+	// update. Empty means the command is advertised only by the
+	// default full surface, which every command is always part of.
+	MCPProfiles []string
 	// Examples are complete invocations for the --help text, one
 	// per line, without shell decoration.
 	Examples []string
@@ -225,6 +238,71 @@ var groupDocs = map[string]string{
 // GroupSummary returns the listing summary for a §4.1 group.
 func GroupSummary(group string) string { return groupDocs[group] }
 
+// mcpProfileDocs are the curated MCP tool profiles (issue #280) with
+// the one-line description `lookout mcp --help` prints. Declaring a
+// command into a profile that is not here is a registration error:
+// a profile is a claim that some set of tools is a coherent working
+// surface, which is a judgment call, not a string.
+//
+// Profiles are deliberately few and deliberately overlapping. They
+// are not a taxonomy of the command set — the §4.1 groups already
+// are one — they are answers to "what does this agent need loaded".
+var mcpProfileDocs = map[string]string{
+	"triage": "an agent working an incident: the zero-argument entry point, the workload bundle, what is broken, what changed, the logs, and the run-to-run diff",
+	"audit":  "an agent reviewing posture rather than chasing an outage: the audit group plus the scan that can run it",
+}
+
+// ProfileFull is the default profile: every advertisable command.
+// It is not declarable on a Command — membership is automatic — and
+// it is reserved so a profile can never be named the same as the
+// escape hatch that turns profiles off.
+const ProfileFull = "full"
+
+// MCPProfileNames returns the declared profile names, sorted, NOT
+// including ProfileFull.
+func MCPProfileNames() []string {
+	out := make([]string, 0, len(mcpProfileDocs))
+	for name := range mcpProfileDocs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// MCPProfileSummary returns the one-line description of a profile,
+// or "" if it is not a declared one.
+func MCPProfileSummary(name string) string { return mcpProfileDocs[name] }
+
+// MCPProfileNote renders the command's profile membership as a
+// parenthetical for the generated reference pages, or "" when it is
+// only in the default surface. It lives here so the skill docs and
+// the site docs cannot phrase it two ways.
+func (c Command) MCPProfileNote() string {
+	if len(c.MCPProfiles) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(c.MCPProfiles))
+	for i, p := range c.MCPProfiles {
+		quoted[i] = "`" + p + "`"
+	}
+	return " (MCP profile: " + strings.Join(quoted, ", ") + ")"
+}
+
+// InMCPProfile reports whether the command is advertised under
+// profile. ProfileFull matches every command, which is what makes it
+// the default.
+func (c Command) InMCPProfile(profile string) bool {
+	if profile == ProfileFull {
+		return true
+	}
+	for _, p := range c.MCPProfiles {
+		if p == profile {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	namePattern     = regexp.MustCompile(`^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)?$`)
 	mcpNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -265,6 +343,30 @@ func (c Command) validateKinds() error {
 					c.Name, k.Name, strings.Join(k.Severity, ","))
 			}
 		}
+	}
+	return nil
+}
+
+// validateProfiles checks the MCP profile memberships: each names a
+// profile that exists, none is repeated, and none claims the reserved
+// default.
+func (c Command) validateProfiles() error {
+	seen := map[string]bool{}
+	for _, p := range c.MCPProfiles {
+		if p == ProfileFull {
+			return fmt.Errorf("command %q: MCP profile %q is implicit — every command is in the full surface, so declaring it says nothing", c.Name, p)
+		}
+		if _, ok := mcpProfileDocs[p]; !ok {
+			return fmt.Errorf("command %q: unknown MCP profile %q (want one of %s) — a profile is a claim that some set of tools is a coherent working surface, so adding one means adding it to mcpProfileDocs with a description first",
+				c.Name, p, strings.Join(MCPProfileNames(), ", "))
+		}
+		if seen[p] {
+			return fmt.Errorf("command %q: MCP profile %q declared twice", c.Name, p)
+		}
+		seen[p] = true
+	}
+	if c.Hidden && len(c.MCPProfiles) > 0 {
+		return fmt.Errorf("command %q: hidden commands are not advertised at all, so profile membership is meaningless", c.Name)
 	}
 	return nil
 }
@@ -326,6 +428,9 @@ func (c Command) Validate() error {
 		return fmt.Errorf("command %q: %w", c.Name, err)
 	}
 	if err := c.validateKinds(); err != nil {
+		return err
+	}
+	if err := c.validateProfiles(); err != nil {
 		return err
 	}
 	seen := map[string]bool{}

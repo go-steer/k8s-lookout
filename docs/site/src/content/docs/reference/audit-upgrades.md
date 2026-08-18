@@ -7,7 +7,7 @@ description: "Upgrade and patch readiness, read from the cloud provider: how far
 
 Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
 
-MCP tool: `k8s_audit_upgrades`
+MCP tool: `k8s_audit_upgrades` (MCP profile: `audit`)
 
 ## Usage
 

@@ -4,7 +4,7 @@
 
 Diff a health report against the previous run and report what CHANGED — new, ongoing, escalated, resolved, suppressed — instead of re-listing every open finding; the command that makes a scheduled scan produce a digest an operator will keep reading.
 
-MCP tool: `k8s_findings_diff`
+MCP tool: `k8s_findings_diff` (MCP profile: `triage`)
 
 ## Usage
 

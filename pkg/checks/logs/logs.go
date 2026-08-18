@@ -60,9 +60,10 @@ type Deps struct {
 // New builds the `triage logs` command with the given dependencies.
 func New(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "triage logs",
-		MCPName: "k8s_triage_logs",
-		Summary: "kubectl logs, distilled: Drain-clusters raw lines into templates with counts (probe noise stripped, stack traces collapsed to top frames) — reach for this instead of reading logs whole.",
+		Name:        "triage logs",
+		MCPName:     "k8s_triage_logs",
+		MCPProfiles: []string{"triage"},
+		Summary:     "kubectl logs, distilled: Drain-clusters raw lines into templates with counts (probe noise stripped, stack traces collapsed to top frames) — reach for this instead of reading logs whole.",
 		Flags: []emit.FlagSpec{
 			{Name: "pod", Type: emit.FlagString, Default: "", Help: "read one pod by name (requires --namespace)"},
 			{Name: "container", Type: emit.FlagString, Default: "", Help: "restrict to one container (default: all init + regular + ephemeral containers)"},

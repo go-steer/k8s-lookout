@@ -110,9 +110,10 @@ const (
 // New builds the `bundle` command around deps.
 func New(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "bundle",
-		MCPName: "k8s_triage_workload",
-		Summary: "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.",
+		Name:        "bundle",
+		MCPName:     "k8s_triage_workload",
+		MCPProfiles: []string{"triage"},
+		Summary:     "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.",
 		Flags: []emit.FlagSpec{
 			{Name: "incident", Type: emit.FlagString, Default: "",
 				Help: "inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain — alternative to --workload"},

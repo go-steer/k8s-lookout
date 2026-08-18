@@ -124,9 +124,10 @@ func New(deps Deps) checks.Command { return newCommand(deps, time.Now) }
 func newCommand(deps Deps, now func() time.Time) checks.Command {
 	l := &lister{deps: deps, now: now}
 	return checks.Command{
-		Name:    "triage list",
-		MCPName: "k8s_list_resources",
-		Summary: "List what EXISTS in a namespace — kubectl get across every kind at once, one line per object, leading with the <Kind>/<namespace>/<name> target the other read tools take. The first call for a namespace you have not enumerated: the health scans report only what is abnormal and name nothing when a namespace is clean, so they cannot tell you what is in one. An inventory, not a diagnosis — never guess an object's name, list the namespace.",
+		Name:        "triage list",
+		MCPName:     "k8s_list_resources",
+		MCPProfiles: []string{"triage"},
+		Summary:     "List what EXISTS in a namespace — kubectl get across every kind at once, one line per object, leading with the <Kind>/<namespace>/<name> target the other read tools take. The first call for a namespace you have not enumerated: the health scans report only what is abnormal and name nothing when a namespace is clean, so they cannot tell you what is in one. An inventory, not a diagnosis — never guess an object's name, list the namespace.",
 		Flags: []emit.FlagSpec{
 			{Name: "kinds", Type: emit.FlagString, Default: "",
 				Help: "comma-separated resource kinds to list, spelled as kubectl spells them (pods, deploy, certificates.cert-manager.io); " +

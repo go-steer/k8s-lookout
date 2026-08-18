@@ -110,9 +110,10 @@ const (
 // one people learn to skip.
 func HardeningCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "audit hardening",
-		MCPName: "k8s_audit_hardening",
-		Summary: "Workload security posture: containers running privileged or holding node-root capabilities, pods sharing the host network/PID/IPC namespaces, hostPath mounts, default-ServiceAccount tokens that something actually uses, and namespaces with no Pod Security Admission enforcement. Judges every pod-template owner in scope — Deployments, StatefulSets, DaemonSets, CronJobs, unowned Jobs and unowned Pods — plus the namespaces around them. Scope with --namespace or -A; scanned counts pod templates examined, the namespaces note counts namespaces.",
+		Name:        "audit hardening",
+		MCPName:     "k8s_audit_hardening",
+		MCPProfiles: []string{"audit"},
+		Summary:     "Workload security posture: containers running privileged or holding node-root capabilities, pods sharing the host network/PID/IPC namespaces, hostPath mounts, default-ServiceAccount tokens that something actually uses, and namespaces with no Pod Security Admission enforcement. Judges every pod-template owner in scope — Deployments, StatefulSets, DaemonSets, CronJobs, unowned Jobs and unowned Pods — plus the namespaces around them. Scope with --namespace or -A; scanned counts pod templates examined, the namespaces note counts namespaces.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindPrivileged, "a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise", emit.SeverityWarning),
 			checks.Kind(kindHostNamespace, "the pod shares the node's network, PID, or IPC namespace", emit.SeverityWarning),

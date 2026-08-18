@@ -26,8 +26,9 @@ import (
 // DiffCommand builds `lookout findings diff`.
 func DiffCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "findings diff",
-		MCPName: "k8s_findings_diff",
+		Name:        "findings diff",
+		MCPName:     "k8s_findings_diff",
+		MCPProfiles: []string{"triage"},
 		// The diff ADVANCES persisted state as a side effect of
 		// answering, so the MCP surface must advertise it as a write
 		// (ReadOnlyHint:false) rather than let a client auto-approve it

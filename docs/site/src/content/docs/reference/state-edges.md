@@ -7,7 +7,7 @@ description: "Verify every dependency edge of one workload — ConfigMap/Secret 
 
 Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.
 
-MCP tool: `k8s_state_edges`
+MCP tool: `k8s_state_edges` (MCP profile: `triage`)
 
 ## Usage
 

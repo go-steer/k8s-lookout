@@ -4,7 +4,7 @@
 
 The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.
 
-MCP tool: `k8s_triage_workload`
+MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 
 ## Usage
 
