@@ -15,6 +15,7 @@
 package inventory
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -116,7 +117,7 @@ var kindToken = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
 // error naming the token — the caller misspelled a kind, and
 // returning the other seventeen as if nothing had happened would hide
 // that.
-func resolve(deps Deps, tokens []string) ([]kindSpec, error) {
+func resolve(ctx context.Context, deps Deps, tokens []string) ([]kindSpec, error) {
 	clean := make([]string, 0, len(tokens))
 	needDiscovery := false
 	for _, raw := range tokens {
@@ -139,7 +140,7 @@ func resolve(deps Deps, tokens []string) ([]kindSpec, error) {
 	served := map[string]kindSpec{}
 	if needDiscovery {
 		var err error
-		if served, err = discoverResources(deps); err != nil {
+		if served, err = discoverResources(ctx, deps); err != nil {
 			return nil, err
 		}
 	}
@@ -187,8 +188,8 @@ func lookupBuiltin(token string) (kindSpec, bool) {
 // lowercased kind — so `--kinds` takes whatever the caller would have
 // typed at kubectl. Within a group only the preferred version is
 // indexed, mirroring `triage spec`'s dynamic path.
-func discoverResources(deps Deps) (map[string]kindSpec, error) {
-	dc, err := deps.Discovery()
+func discoverResources(ctx context.Context, deps Deps) (map[string]kindSpec, error) {
+	dc, err := deps.Discovery(ctx)
 	if err != nil {
 		return nil, err
 	}

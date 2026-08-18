@@ -83,6 +83,8 @@ func CommonFlagsWith(timeout time.Duration) []FlagSpec {
 		{Name: "since", Type: FlagDuration, Default: "0s", Help: "how far back to look (0 = command default)"},
 		{Name: "format", Type: FlagString, Default: "logfmt", Help: "output format: logfmt|json (one record per line either way)"},
 		{Name: "timeout", Type: FlagDuration, Default: timeout.String(), Help: "abort the invocation after this long (exit 1)"},
+		{Name: "kubeconfig", Type: FlagString, Default: "", Help: "path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config"},
+		{Name: "context", Type: FlagString, Default: "", Help: "kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line"},
 		{Name: "exemptions", Type: FlagString, Default: "", Help: "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped"},
 	}
 }
@@ -280,6 +282,14 @@ type Scope struct {
 	// Since bounds the lookback window; 0 means the command's
 	// default.
 	Since time.Duration
+
+	// Kubeconfig and Context are the §4.2 cluster selection. Checks
+	// almost never read them: Run puts them on the context, and
+	// kube.OptionsFrom hands them to whichever client the check
+	// builds. They are on the Scope so that a check which needs to
+	// name the cluster it read can.
+	Kubeconfig string
+	Context    string
 
 	// At is the resolved --at instant for graph-backed commands
 	// (§6.6): answer as of this time instead of live. Zero means

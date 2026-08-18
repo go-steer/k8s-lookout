@@ -20,6 +20,8 @@ MCP tool: `k8s_gateway_routes`
 | `--since` | — | how far back to look (0 = command default) |
 | `--format` | logfmt | output format: logfmt\|json (one record per line either way) |
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
+| `--kubeconfig` | — | path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config |
+| `--context` | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
 ## Finding kinds

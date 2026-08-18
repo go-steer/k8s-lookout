@@ -21,6 +21,7 @@ package checks_test
 // check for --diff (M3).
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -57,8 +58,8 @@ func int32Ptr(i int32) *int32 { return &i }
 func specCmd(objs ...runtime.Object) checks.Command {
 	client := k8sfake.NewSimpleClientset(objs...)
 	return checks.SpecCommand(checks.SpecDeps{
-		Typed: func() (kubernetes.Interface, error) { return client, nil },
-		Dynamic: func() (dynamic.Interface, error) {
+		Typed: func(context.Context) (kubernetes.Interface, error) { return client, nil },
+		Dynamic: func(context.Context) (dynamic.Interface, error) {
 			panic("typed-path test reached the dynamic client")
 		},
 	})
@@ -73,8 +74,8 @@ func specCmdDynamic(t *testing.T, resources []*metav1.APIResourceList,
 	client.Discovery().(*fakediscovery.FakeDiscovery).Resources = resources
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objs...)
 	return checks.SpecCommand(checks.SpecDeps{
-		Typed:   func() (kubernetes.Interface, error) { return client, nil },
-		Dynamic: func() (dynamic.Interface, error) { return dyn, nil },
+		Typed:   func(context.Context) (kubernetes.Interface, error) { return client, nil },
+		Dynamic: func(context.Context) (dynamic.Interface, error) { return dyn, nil },
 	})
 }
 

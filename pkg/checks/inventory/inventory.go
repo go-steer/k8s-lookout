@@ -93,21 +93,21 @@ type Deps struct {
 	// Dynamic lists every kind through one client — eighteen
 	// unrelated schemas, two or three fields read from each, is not
 	// worth eighteen typed clients.
-	Dynamic func() (dynamic.Interface, error)
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
 	// Discovery resolves `--kinds` tokens the built-in table does not
 	// know (a CRD, an aggregated API). The default listing never
 	// calls it.
-	Discovery func() (discovery.DiscoveryInterface, error)
+	Discovery func(ctx context.Context) (discovery.DiscoveryInterface, error)
 }
 
 // DefaultDeps is the production wiring.
 func DefaultDeps() Deps {
 	return Deps{
-		Dynamic: func() (dynamic.Interface, error) {
-			return kube.BuildDynamicClient(kube.Options{})
+		Dynamic: func(ctx context.Context) (dynamic.Interface, error) {
+			return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 		},
-		Discovery: func() (discovery.DiscoveryInterface, error) {
-			c, err := kube.BuildClient(kube.Options{})
+		Discovery: func(ctx context.Context) (discovery.DiscoveryInterface, error) {
+			c, err := kube.BuildClient(kube.OptionsFrom(ctx))
 			if err != nil {
 				return nil, err
 			}
@@ -227,12 +227,12 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	if raw := strings.TrimSpace(inv.Flags.String("kinds")); raw != "" {
 		tokens = strings.Split(raw, ",")
 	}
-	kinds, err := resolve(l.deps, tokens)
+	kinds, err := resolve(ctx, l.deps, tokens)
 	if err != nil {
 		return 0, err
 	}
 
-	dyn, err := l.deps.Dynamic()
+	dyn, err := l.deps.Dynamic(ctx)
 	if err != nil {
 		return 0, err
 	}

@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // fixedClock advances 100ms per call, so elapsed is always 100ms.
@@ -306,5 +308,54 @@ func TestRunUsageErrorFromCheck(t *testing.T) {
 	}
 	if IsUsageError(errors.New("x")) {
 		t.Error("IsUsageError(plain error) = true")
+	}
+}
+
+// --kubeconfig and --context reach the client constructors through
+// the context, not through the check's signature, so the assertion is
+// on what kube.SelectionFrom sees inside the check.
+func TestRunClusterSelectionRidesTheContext(t *testing.T) {
+	var got kube.Selection
+	capture := func(ctx context.Context, inv Invocation) (int, error) {
+		got = kube.SelectionFrom(ctx)
+		return 0, nil
+	}
+
+	code, stdout, stderr := runOnce(t, capture, nil, "--kubeconfig=/tmp/kc", "--context=prod")
+	if code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	want := kube.Selection{Kubeconfig: "/tmp/kc", Context: "prod"}
+	if got != want {
+		t.Errorf("selection = %+v, want %+v", got, want)
+	}
+	if !strings.Contains(stdout, "context=prod") {
+		t.Errorf("summary line does not record the cluster: %q", stdout)
+	}
+
+	// Unflagged, nothing is carried and nothing is claimed.
+	got = kube.Selection{}
+	code, stdout, _ = runOnce(t, capture, nil)
+	if code != ExitData || !got.IsZero() {
+		t.Errorf("bare invocation carried %+v", got)
+	}
+	if strings.Contains(stdout, "context=") {
+		t.Errorf("unflagged summary claims a context: %q", stdout)
+	}
+}
+
+// context= is Writer-owned: a check that tries to set it is a bug,
+// and the guard is the same one that protects exempt=.
+func TestRunContextNoteIsReserved(t *testing.T) {
+	var noteErr error
+	sneak := func(ctx context.Context, inv Invocation) (int, error) {
+		noteErr = inv.Out.Note("context", "somewhere-else")
+		return 0, nil
+	}
+	if code, _, stderr := runOnce(t, sneak, nil); code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	if noteErr == nil {
+		t.Error("a check was allowed to set the reserved context note")
 	}
 }

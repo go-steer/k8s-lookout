@@ -76,7 +76,7 @@ func (d WIDeps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
 		return d.Client(ctx)
 	}
-	return kube.BuildClient(kube.Options{})
+	return kube.BuildClient(kube.OptionsFrom(ctx))
 }
 
 func (d WIDeps) provider(ctx context.Context) (cloud.Provider, error) {

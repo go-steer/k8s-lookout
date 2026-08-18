@@ -15,6 +15,7 @@
 package inventory
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -109,8 +110,8 @@ func listCmd(t *testing.T, objs ...*unstructured.Unstructured) checks.Command {
 
 func cmdFor(dyn dynamic.Interface) checks.Command {
 	return newCommand(Deps{
-		Dynamic: func() (dynamic.Interface, error) { return dyn, nil },
-		Discovery: func() (discovery.DiscoveryInterface, error) {
+		Dynamic: func(context.Context) (dynamic.Interface, error) { return dyn, nil },
+		Discovery: func(context.Context) (discovery.DiscoveryInterface, error) {
 			panic("built-in kind resolution reached discovery")
 		},
 	}, func() time.Time { return testNow })

@@ -197,6 +197,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than two blobs. `pkg/emit` keeps a local copy with a comment
   saying why: `checktest` is built on it, so it cannot import it.
 
+- `--kubeconfig` and `--context` on every read-path command, CLI and
+  MCP alike (#283). Until now the only way to point lookout at a
+  different cluster was to mutate the shared kubeconfig's
+  current-context — a process-outliving side effect that two
+  concurrent invocations against two clusters cannot both win. Both
+  flags are per-invocation and nothing is written back, so a fleet
+  loop can run one process per cluster in parallel.
+
+  An invocation that named a context stamps `context=<name>` on its
+  summary line, whether or not the check ended up building a client,
+  which is what makes several clusters' output mergeable after the
+  fact. The note is Writer-owned: no check can set or contradict it.
+
+  `--context` against in-cluster credentials is refused rather than
+  ignored. There is no kubeconfig to select from inside a pod, and a
+  run that silently read a different cluster than the one it was told
+  to is worse than a run that stops.
+
+  Mechanically, the selection rides the invocation's
+  `context.Context` (`pkg/kube/selection.go`) rather than fourteen
+  `Deps.client(ctx)` signatures: those accessors already take a
+  context and take nothing else, and the alternative — a
+  package-level default — would reintroduce the very race the flags
+  exist to remove.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

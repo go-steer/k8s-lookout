@@ -264,6 +264,15 @@ func (w *Writer) Note(key, value string) error {
 			return fmt.Errorf("summary note key %q is owned by the Writer and must not be set by a check", key)
 		}
 	}
+	return w.note(key, value)
+}
+
+// note is Note without the reserved-key guard: the path the runner
+// itself uses for the keys checks are forbidden to set.
+func (w *Writer) note(key, value string) error {
+	if !keyPattern.MatchString(key) {
+		return fmt.Errorf("summary note key %q does not match %s", key, keyPattern)
+	}
 	for i := range w.notes {
 		if w.notes[i].Key == key {
 			w.notes[i].Value = value

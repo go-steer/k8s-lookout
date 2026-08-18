@@ -51,7 +51,7 @@ func init() {
 type Deps struct {
 	// Client returns the client used for pod/workload discovery.
 	// Nil means kube.BuildClient with default config resolution.
-	Client func() (kubernetes.Interface, error)
+	Client func(ctx context.Context) (kubernetes.Interface, error)
 	// Logs streams one container's logs. Nil means the Client's
 	// GetLogs subresource.
 	Logs PodLogGetter
@@ -130,7 +130,7 @@ func runCheck(deps Deps) emit.CheckFunc {
 			return 0, emit.UsageErrorf("--workload carries its own namespace; drop --namespace/-A")
 		}
 
-		cs, err := buildClient(deps)
+		cs, err := buildClient(ctx, deps)
 		if err != nil {
 			return 0, err
 		}
@@ -171,11 +171,11 @@ func runCheck(deps Deps) emit.CheckFunc {
 	}
 }
 
-func buildClient(deps Deps) (kubernetes.Interface, error) {
+func buildClient(ctx context.Context, deps Deps) (kubernetes.Interface, error) {
 	if deps.Client != nil {
-		return deps.Client()
+		return deps.Client(ctx)
 	}
-	return kube.BuildClient(kube.Options{})
+	return kube.BuildClient(kube.OptionsFrom(ctx))
 }
 
 // fetchOne streams one container's logs into the engine. Timestamps
