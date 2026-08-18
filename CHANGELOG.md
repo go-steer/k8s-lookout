@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New command `state gateway` (MCP `k8s_gateway_routes`): the Gateway
+  API path end to end — GatewayClass → Gateway → listener → HTTPRoute
+  → Service — reporting every hop that is rejected, unprogrammed, or
+  points at something that is not there. The sentinel has watched
+  `gateways` and `httproutes` since v0.16.0; there was no way to ask
+  the same question from the CLI or from an agent.
+
+  Nine claims: a Gateway naming a GatewayClass that does not exist or
+  whose controller rejected it, a Gateway its controller refused or
+  accepted-but-never-programmed, a single unusable listener on an
+  otherwise working Gateway, an HTTPRoute attached to an absent
+  Gateway or refused by a present one, and backendRefs naming a
+  Service that does not exist or a port it does not expose.
+
+  Where the Gateway API defines a status condition, that condition is
+  the answer — route attachment is read from what the controller wrote
+  per parent rather than by re-implementing `AllowedRoutes` matching
+  in this process. The backendRef checks are the exception and are
+  recomputed, because "a reference did not resolve" is not an answer
+  without "which Service, and which port".
+
+- New package `pkg/checks/crd`: the read path's shared seam for
+  detectors over API groups that may or may not be installed.
+  Discovery decides, so `state gateway` auto-enables where the CRDs
+  are present; a cluster without them gets one explicit
+  `crd.unavailable` info finding, an `unavailable=` summary note, and
+  exit 0 with `scanned=0` — the same degradation shape `cloud.*`
+  already uses for an unavailable provider capability, rather than a
+  clean bill of health it did not earn. A partially served group
+  reports what it could not read as `not_served=`.
+
+  Objects are read dynamically as unstructured: taking a build-time
+  dependency on the Gateway API, OLM, KEDA and Kyverno Go modules to
+  read a handful of status conditions is not a trade worth making.
+  Optional CRD reads deliberately stay out of
+  `state.LoadClusterListRequirements()` and therefore out of the
+  shipped watcher ClusterRole — a CRD detector does its own List pass,
+  so an optional read never becomes an unconditional grant.
+
 - New command `state storage` (MCP `k8s_storage_binding`): why a
   PersistentVolumeClaim will never bind. `state volumes` answers "the
   volume bound, so why won't it attach"; this answers "why is the

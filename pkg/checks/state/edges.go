@@ -35,9 +35,11 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/crd"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -53,6 +55,16 @@ type Deps struct {
 	Client func(ctx context.Context) (kubernetes.Interface, error)
 	// Now is the clock used for TLS expiry math. Nil means time.Now.
 	Now func() time.Time
+	// Dynamic builds the dynamic client the CRD-gated checks read
+	// through (`state gateway`). Nil means kube.BuildDynamicClient.
+	// Only those checks call it, so a cluster with no optional API
+	// groups installed never builds one.
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
+	// CRD answers which optional API groups the cluster serves. Nil
+	// means one fresh resolver per invocation over the client's own
+	// discovery interface; a composition passes its own so several
+	// CRD-gated checks share one discovery round trip per group.
+	CRD *crd.Resolver
 }
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
@@ -67,6 +79,20 @@ func (d Deps) now() time.Time {
 		return d.Now()
 	}
 	return time.Now()
+}
+
+func (d Deps) dynamic(ctx context.Context) (dynamic.Interface, error) {
+	if d.Dynamic != nil {
+		return d.Dynamic(ctx)
+	}
+	return kube.BuildDynamicClient(kube.Options{})
+}
+
+func (d Deps) resolver(client kubernetes.Interface) *crd.Resolver {
+	if d.CRD != nil {
+		return d.CRD
+	}
+	return crd.NewResolver(client.Discovery())
 }
 
 func init() {
