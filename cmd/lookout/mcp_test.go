@@ -17,6 +17,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -149,12 +151,39 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 	}
 }
 
+// TestMCPAccessLogIsOpenedBeforeServing: an operator who asked to be
+// able to answer "what did the agent call" must find out at startup
+// that the path is unusable, not after the incident. The failure is a
+// usage error, not a degraded run.
+func TestMCPAccessLogIsOpenedBeforeServing(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "no-such-dir", "access.log")
+	var stdout, stderr bytes.Buffer
+	if got := mcpMain(t.Context(), []string{"--access-log=" + bad}, &stdout, &stderr); got != 2 {
+		t.Errorf("exit code = %d, want 2 (stderr: %s)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--access-log=") {
+		t.Errorf("stderr %q does not name the flag", stderr.String())
+	}
+
+	// A query that never serves anything does not create the file:
+	// --list-tools answers from the registry and exits.
+	quiet := filepath.Join(t.TempDir(), "access.log")
+	stdout.Reset()
+	stderr.Reset()
+	if got := mcpMain(t.Context(), []string{"--list-tools", "--access-log=" + quiet}, &stdout, &stderr); got != 0 {
+		t.Fatalf("--list-tools exit code = %d, want 0 (stderr: %s)", got, stderr.String())
+	}
+	if _, err := os.Stat(quiet); !os.IsNotExist(err) {
+		t.Errorf("--list-tools created the access log (stat err = %v)", err)
+	}
+}
+
 func TestMCPCommand_Help(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if got := mcpMain(t.Context(), []string{"--help"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0", got)
 	}
-	for _, want := range []string{"--listen", "stdio", "loopback"} {
+	for _, want := range []string{"--listen", "stdio", "loopback", "--access-log"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help does not mention %q:\n%s", want, stdout.String())
 		}

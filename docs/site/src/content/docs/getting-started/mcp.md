@@ -82,6 +82,42 @@ command's Reference page names the profiles it belongs to. Membership
 is declared on the command itself, so a new check joins a profile in
 the same edit that creates it.
 
+## The access log
+
+`lookout mcp` is silent by default: it writes nothing but protocol
+frames, so when an agent's tool call misbehaves there is no record it
+happened at all. `--access-log` fixes that with one logfmt line per
+call:
+
+```sh
+lookout mcp --access-log=/var/log/lookout/mcp-access.log
+```
+
+```
+ts=2026-08-18T14:03:21Z tool=k8s_scan exit=0 dur=1.204s bytes=4096
+ts=2026-08-18T14:03:29Z tool=k8s_triage_logs exit=1 dur=312ms bytes=118
+ts=2026-08-18T14:03:33Z tool=k8s_triage_logs exit=2 dur=0s bytes=64
+```
+
+`exit` is the §4.2 code the tool call mapped from — `0` a payload, `1`
+a tool error the model can see, `2` a rejected argument. Calls the
+schema layer rejects before the command ever runs are logged too;
+those are exactly the ones worth noticing.
+
+The file is created if absent, **appended** if present (a supervisor
+restart must not erase the evidence from the run that caused it), and
+created mode `0600` — the tool names alone say which clusters an
+operator has been reading. If the path cannot be opened, `lookout mcp`
+exits 2 rather than serving without a log.
+
+What a line deliberately does *not* carry is the arguments or the
+response body. The [sanitizer](/concepts/sanitization/) guarantees
+no secret value reaches an output surface; a log that copied payloads
+would be a second place that guarantee has to hold, audited by nobody.
+Tool, outcome, and size answer the operational questions — what was
+called, did it work, what did it cost — without becoming a second data
+path.
+
 ## The tools
 
 Tool names are the commands' MCP names — `triage delta` →

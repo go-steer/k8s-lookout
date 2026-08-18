@@ -139,7 +139,7 @@ func (w *Writer) Emit(f Finding) error {
 	case FormatJSON:
 		line = encodeJSON(f.pairs())
 	default:
-		line = encodeLogfmt(f.pairs())
+		line = EncodeLogfmt(f.pairs())
 	}
 	if _, err := w.out.Write(line); err != nil {
 		return err
@@ -312,7 +312,7 @@ func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
 	case FormatJSON:
 		line = encodeJSONSummary(pairs, scanned, w.findings)
 	default:
-		line = encodeLogfmt(pairs)
+		line = EncodeLogfmt(pairs)
 	}
 	_, err := w.out.Write(line)
 	return err
@@ -332,11 +332,17 @@ func encodeJSONSummary(pairs []Field, scanned, findings int) []byte {
 	return b.Bytes()
 }
 
-// encodeLogfmt renders ordered pairs as one logfmt line. Values are
+// EncodeLogfmt renders ordered pairs as one logfmt line. Values are
 // quoted only when they contain characters that would break
 // splitting on spaces — token density is the point of the default
 // format.
-func encodeLogfmt(pairs []Field) []byte {
+//
+// It is exported for the surfaces that are line-oriented but are not
+// findings — the MCP access log (issue #281) is the first — so that
+// everything lookout writes can be read back by one parser
+// (findings.parseLogfmtRecord) instead of each surface inventing its
+// own quoting rules.
+func EncodeLogfmt(pairs []Field) []byte {
 	var b bytes.Buffer
 	for i, p := range pairs {
 		if i > 0 {

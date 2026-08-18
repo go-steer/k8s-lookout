@@ -155,7 +155,7 @@ func parseJSONRecord(text string) (map[string]string, error) {
 }
 
 // parseLogfmtRecord decodes a logfmt line, the exact inverse of
-// emit.encodeLogfmt: space-separated key=value, values quoted with Go
+// emit.EncodeLogfmt: space-separated key=value, values quoted with Go
 // syntax when they contain a space, `=`, `"`, or a control character.
 func parseLogfmtRecord(text string) (map[string]string, error) {
 	out := make(map[string]string, 8)

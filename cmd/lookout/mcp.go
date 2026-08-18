@@ -67,6 +67,12 @@ Flags:
   --list-tools          print the tools this selection would
                         advertise, with the JSON schema bytes each
                         costs on every model call, and exit.
+  --access-log=<path>   append one logfmt line per tool call:
+                        ts, tool, exit code, duration, response
+                        bytes. Created if absent, appended if not,
+                        mode 0600. Deliberately not the arguments or
+                        the response body — the log is an operational
+                        record, not a second copy of cluster data.
 
 Profiles:
 %s
@@ -93,6 +99,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "advertise one curated tool surface instead of all of them")
 	tools := fs.String("tools", "", "adjust the advertised tools: all,<profile>,<tool>,-<tool>, left to right")
 	listTools := fs.Bool("list-tools", false, "print the selected tools and their schema cost, then exit")
+	accessLog := fs.String("access-log", "", "append one line per tool call to this path")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -122,7 +129,23 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	server := mcpserver.New(reg, version.Semver(), mcpserver.WithTools(selected))
+	var log *mcpserver.AccessLog
+	if *accessLog != "" {
+		l, closer, err := mcpserver.OpenAccessLog(*accessLog)
+		if err != nil {
+			// A log that cannot be opened is a usage error, not a
+			// degraded mode: an operator who asked to be able to
+			// answer "what did the agent call" must not find out
+			// afterwards that nothing was recorded.
+			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
+			return 2
+		}
+		defer func() { _ = closer.Close() }()
+		log = l
+	}
+
+	server := mcpserver.New(reg, version.Semver(),
+		mcpserver.WithTools(selected), mcpserver.WithAccessLog(log))
 	if err := mcpserver.Serve(ctx, server, *listen, nil); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1
