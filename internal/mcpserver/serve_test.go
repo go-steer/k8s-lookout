@@ -59,12 +59,29 @@ func TestValidateLoopback(t *testing.T) {
 // Serve itself, not just available: a routable bind address fails
 // loudly before any listener is opened.
 func TestServe_RefusesNonLoopback(t *testing.T) {
-	err := Serve(t.Context(), New(testRegistry(t), "test"), "0.0.0.0:0", nil)
+	err := Serve(t.Context(), New(testRegistry(t), "test"), ServeOptions{Listen: "0.0.0.0:0"})
 	if err == nil {
 		t.Fatal("Serve accepted a non-loopback bind")
 	}
 	if !strings.Contains(err.Error(), "non-loopback") {
 		t.Errorf("refusal does not explain itself: %v", err)
+	}
+}
+
+// TestServe_RechecksTheBindPolicy: the policy is enforced at the flag
+// layer too, but Serve is the last place before a socket exists, and a
+// caller that opts in to a routable bind without bringing a token must
+// not get one.
+func TestServe_RechecksTheBindPolicy(t *testing.T) {
+	err := Serve(t.Context(), New(testRegistry(t), "test"), ServeOptions{
+		Listen:           "0.0.0.0:0",
+		AllowNonLoopback: true,
+	})
+	if err == nil {
+		t.Fatal("Serve opened a routable bind with no auth token")
+	}
+	if !strings.Contains(err.Error(), "--auth-token-file") {
+		t.Errorf("refusal does not name the missing flag: %v", err)
 	}
 }
 
@@ -78,7 +95,10 @@ func TestServe_LoopbackHTTPRoundTrip(t *testing.T) {
 	ready := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- Serve(ctx, New(testRegistry(t), "test"), "127.0.0.1:0", ready)
+		done <- Serve(ctx, New(testRegistry(t), "test"), ServeOptions{
+			Listen: "127.0.0.1:0",
+			Ready:  ready,
+		})
 	}()
 
 	var addr string

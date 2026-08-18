@@ -52,9 +52,18 @@ by §6.5.
 Flags:
   --listen=<host:port>  serve streamable HTTP on a loopback address
                         (e.g. 127.0.0.1:8383) instead of stdio.
-                        Non-loopback binds are refused: this server
-                        has no auth story, so it never listens on a
-                        routable interface (§4.3).
+                        Non-loopback binds are refused unless all
+                        three of --allow-non-loopback,
+                        --auth-token-file, and --access-log are
+                        given (§4.3).
+  --allow-non-loopback  opt in to a routable bind. Not enough on its
+                        own: a bind flag must not open an
+                        unauthenticated cluster-read API.
+  --auth-token-file=<p> require this bearer token on every HTTP
+                        request; 401 otherwise. One shared token, no
+                        authorization — every caller presenting it
+                        gets the full advertised surface. Compared in
+                        constant time. mTLS is out of scope.
   --profile=<name>      advertise only one curated tool surface
                         instead of all of them (see below).
   --tools=<selection>   adjust the surface tool by tool, left to
@@ -73,6 +82,7 @@ Flags:
                         mode 0600. Deliberately not the arguments or
                         the response body — the log is an operational
                         record, not a second copy of cluster data.
+                        Optional on loopback, mandatory off-host.
 
 Profiles:
 %s
@@ -100,6 +110,8 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	tools := fs.String("tools", "", "adjust the advertised tools: all,<profile>,<tool>,-<tool>, left to right")
 	listTools := fs.Bool("list-tools", false, "print the selected tools and their schema cost, then exit")
 	accessLog := fs.String("access-log", "", "append one line per tool call to this path")
+	allowNonLoopback := fs.Bool("allow-non-loopback", false, "permit a routable --listen address (requires --auth-token-file and --access-log)")
+	authTokenFile := fs.String("auth-token-file", "", "require this bearer token on every HTTP request")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -113,11 +125,32 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: unexpected argument %q\nRun 'lookout mcp --help' for usage.\n", fs.Arg(0))
 		return 2
 	}
-	if *listen != "" {
-		if err := mcpserver.ValidateLoopback(*listen); err != nil {
-			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
-			return 2
+	// The HTTP-only flags are rejected on stdio rather than ignored: a
+	// token that authenticates nothing reads, to whoever wrote the
+	// config, exactly like a token that does.
+	if *listen == "" {
+		for _, f := range []struct {
+			name string
+			set  bool
+		}{
+			{"--auth-token-file", *authTokenFile != ""},
+			{"--allow-non-loopback", *allowNonLoopback},
+		} {
+			if f.set {
+				fmt.Fprintf(stderr, "lookout mcp: %s has no effect on the stdio transport "+
+					"(there is no HTTP request to authenticate); pass --listen=<host:port> as well.\n"+
+					"Run 'lookout mcp --help' for usage.\n", f.name)
+				return 2
+			}
 		}
+	} else if err := (mcpserver.BindPolicy{
+		Listen:           *listen,
+		AllowNonLoopback: *allowNonLoopback,
+		HasAuthToken:     *authTokenFile != "",
+		HasAccessLog:     *accessLog != "",
+	}).Validate(); err != nil {
+		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
+		return 2
 	}
 	selected, err := mcpserver.ResolveTools(reg, *profile, *tools)
 	if err != nil {
@@ -144,9 +177,25 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		log = l
 	}
 
+	var auth *mcpserver.BearerAuth
+	if *authTokenFile != "" {
+		a, err := mcpserver.LoadAuthToken(*authTokenFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
+			return 2
+		}
+		auth = a
+	}
+
 	server := mcpserver.New(reg, version.Semver(),
 		mcpserver.WithTools(selected), mcpserver.WithAccessLog(log))
-	if err := mcpserver.Serve(ctx, server, *listen, nil); err != nil {
+	if err := mcpserver.Serve(ctx, server, mcpserver.ServeOptions{
+		Listen:           *listen,
+		AllowNonLoopback: *allowNonLoopback,
+		Auth:             auth,
+		Announce:         stderr,
+		AccessLogPath:    *accessLog,
+	}); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1
 	}
