@@ -112,6 +112,7 @@ Violating any of these is a bug, not a test update
 | Exempt annotates, never drops: a covered finding is still emitted and counted, and the summary reports `exempt=<n>` | `pkg/exempt/`, `pkg/emit/writer.go` | `pkg/exempt/exempt_test.go`, `pkg/emit/exempt_test.go` (`TestExemptAnnotatesNeverDrops`) |
 | Shipped ClusterRole covers the enrichment read paths | `deploy/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
 | Command output schema ↔ declared metadata | each `pkg/checks/*` | `pkg/checks/checktest.VerifyContract` in every command's suite |
+| Every registered check reaches the binary and both doc generators | `pkg/checks/all/all.go` (the one blank-import list; the binary, `internal/sitedoc/gen`, `internal/skilldoc/gen`, and their drift tests import only it) | `pkg/checks/all/all_test.go` (`TestAllImportsEveryRegisteringPackage` walks `pkg/checks/**` for `checks.Register` calls) |
 | Bundle section identifiers/order across CLI and enrichment ("the enrichment bundle IS a bundle") | `pkg/checks/bundle/bundle.go` + `internal/watch/enrich.go` | `internal/watch/enrich_bundle_contract_test.go` (`TestBundleSectionContractFrozen`; pins both heads' `sections=` joins and both bodies' emission order) |
 
 ## Provider boundary and build tags

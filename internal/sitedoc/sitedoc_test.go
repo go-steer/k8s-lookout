@@ -23,21 +23,9 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/sitedoc"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/audit"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/findings"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/inventory"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/perf"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/stab"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/top"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"
+	// Must match what internal/sitedoc/gen imports, or this gate
+	// checks a different registry than the generator writes from.
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/all"
 )
 
 // repoRoot is the working-tree root relative to this package.
