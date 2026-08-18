@@ -30,22 +30,12 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/skilldoc"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 
-	// Read-path command implementations register themselves into
-	// the default registry from their init functions — the same
-	// set cmd/lookout mounts.
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/findings"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/inventory"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/perf"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/stab"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"
+	// Stubs are generated only for the commands skilldoc.SkillCommands
+	// names, so the registry here need only be a superset of those —
+	// but GenerateAll hard-errors on a skill referencing an
+	// unregistered command, and the full set is the one that cannot
+	// go stale as skills grow.
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/all"
 )
 
 func main() {

@@ -31,24 +31,10 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/sitedoc"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 
-	// Read-path command implementations register themselves into
-	// the default registry from their init functions — the same
-	// set cmd/lookout mounts (cmd/lookout/checks.go).
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/audit"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/delta"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/events"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/findings"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/health"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/inventory"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/logs"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/perf"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/stab"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/state"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/top"
-	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"
+	// The same command set cmd/lookout mounts: a reference page is
+	// generated for every registered command, so this generator must
+	// see all of them.
+	_ "github.com/go-steer/k8s-lookout/pkg/checks/all"
 )
 
 func main() {
