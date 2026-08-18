@@ -1,0 +1,86 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dependabot is configured here for SECURITY UPDATES, not for staying
+# on latest. Minimizing dependencies is a maintained property of this
+# module, not an accident — see CONTRIBUTING.md — and a steady drip of
+# "bump x from 1.2.3 to 1.2.4" PRs trains reviewers to merge dependency
+# changes without reading them, which is the exact habit that makes a
+# supply-chain compromise work.
+#
+# So: monthly, grouped into one PR per ecosystem, patch and minor only.
+# Security alerts are separate and arrive immediately regardless of this
+# schedule. Major bumps are a deliberate decision by a human, and
+# `govulncheck` in CI is what actually decides whether we are exposed —
+# it reports only advisories reachable from our code.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go:
+        patterns: ["*"]
+        update-types: [patch, minor]
+    ignore:
+      # Kubernetes libraries move together and pin the Go toolchain.
+      # Upgrading them is a coordinated change across client-go,
+      # apimachinery, and the fake clientsets our entire test suite is
+      # built on — not something to merge from a bot's diff.
+      - dependency-name: k8s.io/*
+        update-types: [version-update:semver-major]
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    # The distroless runtime base. The builder stage's Go version comes
+    # from a GO_VERSION build arg the release workflow reads out of
+    # go.mod, not from a tag dependabot can see — so a Go patch release
+    # arrives by editing go.mod, never here.
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: npm
+    # The docs site (Starlight). Separate from the Go module on
+    # purpose: it ships no binary and its dependency posture is a
+    # different risk, so grouping it with the module would blur both.
+    directory: /docs/site
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(docs)"
+    groups:
+      site:
+        patterns: ["*"]
+        update-types: [patch, minor]

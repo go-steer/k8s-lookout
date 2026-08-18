@@ -27,7 +27,8 @@ current canonical form.
 Scope:
 - Go source under cmd/, pkg/, internal/, skills/, deploy/
 - Shell scripts under dev/tools/ and dev/ci/presubmits/
-- YAML: .github/workflows/*.yml, dev/tools/.golangci.yml
+- YAML: .github/workflows/*.yml, .github/{dependabot,settings}.yml,
+  dev/tools/.golangci.yml
 - Python: dev/tools/add-license-headers (this file)
 
 For Go files, golangci-lint's `goheader` linter enforces the full
@@ -178,9 +179,15 @@ def main() -> None:
                 counts["sh"] += 1
                 print(f"sh:   {path.relative_to(REPO_ROOT)}")
 
-    # YAML: workflows, golangci-lint config, deploy + examples manifests.
+    # YAML: workflows, repo config, golangci-lint config, deploy +
+    # examples manifests. Deliberately NOT .github/ISSUE_TEMPLATE/* or
+    # pull_request_template.md — those are prose GitHub renders to
+    # contributors, and a fourteen-line license header above "What
+    # happened" helps nobody.
     yaml_files = [
         *list((REPO_ROOT / ".github/workflows").glob("*.yml")),
+        REPO_ROOT / ".github/dependabot.yml",
+        REPO_ROOT / ".github/settings.yml",
         REPO_ROOT / "dev/tools/.golangci.yml",
         *sorted((REPO_ROOT / "examples").rglob("*.yaml")),
     ]

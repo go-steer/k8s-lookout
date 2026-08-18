@@ -1,0 +1,89 @@
+name: Bug report
+description: Something lookout did that it should not have
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        If lookout reported a cluster as healthy when it was not, use the
+        **Missed detection** template instead — that failure mode has its
+        own questions and it is the one we most want to hear about.
+
+
+        Not for security issues: report those
+        [privately](https://github.com/go-steer/k8s-lookout/security/advisories/new).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: >-
+        The command you ran and the output you got. Redacted output is
+        fine — the format is designed to be shareable, and secret values
+        never appear in it.
+      render: console
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >-
+        `lookout version` — it prints the version, commit and build date
+        stamped in at release. Say "built from source at <sha>" if so.
+      placeholder: v0.21.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: flavor
+    attributes:
+      label: Build flavor
+      options:
+        - default (GCP-free)
+        - -gke (built with -tags gke or allproviders)
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: cluster
+    attributes:
+      label: Cluster
+      description: >-
+        Distribution and version — GKE Standard/Autopilot, EKS, kind, k3s,
+        kubeadm. `kubectl version --short` covers it. Autopilot in
+        particular has a documented platform limitation (Warden denies
+        `nodes/proxy`).
+      placeholder: GKE Autopilot 1.31.4-gke.1183000
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - CLI
+        - MCP server (lookout mcp)
+        - sentinel (lookout watch)
+        - a skill or playbook
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        Ideally the cluster state that triggers it, as YAML we can apply
+        to a kind cluster. `examples/scenarios/` is the shape we use for
+        these; a rough sketch is still much better than nothing.

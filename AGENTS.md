@@ -71,6 +71,10 @@ opens agent incident sessions from leading indicators (watch-path).
   files. Markdown files carry no header.
 - Run `dev/tools/ci` before pushing — the same checks CI runs
   (`dev/ci/presubmits/` holds them individually).
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) is the human-facing version of
+  the above, plus what review asks for; adding a read-path command is
+  [`docs/adding-a-check.md`](./docs/adding-a-check.md), which has the
+  full touchpoint list. Commits need a DCO sign-off (`git commit -s`).
 
 ## Current state
 
