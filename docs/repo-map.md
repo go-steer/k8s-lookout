@@ -59,7 +59,8 @@ k8s-lookout/
 │   ├── drills/           # GKE/kind replay runbooks (node-failure, bad-deploy, memory-leak,
 │   │                     #   quota-exhaustion) + stub-daemon.py capture sink
 │   └── tools/            # ci (runs all presubmits), build, lint-go, test-unit,
-│                         #   gen-skill-refs, harvest-corpus, add-license-headers, …
+│                         #   gen-skill-refs, new-check (scaffolds a check + its suite),
+│                         #   harvest-corpus, add-license-headers, …
 ├── examples/             # runnable e2e: kind recipe, sentinel + capture stub, demo
 │                         #   workloads, inject/verify/revert failure scenarios, e2e driver,
 │                         #   agent-harness (skills/MCP) testing guide
