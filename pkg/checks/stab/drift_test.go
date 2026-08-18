@@ -260,17 +260,88 @@ func TestDriftBareMajorityIsAccepted(t *testing.T) {
 	}
 }
 
-// TestDriftDeclaredManagerShare: --manager skips the floor entirely —
-// the operator's declaration is authoritative — but the share is
-// still reported, because a declared manager owning almost nothing is
-// itself the warning that the findings are mostly legitimate owners.
+// TestDriftBootstrapClusterIsSilent (#320) is the regression the
+// e2e run bought: a fresh kind cluster, nothing wrong with it, and
+// `lookout scan` reported two CRITICAL drift findings. kubeadm owns a
+// bare majority of the spec fields across the three bootstrap
+// workloads, so the majority floor accepted it — and the two objects
+// it owns NOTHING on came out 100% drifted against a baseline that
+// was never applied to them. Both gates fire here; the recognized-
+// manager gate is the outer one, so that is the reason reported.
+func TestDriftBootstrapClusterIsSilent(t *testing.T) {
+	cmd := stab.DriftCommand(testDeps(
+		// kubeadm's own object: 6 spec leaves, and nobody else's.
+		deployment("kube-system", "coredns",
+			entry("kubeadm", metav1.ManagedFieldsOperationUpdate, ptr(ago(40*time.Second)), gitopsSpec),
+		),
+		// kubeadm has never touched these two.
+		deployment("local-path-storage", "local-path-provisioner",
+			entry("kubectl-client-side-apply", metav1.ManagedFieldsOperationUpdate, ptr(ago(41*time.Second)), termGraceSpec),
+			statusEntry("kube-controller-manager", ""),
+		),
+		deployment("kube-system", "kindnet",
+			entry("kubectl-create", metav1.ManagedFieldsOperationUpdate, ptr(ago(41*time.Second)), kubectlSpec),
+		),
+	))
+	res := checktest.Run(t, cmd)
+	if recs := findingLines(t, res.Stdout); len(recs) != 0 {
+		t.Fatalf("a healthy bootstrap cluster must be silent, got %v", recs)
+	}
+	sum := summaryLine(t, res.Stdout)
+	if sum["detection"] != "none" || sum["detection_reason"] != "not-a-gitops-manager" ||
+		sum["candidate"] != "kubeadm" || sum["share"] != "67%" {
+		t.Errorf("summary = %v, want detection=none detection_reason=not-a-gitops-manager candidate=kubeadm share=67%%", sum)
+	}
+}
+
+// TestDriftUnmanagedObjectsAreNotDrift (#320), the inner gate on its
+// own: a recognized GitOps manager holding a real majority, and an
+// object it has never written. Drift is divergence from an applied
+// baseline, so that object is not drifted — it is out of scope — and
+// the count says so rather than the scan going silently narrow.
+func TestDriftUnmanagedObjectsAreNotDrift(t *testing.T) {
+	cmd := stab.DriftCommand(testDeps(
+		deployment("prod", "api",
+			entry("argocd-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), gitopsSpec),
+			entry("kubectl-edit", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)), kubectlSpec),
+		),
+		// argocd never applied this one: two foreign owners, zero
+		// findings.
+		deployment("kube-system", "bootstrap",
+			entry("kubeadm", metav1.ManagedFieldsOperationUpdate, ptr(ago(240*time.Hour)), termGraceSpec),
+			entry("kubectl-create", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)), `{"f:spec":{"f:paused":{}}}`),
+		),
+	))
+	res := checktest.Run(t, cmd)
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 1 || recs[0]["manager"] != "kubectl-edit" || recs[0]["name"] != "api" {
+		t.Fatalf("want the one real drift on prod/api, got %v", recs)
+	}
+	sum := summaryLine(t, res.Stdout)
+	if sum["manager"] != "argocd-controller" || sum["detection"] != "majority" || sum["unmanaged"] != "1" {
+		t.Errorf("summary = %v, want manager=argocd-controller detection=majority unmanaged=1", sum)
+	}
+	if sum["scanned"] != "2" {
+		t.Errorf("scanned counts every object examined, including unmanaged ones: %v", sum)
+	}
+}
+
+// TestDriftDeclaredManagerShare: --manager skips both detection bars
+// entirely — the operator's declaration is authoritative — but the
+// share is still reported, because a declared manager owning almost
+// nothing is itself the warning that the scope is wrong. And it owns
+// nothing HERE on every object, so every object is unmanaged and
+// nothing is reported: the declared path gets the #320 gate too.
 func TestDriftDeclaredManagerShare(t *testing.T) {
 	cmd := stab.DriftCommand(testDeps(driftMixed()...))
 	res := checktest.Run(t, cmd, "--manager=flux-controller")
+	if recs := findingLines(t, res.Stdout); len(recs) != 0 {
+		t.Errorf("a manager that owns nothing anywhere can have no drift, got %v", recs)
+	}
 	sum := summaryLine(t, res.Stdout)
 	// flux-controller owns nothing in the fixture at all.
-	if sum["detection"] != "declared" || sum["share"] != "0%" {
-		t.Errorf("summary = %v, want detection=declared share=0%%", sum)
+	if sum["detection"] != "declared" || sum["share"] != "0%" || sum["unmanaged"] != "3" {
+		t.Errorf("summary = %v, want detection=declared share=0%% unmanaged=3", sum)
 	}
 	if _, ok := sum["detection_reason"]; ok {
 		t.Errorf("detection_reason belongs to detection=none only: %v", sum)
@@ -278,9 +349,20 @@ func TestDriftDeclaredManagerShare(t *testing.T) {
 }
 
 // TestDriftManagerOverride: --manager reassigns who is foreign — the
-// auto-detected majority manager itself becomes drift.
+// auto-detected majority manager itself becomes drift, on the objects
+// the declared manager actually co-owns.
 func TestDriftManagerOverride(t *testing.T) {
-	cmd := stab.DriftCommand(testDeps(driftMixed()...))
+	cmd := stab.DriftCommand(testDeps(
+		deployment("prod", "api",
+			entry("flux-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), termGraceSpec),
+			entry("argocd-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), gitopsSpec),
+			entry("kubectl-edit", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)), kubectlSpec),
+		),
+		deployment("prod", "worker",
+			entry("flux-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), termGraceSpec),
+			entry("argocd-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), gitopsSpec),
+		),
+	))
 	res := checktest.Run(t, cmd, "--manager=flux-controller")
 	recs := findingLines(t, res.Stdout)
 	managers := map[string]bool{}
@@ -290,13 +372,16 @@ func TestDriftManagerOverride(t *testing.T) {
 			t.Errorf("argocd finding reason = %q, want OutOfBandManager", r["reason"])
 		}
 	}
-	// argocd on 3 objects + kubectl-edit + helm-legacy = 5 findings.
-	if len(recs) != 5 || !managers["argocd-controller"] || !managers["kubectl-edit"] || !managers["helm-legacy"] {
-		t.Errorf("got %d findings for managers %v, want 5 across argocd-controller/kubectl-edit/helm-legacy", len(recs), managers)
+	// argocd on both objects + kubectl-edit on api = 3 findings.
+	if len(recs) != 3 || !managers["argocd-controller"] || !managers["kubectl-edit"] {
+		t.Errorf("got %d findings for managers %v, want 3 across argocd-controller/kubectl-edit", len(recs), managers)
 	}
 	sum := summaryLine(t, res.Stdout)
 	if sum["manager"] != "flux-controller" || sum["detection"] != "declared" {
 		t.Errorf("summary = %v, want manager=flux-controller detection=declared", sum)
+	}
+	if _, ok := sum["unmanaged"]; ok {
+		t.Errorf("unmanaged is omitted at zero: %v", sum)
 	}
 }
 

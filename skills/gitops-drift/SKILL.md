@@ -27,9 +27,11 @@ lookout stab drift
 lookout stab drift --namespace=prod --manager=argocd-controller
 ```
 
-The GitOps manager is auto-detected (owner of a strict majority of the
-spec fields in scope) unless `--manager` declares it; the summary line
-reports which (`manager=… detection=declared|majority share=…`).
+The GitOps manager is auto-detected (a *recognized* GitOps controller
+— Argo CD, Flux, Helm, Config Sync, Fleet, kapp, Terraform, Pulumi —
+owning a strict majority of the spec fields in scope) unless
+`--manager` declares it; the summary line reports which
+(`manager=… detection=declared|majority share=…`).
 Findings name the foreign manager, the operation, and the exact spec
 paths it owns:
 
@@ -58,11 +60,19 @@ scanned=3 findings=2 elapsed=100ms manager=argocd-controller detection=majority 
   means the scope is clean. `detection=none` is a different answer:
   no manager was resolved, so nothing was measured. Read
   `detection_reason` — `no-spec-fields-in-scope` (nothing in scope
-  owns a spec field) or `no-majority-manager` (the leading owner,
-  named in `candidate` with its `share`, holds 50% or less; the
-  normal shape of a cluster with no GitOps controller). If the
+  owns a spec field), `no-majority-manager` (the leading owner, named
+  in `candidate` with its `share`, holds 50% or less), or
+  `not-a-gitops-manager` (the majority owner is not a GitOps
+  controller at all — `kubeadm`, a `kubectl` manager). The last two
+  are the normal shape of a cluster with no GitOps controller. If the
   candidate *is* the GitOps controller, re-run with
   `--manager=<candidate>`.
+- `unmanaged=<n>` on the summary counts scanned objects the resolved
+  manager owns no spec field on. Nothing is reported for them: an
+  object the GitOps controller never applied cannot have drifted from
+  it. A high `unmanaged` next to `findings=0` means the manager's
+  scope is narrower than the scan's — narrow the scan with
+  `--namespace`, or check that `--manager` names the right controller.
 - `share` rides every run. On a declared manager it is the sanity
   check: `detection=declared share=4%` means most of the findings are
   other legitimate owners, not drift.

@@ -428,6 +428,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `stab drift` no longer invents drift on a cluster that has no GitOps
+  controller. Two independent bugs, both found by running `lookout
+  scan` against a thirty-second-old kind cluster with nothing wrong
+  with it — two of its four findings were **critical** drift against
+  the cluster's own bootstrap objects.
+
+  First, auto-detection elected `kubeadm`. A majority share is
+  evidence of volume, not of purpose: across three bootstrap workloads
+  `kubeadm` owned 54% of the spec fields, cleared the majority floor,
+  and became "the GitOps manager". Auto-detection now elects only a
+  *recognized* declarative-source controller — Argo CD, Flux, Helm,
+  Config Sync, Fleet, kapp, Terraform, Pulumi — and otherwise resolves
+  to `detection=none` with the new `detection_reason=not-a-gitops-manager`,
+  naming the candidate to pass back via `--manager`. `--manager` still
+  overrides the list entirely: the operator knows their cluster.
+
+  Second, and underneath it, drift was reported against objects the
+  resolved manager had never written. Drift is divergence from an
+  applied baseline, so an object the GitOps controller has never
+  touched is not drifted from it — it is outside its scope — yet every
+  other owner on it was reported, which made the check most
+  confidently wrong about the objects it knew least about. Findings
+  now require the resolved manager to co-own the object, and the
+  skipped objects are counted in a new `unmanaged=<n>` summary note
+  rather than dropped silently.
+
 - The sentinel serves a real readiness probe. `--metrics-addr` now
   exposes `/readyz` alongside `/healthz`, and the shipped Deployment
   points its readinessProbe at it. `/healthz` is a static 200 and a

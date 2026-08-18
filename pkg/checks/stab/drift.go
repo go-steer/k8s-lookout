@@ -58,7 +58,59 @@ const (
 	// clear managerMinShare, so there is no manager to measure drift
 	// against. The candidate and its share ride the summary.
 	detectionNoMajority = "no-majority-manager"
+	// detectionUnrecognized: a candidate cleared the majority but is
+	// not a GitOps controller, so there is no GitOps baseline on this
+	// cluster to measure drift against. See gitOpsManagers.
+	detectionUnrecognized = "not-a-gitops-manager"
 )
+
+// gitOpsManagers are the field-manager strings written by the tools
+// that hold a cluster to a declarative source. Auto-detection will
+// elect ONLY one of these; --manager overrides the list entirely,
+// because the operator knows their cluster and we do not.
+//
+// The list exists because a majority share is evidence of *volume*,
+// not of purpose. On a fresh kind cluster `kubeadm` owns 54% of the
+// spec fields across three workloads — a majority, by accident, of a
+// tiny population — and electing it declared kindnet and
+// local-path-provisioner 100% drifted at critical on a cluster
+// thirty seconds old with nothing wrong with it (#320). No share
+// floor fixes that: the winner was never a GitOps controller, so
+// "drift against it" was never a meaningful question.
+//
+// Failing closed is deliberate. An unrecognized controller yields
+// detection=none and silence, and the summary names the candidate to
+// pass back via --manager — the same escape hatch the no-majority
+// case already uses. The other direction, guessing, is what #320 was.
+var gitOpsManagers = map[string]bool{
+	// Argo CD
+	"argocd-controller":             true,
+	"argocd-application-controller": true,
+	// Flux v2 (server-side apply, one manager per reconciler)
+	"kustomize-controller": true,
+	"helm-controller":      true,
+	// Flux v1
+	"flux": true,
+	// Helm v3 --server-side
+	"helm": true,
+	// Rancher Fleet
+	"fleet-agent": true,
+	// GKE Config Sync / Anthos Config Management
+	"configsync.gke.io": true,
+	"config-sync":       true,
+	// carvel kapp
+	"kapp": true,
+	// Terraform kubernetes provider
+	"Terraform": true,
+	// Pulumi
+	"pulumi-kubernetes": true,
+}
+
+// isGitOpsManager reports whether a field-manager string belongs to a
+// recognized declarative-source controller.
+func isGitOpsManager(mgr string) bool {
+	return gitOpsManagers[mgr]
+}
 
 // managerShare is one manager's fraction of every spec leaf field
 // owned across the scanned objects.
@@ -89,7 +141,7 @@ func DriftCommand(deps Deps) checks.Command {
 		Summary: "Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other than the GitOps controller (managedFields) — out-of-band kubectl edits and rogue co-managers. Reports manager strings (tool names, not people); --identity additionally resolves each drift write to the audited principal via the cloud provider's audit trail (GKE Cloud Audit Logs), reporting an explicit unavailable on clusters without one. Default scope: all namespaces; scanned counts workload objects examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "manager", Type: emit.FlagString, Default: "",
-				Help: "the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning a strict majority (>50%) of the spec leaf fields summed across the scanned objects. No manager clears the majority — the usual shape of a cluster with no GitOps controller at all — and the scan resolves to detection=none and emits nothing rather than measuring drift against a guess; the summary then names the leading candidate (ties to the lexicographically smallest) and its share, to pass back here if it is in fact the GitOps controller"},
+				Help: "the declared GitOps manager (e.g. argocd-controller); empty auto-detects it as the manager owning a strict majority (>50%) of the spec leaf fields summed across the scanned objects AND recognized as a GitOps controller (Argo CD, Flux, Helm, Config Sync, Fleet, kapp, Terraform, Pulumi). No manager clears both bars — the usual shape of a cluster with no GitOps controller at all — and the scan resolves to detection=none and emits nothing rather than measuring drift against a guess; the summary then names the leading candidate (ties to the lexicographically smallest) and its share, to pass back here if it is in fact the GitOps controller. A declared manager skips both bars: the operator knows their cluster"},
 			{Name: "identity", Type: emit.FlagBool, Default: "false",
 				Help: "resolve each finding's last drift write to the audited principal (who ran it) via the cloud provider's audit trail; requires a provider with the audit capability (GKE: Cloud Audit Logs admin-activity read), otherwise the summary line reports an explicit unavailable"},
 		},
@@ -98,10 +150,11 @@ func DriftCommand(deps Deps) checks.Command {
 		},
 		Output: []checks.OutputField{
 			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager"},
-			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected owner of >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted)"},
-			{Name: "detection_reason", Doc: "summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field) or no-majority-manager (a leading candidate exists but owns 50% or less)"},
-			{Name: "candidate", Doc: "summary note on detection=none/no-majority-manager: the leading manager that fell short of the majority — pass it to --manager if it is in fact the GitOps controller"},
+			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected recognized GitOps controller owning >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted)"},
+			{Name: "detection_reason", Doc: "summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field), no-majority-manager (a leading candidate exists but owns 50% or less), or not-a-gitops-manager (the majority owner is not a recognized GitOps controller — e.g. kubeadm or a kubectl manager on a cluster with no GitOps at all)"},
+			{Name: "candidate", Doc: "summary note on detection=none: the leading manager that fell short (of the majority, or of being a recognized GitOps controller) — pass it to --manager if it is in fact the GitOps controller"},
 			{Name: "share", Doc: "summary note: the resolved manager's (or, on detection=none, the candidate's) percentage of every spec leaf field owned across the scanned objects, rounded. A declared manager with a low share means most findings are other legitimate owners"},
+			{Name: "unmanaged", Doc: "summary note, omitted at zero: scanned objects the resolved GitOps manager owns no spec field on. Nothing is reported for them — an object the manager never applied cannot have drifted from it — so a high count next to zero findings means the manager's scope is narrower than the scan's"},
 			{Name: "operation", Doc: "managedFields operation of the foreign manager's last write: Apply or Update"},
 			{Name: "tool", Doc: "client tool recognized from the manager string (kubectl for kubectl-edit/kubectl-patch/kubectl-*)"},
 			{Name: "fields", Doc: "compact spec paths the foreign manager owns (e.g. spec.template.spec.containers[app].image), capped at 8 with a +N more tail"},
@@ -225,13 +278,35 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 		if share := managerShare(totals[manager], owned); share <= managerMinShare {
 			return len(objs), undetectedManager(inv, detectionNoMajority, manager, share)
 		}
+		// A majority is evidence of volume, not of purpose (#320).
+		// `kubeadm` owns 54% of the spec fields on a fresh kind cluster
+		// and is not holding anything to a declarative source, so
+		// "drift against kubeadm" is not a question with an answer.
+		// Auto-detection therefore elects only a recognized GitOps
+		// controller; anything else resolves to none and names itself
+		// as the candidate to pass to --manager.
+		if !isGitOpsManager(manager) {
+			return len(objs), undetectedManager(inv, detectionUnrecognized, manager, managerShare(totals[manager], owned))
+		}
 		detection = "majority"
 	}
 	share := managerShare(totals[manager], owned)
 
+	// Drift is a claim about divergence from an applied baseline, so
+	// the resolved manager has to own something on the object for the
+	// claim to mean anything. An object it has never written is not
+	// drifted from it — it is outside its control entirely, and
+	// reporting every other owner as drift there says "100% drifted"
+	// about the objects we know the least about (#320). Those objects
+	// are counted and reported as `unmanaged`, never dropped silently.
 	now := deps.now()
 	var hits []driftHit
+	unmanaged := 0
 	for _, o := range objs {
+		if own := o.owners[manager]; own == nil || len(own.paths) == 0 {
+			unmanaged++
+			continue
+		}
 		for mgr, own := range o.owners {
 			if mgr == manager {
 				continue
@@ -282,6 +357,14 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	// findings are mostly other legitimate owners, not drift.
 	if err := inv.Out.Note("share", formatShare(share)); err != nil {
 		return 0, err
+	}
+	// Only when there were any: a zero would be noise on the common
+	// case, but a nonzero is the difference between "nothing drifted"
+	// and "we did not look at 9 of your 12 workloads".
+	if unmanaged > 0 {
+		if err := inv.Out.Note("unmanaged", fmt.Sprint(unmanaged)); err != nil {
+			return 0, err
+		}
 	}
 	return len(objs), nil
 }

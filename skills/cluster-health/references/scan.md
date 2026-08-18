@@ -221,10 +221,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `capability` | cloud.unavailable: the provider capability this command needed (workload-identity) |
 | `provider` | cloud.unavailable: the provider that was asked |
 | `manager` | on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager |
-| `detection` | summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected owner of >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted) |
-| `detection_reason` | summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field) or no-majority-manager (a leading candidate exists but owns 50% or less) |
-| `candidate` | summary note on detection=none/no-majority-manager: the leading manager that fell short of the majority — pass it to --manager if it is in fact the GitOps controller |
+| `detection` | summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected recognized GitOps controller owning >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted) |
+| `detection_reason` | summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field), no-majority-manager (a leading candidate exists but owns 50% or less), or not-a-gitops-manager (the majority owner is not a recognized GitOps controller — e.g. kubeadm or a kubectl manager on a cluster with no GitOps at all) |
+| `candidate` | summary note on detection=none: the leading manager that fell short (of the majority, or of being a recognized GitOps controller) — pass it to --manager if it is in fact the GitOps controller |
 | `share` | summary note: the resolved manager's (or, on detection=none, the candidate's) percentage of every spec leaf field owned across the scanned objects, rounded. A declared manager with a low share means most findings are other legitimate owners |
+| `unmanaged` | summary note, omitted at zero: scanned objects the resolved GitOps manager owns no spec field on. Nothing is reported for them — an object the manager never applied cannot have drifted from it — so a high count next to zero findings means the manager's scope is narrower than the scan's |
 | `operation` | managedFields operation of the foreign manager's last write: Apply or Update |
 | `tool` | client tool recognized from the manager string (kubectl for kubectl-edit/kubectl-patch/kubectl-*) |
 | `fields` | compact spec paths the foreign manager owns (e.g. spec.template.spec.containers[app].image), capped at 8 with a +N more tail |
