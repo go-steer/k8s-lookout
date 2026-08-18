@@ -93,23 +93,44 @@ func (r *readiness) ready() (bool, string) {
 		return false, "starting: no cluster runners resolved yet"
 	}
 	sort.Strings(expected)
+	// The default deployment — one sentinel, one cluster, no
+	// --cluster-name — has no name for its cluster, so the per-cluster
+	// list has nothing to put in it and rendered a blank entry:
+	// `waiting on 1 of 1 cluster(s): [ (not started)]` (#321). Report
+	// the phase on its own there. The "n of m cluster(s)" form earns
+	// its keep only when there are names to distinguish.
+	unnamed := len(expected) == 1 && expected[0] == ""
 	var waiting []string
 	for _, c := range expected {
-		probe, ok := probes[c]
-		if !ok {
-			waiting = append(waiting, c+" (not started)")
-			continue
-		}
+		var phase string
 		// Probes are called outside r.mu: a source's HasSynced takes
 		// its own lock, and holding the tracker's while waiting on a
 		// source's would make a slow source able to block every other
 		// cluster's readiness answer.
-		if !probe() {
-			waiting = append(waiting, c+" (syncing)")
+		switch probe, ok := probes[c]; {
+		case !ok:
+			phase = "not started"
+		case !probe():
+			phase = "syncing"
+		default:
+			continue
 		}
+		if unnamed {
+			return false, unnamedReason[phase]
+		}
+		waiting = append(waiting, c+" ("+phase+")")
 	}
 	if len(waiting) > 0 {
 		return false, fmt.Sprintf("waiting on %d of %d cluster(s): %v", len(waiting), len(expected), waiting)
 	}
 	return true, ""
+}
+
+// unnamedReason renders each not-ready phase for the unnamed
+// single-cluster case, as a whole sentence: the handler prefixes
+// "not ready: ", and naming a cluster that has no name only tells the
+// operator less than the phase does.
+var unnamedReason = map[string]string{
+	"not started": "cluster runner not started",
+	"syncing":     "informer caches syncing",
 }

@@ -461,12 +461,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wired as the readiness probe, so the sentinel reported ready during
   the seconds its informers spend listing every object in the cluster:
   running, and watching nothing. `/readyz` returns 503 with the reason
-  (`waiting on 1 of 2 cluster(s): [prod-west (syncing)]`) until every
-  source with an initial-LIST barrier has crossed it, on every cluster
-  the process watches, and withdraws again while a runner is between
-  supervisor restarts. The poll-driven sources — `expiry`, `quota`,
-  `saturation`, `notifications`, `token-burn` — have no cache to fill
-  and never hold readiness.
+  (`informer caches syncing` for the default single-cluster sentinel,
+  `waiting on 1 of 2 cluster(s): [prod-west (syncing)]` once the
+  clusters have names) until every source with an initial-LIST barrier
+  has crossed it, on every cluster the process watches, and withdraws
+  again while a runner is between supervisor restarts. The poll-driven
+  sources — `expiry`, `quota`, `saturation`, `notifications`,
+  `token-burn` — have no cache to fill and never hold readiness.
 
 - The sentinel Deployment now sets `strategy: Recreate`. At
   `replicas: 1` the default RollingUpdate starts the new pod before

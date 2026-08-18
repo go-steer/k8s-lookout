@@ -26,13 +26,22 @@ each at them:
   with the reason:
 
   ```
+  not ready: informer caches syncing
+  ```
+
+  A process watching a named fleet (`--clusters`, or a single
+  `--cluster-name`) names the stragglers instead, since there the
+  question is *which* cluster:
+
+  ```
   not ready: waiting on 1 of 2 cluster(s): [prod-west (syncing)]
   ```
 
   The poll-driven sources (`expiry`, `quota`, `saturation`,
   `notifications`, `token-burn`) have no cache to fill and never hold
   readiness. A runner that exits and is waiting on its supervisor
-  backoff withdraws from readiness too — `not ready: … (not started)`.
+  backoff withdraws from readiness too — `not ready: cluster runner
+  not started`, or `… (not started)` in the named-fleet form.
 
 Readiness matters most during a rollout: the Deployment uses
 `strategy: Recreate` with one replica, so the new pod must come up
