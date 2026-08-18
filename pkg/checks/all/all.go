@@ -32,9 +32,24 @@
 // must not import it — that would be an import cycle in spirit
 // (every check depending on every other) even where the compiler
 // permits it.
+//
+// # Why `scan` is registered here and nowhere else
+//
+// Every other check registers itself from its own package's init.
+// `scan` cannot: it composes the other commands, and its output
+// glossary is the union of theirs read out of the registry, so it can
+// only be constructed once every other init has run. Registering it
+// from pkg/checks/scan would mean that package blank-importing all
+// fifteen below — a second copy of this file, and the exact drift
+// this package exists to end. So the one place that already imports
+// them all, and where the language guarantees their inits have
+// completed, does it.
 package all
 
 import (
+	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/scan"
+
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/bundle"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/cloudcheck"
@@ -51,3 +66,5 @@ import (
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/top"
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/triage"
 )
+
+func init() { checks.Register(scan.New(scan.Deps{})) }

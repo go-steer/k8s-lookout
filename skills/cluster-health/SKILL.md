@@ -12,6 +12,14 @@ look?", pre/post-maintenance check), one call answers it:
 lookout health
 ```
 
+`health` and `scan` answer the same question two ways over the same
+checks: `health` scores ten categories and always emits a line per
+category, so a healthy cluster is ten `status=healthy` lines; `scan`
+emits findings only, so a healthy cluster is a bare summary line. Reach
+for the scorecard when you owe someone a status, for `lookout scan` when
+you want the raw list to work through — or when you want to pipe it into
+`lookout findings diff` to see what changed since the last sweep.
+
 ## Reading the scorecard
 
 The first block is one `health.category` line per category — **the

@@ -100,7 +100,7 @@ func commandPage(c checks.Command) string {
 		writeSpecTable(&b, c.Flags)
 	}
 	b.WriteString("## Common flags (every `lookout` command)\n\n")
-	writeSpecTable(&b, emit.CommonFlags())
+	writeSpecTable(&b, c.CommonFlags())
 	if c.GraphBacked {
 		b.WriteString("## Point-in-time flags (graph-backed commands)\n\n")
 		b.WriteString("This command answers from the topology graph and accepts the point-in-time flags:\n\n")

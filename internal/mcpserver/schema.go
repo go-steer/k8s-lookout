@@ -54,7 +54,7 @@ func propertyName(flag string) string {
 // flags: the complete flag surface behind a tool's schema, in the
 // order the surfaces document them.
 func schemaSpecs(c checks.Command) []emit.FlagSpec {
-	specs := emit.CommonFlags()
+	specs := c.CommonFlags()
 	if c.GraphBacked {
 		specs = append(specs, emit.GraphHistoryFlags()...)
 	}

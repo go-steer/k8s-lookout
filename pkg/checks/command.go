@@ -26,6 +26,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
@@ -71,6 +72,14 @@ type Command struct {
 	// Hidden commands resolve and run but are omitted from every
 	// listing (used for test scaffolding).
 	Hidden bool
+	// TimeoutDefault overrides the shared --timeout default
+	// (emit.DefaultTimeout) for this command. Zero — every command
+	// but `scan` — keeps the shared value. A composition that runs a
+	// dozen checks under one invocation cannot live inside the
+	// single-check budget; declaring the larger default here means
+	// --help, the MCP schema, and the reference page all show the
+	// number that is actually in force.
+	TimeoutDefault time.Duration
 	// Writes marks a command that MUTATES state rather than only
 	// reading it (e.g. `triage status --status=...`, the §9.4
 	// triage-status upsert). The MCP surface advertises such a tool
@@ -96,6 +105,29 @@ type Positional struct {
 	// Doc explains the argument's syntax and defaults, --help
 	// style: terse, exhaustive, written for an agent reader.
 	Doc string
+}
+
+// CommonFlags returns the §4.2 common flags as this command accepts
+// them — emit.CommonFlags with the --timeout default replaced when
+// the command declares its own. Every surface that renders the common
+// flag table (--help, the skill and site reference pages, the MCP
+// input schema) goes through here so none of them can advertise a
+// default the runner will not use.
+func (c Command) CommonFlags() []emit.FlagSpec {
+	return emit.CommonFlagsWith(c.TimeoutDefault)
+}
+
+// DefaultFlags returns the FlagValues this command sees when invoked
+// with no flags: its own specs plus the common (and, when graph-
+// backed, the §6.6 history) flags, each at its declared default. It
+// is how a composition builds the child emit.Invocation it hands to
+// Run — see emit.DefaultFlags.
+func (c Command) DefaultFlags(overrides ...emit.Field) (emit.FlagValues, error) {
+	specs := c.CommonFlags()
+	if c.GraphBacked {
+		specs = append(specs, emit.GraphHistoryFlags()...)
+	}
+	return emit.DefaultFlags(append(specs, c.Flags...), overrides...)
 }
 
 // Group returns the command's group ("" for top-level commands).
@@ -170,6 +202,9 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command %q: positional doc must be one non-empty line", c.Name)
 		}
 	}
+	if c.TimeoutDefault < 0 {
+		return fmt.Errorf("command %q: negative TimeoutDefault %s", c.Name, c.TimeoutDefault)
+	}
 	validateSpecs := emit.ValidateSpecs
 	if c.GraphBacked {
 		// Graph-backed commands also reserve the §6.6 --at/--store
@@ -215,13 +250,14 @@ func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
 		maxArgs = 1
 	}
 	return emit.RunConfig{
-		Name:        "lookout " + c.Name,
-		Flags:       c.Flags,
-		Check:       c.Run,
-		Help:        c.Help(),
-		MaxArgs:     maxArgs,
-		GraphBacked: c.GraphBacked,
-		Stdout:      stdout,
-		Stderr:      stderr,
+		Name:           "lookout " + c.Name,
+		Flags:          c.Flags,
+		Check:          c.Run,
+		Help:           c.Help(),
+		MaxArgs:        maxArgs,
+		GraphBacked:    c.GraphBacked,
+		TimeoutDefault: c.TimeoutDefault,
+		Stdout:         stdout,
+		Stderr:         stderr,
 	}
 }

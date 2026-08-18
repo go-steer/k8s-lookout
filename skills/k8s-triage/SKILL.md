@@ -22,6 +22,21 @@ daemon's permission gate, on the operator's say-so.
 
 ## Decision tree
 
+**No target yet? Start with `scan`.** When the question is "something is
+wrong with this cluster" and nothing names a workload, one call runs
+every target-free incident check and drills into the dependency edges of
+whatever it flags:
+
+```lookout
+lookout scan
+```
+
+Each finding carries `check=<command>` — the command to run for the full
+detail behind it. Read the criticals, pick the workload, then continue
+below with a target in hand. (`scan` reports incidents only; add
+`--include=audit` for the posture sweep, which is a different question —
+"no safety net" rather than "broken now".)
+
 **Sudden regression? Ask "what changed" first.** When the report is "it
 was fine until ~30 minutes ago", the #1 SRE question comes before any
 log read:
