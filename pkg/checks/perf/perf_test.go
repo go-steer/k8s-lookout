@@ -24,8 +24,6 @@ package perf_test
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,23 +135,6 @@ func summaryLine(t *testing.T, stdout string) map[string]string {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	return parseLine(t, lines[len(lines)-1])
-}
-
-func checkGolden(t *testing.T, name, got string) {
-	t.Helper()
-	golden := filepath.Join("testdata", name)
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("%v (run with UPDATE_GOLDEN=1 to create)", err)
-	}
-	if got != string(want) {
-		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", got, want)
-	}
 }
 
 // Pack fixtures with exact threshold math.
@@ -508,7 +489,7 @@ func TestGolden(t *testing.T) {
 			if res.Code != emit.ExitData {
 				t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 			}
-			checkGolden(t, tc.pack+".golden", res.Stdout)
+			checktest.Golden(t, "testdata/"+tc.pack+".golden", res.Stdout)
 		})
 	}
 }

@@ -122,5 +122,5 @@ func TestIPSpaceGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "ipspace.golden", res.Stdout)
+	checktest.Golden(t, "testdata/ipspace.golden", res.Stdout)
 }

@@ -22,7 +22,6 @@ package triage
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -177,23 +176,6 @@ func radiusFixture() []runtime.Object {
 	}
 }
 
-func golden(t *testing.T, name, got string) {
-	t.Helper()
-	path := filepath.Join("testdata", name)
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 to create): %v", err)
-	}
-	if got != string(want) {
-		t.Errorf("output drifted from %s:\n--- got ---\n%s--- want ---\n%s", path, got, want)
-	}
-}
-
 // TestRadius_LiveGolden pins the whole live payload: directions,
 // relations, hops, lateral anchors, readiness, the missing-reference
 // warning, and the source=live summary note.
@@ -202,7 +184,7 @@ func TestRadius_LiveGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
 	}
-	golden(t, "radius-live.golden", res.Stdout)
+	checktest.Golden(t, "testdata/radius-live.golden", res.Stdout)
 
 	// Spot assertions the golden alone would bury.
 	for _, want := range []string{

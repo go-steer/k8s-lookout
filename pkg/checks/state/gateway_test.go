@@ -667,7 +667,7 @@ func TestGatewayMixedGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	volGolden(t, "gateway-mixed.golden", res.Stdout)
+	checktest.Golden(t, "testdata/gateway-mixed.golden", res.Stdout)
 }
 
 func TestGatewayContract(t *testing.T) {

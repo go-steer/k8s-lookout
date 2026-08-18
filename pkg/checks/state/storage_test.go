@@ -391,7 +391,7 @@ func TestStorageMixedGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	volGolden(t, "storage-mixed.golden", res.Stdout)
+	checktest.Golden(t, "testdata/storage-mixed.golden", res.Stdout)
 }
 
 func TestStorageContract(t *testing.T) {

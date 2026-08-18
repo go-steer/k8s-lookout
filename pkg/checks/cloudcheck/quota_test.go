@@ -131,5 +131,5 @@ func TestQuotaGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "quota.golden", res.Stdout)
+	checktest.Golden(t, "testdata/quota.golden", res.Stdout)
 }

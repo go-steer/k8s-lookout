@@ -24,8 +24,6 @@ package state_test
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -329,31 +327,12 @@ func TestWIUsageErrors(t *testing.T) {
 	}
 }
 
-// wiGolden pins full-output ordering and formatting (named to avoid
-// colliding with other suites' golden helpers in this package).
-func wiGolden(t *testing.T, name, got string) {
-	t.Helper()
-	golden := filepath.Join("testdata", name)
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("%v (run with UPDATE_GOLDEN=1 to create)", err)
-	}
-	if got != string(want) {
-		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", got, want)
-	}
-}
-
 func TestWIMixedGolden(t *testing.T) {
 	res := checktest.Run(t, wiTestCommand(wiBindings(), wiMixed()...))
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	wiGolden(t, "wi-mixed.golden", res.Stdout)
+	checktest.Golden(t, "testdata/wi-mixed.golden", res.Stdout)
 }
 
 func TestWIContract(t *testing.T) {

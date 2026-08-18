@@ -15,9 +15,6 @@
 package audit_test
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -118,19 +115,7 @@ func TestNetpolGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	path := filepath.Join("testdata", "netpol.golden")
-	if *update {
-		if err := os.WriteFile(path, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden (run 'go test ./pkg/checks/audit -update'): %v", err)
-	}
-	if !bytes.Equal([]byte(res.Stdout), want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/netpol.golden", res.Stdout)
 }
 
 // The acceptance criterion of #185: a namespace with a default-deny —

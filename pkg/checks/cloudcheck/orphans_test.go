@@ -165,5 +165,5 @@ func TestOrphansGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "orphans.golden", res.Stdout)
+	checktest.Golden(t, "testdata/orphans.golden", res.Stdout)
 }

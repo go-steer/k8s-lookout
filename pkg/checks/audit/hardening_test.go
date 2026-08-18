@@ -15,9 +15,6 @@
 package audit_test
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -197,19 +194,7 @@ func TestHardeningGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	path := filepath.Join("testdata", "hardening.golden")
-	if *update {
-		if err := os.WriteFile(path, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden (run 'go test ./pkg/checks/audit -update'): %v", err)
-	}
-	if !bytes.Equal([]byte(res.Stdout), want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/hardening.golden", res.Stdout)
 }
 
 // A namespace that enforces a Pod Security level and runs ordinary

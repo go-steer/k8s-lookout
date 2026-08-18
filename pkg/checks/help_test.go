@@ -15,40 +15,17 @@
 package checks_test
 
 import (
-	"bytes"
-	"flag"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 )
 
-var update = flag.Bool("update", false, "rewrite golden files")
-
-func checkGolden(t *testing.T, name string, got []byte) {
-	t.Helper()
-	path := filepath.Join("testdata", name)
-	if *update {
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden file (run 'go test ./pkg/checks -update' to create): %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, got, want)
-	}
-}
-
 // TestCommandHelpGolden pins the generated --help text: it is an
 // agent-facing surface (§4.4.1), so accidental reformatting is a
 // contract change, not cosmetics.
 func TestCommandHelpGolden(t *testing.T) {
-	checkGolden(t, "demo-help.golden", []byte(checktest.DemoCommand().Help()))
+	checktest.Golden(t, "testdata/demo-help.golden", checktest.DemoCommand().Help())
 }
 
 func TestGroupHelpGolden(t *testing.T) {
@@ -61,7 +38,7 @@ func TestGroupHelpGolden(t *testing.T) {
 	logs.MCPName = "k8s_triage_logs"
 	logs.Summary = "Condense a workload's logs by template fingerprint; kubectl logs, but ~350 tokens."
 	r.Register(logs)
-	checkGolden(t, "group-help.golden", []byte(checks.GroupHelp(r, "triage")))
+	checktest.Golden(t, "testdata/group-help.golden", checks.GroupHelp(r, "triage"))
 }
 
 // TestHelpRunsThroughRunner proves `--help` on a mounted command

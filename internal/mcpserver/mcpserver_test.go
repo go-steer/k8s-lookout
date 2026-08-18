@@ -15,13 +15,9 @@
 package mcpserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,8 +28,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
-
-var update = flag.Bool("update", false, "rewrite golden files")
 
 // fakeSpecCommand is a synthetic command with a positional argument
 // and every FlagSpec type, so the schema golden and the target
@@ -148,19 +142,7 @@ func TestToolListGolden(t *testing.T) {
 	}
 	got = append(got, '\n')
 
-	path := filepath.Join("testdata", "tools.golden.json")
-	if *update {
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden file (run 'go test ./internal/mcpserver -update' to create): %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("tools/list does not match %s:\ngot:\n%s\nwant:\n%s", path, got, want)
-	}
+	checktest.GoldenBytes(t, "testdata/tools.golden.json", got)
 }
 
 func TestHiddenCommandsAreNotServed(t *testing.T) {

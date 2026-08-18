@@ -17,15 +17,12 @@ package emit
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-var update = flag.Bool("update", false, "rewrite golden files")
 
 // goldenFindings covers the encoding surface: full records, values
 // needing quoting/escaping, omitted empty fields, and detail fields.
@@ -60,17 +57,21 @@ var goldenFindings = []Finding{
 	},
 }
 
+// checkGolden is a local copy of checktest.Golden: this package is
+// what checktest is built on, so it cannot import it. The update
+// mechanism is deliberately the same one — UPDATE_GOLDEN=1, tree-wide,
+// one answer.
 func checkGolden(t *testing.T, name string, got []byte) {
 	t.Helper()
 	path := filepath.Join("testdata", name)
-	if *update {
+	if os.Getenv("UPDATE_GOLDEN") != "" {
 		if err := os.WriteFile(path, got, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading golden file (run 'go test ./pkg/emit -update' to create): %v", err)
+		t.Fatalf("read golden (run with UPDATE_GOLDEN=1 to create it): %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, got, want)

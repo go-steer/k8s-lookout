@@ -15,8 +15,6 @@
 package audit_test
 
 import (
-	"bytes"
-	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,8 +24,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
-
-var update = flag.Bool("update", false, "rewrite golden files")
 
 // checktest's fake clock starts at 2026-01-01T00:00:00Z, which is the
 // instant every exemption in these fixtures is judged against.
@@ -67,19 +63,7 @@ func TestExemptionsGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	path := filepath.Join("testdata", "exemptions.golden")
-	if *update {
-		if err := os.WriteFile(path, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden (run 'go test ./pkg/checks/audit -update'): %v", err)
-	}
-	if !bytes.Equal([]byte(res.Stdout), want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/exemptions.golden", res.Stdout)
 }
 
 // The two claims are different and must not collapse into one kind: a

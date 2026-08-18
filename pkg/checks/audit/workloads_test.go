@@ -15,11 +15,8 @@
 package audit_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -260,19 +257,7 @@ func TestWorkloadsGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	path := filepath.Join("testdata", "workloads.golden")
-	if *update {
-		if err := os.WriteFile(path, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden (run 'go test ./pkg/checks/audit -update'): %v", err)
-	}
-	if !bytes.Equal([]byte(res.Stdout), want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/workloads.golden", res.Stdout)
 }
 
 // A workload with a PDB, a spread constraint and full probe coverage
