@@ -47,8 +47,12 @@ import (
 
 func init() {
 	Register(SpecCommand(SpecDeps{
-		Typed:   func() (kubernetes.Interface, error) { return kube.BuildClient(kube.Options{}) },
-		Dynamic: func() (dynamic.Interface, error) { return kube.BuildDynamicClient(kube.Options{}) },
+		Typed: func(ctx context.Context) (kubernetes.Interface, error) {
+			return kube.BuildClient(kube.OptionsFrom(ctx))
+		},
+		Dynamic: func(ctx context.Context) (dynamic.Interface, error) {
+			return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
+		},
 	}))
 }
 
@@ -58,8 +62,8 @@ func init() {
 // cluster credentials; tests inject fakes (§13). The typed client
 // also serves discovery for the dynamic fallback.
 type SpecDeps struct {
-	Typed   func() (kubernetes.Interface, error)
-	Dynamic func() (dynamic.Interface, error)
+	Typed   func(ctx context.Context) (kubernetes.Interface, error)
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
 }
 
 // specKind is one kind `triage spec` fetches through a typed client,
@@ -336,7 +340,7 @@ func defaultNamespace(s emit.Scope) string {
 // plus the object as an unstructured map, ready for the sanitizer.
 func fetchSpecObject(ctx context.Context, deps SpecDeps, t *specTarget) (string, map[string]any, error) {
 	if t.typed != nil {
-		c, err := deps.Typed()
+		c, err := deps.Typed(ctx)
 		if err != nil {
 			return "", nil, err
 		}
@@ -368,7 +372,7 @@ func (t specTarget) qualifiedName() string {
 // reads it with the dynamic client. A "Kind.group" token pins the
 // group when the bare kind is served by more than one.
 func fetchDynamic(ctx context.Context, deps SpecDeps, t *specTarget) (string, map[string]any, error) {
-	c, err := deps.Typed()
+	c, err := deps.Typed(ctx)
 	if err != nil {
 		return "", nil, err
 	}
@@ -386,7 +390,7 @@ func fetchDynamic(ctx context.Context, deps SpecDeps, t *specTarget) (string, ma
 		}
 		t.namespace = ""
 	}
-	dyn, err := deps.Dynamic()
+	dyn, err := deps.Dynamic(ctx)
 	if err != nil {
 		return "", nil, err
 	}

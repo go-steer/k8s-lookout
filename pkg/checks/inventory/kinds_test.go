@@ -15,6 +15,7 @@
 package inventory
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ import (
 
 // noDiscovery is the Deps a built-in-only resolution must run under:
 // reaching discovery at all is the failure.
-var noDiscovery = Deps{Discovery: func() (discovery.DiscoveryInterface, error) {
+var noDiscovery = Deps{Discovery: func(context.Context) (discovery.DiscoveryInterface, error) {
 	panic("built-in kind resolution reached discovery")
 }}
 
@@ -44,7 +45,7 @@ var noDiscovery = Deps{Discovery: func() (discovery.DiscoveryInterface, error) {
 // operator most wants to know what is in a namespace is not the moment
 // to depend on a discovery round trip.
 func TestDefaultKindsResolveWithoutDiscovery(t *testing.T) {
-	got, err := resolve(noDiscovery, defaultKinds)
+	got, err := resolve(context.Background(), noDiscovery, defaultKinds)
 	if err != nil {
 		t.Fatalf("resolve(defaultKinds): %v", err)
 	}
@@ -69,7 +70,7 @@ func TestReplicaSetsAreOptIn(t *testing.T) {
 			t.Fatal("replicasets are in the default set; they would be the bulk of every listing")
 		}
 	}
-	got, err := resolve(noDiscovery, []string{"replicasets"})
+	got, err := resolve(context.Background(), noDiscovery, []string{"replicasets"})
 	if err != nil {
 		t.Fatalf("resolve(replicasets): %v", err)
 	}
@@ -94,7 +95,7 @@ func TestKindSpellings(t *testing.T) {
 		{"deployments.apps", "Deployment"},
 		{"pods.", "Pod"}, // the core group, spelled explicitly
 	} {
-		got, err := resolve(noDiscovery, []string{tc.token})
+		got, err := resolve(context.Background(), noDiscovery, []string{tc.token})
 		if err != nil {
 			t.Errorf("resolve(%q): %v", tc.token, err)
 			continue
@@ -106,7 +107,7 @@ func TestKindSpellings(t *testing.T) {
 }
 
 func TestKindsAreDedupedInCallerOrder(t *testing.T) {
-	got, err := resolve(noDiscovery, []string{"services", "po", "pods", " svc ", "pod"})
+	got, err := resolve(context.Background(), noDiscovery, []string{"services", "po", "pods", " svc ", "pod"})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -128,8 +129,8 @@ func TestUnknownKindIsAUsageError(t *testing.T) {
 	// bare) discovery client.
 	client := k8sfake.NewSimpleClientset()
 	cmd := newCommand(Deps{
-		Dynamic:   func() (dynamic.Interface, error) { return newDynamic(t, allListKinds()), nil },
-		Discovery: func() (discovery.DiscoveryInterface, error) { return client.Discovery(), nil },
+		Dynamic:   func(context.Context) (dynamic.Interface, error) { return newDynamic(t, allListKinds()), nil },
+		Discovery: func(context.Context) (discovery.DiscoveryInterface, error) { return client.Discovery(), nil },
 	}, func() time.Time { return testNow })
 	for _, token := range []string{"widgets", "pods!", "--all", "Pods/foo", ","} {
 		res := checktest.Run(t, cmd, "--namespace=shop", "--kinds="+token)
@@ -166,8 +167,8 @@ func TestUnknownKindResolvesThroughDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := newCommand(Deps{
-		Dynamic:   func() (dynamic.Interface, error) { return dyn, nil },
-		Discovery: func() (discovery.DiscoveryInterface, error) { return client.Discovery(), nil },
+		Dynamic:   func(context.Context) (dynamic.Interface, error) { return dyn, nil },
+		Discovery: func(context.Context) (discovery.DiscoveryInterface, error) { return client.Discovery(), nil },
 	}, func() time.Time { return testNow })
 
 	for _, token := range []string{"certificates", "cert", "certificate", "certificates.cert-manager.io"} {

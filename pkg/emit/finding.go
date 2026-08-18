@@ -148,7 +148,7 @@ func EnvelopeFields() []string {
 // owns. Like EnvelopeFields these are implicitly declared for every
 // command, and a command may not redeclare them.
 func SummaryNoteFields() []string {
-	return []string{"exempt"}
+	return []string{"exempt", "context"}
 }
 
 // pairs flattens the finding into its ordered key=value records,

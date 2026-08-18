@@ -174,7 +174,7 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
 		return d.Client(ctx)
 	}
-	return kube.BuildClient(kube.Options{})
+	return kube.BuildClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) now() time.Time {

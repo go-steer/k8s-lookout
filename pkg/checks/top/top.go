@@ -154,7 +154,7 @@ func (d Deps) metrics(ctx context.Context) (metricsv.Interface, error) {
 	if d.Metrics != nil {
 		return d.Metrics(ctx)
 	}
-	cfg, err := kube.BuildConfig(kube.Options{})
+	cfg, err := kube.BuildConfig(kube.OptionsFrom(ctx))
 	if err != nil {
 		return nil, err
 	}

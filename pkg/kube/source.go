@@ -31,7 +31,7 @@ type ClientSource func(ctx context.Context) (kubernetes.Interface, error)
 // precedence: in-cluster when running in a pod, $KUBECONFIG /
 // ~/.kube/config otherwise.
 func DefaultSource() ClientSource {
-	return func(context.Context) (kubernetes.Interface, error) {
-		return BuildClient(Options{})
+	return func(ctx context.Context) (kubernetes.Interface, error) {
+		return BuildClient(OptionsFrom(ctx))
 	}
 }

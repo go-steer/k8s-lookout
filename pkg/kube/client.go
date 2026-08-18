@@ -32,6 +32,15 @@ type Options struct {
 	InCluster bool
 	// Kubeconfig is an explicit kubeconfig path. Used outside a pod.
 	Kubeconfig string
+	// Context names a context in the kubeconfig to use instead of its
+	// current-context. It is a per-invocation override and never
+	// writes back: selecting a cluster must not be a side effect that
+	// outlives the process, because two concurrent invocations against
+	// two clusters cannot both win a mutation of the shared file.
+	//
+	// Meaningless in-cluster — there is no kubeconfig to select from —
+	// and BuildConfig says so rather than ignoring it.
+	Context string
 }
 
 // BuildClient constructs a kubernetes.Interface from the options
@@ -93,6 +102,12 @@ func BuildDynamicClientFromConfig(cfg *rest.Config) (dynamic.Interface, error) {
 //  2. InCluster or auto-detected (KUBERNETES_SERVICE_HOST env
 //     var is set inside a pod).
 //  3. $KUBECONFIG env var → fallback to ~/.kube/config.
+//
+// Options.Context selects a context within whichever kubeconfig cases
+// 1 and 3 land on. It is rejected against case 2: in-cluster
+// credentials come from the pod's service account and there is no
+// context to choose, so honoring the flag silently would report a
+// cluster the invocation did not read.
 func BuildConfig(opts Options) (*rest.Config, error) {
 	var (
 		cfg *rest.Config
@@ -100,11 +115,14 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 	)
 	switch {
 	case opts.Kubeconfig != "":
-		cfg, err = clientcmd.BuildConfigFromFlags("", opts.Kubeconfig)
+		cfg, err = loadKubeconfig(&clientcmd.ClientConfigLoadingRules{ExplicitPath: opts.Kubeconfig}, opts.Context)
 		if err != nil {
 			return nil, fmt.Errorf("kubeconfig %s: %w", opts.Kubeconfig, err)
 		}
 	case opts.InCluster || os.Getenv("KUBERNETES_SERVICE_HOST") != "":
+		if opts.Context != "" {
+			return nil, fmt.Errorf("--context=%s is meaningless with in-cluster credentials: there is no kubeconfig to select a context from. Pass --kubeconfig=<path> as well, or drop --context", opts.Context)
+		}
 		cfg, err = rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("in-cluster config: %w", err)
@@ -113,11 +131,18 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 		// Fallback to default kubeconfig search (KUBECONFIG env,
 		// then $HOME/.kube/config). Fine for local dev; a real
 		// deployment always sets --in-cluster or --kubeconfig.
-		loader := clientcmd.NewDefaultClientConfigLoadingRules()
-		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).ClientConfig()
+		cfg, err = loadKubeconfig(clientcmd.NewDefaultClientConfigLoadingRules(), opts.Context)
 		if err != nil {
 			return nil, fmt.Errorf("default kubeconfig: %w", err)
 		}
 	}
 	return cfg, nil
+}
+
+// loadKubeconfig resolves one kubeconfig with an optional
+// current-context override. The override struct has always been here
+// and empty; kubeContext is what fills it.
+func loadKubeconfig(loader clientcmd.ClientConfigLoader, kubeContext string) (*rest.Config, error) {
+	overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides).ClientConfig()
 }

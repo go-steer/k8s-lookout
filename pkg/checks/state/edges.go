@@ -71,7 +71,7 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
 		return d.Client(ctx)
 	}
-	return kube.BuildClient(kube.Options{})
+	return kube.BuildClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) now() time.Time {
@@ -85,7 +85,7 @@ func (d Deps) dynamic(ctx context.Context) (dynamic.Interface, error) {
 	if d.Dynamic != nil {
 		return d.Dynamic(ctx)
 	}
-	return kube.BuildDynamicClient(kube.Options{})
+	return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) resolver(client kubernetes.Interface) *crd.Resolver {

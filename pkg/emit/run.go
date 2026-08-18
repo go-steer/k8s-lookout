@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/exempt"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // Exit codes per the §4.2 contract. The multicall dispatcher and
@@ -221,6 +222,23 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		return ExitRuntime
 	}
 
+	// The cluster selection rides the context rather than the
+	// Invocation because the code that consumes it — every check
+	// group's client accessor — already takes a context and takes
+	// nothing else. See pkg/kube/selection.go.
+	ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
+	if scope.Context != "" {
+		// Stamped whether or not the check ends up building a client:
+		// the caller named a cluster, and a stream that says which
+		// cluster it was asked about is what makes several of them
+		// mergeable. The note is Writer-owned, so no check can
+		// contradict it.
+		if err := writer.note("context", scope.Context); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+			return ExitRuntime
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -256,6 +274,8 @@ func scopeFromValues(v FlagValues, graphBacked bool, now func() time.Time) (Scop
 		Namespace:     v.String("namespace"),
 		AllNamespaces: v.Bool("A"),
 		Since:         v.Duration("since"),
+		Kubeconfig:    v.String("kubeconfig"),
+		Context:       v.String("context"),
 	}
 	if s.Namespace != "" && s.AllNamespaces {
 		return Scope{}, errors.New("--namespace and -A are mutually exclusive")

@@ -107,7 +107,7 @@ func checkoutFixture() (kubernetes.Interface, *fakeLogs) {
 
 func deps(cs kubernetes.Interface, logs *fakeLogs) Deps {
 	return Deps{
-		Client: func() (kubernetes.Interface, error) { return cs, nil },
+		Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
 		Logs:   logs,
 	}
 }
