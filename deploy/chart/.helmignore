@@ -1,0 +1,15 @@
+# Patterns to ignore when building the chart package.
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+
+# README.md is deliberately NOT ignored — `helm show readme` reads it
+# out of the packaged chart, and it is the only documentation someone
+# installing from a tarball has.

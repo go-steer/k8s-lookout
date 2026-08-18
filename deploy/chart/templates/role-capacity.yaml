@@ -1,0 +1,46 @@
+{{- if .Values.rbac.capacity }}
+# SOURCE OF TRUTH: deploy/14-role-watcher-capacity.yaml and
+# deploy/15-rolebinding-watcher-capacity.yaml — held to it by
+# dev/tools/verify-helm-parity.
+#
+# The capacity source reads the cluster-autoscaler's status ConfigMap
+# in kube-system. Split out of the ClusterRole on purpose: it is the
+# one grant outside the sentinel's own namespace that a cluster admin
+# may reasonably refuse, and refusing it should cost one source rather
+# than the deployment. Under `--sources=auto` the capacity source skips
+# itself, loudly, when the grant is absent.
+#
+# The `list` on all kube-system ConfigMaps is a Kubernetes RBAC
+# limitation, not a wider ask: resourceNames cannot constrain a list.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lookout.fullname" . }}-capacity
+  namespace: kube-system
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["cluster-autoscaler-status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lookout.fullname" . }}-capacity
+  namespace: kube-system
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lookout.fullname" . }}-capacity
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lookout.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -145,3 +145,30 @@ jobs:
           go-version-file: go.mod
       - name: Vuln scan
         run: dev/ci/presubmits/verify-vuln
+
+  # Not named `deploy`: that name is already taken by the docs-site
+  # publish job in docs.yml, and two jobs with one name make the
+  # required-check list ambiguous.
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kustomize, if the runner image stops shipping it
+        run: |
+          set -euo pipefail
+          if command -v kustomize >/dev/null 2>&1; then
+            kustomize version
+            exit 0
+          fi
+          cd /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | sudo bash
+      - name: Chart matches deploy/*.yaml
+        # HELM_PARITY_REQUIRE=1 turns the tool-missing skip into a
+        # failure. Without it, a runner image that dropped kustomize
+        # would leave this job green while checking nothing, which is
+        # the exact failure this job exists to prevent.
+        env:
+          HELM_PARITY_REQUIRE: '1'
+        run: dev/ci/presubmits/verify-helm-parity

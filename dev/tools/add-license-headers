@@ -28,7 +28,7 @@ Scope:
 - Go source under cmd/, pkg/, internal/, skills/, deploy/
 - Shell scripts under dev/tools/ and dev/ci/presubmits/
 - YAML: .github/workflows/*.yml, .github/{dependabot,settings}.yml,
-  dev/tools/.golangci.yml
+  dev/tools/.golangci.yml, deploy/chart/{Chart,values}.yaml
 - Python: dev/tools/add-license-headers (this file)
 
 For Go files, golangci-lint's `goheader` linter enforces the full
@@ -184,11 +184,19 @@ def main() -> None:
     # pull_request_template.md — those are prose GitHub renders to
     # contributors, and a fourteen-line license header above "What
     # happened" helps nobody.
+    #
+    # Also deliberately NOT deploy/chart/templates/* — Helm passes
+    # comments through to its output, so a header there would stamp
+    # fourteen lines of license onto every resource in every
+    # `helm template` render. Chart.yaml and values.yaml, which Helm
+    # does not render, carry one.
     yaml_files = [
         *list((REPO_ROOT / ".github/workflows").glob("*.yml")),
         REPO_ROOT / ".github/dependabot.yml",
         REPO_ROOT / ".github/settings.yml",
         REPO_ROOT / "dev/tools/.golangci.yml",
+        REPO_ROOT / "deploy/chart/Chart.yaml",
+        REPO_ROOT / "deploy/chart/values.yaml",
         *sorted((REPO_ROOT / "examples").rglob("*.yaml")),
     ]
     for path in yaml_files:

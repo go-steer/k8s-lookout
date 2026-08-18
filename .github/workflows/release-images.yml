@@ -572,6 +572,80 @@ jobs:
           [[ "$LATEST_GKE" != "$VER_GKE" ]] && { echo "::error::latest-gke does not match ${{ github.ref_name }}-gke"; exit 1; }
           echo "flavor tags verified: divergent floating tags, each matching its version"
 
+  # The Helm chart (#287), published as an OCI artifact to the same
+  # registry as the images and signed with the same keyless identity.
+  #
+  # Not a gh-pages chart repo: that is a second publishing surface with
+  # its own index.yaml to keep consistent, and `helm install
+  # oci://ghcr.io/...` has needed no extra setup since Helm 3.8.
+  #
+  # Runs after the images so the chart can never be installable before
+  # the image its appVersion names exists — a chart that renders a
+  # pull-loop is worse than a chart that is not there yet. The chart
+  # version is not passed in: it lives in Chart.yaml and is held equal
+  # to the tag by dev/tools/verify-helm-parity, so a mismatch here is a
+  # failure rather than a silent overwrite of whatever was published
+  # last.
+  publish-chart:
+    if: github.ref_type == 'tag'
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Chart version matches the tag
+        run: |
+          set -euo pipefail
+          want="${{ github.ref_name }}"
+          got="v$(helm show chart deploy/chart | yq -r .version)"
+          app="$(helm show chart deploy/chart | yq -r .appVersion)"
+          if [[ "$got" != "$want" || "$app" != "$want" ]]; then
+            echo "::error::chart version=$got appVersion=$app but the tag is $want — the cut commit did not bump deploy/chart/Chart.yaml"
+            exit 1
+          fi
+      - name: Package and push
+        id: push
+        run: |
+          set -euo pipefail
+          # helm package names the tarball <name>-<version>.tgz, and
+          # the chart version has no leading v.
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/chart --destination /tmp/chart
+          helm registry login "${REGISTRY}" \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}"
+          # helm push prints the pushed digest on the "Digest:" line;
+          # capture it so cosign signs the immutable artifact rather
+          # than a tag that a later push could move.
+          helm push "/tmp/chart/lookout-${version}.tgz" \
+            "oci://${REGISTRY}/${IMAGE_OWNER}/charts" 2>&1 | tee /tmp/push.log
+          digest="$(grep -oE 'sha256:[0-9a-f]{64}' /tmp/push.log | head -1)"
+          [[ -n "$digest" ]] || { echo "::error::could not read a digest out of helm push"; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Sign the chart
+        run: |
+          set -euo pipefail
+          cosign sign --yes \
+            "${REGISTRY}/${IMAGE_OWNER}/charts/lookout@${{ steps.push.outputs.digest }}"
+      - name: Verify the published chart installs
+        run: |
+          set -euo pipefail
+          ref="oci://${REGISTRY}/${IMAGE_OWNER}/charts/lookout"
+          cosign verify \
+            "${REGISTRY}/${IMAGE_OWNER}/charts/lookout@${{ steps.push.outputs.digest }}" \
+            --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          # Pull it back and render it. A chart that pushed cleanly but
+          # cannot template is a release nobody finds until an install
+          # fails, and the round trip is two seconds.
+          helm template lookout-watch "$ref" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --namespace agent-triage >/tmp/rendered.yaml
+          grep -q "image: ghcr.io/go-steer/lookout:${{ github.ref_name }}" /tmp/rendered.yaml \
+            || { echo "::error::published chart does not render the ${{ github.ref_name }} image"; exit 1; }
+          echo "chart published and verified: ${ref} ${{ steps.push.outputs.digest }}"
+
   # GitHub Release object (#146, core-agent's discoverability model):
   # every release tag gets a Release whose body is the CHANGELOG
   # section plus the image/cosign footer, composed by

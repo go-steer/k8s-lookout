@@ -1,0 +1,47 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} — the sentinel is installed as
+{{ include "lookout.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Two prerequisites the chart does NOT create, because getting either
+wrong is silent:
+
+  1. The Secret holding the daemon bearer token:
+
+       kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.daemonToken.secretName }} \
+         --from-literal={{ .Values.daemonToken.secretKey }}=<token>
+
+     It is not a chart value on purpose — a token passed as a value is
+     written into the stored release manifest, where anyone who can
+     read the release can read the token.
+
+  2. A reachable core-agent daemon. Right now the sentinel is pointed at:
+
+       {{ range .Values.args }}{{ if hasPrefix "--daemon-url=" . }}{{ trimPrefix "--daemon-url=" . }}{{ end }}{{ end }}
+
+Check it came up:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "lookout.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "lookout.fullname" . }} | head -40
+
+The startup log names every source it enabled and every one it skipped,
+with the reason. A source skipped for a missing grant is reported, never
+silently dropped — if a source you expected is absent, the reason is in
+those lines.
+{{ if not .Values.rbac.create }}
+NOTE: rbac.create is false, so the ClusterRole and its binding were not
+installed. The sentinel will fail at startup unless an equivalent grant
+already exists for ServiceAccount {{ include "lookout.serviceAccountName" . }}.
+{{- end }}
+{{- if not .Values.rbac.capacity }}
+NOTE: rbac.capacity is false. The capacity source cannot read the
+cluster-autoscaler status ConfigMap and will skip itself at startup.
+{{- end }}
+{{- if not .Values.service.create }}
+NOTE: service.create is false. /metrics is reachable at the pod IP on
+:{{ .Values.metricsPort }} and by nothing that scrapes by Service.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+NOTE: the occurrence store is on an emptyDir. That is the intended
+default — the store is telemetry, not control flow — but `--at`
+post-mortems and graph history do not survive a reschedule. Set
+persistence.enabled=true if you want them to.
+{{- end }}

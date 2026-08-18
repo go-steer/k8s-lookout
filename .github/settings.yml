@@ -65,14 +65,21 @@ branches:
         # NOT here: it runs post-merge on main and weekly, because a
         # live-cluster test that gates a PR is a test that eventually
         # gets marked required-but-flaky and then ignored.
+        #
+        # Each name below must be a job that reports on EVERY merge
+        # candidate. That is why ci-docs.yml exists — it emits
+        # same-named jobs for the paths ci.yml skips. `build` is
+        # deliberately absent: the only job by that name is the docs
+        # site build in docs.yml, which triggers on docs paths only,
+        # so requiring it would block every code-only PR forever.
         strict: true
         contexts:
-          - build
           - test
           - lint
           - docs-lint
           - go mod tidy is clean
           - govulncheck
+          - manifests
       enforce_admins: false
       required_linear_history: true
       restrictions: null

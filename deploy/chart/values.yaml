@@ -1,0 +1,197 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Defaults here are not "sensible-looking values someone picked for the
+# chart". They are the values in deploy/*.yaml, and
+# dev/tools/verify-helm-parity fails if that stops being true:
+#
+#   helm template lookout-watch deploy/chart -n agent-triage
+#     ==  kustomize build deploy/
+#
+# So the raw manifests remain the single reviewed description of how the
+# sentinel is deployed, and the chart is a parameterization of it rather
+# than a second opinion. When you change a manifest, run the parity
+# check; it will tell you exactly which chart template drifted.
+
+# -- Image. The default flavor links zero GCP SDKs. Project-tier
+# deployments that enable the quota source need the `-gke` flavor:
+# set `image.tag: v0.21.0-gke`, or `image.flavor: gke` to append the
+# suffix to whatever appVersion the chart ships with.
+image:
+  repository: ghcr.io/go-steer/lookout
+  # Empty means .Chart.AppVersion, which the release cut keeps in step
+  # with deploy/51's pin.
+  tag: ""
+  flavor: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Set false when the ServiceAccount is managed outside the chart —
+  # a Workload-Identity-annotated one, say.
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # The cluster-scoped read-only ClusterRole + binding. Turn off for a
+  # namespace-tier deployment that binds an equivalent Role per
+  # namespace instead (DESIGN §11).
+  create: true
+  # The kube-system Role that lets the capacity source read
+  # `cluster-autoscaler-status`. Independent of the ClusterRole because
+  # it is the one grant outside the sentinel's own namespace that a
+  # cluster admin may reasonably refuse.
+  capacity: true
+
+# -- Sentinel flags. These are the container args, verbatim: the image
+# entrypoint is ["/lookout", "watch"], so each entry splices in behind
+# `watch`. Setting `args` replaces the list wholesale, which is the
+# honest behaviour for a flag set where the interactions matter — see
+# the comments in deploy/51-deployment-watcher.yaml before changing one.
+#
+# The two you will almost certainly change are --daemon-url and
+# --cluster-name; --owner is the fallback session owner.
+args:
+  - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
+  - "--token-env=WATCHER_TOKEN"
+  - "--mode=per-incident"
+  - "--owner=sre-oncall@example.com"
+  - "--cluster-name=local"
+  - "--dedup-window=5m"
+  - "--in-cluster"
+  - "--metrics-addr=:9090"
+  - "--log-level=info"
+  - "--storm=on"
+  - "--store=/var/lib/lookout/lookout.db"
+
+# -- The bearer token the sentinel presents to the core-agent daemon.
+# The chart does NOT create this Secret: a chart that takes a token as
+# a value writes it into the release's stored manifest, where anyone
+# with get-secret in the namespace can read it back out of the Helm
+# release itself. Create it out of band and name it here.
+daemonToken:
+  secretName: lookout-watch-token
+  secretKey: token
+  envVar: WATCHER_TOKEN
+
+# -- Replicas. One, and the strategy is Recreate: with a rolling
+# update, replicas: 1 still briefly runs two sentinels watching the
+# same cluster and double-emitting every signal. Raising this does not
+# give you high availability — it gives you duplicate incidents.
+# Leader election is tracked separately.
+replicaCount: 1
+
+# -- The occurrence store's home (§9.1): info-signal persistence, graph
+# history for `--at` post-mortems, triage-status records. emptyDir is
+# the zero-friction default because the store is telemetry, never
+# control flow — losing it on reschedule costs history, not
+# correctness. For durable post-mortems set `persistence.enabled: true`
+# and either name an existing claim or let the chart create one. The
+# image is distroless, so `kubectl cp` off a live pod does not work; a
+# PVC you can mount from a debug pod is the practical way to get the
+# store out.
+persistence:
+  enabled: false
+  existingClaim: ""
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+# -- The container port /metrics, /healthz and /readyz are served on.
+# It must agree with --metrics-addr in `args` above; nothing can check
+# that for you, because the flag is an opaque string to the chart.
+metricsPort: 9090
+
+service:
+  # A ClusterIP Service for /metrics. Needed by anything that scrapes by
+  # Service rather than by pod IP, which is every operator-managed
+  # Prometheus.
+  create: true
+  type: ClusterIP
+  port: 9090
+  annotations: {}
+  labels: {}
+
+# -- A prometheus-operator ServiceMonitor. Off by default because it is
+# a CRD: rendering it on a cluster without prometheus-operator fails
+# the install, and the base bundle has to work everywhere. GKE's
+# managed Prometheus wants a PodMonitoring instead — see
+# deploy/prometheus-operator/servicemonitor.yaml.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# -- Ingress to :9090 from the release namespace only. If your CNI does
+# not enforce NetworkPolicy this is inert, not broken.
+networkPolicy:
+  create: true
+  # Extra `from:` peers, appended to the same-namespace rule. A scraper
+  # in another namespace (prometheus in monitoring/, GMP in
+  # gmp-system/) needs one:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  extraIngressFrom: []
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "256Mi"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+securityContext: {}
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+# /readyz, not /healthz: liveness asks whether the process is up,
+# readiness asks whether it has established its watches. The sentinel
+# is blind until its informers sync, and that is exactly the window a
+# rollout must not cut over into.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

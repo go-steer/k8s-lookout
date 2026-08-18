@@ -37,6 +37,9 @@ kind: Role
 metadata:
   name: lookout-watch-capacity
   namespace: kube-system
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]

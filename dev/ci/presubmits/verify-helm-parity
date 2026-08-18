@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,18 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: lookout-watch
-  labels:
-    app.kubernetes.io/name: lookout-watch
-    app.kubernetes.io/component: watcher
-subjects:
-  - kind: ServiceAccount
-    name: lookout-watch
-    namespace: agent-triage
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: lookout-watch
+# CI delegator: holds deploy/chart to deploy/*.yaml via
+# dev/tools/verify-helm-parity.
+set -euo pipefail
+exec "$(dirname "$0")/../../tools/verify-helm-parity" "$@"

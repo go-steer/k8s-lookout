@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Holds the Helm chart to the raw manifests.
+#
+#   helm template lookout-watch deploy/chart -n agent-triage
+#     ==  kustomize build deploy/
+#
+# Why this exists rather than trust: two independent descriptions of
+# the same deployment will diverge — that is not a risk, it is a
+# certainty — and the failure mode is silent. deploy/12's ClusterRole
+# is already pinned to what the code reads by
+# pkg/checks/state/rbac_test.go; a chart not held to the same manifest
+# breaks that guarantee for chart users specifically, and nothing else
+# would notice. It would keep deploying last quarter's RBAC while every
+# test in the tree stayed green.
+#
+# The comparison is exact, after normalization:
+#   - resources sorted by (kind, namespace, name), keys sorted
+#   - Helm's own provenance labels dropped (helm.sh/chart,
+#     app.kubernetes.io/managed-by, app.kubernetes.io/version) — they
+#     are metadata Helm adds to every chart and the manifests correctly
+#     do not carry them
+#   - `helm template`'s "# Source:" comments dropped
+# Everything else — every RBAC rule, every container arg, every probe,
+# the security context, the strategy — must match byte for byte.
+#
+# Also checked: Chart.yaml appVersion against deploy/51's image pin, so
+# a release cut that bumps one and forgets the other fails here rather
+# than shipping a chart that installs the previous release.
+#
+# Requires helm and kustomize. Skips with a notice (exit 0) when either
+# is missing, so a contributor without them is not blocked. That skip
+# is exactly the wrong behaviour in CI — a green job that silently
+# checked nothing is worse than no job — so CI sets
+# HELM_PARITY_REQUIRE=1, which turns a missing tool into a failure.
+#
+# Usage:
+#   dev/tools/verify-helm-parity            — diff, exit 1 on drift
+#   dev/tools/verify-helm-parity --show     — print both renders
+#   HELM_PARITY_REQUIRE=1 …                 — missing tool is an error
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+cd "$(repo_root)"
+
+RELEASE_NAME="lookout-watch"
+NAMESPACE="agent-triage"
+CHART="deploy/chart"
+
+SHOW=0
+[[ "${1:-}" == "--show" ]] && SHOW=1
+
+for tool in helm kustomize python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    if [[ "${HELM_PARITY_REQUIRE:-0}" == "1" ]]; then
+      echo "✗ $tool is not installed, and HELM_PARITY_REQUIRE=1 forbids skipping" >&2
+      exit 1
+    fi
+    echo "▸ skipping helm/kustomize parity: $tool not installed" >&2
+    exit 0
+  fi
+done
+
+# ---- chart version vs appVersion vs the deploy/51 image pin -----------
+
+# Read the rendered manifest, not the file: deploy/51's header comment
+# shows a `:<version>-gke` example line, and a grep over the raw source
+# happily matches the documentation instead of the deployment.
+pinned="$(kustomize build deploy/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
+appversion="$(grep -E '^appVersion:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^appVersion: *"?([^"]*)"?/\1/')"
+if [[ "$pinned" != "$appversion" ]]; then
+  echo "✗ Chart.yaml appVersion ($appversion) != deploy/51 image pin ($pinned)" >&2
+  echo "  The release cut bumps both — see docs/release-process.md." >&2
+  exit 1
+fi
+
+chartversion="$(grep -E '^version:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^version: *"?([^"]*)"?/\1/')"
+if [[ "$chartversion" != "${appversion#v}" ]]; then
+  echo "✗ Chart.yaml version ($chartversion) != appVersion without the v (${appversion#v})" >&2
+  echo "  The chart version tracks the app version on purpose — see Chart.yaml." >&2
+  exit 1
+fi
+
+# ---- render both ------------------------------------------------------
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" >"$tmp/chart.raw.yaml"
+kustomize build deploy/ >"$tmp/kustomize.raw.yaml"
+
+normalize() {
+  python3 - "$1" "$2" <<'PY'
+import sys, yaml
+
+src, dst = sys.argv[1], sys.argv[2]
+
+# Labels Helm stamps on everything it renders. They are provenance, not
+# configuration, and the hand-written manifests correctly do not carry
+# them — so they are the one difference this check forgives.
+HELM_META = {
+    "helm.sh/chart",
+    "app.kubernetes.io/managed-by",
+    "app.kubernetes.io/version",
+}
+
+docs = []
+for doc in yaml.safe_load_all(open(src)):
+    if not doc:
+        continue
+    labels = doc.get("metadata", {}).get("labels")
+    if labels:
+        for key in HELM_META:
+            labels.pop(key, None)
+        if not labels:
+            del doc["metadata"]["labels"]
+    docs.append(doc)
+
+def key(d):
+    meta = d.get("metadata", {})
+    return (d.get("kind", ""), meta.get("namespace", ""), meta.get("name", ""))
+
+docs.sort(key=key)
+with open(dst, "w") as out:
+    yaml.safe_dump_all(docs, out, default_flow_style=False, sort_keys=True)
+PY
+}
+
+normalize "$tmp/chart.raw.yaml" "$tmp/chart.yaml"
+normalize "$tmp/kustomize.raw.yaml" "$tmp/kustomize.yaml"
+
+if [[ "$SHOW" -eq 1 ]]; then
+  echo "--- kustomize build deploy/ ---"
+  cat "$tmp/kustomize.yaml"
+  echo "--- helm template $RELEASE_NAME $CHART -n $NAMESPACE ---"
+  cat "$tmp/chart.yaml"
+fi
+
+if diff -u "$tmp/kustomize.yaml" "$tmp/chart.yaml" >"$tmp/diff"; then
+  count="$(grep -c '^kind:' "$tmp/kustomize.yaml" || true)"
+  echo "✓ chart matches deploy/ manifests ($count resources)"
+else
+  echo "✗ the Helm chart and deploy/*.yaml have diverged." >&2
+  echo "  Left is kustomize build deploy/ (the source of truth)," >&2
+  echo "  right is helm template. Fix deploy/chart/templates/." >&2
+  echo >&2
+  cat "$tmp/diff" >&2
+  exit 1
+fi
+
+# ---- the chart must also be valid on its own --------------------------
+
+helm lint "$CHART" --namespace "$NAMESPACE" --quiet
+
+# Non-default paths the parity diff cannot reach, because the defaults
+# reproduce the manifests and these deliberately do not. Rendering them
+# is not a correctness proof; it catches the template that only fails
+# when someone turns an option on, which is the worst time to find out.
+render_ok() {
+  local label="$1"; shift
+  if ! helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" "$@" >/dev/null; then
+    echo "✗ chart fails to render with $label" >&2
+    exit 1
+  fi
+}
+
+render_ok "serviceMonitor.enabled"  --set serviceMonitor.enabled=true
+render_ok "persistence.enabled"     --set persistence.enabled=true
+render_ok "persistence.existingClaim" --set persistence.enabled=true --set persistence.existingClaim=mine
+render_ok "rbac disabled"           --set rbac.create=false --set rbac.capacity=false
+render_ok "serviceAccount external" --set serviceAccount.create=false --set serviceAccount.name=other
+render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
+render_ok "gke flavor"              --set image.flavor=gke
+
+# serviceMonitor without a Service is a scrape target that silently
+# selects nothing; the chart refuses it, and this asserts the refusal.
+if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
+    --set serviceMonitor.enabled=true --set service.create=false >/dev/null 2>&1; then
+  echo "✗ chart rendered a ServiceMonitor with service.create=false — the guard in templates/servicemonitor.yaml is not firing" >&2
+  exit 1
+fi
+
+echo "✓ chart lints and renders on every non-default path"

@@ -371,6 +371,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bumps trains reviewers to merge dependency changes without reading
   them.
 
+- A Helm chart, published as a signed OCI artifact alongside the
+  images:
+
+  ```sh
+  helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
+    --version 0.22.0 --namespace agent-triage --create-namespace
+  ```
+
+  It is a parameterization of `deploy/*.yaml`, not a second
+  description of the deployment, and CI keeps it that way: the new
+  `manifests` job renders both and diffs them, so `helm template
+  lookout-watch deploy/chart -n agent-triage` must equal `kustomize
+  build deploy/` resource for resource and field for field, modulo the
+  three provenance labels Helm stamps on everything. Two hand-written
+  copies of one deployment diverge — that is a certainty, not a risk —
+  and the failure mode is silent, a chart still deploying last
+  quarter's RBAC while every test in the tree stays green against the
+  manifest the chart user never gets. `dev/tools/verify-helm-parity`
+  runs the same check locally.
+
+  What the chart adds over `kubectl apply -k` is toggles the raw
+  bundle cannot express: RBAC tiers (`rbac.create`, `rbac.capacity`),
+  a PVC for the occurrence store (`persistence.enabled`), the
+  prometheus-operator ServiceMonitor as a flag rather than a second
+  `-k` target, the `-gke` image flavor, and extra NetworkPolicy peers
+  for an off-namespace scraper. Two things it deliberately does not
+  do: create the daemon-token Secret (Helm stores the rendered release
+  manifest in a Secret of its own, so a token passed as a value is
+  readable by anyone who can read the release) and let you override
+  sentinel flags one at a time (`args` is a list you replace
+  wholesale, because the flags interact and a per-flag override would
+  happily render a combination nobody has run).
+
+  The chart version tracks the release with the `v` dropped — chart
+  `0.22.0` deploys `v0.22.0` — so there is no compatibility matrix to
+  maintain or to get wrong.
+
 ### Fixed
 
 - The sentinel serves a real readiness probe. `--metrics-addr` now
