@@ -1,0 +1,67 @@
+name: Missed detection
+description: Something was broken and lookout did not say so
+labels: [bug, detection-gap]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        This is the most valuable kind of issue we get. The whole product
+        rests on **silence meaning healthy** — every other check loses
+        credibility when one of them quietly reports a clean bill of
+        health it did not earn. A real cluster state we failed to
+        diagnose is evidence, not a feature request.
+
+
+        Two things that are *not* this: a check that could not run and
+        said so (an `unavailable` or `crd.unavailable` finding is the
+        design working), and a posture claim missing from a bare `lookout
+        scan` (the `audit` group is opt-in — `--include=audit`).
+
+  - type: textarea
+    id: broken
+    attributes:
+      label: What was actually wrong with the cluster
+      description: The failure, as you would describe it to a colleague.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What lookout said
+      description: >-
+        The command and its output, including the summary line — the
+        `scanned=` count matters, because it distinguishes "looked and
+        missed it" from "never listed the object".
+      render: console
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What the API said
+      description: >-
+        The object state that should have triggered it — the relevant
+        `kubectl get -o yaml`, condition, or event. This is what a new
+        check would key on, so it largely determines whether the claim
+        can be made truthfully.
+      render: yaml
+
+  - type: textarea
+    id: lookalike
+    attributes:
+      label: Is there a legitimate configuration that looks like this?
+      description: >-
+        Every rule worth writing has one, and finding it is usually the
+        hard part of the check. If you know of a cluster where this exact
+        state is fine and should stay silent, say so — it saves us
+        shipping a check that gets turned off.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: v0.21.0
+    validations:
+      required: true

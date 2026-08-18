@@ -208,6 +208,21 @@ deployment's `.agents/skills/`.
 - [`docs/milestones/`](./docs/milestones/) — per-milestone exit evidence (M0–M5 complete, v0.6.0)
 - [`CHANGELOG.md`](./CHANGELOG.md)
 
+## Contributing
+
+New checks are the most common contribution, and
+[`docs/adding-a-check.md`](./docs/adding-a-check.md) walks one end to
+end — `dev/tools/new-check` scaffolds the rest.
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) covers what review will ask
+about and the two designs that most often look like omissions.
+[`ROADMAP.md`](./ROADMAP.md) is where things are going, at the
+resolution of "which epic".
+
+Missed detections are the most valuable issue we get: the product
+rests on silence meaning healthy, so a real cluster state we failed to
+report is evidence rather than a feature request. Security
+vulnerabilities go [privately](./SECURITY.md), never to an issue.
+
 ## License
 
 Apache 2.0 — see [LICENSE](./LICENSE).

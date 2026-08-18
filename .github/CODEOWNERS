@@ -1,0 +1,29 @@
+# Review routing. Anything not matched below still falls to the
+# catch-all, so this file is about making the *reason* for a review
+# explicit, not about adding gates.
+#
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*                               @mastersingh24
+
+# Frozen contracts. Changing one of these is a negotiation with
+# downstream consumers, not a code change — the guardian tests exist to
+# force the conversation, and the review is where it happens.
+/docs/DESIGN.md                 @mastersingh24
+/docs/signal-schema-v1.md       @mastersingh24
+/docs/cli-stability-policy.md   @mastersingh24
+/pkg/engine/fingerprint.go      @mastersingh24
+/pkg/inject/schema/             @mastersingh24
+
+# Security boundaries. The sanitizer is the one place a Secret value
+# could reach an output surface; the RBAC manifests define everything
+# the sentinel is allowed to see.
+/pkg/emit/sanitize.go           @mastersingh24
+/pkg/exempt/                    @mastersingh24
+/deploy/                        @mastersingh24
+/SECURITY.md                    @mastersingh24
+
+# Release and supply chain.
+/.github/workflows/             @mastersingh24
+/dev/release/                   @mastersingh24
+/docs/release-process.md        @mastersingh24

@@ -348,6 +348,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first time: the default image's SBOM contains no cloud SDK, and
   the `-gke` image's does.
 
+- The governance files a repository needs before anyone outside it can
+  participate: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `ROADMAP.md`, `.github/CODEOWNERS`, issue and PR templates,
+  `dependabot.yml`, and `settings.yml`. `.github/` held nothing but
+  `workflows/` before this, which reads as "not open to contribution"
+  whether or not that is true.
+
+  Three of them carry more than boilerplate. `SECURITY.md` names a
+  private reporting channel — necessary rather than decorative for a
+  tool that reads Secrets and whose sanitizer is a security boundary
+  — and says which classes we treat as vulnerabilities, including the
+  soft one: a way to make a check report a clean bill of health it did
+  not earn. `CONTRIBUTING.md` writes down the two decisions that most
+  often look like omissions in review: exemptions are file-only
+  (annotations would let the team requesting an exemption grant it to
+  itself, and label selectors cannot be evaluated by `findings diff`,
+  which re-reads a piped report with no cluster to query), and
+  dependencies are minimized as a maintained property. `dependabot.yml`
+  is configured monthly and grouped, for security updates rather than
+  for staying on latest, on the grounds that a steady drip of version
+  bumps trains reviewers to merge dependency changes without reading
+  them.
+
 ### Fixed
 
 - The sentinel serves a real readiness probe. `--metrics-addr` now

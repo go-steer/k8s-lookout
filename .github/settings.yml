@@ -1,0 +1,109 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Repository configuration as code, in the format the
+# github/safe-settings (and probot/settings) app reads.
+#
+# Honesty about what this file is: unless that app is installed on the
+# org, GitHub does not apply any of it. It is checked in anyway,
+# because settings drift silently and invisibly — nobody notices that
+# a required status check was dropped from branch protection until the
+# release it lets through. Written down, the intended configuration is
+# reviewable, diffable, and restorable. If it disagrees with what the
+# repository actually does, the repository is wrong.
+repository:
+  name: k8s-lookout
+  description: >-
+    Data-plane intelligence for core-agent: deterministic, token-dense
+    Kubernetes/GKE diagnostics for LLM troubleshooting agents, plus a
+    resident per-cluster signal engine that opens incident sessions from
+    leading indicators
+  homepage: https://go-steer.github.io/k8s-lookout/
+  topics: >-
+    kubernetes, gke, golang, sre, observability, incident-response,
+    llm-agents, mcp, diagnostics, kubectl
+
+  default_branch: main
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  has_downloads: true
+
+  # Squash only. Every PR lands as one commit whose message is the PR
+  # body, which is what makes `git log` on main a readable record of
+  # decisions rather than a list of "fix test" fixups.
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  delete_branch_on_merge: true
+
+  # The commit subject should be the PR title, not "Merge pull request
+  # #N" and not the first commit's subject.
+  squash_merge_commit_title: PR_TITLE
+  squash_merge_commit_message: PR_BODY
+
+branches:
+  - name: main
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: true
+      required_status_checks:
+        # Every hermetic presubmit. The kind e2e suite is deliberately
+        # NOT here: it runs post-merge on main and weekly, because a
+        # live-cluster test that gates a PR is a test that eventually
+        # gets marked required-but-flaky and then ignored.
+        strict: true
+        contexts:
+          - build
+          - test
+          - lint
+          - docs-lint
+          - go mod tidy is clean
+          - govulncheck
+      enforce_admins: false
+      required_linear_history: true
+      restrictions: null
+
+labels:
+  - name: bug
+    color: d73a4a
+    description: Something lookout did that it should not have
+  - name: detection-gap
+    color: b60205
+    description: A real cluster state lookout failed to report
+  - name: enhancement
+    color: a2eeef
+    description: A new capability or a new check
+  - name: documentation
+    color: 0075ca
+  - name: good first issue
+    color: 7057ff
+  - name: help wanted
+    color: '008672'
+  - name: question
+    color: d876e3
+  - name: infra
+    color: c5def5
+    description: CI, release, tooling
+  - name: tracking
+    color: fef2c0
+    description: An epic or umbrella issue
+  - name: duplicate
+    color: cfd3d7
+  - name: invalid
+    color: e4e669
+  - name: wontfix
+    color: ffffff
