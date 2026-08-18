@@ -296,6 +296,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and mTLS (the right answer for a production deployment, and a much
   larger piece of work than the thing that unblocks the deployment).
 
+- `lookout_findings_total{kind,severity,cluster}` — the sentinel's
+  first metric about what it *found* rather than how it is running.
+  The other thirty-nine collectors measure the machine (informer lag,
+  queue depth, dispatch latency, store size), so "critical findings
+  are rising in this cluster" was not answerable from `/metrics` at
+  all.
+
+  Counted once per distinct finding, when a fresh dedup window opens
+  and before any routing branch: a stored-only info signal, a
+  watchboard-batched warning, and a critical that opens its own
+  session all count the same. That is the difference from
+  `lookout_events_injected_total`, which measures delivery — a
+  downgraded finding is still a finding.
+  `rate(lookout_findings_total{severity="critical"}[1h])` is the
+  cluster-health trend line.
+
+  Namespace is deliberately **not** a label: `kind` is bounded and
+  `severity` is three values, but namespace is unbounded and is where
+  a findings metric turns into an outage of the monitoring stack it
+  feeds. Use `--store` or the read path for per-namespace questions.
+
+- Something to scrape. `deploy/` shipped no Service at all — the
+  NetworkPolicy in `deploy/16` admitted a same-namespace scraper on
+  `:9090` and assumed it would reach the pod IP directly, which works
+  for a hand-rolled scrape config and for nothing else. New
+  `deploy/17-service-watcher.yaml` publishes a ClusterIP Service
+  (`lookout-watch-metrics`), and `deploy/prometheus-operator/` carries
+  a ServiceMonitor as a separate `kubectl apply -k` target, because
+  `ServiceMonitor` is a CRD and the base bundle must still apply
+  cleanly on a cluster without prometheus-operator.
+
 ### Fixed
 
 - The sentinel serves a real readiness probe. `--metrics-addr` now

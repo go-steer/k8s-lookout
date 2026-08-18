@@ -69,6 +69,7 @@ func MetricsInventory() []MetricDoc {
 		{m.watchboardBuffered, "gauge", nil},
 		{m.watchboardReattached, "counter", []string{"kind"}},
 		{m.infoDropped, "counter", []string{"kind"}},
+		{m.findings, "counter", []string{"kind", "severity"}},
 		{m.storeRecords, "counter", []string{"route"}},
 		{m.storeDrops, "counter", []string{"cause"}},
 		{m.storePruned, "counter", []string{"cause"}},

@@ -63,6 +63,7 @@ type metrics struct {
 	watchboardBuffered   prometheus.Gauge
 	watchboardReattached *prometheus.CounterVec
 	infoDropped          *prometheus.CounterVec
+	findings             *prometheus.CounterVec
 	storeRecords         *prometheus.CounterVec
 	storeDrops           *prometheus.CounterVec
 	storePruned          *prometheus.CounterVec
@@ -211,6 +212,30 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_info_dropped_total",
 			Help: "Total info-severity signals routed to the §7.7 stored-only class (no inject anywhere), by signal kind. With --store set they are persisted (§9.1); without it they are dropped after counting.",
 		}, []string{"kind"}),
+		// The one collector that is about what the sentinel FOUND
+		// rather than how the sentinel is running (#288). Everything
+		// else here measures the machine — informer lag, queue depth,
+		// dispatch latency, store size — so "critical findings are
+		// rising in this cluster" was not answerable from /metrics at
+		// all.
+		//
+		// Counted once per DISTINCT finding, at the point dedup says
+		// the window is fresh and before any routing branch: an
+		// info-class signal that is only stored, a warning batched
+		// into the watchboard, and a critical that opens a session
+		// all count the same. This is deliberately not a measure of
+		// inject volume — lookout_events_injected_total already is —
+		// because a downgraded finding is still a finding.
+		//
+		// Namespace is deliberately NOT a label: kind is bounded by
+		// the declared ledger, severity is 3, and cluster comes free
+		// from the per-runner wrapper, but namespace is unbounded and
+		// is where this series would blow up. Use the store or the
+		// read path for per-namespace questions.
+		findings: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_findings_total",
+			Help: "Total distinct findings the sentinel detected, by signal kind and severity — counted once per fresh dedup window, before severity routing, so stored-only and watchboard-batched findings count alongside injected ones. Always carries the cluster label. Namespace is deliberately absent (cardinality); rate() over this is the cluster's health trend.",
+		}, []string{"kind", "severity"}),
 		storeRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_store_records_total",
 			Help: "Total occurrences committed to the §9.1 store, by routing outcome (injected|suppressed|storm|storm-member|watchboard|info-stored|resolved).",
@@ -302,6 +327,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.watchboardBuffered,
 		m.watchboardReattached,
 		m.infoDropped,
+		m.findings,
 		m.storeRecords,
 		m.storeDrops,
 		m.storePruned,

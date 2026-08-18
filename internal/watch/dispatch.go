@@ -336,6 +336,15 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// A fresh incident window: stamp which source family opened it
 	// (the reference point for cross-source join followups above) and
 	// reset any regression baseline from the previous window.
+	//
+	// This is also where a finding is COUNTED as found (#288). Every
+	// non-duplicate passes through here exactly once, before the
+	// routing branches below fork it to the store, the watchboard, a
+	// storm, or its own session — so lookout_findings_total measures
+	// detection, not delivery. Severity is post-triage (§9.4): the
+	// class the sentinel actually assigned, including an agent's
+	// downgrade.
+	d.metrics.findings.WithLabelValues(sig.Kind, string(sig.Severity)).Inc()
 	d.dedup.NoteIncidentKind(key, sig.Kind)
 	if d.triage != nil {
 		d.triage.windowRolled(key)
