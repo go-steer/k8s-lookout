@@ -16,12 +16,35 @@
 // core/v1 Event informer behind the pkg/sources.Source interface. It
 // emits kind=k8s-event Signals per the configured Reason allow-list;
 // filter/dedup/inject stay in the shared pipeline downstream.
+//
+// # The initial LIST is dropped, not replayed
+//
+// Like every informer-backed source, this one is armed only after the
+// initial LIST drains: handlers check armed and emit nothing before
+// the flip. What is different here is what happens to the objects in
+// that first batch — nothing at all.
+//
+// The level-triggered sources (objectstate, capacity, gateway, …)
+// record state while unarmed and can therefore report a pre-existing
+// *sustained* failure the moment they arm: a Deployment that was
+// already stalled before the sentinel started is still stalled after.
+// Events have no such property. An Event is a point-in-time record of
+// something that happened, possibly an hour ago, possibly already
+// resolved — there is nothing to sustain and nothing to re-judge. So
+// every Event already in etcd at startup is dropped on the floor.
+//
+// Emitting them instead is not merely noisy, it is wrong: a restart
+// would manufacture an incident storm out of history, the dedup
+// window would key on stale FirstSeen/LastSeen carried into a fresh
+// process, and a crashlooping sentinel would amplify itself once per
+// restart for the length of the cluster's event TTL.
 package k8sevents
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +73,14 @@ const Name = "k8s-events"
 type Source struct {
 	client       kubernetes.Interface
 	resyncPeriod time.Duration
+
+	mu sync.Mutex
+	// armed flips true once the informer's initial LIST has drained.
+	// Handlers emit only when armed; unlike the level-triggered
+	// sources they record nothing while unarmed, because a
+	// point-in-time Event has no state to carry forward (see the
+	// package comment).
+	armed bool
 }
 
 // New constructs the source. resyncPeriod == 0 disables the periodic
@@ -95,6 +126,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				log.Printf("k8s-events: unexpected object type on Add: %T", obj)
 				return
 			}
+			// The initial LIST arrives as Adds. Dropping them is
+			// the point of the gate, not a side effect of it.
+			if !s.isArmed() {
+				return
+			}
 			emit(toSignal(ev))
 		},
 		UpdateFunc: func(_, newObj any) {
@@ -108,6 +144,9 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				log.Printf("k8s-events: unexpected object type on Update: %T", newObj)
 				return
 			}
+			if !s.isArmed() {
+				return
+			}
 			emit(toSignal(ev))
 		},
 		// No DeleteFunc — event deletion is not a signal we care
@@ -118,18 +157,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("k8s-events: register event handler: %w", err)
 	}
-	// Route client-go internal errors ("unknown object type in
-	// cache" on shutdown ctx.Done races, reflector list failures)
-	// through our logger. APPEND, never replace: runtime.ErrorHandlers
-	// is package-global process state shared by every client-go
-	// consumer in this binary — replacing the slice silently discarded
-	// the default handlers (and any handler another source installed),
-	// a real bug once two informer-backed sources run in one process.
-	runtime.ErrorHandlers = append(runtime.ErrorHandlers,
-		func(_ context.Context, err error, _ string, _ ...any) {
-			log.Printf("k8s-events: informer error: %v", err)
-		},
-	)
+	installErrorHandler()
 
 	factory.Start(ctx.Done())
 	// WaitForCacheSync blocks until the initial list is done —
@@ -139,8 +167,50 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
 		return fmt.Errorf("k8s-events: cache sync failed (informer stopped before initial list completed)")
 	}
+	// handler.HasSynced is per-handler: it goes true only once the
+	// initial batch has been delivered to *this* handler, so arming
+	// here cannot drop a watch event that arrived after the LIST.
+	s.arm()
 	<-ctx.Done()
 	return nil
+}
+
+// errorHandlerOnce guards the one write to runtime.ErrorHandlers.
+var errorHandlerOnce sync.Once
+
+// installErrorHandler routes client-go internal errors ("unknown
+// object type in cache" on shutdown ctx.Done races, reflector list
+// failures) through our logger.
+//
+// Two properties matter and neither is obvious. APPEND, never
+// replace: runtime.ErrorHandlers is package-global process state
+// shared by every client-go consumer in this binary, and replacing
+// the slice silently discarded the default handlers. And append
+// exactly ONCE per process: Run is restarted by the supervisor, so an
+// unguarded append grows the global slice — and the number of log
+// lines per informer error — without bound across a restart loop.
+func installErrorHandler() {
+	errorHandlerOnce.Do(func() {
+		runtime.ErrorHandlers = append(runtime.ErrorHandlers,
+			func(_ context.Context, err error, _ string, _ ...any) {
+				log.Printf("k8s-events: informer error: %v", err)
+			},
+		)
+	})
+}
+
+// arm enables emission — called once, after the initial LIST drains.
+func (s *Source) arm() {
+	s.mu.Lock()
+	s.armed = true
+	s.mu.Unlock()
+}
+
+// isArmed reports whether handlers may emit.
+func (s *Source) isArmed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
 }
 
 // toSignal converts a *corev1.Event to the pipeline Signal: the
