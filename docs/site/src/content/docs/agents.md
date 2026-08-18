@@ -21,7 +21,7 @@ One Go binary, `lookout`, with three surfaces:
 - **CLI** — `lookout <command>`: one-shot diagnostic reads against the
   current kubeconfig context. No deployment required.
 - **MCP server** — `lookout mcp`: every read command exposed 1:1 as MCP
-  tools (stdio, or streamable HTTP on loopback only).
+  tools (stdio, or streamable HTTP — loopback by default).
 - **Sentinel** — `lookout watch`: a resident in-cluster daemon that
   detects developing trouble (stalled rollouts, saturation forecasts,
   expiring certs, node flaps) and opens incident sessions on a sink.
@@ -147,8 +147,9 @@ Tool names mirror the commands (`k8s_cluster_health`,
 `k8s_triage_delta`, `k8s_triage_workload`, …) with schemas generated
 from the CLI flags; results carry the exact CLI payload including the
 summary line. The HTTP transport (`--listen`) refuses non-loopback
-binds by design — there is no auth story, so it never listens on a
-routable interface. Full tool table: [MCP setup](/getting-started/mcp/).
+binds by default; serving off-host takes an explicit opt-in plus a
+bearer token and an access log. Full tool table and the off-host
+recipe: [MCP setup](/getting-started/mcp/).
 
 ## Prove it works
 

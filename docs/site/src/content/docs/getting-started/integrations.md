@@ -39,8 +39,8 @@ claude mcp add k8s-lookout -- lookout mcp
 
 The server reads the current kubeconfig context (the ServiceAccount
 when in-cluster), and every tool result is the CLI's exact sanitized
-payload, summary line included. Transports, the non-loopback refusal,
-and the full tool↔command table are on the
+payload, summary line included. Transports, the non-loopback refusal
+and how to lift it, and the full tool↔command table are on the
 [MCP setup page](/getting-started/mcp/).
 
 ### Shell-capable agents

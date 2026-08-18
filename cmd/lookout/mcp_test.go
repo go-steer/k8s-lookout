@@ -134,6 +134,23 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 		{"unexpected argument", []string{"stray"}, 2, `unexpected argument "stray"`},
 		{"non-loopback listen", []string{"--listen=0.0.0.0:8383"}, 2, "non-loopback"},
 		{"listen without port", []string{"--listen=127.0.0.1"}, 2, "host:port"},
+
+		// #282: three separate mistakes, three separate refusals.
+		{"routable bind names all three flags", []string{"--listen=0.0.0.0:8383"}, 2, "--allow-non-loopback"},
+		{"a token alone does not change the bind", []string{
+			"--listen=0.0.0.0:8383", "--auth-token-file=/dev/null", "--access-log=/dev/null",
+		}, 2, "--allow-non-loopback"},
+		{"the bind flag alone opens nothing", []string{
+			"--listen=0.0.0.0:8383", "--allow-non-loopback", "--access-log=/dev/null",
+		}, 2, "--auth-token-file"},
+		{"off-host requires the access log", []string{
+			"--listen=0.0.0.0:8383", "--allow-non-loopback", "--auth-token-file=/dev/null",
+		}, 2, "--access-log"},
+
+		// The HTTP-only flags are rejected on stdio, not ignored: a
+		// token that authenticates nothing reads like one that does.
+		{"auth token without listen", []string{"--auth-token-file=/dev/null"}, 2, "stdio transport"},
+		{"allow-non-loopback without listen", []string{"--allow-non-loopback"}, 2, "stdio transport"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,12 +195,37 @@ func TestMCPAccessLogIsOpenedBeforeServing(t *testing.T) {
 	}
 }
 
+// TestMCPAuthTokenIsLoadedBeforeBinding: an unusable token file must
+// fail at startup, not leave a listener open that rejects everything.
+func TestMCPAuthTokenIsLoadedBeforeBinding(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{
+		"--listen=127.0.0.1:0",
+		"--auth-token-file=" + token,
+		"--access-log=" + filepath.Join(dir, "access.log"),
+	}
+	var stdout, stderr bytes.Buffer
+	if got := mcpMain(t.Context(), args, &stdout, &stderr); got != 2 {
+		t.Errorf("exit code = %d, want 2 (stderr: %s)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--auth-token-file=") {
+		t.Errorf("stderr %q does not name the flag", stderr.String())
+	}
+}
+
 func TestMCPCommand_Help(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if got := mcpMain(t.Context(), []string{"--help"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0", got)
 	}
-	for _, want := range []string{"--listen", "stdio", "loopback", "--access-log"} {
+	for _, want := range []string{
+		"--listen", "stdio", "loopback", "--access-log",
+		"--allow-non-loopback", "--auth-token-file",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help does not mention %q:\n%s", want, stdout.String())
 		}

@@ -27,17 +27,64 @@ through the same sanitizer.
   `lookout mcp` as a child process. Diagnostics go to stderr only.
 - **`--listen=<host:port>`** — streamable HTTP, for the same-pod case
   where the daemon and `lookout` run as separate containers sharing the
-  pod's network namespace. **Non-loopback binds are refused**:
+  pod's network namespace. **Non-loopback binds are refused by
+  default**:
 
   ```
-  --listen="0.0.0.0:8383": refusing to bind a non-loopback address:
-  lookout mcp has no auth; only 127.0.0.1, ::1, or localhost are allowed (§4.3)
+  --listen="0.0.0.0:8383": refusing to bind a non-loopback address.
+  To serve off-host, pass --allow-non-loopback together with
+  --auth-token-file=<path> and --access-log=<path>; without all three
+  lookout mcp is loopback-only (§4.3)
   ```
 
-  The rationale is exactly what the error says: the MCP server carries
-  no authentication story, and a `lookout` reachable off-host would hand
-  its cluster read access to the network. It never listens on a
-  routable interface.
+  A `lookout` reachable off-host hands its cluster read access to the
+  network, so it is not something to open by accident. It is, however,
+  something you can open on purpose — see below.
+
+## Serving off-host
+
+The one deployment shape the loopback rule blocks is the useful one:
+the MCP server on one host, the agent somewhere else. That is
+permitted, behind three flags that must all be present:
+
+```sh
+lookout mcp \
+  --listen=0.0.0.0:8383 \
+  --allow-non-loopback \
+  --auth-token-file=/etc/lookout/mcp-token \
+  --access-log=/var/log/lookout/mcp-access.log
+```
+
+Three rather than one, because each guards a different mistake:
+
+- **`--allow-non-loopback`** — a token supplied for a localhost bind
+  must not silently change which interface gets opened.
+- **`--auth-token-file`** — a bind flag must not open an
+  unauthenticated cluster-read API.
+- **`--access-log`** — on loopback the log is a debugging convenience;
+  off-host it is the only evidence that exists of who called what.
+
+The token is a single shared bearer token, compared in constant time
+against every request's `Authorization: Bearer <token>` header; anything
+else gets a bare `401` that says nothing about what is behind it. The
+file may have a trailing newline, must be one line, and must be at
+least 16 characters — generate one with `head -c 32 /dev/urandom |
+base64`. Permissions on the file are not checked, because the obvious
+way to supply it in-cluster is a Secret volume and those mount `0644`.
+
+Startup says what it did, on stderr:
+
+```
+lookout mcp: serving MCP over HTTP on 0.0.0.0:8383 — REACHABLE OFF-HOST.
+lookout mcp: bearer-token authentication is REQUIRED; every call is recorded to /var/log/lookout/mcp-access.log.
+```
+
+**What this is not.** There is no authorization: every caller
+presenting the token gets the full advertised tool surface. Narrow it
+with [`--profile`](#profiles-dont-advertise-what-the-agent-will-never-call)
+if a caller should not reach everything. mTLS is out of scope — it is
+the right answer for a production deployment and a much larger piece of
+work (cert distribution, rotation, a CA story).
 
 ## Wiring into a core-agent daemon
 
@@ -108,7 +155,8 @@ The file is created if absent, **appended** if present (a supervisor
 restart must not erase the evidence from the run that caused it), and
 created mode `0600` — the tool names alone say which clusters an
 operator has been reading. If the path cannot be opened, `lookout mcp`
-exits 2 rather than serving without a log.
+exits 2 rather than serving without a log. It is optional on loopback
+and **mandatory** for an off-host bind.
 
 What a line deliberately does *not* carry is the arguments or the
 response body. The [sanitizer](/concepts/sanitization/) guarantees

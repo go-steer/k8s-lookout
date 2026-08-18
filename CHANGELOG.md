@@ -266,6 +266,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to hold. Tool, outcome, and size answer the operational questions
   without becoming a second data path to audit.
 
+- `lookout mcp` can now serve off-host, behind three flags that must
+  all be present: `--allow-non-loopback`, `--auth-token-file=<path>`,
+  and `--access-log=<path>` (#282). The loopback-only refusal was
+  right, and stays the default, but it blocked the one deployment shape
+  people actually want — the MCP server on one host and the agent
+  somewhere else — and there was no way to say "yes, on purpose".
+
+  Three flags rather than one because each guards a different mistake:
+  a token supplied for a localhost bind must not silently change which
+  interface gets opened, a bind flag must not open an unauthenticated
+  cluster-read API, and a remotely reachable read API with no record of
+  who called what is not shippable. Each missing flag gets its own
+  refusal naming itself. The policy is re-checked inside `Serve`
+  immediately before the socket exists, not only at the flag layer.
+
+  Authentication is a single shared bearer token, held and compared as
+  a SHA-256 digest in constant time — fixed-width, so neither the value
+  nor its length leaks through timing. Anything else gets a bare 401
+  that says nothing about what is behind it. The token file may have a
+  trailing newline, must be one line, and must be at least 16
+  characters; its permissions are deliberately not checked, because the
+  obvious way to supply it in-cluster is a Secret volume and those
+  mount 0644. An HTTP bind now announces itself on stderr, and the
+  off-host banner says `REACHABLE OFF-HOST` in as many words.
+
+  Not included, on purpose: authorization (every caller presenting the
+  token gets the full advertised surface — narrow it with `--profile`)
+  and mTLS (the right answer for a production deployment, and a much
+  larger piece of work than the thing that unblocks the deployment).
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

@@ -131,13 +131,21 @@ UAT cases that don't need the full stub-daemon loop:
   `/metrics` exposes Prometheus counters.
 
 ### `lookout mcp` — T0 (server)
-- **Provoke:** `lookout mcp --listen 127.0.0.1:8181` (loopback only;
-  a non-loopback bind must be refused — assert that too).
+- **Provoke:** `lookout mcp --listen 127.0.0.1:8181` (a bare
+  non-loopback bind must be refused — assert that too).
 - **Assert:** every registered read-path check materializes as an MCP
   tool with a JSON schema for its flags; call one tool
   (e.g. `k8s_triage_delta`) over the wire against a broken cluster and
   confirm the result matches the equivalent CLI invocation. This is the
   cheapest way to assert the *whole* check surface is registered.
+- **`--access-log=<path>`** — **assert** one line per call, including
+  for a call with a bogus argument, and that neither the arguments nor
+  the finding text appears in it.
+- **Off-host bind** — `--listen=0.0.0.0:8181` must be refused unless
+  `--allow-non-loopback`, `--auth-token-file`, and `--access-log` are
+  *all* present; assert each of the three missing in turn produces its
+  own refusal. With all three, **assert** `curl` without a token gets
+  `401` and with the token gets a session.
 
 ## Top-level checks
 
@@ -597,7 +605,8 @@ stack).
 
 - [ ] `version`
 - [ ] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast, `/healthz`+`/metrics`
-- [ ] `mcp --listen` tool listing + one tool call (+ non-loopback refusal)
+- [ ] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
+      `--access-log`, and the three-flag off-host bind with a 401)
 - [ ] `bundle` (+ `--incident`, `--store`)
 - [ ] `health` (+ healthy-path)
 - [ ] `triage delta` (+ `--only`)
