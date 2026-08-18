@@ -24,6 +24,8 @@ sentence and name the legitimate look-alike you excluded.
       proving `findings=0`
 - [ ] RBAC updated (`deploy/12-clusterrole-watcher.yaml`, and
       `state.LoadClusterListRequirements`) if a new API resource is read
+- [ ] `dev/tools/verify-helm-parity` passes, if anything under `deploy/`
+      changed — the chart must still render the manifests exactly
 - [ ] Scan membership decided — `stage1` or `excluded` with a reason
       (`TestScanCoversEveryRegisteredCommand` fails until you choose)
 
