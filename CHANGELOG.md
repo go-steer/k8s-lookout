@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `triage delta` reports `workload.replicafailure`: a Deployment whose
+  pods were never created at all, because a ResourceQuota denied them,
+  PodSecurity admission rejected them, or the ServiceAccount they name
+  does not exist. This is the one abnormality with no pod to find, so
+  every pod-level check was silent on it and the scan showed
+  `desired=3 ready=0` with no explanation anywhere. The finding
+  carries the admission error verbatim, which is the whole answer.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

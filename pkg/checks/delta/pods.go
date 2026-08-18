@@ -266,6 +266,45 @@ func (s *scanner) checkDeployment(d *appsv1.Deployment) {
 	}
 	rollout := rolloutDetails(desired, d.Status.ReadyReplicas, d.Status.UpdatedReplicas, d.Status.AvailableReplicas)
 
+	// ReplicaFailure beats stalled beats lagging — most specific
+	// first, one finding per workload.
+	//
+	// ReplicaFailure means the pods were never created: a
+	// ResourceQuota denial, a PodSecurity admission rejection, a
+	// missing ServiceAccount, a LimitRange conflict. It is the one
+	// abnormality with NO pod to find, so every pod-level check in
+	// this package is silent on it and the workload reports desired=3
+	// ready=0 with no explanation anywhere in the scan. The condition
+	// message carries the admission error verbatim, which is the whole
+	// answer.
+	//
+	// Read from the Deployment rather than from a ReplicaSet List: the
+	// deployment controller moves its newest ReplicaSet's
+	// ReplicaFailure condition up onto the Deployment (see
+	// syncRolloutStatus), so the claim costs no extra API call, and it
+	// names the object the operator actually manages. Bare
+	// ReplicaSets — nobody's normal practice — are the one case this
+	// does not reach.
+	for _, c := range d.Status.Conditions {
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			reason := c.Reason
+			if reason == "" {
+				reason = "ReplicaFailure"
+			}
+			s.add(emit.Finding{
+				Kind:         "workload.replicafailure",
+				Severity:     emit.SeverityCritical,
+				Namespace:    d.Namespace,
+				KindOfObject: "Deployment",
+				Name:         d.Name,
+				Reason:       reason,
+				Message:      c.Message,
+				Details:      rollout,
+			})
+			return
+		}
+	}
+
 	// Stalled beats lagging: the controller itself has given up.
 	for _, c := range d.Status.Conditions {
 		if c.Type == appsv1.DeploymentProgressing && c.Status == corev1.ConditionFalse {

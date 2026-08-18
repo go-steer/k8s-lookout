@@ -189,6 +189,47 @@ func stalledDeployment(ns, name string) *appsv1.Deployment {
 	}
 }
 
+// replicaFailureDeployment is the quota-denial shape: the controller
+// created NO pods, so status is all zeros and the only evidence in the
+// cluster is the condition the deployment controller lifted off its
+// ReplicaSet.
+func replicaFailureDeployment(ns, name string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(3))},
+		Status: appsv1.DeploymentStatus{
+			ReadyReplicas: 0, UpdatedReplicas: 0, AvailableReplicas: 0,
+			Conditions: []appsv1.DeploymentCondition{{
+				Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue,
+				Reason:  "FailedCreate",
+				Message: `pods "etl-5c9f8-" is forbidden: exceeded quota: compute, requested: pods=1, used: pods=10, limited: pods=10`,
+			}},
+		},
+	}
+}
+
+// replicaFailureAndStalledDeployment carries both conditions, which is
+// what a real quota denial looks like after the progress deadline
+// passes. Only the more specific one should be reported.
+func replicaFailureAndStalledDeployment(ns, name string) *appsv1.Deployment {
+	d := replicaFailureDeployment(ns, name)
+	d.Status.Conditions = append(d.Status.Conditions, appsv1.DeploymentCondition{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse,
+		Reason: "ProgressDeadlineExceeded", Message: "ReplicaSet \"etl-5c9f8\" has timed out progressing.",
+	})
+	return d
+}
+
+// clearedReplicaFailureDeployment has the condition present but False —
+// the controller records the recovery rather than deleting it.
+func clearedReplicaFailureDeployment(ns, name string, replicas int32) *appsv1.Deployment {
+	d := healthyDeployment(ns, name, replicas)
+	d.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionFalse, Reason: "FailedCreate",
+	}}
+	return d
+}
+
 func rolloutStatefulSet(ns, name string) *appsv1.StatefulSet {
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
