@@ -460,13 +460,15 @@ what a generator cannot decide:
      into whatever the code happened to emit.
 
   2. Decide whether a bare ` + "`lookout scan`" + ` should run it.
-     pkg/checks/scan: add "{{Name}}" to Stage1, or to Excluded with a
-     reason. The coverage test fails until you do — that is deliberate.
+     In pkg/checks/scan/scan.go add "{{Name}}" to stage1, or to
+     excluded with the reason it is left out. The coverage test fails
+     until you do — that is deliberate.
 
-  3. RBAC, if the check lists a kind nothing else does. Add it to
-     state.LoadClusterListRequirements and to
-     deploy/12-clusterrole-watcher.yaml; state/rbac_test.go parses the
-     manifest against the requirements and will tell you.
+  3. RBAC, if the check reads an API resource nothing else reads. The
+     deployed ClusterRole is deploy/12-clusterrole-watcher.yaml; if the
+     check goes through state.LoadCluster, declare the resource in
+     state.LoadClusterListRequirements too — state/rbac_test.go parses
+     the manifest against those requirements and will tell you.
 
   4. Skills, if a workflow should reach for it. Add "{{Name}}" to the
      relevant entry of skilldoc.SkillCommands, and mention it in that
