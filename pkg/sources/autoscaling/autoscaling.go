@@ -317,6 +317,14 @@ func (s *Source) clock() time.Time {
 	return time.Now()
 }
 
+// HasSynced implements sources.SyncReporter — the sentinel's /readyz
+// probe is not ready until every source with a barrier has crossed it.
+func (s *Source) HasSynced() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 // send delivers signals to the pipeline. Never called under s.mu.
 func (s *Source) send(sigs []engine.Signal) {
 	if len(sigs) == 0 {

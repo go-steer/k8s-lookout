@@ -45,6 +45,37 @@ func (f *fakeSource) Run(ctx context.Context, emit func(Signal)) error {
 }
 func (f *fakeSource) RequiredAccess() []Requirement { return f.reqs }
 
+// syncingSource is a fakeSource that also reports a sync barrier.
+type syncingSource struct {
+	fakeSource
+	synced bool
+}
+
+func (s *syncingSource) HasSynced() bool { return s.synced }
+
+// TestAllSynced covers the readiness predicate behind /readyz: the
+// poll-driven sources have no barrier and must not hold the sentinel
+// un-ready, while a single unsynced informer source must.
+func TestAllSynced(t *testing.T) {
+	t.Parallel()
+	pollDriven := &fakeSource{name: "expiry"}
+	ready := &syncingSource{fakeSource: fakeSource{name: "k8s-events"}, synced: true}
+	listing := &syncingSource{fakeSource: fakeSource{name: "objectstate"}}
+
+	if ok, who := AllSynced([]Source{pollDriven}); !ok || who != "" {
+		t.Errorf("a source with no barrier must be ready by definition; got %v %q", ok, who)
+	}
+	if ok, who := AllSynced([]Source{pollDriven, ready}); !ok || who != "" {
+		t.Errorf("all barriers crossed: got %v %q", ok, who)
+	}
+	if ok, who := AllSynced([]Source{pollDriven, ready, listing}); ok || who != "objectstate" {
+		t.Errorf("one source still listing: got %v %q, want false \"objectstate\"", ok, who)
+	}
+	if ok, who := AllSynced(nil); !ok || who != "" {
+		t.Errorf("no sources: got %v %q, want vacuously true", ok, who)
+	}
+}
+
 func TestRegistry_RegisterLookupAll(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry()

@@ -156,6 +156,12 @@ func realMain(argv []string) error {
 	// several sentinels stay filterable in one Prometheus).
 	metricsReg := prometheus.NewRegistry()
 
+	// Readiness tracker behind /readyz (issue #285). Built before the
+	// server so the endpoint exists from the first moment it can be
+	// probed — answering "not ready: starting" is the correct answer
+	// during startup, and a connection refused is not.
+	rd := newReadiness()
+
 	// Root ctx cancelled on SIGINT / SIGTERM for graceful shutdown.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -164,7 +170,7 @@ func realMain(argv []string) error {
 	// server per process serves every runner's bundle from the shared
 	// registry.
 	go func() {
-		if err := serveMetrics(ctx, f.metricsAddr, metricsReg); err != nil {
+		if err := serveMetrics(ctx, f.metricsAddr, metricsReg, rd); err != nil {
 			log.Printf("metrics server: %v", err)
 		}
 	}()
@@ -181,6 +187,14 @@ func realMain(argv []string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(runners))
+	for _, r := range runners {
+		r.ready = rd
+		names = append(names, r.clusterName)
+	}
+	// Only now does the process know what it is responsible for, so
+	// only now can /readyz say anything but "starting".
+	rd.expect(names)
 	return superviseRunners(ctx, runners)
 }
 
@@ -425,6 +439,7 @@ type runner struct {
 	token       string               // resolved --token-env daemon bearer (sources reuse it)
 	metricsReg  *prometheus.Registry // process-global scrape registry
 	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
+	ready       *readiness           // process-global /readyz tracker; nil in tests that drive run directly
 
 	// restCfg, when set, is the fleet-minted rest.Config for this
 	// cluster (multi-cluster GKE-endpoint mode: ADC over the DNS
@@ -871,6 +886,20 @@ func (r *runner) run(ctx context.Context) error {
 			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}
 	m.runnerUp.Set(1)
+	// Readiness (#285): this cluster is ready once every source with
+	// an initial-LIST barrier has crossed it. Registered before RunAll
+	// so the probe reports "syncing" rather than "not started" for the
+	// seconds the informers spend listing, and withdrawn on the way out
+	// so a runner between supervisor restarts is not counted as
+	// watching a cluster it has stopped watching.
+	if r.ready != nil {
+		srcs := registry.All()
+		r.ready.set(r.clusterName, func() bool {
+			ok, _ := sources.AllSynced(srcs)
+			return ok
+		})
+		defer r.ready.clear(r.clusterName)
+	}
 	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})

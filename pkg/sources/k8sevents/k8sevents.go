@@ -128,7 +128,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			}
 			// The initial LIST arrives as Adds. Dropping them is
 			// the point of the gate, not a side effect of it.
-			if !s.isArmed() {
+			if !s.HasSynced() {
 				return
 			}
 			emit(toSignal(ev))
@@ -144,7 +144,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				log.Printf("k8s-events: unexpected object type on Update: %T", newObj)
 				return
 			}
-			if !s.isArmed() {
+			if !s.HasSynced() {
 				return
 			}
 			emit(toSignal(ev))
@@ -206,8 +206,11 @@ func (s *Source) arm() {
 	s.mu.Unlock()
 }
 
-// isArmed reports whether handlers may emit.
-func (s *Source) isArmed() bool {
+// HasSynced reports whether handlers may emit — the initial LIST has
+// drained and the source is armed. It also implements
+// sources.SyncReporter, so the sentinel's /readyz probe is not ready
+// until this source is watching rather than listing.
+func (s *Source) HasSynced() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.armed

@@ -55,6 +55,47 @@ type Source interface {
 	Run(ctx context.Context, emit func(Signal)) error
 }
 
+// SyncReporter is the optional interface an informer-backed source
+// implements to say whether its initial LIST has drained — the same
+// "armed" flip its handlers gate emission on.
+//
+// It exists for the sentinel's readiness probe. A source that is
+// running but unsynced is not yet watching anything: its handlers are
+// suppressed and its state is half-built, which is exactly the window
+// a rollout must not route traffic — or a second sentinel's
+// shutdown — into.
+//
+// Implementing it is optional and its absence means "no barrier, ready
+// as soon as Run is entered", which is the truth for the poll-driven
+// sources (expiry, quota, saturation, notifications, token-burn): they
+// have no cache to fill. Never implement it as `return true`; a source
+// that cannot distinguish the two states should not implement it at
+// all, so an unimplemented barrier and a permanently-open one are not
+// the same claim.
+type SyncReporter interface {
+	// HasSynced reports whether the source's caches are populated
+	// and its handlers armed. Safe to call from any goroutine at any
+	// time, including before Run.
+	HasSynced() bool
+}
+
+// AllSynced reports whether every source that has a sync barrier has
+// crossed it, and names the first that has not. Sources that do not
+// implement SyncReporter are ready by definition (see the interface's
+// doc) and are not named.
+func AllSynced(srcs []Source) (bool, string) {
+	for _, s := range srcs {
+		r, ok := s.(SyncReporter)
+		if !ok {
+			continue
+		}
+		if !r.HasSynced() {
+			return false, s.Name()
+		}
+	}
+	return true, ""
+}
+
 // Scope is the deployment tier a source operates at (DESIGN.md §11).
 // A deployment whose RBAC cannot support a source's scope gets an
 // explicit startup error naming the source and the missing
