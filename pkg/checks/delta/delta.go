@@ -127,7 +127,7 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		return 0, err
 	}
 	if !inv.Scope.Workload.IsZero() {
-		return 0, fmt.Errorf("--workload is not supported by triage delta (scan a namespace, or use bundle for one workload)")
+		return 0, emit.UsageErrorf("--workload is not supported by triage delta (scan a namespace, or use bundle for one workload)")
 	}
 	th := thresholds{
 		restarts:   inv.Flags.Int("restarts"),
@@ -135,13 +135,13 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		quotaWarn:  inv.Flags.Int("quota-warn"),
 	}
 	if th.restarts < 1 {
-		return 0, fmt.Errorf("--restarts must be at least 1, got %d", th.restarts)
+		return 0, emit.UsageErrorf("--restarts must be at least 1, got %d", th.restarts)
 	}
 	if th.pendingAge <= 0 {
-		return 0, fmt.Errorf("--pending-age must be positive, got %s", th.pendingAge)
+		return 0, emit.UsageErrorf("--pending-age must be positive, got %s", th.pendingAge)
 	}
 	if th.quotaWarn < 1 || th.quotaWarn > 100 {
-		return 0, fmt.Errorf("--quota-warn must be a percentage in 1..100, got %d", th.quotaWarn)
+		return 0, emit.UsageErrorf("--quota-warn must be a percentage in 1..100, got %d", th.quotaWarn)
 	}
 
 	client, err := d.source(ctx)
@@ -201,12 +201,12 @@ func parseOnly(s string) (map[string]bool, error) {
 			continue
 		}
 		if !known[tok] {
-			return nil, fmt.Errorf("--only: unknown class %q (want a subset of %s)", tok, strings.Join(allClasses, ","))
+			return nil, emit.UsageErrorf("--only: unknown class %q (want a subset of %s)", tok, strings.Join(allClasses, ","))
 		}
 		out[tok] = true
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("--only: no classes selected (want a subset of %s)", strings.Join(allClasses, ","))
+		return nil, emit.UsageErrorf("--only: no classes selected (want a subset of %s)", strings.Join(allClasses, ","))
 	}
 	return out, nil
 }

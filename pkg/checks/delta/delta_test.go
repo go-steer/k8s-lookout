@@ -345,8 +345,10 @@ func TestUsageErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := checktest.Run(t, testCommand(), tc.args...)
-			if res.Code != emit.ExitRuntime {
-				t.Fatalf("exit = %d, want %d", res.Code, emit.ExitRuntime)
+			// Bad flag values and unsupported scopes are the
+			// operator's mistake: §4.2 exit 2, never 1.
+			if res.Code != emit.ExitUsage {
+				t.Fatalf("exit = %d, want %d", res.Code, emit.ExitUsage)
 			}
 			if !strings.Contains(res.Stderr, tc.wantErr) {
 				t.Errorf("stderr = %q, want it to contain %q", res.Stderr, tc.wantErr)

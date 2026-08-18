@@ -21,7 +21,6 @@ package state
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -148,13 +147,13 @@ func EdgesCommand(deps Deps) checks.Command {
 func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	wl := inv.Scope.Workload
 	if wl.IsZero() {
-		return 0, errors.New("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>)")
+		return 0, emit.UsageErrorf("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>)")
 	}
 	if _, ok := workloadKinds[wl.Kind]; !ok {
-		return 0, fmt.Errorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
+		return 0, emit.UsageErrorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
 	}
 	if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
-		return 0, fmt.Errorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
+		return 0, emit.UsageErrorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
 	}
 
 	client, err := deps.client(ctx)

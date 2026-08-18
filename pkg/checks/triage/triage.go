@@ -158,7 +158,7 @@ func parsePositional(arg, namespace string) (emit.WorkloadRef, error) {
 	parts := strings.Split(arg, "/")
 	for _, p := range parts {
 		if p == "" {
-			return emit.WorkloadRef{}, fmt.Errorf("invalid target %q (want <Kind>/[<namespace>/]<name> or a bare pod name)", arg)
+			return emit.WorkloadRef{}, emit.UsageErrorf("invalid target %q (want <Kind>/[<namespace>/]<name> or a bare pod name)", arg)
 		}
 	}
 	switch len(parts) {
@@ -167,13 +167,13 @@ func parsePositional(arg, namespace string) (emit.WorkloadRef, error) {
 	case 2, 3:
 		kind, ok := workloadKinds[strings.ToLower(parts[0])]
 		if !ok {
-			return emit.WorkloadRef{}, fmt.Errorf("unsupported workload kind %q (want %s)", parts[0], workloadKindNames())
+			return emit.WorkloadRef{}, emit.UsageErrorf("unsupported workload kind %q (want %s)", parts[0], workloadKindNames())
 		}
 		if len(parts) == 2 {
 			return emit.WorkloadRef{Kind: kind, Namespace: fallbackNS, Name: parts[1]}, nil
 		}
 		if namespace != "" && namespace != parts[1] {
-			return emit.WorkloadRef{}, fmt.Errorf("--namespace=%s contradicts target namespace %s", namespace, parts[1])
+			return emit.WorkloadRef{}, emit.UsageErrorf("--namespace=%s contradicts target namespace %s", namespace, parts[1])
 		}
 		return emit.WorkloadRef{Kind: kind, Namespace: parts[1], Name: parts[2]}, nil
 	default:

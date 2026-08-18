@@ -90,7 +90,7 @@ func resolvePods(ctx context.Context, cs kubernetes.Interface, scope emit.Scope,
 	switch {
 	case podName != "":
 		if scope.Namespace == "" {
-			return nil, fmt.Errorf("--pod requires --namespace")
+			return nil, emit.UsageErrorf("--pod requires --namespace")
 		}
 		p, err := cs.CoreV1().Pods(scope.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
@@ -108,7 +108,7 @@ func resolvePods(ctx context.Context, cs kubernetes.Interface, scope emit.Scope,
 		}
 		return list.Items, nil
 	}
-	return nil, fmt.Errorf("scope required: one of --workload, --pod (with --namespace), --namespace, or -A")
+	return nil, emit.UsageErrorf("scope required: one of --workload, --pod (with --namespace), --namespace, or -A")
 }
 
 // workloadPods resolves a workload's pods through the label selector
@@ -153,7 +153,7 @@ func workloadPods(ctx context.Context, cs kubernetes.Interface, w emit.WorkloadR
 			sel = j.Spec.Selector
 		}
 	default:
-		return nil, fmt.Errorf("unsupported workload kind %q (want Deployment, StatefulSet, DaemonSet, ReplicaSet, or Job)", w.Kind)
+		return nil, emit.UsageErrorf("unsupported workload kind %q (want Deployment, StatefulSet, DaemonSet, ReplicaSet, or Job)", w.Kind)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("workload %s: %w", w, err)
