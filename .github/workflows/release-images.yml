@@ -56,6 +56,18 @@ name: Release images
 # the registry, and the previously-unchecked `-gke` tag→digest
 # linkage is now asserted on every release.
 #
+# Each image also carries an SPDX SBOM attestation per platform
+# (#289), signed keyless with the same Fulcio identity, so the
+# signature and the bill of materials verify through one flow:
+#
+#   cosign verify-attestation ghcr.io/go-steer/lookout:vX.Y.Z \
+#     --type spdxjson \
+#     --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# That runs post-publish too, and asserts BOTH platform attestations
+# landed — the whole value of an SBOM is that someone reads it back.
+#
 # The same tag also produces prebuilt workstation binaries (see the
 # build-binaries job: linux amd64/arm64, darwin amd64/arm64, windows
 # amd64 — both flavors, SHA256SUMS signed keyless), attached to the
@@ -308,6 +320,49 @@ jobs:
           # every tag that points at the same digest.
           echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
 
+      # SBOM attestation (#289). A signed image with no bill of
+      # materials answers "who built this" and not "what is in it",
+      # and the second question is the one a consumer's scanner asks.
+      #
+      # syft generates, cosign attests keyless with the SAME Fulcio
+      # identity as the signature above — so a consumer verifies the
+      # signature and the SBOM through one flow and one trust root,
+      # rather than trusting an unsigned in-toto blob that happens to
+      # be sitting in the index.
+      #
+      # ONE SBOM PER PLATFORM, attested separately. The published
+      # artifact is a multi-arch index; scanning it without --platform
+      # silently describes whichever child matches the runner and
+      # labels it as the whole image. For a static Go binary the two
+      # package lists are near-identical, which is exactly why an
+      # unlabeled one would go unnoticed if it were ever wrong.
+      #
+      # Both flavors get this, via the matrix — the default build
+      # links no cloud SDK and -gke links the GCP one, and the SBOM is
+      # what makes that difference externally checkable instead of a
+      # claim in a release note (DESIGN.md §2).
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate + attest SBOMs
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IMG="${REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}@${DIGEST}"
+          for platform in linux/amd64 linux/arm64; do
+            arch="${platform#linux/}"
+            echo "▸ syft: ${IMG} (${platform})"
+            syft scan "registry:${IMG}" \
+              --platform "${platform}" \
+              --output "spdx-json=sbom-${{ matrix.flavor }}-${arch}.spdx.json"
+            echo "▸ cosign attest: ${platform}"
+            cosign attest --yes \
+              --type spdxjson \
+              --predicate "sbom-${{ matrix.flavor }}-${arch}.spdx.json" \
+              "${IMG}"
+          done
+
       # Post-publish verification — the gap #111 flagged. Signing
       # exiting 0 does NOT prove a consumer can verify what's on the
       # registry, nor that each published tag actually resolves to the
@@ -335,6 +390,26 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               > /dev/null
           done <<< "$TAGS"
+
+          # Verify the SBOM attestation (#289) the same way, once, by
+          # digest. An attestation nobody has verified is not evidence
+          # — this is the step that would catch a predicate cosign
+          # accepted and no consumer can read back. Both per-platform
+          # attestations hang off this digest, so one verify covers
+          # them; the payload count assertion is what proves the
+          # second one actually landed.
+          IMG="${REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}@${DIGEST}"
+          echo "▸ verifying SBOM attestation: ${IMG}"
+          ATTESTATIONS=$(cosign verify-attestation "${IMG}" \
+            --type spdxjson \
+            --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            2>/dev/null | wc -l)
+          echo "▸ verified ${ATTESTATIONS} SBOM attestation(s)"
+          if [[ "${ATTESTATIONS}" -lt 2 ]]; then
+            echo "::error::expected 2 verified SBOM attestations (linux/amd64 + linux/arm64), got ${ATTESTATIONS}" >&2
+            exit 1
+          fi
 
           # Smoke test: pull by the immutable digest and run the
           # binary. The image ENTRYPOINT is ["/lookout", "watch"], so

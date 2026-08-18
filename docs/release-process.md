@@ -45,6 +45,11 @@ gh release view vX.Y.Z          # 12 assets: 5 platforms × 2 flavors + SHA256SU
 cosign verify ghcr.io/go-steer/lookout:vX.Y.Z \
   --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify-attestation ghcr.io/go-steer/lookout:vX.Y.Z \
+  --type spdxjson \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload | @base64d | fromjson | .predicate.name'   # 2 lines: amd64, arm64
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest      # == vX.Y.Z digest
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest-gke  # == vX.Y.Z-gke digest
 cosign verify-blob lookout_vX.Y.Z_SHA256SUMS \
