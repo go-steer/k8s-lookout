@@ -32,6 +32,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -72,6 +73,11 @@ func init() {
 	checks.Register(EdgesCommand(Deps{}))
 }
 
+// ingressClassDefaultAnnotation marks the IngressClass an Ingress with
+// no ingressClassName falls back to. It is still an annotation in
+// networking/v1 — there is no field for it — so the string is the API.
+const ingressClassDefaultAnnotation = "ingressclass.kubernetes.io/is-default-class"
+
 // workloadKinds are the --workload kinds `state edges` accepts: the
 // pod-owning workload kinds plus Pod itself.
 var workloadKinds = map[string]graph.NodeKind{
@@ -103,7 +109,7 @@ func EdgesCommand(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "state edges",
 		MCPName: "k8s_state_edges",
-		Summary: "Verify every dependency edge of one workload — ConfigMap/Secret keys, Service selectors and endpoints, Ingress backends, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.",
+		Summary: "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.",
 		Flags: []emit.FlagSpec{
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window"},
@@ -113,24 +119,24 @@ func EdgesCommand(deps Deps) checks.Command {
 			{Name: "pods", Doc: "how many of the workload's pods carry the broken reference"},
 			{Name: "container", Doc: "container declaring the broken env/envFrom reference"},
 			{Name: "env", Doc: "environment variable whose valueFrom reference is broken"},
-			{Name: "volume", Doc: "pod volume whose ConfigMap/Secret reference is broken"},
+			{Name: "volume", Doc: "pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken"},
 			{Name: "key", Doc: "the referenced key that is missing from the ConfigMap/Secret"},
 			{Name: "selector", Doc: "the Service label selector under scrutiny"},
 			{Name: "selected", Doc: "pods the Service selector currently selects"},
 			{Name: "ready", Doc: "ready count (selected pods or serving endpoints, per finding kind)"},
 			{Name: "endpoints", Doc: "total endpoints across the Service's EndpointSlices"},
 			{Name: "slices", Doc: "how many EndpointSlices back the Service"},
-			{Name: "service", Doc: "the Service a slice or Ingress backend refers to"},
+			{Name: "service", Doc: "the Service a slice, Ingress backend, or StatefulSet serviceName refers to"},
 			{Name: "pod", Doc: "pod named by an orphaned endpoint targetRef"},
 			{Name: "subject", Doc: "TLS certificate subject (CN when set); never key material"},
 			{Name: "not_after", Doc: "TLS certificate NotAfter, RFC 3339"},
 			{Name: "days_left", Doc: "whole days until NotAfter (negative = expired)"},
-			{Name: "via", Doc: "how a TLS secret is reachable from the workload: mount or ingress"},
-			{Name: "ingress", Doc: "Ingress referencing the TLS secret"},
+			{Name: "via", Doc: "how the broken reference is reached from the workload: mount, ingress, or imagePullSecret"},
+			{Name: "ingress", Doc: "Ingress referencing the TLS secret, or the unserved Ingress itself"},
 			{Name: "host", Doc: "Ingress rule host of the broken backend (empty for the default backend)"},
 			{Name: "path", Doc: "Ingress rule path of the broken backend"},
 			{Name: "port", Doc: "Service port (name or number) the Ingress backend asks for"},
-			{Name: "service_account", Doc: "ServiceAccount the RBAC finding is about"},
+			{Name: "service_account", Doc: "ServiceAccount the RBAC finding is about, or the one contributing an imagePullSecret"},
 			{Name: "role_ref", Doc: "dangling roleRef as <Kind>/<name>"},
 		},
 		Examples: []string{
@@ -204,10 +210,24 @@ type index struct {
 	services        map[string]*corev1.Service   // ns/name
 	slicesByService map[string][]*discoveryv1.EndpointSlice
 	ingresses       []*netv1.Ingress
+	statefulSets    map[string]*appsv1.StatefulSet // ns/name
 
-	serviceAccounts     map[string]bool // ns/name
-	roles               map[string]bool // ns/name
-	clusterRoles        map[string]bool // name
+	// ingressClasses and storageClasses are cluster-scoped name sets:
+	// the checks only ask "does this class exist", never read a spec.
+	// defaultIngressClasses names those annotated as the cluster
+	// default — more than one is itself the misconfiguration, so the
+	// count is kept rather than a bool.
+	ingressClasses        map[string]bool
+	defaultIngressClasses []string
+	storageClasses        map[string]bool
+
+	// serviceAccounts keeps the objects, not just their names: the
+	// imagePullSecrets a pod inherits from its ServiceAccount are only
+	// readable there (the kubelet merges them into the pod at pull
+	// time, so the pod spec never shows them).
+	serviceAccounts     map[string]*corev1.ServiceAccount // ns/name
+	roles               map[string]bool                   // ns/name
+	clusterRoles        map[string]bool                   // name
 	roleBindings        []*rbacv1.RoleBinding
 	clusterRoleBindings []*rbacv1.ClusterRoleBinding
 
@@ -218,8 +238,9 @@ type index struct {
 }
 
 type podTemplate struct {
-	labels         map[string]string
-	serviceAccount string
+	labels           map[string]string
+	serviceAccount   string
+	imagePullSecrets []string
 }
 
 func key(ns, name string) string { return ns + "/" + name }
@@ -266,7 +287,10 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 		secrets:         map[string]*corev1.Secret{},
 		services:        map[string]*corev1.Service{},
 		slicesByService: map[string][]*discoveryv1.EndpointSlice{},
-		serviceAccounts: map[string]bool{},
+		statefulSets:    map[string]*appsv1.StatefulSet{},
+		ingressClasses:  map[string]bool{},
+		storageClasses:  map[string]bool{},
+		serviceAccounts: map[string]*corev1.ServiceAccount{},
 		roles:           map[string]bool{},
 		clusterRoles:    map[string]bool{},
 		templates:       map[string]podTemplate{},
@@ -276,9 +300,14 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 		ix.scanned++
 	}
 	template := func(kind, ns, name string, tpl corev1.PodTemplateSpec) {
+		pull := make([]string, 0, len(tpl.Spec.ImagePullSecrets))
+		for _, r := range tpl.Spec.ImagePullSecrets {
+			pull = append(pull, r.Name)
+		}
 		ix.templates[kind+"/"+key(ns, name)] = podTemplate{
-			labels:         tpl.Labels,
-			serviceAccount: tpl.Spec.ServiceAccountName,
+			labels:           tpl.Labels,
+			serviceAccount:   tpl.Spec.ServiceAccountName,
+			imagePullSecrets: pull,
 		}
 	}
 
@@ -332,6 +361,10 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 				return l.Items, l.Continue, nil
 			}, func(s *appsv1.StatefulSet) {
 				template("StatefulSet", s.Namespace, s.Name, s.Spec.Template)
+				// Kept whole, unlike the other workload kinds: the
+				// governing-Service and volumeClaimTemplates checks read
+				// spec fields no pod carries.
+				ix.statefulSets[key(s.Namespace, s.Name)] = s
 				graphObj(s)
 			})
 		},
@@ -399,6 +432,25 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 			}, func(i *netv1.Ingress) { ix.ingresses = append(ix.ingresses, i); graphObj(i) })
 		},
 		func() error {
+			// IngressClasses are cluster-scoped and not a graph kind:
+			// they answer "is anything configured to serve this
+			// Ingress", which needs the name set and the default
+			// annotation, nothing else.
+			return listPages("ingressclasses", func(o metav1.ListOptions) ([]netv1.IngressClass, string, error) {
+				l, err := client.NetworkingV1().IngressClasses().List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(c *netv1.IngressClass) {
+				ix.ingressClasses[c.Name] = true
+				if c.Annotations[ingressClassDefaultAnnotation] == "true" {
+					ix.defaultIngressClasses = append(ix.defaultIngressClasses, c.Name)
+				}
+				ix.scanned++
+			})
+		},
+		func() error {
 			return listPages("configmaps", func(o metav1.ListOptions) ([]corev1.ConfigMap, string, error) {
 				l, err := client.CoreV1().ConfigMaps(ns).List(ctx, o)
 				if err != nil {
@@ -426,7 +478,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(s *corev1.ServiceAccount) { ix.serviceAccounts[key(s.Namespace, s.Name)] = true; ix.scanned++ })
+			}, func(s *corev1.ServiceAccount) { ix.serviceAccounts[key(s.Namespace, s.Name)] = s; ix.scanned++ })
 		},
 		func() error {
 			return listPages("rolebindings", func(o metav1.ListOptions) ([]rbacv1.RoleBinding, string, error) {
@@ -466,6 +518,20 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 				}
 				return l.Items, l.Continue, nil
 			}, func(r *rbacv1.ClusterRole) { ix.clusterRoles[r.Name] = true; ix.scanned++ })
+		},
+		func() error {
+			// StorageClasses, likewise name-only: a StatefulSet's
+			// volumeClaimTemplates naming a class that does not exist
+			// is a dangling reference like any other. Binding hygiene
+			// across the whole cluster is `state storage`'s job, not
+			// this workload-scoped pass.
+			return listPages("storageclasses", func(o metav1.ListOptions) ([]storagev1.StorageClass, string, error) {
+				l, err := client.StorageV1().StorageClasses().List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(s *storagev1.StorageClass) { ix.storageClasses[s.Name] = true; ix.scanned++ })
 		},
 	}
 	// steps run in lockstep with LoadClusterListRequirements() so each

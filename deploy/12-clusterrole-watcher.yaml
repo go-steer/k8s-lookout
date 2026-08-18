@@ -196,7 +196,19 @@ rules:
     resources: ["services", "configmaps"]
     verbs: ["list"]
   - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
+    # ingressclasses answers "is any controller configured to serve
+    # this Ingress" — an Ingress naming an absent class, or naming
+    # none where the cluster has no default, is accepted by the API
+    # server and then served by nothing, with no event to find.
+    # Cluster-scoped and tiny: names and the is-default-class
+    # annotation, nothing else is read.
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["list"]
+  - apiGroups: ["storage.k8s.io"]
+    # storageclasses, likewise name-only: a StatefulSet's
+    # volumeClaimTemplates naming a class that no longer exists leaves
+    # every replica after the first one Pending forever.
+    resources: ["storageclasses"]
     verbs: ["list"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     # Enrichment scoped-list continued: the edges section's RBAC

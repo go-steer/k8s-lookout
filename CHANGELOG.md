@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `state edges` verifies three more references, all of which fail
+  silently today:
+  - **imagePullSecrets.** `triage delta` reports `pod.imagepull` — the
+    symptom. This names the cause: the Secret does not exist, or
+    exists and is not a registry credential type the kubelet will use.
+    Both the pod spec's and the ServiceAccount's are checked, and the
+    ServiceAccount's are the trap — the kubelet merges them in at pull
+    time, so they appear nowhere in `kubectl get pod -o yaml`.
+  - **StatefulSet governing Service and volumeClaimTemplate class.** A
+    `serviceName` that resolves to nothing means the per-pod DNS names
+    never resolve, which is the entire reason to run a StatefulSet. A
+    `volumeClaimTemplates` entry naming a StorageClass that no longer
+    exists leaves replica 0 healthy and every replica after it Pending
+    forever.
+  - **IngressClass.** An Ingress naming a class that does not exist,
+    or naming none where nothing declares itself the cluster default,
+    is accepted by the API server and then served by nothing, with no
+    event and no condition to find. The second case is a warning, not
+    a critical: a controller may still claim an unclassed Ingress by
+    convention, as GKE's does.
+
+  `state.LoadCluster` now also lists `ingressclasses` and
+  `storageclasses` — both cluster-scoped, name-only reads — and
+  `deploy/12-clusterrole-watcher.yaml` grants them.
+
 - `triage delta` reports `workload.replicafailure`: a Deployment whose
   pods were never created at all, because a ResourceQuota denied them,
   PodSecurity admission rejected them, or the ServiceAccount they name

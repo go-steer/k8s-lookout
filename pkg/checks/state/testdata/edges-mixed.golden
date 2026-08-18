@@ -6,4 +6,4 @@ kind=edge.backend_missing severity=critical namespace=prod kind_of_object=Ingres
 kind=edge.cert_expiring severity=warning namespace=prod kind_of_object=Secret name=api-tls reason=CertificateExpiringSoon message="certificate expires in 15d" workload=Deployment/prod/api via=mount ingress=api subject=api.example.com not_after=2026-07-16T00:00:00Z days_left=15
 kind=edge.cert_expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" workload=Deployment/prod/api via=ingress ingress=api subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
 kind=edge.rbac_dangling severity=warning kind_of_object=ClusterRoleBinding name=api-crb reason=DanglingRoleRef message="roleRef ClusterRole api-cr not found (binds serviceaccount api-sa)" workload=Deployment/prod/api service_account=api-sa role_ref=ClusterRole/api-cr
-scanned=16 findings=8 elapsed=100ms
+scanned=17 findings=8 elapsed=100ms

@@ -110,18 +110,18 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `omitted_templates` | clusters dropped by --max-templates (log.overflow only) |
 | `omitted_lines` | lines inside the dropped clusters (log.overflow only) |
 | `workload` | the targeted workload as \<Kind>/\<namespace>/\<name>, stamped on every finding |
-| `volume` | pod volume whose ConfigMap/Secret reference is broken |
+| `volume` | pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken |
 | `key` | the referenced key that is missing from the ConfigMap/Secret |
 | `selected` | pods the Service selector currently selects |
 | `endpoints` | total endpoints across the Service's EndpointSlices |
 | `slices` | how many EndpointSlices back the Service |
-| `service` | the Service a slice or Ingress backend refers to |
+| `service` | the Service a slice, Ingress backend, or StatefulSet serviceName refers to |
 | `pod` | pod named by an orphaned endpoint targetRef |
 | `subject` | TLS certificate subject (CN when set); never key material |
 | `not_after` | TLS certificate NotAfter, RFC 3339 |
 | `days_left` | whole days until NotAfter (negative = expired) |
-| `via` | how a TLS secret is reachable from the workload: mount or ingress |
-| `ingress` | Ingress referencing the TLS secret |
+| `via` | how the broken reference is reached from the workload: mount, ingress, or imagePullSecret |
+| `ingress` | Ingress referencing the TLS secret, or the unserved Ingress itself |
 | `host` | Ingress rule host of the broken backend (empty for the default backend) |
 | `path` | Ingress rule path of the broken backend |
 | `port` | Service port (name or number) the Ingress backend asks for |

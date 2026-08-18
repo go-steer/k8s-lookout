@@ -23,8 +23,10 @@ package state
 //
 // Finding kinds and severities:
 //
-//	edge.missing_ref        critical  referenced ConfigMap/Secret/ServiceAccount/TLS secret does not exist
+//	edge.missing_ref        critical  referenced ConfigMap/Secret/ServiceAccount/TLS secret/IngressClass/StorageClass/governing Service does not exist
 //	edge.missing_key        critical  referenced key absent from an existing ConfigMap/Secret
+//	edge.invalid_ref        warning   referenced object exists but is the wrong type to serve the reference
+//	edge.unclassed          warning   Ingress names no class and no IngressClass declares itself the cluster default
 //	edge.selector_empty     critical  Service selector aimed at this workload selects zero pods
 //	edge.selector_unready   warning   Service selects pods but some are not Ready (critical when none are)
 //	edge.endpoints_missing  critical  selecting Service has no EndpointSlices at all
@@ -47,8 +49,10 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -101,6 +105,8 @@ func (e *edgeScan) run() []emit.Finding {
 
 	e.resolvePods()
 	e.checkRefs()
+	e.checkImagePullSecrets()
+	e.checkStatefulSet()
 	e.buildCandidates()
 	e.checkSelectors()
 	e.checkEndpoints()
@@ -376,6 +382,199 @@ func (e *edgeScan) hasKey(kind graph.NodeKind, ns, name, k string) bool {
 		return inData || inString
 	default:
 		return false
+	}
+}
+
+// ---------------------------------------------------------------------------
+// imagePullSecrets: edge.missing_ref, edge.invalid_ref
+// ---------------------------------------------------------------------------
+
+// pullSecretTypes are the two Secret types the kubelet will actually
+// use as registry credentials. Anything else is silently ignored at
+// pull time, which is what makes it worth reporting.
+var pullSecretTypes = map[corev1.SecretType]bool{
+	corev1.SecretTypeDockerConfigJson: true,
+	corev1.SecretTypeDockercfg:        true,
+}
+
+// checkImagePullSecrets validates the registry credentials a pod will
+// be pulled with. `triage delta` reports pod.imagepull — the symptom,
+// "this pod cannot pull its image". This reports the cause, and the
+// cause is a different sentence to act on: the Secret the pod names
+// does not exist, or exists and is the wrong type.
+//
+// Both sources count. imagePullSecrets on the pod spec are the obvious
+// one; the ones on the pod's ServiceAccount are the trap, because the
+// kubelet merges them in at pull time and they appear nowhere in the
+// pod spec, so `kubectl get pod -o yaml` shows a pod with no
+// credentials problem at all.
+func (e *edgeScan) checkImagePullSecrets() {
+	type source struct {
+		secret         string
+		serviceAccount string // "" when named by the pod spec itself
+	}
+	// Deduped by (secret, source): identical breakage across replicas
+	// is one finding, exactly as checkRefs folds its own.
+	seen := map[source]int{}
+	var order []source
+	record := func(s source) {
+		if _, ok := seen[s]; !ok {
+			order = append(order, s)
+		}
+		seen[s]++
+	}
+
+	collect := func(ns string, podSpec []string, sa string) {
+		for _, name := range podSpec {
+			record(source{secret: name})
+		}
+		if acct := e.ix.serviceAccounts[key(ns, sa)]; acct != nil {
+			for _, r := range acct.ImagePullSecrets {
+				record(source{secret: r.Name, serviceAccount: sa})
+			}
+		}
+	}
+	for _, p := range e.pods {
+		names := make([]string, 0, len(p.Spec.ImagePullSecrets))
+		for _, r := range p.Spec.ImagePullSecrets {
+			names = append(names, r.Name)
+		}
+		sa := p.Spec.ServiceAccountName
+		if sa == "" {
+			sa = "default"
+		}
+		collect(p.Namespace, names, sa)
+	}
+	if len(e.pods) == 0 {
+		// Scaled to zero: read the template, same as checkRBAC does.
+		if tpl, ok := e.ix.templates[e.wl.Kind+"/"+key(e.wl.Namespace, e.wl.Name)]; ok {
+			sa := tpl.serviceAccount
+			if sa == "" {
+				sa = "default"
+			}
+			collect(e.wl.Namespace, tpl.imagePullSecrets, sa)
+		}
+	}
+
+	for _, s := range order {
+		details := []emit.Field{
+			{Key: "workload", Value: e.wl.String()},
+			{Key: "via", Value: "imagePullSecret"},
+		}
+		if s.serviceAccount != "" {
+			details = append(details, emit.Field{Key: "service_account", Value: s.serviceAccount})
+		}
+		details = append(details, emit.Field{Key: "pods", Value: strconv.Itoa(seen[s])})
+		from := "pod spec"
+		if s.serviceAccount != "" {
+			from = "serviceaccount " + s.serviceAccount
+		}
+
+		sec := e.ix.secrets[key(e.wl.Namespace, s.secret)]
+		switch {
+		case sec == nil:
+			e.add(emit.Finding{
+				Kind:         "edge.missing_ref",
+				Severity:     emit.SeverityCritical,
+				Namespace:    e.wl.Namespace,
+				KindOfObject: "Secret",
+				Name:         s.secret,
+				// The kubelet's own event reason for this exact failure.
+				Reason:  "FailedToRetrieveImagePullSecret",
+				Message: fmt.Sprintf("imagePullSecret %s not found (referenced by %s) — private images cannot be pulled", s.secret, from),
+				Details: details,
+			})
+		case !pullSecretTypes[sec.Type]:
+			e.add(emit.Finding{
+				Kind:         "edge.invalid_ref",
+				Severity:     emit.SeverityWarning,
+				Namespace:    sec.Namespace,
+				KindOfObject: "Secret",
+				Name:         sec.Name,
+				Reason:       "InvalidImagePullSecret",
+				Message: fmt.Sprintf("imagePullSecret is type %s, want kubernetes.io/dockerconfigjson or kubernetes.io/dockercfg — the kubelet ignores it (referenced by %s)",
+					sec.Type, from),
+				Details: details,
+			})
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StatefulSet: edge.missing_ref (governing Service, volumeClaimTemplate SC)
+// ---------------------------------------------------------------------------
+
+// checkStatefulSet validates the two references a StatefulSet has and
+// no other workload kind does.
+//
+// The governing Service is what a StatefulSet is *for*: without it the
+// per-pod DNS names never resolve, so peers cannot find each other and
+// nothing in the pod's own status says why. The volumeClaimTemplate
+// StorageClass is the slow-motion version — replica 0 may have been
+// bound before the class was deleted and looks perfectly healthy while
+// every replica after it sits Pending forever.
+//
+// Reached both from a StatefulSet target and from a Pod target owned by
+// one, since a pod is the more common thing to have in hand when
+// something is wrong.
+func (e *edgeScan) checkStatefulSet() {
+	sets := map[string]*appsv1.StatefulSet{}
+	if e.wl.Kind == "StatefulSet" {
+		if s := e.ix.statefulSets[key(e.wl.Namespace, e.wl.Name)]; s != nil {
+			sets[key(s.Namespace, s.Name)] = s
+		}
+	}
+	for _, p := range e.pods {
+		for _, o := range p.OwnerReferences {
+			if o.Kind != "StatefulSet" {
+				continue
+			}
+			if s := e.ix.statefulSets[key(p.Namespace, o.Name)]; s != nil {
+				sets[key(s.Namespace, s.Name)] = s
+			}
+		}
+	}
+
+	for _, k := range sortedKeys(sets) {
+		s := sets[k]
+		details := func(extra ...emit.Field) []emit.Field {
+			return append([]emit.Field{{Key: "workload", Value: e.wl.String()}}, extra...)
+		}
+		// serviceName is optional from apps/v1 onward; only a name that
+		// resolves to nothing is a broken edge.
+		if svc := s.Spec.ServiceName; svc != "" && e.ix.services[key(s.Namespace, svc)] == nil {
+			e.add(emit.Finding{
+				Kind:         "edge.missing_ref",
+				Severity:     emit.SeverityCritical,
+				Namespace:    s.Namespace,
+				KindOfObject: "Service",
+				Name:         svc,
+				Reason:       "MissingGoverningService",
+				Message:      fmt.Sprintf("governing service %s not found — statefulset pods have no stable DNS identity", svc),
+				Details:      details(emit.Field{Key: "service", Value: svc}),
+			})
+		}
+		for i := range s.Spec.VolumeClaimTemplates {
+			vct := &s.Spec.VolumeClaimTemplates[i]
+			sc := vct.Spec.StorageClassName
+			// nil means "use the cluster default" — a different claim,
+			// and `state storage` owns it. "" means "no dynamic
+			// provisioning", which is legal.
+			if sc == nil || *sc == "" || e.ix.storageClasses[*sc] {
+				continue
+			}
+			e.add(emit.Finding{
+				Kind:         "edge.missing_ref",
+				Severity:     emit.SeverityCritical,
+				Namespace:    s.Namespace,
+				KindOfObject: "StorageClass",
+				Name:         *sc,
+				Reason:       "MissingStorageClass",
+				Message: fmt.Sprintf("volumeClaimTemplate %s names storageclass %s, which does not exist — new replicas stay Pending",
+					vct.Name, *sc),
+				Details: details(emit.Field{Key: "volume", Value: vct.Name}),
+			})
+		}
 	}
 }
 
@@ -702,6 +901,8 @@ func (e *edgeScan) checkIngresses() {
 			continue
 		}
 
+		e.checkIngressClass(ing)
+
 		for _, ba := range backends {
 			if ba.b.Service == nil {
 				continue // resource backends are out of scope here
@@ -758,6 +959,79 @@ func (e *edgeScan) checkIngresses() {
 			}
 		}
 	}
+}
+
+// legacyIngressClassAnnotation is the pre-1.18 way of choosing a
+// controller. Controllers still honour it, so an Ingress carrying it
+// is classed even with no ingressClassName, and reporting it as
+// unserved would be wrong.
+const legacyIngressClassAnnotation = "kubernetes.io/ingress.class"
+
+// builtinIngressClasses are class names a controller honours WITHOUT a
+// matching IngressClass object existing. GKE's built-in load-balancer
+// controller claims both by name, so "the object does not exist" is
+// not evidence of anything there. Keep this list short: every entry is
+// a detection hole, and it is only justified where the controller is
+// part of the platform rather than something an operator installed.
+var builtinIngressClasses = map[string]bool{
+	"gce":          true,
+	"gce-internal": true,
+}
+
+// checkIngressClass answers whether anything is configured to serve
+// this Ingress at all. Both failures produce the same silence: the
+// object is accepted, its status stays empty, no controller ever
+// claims it, and the only symptom is that the hostname resolves to
+// nothing. There is no event and no condition to find, which is what
+// makes it worth a finding.
+func (e *edgeScan) checkIngressClass(ing *netv1.Ingress) {
+	if ing.Annotations[legacyIngressClassAnnotation] != "" {
+		return // pre-1.18 selection; controllers still honour it
+	}
+	details := []emit.Field{{Key: "workload", Value: e.wl.String()}, {Key: "ingress", Value: ing.Name}}
+
+	if name := ing.Spec.IngressClassName; name != nil && *name != "" {
+		if e.ix.ingressClasses[*name] || builtinIngressClasses[*name] {
+			return
+		}
+		msg := fmt.Sprintf("ingressClassName %s does not exist — no controller will serve this ingress", *name)
+		if have := sortedKeys(e.ix.ingressClasses); len(have) > 0 {
+			msg += " (cluster has: " + strings.Join(have, ", ") + ")"
+		}
+		e.add(emit.Finding{
+			Kind:         "edge.missing_ref",
+			Severity:     emit.SeverityCritical,
+			Namespace:    ing.Namespace,
+			KindOfObject: "IngressClass",
+			Name:         *name,
+			Reason:       "MissingIngressClass",
+			Message:      msg,
+			Details:      details,
+		})
+		return
+	}
+
+	// No class named, so the cluster default applies — if there is
+	// one. More than one default is a cluster-scoped misconfiguration
+	// rather than this workload's problem, so it is not reported here.
+	if len(e.ix.defaultIngressClasses) > 0 {
+		return
+	}
+	// Warning, not critical, and hedged in the message: a controller
+	// may still claim an unclassed Ingress by convention rather than
+	// by declaring itself the default (GKE's does). We can see that
+	// nothing declares itself the default; we cannot see that nothing
+	// serves it, so the finding must not claim to.
+	e.add(emit.Finding{
+		Kind:         "edge.unclassed",
+		Severity:     emit.SeverityWarning,
+		Namespace:    ing.Namespace,
+		KindOfObject: "Ingress",
+		Name:         ing.Name,
+		Reason:       "NoIngressClass",
+		Message:      "ingress names no class and no ingressclass declares itself the cluster default — unless a controller claims it by convention, nothing serves it",
+		Details:      details,
+	})
 }
 
 // backendPort resolves an Ingress backend port against the service's
@@ -933,7 +1207,7 @@ func (e *edgeScan) checkRBAC() {
 	}
 
 	for _, sa := range sortedKeys(sas) {
-		if !e.ix.serviceAccounts[key(e.wl.Namespace, sa)] {
+		if e.ix.serviceAccounts[key(e.wl.Namespace, sa)] == nil {
 			e.add(emit.Finding{
 				Kind:         "edge.missing_ref",
 				Severity:     emit.SeverityCritical,

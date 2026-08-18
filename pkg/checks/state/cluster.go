@@ -77,6 +77,7 @@ func LoadClusterListRequirements() []ListRequirement {
 		{"", "services"},
 		{"discovery.k8s.io", "endpointslices"},
 		{"networking.k8s.io", "ingresses"},
+		{"networking.k8s.io", "ingressclasses"},
 		{"", "configmaps"},
 		{"", "secrets"},
 		{"", "serviceaccounts"},
@@ -84,6 +85,7 @@ func LoadClusterListRequirements() []ListRequirement {
 		{"rbac.authorization.k8s.io", "roles"},
 		{"rbac.authorization.k8s.io", "clusterrolebindings"},
 		{"rbac.authorization.k8s.io", "clusterroles"},
+		{"storage.k8s.io", "storageclasses"},
 	}
 }
 
