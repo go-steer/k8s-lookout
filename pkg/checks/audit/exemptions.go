@@ -40,9 +40,10 @@ const defaultWithin = 14 * 24 * time.Hour
 // ExemptionsCommand builds `lookout audit exemptions`.
 func ExemptionsCommand() checks.Command {
 	return checks.Command{
-		Name:    "audit exemptions",
-		MCPName: "k8s_audit_exemptions",
-		Summary: "Audit the exemption file itself: which reviewed exemptions have lapsed (and are therefore no longer annotating anything) and which are about to. The mechanism that keeps an exemption file from becoming a permanent, unread list of things nobody checks any more.",
+		Name:        "audit exemptions",
+		MCPName:     "k8s_audit_exemptions",
+		MCPProfiles: []string{"audit"},
+		Summary:     "Audit the exemption file itself: which reviewed exemptions have lapsed (and are therefore no longer annotating anything) and which are about to. The mechanism that keeps an exemption file from becoming a permanent, unread list of things nobody checks any more.",
 		Flags: []emit.FlagSpec{
 			{Name: "within", Type: emit.FlagDuration, Default: defaultWithin.String(),
 				Help: "how far ahead to warn about entries that are still live but expiring soon; 0 reports only entries that have already lapsed"},

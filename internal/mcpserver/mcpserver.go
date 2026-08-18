@@ -47,15 +47,40 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
+// Option adjusts what a server advertises. There is one today; it is
+// a variadic option rather than a parameter so that adding the next
+// one does not touch every call site.
+type Option func(*config)
+
+type config struct {
+	// tools, when non-nil, is the set of MCP tool names to advertise
+	// (ResolveTools). nil means every non-hidden command — the
+	// default, and what every caller that does not care gets.
+	tools map[string]bool
+}
+
+// WithTools restricts the advertised surface to the named tools.
+// A nil or empty set is ignored: the way to advertise nothing is not
+// to run a server.
+func WithTools(names map[string]bool) Option {
+	return func(c *config) {
+		if len(names) > 0 {
+			c.tools = names
+		}
+	}
+}
+
 // New builds the MCP server for a registry: one tool per non-hidden
 // registered command, picked up automatically from the registry state
-// at construction time.
-func New(reg *checks.Registry, version string) *mcp.Server {
+// at construction time. WithTools narrows that to a profile or an
+// explicit list (issue #280).
+func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
-	for _, c := range reg.All() {
-		if c.Hidden {
-			continue
-		}
+	for _, c := range Advertised(reg, cfg.tools) {
 		server.AddTool(&mcp.Tool{
 			Name:        c.MCPName,
 			Description: toolDescription(c),
@@ -69,6 +94,24 @@ func New(reg *checks.Registry, version string) *mcp.Server {
 		}, handler(c))
 	}
 	return server
+}
+
+// Advertised returns the commands a server built with this selection
+// serves, in registry order. It is exported because the tool list is
+// worth inspecting without standing a server up — `lookout mcp
+// --list-tools` prints it, and the profile tests assert on it.
+func Advertised(reg *checks.Registry, tools map[string]bool) []checks.Command {
+	var out []checks.Command
+	for _, c := range reg.All() {
+		if c.Hidden {
+			continue
+		}
+		if tools != nil && !tools[c.MCPName] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // handler adapts one command to an MCP tool handler: map the

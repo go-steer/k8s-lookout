@@ -194,9 +194,10 @@ func (d Deps) now() time.Time {
 // have finished — calls this and registers the result.
 func New(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "scan",
-		MCPName: "k8s_scan",
-		Summary: "Start here when you know something is wrong but not what: one call runs every target-free incident check across the cluster — broken workloads, dead admission webhooks, stuck volumes and PVCs, rejected Gateway routes, config drift — then drills into the dependency edges of whatever it flagged. Needs no target; `--include=audit` adds the posture sweep.",
+		Name:        "scan",
+		MCPName:     "k8s_scan",
+		MCPProfiles: []string{"triage", "audit"},
+		Summary:     "Start here when you know something is wrong but not what: one call runs every target-free incident check across the cluster — broken workloads, dead admission webhooks, stuck volumes and PVCs, rejected Gateway routes, config drift — then drills into the dependency edges of whatever it flagged. Needs no target; `--include=audit` adds the posture sweep.",
 		// One invocation is a dozen checks and two List passes; the
 		// single-check budget would abort a healthy scan of a large
 		// cluster.

@@ -7,7 +7,7 @@ description: "Cluster-level security configuration posture, read from the cloud 
 
 Cluster-level security configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, and a control-plane endpoint the internet can reach with nothing narrowing it. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
 
-MCP tool: `k8s_audit_cluster`
+MCP tool: `k8s_audit_cluster` (MCP profile: `audit`)
 
 ## Usage
 

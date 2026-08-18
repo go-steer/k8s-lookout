@@ -133,9 +133,10 @@ func workloadKindNames() string {
 // edges emit nothing.
 func EdgesCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "state edges",
-		MCPName: "k8s_state_edges",
-		Summary: "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.",
+		Name:        "state edges",
+		MCPName:     "k8s_state_edges",
+		MCPProfiles: []string{"triage"},
+		Summary:     "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.",
 		Flags: []emit.FlagSpec{
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window"},

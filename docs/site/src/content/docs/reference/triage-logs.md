@@ -7,7 +7,7 @@ description: "kubectl logs, distilled: Drain-clusters raw lines into templates w
 
 kubectl logs, distilled: Drain-clusters raw lines into templates with counts (probe noise stripped, stack traces collapsed to top frames) — reach for this instead of reading logs whole.
 
-MCP tool: `k8s_triage_logs`
+MCP tool: `k8s_triage_logs` (MCP profile: `triage`)
 
 ## Usage
 

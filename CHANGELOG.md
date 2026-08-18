@@ -222,6 +222,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package-level default — would reintroduce the very race the flags
   exist to remove.
 
+- MCP tool profiles: `lookout mcp --profile=triage`, `--tools=<sel>`,
+  and `--list-tools` (#280). Every advertised tool is paid for on every
+  model call whether or not it is ever invoked — the full surface is
+  139,267 bytes of JSON schema across 34 tools, roughly 35k tokens per
+  turn — and the cost is not only tokens: an agent choosing among
+  thirty similar-sounding tools chooses worse than one choosing among
+  seven. `--profile=triage` advertises 7 tools and 48,327 bytes;
+  `--profile=audit`, 7 tools and 38,804. The default is unchanged, so
+  the saving is opt-in and nothing quietly disappears.
+
+  `--profile` and `--tools` are one left-to-right selection, profile
+  first, in the `all,-x` syntax `bundle --lists` already establishes:
+  `all`/`full` adds every tool, a profile name adds its members, a tool
+  name adds one, a `-` prefix removes. A selection resolving to zero
+  tools is a usage error — an MCP client handed an empty tool list has
+  no way to say so, it simply behaves as though lookout is not
+  installed.
+
+  Membership is an `MCPProfiles` field on `checks.Command`, declared
+  with the command beside its flags and output glossary rather than in
+  a second registry that would be a list to forget. It flows into the
+  generated reference pages for free, and `--list-tools` prints the
+  per-tool schema cost so the number the flags exist to move is
+  measurable rather than asserted.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

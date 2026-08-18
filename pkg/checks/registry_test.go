@@ -140,6 +140,12 @@ func TestCommandValidate(t *testing.T) {
 		{"output field without doc", func(c *Command) {
 			c.Output = []OutputField{{Name: "restarts", Doc: ""}}
 		}},
+		{"unknown MCP profile", func(c *Command) { c.MCPProfiles = []string{"tirage"} }},
+		{"MCP profile declared twice", func(c *Command) { c.MCPProfiles = []string{"triage", "triage"} }},
+		{"the full profile is implicit", func(c *Command) { c.MCPProfiles = []string{ProfileFull} }},
+		{"hidden command in a profile", func(c *Command) {
+			c.Hidden, c.MCPProfiles = true, []string{"triage"}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -171,5 +177,55 @@ func TestGroupSummariesCoverDesignGroups(t *testing.T) {
 		if GroupSummary(g) == "" {
 			t.Errorf("group %q from DESIGN.md §4.1 has no summary", g)
 		}
+	}
+}
+
+func TestMCPProfileMembership(t *testing.T) {
+	c := validCommand("triage logs", "k8s_triage_logs")
+	c.MCPProfiles = []string{"triage"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid profile membership rejected: %v", err)
+	}
+	if !c.InMCPProfile("triage") {
+		t.Error("declared membership not reported")
+	}
+	if c.InMCPProfile("audit") {
+		t.Error("undeclared membership reported")
+	}
+	// Every command is in the full surface, which is why it is the
+	// default and why declaring it is an error.
+	if !c.InMCPProfile(ProfileFull) {
+		t.Error("a command is not in the full surface")
+	}
+	bare := validCommand("triage spec", "k8s_resource_spec")
+	if !bare.InMCPProfile(ProfileFull) || bare.InMCPProfile("triage") {
+		t.Error("a command with no declared profiles is in the full surface only")
+	}
+	if got, want := c.MCPProfileNote(), " (MCP profile: `triage`)"; got != want {
+		t.Errorf("MCPProfileNote() = %q, want %q", got, want)
+	}
+	if got := bare.MCPProfileNote(); got != "" {
+		t.Errorf("MCPProfileNote() on an unprofiled command = %q, want empty", got)
+	}
+}
+
+func TestMCPProfileNamesAreDocumented(t *testing.T) {
+	names := MCPProfileNames()
+	if len(names) == 0 {
+		t.Fatal("no MCP profiles declared")
+	}
+	for i, n := range names {
+		if MCPProfileSummary(n) == "" {
+			t.Errorf("profile %q has no description", n)
+		}
+		if i > 0 && names[i-1] >= n {
+			t.Errorf("MCPProfileNames() is not sorted: %v", names)
+		}
+		if n == ProfileFull {
+			t.Errorf("%q is the reserved default and must not be a declared profile", n)
+		}
+	}
+	if MCPProfileSummary(ProfileFull) != "" {
+		t.Errorf("%q must not be in the declared table", ProfileFull)
 	}
 }

@@ -88,7 +88,7 @@ func commandPage(c checks.Command) string {
 	var b strings.Builder
 	frontmatter(&b, "lookout "+c.Name, c.Summary)
 
-	fmt.Fprintf(&b, "%s\n\nMCP tool: `%s`\n\n", escapeProse(c.Summary), c.MCPName)
+	fmt.Fprintf(&b, "%s\n\nMCP tool: `%s`%s\n\n", escapeProse(c.Summary), c.MCPName, c.MCPProfileNote())
 
 	b.WriteString("## Usage\n\n")
 	if c.Positional != nil {

@@ -98,9 +98,10 @@ const supportedMinorSkew = 2
 // it does not.
 func UpgradesCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "audit upgrades",
-		MCPName: "k8s_audit_upgrades",
-		Summary: "Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
+		Name:        "audit upgrades",
+		MCPName:     "k8s_audit_upgrades",
+		MCPProfiles: []string{"audit"},
+		Summary:     "Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindVersionBehind, "the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindUpgradeUnmanaged, "nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off", emit.SeverityWarning),

@@ -7,7 +7,7 @@ description: "List what EXISTS in a namespace — kubectl get across every kind 
 
 List what EXISTS in a namespace — kubectl get across every kind at once, one line per object, leading with the \<Kind>/\<namespace>/\<name> target the other read tools take. The first call for a namespace you have not enumerated: the health scans report only what is abnormal and name nothing when a namespace is clean, so they cannot tell you what is in one. An inventory, not a diagnosis — never guess an object's name, list the namespace.
 
-MCP tool: `k8s_list_resources`
+MCP tool: `k8s_list_resources` (MCP profile: `triage`)
 
 ## Usage
 

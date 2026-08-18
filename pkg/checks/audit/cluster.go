@@ -96,9 +96,10 @@ const anyIPv4 = "0.0.0.0/0"
 // inventory.
 func ClusterCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "audit cluster",
-		MCPName: "k8s_audit_cluster",
-		Summary: "Cluster-level security configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, and a control-plane endpoint the internet can reach with nothing narrowing it. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
+		Name:        "audit cluster",
+		MCPName:     "k8s_audit_cluster",
+		MCPProfiles: []string{"audit"},
+		Summary:     "Cluster-level security configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, and a control-plane endpoint the internet can reach with nothing narrowing it. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindWorkloadIdentityOff, "Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node", emit.SeverityWarning),
 			checks.Kind(kindLegacyMetadata, "a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read", emit.SeverityWarning),

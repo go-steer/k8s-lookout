@@ -7,7 +7,7 @@ description: "Audit the exemption file itself: which reviewed exemptions have la
 
 Audit the exemption file itself: which reviewed exemptions have lapsed (and are therefore no longer annotating anything) and which are about to. The mechanism that keeps an exemption file from becoming a permanent, unread list of things nobody checks any more.
 
-MCP tool: `k8s_audit_exemptions`
+MCP tool: `k8s_audit_exemptions` (MCP profile: `audit`)
 
 ## Usage
 

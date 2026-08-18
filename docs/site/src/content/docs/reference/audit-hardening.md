@@ -7,7 +7,7 @@ description: "Workload security posture: containers running privileged or holdin
 
 Workload security posture: containers running privileged or holding node-root capabilities, pods sharing the host network/PID/IPC namespaces, hostPath mounts, default-ServiceAccount tokens that something actually uses, and namespaces with no Pod Security Admission enforcement. Judges every pod-template owner in scope — Deployments, StatefulSets, DaemonSets, CronJobs, unowned Jobs and unowned Pods — plus the namespaces around them. Scope with --namespace or -A; scanned counts pod templates examined, the namespaces note counts namespaces.
 
-MCP tool: `k8s_audit_hardening`
+MCP tool: `k8s_audit_hardening` (MCP profile: `audit`)
 
 ## Usage
 

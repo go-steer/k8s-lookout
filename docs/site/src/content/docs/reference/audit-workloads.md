@@ -7,7 +7,7 @@ description: "Workload reliability posture for workloads that are healthy right 
 
 Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, and autoscalers that structurally cannot scale. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
 
-MCP tool: `k8s_audit_workloads`
+MCP tool: `k8s_audit_workloads` (MCP profile: `audit`)
 
 ## Usage
 
