@@ -80,6 +80,70 @@ comma-separated allowlist (`pods,deployments`), or subtractions
 The [`lookout bundle` reference](/reference/bundle/) documents both, and
 the `skipped=` field, in full.
 
+## Or install the chart
+
+The same deployment ships as a Helm chart, published to the same
+registry as the images and signed with the same keyless identity:
+
+```sh
+helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
+  --version 0.22.0 \
+  --namespace agent-triage --create-namespace \
+  --set-string 'args[0]=--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777' \
+  --set-string 'args[4]=--cluster-name=prod-us-east1'
+```
+
+The chart version tracks the release, minus the `v` — chart `0.22.0`
+deploys `v0.22.0`. There is no compatibility matrix to consult because
+there is only one version line. (It reads a release ahead of the
+`?ref=` above on purpose: v0.22.0 is the first release that publishes a
+chart. Before that, `helm install lookout-watch deploy/chart` from a
+clone is the only route.) Verify it the same way you verify an image:
+
+```sh
+cosign verify ghcr.io/go-steer/charts/lookout:0.22.0 \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The namespace and the token Secret are the same two prerequisites as
+above — the chart does not create either. The Secret in particular is
+deliberate: Helm stores the rendered release manifest in a Secret of
+its own, so a token passed as a chart value ends up readable by anyone
+who can read the release.
+
+The chart is **not** a second description of the deployment. Its
+defaults are the values in `deploy/*.yaml`, and a CI job renders both
+and diffs them:
+
+```
+helm template lookout-watch deploy/chart -n agent-triage
+  ==  kustomize build deploy/
+```
+
+They must match resource for resource and field for field, modulo the
+three provenance labels Helm stamps on everything it renders. So the
+manifest table above remains the one place to read about what a rule
+or a flag is for, and a chart that quietly keeps deploying last
+quarter's RBAC is a build failure rather than a discovery you make
+during an incident. Run it yourself with
+`dev/tools/verify-helm-parity`.
+
+What the chart adds over `kubectl apply -k` is the toggles: RBAC tiers
+(`rbac.create`, `rbac.capacity`), a PVC for the occurrence store
+(`persistence.enabled`), the prometheus-operator ServiceMonitor
+(`serviceMonitor.enabled`, which is the `deploy/prometheus-operator/`
+add-on as a flag), the `-gke` image flavor (`image.flavor`), and extra
+NetworkPolicy ingress peers for an off-namespace scraper. Everything is
+documented in [`deploy/chart/README.md`](https://github.com/go-steer/k8s-lookout/blob/main/deploy/chart/README.md)
+and in the comments in `values.yaml`.
+
+One value behaves unlike the rest: `args` is a flat list you replace
+wholesale, not a map of individual flags. The flags interact — `--mode`
+with `--dedup-window`, `--storm` with `--store` — and a chart that let
+you override one in isolation would happily render a combination nobody
+has ever run.
+
 ## Deployment tiers
 
 | Tier | Unit | Mechanism |

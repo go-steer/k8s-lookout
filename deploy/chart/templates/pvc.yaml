@@ -1,0 +1,28 @@
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+# Only when persistence is on and no claim was named. The occurrence
+# store is telemetry, never control flow, so this is opt-in: what a PVC
+# buys is post-mortem history that survives a reschedule (`--at`
+# queries, `triage changes`) and a way to get the store off the node at
+# all — the image is distroless, so `kubectl cp` from a live pod does
+# not work.
+#
+# Deliberately not tied to the release lifecycle with a helm.sh/resource-policy
+# keep annotation: `helm uninstall` should not silently strand a volume
+# someone is paying for. If you want it kept, name an existingClaim.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "lookout.fullname" . }}-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

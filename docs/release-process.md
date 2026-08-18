@@ -17,8 +17,13 @@ wrong flavor with nothing to catch it.
    - `deploy/51-deployment-watcher.yaml`: bump the image pin to
      `vX.Y.Z`. The release workflow's preflight guard refuses to tag
      on a stale pin.
+   - `deploy/chart/Chart.yaml`: `appVersion: "vX.Y.Z"` and
+     `version: X.Y.Z` (the chart version tracks the app version, no
+     leading `v`). `dev/tools/verify-helm-parity` fails CI on any
+     disagreement between these two and the deploy/51 pin.
    - `docs/site/src/content/docs/getting-started/deploy.md`: bump the
-     `?ref=vX.Y.Z` in the `kubectl apply -k` line to match.
+     `?ref=vX.Y.Z` in the `kubectl apply -k` line, and the
+     `--version X.Y.Z` + `charts/lookout:X.Y.Z` in the Helm block.
 2. **Tag**: `git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
 3. **The workflow does the rest** (`.github/workflows/release-images.yml`):
    - preflight: deploy/51 pin == tag;
@@ -31,6 +36,10 @@ wrong flavor with nothing to catch it.
      windows amd64 × both flavors) cross-compiled with the same
      internal/version stamp, smoke-tested, checksummed, the
      SHA256SUMS signed keyless (`cosign sign-blob`);
+   - the Helm chart packaged and pushed as an OCI artifact to
+     `ghcr.io/go-steer/charts/lookout`, cosign-signed with the same
+     keyless identity, then pulled back and rendered to prove the
+     published copy templates the tagged image (#287);
    - GitHub Release created with the CHANGELOG section + image
      footer (`dev/release/compose-release-notes.sh`), binaries
      attached as assets.
@@ -52,6 +61,10 @@ cosign verify-attestation ghcr.io/go-steer/lookout:vX.Y.Z \
   | jq -r '.payload | @base64d | fromjson | .predicate.name'   # 2 lines: amd64, arm64
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest      # == vX.Y.Z digest
 docker buildx imagetools inspect ghcr.io/go-steer/lookout:latest-gke  # == vX.Y.Z-gke digest
+helm show chart oci://ghcr.io/go-steer/charts/lookout --version X.Y.Z
+cosign verify ghcr.io/go-steer/charts/lookout:X.Y.Z \
+  --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 cosign verify-blob lookout_vX.Y.Z_SHA256SUMS \
   --bundle lookout_vX.Y.Z_SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \

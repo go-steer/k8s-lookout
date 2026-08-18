@@ -44,6 +44,7 @@ done
 STEPS=(
   "docs-lint       dev/tools/docs-lint"
   "version-fb      dev/ci/presubmits/verify-version-fallback"
+  "helm-parity     dev/tools/verify-helm-parity"
   "format          dev/tools/verify-go-format"
   "vet             dev/tools/vet"
   "build           dev/tools/build"

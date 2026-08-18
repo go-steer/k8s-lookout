@@ -1,0 +1,120 @@
+# SOURCE OF TRUTH: deploy/51-deployment-watcher.yaml, which carries the
+# rationale for every decision reproduced here — why the sentinel is a
+# separate Deployment rather than a daemon sidecar, what the image
+# flavors differ in, and why `args` pins what it pins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate, not the default RollingUpdate: with replicas: 1 a rolling
+  # update starts the new pod before terminating the old one, so every
+  # rollout briefly runs two sentinels watching the same cluster and
+  # double-emitting every signal. A gap in coverage is recoverable;
+  # duplicate incidents are noise someone has to triage. This fixes the
+  # rollout case only — a node failure or a manual scale-up still
+  # produces two. Leader election is the real answer, tracked
+  # separately.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lookout.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lookout.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "lookout.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: watcher
+          image: {{ include "lookout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image ENTRYPOINT is ["/lookout", "watch"], so these
+          # bare flags splice in behind `watch`.
+          args:
+            {{- toYaml .Values.args | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: lookout-data
+              mountPath: /var/lib/lookout
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: {{ .Values.daemonToken.envVar }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.daemonToken.secretName }}
+                  key: {{ .Values.daemonToken.secretKey }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+              protocol: TCP
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: lookout-data
+        {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "lookout.fullname" .)) }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -89,3 +89,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "non-Go change — no Go to scan"
+
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      # deploy/ is not in this workflow's paths: list, so a run here
+      # means nothing under deploy/ changed and the chart cannot have
+      # drifted off manifests that also did not change.
+      - run: echo "non-Go change — deploy/ untouched"

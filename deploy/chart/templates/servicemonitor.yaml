@@ -1,0 +1,54 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.service.create }}
+{{- fail "serviceMonitor.enabled requires service.create — a ServiceMonitor with no Service selects nothing and reports no error" }}
+{{- end }}
+# SOURCE OF TRUTH: deploy/prometheus-operator/servicemonitor.yaml.
+#
+# Off by default: ServiceMonitor is a CRD, and rendering it on a
+# cluster without prometheus-operator fails the install over an
+# optional extra.
+#
+# On Google Managed Prometheus the equivalent is a
+# monitoring.googleapis.com/v1 PodMonitoring; the port name and
+# interval carry over unchanged.
+#
+# Note the interaction with the NetworkPolicy above: it admits
+# same-namespace scrapers only. A prometheus-operator in its own
+# namespace also needs `networkPolicy.extraIngressFrom`, or this
+# selects a target the CNI then refuses — a scrape that fails in the
+# CNI rather than in the operator, which is a genuinely annoying thing
+# to debug.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "lookout.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      # 30s, not the operator's 60s default: the sentinel's counters
+      # move on incident timescales and a minute of aliasing is enough
+      # to lose a short storm entirely.
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
