@@ -199,6 +199,7 @@ deployment's `.agents/skills/`.
 
 - [`docs/DESIGN.md`](./docs/DESIGN.md) — the complete, normative specification
 - [`docs/repo-map.md`](./docs/repo-map.md) — repo architecture map: layout, data paths, frozen contracts
+- [`docs/adding-a-check.md`](./docs/adding-a-check.md) — how to add a read-path command, one real check end to end
 - [`docs/signal-schema-v1.md`](./docs/signal-schema-v1.md) — the frozen fleet-rollup wire contract
 - [`docs/milestones/`](./docs/milestones/) — per-milestone exit evidence (M0–M5 complete, v0.6.0)
 - [`CHANGELOG.md`](./CHANGELOG.md)

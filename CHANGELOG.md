@@ -164,6 +164,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   severities above the ones documented, and `cloud.unavailable` was
   described two different ways by two commands.
 
+- A contributor onramp: `docs/adding-a-check.md`, a matching page on
+  the docs site, and `dev/tools/new-check`. There was no document
+  saying how to add a read-path command, and behind the missing
+  document sat mechanical friction that was accidental rather than
+  contractual.
+
+  The doc walks `audit netpol` end to end — the rationale comment, the
+  kind and reason constants, the output glossary, the usage-vs-runtime
+  exit split, the shape of `Run`, and the five kinds of test a check's
+  suite carries — and then lists the nine touchpoints, marking which
+  are generated and which are decisions.
+
+  `dev/tools/new-check --group=<g> --check=<c> --summary=...` writes
+  the command, its suite and its first golden, registers it, and runs
+  the generated golden test so the scaffold is proven to compile
+  before it is handed over. It reads the target group's `Deps` first,
+  so a group with a Kubernetes client gets the client guard and a
+  fake-clientset fixture and a group with only a clock gets neither, and
+  it refuses a group that does not exist rather than inventing one — a
+  group is a claim about a class of question, which is not a template
+  decision. What it deliberately does not generate, it prints as a
+  checklist naming the test that fails until each item is answered:
+  the claim, scan membership, RBAC, and skills.
+
+  Goldens also now have one update mechanism instead of two.
+  `checktest.Golden(t, path, got)` replaces the per-package copies
+  across fourteen packages — four of which had drifted onto a
+  `-update` flag, so "how do I refresh this golden" had two answers
+  depending on which file you were in. `UPDATE_GOLDEN=1 go test ./...`
+  is now the only one, and a failure prints an aligned line diff
+  rather than two blobs. `pkg/emit` keeps a local copy with a comment
+  saying why: `checktest` is built on it, so it cannot import it.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

@@ -102,6 +102,10 @@ export default defineConfig({
           label: 'Operations',
           items: [{ autogenerate: { directory: 'operations' } }],
         },
+        {
+          label: 'Contributing',
+          items: [{ autogenerate: { directory: 'contributing' } }],
+        },
       ],
     }),
   ],
