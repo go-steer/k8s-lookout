@@ -408,6 +408,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.22.0` deploys `v0.22.0` — so there is no compatibility matrix to
   maintain or to get wrong.
 
+- `docs/assessments/` — the k8sgpt competitive assessment that drove
+  most of this release, and
+  [the response](docs/assessments/2026-08-18-response.md) that closes
+  it: what we accepted and shipped, what we deferred and where it is
+  tracked, what we rejected and why, and the claims from our own
+  drafts that did not survive re-checking. It carries a coverage
+  ledger against all 36 k8sgpt analyzers at a pinned SHA, so the
+  breadth claim is auditable rather than asserted.
+
+- A note on
+  [Signals & fingerprints](https://go-steer.github.io/k8s-lookout/concepts/signals-and-fingerprints/)
+  explaining why scan fingerprints carry no zone while sentinel ones
+  may, and why that mismatch is harmless: the triage-status join keys
+  on `(fingerprint, resource_key)` and the resource key is the pin.
+  `TestJoiner_ZoneMismatchStillJoins` now holds both directions at
+  once, so a change that made the join depend on the zone would fail
+  rather than silently stop matching.
+
 ### Fixed
 
 - The sentinel serves a real readiness probe. `--metrics-addr` now

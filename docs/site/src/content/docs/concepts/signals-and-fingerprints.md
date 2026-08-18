@@ -73,6 +73,35 @@ every symptom-class finding, which is what lets:
   agent already diagnosed;
 - fleets avoid double-counting a symptom reported by both paths.
 
+### Scan fingerprints carry no zone, on purpose
+
+There is one place the two paths deliberately disagree, and it looks
+enough like a bug to be worth naming. A sentinel with zone stamping
+wired hashes its zone into the fingerprint. A read-path scan hashes an
+**empty** zone — always, even against a cluster whose sentinel stamps
+one. So the same real incident carries two different fingerprints
+depending on which path saw it.
+
+That is not an oversight. A scan is a point-in-time invocation, very
+often from a laptop against a kubeconfig, and nothing in that
+invocation honestly identifies a failure domain. Stamping a guess
+would make the two sides *look* like they agree while grouping
+findings under a zone nobody verified — worse than a visible
+mismatch.
+
+Nothing downstream depends on the two agreeing, because the
+[triage-status join](/concepts/closed-loop/) keys on the **pair**
+`(fingerprint, resource_key)` and the resource key is the pin. The
+fingerprint's job there is narrow: disambiguating several open records
+on one object. So a zone-stamped record still joins a zone-less scan
+finding, and — the direction that matters more, because it is the
+common deployment — a zone-less record does too. A guardian test
+(`TestJoiner_ZoneMismatchStillJoins`) holds both at once, since only
+the resource-key pin can satisfy both.
+
+Where the zone does its real work is fleet rollup, and there both
+sides of a grouping come from sentinels.
+
 ## Severity classes and routing
 
 Every signal kind has a default severity (`critical` / `warning` / `info`),
