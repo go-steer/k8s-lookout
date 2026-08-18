@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A malformed invocation now exits 2 (usage) instead of 1 (runtime),
+  as §4.2 has always specified. `state edges`, `state wi`, `triage
+  delta`, `triage logs`, and the `triage` positional-target parser
+  reported bad flag values, unsupported workload kinds, contradictory
+  `--namespace`/`--workload` pairs, and missing scopes as runtime
+  failures, so a caller could not tell "the cluster is unreachable"
+  (retry) from "you typed it wrong" (do not retry). The distinction is
+  preserved where it is real: a well-formed target naming an object
+  that does not exist is still a runtime error.
+
 ## [0.21.0] - 2026-08-16
 
 The `audit` group arrives in full. v0.20.0 shipped the posture claim

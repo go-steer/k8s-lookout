@@ -274,8 +274,10 @@ func TestScopeAndFlagValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res := checktest.Run(t, c, tt.args...)
-			if res.Code != emit.ExitRuntime {
-				t.Fatalf("exit = %d, want %d (stderr %q)", res.Code, emit.ExitRuntime, res.Stderr)
+			// Every case here is the operator's mistake, not a
+			// cluster failure: §4.2 exit 2, never 1.
+			if res.Code != emit.ExitUsage {
+				t.Fatalf("exit = %d, want %d (stderr %q)", res.Code, emit.ExitUsage, res.Stderr)
 			}
 			if !strings.Contains(res.Stderr, tt.stderr) {
 				t.Errorf("stderr = %q, want substring %q", res.Stderr, tt.stderr)

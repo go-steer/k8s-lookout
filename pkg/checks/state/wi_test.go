@@ -318,8 +318,9 @@ func TestWIUsageErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res := checktest.Run(t, wiTestCommand(wiBindings(), wiMixed()...), tt.args...)
-			if res.Code != emit.ExitRuntime {
-				t.Fatalf("exit %d, want %d (stderr: %s)", res.Code, emit.ExitRuntime, res.Stderr)
+			// Both cases are malformed invocations: §4.2 exit 2.
+			if res.Code != emit.ExitUsage {
+				t.Fatalf("exit %d, want %d (stderr: %s)", res.Code, emit.ExitUsage, res.Stderr)
 			}
 			if !strings.Contains(res.Stderr, tt.stderr) {
 				t.Errorf("stderr %q does not mention %q", res.Stderr, tt.stderr)

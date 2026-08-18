@@ -328,7 +328,11 @@ func (c *Cluster) Objects() []any { return c.ix.graphObjs }
 func (c *Cluster) WorkloadNode(wl emit.WorkloadRef) (graph.NodeID, error) {
 	kind, ok := workloadKinds[wl.Kind]
 	if !ok {
-		return graph.NoNode, fmt.Errorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
+		// A kind we do not support is the caller's mistake (exit 2);
+		// a supported kind that was not observed is a lookup failure
+		// (exit 1, below). Every CLI caller reaches this with a
+		// user-supplied --workload or positional target.
+		return graph.NoNode, emit.UsageErrorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
 	}
 	id, ok := c.snap.Lookup(kind, wl.Namespace, wl.Name)
 	if ok {

@@ -111,16 +111,16 @@ func runCheck(deps Deps) emit.CheckFunc {
 		keepProbes := inv.Flags.Bool("keep-probes")
 
 		if maxTemplates <= 0 {
-			return 0, fmt.Errorf("--max-templates must be positive, got %d", maxTemplates)
+			return 0, emit.UsageErrorf("--max-templates must be positive, got %d", maxTemplates)
 		}
 		if tail < 0 {
-			return 0, fmt.Errorf("--tail must not be negative, got %d", tail)
+			return 0, emit.UsageErrorf("--tail must not be negative, got %d", tail)
 		}
 		if podName != "" && (!inv.Scope.Workload.IsZero() || inv.Scope.AllNamespaces) {
-			return 0, fmt.Errorf("--pod is mutually exclusive with --workload and -A")
+			return 0, emit.UsageErrorf("--pod is mutually exclusive with --workload and -A")
 		}
 		if !inv.Scope.Workload.IsZero() && (inv.Scope.Namespace != "" || inv.Scope.AllNamespaces) {
-			return 0, fmt.Errorf("--workload carries its own namespace; drop --namespace/-A")
+			return 0, emit.UsageErrorf("--workload carries its own namespace; drop --namespace/-A")
 		}
 
 		cs, err := buildClient(deps)

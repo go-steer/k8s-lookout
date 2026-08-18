@@ -548,22 +548,28 @@ func TestEdgesScaledToZeroUsesTemplate(t *testing.T) {
 
 func TestEdgesUsageErrors(t *testing.T) {
 	c := healthy(t)
+	// A malformed or contradictory invocation is the operator's
+	// mistake and exits 2 (§4.2); a well-formed invocation naming an
+	// object that does not exist is a runtime lookup failure and
+	// exits 1. The distinction is what lets a caller retry on 1 and
+	// never retry on 2.
 	tests := []struct {
 		name    string
 		args    []string
 		stderr  string
+		code    int
 		useArgs bool
 	}{
-		{"workload required", []string{}, "requires --workload", true},
-		{"unsupported kind", []string{"--workload=Service/prod/api"}, "unsupported workload kind", true},
-		{"namespace contradiction", []string{"--workload=" + wl, "--namespace=other"}, "contradicts", true},
-		{"workload not found", []string{"--workload=Deployment/prod/nonesuch"}, "not found", true},
+		{"workload required", []string{}, "requires --workload", emit.ExitUsage, true},
+		{"unsupported kind", []string{"--workload=Service/prod/api"}, "unsupported workload kind", emit.ExitUsage, true},
+		{"namespace contradiction", []string{"--workload=" + wl, "--namespace=other"}, "contradicts", emit.ExitUsage, true},
+		{"workload not found", []string{"--workload=Deployment/prod/nonesuch"}, "not found", emit.ExitRuntime, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res := checktest.Run(t, testCommand(c.objects()...), tt.args...)
-			if res.Code != emit.ExitRuntime {
-				t.Fatalf("exit %d, want %d (stderr: %s)", res.Code, emit.ExitRuntime, res.Stderr)
+			if res.Code != tt.code {
+				t.Fatalf("exit %d, want %d (stderr: %s)", res.Code, tt.code, res.Stderr)
 			}
 			if !strings.Contains(res.Stderr, tt.stderr) {
 				t.Errorf("stderr %q does not mention %q", res.Stderr, tt.stderr)

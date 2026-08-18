@@ -128,10 +128,10 @@ func runWI(ctx context.Context, deps WIDeps, inv emit.Invocation) (int, error) {
 	wl := inv.Scope.Workload
 	if !wl.IsZero() {
 		if _, ok := workloadKinds[wl.Kind]; !ok {
-			return 0, fmt.Errorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
+			return 0, emit.UsageErrorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
 		}
 		if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
-			return 0, fmt.Errorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
+			return 0, emit.UsageErrorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
 		}
 	}
 
