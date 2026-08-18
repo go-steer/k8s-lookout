@@ -154,7 +154,7 @@ func TestChanges_AtGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
 	}
-	golden(t, "changes-at.golden", res.Stdout)
+	checktest.Golden(t, "testdata/changes-at.golden", res.Stdout)
 
 	for _, want := range []string{
 		"kind=change.rollout",
@@ -310,7 +310,7 @@ func TestChanges_LiveApproximationGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
 	}
-	golden(t, "changes-live.golden", res.Stdout)
+	checktest.Golden(t, "testdata/changes-live.golden", res.Stdout)
 
 	for _, want := range []string{
 		"kind=change.rollout", "name=web-rs-2", "revision=2", "image=img:v2", "origin=api",

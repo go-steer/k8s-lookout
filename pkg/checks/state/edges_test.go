@@ -32,8 +32,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -801,19 +799,7 @@ func TestEdgesMixedGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	golden := filepath.Join("testdata", "edges-mixed.golden")
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(golden, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("%v (run with UPDATE_GOLDEN=1 to create)", err)
-	}
-	if res.Stdout != string(want) {
-		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/edges-mixed.golden", res.Stdout)
 }
 
 func TestEdgesContract(t *testing.T) {

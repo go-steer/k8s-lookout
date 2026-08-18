@@ -171,5 +171,5 @@ func TestStockoutGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "stockout.golden", res.Stdout)
+	checktest.Golden(t, "testdata/stockout.golden", res.Stdout)
 }

@@ -32,8 +32,6 @@ package top_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -863,7 +861,7 @@ func TestGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "top-cluster.golden", res.Stdout)
+	checktest.Golden(t, "testdata/top-cluster.golden", res.Stdout)
 }
 
 // TestGoldenCensus pins the #235 pair on the fixture that separates
@@ -877,22 +875,5 @@ func TestGoldenCensus(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "top-census.golden", res.Stdout)
-}
-
-func checkGolden(t *testing.T, name, got string) {
-	t.Helper()
-	golden := filepath.Join("testdata", name)
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("%v (run with UPDATE_GOLDEN=1 to create)", err)
-	}
-	if got != string(want) {
-		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", got, want)
-	}
+	checktest.Golden(t, "testdata/top-census.golden", res.Stdout)
 }

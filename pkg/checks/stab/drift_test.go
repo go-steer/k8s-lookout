@@ -378,5 +378,5 @@ func TestDriftGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "drift-mixed.golden", res.Stdout)
+	checktest.Golden(t, "testdata/drift-mixed.golden", res.Stdout)
 }

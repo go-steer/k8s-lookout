@@ -296,5 +296,5 @@ func TestDrainGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "drain-node.golden", res.Stdout)
+	checktest.Golden(t, "testdata/drain-node.golden", res.Stdout)
 }

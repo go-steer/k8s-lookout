@@ -167,7 +167,7 @@ func TestSpecPodGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-pod.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-pod.golden", res.Stdout)
 	assertNoLeak(t, res.Stdout)
 	if !strings.Contains(res.Stdout, "DB_PASSWORD=[REDACTED]") {
 		t.Errorf("credential env var should render as name + [REDACTED]:\n%s", res.Stdout)
@@ -241,7 +241,7 @@ func TestSpecDeploymentGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-deployment.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-deployment.golden", res.Stdout)
 	assertNoLeak(t, res.Stdout)
 	if strings.Contains(res.Stdout, "Progressing") {
 		t.Errorf("healthy condition must be elided:\n%s", res.Stdout)
@@ -266,7 +266,7 @@ func TestSpecServiceGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-service.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-service.golden", res.Stdout)
 	if strings.Contains(res.Stdout, "ClusterIP") {
 		t.Errorf("default service type must be elided:\n%s", res.Stdout)
 	}
@@ -288,7 +288,7 @@ func TestSpecSecretGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-secret.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-secret.golden", res.Stdout)
 	assertNoLeak(t, res.Stdout)
 	// Neither raw nor base64 form may survive; "admin" is planted
 	// as a value, not a key, so it must vanish too.
@@ -315,7 +315,7 @@ func TestSpecConfigMapKeysOnly(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-configmap.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-configmap.golden", res.Stdout)
 	if strings.Contains(res.Stdout, "listen :8080") {
 		t.Errorf("configmap values must not render (keys only):\n%s", res.Stdout)
 	}
@@ -350,7 +350,7 @@ func TestSpecDynamicFallback(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-certificate.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-certificate.golden", res.Stdout)
 	checktest.VerifyContract(t, specCmdDynamic(t, resources, listKinds, cert), "Certificate/prod/api-tls")
 
 	// Unknown kind: runtime error naming the kind, exit 1.
@@ -376,7 +376,7 @@ func TestSpecClusterScoped(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	checkGolden(t, "spec-node.golden", []byte(res.Stdout))
+	checktest.Golden(t, "testdata/spec-node.golden", res.Stdout)
 	if !strings.Contains(res.Stdout, "MemoryPressure=True") {
 		t.Errorf("pressure condition at True must surface:\n%s", res.Stdout)
 	}
@@ -457,7 +457,7 @@ func TestSpecTargetUsageErrors(t *testing.T) {
 // alias table and the M3 status of --diff, both agent-facing
 // contracts.
 func TestSpecHelpGolden(t *testing.T) {
-	checkGolden(t, "spec-help.golden", []byte(specCmd().Help()))
+	checktest.Golden(t, "testdata/spec-help.golden", specCmd().Help())
 }
 
 // TestSpecRegisteredInDefaultRegistry: the production command is

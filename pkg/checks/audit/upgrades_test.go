@@ -19,11 +19,8 @@ package audit_test
 // and the clock.
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,19 +99,7 @@ func TestUpgradesGolden(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	path := filepath.Join("testdata", "upgrades.golden")
-	if *update {
-		if err := os.WriteFile(path, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading golden (run 'go test ./pkg/checks/audit -update'): %v", err)
-	}
-	if !bytes.Equal([]byte(res.Stdout), want) {
-		t.Errorf("output does not match %s:\ngot:\n%s\nwant:\n%s", path, res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/upgrades.golden", res.Stdout)
 }
 
 // The comparison is against THIS cluster's channel. Asking the provider

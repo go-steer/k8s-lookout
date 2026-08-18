@@ -31,8 +31,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -489,19 +487,7 @@ func TestBrokenClusterGolden(t *testing.T) {
 	// The certificate is generated per run: normalize nothing — the
 	// finding carries only subject/notAfter/days, all pinned by the
 	// fixture parameters.
-	golden := filepath.Join("testdata", "health-broken.golden")
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(golden, []byte(res.Stdout), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("%v (run with UPDATE_GOLDEN=1 to create)", err)
-	}
-	if res.Stdout != string(want) {
-		t.Errorf("golden mismatch:\ngot:\n%s\nwant:\n%s", res.Stdout, want)
-	}
+	checktest.Golden(t, "testdata/health-broken.golden", res.Stdout)
 }
 
 // TestWebhooksCategoryLineStable pins the scorecard shape across the
