@@ -187,6 +187,47 @@ func TestRestartThresholdFlag(t *testing.T) {
 	assertFindings(t, got, []finding{{"pod.restarts", "restart-1", "warning"}})
 }
 
+// TestReplicaFailure covers the one abnormality with no pod to find.
+// A quota or admission denial creates zero pods, so every pod-level
+// check in this package is silent and the Deployment's own condition
+// is the only evidence in the cluster.
+func TestReplicaFailure(t *testing.T) {
+	cmd := testCommand(
+		replicaFailureDeployment("prod", "etl"),
+		replicaFailureAndStalledDeployment("prod", "both"),
+		clearedReplicaFailureDeployment("prod", "recovered", 2),
+	)
+	got, _ := runFindings(t, cmd, "--only=pods")
+	// "both" reports replicafailure only: most specific wins, one
+	// finding per workload. "recovered" is silent — the condition is
+	// present but False.
+	assertFindings(t, got, []finding{
+		{"workload.replicafailure", "etl", "critical"},
+		{"workload.replicafailure", "both", "critical"},
+	})
+}
+
+// TestReplicaFailureCarriesTheAdmissionError checks the part that
+// makes the finding actionable: the condition message is the whole
+// answer, so it must survive to stdout.
+func TestReplicaFailureCarriesTheAdmissionError(t *testing.T) {
+	cmd := testCommand(replicaFailureDeployment("prod", "etl"))
+	res := checktest.Run(t, cmd, "--only=pods")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
+	}
+	rec := parseLogfmtLine(t, strings.Split(res.Stdout, "\n")[0])
+	if rec["reason"] != "FailedCreate" {
+		t.Errorf("reason = %q, want FailedCreate", rec["reason"])
+	}
+	if !strings.Contains(rec["message"], "exceeded quota: compute") {
+		t.Errorf("message = %q, want the admission error verbatim", rec["message"])
+	}
+	if rec["desired"] != "3" || rec["ready"] != "0" {
+		t.Errorf("rollout details = desired %q ready %q, want 3 and 0", rec["desired"], rec["ready"])
+	}
+}
+
 func TestNodesClass(t *testing.T) {
 	cmd := testCommand(
 		healthyNode("n-ok"),

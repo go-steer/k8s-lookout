@@ -70,7 +70,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 	return checks.Command{
 		Name:    "triage delta",
 		MCPName: "k8s_triage_delta",
-		Summary: "Every abnormal object in one scan — the first call for \"anything wrong in this cluster?\": broken/pending pods, stalled rollouts, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.",
+		Summary: "Every abnormal object in one scan — the first call for \"anything wrong in this cluster?\": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.",
 		Flags: []emit.FlagSpec{
 			{Name: "only", Type: emit.FlagString, Default: strings.Join(allClasses, ","),
 				Help: "comma-separated finding classes to scan: any subset of pods,nodes,pdb,system,quota"},
