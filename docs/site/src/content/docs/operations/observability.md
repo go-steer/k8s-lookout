@@ -1,15 +1,43 @@
 ---
 title: Observing lookout
-description: The Prometheus metrics surface, /healthz, startup-log verification, and which counters to alert on.
+description: The Prometheus metrics surface, /healthz and /readyz, startup-log verification, and which counters to alert on.
 sidebar:
   order: 4
 ---
 
 The watcher of the cluster needs watching too. The sentinel's own
 observability surface is `--metrics-addr` (the shipped manifest sets
-`:9090`), which serves Prometheus metrics on `/metrics` and a liveness
-endpoint on `/healthz` — the shipped Deployment's liveness and readiness
-probes both hit it.
+`:9090`), which serves Prometheus metrics on `/metrics` plus two
+probes.
+
+## The two probes
+
+They answer different questions, and the shipped Deployment points one
+each at them:
+
+- **`/healthz`** (liveness) — a static 200. The process is up. It
+  deliberately does not depend on `/metrics` or on any cluster call, so
+  a cluster outage does not get the sentinel killed and restarted into
+  the same outage.
+- **`/readyz`** (readiness) — 200 only once every source with an
+  initial-LIST barrier has crossed it, for every cluster this process
+  watches. A sentinel spends its first seconds listing each informer's
+  world; it is running and blind in that window, so it reports `503`
+  with the reason:
+
+  ```
+  not ready: waiting on 1 of 2 cluster(s): [prod-west (syncing)]
+  ```
+
+  The poll-driven sources (`expiry`, `quota`, `saturation`,
+  `notifications`, `token-burn`) have no cache to fill and never hold
+  readiness. A runner that exits and is waiting on its supervisor
+  backoff withdraws from readiness too — `not ready: … (not started)`.
+
+Readiness matters most during a rollout: the Deployment uses
+`strategy: Recreate` with one replica, so the new pod must come up
+before anything is watching again, and `/readyz` is what tells you when
+that has happened rather than when the process merely started.
 
 ## Metrics
 

@@ -61,7 +61,7 @@ breaking change to running deployments, never a refactor.
 | `--inject-max-bytes` | int | `8192` | Per-inject wire-body ceiling the dispatcher fits payloads to before POSTing (default matches the core-agent daemon's 8192-byte limit). An over-limit payload is shrunk least-signal-first — enrichment dropped, then message truncated — never identity, so the incident still routes; without this the daemon 400s the whole inject and a new incident lands as an empty session (issue #198). |
 | `--kubeconfig` | string | — | Explicit kubeconfig path. Used outside a pod. |
 | `--log-level` | string | `info` | One of: debug, info, warn, error. |
-| `--metrics-addr` | string | — | Prometheus /metrics + /healthz listener address (host:port). Empty = disabled. |
+| `--metrics-addr` | string | — | Prometheus /metrics + /healthz + /readyz listener address (host:port). Empty = disabled. |
 | `--mode` | string | `per-incident` | Session routing mode: per-incident (create per (uid,reason)) or shared (all to --target-session). |
 | `--namespace` | string | — | Comma-separated allow-list of namespaces. Empty = all namespaces. |
 | `--notifications-subscription` | string | — | Subscription the notifications source reads (GKE: a Pub/Sub subscription on the cluster's notificationConfig topic) — either projects/\<p>/subscriptions/\<name> or a bare name resolved against the provider project. Required when the notifications source is enabled. |

@@ -340,14 +340,18 @@ func (m *metrics) boundReason(reason string) string {
 	return reason
 }
 
-// serveMetrics starts a small HTTP server exposing /metrics on addr.
-// Blocks until ctx is cancelled; returns any listener error. Callers
-// start it in a goroutine and use ctx cancellation for shutdown.
+// serveMetrics starts a small HTTP server exposing /metrics, /healthz
+// and /readyz on addr. Blocks until ctx is cancelled; returns any
+// listener error. Callers start it in a goroutine and use ctx
+// cancellation for shutdown.
 //
 // When addr == "" the server is skipped entirely (metrics still get
 // collected in-process; just not exposed). Useful for tests + tiny
 // deployments that don't have a Prometheus scraper.
-func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry) error {
+//
+// rd may be nil, in which case /readyz answers exactly like /healthz —
+// for callers that have no runners to be ready about.
+func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry, rd *readiness) error {
 	if addr == "" {
 		<-ctx.Done()
 		return nil
@@ -358,6 +362,25 @@ func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry) er
 	// use it as a livenessProbe without conflating "prometheus is
 	// scraping" with "the process is up."
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	// Readiness is a different question from liveness and deserves a
+	// different answer (issue #285): "has this process established its
+	// watches", not "is it running". A sentinel whose informers are
+	// still listing is up but blind.
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if rd == nil {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+		ok, why := rd.ready()
+		if !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, "not ready: %s\n", why)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})

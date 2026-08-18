@@ -356,7 +356,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Operational.
 	fs.StringVar(&f.logLevel, "log-level", "info", "One of: debug, info, warn, error.")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "Watch the cluster for real (informers, sources, filter/dedup/routing all run) but print inject payloads to stdout instead of calling the daemon/sink. Needs cluster access like a normal run.")
-	fs.StringVar(&f.metricsAddr, "metrics-addr", "", "Prometheus /metrics + /healthz listener address (host:port). Empty = disabled.")
+	fs.StringVar(&f.metricsAddr, "metrics-addr", "", "Prometheus /metrics + /healthz + /readyz listener address (host:port). Empty = disabled.")
 	fs.DurationVar(&f.snapshotInterval, "snapshot-interval", 30*time.Second, "How often to persist the dedup cache when --dedup-persist is set. 0 = only on shutdown.")
 
 	// OpenTelemetry — mirrors the daemon's config.otel.exporter shape.

@@ -174,6 +174,14 @@ func (s *Source) arm() {
 	s.mu.Unlock()
 }
 
+// HasSynced implements sources.SyncReporter — the sentinel's /readyz
+// probe is not ready until every source with a barrier has crossed it.
+func (s *Source) HasSynced() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 // send hands a signal to the pipeline under the source lock's
 // protection of s.emit (Run sets it before the informer starts).
 func (s *Source) send(sig engine.Signal) {

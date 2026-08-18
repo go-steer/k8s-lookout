@@ -298,6 +298,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The sentinel serves a real readiness probe. `--metrics-addr` now
+  exposes `/readyz` alongside `/healthz`, and the shipped Deployment
+  points its readinessProbe at it. `/healthz` is a static 200 and a
+  defensible *liveness* answer — the process is up — but it was also
+  wired as the readiness probe, so the sentinel reported ready during
+  the seconds its informers spend listing every object in the cluster:
+  running, and watching nothing. `/readyz` returns 503 with the reason
+  (`waiting on 1 of 2 cluster(s): [prod-west (syncing)]`) until every
+  source with an initial-LIST barrier has crossed it, on every cluster
+  the process watches, and withdraws again while a runner is between
+  supervisor restarts. The poll-driven sources — `expiry`, `quota`,
+  `saturation`, `notifications`, `token-burn` — have no cache to fill
+  and never hold readiness.
+
+- The sentinel Deployment now sets `strategy: Recreate`. At
+  `replicas: 1` the default RollingUpdate starts the new pod before
+  terminating the old one, so every rollout briefly ran two sentinels
+  watching the same cluster and double-emitting every signal. A few
+  seconds of downtime is the right trade for a watcher: a gap in
+  coverage is recoverable, duplicate incidents are work for a human.
+  This fixes the rollout case only — a node failure or an eviction can
+  still produce two, and leader election remains the real answer.
+
 - The sentinel no longer replays the cluster's Event backlog as fresh
   incidents on every restart. The `k8s-events` source registered its
   informer handler before the initial LIST and emitted unconditionally,

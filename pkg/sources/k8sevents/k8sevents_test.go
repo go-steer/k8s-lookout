@@ -88,7 +88,7 @@ func crashEvent(name string) *corev1.Event {
 func waitArmed(ctx context.Context, t *testing.T, src *Source) {
 	t.Helper()
 	for {
-		if src.isArmed() {
+		if src.HasSynced() {
 			return
 		}
 		select {

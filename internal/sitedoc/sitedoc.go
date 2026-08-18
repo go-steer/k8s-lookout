@@ -293,7 +293,7 @@ func metricsPage() string {
 		"Every metric the sentinel serves on --metrics-addr, derived from the registered collectors.")
 	b.WriteString("" +
 		"`lookout watch --metrics-addr=host:port` serves Prometheus metrics on\n" +
-		"`/metrics` (plus `/healthz`). Every metric carries the `lookout_` prefix.\n\n" +
+		"`/metrics` (plus `/healthz` and `/readyz`). Every metric carries the\n`lookout_` prefix.\n\n" +
 		"Generation note (the documented choice): metric names and help strings are\n" +
 		"derived from the live collectors (`internal/watch.MetricsInventory`); the\n" +
 		"type and label columns are stamped per collector in that inventory because\n" +

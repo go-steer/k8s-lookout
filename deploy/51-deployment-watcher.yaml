@@ -64,6 +64,19 @@ metadata:
     app.kubernetes.io/component: watcher
 spec:
   replicas: 1
+  # Recreate, not the default RollingUpdate: with replicas: 1 a rolling
+  # update starts the new pod before terminating the old one, so every
+  # rollout briefly runs two sentinels watching the same cluster and
+  # double-emitting every signal. Recreate trades a few seconds of
+  # downtime for that, which is the right way round for a watcher —
+  # a gap in coverage is recoverable, duplicate incidents are noise
+  # someone has to triage.
+  #
+  # This fixes the rollout case only. A node failure, an eviction, or a
+  # manual scale-up still produces two sentinels; leader election is the
+  # real answer and is tracked separately.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: lookout-watch
@@ -139,9 +152,14 @@ spec:
               port: metrics
             initialDelaySeconds: 10
             periodSeconds: 30
+          # /readyz, not /healthz: liveness asks whether the process is
+          # up, readiness asks whether it has established its watches.
+          # The sentinel spends its first seconds listing every
+          # informer's world and is blind until they sync, which is
+          # exactly the window a rollout must not cut over into.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 10
