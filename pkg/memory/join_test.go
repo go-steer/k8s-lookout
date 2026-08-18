@@ -176,3 +176,77 @@ func TestJoiner_FreshestRecordWins(t *testing.T) {
 		t.Errorf("got %+v, want the freshest (triaged) record", rec)
 	}
 }
+
+// TestJoiner_ZoneMismatchStillJoins is a GUARDIAN, not a feature
+// test. It exists because the push/pull fingerprint asymmetry it
+// pins down reads like a defect and has been reported as one
+// (kube-agent-demo-e2e GAP-15).
+//
+// The asymmetry: a sentinel with zone stamping wired writes a record
+// whose §8 fingerprint hashes a zone. A `lookout scan` — or any
+// read-path check — derives its candidate with zone EMPTY, because a
+// point-in-time scan carries no deployment identity: it is being run
+// from a laptop against a kubeconfig, and there is nothing in that
+// invocation that honestly identifies a failure domain. So the two
+// fingerprints for one real incident do not and cannot match.
+//
+// That is fine, and the reason it is fine is the §9.4 PAIR key: the
+// fingerprint disambiguates several open records on ONE resource,
+// and the resource key is the pin that actually joins them. The scan
+// still sees the agent's triage state.
+//
+// What this test forbids is the tempting "fix": stamping a zone into
+// ScanFingerprint to make the two sides agree. engine.Fingerprint is
+// frozen at schema v1, and a zone-stamped scan candidate would break
+// the join in the other direction — against every record a
+// zone-LESS sentinel wrote, which is the common deployment. If a
+// change to the fingerprint recipe or to Match's fallback ever makes
+// this test fail, the join has stopped tolerating the mismatch and
+// scans have gone back to reporting triaged incidents as fresh
+// unknowns.
+func TestJoiner_ZoneMismatchStillJoins(t *testing.T) {
+	t.Parallel()
+	const zone = "us-central1-a"
+
+	zoned := engine.Fingerprint(engine.KindK8sEvent, engine.CanonicalReason("CrashLoopBackOff"), "Pod", zone)
+	if zoned == scanFingerprint("CrashLoopBackOff", "Pod") {
+		t.Fatal("zoned and zone-less fingerprints are equal — the premise of this test is gone, and zone has stopped being part of the hash")
+	}
+
+	rec := TriageStatusRecord{
+		Fingerprint:         zoned,
+		ResourceKey:         "Pod/prod/payment-7d5b9c6f4-x2k9q",
+		Session:             "sid-77",
+		Status:              StatusTriaged,
+		RootCauseHypothesis: "node pool drained mid-rollout",
+		Updated:             joinNow.Add(-20 * time.Minute),
+	}
+	j := NewJoiner([]TriageStatusRecord{rec}, joinNow)
+
+	f := crashFinding()
+	if !j.Annotate(&f) {
+		t.Fatal("a zone-stamped record did not join a zone-less scan finding — the resource-key pin has stopped covering the fingerprint mismatch (GAP-15)")
+	}
+	got := map[string]string{}
+	for _, d := range f.Details {
+		got[d.Key] = d.Value
+	}
+	if got[DetailTriageStatus] != "triaged" {
+		t.Errorf("triage status = %q, want %q", got[DetailTriageStatus], "triaged")
+	}
+	if got[DetailTriageRootCause] != "node pool drained mid-rollout" {
+		t.Errorf("root cause = %q, want the record's hypothesis", got[DetailTriageRootCause])
+	}
+
+	// And the other direction, which is the one a "fix" would break:
+	// the far more common zone-less sentinel record must keep joining
+	// too. Both must work at once, which is only possible if the
+	// resource key is doing the joining.
+	plain := rec
+	plain.Fingerprint = scanFingerprint("CrashLoopBackOff", "Pod")
+	plain.RootCauseHypothesis = "same incident, sentinel without zone stamping"
+	g := crashFinding()
+	if !NewJoiner([]TriageStatusRecord{plain}, joinNow).Annotate(&g) {
+		t.Fatal("zone-less record failed to join")
+	}
+}
