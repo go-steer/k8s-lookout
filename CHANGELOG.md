@@ -247,6 +247,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-tool schema cost so the number the flags exist to move is
   measurable rather than asserted.
 
+- `lookout mcp --access-log=<path>`: one logfmt line per tool call
+  (#281). The MCP server used to log nothing at all — a full demo run
+  left two zero-byte log files — so when an agent's tool call
+  misbehaved there was no record it had happened, and debugging one
+  meant adding print statements to the server. A line is
+  `ts=<rfc3339> tool=<name> exit=<code> dur=<d> bytes=<n>`, including
+  for the calls the schema layer rejects before the command ever runs,
+  which are exactly the ones worth noticing. The file is appended, not
+  truncated, so a supervisor restart does not erase the evidence from
+  the run that caused it, and it is created mode 0600 because the tool
+  names alone say which clusters an operator has been reading. An
+  unusable path fails at startup rather than serving without a log.
+
+  Deliberately not the arguments and not the response body: the §6.5
+  sanitizer guarantees no secret value reaches an output surface, and a
+  log that copied payloads would be a second place that guarantee has
+  to hold. Tool, outcome, and size answer the operational questions
+  without becoming a second data path to audit.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

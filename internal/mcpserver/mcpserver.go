@@ -47,9 +47,9 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
-// Option adjusts what a server advertises. There is one today; it is
-// a variadic option rather than a parameter so that adding the next
-// one does not touch every call site.
+// Option adjusts how a server is built. Options are variadic rather
+// than parameters so that adding the next one does not touch every
+// call site.
 type Option func(*config)
 
 type config struct {
@@ -57,6 +57,9 @@ type config struct {
 	// (ResolveTools). nil means every non-hidden command — the
 	// default, and what every caller that does not care gets.
 	tools map[string]bool
+	// log, when non-nil, receives one line per tool call. A nil log
+	// is the no-op default; AccessLog's methods tolerate it.
+	log *AccessLog
 }
 
 // WithTools restricts the advertised surface to the named tools.
@@ -68,6 +71,12 @@ func WithTools(names map[string]bool) Option {
 			c.tools = names
 		}
 	}
+}
+
+// WithAccessLog records one line per tool call to l (issue #281).
+// A nil log leaves the server silent, which is the default.
+func WithAccessLog(l *AccessLog) Option {
+	return func(c *config) { c.log = l }
 }
 
 // New builds the MCP server for a registry: one tool per non-hidden
@@ -91,7 +100,7 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 			// non-read-only so a convention-following client does not
 			// auto-approve it as a read (issue #105).
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: !c.Writes},
-		}, handler(c))
+		}, handler(c, cfg.log))
 	}
 	return server
 }
@@ -117,26 +126,42 @@ func Advertised(reg *checks.Registry, tools map[string]bool) []checks.Command {
 // handler adapts one command to an MCP tool handler: map the
 // arguments back to argv, run in-process under emit.Run with captured
 // buffers, and translate the §4.2 exit code.
-func handler(c checks.Command) mcp.ToolHandler {
+//
+// Every return path goes through record, including the one that never
+// reaches emit.Run — a client that keeps sending arguments the schema
+// rejects is exactly the thing an access log is for, and it would be
+// the one call shape invisible in the log if the argv error returned
+// early.
+func handler(c checks.Command, log *AccessLog) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		start := log.now()
+		record := func(exit int, text string) {
+			log.Record(c.MCPName, exit, start, len(text))
+		}
 		args, err := argv(c, req.Params.Arguments)
 		if err != nil {
+			record(emit.ExitUsage, err.Error())
 			return nil, invalidParams(err.Error())
 		}
 		var stdout, stderr bytes.Buffer
 		switch code := emit.Run(ctx, c.RunConfig(&stdout, &stderr), args); code {
 		case emit.ExitData:
+			record(emit.ExitData, stdout.String())
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
 			}, nil
 		case emit.ExitUsage:
-			return nil, invalidParams(diagnostics(c, &stderr))
+			msg := diagnostics(c, &stderr)
+			record(emit.ExitUsage, msg)
+			return nil, invalidParams(msg)
 		default: // emit.ExitRuntime
 			// A tool error, not a protocol error: the model must
 			// see the diagnostics to self-correct (MCP spec).
+			msg := diagnostics(c, &stderr)
+			record(emit.ExitRuntime, msg)
 			return &mcp.CallToolResult{
 				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{Text: diagnostics(c, &stderr)}},
+				Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 			}, nil
 		}
 	}
