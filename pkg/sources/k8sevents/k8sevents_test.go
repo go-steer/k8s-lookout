@@ -59,15 +59,12 @@ func (r *signalRecorder) snapshot() []sources.Signal {
 	return out
 }
 
-// TestSource_EmitsSignalsFromInformer is the M0 watcher harness
-// (fake clientset seeded with an Event; informer initial list
-// surfaces it) retargeted at the Source interface: the same event
-// must now come out as a kind=k8s-event Signal.
-func TestSource_EmitsSignalsFromInformer(t *testing.T) {
-	t.Parallel()
-	seed := &corev1.Event{
+// crashEvent is the canonical fixture: a pod backing off, involved
+// object and timestamps populated the way a kubelet would.
+func crashEvent(name string) *corev1.Event {
+	return &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "checkout-svc.evt",
+			Name:      name,
 			Namespace: "checkout",
 		},
 		Reason:  "CrashLoopBackOff",
@@ -82,27 +79,53 @@ func TestSource_EmitsSignalsFromInformer(t *testing.T) {
 		LastTimestamp:  metav1.Time{Time: time.Now()},
 		Count:          3,
 	}
-	client := fake.NewClientset(seed)
+}
+
+// waitArmed blocks until the source has finished its initial LIST and
+// flipped armed, or the context expires. Tests create their Events
+// after this returns so the informer delivers them as watch adds
+// rather than as part of the dropped backlog.
+func waitArmed(ctx context.Context, t *testing.T, src *Source) {
+	t.Helper()
+	for {
+		if src.isArmed() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("source never armed")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// TestSource_EmitsSignalsFromInformer is the M0 watcher harness
+// (fake clientset, informer surfaces an Event) retargeted at the
+// Source interface: an event arriving on the watch must come out as a
+// kind=k8s-event Signal.
+func TestSource_EmitsSignalsFromInformer(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset()
 
 	rec := newSignalRecorder()
 	src := New(client, 0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() { done <- src.Run(ctx, rec.emit) }()
 
-	// Wait for the informer's cache to sync + first emit.
+	waitArmed(ctx, t, src)
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, crashEvent("checkout-svc.evt"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+
 	select {
 	case <-rec.first:
 	case <-ctx.Done():
 		t.Fatal("no signal within timeout")
 	}
-	// Let Run finish. Its error is deliberately not asserted: the
-	// first emit can arrive while WaitForCacheSync is still polling,
-	// so this cancel may interrupt the sync and surface as a startup
-	// error — same race the M0 watcher harness ignored.
 	cancel()
 	<-done
 
@@ -137,6 +160,58 @@ func TestSource_EmitsSignalsFromInformer(t *testing.T) {
 	if got.Cluster != "" || got.Zone != "" || got.Fingerprint != "" {
 		t.Errorf("source must leave Cluster/Zone/Fingerprint empty; got %q/%q/%q",
 			got.Cluster, got.Zone, got.Fingerprint)
+	}
+}
+
+// TestSource_DropsThePreExistingBacklog is the arm gate (#284). Every
+// Event still in etcd when the sentinel starts arrives as an informer
+// Add during the initial LIST. Emitting those replays up to an event
+// TTL of resolved history as fresh incidents on every restart, so the
+// source drops the whole batch and only starts emitting afterwards.
+func TestSource_DropsThePreExistingBacklog(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset(
+		crashEvent("backlog-1.evt"),
+		crashEvent("backlog-2.evt"),
+		crashEvent("backlog-3.evt"),
+	)
+
+	rec := newSignalRecorder()
+	src := New(client, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- src.Run(ctx, rec.emit) }()
+
+	waitArmed(ctx, t, src)
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("pre-existing events must not emit; got %d signal(s), first reason %q",
+			len(got), got[0].Key.Reason)
+	}
+
+	// An event created after arming is a real observation and must
+	// still get through — the gate suppresses history, not the source.
+	fresh := crashEvent("after-arming.evt")
+	fresh.Reason = "OOMKilling"
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, fresh, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	select {
+	case <-rec.first:
+	case <-ctx.Done():
+		t.Fatal("post-arming event never emitted")
+	}
+	cancel()
+	<-done
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("want exactly the one post-arming signal, got %d", len(got))
+	}
+	if got[0].Key.Reason != "OOMKilling" {
+		t.Errorf("emitted signal reason = %q, want OOMKilling (a backlog event leaked)", got[0].Key.Reason)
 	}
 }
 

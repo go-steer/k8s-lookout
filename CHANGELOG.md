@@ -268,6 +268,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The sentinel no longer replays the cluster's Event backlog as fresh
+  incidents on every restart. The `k8s-events` source registered its
+  informer handler before the initial LIST and emitted unconditionally,
+  so every Event still in etcd — an hour's worth on a default cluster
+  — arrived as a new signal at startup, carrying old timestamps into a
+  fresh dedup window. A crashlooping sentinel amplified itself once
+  per restart. It now arms after the cache syncs, like the eight
+  level-triggered sources already did, and drops the initial batch
+  outright: an Event is a point-in-time record with nothing to
+  sustain, so unlike a still-stalled Deployment there is nothing there
+  to re-report. Events arriving after startup are unaffected.
+
+  Also in that source: the client-go error handler it installs is now
+  installed once per process rather than once per `Run`, so a restart
+  loop no longer multiplies the log line for every informer error.
+
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),
   as §4.2 has always specified. `state edges`, `state wi`, `triage
   delta`, `triage logs`, and the `triage` positional-target parser
