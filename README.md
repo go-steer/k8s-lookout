@@ -139,6 +139,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `state webhooks` | admission webhooks failing closed with dead backends |
 | `state wi` † | GKE Workload Identity KSA↔GSA binding verification |
 | `state volumes` | RWO multi-attach / cross-zone PV locks |
+| `state storage` | why a PersistentVolumeClaim will never bind: missing StorageClass, no cluster default, static-only class, stranded volumes |
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New command `state storage` (MCP `k8s_storage_binding`): why a
+  PersistentVolumeClaim will never bind. `state volumes` answers "the
+  volume bound, so why won't it attach"; this answers "why is the
+  claim still Pending" — a StorageClass that does not exist, no class
+  named and no cluster default, a static-only class with nothing
+  pre-provisioned — plus the two states behind those: more than one
+  StorageClass annotated as the default, and volumes stranded in
+  `Released` or `Failed`.
+
+  Every claim rule is gated on evidence rather than shape, so the
+  normal ways a Pending claim is healthy stay silent:
+  `WaitForFirstConsumer`, an explicit `storageClassName: ""`, and a
+  matching volume already sitting Available.
+
 - `state edges` verifies three more references, all of which fail
   silently today:
   - **imagePullSecrets.** `triage delta` reports `pod.imagepull` — the

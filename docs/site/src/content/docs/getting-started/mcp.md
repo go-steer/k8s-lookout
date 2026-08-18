@@ -76,6 +76,7 @@ command takes a positional argument). The current surface:
 | `k8s_admission_webhooks` | [`state webhooks`](/reference/state-webhooks/) |
 | `k8s_workload_identity` | [`state wi`](/reference/state-wi/) |
 | `k8s_volume_conflicts` | [`state volumes`](/reference/state-volumes/) |
+| `k8s_storage_binding` | [`state storage`](/reference/state-storage/) |
 | `k8s_gitops_drift` | [`stab drift`](/reference/stab-drift/) |
 | `k8s_drain_blockers` | [`stab drain`](/reference/stab-drain/) |
 | `k8s_perf_probe` | [`perf probe`](/reference/perf-probe/) |
