@@ -92,7 +92,7 @@ endpoints:
 kind=edge.missing_key severity=critical namespace=prod kind_of_object=ConfigMap name=app-config reason=CreateContainerConfigError message="key log.level not found in configmap app-config (env LOG_LEVEL in container api)" workload=Deployment/prod/api container=api env=LOG_LEVEL key=log.level pods=2
 kind=edge.endpoints_unready severity=warning namespace=prod kind_of_object=Service name=api reason=EndpointMismatch message="1/3 endpoints ready across 1 slice(s); selector selects 2 pod(s), 1 ready" workload=Deployment/prod/api endpoints=3 ready=1 slices=1 selected=2
 …
-scanned=16 findings=8 elapsed=100ms
+scanned=17 findings=8 elapsed=100ms
 ```
 
 Typical narrowing sequence when `bundle` showed a crash but not the cause:

@@ -43,6 +43,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -80,6 +81,7 @@ type cluster struct {
 	svc         *corev1.Service
 	slice       *discoveryv1.EndpointSlice
 	ingress     *netv1.Ingress
+	ingClass    *netv1.IngressClass
 	role        *rbacv1.Role
 	rb          *rbacv1.RoleBinding
 	clusterRole *rbacv1.ClusterRole
@@ -124,6 +126,9 @@ func (c *cluster) objects() []runtime.Object {
 	}
 	if c.ingress != nil {
 		out = append(out, c.ingress)
+	}
+	if c.ingClass != nil {
+		out = append(out, c.ingClass)
 	}
 	if c.role != nil {
 		out = append(out, c.role)
@@ -194,6 +199,15 @@ func healthy(t *testing.T) *cluster {
 			Spec: netv1.IngressSpec{
 				TLS:   []netv1.IngressTLS{{Hosts: []string{"api.example.com"}, SecretName: "api-tls"}},
 				Rules: []netv1.IngressRule{rule("api.example.com", "/", backendByName("api", "http"))},
+			},
+		},
+		// The cluster's default ingress class. Without one, an Ingress
+		// naming no class is served by nothing in particular — itself a
+		// finding, so a healthy fixture has to have one.
+		ingClass: &netv1.IngressClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "nginx",
+				Annotations: map[string]string{"ingressclass.kubernetes.io/is-default-class": "true"},
 			},
 		},
 		role: &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "api-role"}},
@@ -366,7 +380,7 @@ func TestEdgesHealthyIsSilent(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	want := "scanned=16 findings=0 elapsed=100ms\n"
+	want := "scanned=17 findings=0 elapsed=100ms\n"
 	if res.Stdout != want {
 		t.Errorf("healthy cluster must emit only the summary:\ngot:  %qwant: %q", res.Stdout, want)
 	}
@@ -401,6 +415,186 @@ func TestEdgesOptionalRefsAreSilent(t *testing.T) {
 	c.podB.Spec.Containers[0].EnvFrom[0].ConfigMapRef.Optional = &opt
 	got := findings(t, c)
 	wantFindings(t, got, nil)
+}
+
+// dockerSecret is a well-formed registry credential of the type the
+// kubelet accepts. The payload is a literal, not a credential: the
+// check reads the Secret's TYPE and never its data.
+func dockerSecret(name string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+	}
+}
+
+func TestEdgesImagePullSecretMissing(t *testing.T) {
+	c := healthy(t)
+	ref := []corev1.LocalObjectReference{{Name: "regcred"}}
+	c.podA.Spec.ImagePullSecrets = ref
+	c.podB.Spec.ImagePullSecrets = ref
+	got := findings(t, c)
+	wantFindings(t, got, []string{
+		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=Secret name=regcred reason=FailedToRetrieveImagePullSecret message="imagePullSecret regcred not found (referenced by pod spec) — private images cannot be pulled" workload=Deployment/prod/api via=imagePullSecret pods=2`,
+	})
+}
+
+// TestEdgesImagePullSecretFromServiceAccount is the case the pod spec
+// hides: the kubelet merges the ServiceAccount's imagePullSecrets in
+// at pull time, so `kubectl get pod -o yaml` shows nothing wrong.
+func TestEdgesImagePullSecretFromServiceAccount(t *testing.T) {
+	c := healthy(t)
+	c.sa.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "sa-regcred"}}
+	got := findings(t, c)
+	wantFindings(t, got, []string{
+		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=Secret name=sa-regcred reason=FailedToRetrieveImagePullSecret message="imagePullSecret sa-regcred not found (referenced by serviceaccount api-sa) — private images cannot be pulled" workload=Deployment/prod/api via=imagePullSecret service_account=api-sa pods=2`,
+	})
+}
+
+func TestEdgesImagePullSecretWrongType(t *testing.T) {
+	c := healthy(t)
+	ref := []corev1.LocalObjectReference{{Name: "regcred"}}
+	c.podA.Spec.ImagePullSecrets = ref
+	c.podB.Spec.ImagePullSecrets = ref
+	// Exists, but Opaque — the kubelet ignores it silently.
+	c.extra = append(c.extra, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "regcred"},
+		Type:       corev1.SecretTypeOpaque,
+	})
+	got := findings(t, c)
+	wantFindings(t, got, []string{
+		`kind=edge.invalid_ref severity=warning namespace=prod kind_of_object=Secret name=regcred reason=InvalidImagePullSecret message="imagePullSecret is type Opaque, want kubernetes.io/dockerconfigjson or kubernetes.io/dockercfg — the kubelet ignores it (referenced by pod spec)" workload=Deployment/prod/api via=imagePullSecret pods=2`,
+	})
+}
+
+func TestEdgesImagePullSecretHealthyIsSilent(t *testing.T) {
+	c := healthy(t)
+	ref := []corev1.LocalObjectReference{{Name: "regcred"}}
+	c.podA.Spec.ImagePullSecrets = ref
+	c.podB.Spec.ImagePullSecrets = ref
+	c.sa.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "sa-regcred"}}
+	c.extra = append(c.extra, dockerSecret("regcred"), dockerSecret("sa-regcred"))
+	wantFindings(t, findings(t, c), nil)
+}
+
+// statefulCluster swaps the Deployment/ReplicaSet owner chain for a
+// StatefulSet so the governing-Service and volumeClaimTemplate checks
+// have a real target. Everything else stays the healthy fixture.
+func statefulCluster(t *testing.T, mutate func(*appsv1.StatefulSet)) *cluster {
+	t.Helper()
+	c := healthy(t)
+	c.deployment, c.rs = nil, nil
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "db"},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: "api",
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "api"}},
+				Spec:       corev1.PodSpec{ServiceAccountName: "api-sa"},
+			},
+		},
+	}
+	mutate(sts)
+	c.extra = append(c.extra, sts)
+	for _, p := range []*corev1.Pod{c.podA, c.podB} {
+		p.OwnerReferences = []metav1.OwnerReference{{Kind: "StatefulSet", Name: "db"}}
+	}
+	return c
+}
+
+func statefulFindings(t *testing.T, c *cluster) []string {
+	t.Helper()
+	res := checktest.Run(t, testCommand(c.objects()...), "--workload=StatefulSet/prod/db")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	return lines[:len(lines)-1]
+}
+
+func TestEdgesStatefulSetGoverningServiceMissing(t *testing.T) {
+	c := statefulCluster(t, func(s *appsv1.StatefulSet) { s.Spec.ServiceName = "db-headless" })
+	wantFindings(t, statefulFindings(t, c), []string{
+		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=Service name=db-headless reason=MissingGoverningService message="governing service db-headless not found — statefulset pods have no stable DNS identity" workload=StatefulSet/prod/db service=db-headless`,
+	})
+}
+
+func TestEdgesStatefulSetVolumeClaimStorageClassMissing(t *testing.T) {
+	gone, fine := "gone", "standard"
+	c := statefulCluster(t, func(s *appsv1.StatefulSet) {
+		s.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			{ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &gone}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "wal"},
+				Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &fine}},
+			// nil means "cluster default" — a different claim, and
+			// `state storage` owns it.
+			{ObjectMeta: metav1.ObjectMeta{Name: "logs"}},
+		}
+	})
+	c.extra = append(c.extra, &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "standard"}})
+	wantFindings(t, statefulFindings(t, c), []string{
+		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=StorageClass name=gone reason=MissingStorageClass message="volumeClaimTemplate data names storageclass gone, which does not exist — new replicas stay Pending" workload=StatefulSet/prod/db volume=data`,
+	})
+}
+
+func TestEdgesStatefulSetHealthyIsSilent(t *testing.T) {
+	fine := "standard"
+	c := statefulCluster(t, func(s *appsv1.StatefulSet) {
+		s.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			{ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: &fine}},
+		}
+	})
+	c.extra = append(c.extra, &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "standard"}})
+	wantFindings(t, statefulFindings(t, c), nil)
+}
+
+func TestEdgesIngressClassMissing(t *testing.T) {
+	c := healthy(t)
+	name := "traefik"
+	c.ingress.Spec.IngressClassName = &name
+	wantFindings(t, findings(t, c), []string{
+		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=IngressClass name=traefik reason=MissingIngressClass message="ingressClassName traefik does not exist — no controller will serve this ingress (cluster has: nginx)" workload=Deployment/prod/api ingress=api`,
+	})
+}
+
+func TestEdgesIngressUnclassed(t *testing.T) {
+	c := healthy(t)
+	c.ingClass = nil // no class object at all, so no cluster default
+	wantFindings(t, findings(t, c), []string{
+		`kind=edge.unclassed severity=warning namespace=prod kind_of_object=Ingress name=api reason=NoIngressClass message="ingress names no class and no ingressclass declares itself the cluster default — unless a controller claims it by convention, nothing serves it" workload=Deployment/prod/api ingress=api`,
+	})
+}
+
+// TestEdgesIngressClassEscapeHatches covers the three ways an Ingress
+// is legitimately served without a matching default IngressClass
+// object; each is silence, not a finding.
+func TestEdgesIngressClassEscapeHatches(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*cluster)
+	}{
+		{"legacy annotation", func(c *cluster) {
+			c.ingClass = nil
+			c.ingress.Annotations = map[string]string{"kubernetes.io/ingress.class": "nginx"}
+		}},
+		{"GKE built-in class", func(c *cluster) {
+			c.ingClass = nil
+			name := "gce"
+			c.ingress.Spec.IngressClassName = &name
+		}},
+		{"named class exists", func(c *cluster) {
+			name := "nginx"
+			c.ingress.Spec.IngressClassName = &name
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := healthy(t)
+			tc.apply(c)
+			wantFindings(t, findings(t, c), nil)
+		})
+	}
 }
 
 func TestEdgesSelectorEmpty(t *testing.T) {
