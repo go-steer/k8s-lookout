@@ -58,6 +58,11 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "min-age", Type: emit.FlagDuration, Default: defaultOrphanMinAge.String(),
 				Help: "report a disk only when unattached at least this long (age from last detach, else creation); disks with no datable age are always reported"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("orphan.disk", "a GCE disk has been unattached for at least --min-age and is still billing", emit.SeverityWarning),
+			checks.Kind("orphan.lb", "a forwarding rule or load balancer routes to zero endpoints and is still billing", emit.SeverityWarning),
+			checks.CloudUnavailableKind(),
+		},
 		Output: append([]checks.OutputField{
 			{Name: "zone", Doc: "orphan.disk: the disk's zone"},
 			{Name: "size_gb", Doc: "orphan.disk: provisioned size in GB (billed whether used or not)"},

@@ -139,6 +139,14 @@ func New(deps Deps) checks.Command {
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override"},
 		},
+		Kinds: append([]checks.KindField{
+			checks.Kind("health.category", "one scorecard line: how this category answered — healthy, degraded, or unavailable. The scorecard always answers, so healthy is explicit rather than silent; the line carries the worst severity found inside the category", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("pvc.pending", "a PersistentVolumeClaim is not bound; pods mounting it cannot start", emit.SeverityWarning),
+			checks.Kind("pvc.lost", "a PersistentVolumeClaim's bound volume is lost", emit.SeverityCritical),
+			checks.Kind("cert.expired", "a TLS secret's certificate has expired", emit.SeverityCritical),
+			checks.Kind("cert.expiring", "a TLS secret's certificate expires within --cert-warn", emit.SeverityWarning),
+			checks.Kind("cert.invalid", "a TLS secret's tls.crt does not contain a parseable X.509 certificate", emit.SeverityWarning),
+		}, delegatedKinds()...),
 		Output: append([]checks.OutputField{
 			{Name: "category", Doc: "scorecard category the finding belongs to (on health.category: which category this line scores)"},
 			{Name: "status", Doc: "category status: healthy|degraded|unavailable (the scorecard always answers — healthy is explicit)"},
@@ -206,6 +214,42 @@ func delegatedOutput() []checks.OutputField {
 			}
 			seen[f.Name] = true
 			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// perfKinds is the subset of `perf probe`'s ledger the control-plane
+// category can reach: it runs the apiserver pack only, so the apf,
+// etcd and startup claims never appear on a scorecard and stay out of
+// this command's vocabulary.
+var perfKinds = map[string]bool{
+	"perf.apiserver_p99": true, "perf.pack_unavailable": true,
+}
+
+// delegatedKinds pulls the delegated commands' kind ledgers on the
+// same principle as delegatedOutput: `triage delta` for the
+// delta-backed categories, `state webhooks` for the webhooks one, and
+// `perf probe` (apiserver pack only) for control-plane. Health emits
+// those findings verbatim, so it must declare exactly what they do.
+func delegatedKinds() []checks.KindField {
+	seen := map[string]bool{
+		"health.category": true,
+		"pvc.pending":     true, "pvc.lost": true,
+		"cert.expired": true, "cert.expiring": true, "cert.invalid": true,
+	}
+	var out []checks.KindField
+	for _, name := range []string{"triage delta", "state webhooks", "perf probe"} {
+		c, ok := checks.Lookup(name)
+		if !ok {
+			continue // isolated test registry; contract test asserts presence
+		}
+		for _, k := range c.Kinds {
+			if seen[k.Name] || (name == "perf probe" && !perfKinds[k.Name]) {
+				continue
+			}
+			seen[k.Name] = true
+			out = append(out, k)
 		}
 	}
 	return out

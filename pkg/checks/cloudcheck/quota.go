@@ -61,6 +61,10 @@ func QuotaCommand(deps Deps) checks.Command {
 			{Name: "all", Type: emit.FlagBool, Default: "false",
 				Help: "exploratory dump: emit every ratable quota regardless of --quota-warn (info severity below it), sorted by pct descending"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("quota.pressure", "a cloud quota is at or above --quota-warn percent of its limit; critical from 95%, info for an --all row below the line", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.CloudUnavailableKind(),
+		},
 		Output: append([]checks.OutputField{
 			{Name: "scope", Doc: "the quota's scope: a region name, or \"global\""},
 			{Name: "usage", Doc: "current usage in the quota's own unit"},

@@ -18,6 +18,8 @@ A drift test fails CI when a committed page differs from regeneration.
 
 ## Read-path commands
 
+- [Finding kinds](/reference/finding-kinds/) — the whole vocabulary these commands emit, in one table.
+
 Composed entry points:
 
 - [`lookout bundle`](/reference/bundle/) — The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.

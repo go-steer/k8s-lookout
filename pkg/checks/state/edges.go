@@ -140,6 +140,7 @@ func EdgesCommand(deps Deps) checks.Command {
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window"},
 		},
+		Kinds: EdgeKinds(),
 		Output: []checks.OutputField{
 			{Name: "workload", Doc: "the targeted workload as <Kind>/<namespace>/<name>, stamped on every finding"},
 			{Name: "pods", Doc: "how many of the workload's pods carry the broken reference"},

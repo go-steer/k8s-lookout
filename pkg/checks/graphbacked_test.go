@@ -30,6 +30,7 @@ func graphBackedCmd() Command {
 		Summary:     "Synthetic graph-backed command for §6.6 flag tests.",
 		GraphBacked: true,
 		Hidden:      true,
+		Kinds:       []KindField{Kind("test.finding", "synthetic; test scaffolding only", emit.SeverityInfo)},
 		Run:         func(ctx context.Context, inv emit.Invocation) (int, error) { return 0, nil },
 	}
 }

@@ -57,6 +57,9 @@ func DriftCommand(deps Deps) checks.Command {
 			{Name: "identity", Type: emit.FlagBool, Default: "false",
 				Help: "resolve each finding's last drift write to the audited principal (who ran it) via the cloud provider's audit trail; requires a provider with the audit capability (GKE: Cloud Audit Logs admin-activity read), otherwise the summary line reports an explicit unavailable"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("drift.manual_edit", "a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, resources)", emit.SeverityCritical, emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager"},
 			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected), or none (scope owns no spec fields)"},

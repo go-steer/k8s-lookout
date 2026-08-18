@@ -39,6 +39,59 @@ lookout bundle [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `bundle.target` | info | the head record: which workload the bundle is about and which sections follow |
+| `radius.neighbor` | info | one object in the target's neighborhood, with its direction, relation, and hop distance — an enumeration of impact, not a defect |
+| `radius.missing` | warning | a neighbor the graph references but never observed, in a kind the snapshot does watch: the reference is dangling |
+| `spec.resource` | info | the object itself: metadata, owner, and the kind-specific highlights (one per target) |
+| `spec.container` | info | one container of the target: image, resources, ports, probes, env (one per container) |
+| `spec.condition` | warning | a status condition of the target that is not in its nominal state |
+| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.imagepull` | critical | a container cannot pull its image |
+| `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
+| `pod.oomkilled` | warning | a container's last termination was an OOM kill |
+| `pod.restarts` | warning | a container has restarted at least --restarts times |
+| `pod.notready` | warning | a container in a Running pod has been not-ready past the --pending-age grace |
+| `pod.failed` | warning | the pod reached phase Failed |
+| `pod.pending` | critical, warning | the pod has been Pending longer than --pending-age with no container-level diagnosis; critical when the scheduler has declared it Unschedulable, which is a capacity or constraint problem rather than latency |
+| `workload.replicafailure` | critical | the controller cannot create pods at all (quota, PodSecurity, admission) — no pod exists to diagnose |
+| `workload.stalled` | critical | a Deployment's Progressing condition is False: the rollout has given up |
+| `workload.rollout` | critical, warning | replicas are short of desired; critical when nothing is serving at all |
+| `job.failed` | warning | a Job's Failed condition is set |
+| `node.notready` | critical | the node's Ready condition is not True |
+| `node.pressure` | critical | the node reports Memory/Disk/PID pressure |
+| `node.condition` | critical, warning | a non-standard node condition is True — NPD and its cousins publish problems that way |
+| `node.cordoned` | warning | the node is unschedulable but still holds pods: a stuck drain or a forgotten maintenance step |
+| `node.preempt` | critical, warning, info | a reclaim taint marks the node for termination; severity tracks how imminent |
+| `pdb.gridlocked` | critical, warning | the budget permits no disruptions; critical when healthy pods are already below the required minimum |
+| `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
+| `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
+| `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `log.template` | critical, warning, info | one distilled template and how many lines collapsed into it; severity is the guessed level — critical at fatal, warning for error-ish, info otherwise |
+| `log.stacktrace` | critical, warning, info | a template that is a Go panic, Java exception, or Python traceback, with its innermost frames |
+| `log.overflow` | info | the low-count tail --max-templates dropped, counted rather than discarded silently (no coverage lies) |
+| `log.probe_noise` | info | health/readiness probe request lines stripped before distillation, counted so the removal is visible |
+| `log.fetch_error` | warning | a container's log stream could not be read, so its lines are missing from the distillation |
+| `edge.missing_ref` | critical | a referenced ConfigMap, Secret, ServiceAccount, TLS secret, IngressClass, StorageClass, or governing Service does not exist |
+| `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
+| `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
+| `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
+| `edge.selector_empty` | critical | a Service selector aimed at this workload selects zero pods |
+| `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
+| `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
+| `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |
+| `edge.endpoints_unready` | critical, warning | the endpoint ready-count disagrees with the selected pods (stale or lagging slices); critical at zero ready |
+| `edge.backend_missing` | critical | an Ingress backend service, or the port it names, does not exist |
+| `edge.cert_expired` | critical | a TLS certificate's NotAfter is in the past |
+| `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn |
+| `edge.cert_invalid` | warning | tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls |
+| `edge.rbac_dangling` | warning | a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

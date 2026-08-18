@@ -184,6 +184,7 @@ func unavailableCommand(disc discovery.DiscoveryInterface) checks.Command {
 		Name:    "demo unavailable",
 		MCPName: "k8s_demo_unavailable",
 		Summary: "Test-only command exercising the CRD degradation path.",
+		Kinds:   []checks.KindField{crd.UnavailableKind()},
 		Output:  crd.UnavailableFields(),
 		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
 			return crd.EmitUnavailable(inv, crd.NewResolver(disc).Resolve(testGroup))
@@ -226,6 +227,7 @@ func TestPartialNote(t *testing.T) {
 		Name:    "demo partial",
 		MCPName: "k8s_demo_partial",
 		Summary: "Test-only command exercising the partial-coverage note.",
+		Kinds:   []checks.KindField{crd.UnavailableKind()},
 		Output:  crd.UnavailableFields(),
 		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
 			a := crd.NewResolver(discoveryServing("widgets")).Resolve(testGroup)

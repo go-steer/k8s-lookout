@@ -86,6 +86,9 @@ func StatusCommand() checks.Command {
 			{Name: "action", Type: emit.FlagString, Default: "",
 				Help: "action taken / paper trail (\"fix PR opened; config rollout pending\")"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("triage.status", "the triage record for an incident subject as it now stands — state, root-cause hypothesis, action, and who wrote it; a receipt, not a defect", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "resource_key", Doc: "the record's resource pin, as stored (<KindOfObject>/<namespace>/<name>)"},
 			{Name: memory.DetailTriageStatus, Doc: "the record's triage state (investigating|triaged|actioned|escalated|resolved)"},

@@ -183,6 +183,11 @@ func SpecCommand(deps SpecDeps) Command {
 			{Name: "diff", Type: emit.FlagBool, Default: "false",
 				Help: "diff against the previous graph-history revision — requires a sentinel store; not yet implemented (§6.6)"},
 		},
+		Kinds: []KindField{
+			Kind("spec.resource", "the object itself: metadata, owner, and the kind-specific highlights (one per target)", emit.SeverityInfo),
+			Kind("spec.container", "one container of the target: image, resources, ports, probes, env (one per container)", emit.SeverityInfo),
+			Kind("spec.condition", "a status condition of the target that is not in its nominal state", emit.SeverityWarning),
+		},
 		Output: []OutputField{
 			{Name: "labels", Doc: "resource labels as sorted k=v pairs"},
 			{Name: "owner", Doc: "controlling owner as Kind/name"},

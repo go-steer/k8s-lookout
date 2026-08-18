@@ -48,7 +48,15 @@ func stage(name string, run emit.CheckFunc) checks.Command {
 		Name:    name,
 		MCPName: "k8s_" + strings.ReplaceAll(name, " ", "_"),
 		Summary: "test double for " + name,
-		Run:     run,
+		// A double stands in for a real stage's whole ledger; the
+		// contract test over the production registry is what holds the
+		// real commands to their own declarations.
+		Kinds: []checks.KindField{
+			checks.Kind("pod.crashloop", "synthetic; test scaffolding only", emit.SeverityCritical),
+			checks.Kind("pod.info", "synthetic; test scaffolding only", emit.SeverityInfo),
+			checks.Kind("audit.netpol_absent", "synthetic; test scaffolding only", emit.SeverityWarning),
+		},
+		Run: run,
 	}
 }
 

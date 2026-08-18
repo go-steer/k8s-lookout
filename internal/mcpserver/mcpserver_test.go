@@ -54,6 +54,9 @@ func fakeSpecCommand() checks.Command {
 			{Name: "tail", Type: emit.FlagInt, Default: "400", Help: "lines per container"},
 			{Name: "grace", Type: emit.FlagDuration, Default: "30s", Help: "grace window"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("fake.spec", "synthetic; test scaffolding only", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "target", Doc: "the positional argument as received"},
 			{Name: "grace", Doc: "the parsed --grace value"},
@@ -324,6 +327,7 @@ func TestCallTool_SanitizerHoldsOnMCPSurface(t *testing.T) {
 		Name:    "leaky",
 		MCPName: "k8s_leaky",
 		Summary: "Emits a credential-shaped message; test scaffolding only.",
+		Kinds:   []checks.KindField{checks.Kind("fake.leak", "synthetic; test scaffolding only", emit.SeverityInfo)},
 		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
 			return 1, inv.Out.Emit(emit.Finding{
 				Kind:         "fake.leak",

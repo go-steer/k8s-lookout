@@ -22,6 +22,19 @@ MCP tool: `k8s_storage_binding`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `storage.missing_class` | critical | the claim names a StorageClass that does not exist — it will stay Pending forever |
+| `storage.no_default_class` | critical | the claim names no class and the cluster has no default StorageClass |
+| `storage.no_provisioner` | warning | the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available |
+| `storage.multiple_defaults` | warning | more than one StorageClass is annotated as the cluster default; which one wins is not defined |
+| `storage.pv_failed` | warning | a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused |
+| `storage.pv_released` | info | a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

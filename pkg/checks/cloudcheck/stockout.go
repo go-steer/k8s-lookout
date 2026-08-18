@@ -60,6 +60,10 @@ func StockoutCommand(deps Deps) checks.Command {
 		MCPName: "k8s_cloud_stockout",
 		Summary: "GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.",
 		Flags:   []emit.FlagSpec{},
+		Kinds: []checks.KindField{
+			checks.Kind("stockout.zone", "the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending", emit.SeverityWarning),
+			checks.CloudUnavailableKind(),
+		},
 		Output: append([]checks.OutputField{
 			{Name: "machine_type", Doc: "the exhausted machine type (omitted when the log record does not name one)"},
 			{Name: "events", Doc: "stockout events for this zone/machine-type pair in the window"},

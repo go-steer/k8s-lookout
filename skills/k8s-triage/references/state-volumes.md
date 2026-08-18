@@ -22,6 +22,17 @@ MCP tool: `k8s_volume_conflicts`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `volume.multi_attach` | critical | an RWO claim is wanted by pods on more than one node — the second pod never starts |
+| `volume.zone_conflict` | critical | the PV is locked to a zone the pod's node is not in |
+| `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
+| `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

@@ -27,6 +27,23 @@ lookout state gateway [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `gateway.missing_class` | critical | the Gateway names a GatewayClass that does not exist — nothing will program it |
+| `gateway.class_not_accepted` | critical | the Gateway's GatewayClass is not Accepted by its controller |
+| `gateway.not_accepted` | critical | the Gateway itself is not Accepted |
+| `gateway.not_programmed` | critical | the Gateway is Accepted but not Programmed: no data plane is carrying its traffic |
+| `gateway.listener_invalid` | warning | one listener of an otherwise working Gateway is not resolved or not programmed |
+| `route.missing_parent` | critical | the route's parentRef names a Gateway that does not exist |
+| `route.not_accepted` | critical | the Gateway refused the route's attachment (listener, hostname, or namespace policy) |
+| `route.missing_backend` | critical | the route's backendRef Service does not exist |
+| `route.backend_port` | critical | the route's backendRef Service exists but does not expose the named port |
+| `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (no coverage lies) |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

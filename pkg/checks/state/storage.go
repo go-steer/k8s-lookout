@@ -97,6 +97,14 @@ func StorageCommand(deps Deps) checks.Command {
 		Name:    "state storage",
 		MCPName: "k8s_storage_binding",
 		Summary: "When a PersistentVolumeClaim sits Pending and the pod behind it will not schedule — name the reason: a StorageClass that does not exist, no class and no cluster default, a static-only class with nothing pre-provisioned, plus the default-class ambiguity and stranded volumes behind it.",
+		Kinds: []checks.KindField{
+			checks.Kind("storage.missing_class", "the claim names a StorageClass that does not exist — it will stay Pending forever", emit.SeverityCritical),
+			checks.Kind("storage.no_default_class", "the claim names no class and the cluster has no default StorageClass", emit.SeverityCritical),
+			checks.Kind("storage.no_provisioner", "the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available", emit.SeverityWarning),
+			checks.Kind("storage.multiple_defaults", "more than one StorageClass is annotated as the cluster default; which one wins is not defined", emit.SeverityWarning),
+			checks.Kind("storage.pv_failed", "a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused", emit.SeverityWarning),
+			checks.Kind("storage.pv_released", "a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "storage_class", Doc: "StorageClass the claim names, or the class the finding is about"},
 			{Name: "classes", Doc: "StorageClasses the cluster does have, sorted (empty when there are none)"},

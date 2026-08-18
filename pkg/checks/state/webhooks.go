@@ -75,6 +75,13 @@ func WebhooksCommand(deps Deps) checks.Command {
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report webhook CA bundles expiring within this window"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("webhook.failing_closed", "the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide", emit.SeverityCritical),
+			checks.Kind("webhook.dead_backend", "the webhook's service backend is missing, has no ready endpoints, or does not serve the named port", emit.SeverityWarning),
+			checks.Kind("webhook.slow_risk", "the webhook's timeout is long enough to slow every gated write if the backend degrades", emit.SeverityInfo),
+			checks.Kind("webhook.ca_expired", "the webhook's caBundle has expired: the API server cannot verify it", emit.SeverityCritical),
+			checks.Kind("webhook.ca_expiring", "the webhook's caBundle expires within --cert-warn", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "webhook", Doc: "admission webhook as <configuration>/<webhook name>"},
 			{Name: "service", Doc: "service backend the webhook points at, as <namespace>/<name>"},

@@ -46,6 +46,9 @@ func DiffCommand(deps Deps) checks.Command {
 			{Name: "dry-run", Type: emit.FlagBool, Default: "false",
 				Help: "classify and print, but do not advance the stored state. Use to preview a report without consuming it — a normal run is not repeatable, because after it the second run's findings are all `ongoing`"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("findings.transition", "a finding subject changed state since the previous run ("+transitionList()+"); the severity is the underlying finding's current one, not a judgment about the transition", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "transition", Doc: "how this subject changed since the previous run: " + transitionList()},
 			{Name: "subject_key", Doc: "the normalized instance-grain key this diff tracks: <cluster>/<namespace>/<kind_of_object>/<normalized-name>/<canonical-reason>. Distinct from the envelope's class-level fingerprint (§8); pass it to `lookout findings ack`"},

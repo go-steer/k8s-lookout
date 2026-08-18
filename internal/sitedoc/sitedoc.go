@@ -19,7 +19,9 @@
 //
 // Inputs, all exported data or registries so nothing here is
 // hand-maintained twice:
-//   - pkg/checks command metadata (one page per registered command),
+//   - pkg/checks command metadata (one page per registered command,
+//     plus the finding-kind glossary unioned from their Kinds
+//     ledgers),
 //   - internal/watch.FlagInventory (the sentinel page, derived from
 //     the real FlagSet),
 //   - pkg/inject/schema.Kinds (the signal-kind catalog, the same
@@ -59,10 +61,11 @@ const Dir = "docs/site/src/content/docs/reference"
 // relative to the repository root.
 func GenerateAll(reg *checks.Registry) map[string]string {
 	out := map[string]string{
-		Dir + "/index.md":        indexPage(reg),
-		Dir + "/watch.md":        watchPage(),
-		Dir + "/signal-kinds.md": kindsPage(),
-		Dir + "/metrics.md":      metricsPage(),
+		Dir + "/index.md":         indexPage(reg),
+		Dir + "/watch.md":         watchPage(),
+		Dir + "/signal-kinds.md":  kindsPage(),
+		Dir + "/finding-kinds.md": findingKindsPage(reg),
+		Dir + "/metrics.md":       metricsPage(),
 	}
 	for _, c := range reg.All() {
 		if c.Hidden {
@@ -105,6 +108,17 @@ func commandPage(c checks.Command) string {
 		b.WriteString("## Point-in-time flags (graph-backed commands)\n\n")
 		b.WriteString("This command answers from the topology graph and accepts the point-in-time flags:\n\n")
 		writeSpecTable(&b, emit.GraphHistoryFlags())
+	}
+
+	if len(c.Kinds) > 0 {
+		b.WriteString("## Finding kinds\n\nEvery `kind=` this command can emit, and the severities it carries them at. " +
+			"Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. " +
+			"See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.\n\n")
+		b.WriteString("| Kind | Severity | Claim |\n| --- | --- | --- |\n")
+		for _, k := range c.Kinds {
+			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", k.Name, strings.Join(k.Severity, ", "), cell(escapeProse(k.Doc)))
+		}
+		b.WriteString("\n")
 	}
 
 	if len(c.Output) > 0 {
@@ -231,6 +245,46 @@ func kindsPage() string {
 
 func structName(payload any) string { return reflect.TypeOf(payload).Name() }
 
+// ---- the finding-kind glossary ------------------------------------------
+
+// findingKindsPage renders the read path's whole vocabulary from the
+// commands' own Kinds ledgers (issue #278) — the counterpart to the
+// signal-kind catalog, which does the same job for the sentinel's wire
+// format. It is the page to reach for when a report contains a kind
+// you do not recognise: it names the claim, the severities the kind
+// can carry, and every command that can produce it.
+func findingKindsPage(reg *checks.Registry) string {
+	entries := reg.KindGlossary()
+	var b strings.Builder
+	frontmatter(&b, "Finding kinds",
+		"Every kind= a read-path check can emit, its claim, and the commands that produce it — generated from the commands' own ledgers.")
+	fmt.Fprintf(&b, ""+
+		"Every `kind=` the read path can emit (%d in all), rendered from the same\n"+
+		"`Kinds` declarations that produce each command's `--help`, MCP tool\n"+
+		"schema, and reference page. A check cannot emit a kind that is not here:\n"+
+		"the contract tests reject an undeclared kind, and a source sweep rejects\n"+
+		"one no test happens to exercise.\n\n"+
+		"The severity column is every level the kind can carry, worst first — one\n"+
+		"kind often spans two, because the same defect is graver in some shapes\n"+
+		"than others. A kind's absence from a run means the check looked and found\n"+
+		"nothing (zero nominal state); it never means the check was skipped, which\n"+
+		"is reported explicitly.\n\n"+
+		"These are read-path FINDING kinds. The sentinel's wire format has its own\n"+
+		"frozen vocabulary — see [Signal kinds](/reference/signal-kinds/).\n\n", len(entries))
+
+	b.WriteString("| Kind | Severity | Claim | Emitted by |\n| --- | --- | --- | --- |\n")
+	for _, e := range entries {
+		cmds := make([]string, 0, len(e.Commands))
+		for _, name := range e.Commands {
+			cmds = append(cmds, fmt.Sprintf("[`%s`](/reference/%s/)", name, PageFileName(name)))
+		}
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s |\n",
+			e.Name, strings.Join(e.Severity, ", "), cell(escapeProse(e.Doc)), strings.Join(cmds, ", "))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // ---- the metrics page ----------------------------------------------------
 
 func metricsPage() string {
@@ -276,6 +330,7 @@ func indexPage(reg *checks.Registry) string {
 	b.WriteString("- [Prometheus metrics](/reference/metrics/) — the `--metrics-addr` surface.\n\n")
 
 	b.WriteString("## Read-path commands\n\n")
+	b.WriteString("- [Finding kinds](/reference/finding-kinds/) — the whole vocabulary these commands emit, in one table.\n\n")
 	if top := reg.TopLevel(); len(top) > 0 {
 		b.WriteString("Composed entry points:\n\n")
 		for _, c := range top {

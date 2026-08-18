@@ -192,6 +192,16 @@ func isNotFound(err error) bool {
 		strings.Contains(err.Error(), "the server could not find")
 }
 
+// UnavailableKind is the ledger entry for the record EmitUnavailable
+// writes. Every discovery-gated command must declare it, and they all
+// declare it from here so the one claim reads identically wherever it
+// is rendered.
+func UnavailableKind() checks.KindField {
+	return checks.Kind("crd.unavailable",
+		"the API group this check reads is not served by the cluster, so nothing was examined (§11: no coverage lies)",
+		emit.SeverityInfo)
+}
+
 // EmitUnavailable writes the standard degradation record for a group
 // that is not served: one crd.unavailable finding, the summary note,
 // exit 0 with scanned=0. Call it and return its result directly.

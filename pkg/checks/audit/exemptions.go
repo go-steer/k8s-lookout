@@ -47,6 +47,10 @@ func ExemptionsCommand() checks.Command {
 			{Name: "within", Type: emit.FlagDuration, Default: defaultWithin.String(),
 				Help: "how far ahead to warn about entries that are still live but expiring soon; 0 reports only entries that have already lapsed"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind(kindExpired, "an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again", emit.SeverityWarning),
+			checks.Kind(kindExpiring, "an exemption entry lapses within --within — renew it or let it go deliberately", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "exempt_kind", Doc: "the finding kind the entry covers — this is the entry's `kind:` field, not this finding's own kind"},
 			{Name: "subject", Doc: "the entry's match scope as written: `<kind>`, `<kind> in <ns>`, or `<kind> on <ns>/<name>`"},

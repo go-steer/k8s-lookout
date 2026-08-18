@@ -93,6 +93,11 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "hpa-flips", Type: emit.FlagInt, Default: "2",
 				Help: "scale-direction changes within --hpa-window that count as thrash (2 = up→down→up)"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("event.warning", "one collapsed timeline entry for a Warning-type event family on a subject", emit.SeverityWarning),
+			checks.Kind("event.normal", "one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own", emit.SeverityInfo),
+			checks.Kind("event.hpa_thrash", "an HPA changed scale direction at least --hpa-flips times inside --hpa-window: the autoscaler is fighting itself", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "count", Doc: "events collapsed into this timeline entry: k8s per-event repeat counts summed across the entry's reason family"},
 			{Name: "first_seen", Doc: "RFC3339 timestamp of the entry's oldest activity"},

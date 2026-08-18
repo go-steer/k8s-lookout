@@ -71,6 +71,13 @@ func New(deps Deps) checks.Command {
 			{Name: "max-templates", Type: emit.FlagInt, Default: "40", Help: "cap emitted template clusters; the low-count tail is summarized in one log.overflow finding"},
 			{Name: "keep-probes", Type: emit.FlagBool, Default: "false", Help: "keep health/readiness probe request lines instead of stripping them"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("log.template", "one distilled template and how many lines collapsed into it; severity is the guessed level — critical at fatal, warning for error-ish, info otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("log.stacktrace", "a template that is a Go panic, Java exception, or Python traceback, with its innermost frames", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("log.overflow", "the low-count tail --max-templates dropped, counted rather than discarded silently (§11: no coverage lies)", emit.SeverityInfo),
+			checks.Kind("log.probe_noise", "health/readiness probe request lines stripped before distillation, counted so the removal is visible", emit.SeverityInfo),
+			checks.Kind("log.fetch_error", "a container's log stream could not be read, so its lines are missing from the distillation", emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "template", Doc: "log template; <*> marks positions that varied across merged lines"},
 			{Name: "count", Doc: "lines merged into this cluster (on log.probe_noise: probe lines stripped)"},

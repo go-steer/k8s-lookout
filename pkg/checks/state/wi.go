@@ -98,6 +98,12 @@ func WICommand(deps WIDeps) checks.Command {
 		Name:    "state wi",
 		MCPName: "k8s_workload_identity",
 		Summary: "When a GKE pod gets 403s or metadata-server errors calling GCP APIs, verify the Workload Identity chain — KSA annotation (iam.gke.io/gcp-service-account) → roles/iam.workloadIdentityUser binding on the GSA — reporting only the broken links; vanilla clusters report an explicit unavailable.",
+		Kinds: []checks.KindField{
+			checks.Kind("wi.gsa_missing", "the annotated Google service account does not exist — every GCP call from these pods fails", emit.SeverityCritical),
+			checks.Kind("wi.unbound", "the KSA annotates a GSA but the roles/iam.workloadIdentityUser binding is missing or malformed", emit.SeverityCritical),
+			checks.Kind("wi.unannotated_use", "a pod sets GOOGLE_APPLICATION_CREDENTIALS but its ServiceAccount carries no Workload Identity annotation", emit.SeverityInfo),
+			checks.CloudUnavailableKind(),
+		},
 		Output: []checks.OutputField{
 			{Name: "gsa", Doc: "the cloud identity (GSA email) the ServiceAccount's annotation claims"},
 			{Name: "pods", Doc: "how many in-scope pods run as the affected ServiceAccount"},

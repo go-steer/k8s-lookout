@@ -29,6 +29,7 @@ func validCommand(name, mcpName string) Command {
 		Name:    name,
 		MCPName: mcpName,
 		Summary: "Test command; when in doubt, do not reach for it.",
+		Kinds:   []KindField{Kind("test.finding", "synthetic; test scaffolding only", emit.SeverityInfo)},
 		Run:     nopRun,
 	}
 }

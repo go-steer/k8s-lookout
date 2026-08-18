@@ -30,6 +30,115 @@ MCP tool: `k8s_scan`
 | `--timeout` | 1m0s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `scan.check_skipped` | info | a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks (§11) |
+| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster |
+| `scan.incomplete` | warning | the --timeout expired with stages still to run; not_run names them |
+| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.imagepull` | critical | a container cannot pull its image |
+| `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
+| `pod.oomkilled` | warning | a container's last termination was an OOM kill |
+| `pod.restarts` | warning | a container has restarted at least --restarts times |
+| `pod.notready` | warning | a container in a Running pod has been not-ready past the --pending-age grace |
+| `pod.failed` | warning | the pod reached phase Failed |
+| `pod.pending` | critical, warning | the pod has been Pending longer than --pending-age with no container-level diagnosis; critical when the scheduler has declared it Unschedulable, which is a capacity or constraint problem rather than latency |
+| `workload.replicafailure` | critical | the controller cannot create pods at all (quota, PodSecurity, admission) — no pod exists to diagnose |
+| `workload.stalled` | critical | a Deployment's Progressing condition is False: the rollout has given up |
+| `workload.rollout` | critical, warning | replicas are short of desired; critical when nothing is serving at all |
+| `job.failed` | warning | a Job's Failed condition is set |
+| `node.notready` | critical | the node's Ready condition is not True |
+| `node.pressure` | critical | the node reports Memory/Disk/PID pressure |
+| `node.condition` | critical, warning | a non-standard node condition is True — NPD and its cousins publish problems that way |
+| `node.cordoned` | warning | the node is unschedulable but still holds pods: a stuck drain or a forgotten maintenance step |
+| `node.preempt` | critical, warning, info | a reclaim taint marks the node for termination; severity tracks how imminent |
+| `pdb.gridlocked` | critical, warning | the budget permits no disruptions; critical when healthy pods are already below the required minimum |
+| `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
+| `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
+| `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
+| `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
+| `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
+| `webhook.ca_expiring` | warning | the webhook's caBundle expires within --cert-warn |
+| `volume.multi_attach` | critical | an RWO claim is wanted by pods on more than one node — the second pod never starts |
+| `volume.zone_conflict` | critical | the PV is locked to a zone the pod's node is not in |
+| `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
+| `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
+| `storage.missing_class` | critical | the claim names a StorageClass that does not exist — it will stay Pending forever |
+| `storage.no_default_class` | critical | the claim names no class and the cluster has no default StorageClass |
+| `storage.no_provisioner` | warning | the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available |
+| `storage.multiple_defaults` | warning | more than one StorageClass is annotated as the cluster default; which one wins is not defined |
+| `storage.pv_failed` | warning | a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused |
+| `storage.pv_released` | info | a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared |
+| `gateway.missing_class` | critical | the Gateway names a GatewayClass that does not exist — nothing will program it |
+| `gateway.class_not_accepted` | critical | the Gateway's GatewayClass is not Accepted by its controller |
+| `gateway.not_accepted` | critical | the Gateway itself is not Accepted |
+| `gateway.not_programmed` | critical | the Gateway is Accepted but not Programmed: no data plane is carrying its traffic |
+| `gateway.listener_invalid` | warning | one listener of an otherwise working Gateway is not resolved or not programmed |
+| `route.missing_parent` | critical | the route's parentRef names a Gateway that does not exist |
+| `route.not_accepted` | critical | the Gateway refused the route's attachment (listener, hostname, or namespace policy) |
+| `route.missing_backend` | critical | the route's backendRef Service does not exist |
+| `route.backend_port` | critical | the route's backendRef Service exists but does not expose the named port |
+| `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (§11: no coverage lies) |
+| `wi.gsa_missing` | critical | the annotated Google service account does not exist — every GCP call from these pods fails |
+| `wi.unbound` | critical | the KSA annotates a GSA but the roles/iam.workloadIdentityUser binding is missing or malformed |
+| `wi.unannotated_use` | info | a pod sets GOOGLE_APPLICATION_CREDENTIALS but its ServiceAccount carries no Workload Identity annotation |
+| `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence (§2, §11) |
+| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, resources) |
+| `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
+| `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
+| `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
+| `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
+| `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
+| `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
+| `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
+| `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
+| `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
+| `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
+| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
+| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
+| `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
+| `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
+| `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
+| `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
+| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
+| `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
+| `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
+| `quota.pressure` | critical, warning, info | a cloud quota is at or above --quota-warn percent of its limit; critical from 95%, info for an --all row below the line |
+| `stockout.zone` | warning | the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending |
+| `perf.apiserver_p99` | critical, warning | apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s |
+| `perf.apf_saturation` | critical, warning | an API Priority and Fairness level is holding a sustained queue — warning from 10 queued, critical from 100 |
+| `perf.apf_rejects` | critical, warning | APF is shedding load: the apiserver is returning 429s at a priority level |
+| `perf.etcd_fsync` | critical, warning | etcd WAL fsync p99 crossed the pack threshold — warning from 10ms, critical from 100ms |
+| `perf.etcd_db_size` | critical, warning | the etcd database is approaching its quota — warning from 4 GiB, critical from 5.5 GiB |
+| `perf.startup_p95` | critical, warning | pod first-ready p95 crossed the pack threshold — warning from 60s, critical from 300s |
+| `perf.pack_unavailable` | warning | a metric the requested pack needs is not in the metrics workspace, so part of the pack could not run; the rest still did (§11: no coverage lies) |
+| `edge.missing_ref` | critical | a referenced ConfigMap, Secret, ServiceAccount, TLS secret, IngressClass, StorageClass, or governing Service does not exist |
+| `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
+| `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
+| `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
+| `edge.selector_empty` | critical | a Service selector aimed at this workload selects zero pods |
+| `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
+| `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
+| `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |
+| `edge.endpoints_unready` | critical, warning | the endpoint ready-count disagrees with the selected pods (stale or lagging slices); critical at zero ready |
+| `edge.backend_missing` | critical | an Ingress backend service, or the port it names, does not exist |
+| `edge.cert_expired` | critical | a TLS certificate's NotAfter is in the past |
+| `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn |
+| `edge.cert_invalid` | warning | tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls |
+| `edge.rbac_dangling` | warning | a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

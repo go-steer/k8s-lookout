@@ -21,22 +21,11 @@ package state
 // check here decides whether an edge is *valid*. Every failure is one
 // finding; healthy edges are silent (§4.2 zero nominal state).
 //
-// Finding kinds and severities:
-//
-//	edge.missing_ref        critical  referenced ConfigMap/Secret/ServiceAccount/TLS secret/IngressClass/StorageClass/governing Service does not exist
-//	edge.missing_key        critical  referenced key absent from an existing ConfigMap/Secret
-//	edge.invalid_ref        warning   referenced object exists but is the wrong type to serve the reference
-//	edge.unclassed          warning   Ingress names no class and no IngressClass declares itself the cluster default
-//	edge.selector_empty     critical  Service selector aimed at this workload selects zero pods
-//	edge.selector_unready   warning   Service selects pods but some are not Ready (critical when none are)
-//	edge.endpoints_missing  critical  selecting Service has no EndpointSlices at all
-//	edge.endpoints_orphaned warning   endpoint targetRef names a pod that no longer exists
-//	edge.endpoints_unready  warning   endpoint ready-count disagrees with selected-pod state (critical at zero ready)
-//	edge.cert_expired       critical  TLS certificate NotAfter is in the past
-//	edge.cert_expiring      warning   TLS certificate expires within --cert-warn
-//	edge.cert_invalid       warning   tls.crt is missing/unparseable, or the secret is not kubernetes.io/tls
-//	edge.rbac_dangling      warning   (Cluster)RoleBinding for the ServiceAccount points at a missing (Cluster)Role
-//	edge.backend_missing    critical  Ingress backend service or service port does not exist
+// The finding kinds and their severities are declared once, in
+// EdgeKinds below — that ledger is the command's contract, is
+// rendered into --help and the reference docs, and is enforced
+// against what the checks actually emit, so there is no prose copy
+// here to drift.
 //
 // No secret material can appear here: cert findings carry only
 // subject/notAfter/days-left, and the pkg/emit sanitizer additionally
@@ -58,9 +47,35 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 )
+
+// EdgeKinds is the finding-kind ledger of the edge checks. It is
+// exported because the checks run from two places: `state edges`
+// itself, and every composition that calls (*Cluster).EdgeFindings
+// directly — `lookout scan`, `bundle`, `health`. Each of those has to
+// declare the kinds it can emit, and all of them must say the same
+// thing, so they all say it from here.
+func EdgeKinds() []checks.KindField {
+	return []checks.KindField{
+		checks.Kind("edge.missing_ref", "a referenced ConfigMap, Secret, ServiceAccount, TLS secret, IngressClass, StorageClass, or governing Service does not exist", emit.SeverityCritical),
+		checks.Kind("edge.missing_key", "the referenced key is absent from an existing ConfigMap/Secret", emit.SeverityCritical),
+		checks.Kind("edge.invalid_ref", "the referenced object exists but is the wrong type to serve the reference", emit.SeverityWarning),
+		checks.Kind("edge.unclassed", "the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it", emit.SeverityWarning),
+		checks.Kind("edge.selector_empty", "a Service selector aimed at this workload selects zero pods", emit.SeverityCritical),
+		checks.Kind("edge.selector_unready", "the Service selects pods but some are not Ready; critical when none are", emit.SeverityCritical, emit.SeverityWarning),
+		checks.Kind("edge.endpoints_missing", "a selecting Service has no EndpointSlices at all", emit.SeverityCritical),
+		checks.Kind("edge.endpoints_orphaned", "an endpoint targetRef names a pod that no longer exists", emit.SeverityWarning),
+		checks.Kind("edge.endpoints_unready", "the endpoint ready-count disagrees with the selected pods (stale or lagging slices); critical at zero ready", emit.SeverityCritical, emit.SeverityWarning),
+		checks.Kind("edge.backend_missing", "an Ingress backend service, or the port it names, does not exist", emit.SeverityCritical),
+		checks.Kind("edge.cert_expired", "a TLS certificate's NotAfter is in the past", emit.SeverityCritical),
+		checks.Kind("edge.cert_expiring", "a TLS certificate expires within --cert-warn", emit.SeverityWarning),
+		checks.Kind("edge.cert_invalid", "tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls", emit.SeverityWarning),
+		checks.Kind("edge.rbac_dangling", "a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role", emit.SeverityWarning),
+	}
+}
 
 // edgeScan is one `state edges` evaluation: the workload, the graph
 // snapshot it is resolved in, and the listed objects the validity

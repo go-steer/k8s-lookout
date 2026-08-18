@@ -123,6 +123,11 @@ func New(deps Deps) checks.Command {
 			{Name: "probe-timeout", Type: emit.FlagDuration, Default: "5s",
 				Help: "per-probe timeout; raise --timeout too when probing many slow targets (it caps the whole invocation)"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("probe.dns", "the result of one DNS resolution: info when it resolved, warning on timeout, critical otherwise — a probe result is always emitted, success included, because the answer to \"can this be reached\" is the point of the command", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("probe.tcp", "the result of one TCP connect: info when it connected, warning on timeout, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind("probe.http", "the result of one HTTP GET (redirects reported, not followed): info on success, warning on timeout or 4xx, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "ips", Doc: "probe.dns: resolved addresses, sorted, comma-separated"},
 			{Name: "latency", Doc: "how long the probe took: DNS resolution / TCP connect / full HTTP exchange"},

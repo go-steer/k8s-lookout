@@ -138,6 +138,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `desired=3 ready=0` with no explanation anywhere. The finding
   carries the admission error verbatim, which is the whole answer.
 
+- Every read-path command now declares the finding kinds it can emit,
+  and the severities it carries each one at. Until now the `kind=`
+  field was the most load-bearing string in the output and the only
+  one with no contract behind it: `Finding.validate` asked that it be
+  non-empty and nothing more, so the vocabulary lived in whichever
+  emit site happened to write it and appeared in no help text, no
+  schema, and no page. A new `Kinds` ledger on `checks.Command` sits
+  beside the `Output` glossary that has always worked this way, and
+  the [Finding kinds](https://k8s-lookout.dev/reference/finding-kinds/)
+  page renders the whole vocabulary — kind, severities, the one-line
+  claim, and which commands emit it — from those declarations. Each
+  command's own reference page and skill stub gained the same table
+  for its slice of it.
+
+  Two tests hold the ledger to the code. `checktest.Verify` rejects a
+  finding whose kind is undeclared, or whose severity the declaration
+  does not list, so every test run checks the emitters it exercises; a
+  source sweep over `pkg/checks/**` then resolves the kind at every
+  emit site — through constants, struct fields, and helper returns —
+  so a branch no fixture reaches cannot slip through either. The
+  ledger caught four real drifts while it was being filled: `state
+  storage` never declared `storage.pv_failed` or `storage.pv_released`
+  at all, `pod.pending` and `health.category` were emitted at
+  severities above the ones documented, and `cloud.unavailable` was
+  described two different ways by two commands.
+
 ### Fixed
 
 - A malformed invocation now exits 2 (usage) instead of 1 (runtime),

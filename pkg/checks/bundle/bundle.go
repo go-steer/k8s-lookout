@@ -79,6 +79,25 @@ func (d Deps) now() time.Time {
 	return time.Now()
 }
 
+// The blast-radius kinds. They live here rather than in
+// pkg/checks/triage because `triage radius` imports this package for
+// the traversal it shares, so this is the lower of the two — and the
+// two must not say different things about the same claim.
+const (
+	KindRadiusNeighbor = "radius.neighbor"
+	KindRadiusMissing  = "radius.missing"
+)
+
+// RadiusKinds is the blast-radius ledger, declared once for the two
+// commands that render it: `triage radius` and this package's radius
+// section.
+func RadiusKinds() []checks.KindField {
+	return []checks.KindField{
+		checks.Kind(KindRadiusNeighbor, "one object in the target's neighborhood, with its direction, relation, and hop distance — an enumeration of impact, not a defect", emit.SeverityInfo),
+		checks.Kind(KindRadiusMissing, "a neighbor the graph references but never observed, in a kind the snapshot does watch: the reference is dangling", emit.SeverityWarning),
+	}
+}
+
 // sections, in emission order.
 const (
 	sectionSpec   = "spec"
@@ -110,6 +129,9 @@ func New(deps Deps) checks.Command {
 			{Name: "lists-preflight", Type: emit.FlagBool, Default: "false",
 				Help: "before listing, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s); falls back to reactive Forbidden-skip if SSAR is not permitted"},
 		},
+		Kinds: append([]checks.KindField{
+			checks.Kind("bundle.target", "the head record: which workload the bundle is about and which sections follow", emit.SeverityInfo),
+		}, composedKinds()...),
 		Output: append([]checks.OutputField{
 			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
@@ -161,6 +183,41 @@ func composedOutput() []checks.OutputField {
 			seen[f.Name] = true
 			out = append(out, f)
 		}
+	}
+	return out
+}
+
+// composedKinds is the union of the composed sections' kind ledgers,
+// on the same principle as composedOutput: taken from the composed
+// commands where they are registered, so the bundle cannot claim a
+// different vocabulary than the checks it runs.
+//
+// The radius section is the exception. The bundle walks the graph
+// itself rather than calling `triage radius`, so that ledger comes
+// from RadiusKinds below — the same declaration `triage radius` uses —
+// instead of from the registry.
+func composedKinds() []checks.KindField {
+	seen := map[string]bool{"bundle.target": true}
+	var out []checks.KindField
+	add := func(kinds []checks.KindField) {
+		for _, k := range kinds {
+			if seen[k.Name] {
+				continue
+			}
+			seen[k.Name] = true
+			out = append(out, k)
+		}
+	}
+	add(RadiusKinds())
+	for _, name := range []string{"triage spec", "triage delta", "triage logs", "state edges"} {
+		c, ok := checks.Lookup(name)
+		if !ok {
+			// Not registered (isolated test registry) — the §13
+			// contract test in this package asserts all four are
+			// present in the default registry.
+			continue
+		}
+		add(c.Kinds)
 	}
 	return out
 }
@@ -591,7 +648,7 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 	var out []emit.Finding
 	for _, nb := range radiusNeighbors(snap, id, depth) {
 		f := emit.Finding{
-			Kind:         "radius.neighbor",
+			Kind:         KindRadiusNeighbor,
 			Severity:     emit.SeverityInfo,
 			Namespace:    nb.Ref.Namespace,
 			KindOfObject: nb.Ref.Kind.String(),
@@ -603,7 +660,7 @@ func radiusFindings(snap *graph.Snapshot, id graph.NodeID, depth int) []emit.Fin
 		}
 		if !nb.Ref.Observed {
 			if snap.Watches(nb.Ref.Kind) {
-				f.Kind = "radius.missing"
+				f.Kind = KindRadiusMissing
 				f.Severity = emit.SeverityWarning
 				f.Reason = "ReferencedNotFound"
 				f.Message = "referenced by the neighborhood but not observed on the API server"

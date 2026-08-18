@@ -51,6 +51,9 @@ func AckCommand(deps Deps) checks.Command {
 			{Name: "clear", Type: emit.FlagBool, Default: "false",
 				Help: "end the ack window now instead of opening one; the subject goes back to being classified normally on the next diff"},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("findings.ack", "the receipt for the ack this call took or cleared — what was acked, by whom, and until when", emit.SeverityInfo),
+		},
 		Output: []checks.OutputField{
 			{Name: "subject_key", Doc: "the acked subject's key, as stored"},
 			{Name: "ack_until", Doc: "when the window expires, RFC 3339; absent after --clear"},

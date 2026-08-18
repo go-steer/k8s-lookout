@@ -313,10 +313,14 @@ by invocation surface, cheapest-first:
    teaching command sequencing.
 
 3. **One source of truth, generated outward.** Command metadata in
-   `pkg/checks` (name, flags, when-to-use line, output fields) generates
-   `--help`, the MCP schemas, and the skill `references/` stubs. The §13
-   contract tests validate skill-doc examples against golden outputs, so the
-   three surfaces cannot drift apart silently.
+   `pkg/checks` (name, flags, when-to-use line, output fields, and the
+   ledger of finding kinds the command can emit) generates `--help`, the
+   MCP schemas, the skill `references/` stubs, and the site's reference
+   pages including the finding-kind glossary unioned across every command.
+   The §13 contract tests validate skill-doc examples against golden
+   outputs and reject a finding whose kind or severity the emitting
+   command did not declare, so the surfaces cannot drift apart silently
+   and the declarations cannot drift from the code.
 
 4. **In-context education at the moment of need.** The enrichment bundle's
    overflow keys already name the follow-up `lookout` commands the agent can

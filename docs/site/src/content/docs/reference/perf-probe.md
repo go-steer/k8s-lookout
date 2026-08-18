@@ -33,6 +33,21 @@ lookout perf probe [flags]
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing. See the [finding-kind glossary](/reference/finding-kinds/) for the whole vocabulary.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `perf.apiserver_p99` | critical, warning | apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s |
+| `perf.apf_saturation` | critical, warning | an API Priority and Fairness level is holding a sustained queue — warning from 10 queued, critical from 100 |
+| `perf.apf_rejects` | critical, warning | APF is shedding load: the apiserver is returning 429s at a priority level |
+| `perf.etcd_fsync` | critical, warning | etcd WAL fsync p99 crossed the pack threshold — warning from 10ms, critical from 100ms |
+| `perf.etcd_db_size` | critical, warning | the etcd database is approaching its quota — warning from 4 GiB, critical from 5.5 GiB |
+| `perf.startup_p95` | critical, warning | pod first-ready p95 crossed the pack threshold — warning from 60s, critical from 300s |
+| `perf.pack_unavailable` | warning | a metric the requested pack needs is not in the metrics workspace, so part of the pack could not run; the rest still did (no coverage lies) |
+| `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

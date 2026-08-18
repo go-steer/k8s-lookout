@@ -51,6 +51,13 @@ func DrainCommand(deps Deps) checks.Command {
 			{Name: "node", Type: emit.FlagString, Default: "",
 				Help: "analyze one node in detail: every blocker on it becomes its own finding. Exactly one of --node or -A (all-nodes summary) is required."},
 		},
+		Kinds: []checks.KindField{
+			checks.Kind("drain.pdb_gridlock", "a PodDisruptionBudget covering pods on this node allows zero disruptions: the eviction API refuses and the drain hangs", emit.SeverityCritical),
+			checks.Kind("drain.bare_pod", "a pod on this node has no owner, so eviction deletes it permanently and nothing recreates it", emit.SeverityWarning),
+			checks.Kind("drain.local_storage", "a pod on this node has emptyDir volumes: the drain needs --delete-emptydir-data and the data is lost", emit.SeverityWarning),
+			checks.Kind("drain.singleton", "a pod on this node is the only replica of its controller — evicting it is an outage", emit.SeverityWarning),
+			checks.Kind("drain.node", "the -A roll-up: this node is not cleanly drainable, with the blocker classes counted; critical when a PDB gridlock is among them", emit.SeverityCritical, emit.SeverityWarning),
+		},
 		Output: []checks.OutputField{
 			{Name: "node", Doc: "the node the blocker sits on (stamped on every --node-mode finding)"},
 			{Name: "pods", Doc: "pods on the node covered by the gridlocked PDB"},

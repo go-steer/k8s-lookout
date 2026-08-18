@@ -28,6 +28,18 @@ MCP tool: `k8s_drain_blockers`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `drain.pdb_gridlock` | critical | a PodDisruptionBudget covering pods on this node allows zero disruptions: the eviction API refuses and the drain hangs |
+| `drain.bare_pod` | warning | a pod on this node has no owner, so eviction deletes it permanently and nothing recreates it |
+| `drain.local_storage` | warning | a pod on this node has emptyDir volumes: the drain needs --delete-emptydir-data and the data is lost |
+| `drain.singleton` | warning | a pod on this node is the only replica of its controller — evicting it is an outage |
+| `drain.node` | critical, warning | the -A roll-up: this node is not cleanly drainable, with the blocker classes counted; critical when a PDB gridlock is among them |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):

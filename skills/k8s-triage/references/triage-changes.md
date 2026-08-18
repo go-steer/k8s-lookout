@@ -30,6 +30,20 @@ MCP tool: `k8s_recent_changes`
 | `--timeout` | 10s | abort the invocation after this long (exit 1) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
+## Finding kinds
+
+Every `kind=` this command can emit, and the severities it carries them at. Nothing else appears in its output; a kind absent from a run means the check looked and found nothing.
+
+| Kind | Severity | Claim |
+| --- | --- | --- |
+| `change.rollout` | info | a workload's pod template changed — a new image, container or mount, or a controller churn event |
+| `change.scale` | info | a workload's replica count changed |
+| `change.config` | info | a ConfigMap in the neighborhood changed |
+| `change.secret` | info | a Secret in the neighborhood changed (names and shortened hashes only, never values — §6.5) |
+| `change.node` | info | a Node in the neighborhood changed |
+| `change.label` | info | only labels changed on a neighborhood object — enough to move it in or out of a selector |
+| `change.topology` | info | a neighborhood object appeared, disappeared, or changed in a way none of the other classes name |
+
 ## Output fields
 
 Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_object`, `name`, `reason`, `message`, `fingerprint`, `exempt_reason`, `exempt_expires`):
