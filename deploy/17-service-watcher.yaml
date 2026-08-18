@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Something to scrape (#288). Until now deploy/ shipped no Service at
+# all: deploy/16's NetworkPolicy admits a same-namespace scraper on
+# :9090 and the assumption was that it reaches the pod IP directly.
+# That works for a hand-rolled Prometheus with a pod-level scrape
+# config and for nothing else — every operator-managed monitoring
+# stack discovers targets through a Service.
+#
+# ClusterIP, not headless: with replicas: 1 there is exactly one
+# endpoint either way, and a normal ClusterIP is what a ServiceMonitor
+# and a manual `kubectl port-forward svc/lookout-watch-metrics 9090`
+# both expect. It publishes the metrics port only — the sentinel
+# serves nothing else, and /metrics is an incident-topology map, which
+# is why deploy/16 still gates who may reach it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lookout-watch-metrics
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

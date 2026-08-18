@@ -53,9 +53,60 @@ lookout_active_incidents 5
 ```
 
 The generated [Prometheus metrics reference](/reference/metrics/) covers
-all 33 metrics — pipeline counters, recovery, storms, watchboard, store,
+all 40 metrics — pipeline counters, recovery, storms, watchboard, store,
 enrichment, distiller, and triage-status routing — with types, labels,
 and meanings derived from the live collectors.
+
+### One of them is about what was found
+
+Every metric above measures the *machine*: informer lag, queue depth,
+dispatch latency, store size. `lookout_findings_total{kind,severity}`
+is the exception — it measures what the sentinel found.
+
+```
+lookout_findings_total{cluster="prod-us",kind="pod.crashloop",severity="critical"} 12
+lookout_findings_total{cluster="prod-us",kind="objectstate.restart_burst",severity="warning"} 41
+```
+
+It counts **once per distinct finding**, at the moment a fresh dedup
+window opens and before any routing decision — so an info-class signal
+that is only stored, a warning batched into the watchboard, and a
+critical that opens its own session all count the same. That is the
+difference from `events_injected_total`, which measures delivery: a
+downgraded finding is still a finding.
+
+The `cluster` label is always present, so a multi-cluster process
+produces one series per watched cluster. **Namespace is deliberately
+not a label** — `kind` is bounded and `severity` is three values, but
+namespace is unbounded, and that is where a findings metric turns into
+an outage of the monitoring stack it feeds. For per-namespace
+questions use [the occurrence store](/operations/store/) or the read
+path.
+
+`rate(lookout_findings_total{severity="critical"}[1h])` is the
+cluster-health trend line; a step change in it is usually the first
+graph worth looking at.
+
+### Something to scrape
+
+`deploy/17-service-watcher.yaml` publishes a ClusterIP Service,
+`lookout-watch-metrics`, on `:9090`. Prometheus-operator users can
+additionally apply the ServiceMonitor:
+
+```sh
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=v0.21.0"
+```
+
+It ships outside the base bundle because `ServiceMonitor` is a CRD and
+`kubectl apply -k deploy/` must not fail on a cluster that does not
+have it. On Google Managed Prometheus the equivalent is a
+`PodMonitoring`; the port name and interval carry over.
+
+Two things to check if a scrape comes back empty: the NetworkPolicy in
+`deploy/16` admits **same-namespace** scrapers only — monitoring in its
+own namespace needs that `namespaceSelector` block uncommented — and
+the Service selects on both `app.kubernetes.io/name` and
+`app.kubernetes.io/component`, so a renamed Deployment needs both.
 
 ## What to alert on
 
@@ -71,6 +122,7 @@ Prefix `lookout_` omitted:
 | `recovery_drops_total{cause="unknown_session"}` | A resolved outcome had nowhere to go — the incident binding was lost, typically a restart without `--dedup-persist`. Fix the volume; every drop is a fix-verify loop that could not close. |
 | `info_dropped_total` | Info-class signals counted and discarded because no `--store` is set. Not a fault, but if you expected the store to have them, this is the tell. |
 | `watchboard_buffered` (gauge) | Stuck above `--watchboard-batch` across scrapes means flushes are failing — see `inject_errors_total`. |
+| `findings_total{severity="critical"}` | The only entry here that is about the cluster rather than the sentinel. A rate step change means something broke; a rate that goes to zero on a cluster that normally has one means the sentinel stopped seeing, which the machine metrics above will not tell you. |
 
 `active_incidents`, `storms_active`, and `recovery_tracking` are the
 load gauges worth graphing rather than alerting on.

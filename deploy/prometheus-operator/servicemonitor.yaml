@@ -1,0 +1,58 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scrape config for a prometheus-operator install, pointed at the
+# Service in deploy/17.
+#
+# This lives OUTSIDE the top-level kustomization on purpose:
+# ServiceMonitor is a CRD, and `kubectl apply -k deploy/` on a cluster
+# without prometheus-operator would fail the whole bundle over an
+# optional extra. Apply it separately when you have the CRD:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=vX.Y.Z"
+#
+# On Google Managed Prometheus the equivalent object is a
+# `monitoring.googleapis.com/v1` PodMonitoring rather than a
+# ServiceMonitor; the port name (`metrics`) and interval below carry
+# over unchanged.
+#
+# Note the namespace interaction with deploy/16: that NetworkPolicy
+# admits same-namespace scrapers only. A prometheus-operator running
+# in its own namespace needs deploy/16's namespaceSelector block
+# uncommented and pointed at it, or this ServiceMonitor will select a
+# target the CNI then refuses.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: lookout-watch
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lookout-watch
+      app.kubernetes.io/component: watcher
+  namespaceSelector:
+    matchNames:
+      - agent-triage
+  endpoints:
+    - port: metrics
+      # 30s, not the operator's 60s default: the sentinel's counters
+      # move on incident timescales and a minute of aliasing is
+      # enough to lose a short storm entirely.
+      interval: 30s
+      scrapeTimeout: 10s
+      path: /metrics

@@ -28,4 +28,9 @@ resources:
   - 14-role-watcher-capacity.yaml
   - 15-rolebinding-watcher-capacity.yaml
   - 16-networkpolicy-watcher.yaml
+  - 17-service-watcher.yaml
   - 51-deployment-watcher.yaml
+
+# Not listed above and applied separately, because it needs a CRD this
+# bundle must not assume: deploy/prometheus-operator/ (a ServiceMonitor
+# for the Service in 17).
