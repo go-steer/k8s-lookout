@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+require_kwok_installed
+
+NS=kwok-scenario-endpoints
+SERVICES=12
+BROKEN=3
+
+stub_mark kwok-endpoints-empty
+
+echo "▸ $SERVICES services in $NS, of which $BROKEN select nothing"
+
+emit_svc() {
+  local name="$1" selector="$2"
+  cat <<EOF
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}
+  namespace: ${NS}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${name}
+  template:
+    metadata:
+      labels:
+        app: ${name}
+    spec:
+      nodeSelector:
+        type: kwok
+      tolerations:
+      - key: ${FAKE_NODE_TAINT_KEY}
+        operator: Equal
+        value: ${FAKE_NODE_ANNOTATION_VALUE}
+        effect: NoSchedule
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}
+  namespace: ${NS}
+spec:
+  selector:
+    app: ${selector}
+  ports:
+  - port: 80
+    targetPort: 8080
+EOF
+}
+
+{
+  cat <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NS}
+  labels:
+    app.kubernetes.io/managed-by: lookout-kwok-scale
+EOF
+  i=0
+  for ((i = 0; i < BROKEN; i++)); do
+    n="$(printf 'unplugged-%02d' "$i")"
+    # The selector is one label value away from correct — the shape a
+    # rename or a copy-paste actually produces, not an obvious typo.
+    emit_svc "$n" "${n}-v2"
+  done
+  for ((i = 0; i < SERVICES - BROKEN; i++)); do
+    n="$(printf 'wired-%02d' "$i")"
+    emit_svc "$n" "$n"
+  done
+} | kubectl apply -f -
+
+kubectl -n "$NS" wait --for=condition=Available deploy --all --timeout=180s >/dev/null
+echo "  ✓ $SERVICES services up; $BROKEN with no matching pods"

@@ -75,3 +75,58 @@ require_kwok_installed() {
     exit 1
   fi
 }
+
+# kwok_host_ip — the node address the controller serves its fake kubelet
+# endpoint on. `up` runs it with hostNetwork precisely so this is a REAL
+# node IP: see the long comment in scale-up for why every fake node has
+# to advertise it as its own InternalIP.
+kwok_host_ip() {
+  kubectl -n kube-system get pods -l app=kwok-controller \
+    -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null
+}
+
+# ---- fake container logs ---------------------------------------------------
+
+# kwok serves a pod's logs from a file on the CONTROLLER's filesystem,
+# named by a ClusterLogs/Logs CR. `up` mounts one ConfigMap at /logs and
+# scenarios add a key to it, so publishing a log stream never needs a
+# controller rollout — the kubelet reprojects the volume in place.
+KWOK_LOGS_CM="kwok-logs"
+KWOK_LOGS_MOUNT="/logs"
+
+# kwok_logs_dir — local staging for the ConfigMap's keys. Republishing
+# from a directory keeps this jq-free and makes revert a file delete.
+kwok_logs_dir() {
+  local d="$STATE_DIR/kwok-logs"
+  mkdir -p "$d"
+  echo "$d"
+}
+
+# kwok_logs_publish — push the staging directory to the cluster. Safe to
+# call with the directory empty; that is how revert clears a stream.
+kwok_logs_publish() {
+  local dir
+  dir="$(kwok_logs_dir)"
+  local args=(-n kube-system create configmap "$KWOK_LOGS_CM")
+  local f
+  for f in "$dir"/*; do
+    [[ -e "$f" ]] && args+=("--from-file=$(basename "$f")=$f")
+  done
+  kubectl "${args[@]}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+# cri_log <stream> <age-seconds> <message>
+#
+# One line in the CRI log format the kwok controller parses:
+#
+#   <RFC3339Nano> <stdout|stderr> <F|P> <message>
+#
+# Anything else is rejected outright with "unsupported log format", and
+# the timestamp is load-bearing a second time: every read path asks the
+# kubelet for a --since window, so a fixture stamped at authoring time
+# is simply filtered out and the scenario reads as healthy.
+cri_log() {
+  local stream="$1" age="$2" msg="$3"
+  printf '%s %s F %s\n' \
+    "$(date -u -d "-${age} seconds" +%Y-%m-%dT%H:%M:%S.000000000Z)" "$stream" "$msg"
+}

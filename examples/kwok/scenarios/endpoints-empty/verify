@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+NS=kwok-scenario-endpoints
+
+echo "▸ verify endpoints-empty"
+
+# The EndpointSlice controller is a REAL controller reading REAL pod
+# IPs and Ready conditions off fake pods — this is the class kwok gets
+# right for free, and the fixture assertion says so out loud.
+_slices_ready() {
+  local wired unplugged
+  wired="$(kubectl -n "$NS" get endpointslices -l kubernetes.io/service-name=wired-00 \
+    -o jsonpath='{.items[*].endpoints[*].addresses[0]}' 2>/dev/null | wc -w)"
+  unplugged="$(kubectl -n "$NS" get endpointslices -l kubernetes.io/service-name=unplugged-00 \
+    -o jsonpath='{.items[*].endpoints[*].addresses[0]}' 2>/dev/null | wc -w)"
+  [[ "$wired" == 2 && "$unplugged" == 0 ]]
+}
+await 120 "wired-00 has 2 endpoints, unplugged-00 has none" _slices_ready
+
+await_finding 180 'kind=edge.selector_empty severity=critical.*name=unplugged-00' \
+  -- state edges --workload="Deployment/$NS/unplugged-00"
+
+echo "▸ the haystack stays quiet"
+if run_lookout state edges --workload="Deployment/$NS/unplugged-00" 2>/dev/null |
+  grep -E 'name=wired-[0-9]'; then
+  echo "  ✗ a correctly wired service was reported" >&2
+  exit 1
+fi
+echo "  ✓ no wired-* service reported"
+
+# ---------------------------------------------------------------------------
+# Two gaps this scenario exists to hold open. Both are soft: they are
+# product defects, not fixture problems, and a driver that goes red on
+# a known defect stops being a signal. Both go away when the defects do,
+# at which point these become hard assertions.
+# ---------------------------------------------------------------------------
+
+# GAP 1 — a bare `scan` never sees this. Stage 2 drills only into
+# workloads stage 1 already flagged, and all twelve Deployments here are
+# Available with every pod Running: `drilldown=0`. Three services
+# routing nowhere behind twelve healthy workloads is precisely the
+# "something is wrong and I don't know what" case scan is the entry
+# point for. It surfaces under `--include=all`, but only as a side
+# effect of unrelated posture warnings flagging the workloads.
+echo "▸ gap 1: bare scan reaches the broken services"
+soft await_finding 60 'unplugged-0' -- scan --namespace="$NS"
+
+# GAP 2 — `edge.selector_empty` is documented as "a Service selector
+# aimed at THIS workload selects zero pods", and the intent heuristic
+# (edges_checks.go, selectorIntends) tests only that the selector's
+# label KEYS exist among the workload's pod labels — values are not
+# compared. Every workload in this namespace uses the key `app`, so
+# querying the sound `wired-00` reports all three unplugged services
+# and stamps `workload=Deployment/…/wired-00` on findings that have
+# nothing to do with it. Invisible with one workload per namespace,
+# which is the only shape examples/scenarios/ can build.
+echo "▸ gap 2: a sound workload's edges stay clean"
+# Captured, not piped: `! lookout … | grep -q` under `set -o pipefail`
+# reports CLEAN when lookout dies of SIGPIPE, which is what happens as
+# soon as the output outgrows a pipe buffer. Same trap as await_finding.
+_wired_clean() {
+  local out
+  out="$(run_lookout state edges --workload="Deployment/$NS/wired-00" 2>/dev/null || true)"
+  ! grep -qE 'kind=edge\.selector_empty' <<<"$out"
+}
+soft await 30 "state edges on wired-00 reports no selector_empty" _wired_clean

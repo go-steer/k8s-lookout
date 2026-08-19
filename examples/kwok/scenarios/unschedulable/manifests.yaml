@@ -1,0 +1,137 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Three ways to be unschedulable, chosen because the real kube-scheduler
+# rejects each of them for a DIFFERENT reason. Templated by inject:
+# @NS@, @SPREAD_NODES@, @SPREAD_REPLICAS@.
+#
+# Every pod here tolerates the fake-node taint and pins itself somewhere
+# only fake nodes can satisfy, so none of them can fall back onto a real
+# kind node and quietly succeed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "@NS@"
+  labels:
+    app.kubernetes.io/managed-by: lookout-kwok-scale
+---
+# 1. A zone that does not exist. "102 node(s) didn't match Pod's node
+#    affinity/selector" — the config-error shape: no amount of capacity
+#    will ever help.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-orphan
+  namespace: "@NS@"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: zone-orphan
+  template:
+    metadata:
+      labels:
+        app: zone-orphan
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/zone: zone-99
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Equal
+        value: fake
+        effect: NoSchedule
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+---
+# 2. Bigger than any single node. "100 Insufficient cpu" — the capacity
+#    shape, and note it is per-node: the fleet has thousands of spare
+#    cores and not one node that can hold this pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oversized
+  namespace: "@NS@"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: oversized
+  template:
+    metadata:
+      labels:
+        app: oversized
+    spec:
+      nodeSelector:
+        type: kwok
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Equal
+        value: fake
+        effect: NoSchedule
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: "64"
+            memory: 16Mi
+---
+# 3. Anti-affinity against a bounded pool. "3 node(s) didn't match pod
+#    anti-affinity rules" — the topology shape: the first
+#    @SPREAD_NODES@ replicas schedule and the rest never can, so this
+#    is the one that produces a PARTIALLY placed workload. It needs a
+#    labelled pool of exactly @SPREAD_NODES@ nodes, which is why inject
+#    labels them rather than reusing a zone: the arithmetic has to hold
+#    at any fleet size.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread
+  namespace: "@NS@"
+spec:
+  replicas: @SPREAD_REPLICAS@
+  selector:
+    matchLabels:
+      app: spread
+  template:
+    metadata:
+      labels:
+        app: spread
+    spec:
+      nodeSelector:
+        lookout.examples/kwok-scenario: spread
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Equal
+        value: fake
+        effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: spread
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi

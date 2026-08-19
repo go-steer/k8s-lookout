@@ -19,6 +19,7 @@ examples/sentinel/up                # sentinel + wire capture, as always
 examples/kwok/up                    # + the kwok controller
 examples/kwok/scale-up 300 400 3    # + 300 fake nodes, 400 workloads, 1000 pods
 examples/kwok/bench                 # what the read path costs at that size
+examples/kwok/e2e                   # inject → verify → revert, fleet-scale scenarios
 examples/kwok/node-fail 30          # 30 nodes lose their kubelet at once
 examples/kwok/node-heal             # give them back
 examples/kwok/down                  # remove the whole layer
@@ -44,6 +45,15 @@ controllers running the same code as on a real cluster.
 scenario asserts that lookout matches the event you already believed
 kubelet emits. That tests the fixture, not the product. Those four
 scenarios stay on kind, where a real kubelet produces the real string.
+
+**Container logs are the interesting middle case.** They are also
+authored — kwok serves a file off the controller's filesystem — but
+what the `logs` scenario asserts is not "lookout recognises a Java
+stack trace". It is the *reduction*: forty-eight streams collapsing to
+a handful of templates that count their pods. The input being synthetic
+does not weaken that claim, because the claim is about the arithmetic
+on the way out, not the string on the way in. See
+[`scenarios/logs`](scenarios/logs/).
 
 So this is not a cheaper kind. It is a second tier that answers
 questions kind cannot answer at all:
@@ -84,11 +94,11 @@ Keeping the fake fleet *scheduled* apart from the real one is the easy
 half. The hard half is that the real cluster's own components watch
 every node in the cluster, and cannot be told not to.
 
-**kindnet crashloops unless fake nodes get an on-link InternalIP.**
-Left alone, kwok reports its own controller-pod IP (a `10.244.x` pod
-address) as the InternalIP of *every* fake node. kindnet then tries to
-install `10.244.<n>.0/24 via <that pod IP>`, and Linux rejects a
-gateway that is not on a directly-connected subnet:
+**A fake node's InternalIP has two consumers that want different
+things.** Left alone, kwok reports its own controller-pod IP (a
+`10.244.x` pod address) as the InternalIP of *every* fake node. kindnet
+then tries to install `10.244.<n>.0/24 via <that pod IP>`, and Linux
+rejects a gateway that is not on a directly-connected subnet:
 
 ```
 Failed to reconcile routes, retrying after error: network is unreachable
@@ -96,10 +106,29 @@ panic: Maximum retries reconciling node routes: network is unreachable
 ```
 
 That is the real CNI on the real nodes dying, and it happens with one
-fake node as surely as with three hundred. `scale-up` therefore hands
-each fake node an unused address from the kind node subnet (derived
-from a real node, `.128.0` upward), which makes the gateway on-link;
-the routes install and blackhole traffic nobody sends.
+fake node as surely as with three hundred. So kindnet wants an
+**on-link** address. But the apiserver wants a **reachable** one: it
+dials `InternalIP:10247` — the port from
+`daemonEndpoints.kubeletEndpoint` — for `kubectl logs`, `exec` and
+`attach`, and an address nobody listens on gives
+
+```
+dial tcp 172.17.128.85:10247: connect: no route to host
+```
+
+Handing out unused addresses from the kind node subnet satisfies the
+first consumer and not the second. The fix that satisfies both is to
+stop synthesising addresses at all: `up` runs the kwok controller with
+`hostNetwork: true` and `--node-ip=$(HOST_IP)`, so the address it serves
+the fake kubelet endpoint on *is* a real node IP, and `scale-up` gives
+every fake node that one address as its InternalIP. On-link because it
+is a real node's address, reachable because the controller is listening
+there. Every fake node sharing one address is fine for both: routes via
+a local IP install cleanly, and the apiserver only ever needs the
+endpoint to answer.
+
+`node-initialize` fills in addresses only `{{ if not $hasInternalIP }}`,
+so the explicit address in `scale-up`'s manifest wins and stays.
 
 **kindnet's memory limit is sized for three nodes.** kind ships it with
 a 50Mi cap; watching 300 nodes and 1000 pods takes 51–57Mi, so it is
@@ -159,6 +188,37 @@ lookout audit workloads -A --cron-suspended=1m --timeout=120s
 ```
 
 kwok does not fake time, and neither does this layer.
+
+## Scenarios
+
+`scale-up` builds a fleet with a *posture*. The scenarios in
+[`scenarios/`](scenarios/) build a fleet with a *fault*, on the same
+contract as [`../scenarios/`](../scenarios/) — `inject`, `verify`,
+`revert`, one directory each, driven together by `examples/kwok/e2e`:
+
+```sh
+examples/kwok/e2e                    # all four, ordered
+examples/kwok/e2e logs unschedulable # or pick
+```
+
+| Scenario | Fault | The claim that needs a fleet |
+| --- | --- | --- |
+| [`logs`](scenarios/logs/) | 24 pods × 2 containers, a Java exception and a Go panic under a flood of probe noise | 24 pods emitting one line arrive as **one** finding with `pods=24`, not 24 findings |
+| [`unschedulable`](scenarios/unschedulable/) | 10 Pending pods, three different scheduler verdicts | a capacity *wall* that is not a capacity shortage; a workload placed 3-of-8 and stuck |
+| [`pdb-gridlock`](scenarios/pdb-gridlock/) | 3 undrainable PDBs among 9 sound ones | which *nodes* you cannot drain, and silence about the nine |
+| [`endpoints-empty`](scenarios/endpoints-empty/) | 3 Services selecting nothing among 9 that work | naming the three without naming the nine |
+
+Two things are true of all four. They assert the **read path only** —
+the sentinel's wire is out of scope here, not because it would not work
+but because every claim these make is answerable from a read. And each
+one pairs a positive assertion with a **negative** one: the sound
+lookalikes sitting beside the fault must stay unreported. On a
+two-worker cluster there are no lookalikes, so that half of the
+detector is unassertable, which is the whole reason these live here
+rather than in `../scenarios/`.
+
+Each scenario's README says what it costs to get wrong; `logs` in
+particular documents three failure modes that all present as *green*.
 
 ## Node failure, and why it is the strongest thing here
 

@@ -48,6 +48,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later, the survivors being exactly the DaemonSet pods that tolerate
   `unreachable`.
 
+  `examples/kwok/scenarios/` then plants faults in that fleet, on the
+  same `inject`/`verify`/`revert` contract as `examples/scenarios/` and
+  driven by `examples/kwok/e2e`: `logs`, `unschedulable`,
+  `pdb-gridlock`, `endpoints-empty`. Each exists because its claim is
+  unassertable on two workers, and in every case the claim has two
+  halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
+  among nine sound ones of the identical shape and asserts both that
+  the three are named *and* that the nine are not; `endpoints-empty`
+  does the same with three Services whose selector is one label value
+  off. Reporting the needle is easy when the haystack has one straw in
+  it, and a cluster with a single PDB in it cannot tell a detector that
+  discriminates from one that reports everything.
+
+  `unschedulable` gets three *different* verdicts out of the real
+  scheduler at once — a nonexistent zone, a 64-CPU request against
+  32-CPU nodes, and required anti-affinity over a bounded node pool —
+  so `pod.pending` has to carry enough of the scheduler's own message
+  to tell a config error from a capacity wall from a topology limit.
+  The middle one is the shape a small cluster cannot make at all: a
+  workload that cannot place a single pod while the fleet has thousands
+  of idle cores. `logs` asserts the reduction rather than the parse:
+  forty-eight streams in, and twenty-four pods emitting one line arrive
+  as **one** finding carrying `pods=24`.
+
+  Serving those logs took three things, and all three fail *green* —
+  as a healthy-looking scan rather than an error. kwok's shipped config
+  leaves `enableDebuggingHandlers` off, and with it off `/containerLogs`
+  answers "Debug endpoints are disabled." however correct the
+  `ClusterLogs` CR is; the log file must be in CRI format
+  (`<RFC3339Nano> <stream> <F|P> <msg>`) or the kubelet shim rejects it
+  outright; and the fixture's timestamps must be fresh, because every
+  read path asks for a `--since` window and a stale fixture is simply
+  filtered out. `up` handles the first, and `lib.sh`'s `cri_log` helper
+  handles the other two.
+
+  Running them turned up a latent bug in the shared `examples/lib.sh`:
+  `await_finding` piped lookout into `grep -q`, and once a command
+  emits more than a pipe buffer of findings, grep exits at the first
+  match, lookout takes SIGPIPE, and `set -o pipefail` turns a passing
+  assertion into an exit 141 that kills the scenario. It now captures
+  the output and matches against the capture. Unreachable on a
+  two-worker cluster, deterministic at fleet scale.
+
+  Fake nodes now advertise the kwok controller's **host** IP as their
+  InternalIP, with the controller running `hostNetwork` and
+  `--node-ip=$(HOST_IP)`. A fake node's address has two consumers that
+  want incompatible things: kindnet needs it on-link or it panics
+  installing pod routes, and the apiserver needs something listening on
+  `:10247` or `kubectl logs`/`exec` gets "no route to host". A real node
+  IP that the controller is actually serving on is the one value that
+  satisfies both, and it replaces the synthetic addresses this layer
+  handed out before.
+
   The layer is additive and reversible: the kwok controller is
   annotation-scoped (asserted by `up`, which refuses to leave it
   running otherwise), every fake node is tainted, every fake pod is

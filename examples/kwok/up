@@ -65,6 +65,64 @@ kubectl apply -f "${KWOK_RELEASE_URL}/stage-fast.yaml"
 echo "▸ node-failure stages (node-fail / node-heal)"
 kubectl apply -f "$(kwok_root)/stages/"
 
+# ---- making the fake kubelet reachable -------------------------------------
+#
+# Three edits to what upstream ships, all of them in service of one
+# thing: a log/exec/attach request for a fake pod has to arrive.
+#
+# 1. enableDebuggingHandlers. The release config leaves it off, and with
+#    it off /containerLogs/ answers "Debug endpoints are disabled." for
+#    every request — the CRDs install and match, and nothing serves.
+# 2. hostNetwork + --node-ip=$(HOST_IP). The apiserver dials a pod's
+#    logs at `<node InternalIP>:10247`, and kindnet routes fake pod
+#    CIDRs via that same address. Host networking is what lets one
+#    address be both reachable and on-link; scale-up explains why at
+#    length.
+# 3. a ConfigMap at /logs. kwok reads a pod's log stream from a FILE on
+#    the controller's filesystem, so scenarios need somewhere to put
+#    one. Mounted as a directory, not a subPath, because subPath mounts
+#    never see a ConfigMap update — the scenarios rely on adding a key
+#    and having it appear without a rollout.
+echo "▸ enabling the fake kubelet's log/exec endpoints"
+conf="$(mktemp)"
+kubectl -n kube-system get cm kwok -o jsonpath='{.data.kwok\.yaml}' >"$conf"
+if ! grep -q 'enableDebuggingHandlers' "$conf"; then
+  printf '  enableDebuggingHandlers: true\n' >>"$conf"
+  kubectl -n kube-system create cm kwok --from-file=kwok.yaml="$conf" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+rm -f "$conf"
+
+kubectl -n kube-system create configmap "$KWOK_LOGS_CM" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+# `up` is re-runnable, so both patches have to be idempotent. The volume
+# and the mount go in as a STRATEGIC merge — those two lists merge by
+# name, where a JSON-patch append would stack a duplicate every run.
+kubectl -n kube-system patch deploy kwok-controller -p "$(
+  printf '{"spec":{"template":{"spec":{'
+  printf '"volumes":[{"name":"kwok-logs","configMap":{"name":"%s","optional":true}}],' "$KWOK_LOGS_CM"
+  printf '"containers":[{"name":"kwok-controller","volumeMounts":'
+  printf '[{"name":"kwok-logs","mountPath":"%s","readOnly":true}]}]' "$KWOK_LOGS_MOUNT"
+  printf '}}}}'
+)" >/dev/null
+
+# The rest is positional, so assert the position rather than trust it: a
+# kwok release that reorders its args would otherwise silently overwrite
+# --config and leave a controller that manages every node in the cluster.
+args_node_ip="$(kubectl -n kube-system get deploy kwok-controller \
+  -o jsonpath='{.spec.template.spec.containers[0].args[1]}')"
+if [[ "$args_node_ip" != --node-ip=* ]]; then
+  echo "ERROR: kwok $KWOK_VERSION does not have --node-ip as its second arg (got '$args_node_ip')." >&2
+  echo "Refusing to patch it blind — the fake kubelet address is what makes logs reachable." >&2
+  exit 1
+fi
+kubectl -n kube-system patch deploy kwok-controller --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/hostNetwork","value":true},
+  {"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"},
+  {"op":"replace","path":"/spec/template/spec/containers/0/args/1","value":"--node-ip=$(HOST_IP)"}
+]' >/dev/null
+
 if $with_metrics; then
   echo "▸ resource-usage metrics simulation"
   kubectl apply -f "${KWOK_RELEASE_URL}/metrics-usage.yaml"
@@ -84,6 +142,13 @@ if ! kubectl -n kube-system get cm kwok -o jsonpath='{.data.kwok\.yaml}' 2>/dev/
   echo "Inspect: kubectl -n kube-system get cm kwok -o yaml" >&2
   exit 1
 fi
+
+if [[ -z "$(kwok_host_ip)" ]]; then
+  echo "ERROR: the kwok controller reports no host IP." >&2
+  echo "Fake nodes advertise it as their InternalIP; without it kindnet crashloops." >&2
+  exit 1
+fi
+echo "  ✓ fake kubelet endpoint: $(kwok_host_ip):10247"
 
 echo
 echo "kwok is up. The real nodes are unchanged:"

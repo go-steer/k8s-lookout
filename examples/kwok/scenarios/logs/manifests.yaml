@@ -1,0 +1,77 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Templated by inject: @NS@, @REPLICAS@, @MOUNT@.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "@NS@"
+  labels:
+    app.kubernetes.io/managed-by: lookout-kwok-scale
+---
+# kwok resolves a pod's log stream through this. The selector is
+# namespace-based because matchNames is an exact-match list and a
+# Deployment's pod names carry a generated suffix — there is no
+# prefix or wildcard form. Per-container files come from the
+# `containers` field instead, which is the axis that actually
+# matters here: one pod, two very different log shapes.
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: ClusterLogs
+metadata:
+  name: lookout-scenario-logs
+spec:
+  selector:
+    matchNamespaces:
+    - "@NS@"
+  logs:
+  - containers: ["app"]
+    logsFile: "@MOUNT@/@NS@-app.log"
+  - containers: ["gateway"]
+    logsFile: "@MOUNT@/@NS@-gateway.log"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: noisy
+  namespace: "@NS@"
+spec:
+  replicas: @REPLICAS@
+  selector:
+    matchLabels:
+      app: noisy
+  template:
+    metadata:
+      labels:
+        app: noisy
+    spec:
+      nodeSelector:
+        type: kwok
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Equal
+        value: fake
+        effect: NoSchedule
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: gateway
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi

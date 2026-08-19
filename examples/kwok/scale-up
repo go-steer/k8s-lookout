@@ -151,41 +151,42 @@ echo "▸ generating $NODES fake nodes, $WORKLOADS workloads, $pods pods"
 
 node_name() { printf 'kwok-node-%04d' "$1"; }
 
-# Every fake node needs an InternalIP that is ON-LINK from a real node,
-# and this is not cosmetic — it is the difference between a working
-# cluster and a broken one.
+# Every fake node's InternalIP is the node the kwok controller runs on.
+# One address, three hundred nodes, and it is not laziness — that single
+# value is read by two different consumers with two incompatible
+# requirements, and it is the only value that satisfies both.
 #
-# Left to itself, kwok reports its own controller-pod IP (a 10.244.x
-# pod address) as the InternalIP of every fake node. kindnet then tries
-# to install one route per node — `10.244.<n>.0/24 via <that pod IP>` —
-# and Linux rejects a gateway that is not on a directly-connected
-# subnet with ENETUNREACH. kindnet retries, gives up and panics:
+# kindnet needs it ON-LINK. It installs one route per node —
+# `10.244.<n>.0/24 via <that node's InternalIP>` — and Linux rejects a
+# gateway that is not on a directly-connected subnet with ENETUNREACH.
+# Left to itself kwok advertises its own controller-POD IP, so kindnet
+# retries, gives up and panics:
 #
 #   Failed to reconcile routes, retrying after error: network is unreachable
 #   panic: Maximum retries reconciling node routes: network is unreachable
 #
-# That is the REAL CNI on the REAL nodes crashlooping, so the fake fleet
-# would be breaking the cluster it is supposed to sit quietly beside —
-# and it happens with one fake node just as surely as with three
-# hundred. Handing out unused addresses from the kind node subnet makes
-# the gateway on-link, the route add succeeds, and the routes simply
-# blackhole traffic nobody sends.
+# That is the real CNI on the real nodes crashlooping — the fake fleet
+# breaking the cluster it is supposed to sit quietly beside, with one
+# fake node as surely as with three hundred.
 #
-# The subnet comes from a real node rather than being hardcoded; kind
-# gives its docker network a /16, so .128.0 upward is far clear of the
-# low addresses docker's IPAM hands the real nodes.
-node_ip_prefix="$(
-  kubectl get nodes -l "!${FAKE_NODE_LABEL%%=*}" \
-    -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null \
-    | awk -F. 'NF==4 {print $1"."$2}'
-)"
-if [[ -z "$node_ip_prefix" ]]; then
-  echo "ERROR: could not read a real node's InternalIP to derive fake node addresses." >&2
-  echo "Without them kindnet cannot route to the fake nodes and will crashloop." >&2
+# The APISERVER needs it REACHABLE. Every log, exec and attach request
+# for a pod is dialled at `<node InternalIP>:<daemonEndpoints port>`,
+# 10247 for kwok. Synthetic-but-unused addresses satisfy kindnet and
+# fail here: `dial tcp …:10247: connect: no route to host`, and with it
+# the whole `triage logs` surface.
+#
+# `up` runs the controller with hostNetwork, so its address IS a real
+# node's address: on-link for kindnet, and listening on 10247 for the
+# apiserver. Duplicated across every fake node, which no real cluster
+# would do, and the two consumers that care both cope — kindnet keys
+# routes by pod CIDR, and the log dial only has to arrive.
+kwok_ip="$(kwok_host_ip)"
+if [[ -z "$kwok_ip" ]]; then
+  echo "ERROR: could not read the kwok controller's host IP." >&2
+  echo "Fake nodes need it as their InternalIP: without it kindnet crashloops" >&2
+  echo "and the apiserver cannot reach the fake kubelet. Re-run examples/kwok/up." >&2
   exit 1
 fi
-
-node_ip() { printf '%s.%d.%d' "$node_ip_prefix" $((128 + $1 / 250)) $((1 + $1 % 250)); }
 
 # 32 CPU / 256Gi is kwok's documented shape, and deliberately roomy:
 # the point of the fake fleet is to make the SCHEDULER's placement
@@ -222,7 +223,7 @@ spec:
     value: ${FAKE_NODE_ANNOTATION_VALUE}
 status:
   addresses:
-  - address: $(node_ip "$i")
+  - address: ${kwok_ip}
     type: InternalIP
   - address: ${name}
     type: Hostname
