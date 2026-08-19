@@ -150,6 +150,19 @@ var excluded = map[string]string{
 	"net probe": "requires explicit probe targets (--dns/--tcp/--http): there is nothing for a zero-argument scan to probe, and generating active traffic is not a default a scan should take",
 }
 
+// Stages returns the stage-1 command names — everything a bare
+// `lookout scan` runs, in emission order. Exported for the docs-site
+// coverage page (internal/sitedoc), which renders what a zero-argument
+// scan covers from this list rather than from a second copy of it: the
+// composition is declared once, here, and the contract test in this
+// package holds it to the production registry.
+func Stages() []string { return append([]string(nil), stage1...) }
+
+// Groups returns the opt-in group names `--include` switches on,
+// whole. Same reason as Stages: the coverage page's "what --include
+// adds" section is this list resolved against the registry.
+func Groups() []string { return append([]string(nil), optionalGroups...) }
+
 // Deps injects the seams. The zero value is the production wiring.
 type Deps struct {
 	// Registry is where stages are resolved from. Nil means

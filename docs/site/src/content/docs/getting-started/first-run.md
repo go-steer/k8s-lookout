@@ -1,6 +1,6 @@
 ---
 title: First reads
-description: The read-path against your current kubeconfig — lookout health and lookout triage delta, with real captured output.
+description: The read-path against your current kubeconfig — lookout scan, lookout audit, lookout health and lookout triage delta, with real captured output.
 sidebar:
   order: 2
 ---
@@ -8,6 +8,40 @@ sidebar:
 Every read command works against your current kubeconfig context. Nothing
 is deployed, nothing is mutated — the read-path only ever gets, lists, and
 watches.
+
+## Start here: `lookout scan`
+
+If you know something is wrong but not what, this is the first call.
+No target, no flags, nothing deployed:
+
+```sh
+lookout scan
+```
+
+It runs every target-free incident check in one invocation — broken
+workloads, dead admission webhooks, stuck volumes and PVCs, rejected
+Gateway routes, config drift — then drills into the dependency edges of
+whatever it flagged. Every finding is stamped `check=<command>`, which
+is also the command to run for the detail behind it, so the output is
+both a worklist and a set of next moves.
+
+[What `lookout scan` finds](/detect/scan/) lists every check it runs and
+every kind it can emit, grouped by stage.
+
+`scan` reports **incidents**: things broken now, which clear themselves
+when fixed. The posture sweep is one flag away —
+`lookout scan --include=audit`, or on its own:
+
+```sh
+lookout audit workloads -A
+```
+
+That answers a different question — *what has no safety net while it is
+still healthy* — and [What `lookout audit` checks](/detect/audit/) is
+its coverage map.
+
+The rest of this page is the individual commands behind those two, with
+real captured output.
 
 ## "Any issues with this cluster?"
 
@@ -40,11 +74,12 @@ because they are the output contract everything else follows:
 - **Findings are one record per line** (logfmt by default, `--format=json`
   for JSON), each with a stable `fingerprint` for cross-referencing.
 
-## Everything abnormal, in one scan
+## Everything abnormal, in one pass
 
-`lookout triage delta` is the first call for "anything wrong?": broken
-workloads, aged Pending pods, node pressure, gridlocked PDBs, degraded
-kube-system add-ons, quotas at their limits — one pass, only the abnormal:
+`lookout triage delta` is `scan`'s first and broadest stage, and useful
+on its own: broken workloads, aged Pending pods, node pressure,
+gridlocked PDBs, degraded kube-system add-ons, quotas at their limits —
+one pass, only the abnormal:
 
 ```sh
 lookout triage delta -A

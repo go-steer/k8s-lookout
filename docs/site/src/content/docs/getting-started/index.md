@@ -22,24 +22,33 @@ works without the next:
    your workstation, and know which container image flavor a cluster
    deployment needs.
 2. [First reads](/getting-started/first-run/) — the CLI against your
-   current kubeconfig: `lookout health` and `lookout triage delta`, no
-   deployment needed.
+   current kubeconfig, nothing deployed. Start with `lookout scan`: no
+   target, no flags, and it names what is broken.
 3. [Tutorial](/getting-started/tutorial/) — a ~20-minute end-to-end
    run on a disposable kind cluster: stage real failures, watch the
    sentinel open and close incidents.
 4. [Deploy the sentinel](/getting-started/deploy/) — one
    `kubectl apply -k` from the shipped manifests, what each manifest
    is, the RBAC tiers, and the flags that matter.
-5. [What the sentinel watches](/getting-started/what-the-sentinel-watches/)
-   — the failure classes it monitors, what is on out of the box, and
-   the flag line that turns the rest on.
-6. [Connect to core-agent](/getting-started/connect-core-agent/) — the
+5. [Connect to core-agent](/getting-started/connect-core-agent/) — the
    daemon contract: sessions, injects, per-incident vs shared routing.
-7. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
+6. [MCP setup](/getting-started/mcp/) — every read command as an MCP tool,
    for agent runtimes that cannot shell out.
-8. [Integrations](/getting-started/integrations/) — beyond core-agent:
+7. [Integrations](/getting-started/integrations/) — beyond core-agent:
    the read path from any MCP client or shell-capable agent, and the
    watch path into any webhook receiver.
+
+The two commands worth running first take no arguments and need
+nothing deployed — point them at a cluster you have never seen:
+
+```sh
+lookout scan     # what is broken right now
+lookout audit    # what has no safety net, while it is still healthy
+```
+
+[What lookout detects](/detect/) is the coverage map for both, and for
+the sentinel: one page per mode, listing everything each one looks
+for.
 
 The [Reference](/reference/) section is generated from the same
 declarations that produce `--help` — when this section links a flag or a

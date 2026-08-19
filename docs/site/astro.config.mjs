@@ -20,6 +20,14 @@ export default defineConfig({
   markdown: {
     processor: unified({ remarkPlugins: [remarkPrependBase(BASE)] }),
   },
+  // The sentinel coverage map moved out of Getting started when the
+  // "What lookout detects" section landed (one coverage page per mode).
+  // The old URL was linked from the README and shipped in a release, so
+  // it redirects rather than 404s.
+  redirects: {
+    '/getting-started/what-the-sentinel-watches':
+      '/k8s-lookout/detect/sentinel/',
+  },
   integrations: [
     starlight({
       title: 'k8s-lookout',
@@ -85,6 +93,10 @@ export default defineConfig({
         {
           label: 'Getting started',
           items: [{ autogenerate: { directory: 'getting-started' } }],
+        },
+        {
+          label: 'What lookout detects',
+          items: [{ autogenerate: { directory: 'detect' } }],
         },
         {
           label: 'Concepts',

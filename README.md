@@ -22,6 +22,8 @@ where things live in the tree, see the
 [repo architecture map](./docs/repo-map.md).
 
 **Documentation:** [go-steer.github.io/k8s-lookout](https://go-steer.github.io/k8s-lookout/).
+For what each of the three modes looks for, one page per mode:
+[What lookout detects](https://go-steer.github.io/k8s-lookout/detect/).
 AI agents installing or operating this: start at
 [the agent guide](https://go-steer.github.io/k8s-lookout/agents/), or
 fetch the whole docs as one file —

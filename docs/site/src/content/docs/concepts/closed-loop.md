@@ -12,7 +12,7 @@ one incident that accumulates the follow-up observations, the
 diagnosis, and finally proof the problem is actually gone. This page
 explains the four mechanisms that make that work; for the inventory of
 what's watched in the first place, see [What the sentinel
-watches](/getting-started/what-the-sentinel-watches/).
+watches](/detect/sentinel/).
 
 ## Recovery injects: fix-verify without polling
 
