@@ -447,7 +447,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Suspended CronJobs are deliberately **not** reported here. `suspend:
   true` is a standing state that never self-clears, which makes it
-  posture rather than an incident (#293).
+  posture rather than an incident; `audit workloads` reports it, below.
 
   This is the scan-path twin of the `workload` sentinel's
   `workload.cron_missed`, and the two now share one parser — the new
@@ -458,6 +458,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, down to the day-of-month/day-of-week OR rule and DST. The
   package embeds `time/tzdata` so `spec.timeZone` resolves without
   depending on a zoneinfo database in the base image.
+
+- `audit workloads` now reports **CronJobs left suspended long enough
+  to have skipped runs** — `audit.suspended_cronjob`, warning. A
+  suspension is the one failure mode with no symptom: nothing crashes,
+  nothing is unready, no event fires, and the backup or expiry sweep
+  simply stops happening. It is usually a deliberate act during an
+  incident that nobody reverted, and it stays invisible until the
+  thing the job was protecting against arrives.
+
+  The threshold is deliberately not a plain duration. What makes a
+  suspension a finding is that it outlived the maintenance that
+  motivated it, and how long that takes depends on the schedule, so
+  two conditions must both hold: the suspension is older than
+  `--cron-suspended` (default 7d), **and** at least one activation has
+  actually been skipped. The second is structural rather than tunable
+  — an @hourly job dark for a week has lost 168 runs and an @monthly
+  one has lost nothing, and a claim that has cost nothing yet has
+  nothing to report.
+
+  Because Kubernetes records no "suspended at" timestamp, the age is
+  recovered from the `managedFields` entry that owns `spec.suspend`,
+  falling back to `lastScheduleTime` and then to creation; the finding
+  names which anchor it used. That entry's timestamp moves whenever
+  its manager rewrites any field it owns, so the reported age is a
+  floor — the estimate errs toward staying quiet, never toward
+  inventing a suspension.
+
+  `audit workloads` therefore now accepts `--workload=CronJob/ns/name`
+  and its summary note gains a fourth count
+  (`workloads=deploy/sts/ds/cj`). CronJobs are scanned only for this
+  claim: availability, probe, and placement claims are meaningless for
+  a batch pod that serves no traffic.
 
 ### Fixed
 
