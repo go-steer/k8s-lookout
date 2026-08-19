@@ -44,7 +44,7 @@ import (
 // Finding classes, toggled by --only. Each class maps to a
 // dot-namespaced prefix family in the emitted finding kinds.
 const (
-	classPods   = "pods"   // pod.*, workload.*, job.*
+	classPods   = "pods"   // pod.*, workload.*, job.*, cron.*
 	classNodes  = "nodes"  // node.*
 	classPDB    = "pdb"    // pdb.*
 	classSystem = "system" // addon.*
@@ -81,6 +81,8 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 				Help: "flag Pending pods older than this; also the grace before a not-ready container in a Running pod is flagged"},
 			{Name: "quota-warn", Type: emit.FlagInt, Default: "90",
 				Help: "warn when a ResourceQuota resource reaches this percent of its hard limit (the hard limit itself is always critical)"},
+			{Name: "cron-grace", Type: emit.FlagDuration, Default: "5m",
+				Help: "how late a CronJob activation may be before it counts as missed; absorbs normal controller scheduling latency"},
 		},
 		Kinds: []checks.KindField{
 			checks.Kind("pod.crashloop", "a container is in CrashLoopBackOff", emit.SeverityCritical),
@@ -95,6 +97,8 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("workload.stalled", "a Deployment's Progressing condition is False: the rollout has given up", emit.SeverityCritical),
 			checks.Kind("workload.rollout", "replicas are short of desired; critical when nothing is serving at all", emit.SeverityCritical, emit.SeverityWarning),
 			checks.Kind("job.failed", "a Job's Failed condition is set", emit.SeverityWarning),
+			checks.Kind("cron.missed", "an unsuspended CronJob's schedule said to run more than --cron-grace ago and status says it did not; critical once several activations in a row are gone", emit.SeverityCritical, emit.SeverityWarning),
+			checks.Kind("cron.unparseable", "a CronJob's spec.schedule could not be parsed, so its activations cannot be judged at all", emit.SeverityWarning),
 			checks.Kind("node.notready", "the node's Ready condition is not True", emit.SeverityCritical),
 			checks.Kind("node.pressure", "the node reports Memory/Disk/PID pressure", emit.SeverityCritical),
 			checks.Kind("node.condition", "a non-standard node condition is True — NPD and its cousins publish problems that way", emit.SeverityCritical, emit.SeverityWarning),
@@ -117,6 +121,13 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "updated", Doc: "updated-to-current-revision count from status"},
 			{Name: "available", Doc: "available count from status"},
 			{Name: "failed", Doc: "failed pod count of a Job"},
+			{Name: "schedule", Doc: "a CronJob's spec.schedule"},
+			{Name: "expected", Doc: "the activation a CronJob should have run and did not"},
+			{Name: "missed_runs", Doc: "activations missed since the anchor; ≥N when the walk was capped"},
+			{Name: "anchor", Doc: "what the missed count was measured from: last_schedule or creation"},
+			{Name: "time_zone", Doc: "a CronJob's spec.timeZone, when set"},
+			{Name: "last_schedule", Doc: "a CronJob's status.lastScheduleTime, or never"},
+			{Name: "active_jobs", Doc: "Jobs a CronJob still has running"},
 			{Name: "condition", Doc: "node condition type that is abnormal"},
 			{Name: "taint", Doc: "taint key indicating reclaim/drain"},
 			{Name: "pods", Doc: "pods affected (behind a cordoned node or a PDB)"},
@@ -157,6 +168,7 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		restarts:   inv.Flags.Int("restarts"),
 		pendingAge: inv.Flags.Duration("pending-age"),
 		quotaWarn:  inv.Flags.Int("quota-warn"),
+		cronGrace:  inv.Flags.Duration("cron-grace"),
 	}
 	if th.restarts < 1 {
 		return 0, emit.UsageErrorf("--restarts must be at least 1, got %d", th.restarts)
@@ -166,6 +178,12 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	}
 	if th.quotaWarn < 1 || th.quotaWarn > 100 {
 		return 0, emit.UsageErrorf("--quota-warn must be a percentage in 1..100, got %d", th.quotaWarn)
+	}
+	// Zero is allowed and meaningful: judge activations the instant
+	// they come due. Negative would report activations still in the
+	// future as missed.
+	if th.cronGrace < 0 {
+		return 0, emit.UsageErrorf("--cron-grace must not be negative, got %s", th.cronGrace)
 	}
 
 	client, err := d.source(ctx)
@@ -210,6 +228,7 @@ type thresholds struct {
 	restarts   int
 	pendingAge time.Duration
 	quotaWarn  int
+	cronGrace  time.Duration
 }
 
 // parseOnly validates the --only list against the known classes.

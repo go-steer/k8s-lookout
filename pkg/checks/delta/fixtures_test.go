@@ -261,6 +261,25 @@ func failedJob(ns, name string) *batchv1.Job {
 	}
 }
 
+// cronJob builds an @hourly CronJob created a day before the pinned
+// clock, last scheduled lastRunAgo ago. A nil lastRunAgo means it has
+// never run.
+func cronJob(ns, name string, lastRunAgo *time.Duration) *batchv1.CronJob {
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, CreationTimestamp: ago(24 * time.Hour)},
+		Spec:       batchv1.CronJobSpec{Schedule: "@hourly"},
+	}
+	if lastRunAgo != nil {
+		cj.Status.LastScheduleTime = ptr(ago(*lastRunAgo))
+	}
+	return cj
+}
+
+// healthyCronJob ran at the top of the current hour: nothing is due.
+func healthyCronJob(ns, name string) *batchv1.CronJob {
+	return cronJob(ns, name, ptr(time.Duration(0)))
+}
+
 // --- nodes ----------------------------------------------------------------
 
 func healthyNode(name string) *corev1.Node {

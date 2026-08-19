@@ -426,6 +426,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once, so a change that made the join depend on the zone would fail
   rather than silently stop matching.
 
+- `triage delta` (and therefore `scan`, `health`, and `bundle`) now
+  reports **CronJobs whose schedule said to run and whose status says
+  they did not** — `cron.missed`, critical once three activations in a
+  row are gone. A wedged schedule is invisible in every other view: the
+  CronJob object looks fine, there are no failing pods to find, and the
+  only evidence is a `lastScheduleTime` that stopped advancing. The
+  finding carries the activation it expected, how many it has missed,
+  and which anchor that count was measured from (`last_schedule`, or
+  `creation` for a CronJob that has never run). `--cron-grace`
+  (default 5m) absorbs normal controller scheduling latency.
+
+  Past 100 missed starts the finding changes its reason to
+  `ScheduleAbandoned` and says so in the message, because that is the
+  point where kube-controller-manager stops trying: with
+  `startingDeadlineSeconds` unset it refuses to schedule at all, and
+  the schedule does not recover without intervention. Reporting that
+  as "late" would leave the reader waiting for a run that is never
+  coming.
+
+  Suspended CronJobs are deliberately **not** reported here. `suspend:
+  true` is a standing state that never self-clears, which makes it
+  posture rather than an incident (#293).
+
+  This is the scan-path twin of the `workload` sentinel's
+  `workload.cron_missed`, and the two now share one parser — the new
+  `pkg/cronsched`, wrapping `robfig/cron/v3`, which is the same parser
+  the upstream CronJob controller uses. That is a correctness
+  property, not a convenience: a claim that a controller missed a
+  window is only sound if "window" means what the controller means by
+  it, down to the day-of-month/day-of-week OR rule and DST. The
+  package embeds `time/tzdata` so `spec.timeZone` resolves without
+  depending on a zoneinfo database in the base image.
+
 ### Fixed
 
 - `stab drift` no longer invents drift on a cluster that has no GitOps
