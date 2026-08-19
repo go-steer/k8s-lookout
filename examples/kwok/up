@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Install the kwok controller into the CURRENT cluster, so fake nodes
+# can be added alongside the real kind ones.
+#
+# This is deliberately ADDITIVE. kwok's shipped config sets
+#
+#   manageNodesWithAnnotationSelector: kwok.x-k8s.io/node=fake
+#
+# so the controller only ever touches nodes that opt in by annotation.
+# The three real kind nodes keep their real kubelets, the sentinel and
+# the demo app keep running on them, and every examples/scenarios/
+# script behaves exactly as before. Nothing here replaces kind — it
+# adds a second, free tier of nodes next to it.
+#
+# What lands in the cluster:
+#   1. kwok.yaml        — CRDs, RBAC, and the kwok-controller Deployment
+#   2. stage-fast.yaml  — the default pod/node lifecycle Stages (a pod
+#                         assigned to a fake node goes Running/Ready
+#                         immediately; a fake node heartbeats)
+#   3. metrics-usage.yaml (--metrics) — ResourceUsage + Metric CRs that
+#                         serve a synthetic /metrics/resource per fake
+#                         node, driven by the pod's kwok.x-k8s.io/usage-*
+#                         annotations
+#
+# Flags:
+#   --metrics   also install the resource-usage metrics simulation.
+#               Off by default: metrics-server has to reach the fake
+#               kubelet endpoint the kwok controller serves, which does
+#               not work on every runtime — see README § Metrics.
+#
+# Env:
+#   KWOK_VERSION   kwok release to install (default v0.8.0)
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+
+with_metrics=false
+[[ "${1:-}" == "--metrics" ]] && with_metrics=true
+
+command -v kubectl >/dev/null 2>&1 || {
+  echo "ERROR: kubectl not found on PATH" >&2
+  exit 1
+}
+
+echo "▸ installing kwok $KWOK_VERSION (CRDs, RBAC, controller)"
+kubectl apply -f "${KWOK_RELEASE_URL}/kwok.yaml"
+
+echo "▸ default lifecycle stages (pod fast-forward + node heartbeat)"
+kubectl apply -f "${KWOK_RELEASE_URL}/stage-fast.yaml"
+
+echo "▸ node-failure stages (node-fail / node-heal)"
+kubectl apply -f "$(kwok_root)/stages/"
+
+if $with_metrics; then
+  echo "▸ resource-usage metrics simulation"
+  kubectl apply -f "${KWOK_RELEASE_URL}/metrics-usage.yaml"
+fi
+
+echo "▸ waiting for kwok-controller"
+kubectl -n kube-system rollout status deploy/kwok-controller --timeout=180s
+
+# The whole safety argument rests on this one setting: assert it rather
+# than trust it. A controller that manages ALL nodes would start
+# writing status onto the real kind nodes and fight their kubelets.
+echo "▸ verifying the controller is annotation-scoped (real nodes untouched)"
+if ! kubectl -n kube-system get cm kwok -o jsonpath='{.data.kwok\.yaml}' 2>/dev/null \
+  | grep -q "manageNodesWithAnnotationSelector: *['\"]\?${FAKE_NODE_ANNOTATION}=${FAKE_NODE_ANNOTATION_VALUE}"; then
+  echo "ERROR: kwok-controller is not scoped to ${FAKE_NODE_ANNOTATION}=${FAKE_NODE_ANNOTATION_VALUE}." >&2
+  echo "Refusing to leave it running against the real kind nodes." >&2
+  echo "Inspect: kubectl -n kube-system get cm kwok -o yaml" >&2
+  exit 1
+fi
+
+echo
+echo "kwok is up. The real nodes are unchanged:"
+kubectl get nodes
+echo
+echo "Next: examples/kwok/scale-up [nodes] [workloads] [replicas]"

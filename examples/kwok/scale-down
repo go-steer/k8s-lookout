@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Remove the synthetic fleet and the fake nodes, leaving the kwok
+# controller installed and the real kind cluster exactly as it was.
+#
+# Deletes only what scale-up created: namespaces carrying the fleet
+# label, and nodes carrying type=kwok. Real nodes have neither, so
+# there is no path from here to touching one.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+
+echo "▸ deleting the synthetic fleet"
+kubectl delete namespace -l "$FLEET_LABEL" --wait=false >/dev/null 2>&1 || true
+
+# Namespaces first, nodes second, and in that order deliberately: kwok
+# only completes a pod deletion for a node it still manages. Delete the
+# nodes first and every pod on them hangs Terminating until the pod GC
+# controller reaps it.
+echo "▸ waiting for the fleet namespaces to finish terminating"
+deadline=$((SECONDS + 300))
+while :; do
+  left="$(kubectl get namespace -l "$FLEET_LABEL" -o name 2>/dev/null | grep -c . || true)"
+  ((left == 0)) && break
+  if ((SECONDS >= deadline)); then
+    echo
+    echo "  ⚠ $left namespace(s) still terminating after 300s" >&2
+    break
+  fi
+  printf '\r  … %s remaining ' "$left"
+  sleep 5
+done
+printf '\r  ✓ fleet gone          \n'
+
+echo "▸ deleting fake nodes"
+count="$(fake_node_count)"
+if ((count > 0)); then
+  kubectl delete nodes -l "$FAKE_NODE_LABEL" --wait=false >/dev/null
+  echo "  ✓ $count fake nodes deleted"
+else
+  echo "  (none)"
+fi
+
+# Put kindnet's memory limit back exactly as scale-up found it. Nothing
+# else in this layer reaches outside the fake fleet, so nothing else
+# needs undoing here.
+original="$(kubectl -n kube-system get ds kindnet \
+  -o "jsonpath={.metadata.annotations['${KINDNET_LIMIT_ANNOTATION//./\\.}']}" 2>/dev/null || true)"
+if [[ -n "$original" ]]; then
+  echo "▸ restoring kindnet's memory limit to $original"
+  kubectl -n kube-system set resources ds kindnet --limits="memory=${original}" >/dev/null
+  kubectl -n kube-system annotate ds kindnet "${KINDNET_LIMIT_ANNOTATION}-" >/dev/null
+fi
+
+echo
+kubectl get nodes

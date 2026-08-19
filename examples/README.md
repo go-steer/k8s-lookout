@@ -20,6 +20,7 @@ examples/
 ├── sentinel/        # sentinel + stub daemon deploy (uses deploy/ manifests unmodified)
 ├── workloads/       # the lookout-demo baseline app: web, api(+PDB), worker, vantage
 ├── scenarios/       # one dir per failure: README + inject / verify / revert
+├── kwok/            # + hundreds of fake nodes on the same cluster: scale, bench, mass node failure
 ├── e2e              # driver: inject → verify → revert per scenario, PASS/FAIL summary
 ├── lib.sh           # shared helpers (context guard, wire/read-path await)
 ├── agent-harness.md # testing the CLI via skills / MCP in Claude, core-agent, etc.
@@ -78,6 +79,28 @@ Three surfaces to verify on, weakest to strongest:
 
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
+
+## The scale tier
+
+Every scenario above runs on two real workers and ~10 pods, which is
+the right size for asserting *what* lookout reports and no size at all
+for asserting what it costs. [`kwok/`](kwok/) adds hundreds of fake
+nodes to the same cluster — kubelets simulated, control plane real —
+so the read path can be timed at 300 nodes and thirty nodes can lose
+their kubelet in the same second:
+
+```sh
+examples/kwok/up                    # kwok controller, annotation-scoped to fake nodes
+examples/kwok/scale-up 300 400 3    # 300 fake nodes, 400 workloads, 1000 pods
+examples/kwok/bench                 # every read command, against its own --timeout default
+examples/kwok/node-fail 30          # the storm drill kind cannot run
+examples/kwok/down                  # remove the layer; the real cluster is untouched
+```
+
+It is additive, not a replacement: kubelet-observed event grammar
+(`BackOff`, `ErrImagePull`, `FailedMount`, `OOMKilled`) is not faithful
+on a simulated kubelet, so those scenarios stay on kind. See
+[`kwok/README.md`](kwok/README.md) for the full split.
 
 ## CI
 

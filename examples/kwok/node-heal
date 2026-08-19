@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Undo examples/kwok/node-fail: hand every failed fake node back to
+# kwok's normal lifecycle stages, which rebuild its status and return
+# it to Ready.
+#
+# This is the recovery half of the drill, and the interesting half: the
+# sentinel's closed loop should emit the resolved/reverted signal for
+# the node_notready incidents raised by node-fail, and `lookout health`
+# should return the nodes category to healthy — without an agent
+# polling for it.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+require_kwok_installed
+
+mapfile -t failed < <(
+  kubectl get nodes -l "$FAILED_NODE_LABEL" -o name 2>/dev/null | sed 's|^node/||'
+)
+
+if ((${#failed[@]} == 0)); then
+  echo "No failed fake nodes — nothing to heal."
+  exit 0
+fi
+
+# Dropping the label stops lookout-node-unreachable matching, which
+# hands the node back to kwok's own node-initialize stage — it selects
+# every node that is not Ready, so it rebuilds the full healthy status
+# and the heartbeat resumes from there. There is no separate recovery
+# Stage; see stages/node-unreachable.yaml.
+echo "▸ restarting the simulated kubelet on ${#failed[@]} node(s)"
+kubectl label node "${failed[@]}" "${FAILED_NODE_LABEL%%=*}-" >/dev/null
+
+echo "▸ waiting for them to return Ready"
+if kubectl wait --for=condition=Ready node "${failed[@]}" --timeout=300s >/dev/null 2>&1; then
+  echo "  ✓ ${#failed[@]} nodes Ready"
+else
+  echo "  ⚠ not all nodes returned Ready within 300s" >&2
+fi
+
+echo
+kubectl get nodes -l "$FAKE_NODE_LABEL" --no-headers \
+  | awk '{print $2}' | sort | uniq -c | sed 's/^/  /'
