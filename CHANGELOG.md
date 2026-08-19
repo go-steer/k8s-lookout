@@ -491,7 +491,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim: availability, probe, and placement claims are meaningless for
   a batch pod that serves no traffic.
 
+- **What lookout detects** — a new docs-site section, one coverage page
+  per mode, answering "what does this thing actually look for" without
+  reading thirty reference pages. The information existed; it was
+  scattered across the reference section, the flat kind catalogs, and
+  one page filed under Getting started, organized by output vocabulary
+  rather than by the three things people actually run.
+
+  [`lookout scan`](https://go-steer.github.io/k8s-lookout/detect/scan/)
+  and [`lookout audit`](https://go-steer.github.io/k8s-lookout/detect/audit/)
+  are generated from the same declarations as `--help`: scan's page
+  from its own declared composition (stage 1, the edge drill-down, and
+  what each `--include` group adds), audit's from its registry group,
+  both with every kind, severity and claim in a table. Neither can go
+  stale — a check added to a stage appears on the page with no
+  metadata to remember. Each carries a hand-written preamble, and the
+  [overview](https://go-steer.github.io/k8s-lookout/detect/) states the
+  split the three modes make: an incident clears itself when fixed,
+  a posture claim never self-clears, and a leading indicator means
+  nothing is broken yet.
+
+  The sentinel's coverage map moved here from Getting started as
+  [The sentinel](https://go-steer.github.io/k8s-lookout/detect/sentinel/);
+  its old URL redirects. Getting started now opens with the two
+  commands that take no arguments and need nothing deployed, which is
+  the shortest honest path from "I have a kubeconfig" to output.
+
 ### Fixed
+
+- "What the sentinel watches" is a complete coverage map again. The
+  page is the one hand-written enumeration of the detection surface —
+  everything else that lists it is generated — and it had fallen three
+  sources behind: `autoscaling` (HPAs pinned at max, dead metrics
+  pipelines), `ingress` (ingress-gce Sync/Translate/NEG programming
+  failures), and `gateway` (Gateway API `Programmed=False` and
+  rejected routes) were all auto-enabled in the shipped deployment and
+  named nowhere on the page. Node pressure and eviction bursts, also
+  unlisted, now have a row too. Alongside them: the signal-kind count
+  read 32 against a frozen ledger of 48, the intro said two sources
+  stay explicit-only when `notifications` makes three, and both the
+  startup-block sample and the strict `--sources` list disagreed with
+  what the binary and `deploy/51` actually do.
+
+  Three tests now hold the page to the registry: every entry in
+  `knownSources` must have a table row, the prose kind count must
+  equal `len(schema.Kinds())`, and the intro's "three of the fourteen"
+  must match `knownSources` minus the auto candidates. The sitedoc
+  drift test cannot cover this page — it is narrative rather than a
+  render of a declaration — so what goes stale on its own is asserted
+  and the prose is left to the author.
 
 - `stab drift` no longer invents drift on a cluster that has no GitOps
   controller. Two independent bugs, both found by running `lookout
