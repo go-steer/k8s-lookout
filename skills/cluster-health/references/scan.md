@@ -116,6 +116,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
@@ -296,6 +297,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `eligible_nodes` | nodes satisfying the workload's REQUIRED placement constraint; an upper bound, since taints and cordons are not subtracted |
 | `cluster_nodes` | nodes in the cluster, so `eligible_nodes` reads as a fraction |
 | `constraint` | the label and field keys that narrow placement, sorted and capped at 8 |
+| `suspended_for` | how long spec.suspend has been true, rounded to whole days |
+| `suspended_since` | when the suspension is estimated to have started, RFC 3339 |
 | `pdbs` | summary note: PodDisruptionBudgets seen in scope |
 | `hpas` | summary note: HorizontalPodAutoscalers seen in scope |
 | `cidr` | the range's CIDR block |

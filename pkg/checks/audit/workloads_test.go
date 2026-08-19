@@ -508,7 +508,10 @@ func TestWorkloadsScopeErrors(t *testing.T) {
 		{"no-scope", nil, "no scope"},
 		{"A-with-workload", []string{"-A", "--workload=Deployment/prod/checkout"}, "does not combine"},
 		{"contradictory-namespace", []string{"--namespace=batch", "--workload=Deployment/prod/checkout"}, "contradicts"},
-		{"unsupported-kind", []string{"--workload=CronJob/prod/nightly"}, "unsupported workload kind"},
+		// A Job owns a pod template but is a one-shot: none of the
+		// standing claims here mean anything for it.
+		{"unsupported-kind", []string{"--workload=Job/prod/migrate"}, "unsupported workload kind"},
+		{"negative-cron-suspended", []string{"-A", "--cron-suspended=-1h"}, "--cron-suspended must not be negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := checktest.Run(t, audit.WorkloadsCommand(testDeps(postureCluster()...)), tc.args...)
