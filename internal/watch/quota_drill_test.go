@@ -215,6 +215,25 @@ func waitInjects(t *testing.T, dd *drillDaemon, want int, what string) []string 
 	return nil
 }
 
+// waitSession polls until key is bound to a session (or fails the test
+// after 10s). Observing an inject at the drill daemon does NOT mean the
+// binding is readable: waitInjects watches the daemon's HTTP capture,
+// while the dispatch loop records the returned session id into dedup
+// afterwards. Reading LookupSession straight after waitInjects races
+// that write and fails roughly one run in twenty.
+func waitSession(t *testing.T, dc *engine.DedupCache, key engine.EventKey, what string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if sid, ok := dc.LookupSession(key); ok && sid != "" {
+			return sid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("waiting for %s: %+v never bound to a session after 10s", what, key)
+	return ""
+}
+
 func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-second wall-clock drill; skipped under -short")
@@ -349,10 +368,9 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 
 	// The critical incident's bound session (fake daemon session ids
 	// are deterministic: sess-x, sess-xx, ...).
-	criticalSid, ok := dedup.LookupSession(engine.EventKey{UID: "quota:CPUS/us-east1", Reason: quota.Reason})
-	if !ok || criticalSid == "" {
-		t.Fatal("critical quota incident has no bound session")
-	}
+	criticalSid := waitSession(t, dedup,
+		engine.EventKey{UID: "quota:CPUS/us-east1", Reason: quota.Reason},
+		"the critical quota incident's session binding")
 
 	// --- Step 3: the reactive GCE_QUOTA_EXCEEDED scaleup failure
 	// joins the OPEN session instead of opening a second one. ---
