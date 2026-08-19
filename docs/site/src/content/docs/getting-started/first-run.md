@@ -11,19 +11,46 @@ watches.
 
 ## Start here: `lookout scan`
 
-If you know something is wrong but not what, this is the first call.
-No target, no flags, nothing deployed:
+If you know something is wrong but not what, this is the first call. It
+runs every target-free incident check in one invocation — broken
+workloads, dead admission webhooks, stuck volumes and PVCs, rejected
+Gateway routes, config drift — then drills into the dependency edges of
+whatever it flagged. No target, no flags, nothing deployed:
 
 ```sh
 lookout scan
 ```
 
-It runs every target-free incident check in one invocation — broken
-workloads, dead admission webhooks, stuck volumes and PVCs, rejected
-Gateway routes, config drift — then drills into the dependency edges of
-whatever it flagged. Every finding is stamped `check=<command>`, which
-is also the command to run for the detail behind it, so the output is
-both a worklist and a set of next moves.
+```console
+kind=pod.imagepull severity=critical namespace=lookout-demo kind_of_object=Pod name=api-f599769c4-swfxx reason=ErrImagePull message="failed to pull and unpack image \"ghcr.io/go-steer/lookout-examples-nosuch:v0\"…" fingerprint=sha256:e95154c7… check="triage delta" container=api image=ghcr.io/go-steer/lookout-examples-nosuch:v0
+kind=pod.restarts severity=warning namespace=lookout-demo kind_of_object=Pod name=worker-7cd49696bf-9sbf5 reason=ExcessiveRestarts fingerprint=sha256:e094a6ee… check="triage delta" container=worker restarts=6
+kind=workload.rollout severity=critical namespace=lookout-demo kind_of_object=Deployment name=worker reason=RolloutIncomplete fingerprint=sha256:f954cac0… check="triage delta" desired=1 ready=0 updated=1 available=0
+…
+kind=crd.unavailable severity=info reason=APIGroupNotServed message="Gateway API is not installed: the gateway.networking.k8s.io/v1 API group is not served by this cluster…" check="state gateway" api_group=gateway.networking.k8s.io/v1
+kind=cloud.unavailable severity=info reason=CapabilityUnavailable message="state wi needs the provider workload-identity capability: no cloud provider configured" check="state wi" capability=workload-identity provider=none
+kind=edge.missing_ref severity=critical namespace=lookout-demo kind_of_object=ConfigMap name=missing-config reason=FailedMount message="configmap missing-config not found (volume config)" check="state edges" workload=Deployment/lookout-demo/mounter volume=config pods=1
+scanned=330 findings=9 elapsed=442ms unavailable="state gateway,state wi" detection=none detection_reason=no-majority-manager candidate=kubectl-client-side-apply share=45% checks=7 skipped=audit,cloud,perf drilldown=3
+```
+
+(Real output against a kind cluster with three faults staged, abridged.)
+One call, and four things are visible that no single command would have
+given you:
+
+- **Stage 1 named the incidents** — a bad image tag, a container
+  restarting, the rollouts those two are holding up. Every finding is
+  stamped `check=<command>`, which is also the command to run for the
+  detail behind it, so the output is both a worklist and a set of next
+  moves.
+- **Stage 2 drilled in.** `drilldown=3` means three flagged workloads
+  had their dependency edges verified, which is where
+  `edge.missing_ref` came from: nothing in stage 1 knew *why* `mounter`
+  could not start, and the answer is a ConfigMap that does not exist.
+- **What could not run said so.** No Gateway API CRDs and no cloud
+  provider, both reported as `info` findings and rolled up into
+  `unavailable=` — an empty scan means "nothing is wrong", never
+  "nothing ran".
+- **`skipped=audit,cloud,perf`** names the groups that are off by
+  default, so they stay discoverable while off.
 
 [What `lookout scan` finds](/detect/scan/) lists every check it runs and
 every kind it can emit, grouped by stage.
@@ -36,12 +63,23 @@ when fixed. The posture sweep is one flag away —
 lookout audit workloads -A
 ```
 
-That answers a different question — *what has no safety net while it is
-still healthy* — and [What `lookout audit` checks](/detect/audit/) is
-its coverage map.
+```console
+kind=audit.no_pdb severity=warning namespace=lookout-demo kind_of_object=Deployment name=web reason=NoPodDisruptionBudget message="2 replicas and no PodDisruptionBudget selecting them: the eviction API will let a drain or upgrade take all 2 at once" fingerprint=sha256:7fe356f9… replicas=2 namespace_pdbs=1
+kind=audit.single_replica severity=warning namespace=lookout-demo kind_of_object=Deployment name=worker reason=SingleReplica message="spec.replicas=1: a node drain, upgrade, or eviction takes the workload fully down, and no PodDisruptionBudget can prevent that" fingerprint=sha256:8a0b879a… replicas=1
+kind=audit.no_spread severity=info namespace=lookout-demo kind_of_object=Deployment name=api reason=NoTopologySpread message="2 replicas with no topologySpreadConstraints and no pod anti-affinity: nothing in the spec stops the scheduler putting them all on one node…" fingerprint=sha256:994489a9… replicas=2
+…
+scanned=8 findings=19 elapsed=281ms pdbs=1 hpas=0 nodes=3 workloads=6/0/2/0
+```
 
-The rest of this page is the individual commands behind those two, with
-real captured output.
+That answers a different question — *what has no safety net while it is
+still healthy*. Note what it did **not** say: none of these workloads is
+unhealthy, and none of these findings will clear on its own. `web` has
+two replicas and no budget protecting them — `namespace_pdbs=1` says the
+namespace has a PDB, just not one selecting `web`, which is the mistake
+worth catching. [What `lookout audit` checks](/detect/audit/) is its
+coverage map.
+
+The rest of this page is the individual commands behind those two.
 
 ## "Any issues with this cluster?"
 
