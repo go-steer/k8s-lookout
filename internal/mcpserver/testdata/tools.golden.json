@@ -1,6 +1,7 @@
 [
   {
     "annotations": {
+      "idempotentHint": false,
       "readOnlyHint": true
     },
     "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): target — the positional argument as received; grace — the parsed --grace value.",
@@ -76,6 +77,7 @@
   },
   {
     "annotations": {
+      "idempotentHint": false,
       "readOnlyHint": true
     },
     "description": "Emit synthetic findings to exercise the §4.2 envelope; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): index — 1-based ordinal of the synthetic finding.",
