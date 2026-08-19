@@ -62,6 +62,6 @@ body:
     id: version
     attributes:
       label: Version
-      placeholder: v0.21.0
+      placeholder: v0.22.0
     validations:
       required: true

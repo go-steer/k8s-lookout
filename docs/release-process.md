@@ -24,6 +24,12 @@ wrong flavor with nothing to catch it.
    - `docs/site/src/content/docs/getting-started/deploy.md`: bump the
      `?ref=vX.Y.Z` in the `kubectl apply -k` line, and the
      `--version X.Y.Z` + `charts/lookout:X.Y.Z` in the Helm block.
+     `grep -rn 'v\?X\.Y\.(Z-1)' --include='*.md' --include='*.yaml'`
+     catches the rest — the ServiceMonitor `?ref=` in
+     `operations/observability.md`, the `image.tag` example in
+     `deploy/chart/values.yaml`, the issue-template placeholders.
+     Files under `docs/assessments/` and `docs/milestones/` are dated
+     records and stay as written.
 2. **Tag**: `git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
 3. **The workflow does the rest** (`.github/workflows/release-images.yml`):
    - preflight: deploy/51 pin == tag;
