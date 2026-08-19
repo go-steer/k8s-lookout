@@ -51,7 +51,7 @@ echo "  ✓ no wired-* service reported"
 # at which point these become hard assertions.
 # ---------------------------------------------------------------------------
 
-# GAP 1 — a bare `scan` never sees this. Stage 2 drills only into
+# GAP 1 (#331) — a bare `scan` never sees this. Stage 2 drills only into
 # workloads stage 1 already flagged, and all twelve Deployments here are
 # Available with every pod Running: `drilldown=0`. Three services
 # routing nowhere behind twelve healthy workloads is precisely the
@@ -61,7 +61,7 @@ echo "  ✓ no wired-* service reported"
 echo "▸ gap 1: bare scan reaches the broken services"
 soft await_finding 60 'unplugged-0' -- scan --namespace="$NS"
 
-# GAP 2 — `edge.selector_empty` is documented as "a Service selector
+# GAP 2 (#332) — `edge.selector_empty` is documented as "a Service selector
 # aimed at THIS workload selects zero pods", and the intent heuristic
 # (edges_checks.go, selectorIntends) tests only that the selector's
 # label KEYS exist among the workload's pod labels — values are not

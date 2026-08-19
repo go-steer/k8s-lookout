@@ -44,9 +44,11 @@ before it asserts anything about lookout.
 Both were found by running it, both are product defects rather than
 fixture problems, and both are `soft` in `verify` — a driver that goes
 red on a known defect stops being a signal. They become hard assertions
-when the defects are fixed.
+when the defects are fixed. Filed as
+[#331](https://github.com/go-steer/k8s-lookout/issues/331) and
+[#332](https://github.com/go-steer/k8s-lookout/issues/332).
 
-**A bare `scan` never sees this.** Stage 2 drills only into workloads
+**A bare `scan` never sees this (#331).** Stage 2 drills only into workloads
 stage 1 already flagged, and all twelve Deployments here are Available
 with every pod Running, so `drilldown=0` and `scan` reports nothing.
 Three Services routing nowhere behind twelve healthy workloads is
@@ -55,7 +57,7 @@ the entry point for. It does surface under `--include=all`, but only as
 a side effect: the posture checks flag every workload at warning, and
 *that* is what triggers the drill-down.
 
-**`edge.selector_empty` misattributes.** The kind is documented as *"a
+**`edge.selector_empty` misattributes (#332).** The kind is documented as *"a
 Service selector aimed at **this workload** selects zero pods"*, and
 the intent heuristic (`selectorIntends` in
 `pkg/checks/state/edges_checks.go`) tests only that the selector's
