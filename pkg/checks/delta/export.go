@@ -45,11 +45,14 @@ type Config struct {
 	PendingAge time.Duration
 	// QuotaWarn is the used/hard percentage that warns (default 90).
 	QuotaWarn int
+	// CronGrace is how late a CronJob activation may be before it
+	// counts as missed (default 5m).
+	CronGrace time.Duration
 }
 
 // thresholds applies the flag defaults to zero fields.
 func (c Config) thresholds() thresholds {
-	th := thresholds{restarts: c.Restarts, pendingAge: c.PendingAge, quotaWarn: c.QuotaWarn}
+	th := thresholds{restarts: c.Restarts, pendingAge: c.PendingAge, quotaWarn: c.QuotaWarn, cronGrace: c.CronGrace}
 	if th.restarts == 0 {
 		th.restarts = 5
 	}
@@ -58,6 +61,9 @@ func (c Config) thresholds() thresholds {
 	}
 	if th.quotaWarn == 0 {
 		th.quotaWarn = 90
+	}
+	if th.cronGrace == 0 {
+		th.cronGrace = 5 * time.Minute
 	}
 	return th
 }
@@ -71,6 +77,7 @@ type Objects struct {
 	StatefulSets []appsv1.StatefulSet
 	DaemonSets   []appsv1.DaemonSet
 	Jobs         []batchv1.Job
+	CronJobs     []batchv1.CronJob
 	Nodes        []corev1.Node
 	PDBs         []policyv1.PodDisruptionBudget
 	Quotas       []corev1.ResourceQuota
@@ -118,6 +125,7 @@ func ScanObjects(now time.Time, cfg Config, objs Objects) []emit.Finding {
 	s.checkPods(objs.Pods)
 	s.checkWorkloads(objs.Deployments, objs.StatefulSets, objs.DaemonSets, objs.SystemAddons)
 	s.checkJobs(objs.Jobs)
+	s.checkCronJobs(objs.CronJobs)
 	if objs.SystemAddons {
 		s.checkSystem(objs.Deployments, objs.DaemonSets)
 	}

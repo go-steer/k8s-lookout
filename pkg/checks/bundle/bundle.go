@@ -516,6 +516,8 @@ func deltaObjectsFor(obj any, pods []*corev1.Pod) delta.Objects {
 		objs.DaemonSets = []appsv1.DaemonSet{*o}
 	case *batchv1.Job:
 		objs.Jobs = []batchv1.Job{*o}
+	case *batchv1.CronJob:
+		objs.CronJobs = []batchv1.CronJob{*o}
 	}
 	return objs
 }

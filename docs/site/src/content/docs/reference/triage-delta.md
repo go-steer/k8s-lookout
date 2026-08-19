@@ -23,6 +23,7 @@ lookout triage delta [flags]
 | `--restarts` | int | `5` | flag containers restarted at least this many times |
 | `--pending-age` | duration | `5m` | flag Pending pods older than this; also the grace before a not-ready container in a Running pod is flagged |
 | `--quota-warn` | int | `90` | warn when a ResourceQuota resource reaches this percent of its hard limit (the hard limit itself is always critical) |
+| `--cron-grace` | duration | `5m` | how late a CronJob activation may be before it counts as missed; absorbs normal controller scheduling latency |
 
 ## Common flags (every `lookout` command)
 
@@ -56,6 +57,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `workload.stalled` | critical | a Deployment's Progressing condition is False: the rollout has given up |
 | `workload.rollout` | critical, warning | replicas are short of desired; critical when nothing is serving at all |
 | `job.failed` | warning | a Job's Failed condition is set |
+| `cron.missed` | critical, warning | an unsuspended CronJob's schedule said to run more than --cron-grace ago and status says it did not; critical once several activations in a row are gone |
+| `cron.unparseable` | warning | a CronJob's spec.schedule could not be parsed, so its activations cannot be judged at all |
 | `node.notready` | critical | the node's Ready condition is not True |
 | `node.pressure` | critical | the node reports Memory/Disk/PID pressure |
 | `node.condition` | critical, warning | a non-standard node condition is True — NPD and its cousins publish problems that way |
@@ -83,6 +86,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `updated` | updated-to-current-revision count from status |
 | `available` | available count from status |
 | `failed` | failed pod count of a Job |
+| `schedule` | a CronJob's spec.schedule |
+| `expected` | the activation a CronJob should have run and did not |
+| `missed_runs` | activations missed since the anchor; ≥N when the walk was capped |
+| `anchor` | what the missed count was measured from: last_schedule or creation |
+| `time_zone` | a CronJob's spec.timeZone, when set |
+| `last_schedule` | a CronJob's status.lastScheduleTime, or never |
+| `active_jobs` | Jobs a CronJob still has running |
 | `condition` | node condition type that is abnormal |
 | `taint` | taint key indicating reclaim/drain |
 | `pods` | pods affected (behind a cordoned node or a PDB) |

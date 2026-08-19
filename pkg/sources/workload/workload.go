@@ -36,11 +36,11 @@
 //     at CriticalMisses — one miss is a hiccup, three is an outage of
 //     the schedule.
 //
-// Schedules are parsed with github.com/robfig/cron/v3 — the same
-// parser the upstream CronJob controller uses — honoring
-// spec.timeZone via the CRON_TZ prefix exactly as upstream does. A
-// spec the API server accepted but this parser rejects is skipped
-// with one loud log line per CronJob generation (§2: never silent).
+// Schedules are resolved by pkg/cronsched, which wraps the same
+// parser the upstream CronJob controller uses and honors
+// spec.timeZone exactly as upstream does. A spec the API server
+// accepted but that parser rejects is skipped with one loud log line
+// per CronJob generation (§2: never silent).
 //
 // Transition-based, arm-after-sync (the objectstate discipline): the
 // initial LIST populates state without emitting, so Jobs that failed
@@ -77,7 +77,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,6 +84,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/go-steer/k8s-lookout/pkg/cronsched"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
@@ -530,13 +530,11 @@ func (s *Source) trackFor(uid types.UID) *cronTrack {
 
 // ---- the miss sweep ----
 
-// cronSpec renders the robfig parse input, honoring spec.timeZone via
-// the CRON_TZ prefix exactly as the upstream controller does.
-func cronSpec(schedule, timeZone string) string {
-	if timeZone != "" {
-		return "CRON_TZ=" + timeZone + " " + schedule
-	}
-	return schedule
+// specKey identifies a revision of a CronJob's schedule, so the
+// unparseable-spec warning fires once per revision rather than once
+// per sweep.
+func specKey(schedule, timeZone string) string {
+	return schedule + "\x00" + timeZone
 }
 
 // sweep judges every CronJob's schedule. Returns the signals to emit
@@ -565,15 +563,15 @@ func (s *Source) evalCron(uid types.UID, e *cronEntry, now time.Time) *engine.Si
 		return nil // deliberate operator state, never a miss
 	}
 	tr := s.trackFor(uid)
-	spec := cronSpec(e.schedule, e.timeZone)
-	sched, err := cron.ParseStandard(spec)
+	key := specKey(e.schedule, e.timeZone)
+	sched, err := cronsched.Parse(e.schedule, e.timeZone)
 	if err != nil {
 		// The API server accepted a spec this parser rejects —
 		// near-impossible (both use the same grammar), but §2 forbids
 		// silence. One line per revision of the spec.
-		if tr.parseWarned != spec {
-			tr.parseWarned = spec
-			log.Printf("workload: CronJob %s/%s schedule %q unparseable (%v) — cron_missed detection disabled for it", e.namespace, e.name, spec, err)
+		if tr.parseWarned != key {
+			tr.parseWarned = key
+			log.Printf("workload: CronJob %s/%s schedule %q (timeZone %q) unparseable (%v) — cron_missed detection disabled for it", e.namespace, e.name, e.schedule, e.timeZone, err)
 		}
 		return nil
 	}
@@ -594,8 +592,8 @@ func (s *Source) evalCron(uid types.UID, e *cronEntry, now time.Time) *engine.Si
 	if tr.lastMissed.After(anchor) {
 		anchor = tr.lastMissed
 	}
-	expected := sched.Next(anchor)
-	if expected.IsZero() || now.Before(expected.Add(s.cfg.Grace)) {
+	expected, overdue := sched.Overdue(anchor, now, s.cfg.Grace)
+	if !overdue {
 		return nil // nothing due yet (inside grace)
 	}
 	if !e.lastSchedule.Before(expected) {

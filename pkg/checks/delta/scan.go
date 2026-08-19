@@ -45,7 +45,7 @@ type scanner struct {
 // enabled classes and derives all findings from those lists.
 //
 // scanned counts the objects of the enabled classes: pods, apps
-// workloads, and Jobs for the pods class; Nodes for nodes; PDBs for
+// workloads, Jobs and CronJobs for the pods class; Nodes for nodes; PDBs for
 // pdb; kube-system Deployments/DaemonSets for system (unless the
 // pods class already counted them); ResourceQuotas for quota. A
 // list fetched only as auxiliary input (pods when just the nodes
@@ -92,9 +92,14 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		scanned += len(deps) + len(stss) + len(dss) + len(jobs)
+		cjs, err := listCronJobs(ctx, s.client, s.ns)
+		if err != nil {
+			return 0, nil, err
+		}
+		scanned += len(deps) + len(stss) + len(dss) + len(jobs) + len(cjs)
 		s.checkWorkloads(deps, stss, dss, systemOn)
 		s.checkJobs(jobs)
+		s.checkCronJobs(cjs)
 		if systemOn {
 			// checkSystem skips objects outside kube-system.
 			s.checkSystem(deps, dss)
@@ -245,6 +250,16 @@ func listJobs(ctx context.Context, c kubernetes.Interface, ns string) ([]batchv1
 		l, err := c.BatchV1().Jobs(ns).List(ctx, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("listing jobs: %w", err)
+		}
+		return l.Items, l.Continue, nil
+	})
+}
+
+func listCronJobs(ctx context.Context, c kubernetes.Interface, ns string) ([]batchv1.CronJob, error) {
+	return paged(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]batchv1.CronJob, string, error) {
+		l, err := c.BatchV1().CronJobs(ns).List(ctx, opts)
+		if err != nil {
+			return nil, "", fmt.Errorf("listing cronjobs: %w", err)
 		}
 		return l.Items, l.Continue, nil
 	})

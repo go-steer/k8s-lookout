@@ -50,13 +50,14 @@ func TestHealthyClusterEmitsNothing(t *testing.T) {
 		healthyNode("node-0"),
 		pdb("prod", "web-pdb", 1, 3, 2, 3),
 		quota("prod", "compute", map[string][2]string{"pods": {"10", "1"}}),
+		healthyCronJob("prod", "backup"),
 	)
 	res := checktest.Run(t, cmd)
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	// 1 pod + 2 deployments + 1 node + 1 pdb + 1 quota = 6.
-	if want := "scanned=6 findings=0 elapsed=100ms\n"; res.Stdout != want {
+	// 1 pod + 2 deployments + 1 node + 1 pdb + 1 quota + 1 cronjob = 7.
+	if want := "scanned=7 findings=0 elapsed=100ms\n"; res.Stdout != want {
 		t.Errorf("stdout = %q, want %q (healthy objects must emit nothing)", res.Stdout, want)
 	}
 }
