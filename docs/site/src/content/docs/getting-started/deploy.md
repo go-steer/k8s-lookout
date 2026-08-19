@@ -16,7 +16,7 @@ its bearer token):
 kubectl create namespace agent-triage
 kubectl -n agent-triage create secret generic lookout-watch-token \
   --from-literal=token="$WATCHER_TOKEN"
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.21.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.22.0"
 ```
 
 Pin `?ref=` to the release you are deploying — each tag's manifest
@@ -95,10 +95,10 @@ helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
 
 The chart version tracks the release, minus the `v` — chart `0.22.0`
 deploys `v0.22.0`. There is no compatibility matrix to consult because
-there is only one version line. (It reads a release ahead of the
-`?ref=` above on purpose: v0.22.0 is the first release that publishes a
-chart. Before that, `helm install lookout-watch deploy/chart` from a
-clone is the only route.) Verify it the same way you verify an image:
+there is only one version line. (v0.22.0 is the first release that
+publishes a chart; for anything earlier, `helm install lookout-watch
+deploy/chart` from a clone is the only route.) Verify it the same way
+you verify an image:
 
 ```sh
 cosign verify ghcr.io/go-steer/charts/lookout:0.22.0 \

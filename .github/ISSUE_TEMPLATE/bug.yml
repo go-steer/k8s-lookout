@@ -39,7 +39,7 @@ body:
       description: >-
         `lookout version` — it prints the version, commit and build date
         stamped in at release. Say "built from source at <sha>" if so.
-      placeholder: v0.21.0
+      placeholder: v0.22.0
     validations:
       required: true
 

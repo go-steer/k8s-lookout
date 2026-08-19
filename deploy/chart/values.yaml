@@ -26,7 +26,7 @@
 
 # -- Image. The default flavor links zero GCP SDKs. Project-tier
 # deployments that enable the quota source need the `-gke` flavor:
-# set `image.tag: v0.21.0-gke`, or `image.flavor: gke` to append the
+# set `image.tag: v0.22.0-gke`, or `image.flavor: gke` to append the
 # suffix to whatever appVersion the chart ships with.
 image:
   repository: ghcr.io/go-steer/lookout

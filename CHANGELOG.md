@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-19
+
+This release answers a question the tool could not previously be
+asked: "something is wrong with this cluster — what?" Thirty-odd
+commands each answered a specific question well, and every one of
+them assumed you already knew which question to ask. `lookout scan`
+takes no arguments, runs every target-free incident check into one
+envelope, then drills into the dependency edges of whatever it
+flagged. It composes the command **registry** rather than a
+hand-written list, so a check added after it was written cannot
+silently fall out of it — a contract test makes adding one without
+deciding whether a bare scan should run it fail CI.
+
+`scan` came out of `docs/assessments/`, a head-to-head assessment
+against k8sgpt that is now in the tree along with the response to it.
+Most of the rest of this release is the same document's other
+conclusions, shipped: the coverage gaps it named (`state gateway` for
+the Gateway API path end to end, `state storage` for why a PVC is
+still Pending, three more reference classes in `state edges`,
+`workload.replicafailure`, CronJobs left suspended long enough to
+have skipped runs), the discoverability gaps (a **What lookout
+detects** section on the docs site, one coverage page per mode, a
+machine-readable kind declaration behind them so the pages cannot
+drift from the code), and the adoption gaps (`--kubeconfig` and
+`--context` everywhere, MCP tool profiles, a Helm chart published as
+a signed OCI artifact, an SBOM attestation, the governance files a
+repository needs before anyone outside it can join, and
+`docs/adding-a-check.md` for what to do once they have).
+
+The Fixed section is longer than usual, and most of it is one kind of
+bug: something reporting what it had not actually established. The
+hand-written coverage map named 32 signal kinds against a ledger of
+48 and omitted three sources the shipped deployment auto-enables; the
+sentinel replayed the whole Event backlog as fresh findings on every
+restart; `stab drift` invented drift on clusters running no GitOps
+controller at all; `/readyz` reported a lifecycle phase in the field
+meant for a cluster name. The last two were found by running the
+thing against a live kind cluster and reading the output, which no
+amount of unit testing had done.
+
 ### Added
 
 - New command `scan` (MCP `k8s_scan`): the zero-argument entry point.

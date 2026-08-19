@@ -21,7 +21,7 @@ type: application
 
 # The chart version deliberately tracks the app version rather than
 # moving on its own. Two independent version lines would mean answering
-# "which chart ships v0.21.0?" from a compatibility matrix nobody
+# "which chart ships v0.22.0?" from a compatibility matrix nobody
 # maintains; one line means the answer is the version itself. It costs
 # a no-change chart release each cut, which is cheap.
 #
@@ -30,8 +30,8 @@ type: application
 # deploy/51-deployment-watcher.yaml. A cut that bumps one and forgets
 # the others fails before it can publish a chart that installs the
 # previous release.
-version: 0.21.0
-appVersion: "v0.21.0"
+version: 0.22.0
+appVersion: "v0.22.0"
 
 kubeVersion: ">=1.25.0-0"
 home: https://go-steer.github.io/k8s-lookout/
