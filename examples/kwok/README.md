@@ -221,8 +221,9 @@ the whole reason these live here rather than in `../scenarios/`.
 
 `node-storm` is the exception on both counts, and is opt-in for it: its
 entire claim is about what the sentinel **sends**, so it needs
-`examples/sentinel/up`, and it spends most of fifteen minutes waiting on
-the real taint manager and the real recovery window. It is also the one
+`examples/sentinel/up`, and it spends most of ten minutes letting the
+fleet go quiet before it marks the wire and then waiting on the real
+recovery window. It is also the one
 that found a product defect rather than confirming a behaviour: the wire
 used to answer a 30-node outage with thirty sessions while `lookout
 health` answered it in one line

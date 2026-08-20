@@ -23,9 +23,9 @@
 #
 # node-storm is the exception and is therefore opt-in: its whole claim
 # is about what the sentinel SENDS when a third of the fleet dies at
-# once, so it needs examples/sentinel/up, and it spends most of fifteen
-# minutes waiting on the real taint manager and the real recovery
-# window. Run it by name.
+# once, so it needs examples/sentinel/up, and it spends most of ten
+# minutes letting the fleet go quiet before it marks the wire and then
+# waiting on the real recovery window. Run it by name.
 #
 # Usage:
 #   examples/kwok/e2e                        # the default set, ordered

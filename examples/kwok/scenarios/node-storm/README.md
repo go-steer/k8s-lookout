@@ -13,10 +13,9 @@ examples/kwok/scenarios/node-storm/revert
 
 Unlike its four neighbours this one needs the sentinel deployed
 (`examples/sentinel/up`), and it is not in `examples/kwok/e2e`'s
-default set: it takes about fifteen minutes, most of it spent waiting
-for the real taint manager to evict pods on the real
-`tolerationSeconds` and then for `--recovery-stable-for` to clear
-them. Run it by name.
+default set: it takes about ten minutes, most of it spent letting the
+fleet go quiet before the wire is marked and then waiting for
+`--recovery-stable-for` to close the sessions again. Run it by name.
 
 ## Why this is the scale tier and not `examples/scenarios/`
 
@@ -34,7 +33,10 @@ from the single-node case in a way nobody had measured.
 ## What to expect
 
 **Detection.** All thirty node failures reach the wire, each naming its
-node, within about a minute.
+node, within about a minute — though only the first two per zone get
+an `objectstate.node_notready` inject of their own. The third forms the
+storm and the rest arrive as `storm.member`, so `verify` counts nodes
+across all three shapes.
 
 **The read path** summarizes the whole outage in one line:
 
@@ -50,10 +52,15 @@ takes nodes in name order, so a 30-node outage spans all three failure
 domains and each one groups:
 
 ```
-INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-0  affected_count=10
-INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-1  affected_count=10
-INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-2  affected_count=10
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-0  affected_count=3
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-1  affected_count=3
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-2  affected_count=3
 ```
+
+`affected_count=3` is the count at *formation*, not the final size:
+the storm opens on its third member and the remaining seven per zone
+attach afterwards as `storm.member` injects into the same session. Ten
+sessions for the whole outage, measured.
 
 This is what [#334](https://github.com/go-steer/k8s-lookout/issues/334)
 fixed, and this scenario is the measurement that found it. Before the
@@ -71,11 +78,20 @@ fallback. That one is covered by unit tests rather than by this drill,
 because kwok's nodes are labelled and the modelled zone key correctly
 wins here.
 
-The pod fallout correlates as it always did. About five minutes in the
-taint manager starts evicting, and the evicted pods — which share
-declared ancestors — form their own storms keyed on Deployment and
-Namespace. `verify` asserts that too: it is the control that says a
-zone storm is the correlator working, not the correlator over-grouping.
+**The workload fallout is reported, not asserted.** `verify` prints
+every storm key it saw and moves on. The eviction itself is real and
+reliable — 163 pods on the failed nodes, 86 left five minutes later —
+but it does not reliably produce an *incident*: fake nodes have no
+capacity pressure, so the replacement pods schedule onto the survivors
+at once and no Deployment misses its 600s `progressDeadlineSeconds`
+because of this drill. One run did emit two `progress_deadline` storms
+keyed on Namespace, from Deployments that were already mid-rollout when
+it started; the next run, identical command and fleet, emitted none.
+
+The claim this looks like it should be testing — a dead node's pods
+arrive as one storm, not thirty sessions — is DESIGN.md §7.5's, and
+`examples/scenarios/node-failure` asserts it deterministically on kind.
+Asserting it here again would only buy a flake.
 
 ## The closed loop, which passes
 
@@ -83,11 +99,12 @@ zone storm is the correlator working, not the correlator over-grouping.
 kubelets back, and recovery has to travel the whole way home on its
 own: the sentinel notices, holds the nodes for
 `--recovery-stable-for`, and injects into the sessions that already
-exist. Measured on a 30-node run: **48 `resolved` injects, every one
-`resolution=recovered`**, closing all thirty node sessions plus the pod
-storms, with zero new sessions and no agent polling. That measurement
-predates #334 — thirty node sessions was the state of the world then —
-and it is the half of this scenario that always worked.
+exist. Measured post-#334 on a 30-node run: **33 `resolved` injects,
+every one `resolution=recovered`**, naming all thirty nodes and closing
+the ten sessions the outage opened, with zero new sessions and no agent
+polling. The same measurement before #334 read 48 injects across thirty
+sessions — the grouping changed, the closed loop did not. This is the
+half of the scenario that always worked.
 
 ## Explore by hand
 
@@ -95,11 +112,14 @@ and it is the half of this scenario that always worked.
 kubectl -n agent-triage logs deploy/stub-daemon -f &   # the wire
 examples/kwok/node-fail 30
 
-# how many pages did one event produce?
+# how many pages did one event produce?  (10, not 30)
 kubectl -n agent-triage logs deploy/stub-daemon | grep -c SESSION-CREATE
 
-# what did the storms key on? (expect three Zone storms + pod fallout)
+# what did the storms key on?  (expect three Zone storms)
 kubectl -n agent-triage logs deploy/stub-daemon | grep 'kind=storm '
+
+# where did the other 24 nodes go?  (attached, not dropped)
+kubectl -n agent-triage logs deploy/stub-daemon | grep -c 'kind=storm.member '
 
 lookout health                       # one line, total=30
 lookout triage radius --node=kwok-node-0000
