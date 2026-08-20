@@ -128,6 +128,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running otherwise), every fake node is tainted, every fake pod is
   pinned, and teardown deletes only by those selectors.
 
+- **Storm correlation now groups simultaneous NODE failures** (#334).
+  §7.5's opening line — a node failure opening ~30 sessions for 30
+  evicted pods — is about the pods on *one* node, and the topology tier
+  has always answered it. The multi-node version had the opposite
+  answer: the `node-storm` fleet drill measured thirty nodes losing
+  their kubelet in the same second and thirty sessions opening, because
+  a Node's only blast-radius ancestor is itself, while `lookout health`
+  summarized the identical outage in one line. Two keys close that gap.
+
+  **Zone** (`ancestor_kind=Zone`) is now a storm key for **node**
+  incidents, ranked last so it can never outrank the node itself. The
+  topology graph has always derived a Zone node from
+  `topology.kubernetes.io/zone`; the resolver simply excluded it.
+  Pods are deliberately *not* offered their zone — they reach it
+  transitively through their node, and grouping on that would fold
+  every unrelated workload in a failure domain into one storm.
+
+  **Simultaneity** (`key_source=simultaneity`,
+  `ancestor_kind=Cluster`) is a fourth, last-resort tier for the fleets
+  that carry no zone labels at all — bare metal, kind, kwok. It groups
+  on *timing* rather than on a modelled relationship, which is the
+  weakest claim the correlator makes, so it is offered only to Node
+  incidents that nothing else groups and is deliberately expensive to
+  trigger: at least a fifth of the fleet, at least 3 nodes, all inside
+  20s rather than the 60s `--storm-window` (so a rolling upgrade
+  draining nodes one at a time never accumulates into a cluster-wide
+  page), and the storm expires after 5 idle minutes instead of 30. With
+  no fleet size available — before the topology index publishes its
+  first snapshot — it does not form at all. On by default, unlike
+  mining, because it groups a failure a human already calls one event;
+  `--storm-cluster-fallback=false` restores one session per node.
+
+  Wire: `StormPayload` gains `key_source` (last field, omitempty), set
+  only when the key did *not* come from the topology ancestor
+  relation — so `kind=storm` payloads for modelled keys are
+  byte-identical and the pinned wire shapes are unchanged. Recorded as
+  a dated amendment in `docs/signal-schema-v1.md`; `ancestor_kind` was
+  always an open object-class string, so `Zone` and `Cluster` are not a
+  v1 break either.
+
 ## [0.22.0] - 2026-08-19
 
 This release answers a question the tool could not previously be

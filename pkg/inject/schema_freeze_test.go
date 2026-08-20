@@ -87,11 +87,16 @@ var frozenFields = map[string][]string{
 		"name", "container", "uid", "fingerprint", "cluster", "first_seen",
 		"resolved_at", "cleared_after", "observed_stable_for", "resolution",
 		"reverted_after", "context"},
+	// key_source added 2026-08-20 (issue #334), additive + omitempty:
+	// present only when the correlation key did NOT come from the
+	// topology graph's ancestor relation, so every storm that had a
+	// modelled key stays byte-identical. See docs/signal-schema-v1.md
+	// §Amendments.
 	"StormPayload": {"kind", "fingerprint", "severity", "cluster",
 		"ancestor_kind", "ancestor_namespace", "ancestor_name", "reason",
 		"message", "affected_count", "namespaces_count", "first_seen",
 		"last_seen", "representative_incidents", "member_fingerprints",
-		"context", "enrichment"},
+		"context", "enrichment", "key_source"},
 	"StormMemberPayload": {"kind", "storm_fingerprint", "storm_session_id",
 		"ancestor_kind", "ancestor_namespace", "ancestor_name", "cluster",
 		"message", "incident"},

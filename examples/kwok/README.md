@@ -62,7 +62,7 @@ questions kind cannot answer at all:
 | --- | --- | --- |
 | What does `audit workloads -A` cost across 400 workloads? | 2 workers, ~10 pods | `bench` |
 | Does `health` survive its own 10s `--timeout` default on a big cluster? | never gets big | `bench` |
-| When 30 nodes fail at once, is that one incident or thirty? | 2 workers; killing one is destructive and slow | `node-fail 30`, `scenarios/node-storm` |
+| When 30 nodes fail at once, is that one incident or thirty? | 2 workers; killing one is destructive and slow | `node-fail 30`, `scenarios/node-storm` (this one found #334) |
 | How does the sentinel's informer set behave at 1000+ pods? | never gets there | `scale-up` |
 | Does `audit netpol` correctly separate covered from uncovered namespaces? | one namespace | 9, in three tiers |
 
@@ -208,7 +208,7 @@ examples/kwok/e2e node-storm         # opt-in; needs the sentinel
 | [`unschedulable`](scenarios/unschedulable/) | 10 Pending pods, three different scheduler verdicts | a capacity *wall* that is not a capacity shortage; a workload placed 3-of-8 and stuck |
 | [`pdb-gridlock`](scenarios/pdb-gridlock/) | 3 undrainable PDBs among 9 sound ones | which *nodes* you cannot drain, and silence about the nine |
 | [`endpoints-empty`](scenarios/endpoints-empty/) | 3 Services selecting nothing among 9 that work | naming the three without naming the nine |
-| [`node-storm`](scenarios/node-storm/) | 30 nodes lose their kubelet in the same second | is that one incident or thirty? (and does recovery close all of it) |
+| [`node-storm`](scenarios/node-storm/) | 30 nodes lose their kubelet in the same second | one storm per failure domain, not one session per node (and does recovery close all of it) |
 
 Two things are true of the default four. They assert the **read path
 only** — the sentinel's wire is out of scope, not because it would not
@@ -221,10 +221,14 @@ the whole reason these live here rather than in `../scenarios/`.
 
 `node-storm` is the exception on both counts, and is opt-in for it: its
 entire claim is about what the sentinel **sends**, so it needs
-`examples/sentinel/up`, and it spends most of fifteen minutes waiting on
-the real taint manager and the real recovery window. It is also the only
-one here whose headline result is a *disagreement* — `lookout health`
-reports the outage in one line, the wire reports it in thirty sessions.
+`examples/sentinel/up`, and it spends most of ten minutes letting the
+fleet go quiet before it marks the wire and then waiting on the real
+recovery window. It is also the one
+that found a product defect rather than confirming a behaviour: the wire
+used to answer a 30-node outage with thirty sessions while `lookout
+health` answered it in one line
+([#334](https://github.com/go-steer/k8s-lookout/issues/334), fixed —
+the drill now asserts three zone storms).
 
 Each scenario's README says what it costs to get wrong; `logs` in
 particular documents three failure modes that all present as *green*.
@@ -287,11 +291,14 @@ Note which question that answers. DESIGN.md §14's *"one storm session,
 not thirty"* is about the ~30 **pods** on a single dead node, and the
 kind scenario already proves it (33 affected objects, 3 session
 creates). What only a fleet can ask is what happens when the thing
-that fails is many **nodes** — and the answer, measured, is thirty
-sessions, because nothing keys a storm across nodes
-([#334](https://github.com/go-steer/k8s-lookout/issues/334)).
-[`scenarios/node-storm`](scenarios/node-storm) is this drill with
-assertions attached.
+that fails is many **nodes** — and the first answer, measured here, was
+thirty sessions, because nothing keyed a storm across nodes
+([#334](https://github.com/go-steer/k8s-lookout/issues/334)). That is
+fixed: a node incident is now offered its zone as a last-ranked key,
+and a fleet with no zone labels gets the `key_source=simultaneity`
+cluster fallback. Same drill, three storms.
+[`scenarios/node-storm`](scenarios/node-storm) is it with assertions
+attached.
 
 ## bench
 

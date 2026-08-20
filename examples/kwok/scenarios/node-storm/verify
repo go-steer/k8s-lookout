@@ -38,13 +38,25 @@ await 300 "$COUNT fake nodes report Ready=Unknown" _nodes_down
 # the floor, whatever it decides to do about grouping them.
 await_inject node-storm 300 'kind=objectstate.node_notready'
 
-# Count nodes named as the SUBJECT of a node_notready inject, not every
-# node the capture happens to mention: the pod incidents and the storms
-# name their nodes too, so a loose match here would pass on the healthy
-# ones and assert nothing.
+# Count the nodes NAMED by a node incident, across all three shapes one
+# can take. Since #334 most of them never get their own inject: the
+# third failure in a zone forms the storm and everything after it
+# arrives as `storm.member`, which is the whole point of the fix — so
+# counting node_notready subjects alone would only ever find the first
+# two per zone.
+#
+#   objectstate.node_notready   .name          — its own session
+#   storm / storm.member[_superseded]
+#                               .incident.name  \ named inside the
+#                               .representative_incidents[].name  / storm
+#
+# Still a subject match (`"name":"kwok-node-N`) rather than any mention
+# of a node name, so an enrichment block listing the healthy fleet
+# cannot satisfy it.
 _all_nodes_on_wire() {
   local named
-  named="$(stub_since node-storm | grep 'kind=objectstate.node_notready' \
+  named="$(stub_since node-storm \
+    | grep -E 'kind=objectstate.node_notready|kind=storm' \
     | grep -o '\\"name\\":\\"kwok-node-[0-9]*' | sort -u | wc -l || true)"
   ((named >= COUNT))
 }
@@ -52,51 +64,71 @@ await 300 "all $COUNT failed nodes named on the wire" _all_nodes_on_wire
 
 # ---- the read path summarizes the same event in one line -------------
 
-# Worth asserting next to the wire check, because the two disagree (see
-# the soft check below): `health` rolls the whole outage into a single
-# nodes-category line carrying the count.
+# The read path was always the one that got this right: `health` rolls
+# the whole outage into a single nodes-category line carrying the count.
+# Before #334 that flatly contradicted the wire's thirty sessions, and
+# the disagreement is what the issue was filed on.
 await_finding 300 "category=nodes status=degraded total=$COUNT" -- health
 
-# ---- the pod fallout DOES correlate ----------------------------------
+# ---- the NODES correlate (#334) --------------------------------------
 
-# Eviction starts on the real tolerationSeconds (~5 minutes), and the
-# pods that go with the nodes are what §7.5 was built for: they share
-# declared ancestors — their Deployment, their Namespace — so they form
-# storms instead of one session each. This half works, and locking it
-# down is what keeps the soft check below honest: the correlator is not
-# broken, it just has no key for nodes.
-_storm_formed() {
-  local out
-  out="$(stub_since node-storm)"
-  grep -q 'INJECT .* kind=storm ' <<<"$out"
-}
-if await 600 "the evicted pods form at least one storm session" _storm_formed; then
-  storms="$(stub_since node-storm | grep -c 'INJECT .* kind=storm ' || true)"
-  echo "    wire: $storms storm session(s) from the pod fallout"
-fi
-
-# ---- GAP (#334): nothing groups the NODES ----------------------------
-
-# Thirty nodes lose their kubelet in the same second and the sentinel
-# opens thirty sessions: each Node incident's only blast-radius key is
-# its own Node (graphfeed.go, Ancestors), the mined dimensions are
-# image/node/container (mined.go), and although the nodes carry
-# topology.kubernetes.io/zone and Signal.Zone is already plumbed into
-# the correlator, zone is used only in the storm fingerprint — never
-# offered as a candidate key. All thirty incidents even compute the
-# SAME fingerprint and still open thirty sessions.
+# This is the claim only a fleet can make, and it was the answer that
+# needed fixing: before #334 a Node incident's only blast-radius key
+# was its own Node, so thirty nodes dying in one second opened thirty
+# sessions while `lookout health` said it in one line.
 #
-# Soft, not hard, for the reason the other kwok gaps are soft: a driver
-# that goes red on a filed defect stops being a signal. When #334 lands
-# this becomes a hard assertion — flip `soft` off and tighten the bound.
-echo "▸ gap (#334): the node failures correlate with each other"
+# scale-up labels every fake node topology.kubernetes.io/zone=zone-N
+# for N in 0..2 and node-fail takes them in name order, so a 30-node
+# outage spans all three zones and the ZONE key is what forms here —
+# one storm per zone, the modelled answer. The cluster fallback
+# (key_source=simultaneity) is the unlabelled-fleet path and is covered
+# by unit tests, not by this drill.
+echo "▸ the node failures correlate with each other (#334)"
+
+# Each zone's storm names it, so counting distinct Zone ancestors is a
+# tighter assertion than counting storms: it proves the key is the
+# zone and not something that happens to group.
+_zone_storms() {
+  local zones
+  zones="$(stub_since node-storm | grep 'INJECT .* kind=storm ' \
+    | grep -o 'ancestor_kind\\":\\"Zone\\",\\"ancestor_name\\":\\"zone-[0-9]*' \
+    | sort -u | wc -l || true)"
+  ((zones >= 3))
+}
+await 300 "the failed nodes group by zone, not one session each" _zone_storms
+
+# The reduction itself. Three zone storms plus their member sessions
+# and whatever fallout the workloads produce is well under COUNT; one
+# session per node is the regression this guards.
 _nodes_correlate() {
   local sessions
   sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
-  # One page per zone would be 3 here, one per cluster 1. Anything at or
-  # near COUNT is the fragmentation #334 describes.
-  ((sessions > 0 && sessions < COUNT))
+  ((sessions > 0 && sessions < COUNT / 2))
 }
-soft await 30 "fewer than $COUNT sessions for one $COUNT-node outage" _nodes_correlate
+await 60 "fewer than $((COUNT / 2)) sessions for one $COUNT-node outage" _nodes_correlate
 sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
 echo "    wire: $sessions sessions opened for one $COUNT-node outage"
+
+# ---- workload fallout: reported, not asserted ------------------------
+
+# Everything above is about the nodes. What the WORKLOADS on them do is
+# reported here and deliberately not asserted, because it is not
+# reproducible. The taint manager does evict — measured at 163 pods on
+# the failed nodes, 86 left five minutes later — but on fake nodes the
+# replacements schedule instantly onto the survivors, so no Deployment
+# misses its 600s progressDeadline on account of this drill. One run
+# produced two `progress_deadline` storms keyed on Namespace; they came
+# from Deployments already mid-rollout when the drill started, left over
+# from the run before. The next run, identical command and fleet,
+# produced none.
+#
+# The claim this looks like it is testing — a dead node's pods arrive as
+# one storm, not thirty sessions — is DESIGN.md §7.5's, and
+# examples/scenarios/node-failure asserts it deterministically on kind
+# (33 affected objects, 3 session creates). Duplicating it here would
+# only buy a flake.
+echo "▸ storm keys on the wire (workload fallout is reported, not asserted)"
+stub_since node-storm | grep 'INJECT .* kind=storm ' \
+  | grep -o 'ancestor_kind\\":\\"[A-Za-z]*\\",\\"ancestor_name\\":\\"[^\\]*' \
+  | sed 's/.*ancestor_kind..:..//; s/..,..ancestor_name..:..\?/\//' \
+  | sort | uniq -c | sed 's/^/    wire: /' || true

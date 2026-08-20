@@ -62,8 +62,10 @@ import (
 //     the CommonAncestors relation (or marginal — CronJob-level
 //     grouping needs a jobs watch); they arrive with the full §6.1
 //     graph in the enrichment milestone (M3), not here.
-//   - Zone grouping is excluded from storm keys entirely: zone-tier
-//     correlation is the fleet layer's job (§7.5).
+//   - Zone is a storm key for NODE incidents only (issue #334): a
+//     failure domain going at once is one event, and nothing smaller
+//     than the zone explains it. Pods reach their zone transitively
+//     and are deliberately not grouped on it — see ancestorClass.
 type graphFeed struct {
 	factory informers.SharedInformerFactory
 	graph   *graph.Graph
@@ -281,11 +283,17 @@ var stormObjectKinds = map[string]graph.NodeKind{
 }
 
 // ancestorClass ranks ancestor kinds by the §7.5 key priority:
-// node > owner chain > shared config/PVC > namespace. -1 excludes the
-// kind from storm keys entirely: Zone (fleet tier — the fleet layer's
-// join, §7.5),
-// Pod/Container (an object, not a blast-radius key), and the
-// traffic-layer kinds (not ancestors on the CommonAncestors relation).
+// node > owner chain > shared config/PVC > namespace > zone. -1
+// excludes the kind from storm keys entirely: Pod/Container (an
+// object, not a blast-radius key) and the traffic-layer kinds (not
+// ancestors on the CommonAncestors relation).
+//
+// Zone ranks LAST, below namespace, and Ancestors offers it for Node
+// incidents only (issue #334). It is the fleet tier's join and the
+// coarsest key in the system: a zone key answers "did a whole failure
+// domain go?", which is a real question about nodes and the wrong
+// question about pods — a zone-wide pod storm would fold unrelated
+// workloads together on nothing but placement.
 func ancestorClass(k graph.NodeKind) int {
 	switch k {
 	case graph.KindNode:
@@ -297,6 +305,8 @@ func ancestorClass(k graph.NodeKind) int {
 		return 2
 	case graph.KindNamespace:
 		return 3
+	case graph.KindZone:
+		return 4
 	default:
 		return -1
 	}
@@ -341,6 +351,13 @@ func (g *graphFeed) Ancestors(ref engine.ObjectRef) []engine.Ancestor {
 		if class < 0 {
 			continue
 		}
+		if r.Kind == graph.KindZone && ref.Kind != "Node" {
+			// Node incidents only — see ancestorClass. A pod reaches
+			// its zone transitively through its node, and grouping on
+			// that would coarsen every workload in a failure domain
+			// into one storm.
+			continue
+		}
 		cands = append(cands, cand{class: class, idx: idx, ref: r})
 	}
 	slices.SortStableFunc(cands, func(a, b cand) int {
@@ -358,4 +375,22 @@ func (g *graphFeed) Ancestors(ref engine.ObjectRef) []engine.Ancestor {
 		})
 	}
 	return out
+}
+
+// NodeCount reports how many nodes the topology index currently
+// knows about — the denominator of the cluster fallback's fraction
+// test (engine.EnableClusterFallback, issue #334). 0 before the first
+// snapshot, which keeps the fallback off until the index can size the
+// fleet it is about to make a claim about.
+//
+// This counts nodes as OBJECTS, not as Ready nodes: during the outage
+// the fallback exists to group, a readiness-based denominator would
+// shrink as the outage grew, lowering the bar exactly when it should
+// hold.
+func (g *graphFeed) NodeCount() int {
+	snap, err := g.graph.Snapshot()
+	if err != nil {
+		return 0
+	}
+	return snap.CountKind(graph.KindNode)
 }

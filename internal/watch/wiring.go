@@ -843,6 +843,11 @@ func (r *runner) run(ctx context.Context) error {
 				return fmt.Errorf("--storm-mine: %w", merr)
 			}
 		}
+		if f.stormClusterFallback {
+			if cerr := correlator.EnableClusterFallback(feed.NodeCount); cerr != nil {
+				return fmt.Errorf("--storm-cluster-fallback: %w", cerr)
+			}
+		}
 		disp.storm = correlator
 		go func() {
 			if ferr := feed.Run(ctx); ferr != nil && ctx.Err() == nil {
@@ -853,6 +858,9 @@ func (r *runner) run(ctx context.Context) error {
 			}
 		}()
 		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
+		if !f.stormClusterFallback {
+			log.Printf("storm: cluster fallback disabled (--storm-cluster-fallback=false) — simultaneous failures of nodes carrying no topology.kubernetes.io/zone label will open one session each (issue #334)")
+		}
 		if f.stormMine {
 			log.Printf("storm: mined keys enabled (--storm-mine, min=%d) — incidents sharing an exact image, node or container may group into one storm with no topology ancestor between them; every such storm names the attribute it grouped on (issue #225)", f.stormMineMin)
 		}
