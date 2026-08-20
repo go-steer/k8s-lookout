@@ -332,6 +332,9 @@ func stormPayload(info engine.StormInfo, cluster string) inject.StormPayload {
 		Representatives:    stormRefs(info.Representatives),
 		MemberFingerprints: info.MemberFingerprints,
 	}
+	if info.KeySource != engine.KeySourceTopology {
+		p.KeySource = info.KeySource
+	}
 	if info.Ancestor.Kind == "Node" {
 		p.Context.Node = info.Ancestor.Name
 	}

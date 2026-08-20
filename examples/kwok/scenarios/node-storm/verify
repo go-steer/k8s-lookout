@@ -75,28 +75,41 @@ if await 600 "the evicted pods form at least one storm session" _storm_formed; t
   echo "    wire: $storms storm session(s) from the pod fallout"
 fi
 
-# ---- GAP (#334): nothing groups the NODES ----------------------------
+# ---- the NODES correlate too (#334) ----------------------------------
 
-# Thirty nodes lose their kubelet in the same second and the sentinel
-# opens thirty sessions: each Node incident's only blast-radius key is
-# its own Node (graphfeed.go, Ancestors), the mined dimensions are
-# image/node/container (mined.go), and although the nodes carry
-# topology.kubernetes.io/zone and Signal.Zone is already plumbed into
-# the correlator, zone is used only in the storm fingerprint — never
-# offered as a candidate key. All thirty incidents even compute the
-# SAME fingerprint and still open thirty sessions.
+# This is the claim only a fleet can make, and it was the answer that
+# needed fixing: before #334 a Node incident's only blast-radius key
+# was its own Node, so thirty nodes dying in one second opened thirty
+# sessions while `lookout health` said it in one line.
 #
-# Soft, not hard, for the reason the other kwok gaps are soft: a driver
-# that goes red on a filed defect stops being a signal. When #334 lands
-# this becomes a hard assertion — flip `soft` off and tighten the bound.
-echo "▸ gap (#334): the node failures correlate with each other"
+# scale-up labels every fake node topology.kubernetes.io/zone=zone-N
+# for N in 0..2 and node-fail takes them in name order, so a 30-node
+# outage spans all three zones and the ZONE key is what forms here —
+# one storm per zone, the modelled answer. The cluster fallback
+# (key_source=simultaneity) is the unlabelled-fleet path and is covered
+# by unit tests, not by this drill.
+echo "▸ the node failures correlate with each other (#334)"
+
+# Each zone's storm names it, so counting distinct Zone ancestors is a
+# tighter assertion than counting storms: it proves the key is the
+# zone and not something that happens to group.
+_zone_storms() {
+  local zones
+  zones="$(stub_since node-storm | grep 'INJECT .* kind=storm ' \
+    | grep -o 'ancestor_kind\\":\\"Zone\\",\\"ancestor_name\\":\\"zone-[0-9]*' \
+    | sort -u | wc -l || true)"
+  ((zones >= 3))
+}
+await 300 "the failed nodes group by zone, not one session each" _zone_storms
+
+# The reduction itself. Three zone storms plus the pod fallout's own
+# storms and their member sessions is well under COUNT; one session per
+# node is the regression this guards.
 _nodes_correlate() {
   local sessions
   sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
-  # One page per zone would be 3 here, one per cluster 1. Anything at or
-  # near COUNT is the fragmentation #334 describes.
-  ((sessions > 0 && sessions < COUNT))
+  ((sessions > 0 && sessions < COUNT / 2))
 }
-soft await 30 "fewer than $COUNT sessions for one $COUNT-node outage" _nodes_correlate
+await 60 "fewer than $((COUNT / 2)) sessions for one $COUNT-node outage" _nodes_correlate
 sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
 echo "    wire: $sessions sessions opened for one $COUNT-node outage"

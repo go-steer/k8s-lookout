@@ -576,15 +576,17 @@ NotReady; 30 pods affected across 6 namespaces; 3 representative incidents
 attached."* Member signals are recorded but don't open sessions. Severity of
 the storm is the max of members + a size escalator.
 
-A blast-radius key comes from one of three tiers, tried in order. Every storm
-records which tier produced its key (`StormInfo.KeySource`), so a grouping can
-be explained rather than asserted.
+A blast-radius key comes from one of four tiers, tried in order. Every storm
+records which tier produced its key (`StormInfo.KeySource`, on the wire as
+`key_source` whenever it is not the modelled default), so a grouping can be
+explained rather than asserted.
 
 | Tier | Key source | Example | Threshold |
 | --- | --- | --- | --- |
 | **External** | an extractor reading the *signal*, for dependencies with no vertex in the graph | registry host (`registry-host`) | `--storm-min` |
-| **Topology** | the topology index: nearest common ancestor of the affected objects — node, owner chain, shared ConfigMap/PVC, namespace; at fleet tier, zone (`topology`) | `Node/gke-node-3` | `--storm-min` |
+| **Topology** | the topology index: nearest common ancestor of the affected objects — node, owner chain, shared ConfigMap/PVC, namespace, and (for **node** incidents only, ranked last) zone (`topology`) | `Node/gke-node-3`, `Zone/us-east1-b` | `--storm-min` |
 | **Mined** | an exact value shared by enough windowed incidents, discovered rather than declared (`mined:<attribute>`) | one bad image digest across unrelated Deployments | `--storm-mine-min`, opt-in |
+| **Simultaneity** | the cluster itself, for node failures nothing else groups (`simultaneity`) | 30 unlabelled nodes lose their kubelet at once | a fifth of the fleet, ≥3 nodes, within 20 s |
 
 External keys are consulted *first* and outrank every topology ancestor: an
 external dependency spans workloads, so letting an owner-chain or namespace
@@ -602,6 +604,22 @@ subject to an **explainability gate**: a mined attribute may key a storm only
 if it has a human-readable name, so the payload can always state *why* these N
 are one incident. Absent attributes never correlate — incidents with no node
 recorded do not become "the same node".
+
+The opening line of this section — *"a node failure opens ~30 sessions for 30
+evicted pods"* — is about the pods on **one** node, and the topology tier
+answers it. The multi-node version is a different question with, until #334, a
+different answer: thirty nodes failing in the same second opened thirty
+sessions, because a Node's only ancestor is itself. Zone answers it wherever
+`topology.kubernetes.io/zone` is set, which is every managed cloud and no bare
+metal cluster, so a last-resort **simultaneity** tier keys the remainder on the
+cluster itself. That key groups on *timing*, not on a modelled relationship —
+the weakest claim the correlator makes — so it is ranked below every declared
+key and deliberately expensive to trigger: a fifth of the fleet, at least three
+nodes, all inside 20 s (not the 60 s window, so a rolling upgrade never
+accumulates into one), and the storm expires after 5 idle minutes rather than
+30. Without a fleet size it does not form at all. On by default
+(`--storm-cluster-fallback=false` restores one session per node), because
+unlike a mined key it groups a failure a human already calls a single event.
 
 ### 7.6 Enrichment (warm sessions)
 

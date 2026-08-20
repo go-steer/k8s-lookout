@@ -312,6 +312,31 @@ func TestStormFormed_ExactWireShape(t *testing.T) {
 	}
 }
 
+// TestStormPayload_KeySource: the wire says WHY these incidents are
+// one incident whenever the answer is not the modelled §7.5 ancestor
+// — and stays silent when it is, which is what keeps the byte pin
+// above unchanged (issue #334).
+func TestStormPayload_KeySource(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		source string
+		want   string
+	}{
+		{engine.KeySourceTopology, ""},
+		{engine.KeySourceSimultaneity, "simultaneity"},
+		{engine.KeySourceRegistry, "registry-host"},
+		{engine.MinedKeySource("image"), "mined:image"},
+	} {
+		info := engine.StormInfo{
+			Ancestor:  engine.Ancestor{Kind: engine.ClusterAncestorKind, Name: "prod"},
+			KeySource: tc.source,
+		}
+		if got := stormPayload(info, "prod").KeySource; got != tc.want {
+			t.Errorf("KeySource for %q = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+}
+
 // TestStormKindConstantsAlignedWithWireContract pins engine's storm
 // kinds to inject's, mirroring the k8s-event and resolved pins.
 func TestStormKindConstantsAlignedWithWireContract(t *testing.T) {

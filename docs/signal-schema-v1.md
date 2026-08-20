@@ -325,6 +325,17 @@ first external consumer deploys.
   findings are point-in-time observations of object state, not
   Events — there is no `Event.Type` to report, and inventing one from
   severity would be a lie.
+- **2026-08-20 — `key_source` added to `StormPayload` (#334):** last
+  field, omitempty, set only when the correlation key did NOT come
+  from the topology graph's ancestor relation —
+  `"registry-host"` (an external extractor), `"mined:<dimension>"`,
+  or `"simultaneity"` (the cluster fallback: nodes grouped because
+  they failed together, the weakest claim the correlator makes). A
+  storm keyed on a modelled ancestor omits it, so the pinned
+  `kind=storm` bytes are unchanged for every storm that had one. The
+  same change adds `Zone` and the synthetic `Cluster` to the values
+  `ancestor_kind` can take — always an open object-class string, never
+  an enum, so this is not a v1 break either.
 
 ## Evolution
 

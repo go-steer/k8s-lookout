@@ -81,8 +81,9 @@ func buildFeedGraph(t *testing.T, objs ...any) *graphFeed {
 
 // TestGraphAncestors_Priority pins the §7.5 key priority over a REAL
 // topology: node > owner chain (nearest owner first) > shared
-// config > namespace — and Zone excluded (fleet tier, the fleet
-// layer's join).
+// config > namespace — and Zone excluded, because this is a POD (the
+// node carries a zone label and the pod reaches it transitively; see
+// TestGraphAncestors_ZoneIsANodeKeyOnly).
 func TestGraphAncestors_Priority(t *testing.T) {
 	t.Parallel()
 	g := buildFeedGraph(t,
@@ -104,8 +105,57 @@ func TestGraphAncestors_Priority(t *testing.T) {
 	}
 	for _, a := range got {
 		if a.Kind == "Zone" {
-			t.Error("Zone must never be a storm key (fleet tier is the fleet layer's join)")
+			t.Error("Zone must never key a POD storm — it would fold every workload in a failure domain together on placement alone")
 		}
+	}
+}
+
+// TestGraphAncestors_ZoneIsANodeKeyOnly is the #334 seam: a Node
+// incident is offered its zone, ranked LAST so it can never outrank
+// the node itself, which is what turns "a failure domain went" into
+// one page instead of one per node. Pods in that zone are not offered
+// it at all.
+func TestGraphAncestors_ZoneIsANodeKeyOnly(t *testing.T) {
+	t.Parallel()
+	g := buildFeedGraph(t,
+		testNode("gke-a"),
+		testPod("shop", "pay-1", "gke-a", "pay-7b9d", ""),
+	)
+	zone := engine.Ancestor{Kind: "Zone", Name: "us-east1-b"}
+
+	node := g.Ancestors(engine.ObjectRef{Kind: "Node", Name: "gke-a"})
+	if !slices.Contains(node, zone) {
+		t.Errorf("Ancestors(node) = %+v, want it to include %+v", node, zone)
+	}
+	if node[len(node)-1] != zone {
+		t.Errorf("Ancestors(node) = %+v, want the zone LAST (never outranking a modelled key)", node)
+	}
+	if node[0] != (engine.Ancestor{Kind: "Node", Name: "gke-a"}) {
+		t.Errorf("Ancestors(node) = %+v, want the node itself still first", node)
+	}
+
+	pod := g.Ancestors(engine.ObjectRef{Kind: "Pod", Namespace: "shop", Name: "pay-1"})
+	if slices.Contains(pod, zone) {
+		t.Errorf("Ancestors(pod) = %+v, must not include %+v", pod, zone)
+	}
+}
+
+// TestGraphFeed_NodeCount is the cluster fallback's denominator: the
+// nodes the index knows about, and 0 before the first snapshot — a
+// correlator that read "unknown" as "tiny" would fire the coarsest
+// key it has during exactly the window where it knows least.
+func TestGraphFeed_NodeCount(t *testing.T) {
+	t.Parallel()
+	cold := &graphFeed{graph: graph.New(graph.Options{SwapInterval: -1})}
+	if got := cold.NodeCount(); got != 0 {
+		t.Errorf("NodeCount() before the first snapshot = %d, want 0", got)
+	}
+	g := buildFeedGraph(t,
+		testNode("gke-a"), testNode("gke-b"), testNode("gke-c"),
+		testPod("shop", "pay-1", "gke-a", "", ""),
+	)
+	if got := g.NodeCount(); got != 3 {
+		t.Errorf("NodeCount() = %d, want 3", got)
 	}
 }
 

@@ -33,41 +33,49 @@ from the single-node case in a way nobody had measured.
 
 ## What to expect
 
-Three results, and they do not agree with each other.
+**Detection.** All thirty node failures reach the wire, each naming its
+node, within about a minute.
 
-**Detection is fine.** All thirty node failures reach the wire, each
-naming its node, within about a minute.
-
-**The read path summarizes correctly** — one line for the whole
-outage:
+**The read path** summarizes the whole outage in one line:
 
 ```
 kind=health.category severity=critical category=nodes status=degraded total=30 \
   top="node.notready kwok-node-0000; node.notready kwok-node-0001; …"
 ```
 
-**The push path fragments.** The sentinel opens **thirty sessions**,
-one per node, with no storm formed between them
-([#334](https://github.com/go-steer/k8s-lookout/issues/334)). Each Node
-incident's only blast-radius key is its own Node, the mined dimensions
-are image/node/container, and although every node carries
-`topology.kubernetes.io/zone` and `Signal.Zone` is already plumbed into
-the correlator, zone feeds only the storm *fingerprint* — it is never
-offered as a candidate key. The sharpest version of the symptom: all
-thirty incidents compute the **same fingerprint** and still open thirty
-sessions.
+**The push path agrees with it** — three storms, one per zone, not
+thirty sessions. `scale-up` labels every fake node
+`topology.kubernetes.io/zone=zone-N` for N in 0..2, and `node-fail`
+takes nodes in name order, so a 30-node outage spans all three failure
+domains and each one groups:
 
-That last one is the scenario's `soft` check, for the same reason the
-gaps in `endpoints-empty` are soft — a driver that goes red on a filed
-defect stops being a signal. It becomes a hard assertion when #334
-lands.
+```
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-0  affected_count=10
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-1  affected_count=10
+INJECT kind=storm ancestor_kind=Zone ancestor_name=zone-2  affected_count=10
+```
 
-The pod fallout, meanwhile, correlates exactly as designed. About five
-minutes in the taint manager starts evicting, and the evicted pods —
-which *do* share declared ancestors — form storms keyed on their
-Deployment and Namespace. `verify` asserts that too, which is what
-keeps the soft check honest: the correlator works, it just has no key
-for nodes.
+This is what [#334](https://github.com/go-steer/k8s-lookout/issues/334)
+fixed, and this scenario is the measurement that found it. Before the
+fix the same drill opened **thirty sessions**: a Node incident's only
+blast-radius key was its own Node, the mined dimensions are
+image/node/container, and although every node carried a zone label and
+`Signal.Zone` already reached the correlator, zone fed only the storm
+*fingerprint* and was never offered as a candidate key. The sharpest
+version of the old symptom: all thirty incidents computed the **same
+fingerprint** and still opened thirty sessions.
+
+A fleet with no zone labels at all — bare metal, a plain kind cluster —
+takes the other path #334 added, the `key_source=simultaneity` cluster
+fallback. That one is covered by unit tests rather than by this drill,
+because kwok's nodes are labelled and the modelled zone key correctly
+wins here.
+
+The pod fallout correlates as it always did. About five minutes in the
+taint manager starts evicting, and the evicted pods — which share
+declared ancestors — form their own storms keyed on Deployment and
+Namespace. `verify` asserts that too: it is the control that says a
+zone storm is the correlator working, not the correlator over-grouping.
 
 ## The closed loop, which passes
 
@@ -77,8 +85,9 @@ own: the sentinel notices, holds the nodes for
 `--recovery-stable-for`, and injects into the sessions that already
 exist. Measured on a 30-node run: **48 `resolved` injects, every one
 `resolution=recovered`**, closing all thirty node sessions plus the pod
-storms, with zero new sessions and no agent polling. The closed loop
-scales; only the correlation does not.
+storms, with zero new sessions and no agent polling. That measurement
+predates #334 — thirty node sessions was the state of the world then —
+and it is the half of this scenario that always worked.
 
 ## Explore by hand
 
@@ -89,7 +98,7 @@ examples/kwok/node-fail 30
 # how many pages did one event produce?
 kubectl -n agent-triage logs deploy/stub-daemon | grep -c SESSION-CREATE
 
-# what did the storms that DID form key on?
+# what did the storms key on? (expect three Zone storms + pod fallout)
 kubectl -n agent-triage logs deploy/stub-daemon | grep 'kind=storm '
 
 lookout health                       # one line, total=30
@@ -103,6 +112,8 @@ examples/kwok/node-heal
 > whether this is one failure or thirty separate ones, what evidence
 > you have either way, and which workloads actually lost capacity.
 
-The interesting part of the answer is whether the agent reconstructs
-"this is one event" from thirty separate sessions, or reports thirty
-incidents because that is how they arrived.
+The interesting part of the answer used to be whether the agent could
+reconstruct "this is one event" from thirty separate sessions. Now that
+the sessions arrive as three zone storms, the question is the next one
+down: does the agent notice that *all three* zones went, which is a
+different failure from one zone going.
