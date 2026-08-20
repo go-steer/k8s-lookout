@@ -62,7 +62,7 @@ questions kind cannot answer at all:
 | --- | --- | --- |
 | What does `audit workloads -A` cost across 400 workloads? | 2 workers, ~10 pods | `bench` |
 | Does `health` survive its own 10s `--timeout` default on a big cluster? | never gets big | `bench` |
-| Does 30 simultaneous node failures produce ONE storm session? (DESIGN.md §14) | 2 workers; killing one is destructive and slow | `node-fail 30` |
+| When 30 nodes fail at once, is that one incident or thirty? | 2 workers; killing one is destructive and slow | `node-fail 30`, `scenarios/node-storm` |
 | How does the sentinel's informer set behave at 1000+ pods? | never gets there | `scale-up` |
 | Does `audit netpol` correctly separate covered from uncovered namespaces? | one namespace | 9, in three tiers |
 
@@ -197,8 +197,9 @@ contract as [`../scenarios/`](../scenarios/) — `inject`, `verify`,
 `revert`, one directory each, driven together by `examples/kwok/e2e`:
 
 ```sh
-examples/kwok/e2e                    # all four, ordered
+examples/kwok/e2e                    # the default four, ordered
 examples/kwok/e2e logs unschedulable # or pick
+examples/kwok/e2e node-storm         # opt-in; needs the sentinel
 ```
 
 | Scenario | Fault | The claim that needs a fleet |
@@ -207,15 +208,23 @@ examples/kwok/e2e logs unschedulable # or pick
 | [`unschedulable`](scenarios/unschedulable/) | 10 Pending pods, three different scheduler verdicts | a capacity *wall* that is not a capacity shortage; a workload placed 3-of-8 and stuck |
 | [`pdb-gridlock`](scenarios/pdb-gridlock/) | 3 undrainable PDBs among 9 sound ones | which *nodes* you cannot drain, and silence about the nine |
 | [`endpoints-empty`](scenarios/endpoints-empty/) | 3 Services selecting nothing among 9 that work | naming the three without naming the nine |
+| [`node-storm`](scenarios/node-storm/) | 30 nodes lose their kubelet in the same second | is that one incident or thirty? (and does recovery close all of it) |
 
-Two things are true of all four. They assert the **read path only** —
-the sentinel's wire is out of scope here, not because it would not work
-but because every claim these make is answerable from a read. And each
-one pairs a positive assertion with a **negative** one: the sound
-lookalikes sitting beside the fault must stay unreported. On a
-two-worker cluster there are no lookalikes, so that half of the
-detector is unassertable, which is the whole reason these live here
-rather than in `../scenarios/`.
+Two things are true of the default four. They assert the **read path
+only** — the sentinel's wire is out of scope, not because it would not
+work but because every claim they make is answerable from a read, which
+is also why they need no sentinel deployed. And each one pairs a
+positive assertion with a **negative** one: the sound lookalikes sitting
+beside the fault must stay unreported. On a two-worker cluster there are
+no lookalikes, so that half of the detector is unassertable, which is
+the whole reason these live here rather than in `../scenarios/`.
+
+`node-storm` is the exception on both counts, and is opt-in for it: its
+entire claim is about what the sentinel **sends**, so it needs
+`examples/sentinel/up`, and it spends most of fifteen minutes waiting on
+the real taint manager and the real recovery window. It is also the only
+one here whose headline result is a *disagreement* — `lookout health`
+reports the outage in one line, the wire reports it in thirty sessions.
 
 Each scenario's README says what it costs to get wrong; `logs` in
 particular documents three failure modes that all present as *green*.
@@ -272,8 +281,17 @@ in lookout reads Leases, but do not build an assertion on one here.
 The kind equivalent ([`../scenarios/node-failure`](../scenarios/node-failure))
 stops a docker container: destructive, slow, and limited to one of two
 workers forever. Thirty nodes losing their kubelet in the same second
-costs about ten seconds here, which is the only honest way to exercise
-DESIGN.md §14's *"one storm session, not thirty"*.
+costs about ten seconds here.
+
+Note which question that answers. DESIGN.md §14's *"one storm session,
+not thirty"* is about the ~30 **pods** on a single dead node, and the
+kind scenario already proves it (33 affected objects, 3 session
+creates). What only a fleet can ask is what happens when the thing
+that fails is many **nodes** — and the answer, measured, is thirty
+sessions, because nothing keys a storm across nodes
+([#334](https://github.com/go-steer/k8s-lookout/issues/334)).
+[`scenarios/node-storm`](scenarios/node-storm) is this drill with
+assertions attached.
 
 ## bench
 

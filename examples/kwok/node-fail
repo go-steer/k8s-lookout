@@ -32,8 +32,16 @@
 # (examples/scenarios/node-failure) stops a docker container, is
 # destructive, takes minutes, and can only ever kill ONE of two
 # workers. Here, thirty nodes losing their kubelet in the same second
-# costs nothing — which is the only way to actually exercise DESIGN.md
-# §14's "one storm session, not thirty".
+# costs nothing.
+#
+# Which is a DIFFERENT question from DESIGN.md §14's "one storm
+# session, not thirty" — that one is about the ~30 pods on a single
+# dead node, and the kind scenario already proves it (33 affected
+# objects, 3 session creates). What only a fleet can ask is what
+# happens when the thing that fails is many NODES. Measured here:
+# thirty sessions, one per node, because nothing keys a storm across
+# nodes — issue #334. examples/kwok/scenarios/node-storm is that drill
+# with assertions attached.
 #
 # What to watch:
 #   kubectl -n agent-triage logs deploy/lookout-watch -f

@@ -41,19 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command clears its 10s default by two orders of magnitude.
 
   `node-fail N` is the drill kind cannot run: thirty nodes lose their
-  kubelet in the same second, for DESIGN.md §14's *"one storm session,
-  not thirty"*. Only the node condition is authored; the taint manager
-  and pod eviction that follow are the real controllers on real
-  timing — measured, 163 pods on the failed nodes, 86 left five minutes
-  later, the survivors being exactly the DaemonSet pods that tolerate
-  `unreachable`.
+  kubelet in the same second. Only the node condition is authored; the
+  taint manager and pod eviction that follow are the real controllers
+  on real timing — measured, 163 pods on the failed nodes, 86 left five
+  minutes later, the survivors being exactly the DaemonSet pods that
+  tolerate `unreachable`.
 
   `examples/kwok/scenarios/` then plants faults in that fleet, on the
   same `inject`/`verify`/`revert` contract as `examples/scenarios/` and
   driven by `examples/kwok/e2e`: `logs`, `unschedulable`,
-  `pdb-gridlock`, `endpoints-empty`. Each exists because its claim is
-  unassertable on two workers, and in every case the claim has two
-  halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
+  `pdb-gridlock`, `endpoints-empty`, plus the opt-in `node-storm`. Each
+  exists because its claim is unassertable on two workers, and in every
+  case the claim has two halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
   among nine sound ones of the identical shape and asserts both that
   the three are named *and* that the nine are not; `endpoints-empty`
   does the same with three Services whose selector is one label value
@@ -71,6 +70,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of idle cores. `logs` asserts the reduction rather than the parse:
   forty-eight streams in, and twenty-four pods emitting one line arrive
   as **one** finding carrying `pods=24`.
+
+  `node-storm` is the one that asserts the **wire** rather than the read
+  path, so unlike its neighbours it needs the sentinel deployed and is
+  not in `e2e`'s default set. It fails thirty nodes at once and measures
+  what a daemon receives. Two halves, and they disagree. The recovery
+  closed loop scales cleanly: `node-heal` produced 48 `resolved`
+  injects, every one `resolution=recovered`, closing all thirty node
+  sessions plus the pod storms with no new sessions and no agent
+  polling. Correlation does not: the sentinel opens **thirty sessions,
+  one per node**, while `lookout health` reports the identical event in
+  a single line (`category=nodes status=degraded total=30`). Each Node
+  incident's only blast-radius key is its own Node, the mined dimensions
+  are image/node/container, and although the nodes carry
+  `topology.kubernetes.io/zone` and `Signal.Zone` already reaches the
+  correlator, zone feeds only the storm fingerprint and is never offered
+  as a key — so all thirty incidents compute the same fingerprint and
+  still open thirty sessions. Filed as #334 and held open as a `soft`
+  check, the same way `endpoints-empty` holds #331 and #332.
+
+  Note this is a *different* claim from DESIGN.md §14's "one storm
+  session, not thirty", which is about the ~30 pods on a single dead
+  node and which `examples/scenarios/node-failure` already proves on
+  kind. Earlier drafts of this layer's docs conflated the two.
 
   Serving those logs took three things, and all three fail *green* —
   as a healthy-looking scan rather than an error. kwok's shipped config
