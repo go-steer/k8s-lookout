@@ -179,16 +179,28 @@ await_inject() {
 #
 # Polls a read-path command until its stdout matches the pattern.
 # Prints the matching finding line as evidence on success.
+#
+# Both the match and the evidence CAPTURE the output first and match
+# against the capture. Piping lookout straight into `grep -q` (or into
+# `grep | head -n1`) reads better and is wrong once a command emits more
+# than a pipe buffer of findings: grep exits at the first match, lookout
+# takes SIGPIPE mid-stream, and `set -o pipefail` turns a pass into an
+# exit 141 that kills the scenario. Invisible on a two-worker cluster,
+# reproducible at fleet scale — see examples/kwok/.
 await_finding() {
   local timeout="$1" pattern="$2"
   shift 2
   [[ "${1:-}" == "--" ]] && shift
   _finding_match() {
-    run_lookout "$@" 2>/dev/null | grep -Eq "$pattern"
+    local out
+    out="$(run_lookout "$@" 2>/dev/null || true)"
+    grep -Eq "$pattern" <<<"$out"
   }
   if await "$timeout" "lookout $* → /$pattern/" _finding_match "$@"; then
-    run_lookout "$@" 2>/dev/null | grep -E "$pattern" | head -n1 \
-      | cut -c1-200 | sed 's/^/    read: /'
+    local out line
+    out="$(run_lookout "$@" 2>/dev/null || true)"
+    line="$(grep -E -m1 "$pattern" <<<"$out" || true)"
+    [[ -n "$line" ]] && printf '    read: %s\n' "${line:0:200}"
     return 0
   fi
   return 1

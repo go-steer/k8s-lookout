@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Remove the whole kwok layer: the synthetic fleet, the fake nodes, the
+# Stages and the controller. The kind cluster, the sentinel and the
+# demo app are left running and untouched — the point of this layer is
+# that it can be taken away without disturbing anything under it.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+
+# Fleet and nodes first: with the controller gone there is nothing left
+# to complete a fake pod's deletion.
+"$(kwok_root)/scale-down"
+
+echo "▸ removing kwok Stages and controller"
+kubectl delete -f "$(kwok_root)/stages/" --ignore-not-found >/dev/null
+kubectl delete -f "${KWOK_RELEASE_URL}/metrics-usage.yaml" --ignore-not-found >/dev/null 2>&1 || true
+kubectl delete -f "${KWOK_RELEASE_URL}/stage-fast.yaml" --ignore-not-found >/dev/null
+kubectl delete -f "${KWOK_RELEASE_URL}/kwok.yaml" --ignore-not-found >/dev/null
+
+echo
+echo "kwok removed. The real cluster is unchanged:"
+kubectl get nodes

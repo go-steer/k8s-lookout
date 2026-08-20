@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+NS=kwok-scenario-logs
+REPLICAS="${LOGS_REPLICAS:-24}"
+
+echo "▸ verify logs"
+
+# The kubelet reprojects the ConfigMap in place, so the first read after
+# inject can still see the old directory — hence a patient first await.
+await_finding 240 "kind=log.stacktrace .*reason=JavaException.*lang=java" \
+  -- triage logs --namespace="$NS"
+await_finding 60 "frames=\"com.example.db.Pool.acquire" \
+  -- triage logs --namespace="$NS"
+
+# Two containers in one pod, two log shapes, two runtimes: the Go panic
+# comes from the gateway container's file and must be recognised on its
+# own terms, not folded into the Java one.
+await_finding 60 "kind=log.stacktrace .*reason=GoPanic.*lang=go" \
+  -- triage logs --namespace="$NS" --container=gateway
+await_finding 60 "frames=\"main\.\(\*Server\)\.handle" \
+  -- triage logs --namespace="$NS" --container=gateway
+
+# The gateway's access log is 50% kube-probe. Stripping it is the whole
+# point of the check; the count has to be REPORTED, not swallowed.
+await_finding 60 "kind=log.probe_noise" \
+  -- triage logs --namespace="$NS" --container=gateway
+
+# --max-templates forces the overflow path deterministically rather than
+# waiting for a fixture to grow past the 40 default.
+await_finding 60 "kind=log.overflow.*omitted_templates=" \
+  -- triage logs --namespace="$NS" --max-templates=2
+
+# The scale-tier assertion, and the reason this scenario is here rather
+# than in examples/scenarios/: $REPLICAS pods emit the SAME line and it
+# has to arrive as one finding that counts them, not as $REPLICAS
+# findings. A two-pod cluster cannot tell those two behaviours apart.
+await_finding 90 "kind=log.template.*pods=${REPLICAS}" \
+  -- triage logs --namespace="$NS" --container=app

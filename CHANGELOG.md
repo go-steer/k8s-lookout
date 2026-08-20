@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `examples/kwok/` — a scale tier for the e2e layer, built on
+  [KWOK](https://github.com/kubernetes-sigs/kwok). It installs the kwok
+  controller **into the existing kind cluster** and grows hundreds of
+  fake nodes beside the three real ones: `up`, `scale-up`, `bench`,
+  `node-fail`/`node-heal`, `scale-down`, `down`.
+
+  Every scenario in `examples/scenarios/` runs on two workers and about
+  ten pods, which is the right size for asserting *what* lookout
+  reports and no size at all for asserting what it costs. A fake node
+  costs one etcd object, so a laptop holds three hundred. The split
+  that makes this sound is kubelet-versus-control-plane: kwok simulates
+  only the kubelet, so anything a controller decides — scheduling,
+  ReplicaSet progress, EndpointSlices, PDB status, node lifecycle — is
+  the real code path, while kubelet-observed event grammar (`BackOff`,
+  `ErrImagePull`, `FailedMount`, `OOMKilled`) is not, and those four
+  scenarios stay on kind.
+
+  `scale-up` generates ten posture archetypes across nine namespaces in
+  three Pod Security Admission tiers, so a scan has to separate sound
+  workloads from six different defects under partial coverage rather
+  than reporting one finding N times. `bench` then times every
+  target-free read command twice: once under a generous timeout for a
+  real cost, and once under the command's own shipped 10s `--timeout`
+  default, because a command that cannot answer a 300-node cluster
+  inside the default it documents fails closed for every operator who
+  does not know to override it.
+
+  First result, at 303 nodes / 1615 pods / 400 workloads: nothing fell
+  over. The whole target-free read path finishes in 0.1–1.3s and every
+  command clears its 10s default by two orders of magnitude.
+
+  `node-fail N` is the drill kind cannot run: thirty nodes lose their
+  kubelet in the same second. Only the node condition is authored; the
+  taint manager and pod eviction that follow are the real controllers
+  on real timing — measured, 163 pods on the failed nodes, 86 left five
+  minutes later, the survivors being exactly the DaemonSet pods that
+  tolerate `unreachable`.
+
+  `examples/kwok/scenarios/` then plants faults in that fleet, on the
+  same `inject`/`verify`/`revert` contract as `examples/scenarios/` and
+  driven by `examples/kwok/e2e`: `logs`, `unschedulable`,
+  `pdb-gridlock`, `endpoints-empty`, plus the opt-in `node-storm`. Each
+  exists because its claim is unassertable on two workers, and in every
+  case the claim has two halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
+  among nine sound ones of the identical shape and asserts both that
+  the three are named *and* that the nine are not; `endpoints-empty`
+  does the same with three Services whose selector is one label value
+  off. Reporting the needle is easy when the haystack has one straw in
+  it, and a cluster with a single PDB in it cannot tell a detector that
+  discriminates from one that reports everything.
+
+  `unschedulable` gets three *different* verdicts out of the real
+  scheduler at once — a nonexistent zone, a 64-CPU request against
+  32-CPU nodes, and required anti-affinity over a bounded node pool —
+  so `pod.pending` has to carry enough of the scheduler's own message
+  to tell a config error from a capacity wall from a topology limit.
+  The middle one is the shape a small cluster cannot make at all: a
+  workload that cannot place a single pod while the fleet has thousands
+  of idle cores. `logs` asserts the reduction rather than the parse:
+  forty-eight streams in, and twenty-four pods emitting one line arrive
+  as **one** finding carrying `pods=24`.
+
+  `node-storm` is the one that asserts the **wire** rather than the read
+  path, so unlike its neighbours it needs the sentinel deployed and is
+  not in `e2e`'s default set. It fails thirty nodes at once and measures
+  what a daemon receives. Two halves, and they disagree. The recovery
+  closed loop scales cleanly: `node-heal` produced 48 `resolved`
+  injects, every one `resolution=recovered`, closing all thirty node
+  sessions plus the pod storms with no new sessions and no agent
+  polling. Correlation does not: the sentinel opens **thirty sessions,
+  one per node**, while `lookout health` reports the identical event in
+  a single line (`category=nodes status=degraded total=30`). Each Node
+  incident's only blast-radius key is its own Node, the mined dimensions
+  are image/node/container, and although the nodes carry
+  `topology.kubernetes.io/zone` and `Signal.Zone` already reaches the
+  correlator, zone feeds only the storm fingerprint and is never offered
+  as a key — so all thirty incidents compute the same fingerprint and
+  still open thirty sessions. Filed as #334 and held open as a `soft`
+  check, the same way `endpoints-empty` holds #331 and #332.
+
+  Note this is a *different* claim from DESIGN.md §14's "one storm
+  session, not thirty", which is about the ~30 pods on a single dead
+  node and which `examples/scenarios/node-failure` already proves on
+  kind. Earlier drafts of this layer's docs conflated the two.
+
+  Serving those logs took three things, and all three fail *green* —
+  as a healthy-looking scan rather than an error. kwok's shipped config
+  leaves `enableDebuggingHandlers` off, and with it off `/containerLogs`
+  answers "Debug endpoints are disabled." however correct the
+  `ClusterLogs` CR is; the log file must be in CRI format
+  (`<RFC3339Nano> <stream> <F|P> <msg>`) or the kubelet shim rejects it
+  outright; and the fixture's timestamps must be fresh, because every
+  read path asks for a `--since` window and a stale fixture is simply
+  filtered out. `up` handles the first, and `lib.sh`'s `cri_log` helper
+  handles the other two.
+
+  Running them turned up a latent bug in the shared `examples/lib.sh`:
+  `await_finding` piped lookout into `grep -q`, and once a command
+  emits more than a pipe buffer of findings, grep exits at the first
+  match, lookout takes SIGPIPE, and `set -o pipefail` turns a passing
+  assertion into an exit 141 that kills the scenario. It now captures
+  the output and matches against the capture. Unreachable on a
+  two-worker cluster, deterministic at fleet scale.
+
+  Fake nodes now advertise the kwok controller's **host** IP as their
+  InternalIP, with the controller running `hostNetwork` and
+  `--node-ip=$(HOST_IP)`. A fake node's address has two consumers that
+  want incompatible things: kindnet needs it on-link or it panics
+  installing pod routes, and the apiserver needs something listening on
+  `:10247` or `kubectl logs`/`exec` gets "no route to host". A real node
+  IP that the controller is actually serving on is the one value that
+  satisfies both, and it replaces the synthetic addresses this layer
+  handed out before.
+
+  The layer is additive and reversible: the kwok controller is
+  annotation-scoped (asserted by `up`, which refuses to leave it
+  running otherwise), every fake node is tainted, every fake pod is
+  pinned, and teardown deletes only by those selectors.
+
 ## [0.22.0] - 2026-08-19
 
 This release answers a question the tool could not previously be

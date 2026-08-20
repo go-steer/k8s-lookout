@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Grow the current cluster by N fake nodes and a synthetic fleet on top
+# of them:
+#
+#   examples/kwok/scale-up [nodes] [workloads] [replicas]
+#   examples/kwok/scale-up 300 400 3       # 300 nodes, 400 workloads
+#
+# Defaults: 100 nodes, 200 workloads, 3 replicas.
+#
+# Every fake node carries the kwok.x-k8s.io/node=fake NoSchedule taint
+# and every generated pod tolerates it, so the fake fleet and the real
+# kind workloads never mix: nothing real lands on a node with no
+# kubelet, and nothing fake displaces the sentinel or the demo app.
+#
+# The fleet is not uniform — it cycles through ten posture archetypes,
+# so a scale run produces a realistic MIX of findings and clean
+# workloads rather than one finding replicated N times. A scan that
+# reports "everything is broken" proves nothing about the read path; a
+# scan that has to separate sound workloads from six different defects
+# is the actual work.
+#
+#   0 sound          PDB, probes, spread, requests — emits nothing
+#   1 no-pdb         no PodDisruptionBudget
+#   2 singleton      replicas: 1, no PDB
+#   3 no-probes      no readiness/liveness probe
+#   4 no-spread      no topology spread constraint
+#   5 pinned         nodeSelector onto exactly one node
+#   6 privileged     securityContext.privileged
+#   7 host-ns        hostNetwork + hostPID
+#   8 hostpath       hostPath mount of /var/lib
+#   9 cron-suspended a CronJob left suspended
+#
+# Namespaces come in three Pod Security Admission tiers, so `audit
+# hardening` and `audit netpol` see PARTIAL coverage — the harder and
+# more realistic read — rather than all or nothing:
+#
+#   ns % 3 == 0   enforce: baseline, plus a default-deny NetworkPolicy
+#   ns % 3 == 1   warn/audit only — PSA in dry-run, which enforces nothing
+#   ns % 3 == 2   no PSA labels, no NetworkPolicy
+#
+# The three host-namespace/privileged/hostPath archetypes are routed
+# away from the enforcing namespaces: PSA baseline would REJECT those
+# pods at admission, and a rejected pod is not a posture finding, it is
+# a broken fixture.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+require_kwok_installed
+
+NODES="${1:-100}"
+WORKLOADS="${2:-200}"
+REPLICAS="${3:-3}"
+
+# Nine, not ten: the three PSA tiers must divide the namespaces evenly,
+# and rerouting a hardening archetype off an enforcing namespace by +1
+# must always land on a non-enforcing one.
+NAMESPACES=9
+
+for n in "$NODES" "$WORKLOADS" "$REPLICAS"; do
+  [[ "$n" =~ ^[0-9]+$ ]] && ((n > 0)) || {
+    echo "ERROR: arguments must be positive integers (got '$n')" >&2
+    echo "Usage: examples/kwok/scale-up [nodes] [workloads] [replicas]" >&2
+    exit 2
+  }
+done
+
+# Exact pod count: the CronJob archetype creates none until it is
+# unsuspended, and the singleton archetype creates one.
+pods=0
+for ((i = 0; i < WORKLOADS; i++)); do
+  case $((i % 10)) in
+  9) ;;
+  2) pods=$((pods + 1)) ;;
+  *) pods=$((pods + REPLICAS)) ;;
+  esac
+done
+
+capacity=$((NODES * 110))
+if ((pods > capacity)); then
+  echo "ERROR: this fleet needs $pods pods, but $NODES nodes hold $capacity." >&2
+  echo "Raise the node count or lower the replicas." >&2
+  exit 2
+fi
+
+# kind's default pod subnet is 10.244.0.0/16 and node-ipam hands out a
+# /24 per node, so it runs dry at 256 nodes: every node past that gets
+# a CIDRNotAvailable event and no podCIDR. Harmless to the fake fleet —
+# kwok assigns pod IPs from its own range — but it is real event noise
+# in every subsequent read, so say so rather than let it look like a
+# product defect. Widen `podSubnet` in ../kind/cluster.yaml to go
+# higher cleanly.
+if ((NODES > 250)); then
+  echo "  ⚠ $NODES nodes exceeds what kind's default 10.244.0.0/16 pod subnet can" >&2
+  echo "    allocate (/24 per node = 256). Expect CIDRNotAvailable events on the" >&2
+  echo "    overflow; see README § Known limits." >&2
+fi
+
+# ---- CNI headroom --------------------------------------------------------
+
+# kind ships kindnet with a 50Mi memory limit, sized for a three-node
+# cluster. kindnet watches every node and every pod, so a few hundred
+# fake ones walk it straight into the limit: measured 43Mi against the
+# 50Mi cap at 300 nodes / 1000 pods, and it is OOMKilled shortly after.
+# That is the real CNI on the real nodes dying, which is precisely what
+# this layer promises not to do — so raise the limit for as long as the
+# fake fleet exists, record what it was, and let scale-down put it back.
+#
+# Deliberately explicit rather than silent: it is the one thing here
+# that reaches outside the fake fleet.
+kindnet_headroom() {
+  kubectl -n kube-system get ds kindnet >/dev/null 2>&1 || return 0
+
+  local cur want
+  cur="$(kubectl -n kube-system get ds kindnet \
+    -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}' 2>/dev/null)"
+  [[ "$cur" =~ ^([0-9]+)Mi$ ]] || return 0 # Gi, unset, or exotic: leave it alone.
+
+  want=$((128 + NODES))
+  ((${BASH_REMATCH[1]} >= want)) && return 0
+
+  echo "▸ raising kindnet's memory limit ${cur} → ${want}Mi for $NODES nodes"
+  echo "  (restored by examples/kwok/scale-down)"
+  # Only on the first raise: a second scale-up at a higher node count
+  # must not record the already-raised value as the original.
+  if [[ -z "$(kubectl -n kube-system get ds kindnet \
+    -o "jsonpath={.metadata.annotations['${KINDNET_LIMIT_ANNOTATION//./\\.}']}" 2>/dev/null)" ]]; then
+    kubectl -n kube-system annotate ds kindnet \
+      "${KINDNET_LIMIT_ANNOTATION}=${cur}" >/dev/null
+  fi
+  kubectl -n kube-system set resources ds kindnet --limits="memory=${want}Mi" >/dev/null
+}
+kindnet_headroom
+
+echo "▸ generating $NODES fake nodes, $WORKLOADS workloads, $pods pods"
+
+# ---- nodes ---------------------------------------------------------------
+
+node_name() { printf 'kwok-node-%04d' "$1"; }
+
+# Every fake node's InternalIP is the node the kwok controller runs on.
+# One address, three hundred nodes, and it is not laziness — that single
+# value is read by two different consumers with two incompatible
+# requirements, and it is the only value that satisfies both.
+#
+# kindnet needs it ON-LINK. It installs one route per node —
+# `10.244.<n>.0/24 via <that node's InternalIP>` — and Linux rejects a
+# gateway that is not on a directly-connected subnet with ENETUNREACH.
+# Left to itself kwok advertises its own controller-POD IP, so kindnet
+# retries, gives up and panics:
+#
+#   Failed to reconcile routes, retrying after error: network is unreachable
+#   panic: Maximum retries reconciling node routes: network is unreachable
+#
+# That is the real CNI on the real nodes crashlooping — the fake fleet
+# breaking the cluster it is supposed to sit quietly beside, with one
+# fake node as surely as with three hundred.
+#
+# The APISERVER needs it REACHABLE. Every log, exec and attach request
+# for a pod is dialled at `<node InternalIP>:<daemonEndpoints port>`,
+# 10247 for kwok. Synthetic-but-unused addresses satisfy kindnet and
+# fail here: `dial tcp …:10247: connect: no route to host`, and with it
+# the whole `triage logs` surface.
+#
+# `up` runs the controller with hostNetwork, so its address IS a real
+# node's address: on-link for kindnet, and listening on 10247 for the
+# apiserver. Duplicated across every fake node, which no real cluster
+# would do, and the two consumers that care both cope — kindnet keys
+# routes by pod CIDR, and the log dial only has to arrive.
+kwok_ip="$(kwok_host_ip)"
+if [[ -z "$kwok_ip" ]]; then
+  echo "ERROR: could not read the kwok controller's host IP." >&2
+  echo "Fake nodes need it as their InternalIP: without it kindnet crashloops" >&2
+  echo "and the apiserver cannot reach the fake kubelet. Re-run examples/kwok/up." >&2
+  exit 1
+fi
+
+# 32 CPU / 256Gi is kwok's documented shape, and deliberately roomy:
+# the point of the fake fleet is to make the SCHEDULER's placement
+# answers interesting, not to simulate resource exhaustion — the
+# `pending` scenario on the real kind nodes already covers that
+# honestly, with a real kubelet behind it.
+emit_nodes() {
+  local i name
+  for ((i = 0; i < NODES; i++)); do
+    name="$(node_name "$i")"
+    cat <<EOF
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: ${name}
+  annotations:
+    node.alpha.kubernetes.io/ttl: "0"
+    ${FAKE_NODE_ANNOTATION}: ${FAKE_NODE_ANNOTATION_VALUE}
+  labels:
+    beta.kubernetes.io/arch: amd64
+    beta.kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    kubernetes.io/hostname: ${name}
+    kubernetes.io/os: linux
+    kubernetes.io/role: agent
+    node-role.kubernetes.io/agent: ""
+    topology.kubernetes.io/zone: zone-$((i % 3))
+    type: kwok
+spec:
+  taints:
+  - effect: NoSchedule
+    key: ${FAKE_NODE_TAINT_KEY}
+    value: ${FAKE_NODE_ANNOTATION_VALUE}
+status:
+  addresses:
+  - address: ${kwok_ip}
+    type: InternalIP
+  - address: ${name}
+    type: Hostname
+  allocatable:
+    cpu: "32"
+    memory: 256Gi
+    pods: "110"
+  capacity:
+    cpu: "32"
+    memory: 256Gi
+    pods: "110"
+  nodeInfo:
+    architecture: amd64
+    kubeProxyVersion: fake
+    kubeletVersion: fake
+    operatingSystem: linux
+  phase: Running
+EOF
+  done
+}
+
+# A bulk apply that lands right behind a scale-down's mass delete can
+# hit `etcdserver: request timed out` while etcd is still working
+# through the deletions. apply is idempotent, so retry once instead of
+# handing the operator a half-built fleet and an error.
+apply_stdin() {
+  local what="$1" manifest
+  manifest="$(mktemp)"
+  cat >"$manifest"
+  if ! kubectl apply -f "$manifest" >/dev/null; then
+    echo "  … etcd busy applying $what; retrying once in 30s" >&2
+    sleep 30
+    kubectl apply -f "$manifest" >/dev/null
+  fi
+  rm -f "$manifest"
+}
+
+emit_nodes | apply_stdin nodes
+echo "▸ waiting for kwok to bring them Ready"
+kubectl wait --for=condition=Ready nodes -l "$FAKE_NODE_LABEL" --timeout=300s >/dev/null
+echo "  ✓ $(fake_node_count) fake nodes Ready"
+
+# ---- namespaces ----------------------------------------------------------
+
+ns_name() { printf '%s-%02d' "$FLEET_NS_PREFIX" "$1"; }
+
+emit_namespaces() {
+  local i ns
+  for ((i = 0; i < NAMESPACES; i++)); do
+    ns="$(ns_name "$i")"
+    cat <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ns}
+  labels:
+    ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+EOF
+    case $((i % 3)) in
+    0) # enforcing, and network-isolated
+      cat <<EOF
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ${ns}
+  labels:
+    ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+EOF
+      ;;
+    1) # dry-run: labelled, enforces nothing
+      cat <<EOF
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+EOF
+      ;;
+    esac
+  done
+}
+
+emit_namespaces | apply_stdin namespaces
+echo "  ✓ $NAMESPACES namespaces across three PSA tiers"
+
+# ---- workloads -----------------------------------------------------------
+
+# Indentation in these fragments is load-bearing: each is emitted at a
+# fixed depth inside the pod template below.
+tolerations_block() {
+  cat <<EOF
+      tolerations:
+      - key: ${FAKE_NODE_TAINT_KEY}
+        operator: Equal
+        value: ${FAKE_NODE_ANNOTATION_VALUE}
+        effect: NoSchedule
+EOF
+}
+
+probes_block() {
+  cat <<'EOF'
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          periodSeconds: 30
+EOF
+}
+
+emit_pdb() {
+  cat <<EOF
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: $2
+  namespace: $1
+  labels:
+    ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: $2
+EOF
+}
+
+# emit_workload <index> — one archetype's worth of YAML.
+emit_workload() {
+  local i="$1"
+  local arch=$((i % 10))
+  local ns_idx=$(((i / 10) % NAMESPACES))
+  local ns name replicas="$REPLICAS"
+
+  # PSA baseline rejects privileged, host namespaces and hostPath at
+  # admission. Move those three archetypes one namespace along, which
+  # (with NAMESPACES=9) is always a dry-run tier.
+  if ((arch >= 6 && arch <= 8 && ns_idx % 3 == 0)); then
+    ns_idx=$((ns_idx + 1))
+  fi
+  ns="$(ns_name "$ns_idx")"
+  name="$(printf 'svc-%04d' "$i")"
+
+  if ((arch == 9)); then
+    cat <<EOF
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ${name}
+  namespace: ${ns}
+  labels:
+    ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+spec:
+  schedule: "*/5 * * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: ${name}
+            ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            type: kwok
+$(tolerations_block | sed 's/^      /          /')
+          containers:
+          - name: job
+            image: fake-image:v1
+            resources:
+              requests: {cpu: 100m, memory: 128Mi}
+EOF
+    return 0
+  fi
+
+  ((arch == 2)) && replicas=1
+
+  cat <<EOF
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}
+  namespace: ${ns}
+  labels:
+    app: ${name}
+    ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      app: ${name}
+  template:
+    metadata:
+      labels:
+        app: ${name}
+        ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+    spec:
+      nodeSelector:
+        type: kwok
+EOF
+
+  # pinned: narrow placement to exactly one node, so the placement
+  # claim has a real eligible_nodes=1 to report.
+  ((arch == 5)) && printf '        kubernetes.io/hostname: %s\n' "$(node_name $((i % NODES)))"
+
+  tolerations_block
+
+  case "$arch" in
+  7) printf '      hostNetwork: true\n      hostPID: true\n' ;;
+  8)
+    cat <<'EOF'
+      volumes:
+      - name: hostlib
+        hostPath:
+          path: /var/lib
+EOF
+    ;;
+  esac
+
+  # Spread everywhere except no-spread and pinned: a workload pinned to
+  # one node cannot spread, and claiming both would double-count one
+  # defect.
+  if ((arch != 4 && arch != 5)); then
+    cat <<EOF
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: ${name}
+EOF
+  fi
+
+  cat <<EOF
+      containers:
+      - name: app
+        image: fake-image:v1
+        ports:
+        - containerPort: 8080
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+EOF
+
+  ((arch == 6)) && printf '        securityContext:\n          privileged: true\n'
+  ((arch == 8)) && printf '        volumeMounts:\n        - name: hostlib\n          mountPath: /host/lib\n'
+  ((arch != 3)) && probes_block
+  ((arch != 1 && arch != 2)) && emit_pdb "$ns" "$name"
+
+  return 0
+}
+
+echo "▸ applying $WORKLOADS workloads"
+for ((i = 0; i < WORKLOADS; i++)); do
+  emit_workload "$i"
+done | apply_stdin workloads
+echo "  ✓ workloads applied"
+
+echo "▸ waiting for pods to reach Running (kwok fast-forwards them)"
+deadline=$((SECONDS + 600))
+while :; do
+  running="$(kubectl get pods -A -l "$FLEET_LABEL" --field-selector=status.phase=Running \
+    -o name 2>/dev/null | grep -c . || true)"
+  ((running >= pods)) && break
+  if ((SECONDS >= deadline)); then
+    printf '\r  ⚠ only %s/%s pods Running after 600s — continuing anyway\n' "$running" "$pods" >&2
+    break
+  fi
+  printf '\r  … %s/%s Running ' "$running" "$pods"
+  sleep 5
+done
+((running >= pods)) && printf '\r  ✓ %s pods Running          \n' "$running"
+
+echo
+echo "Fleet up:"
+printf '  nodes      %s fake + %s real\n' "$(fake_node_count)" \
+  "$(kubectl get nodes -l '!type' -o name | grep -c . || true)"
+printf '  workloads  %s across %s namespaces\n' "$WORKLOADS" "$NAMESPACES"
+printf '  pods       %s\n' "$pods"
+echo
+echo "Next: examples/kwok/bench          # time the read path at this scale"
+echo "      examples/kwok/node-fail 30   # 30 nodes lose their kubelet at once"

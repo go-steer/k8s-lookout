@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Take N fake nodes down at once:
+#
+#   examples/kwok/node-fail [n]      # default 1
+#   examples/kwok/node-heal          # undo
+#
+# HOW: labelling the nodes makes the lookout-node-unreachable Stage
+# (stages/node-unreachable.yaml) fire, writing exactly what the real
+# node-lifecycle-controller writes for a kubelet that stopped posting
+# status — every condition Unknown, reason NodeStatusUnknown. The
+# condition is authored; everything downstream of it is real. The taint
+# manager sees Ready=Unknown and applies node.kubernetes.io/unreachable
+# NoSchedule + NoExecute, and pod eviction follows on the real
+# tolerationSeconds. See the Stage file for why letting kwok simply
+# stop heartbeating does not work.
+#
+# That is the argument for this tier. The equivalent on kind
+# (examples/scenarios/node-failure) stops a docker container, is
+# destructive, takes minutes, and can only ever kill ONE of two
+# workers. Here, thirty nodes losing their kubelet in the same second
+# costs nothing.
+#
+# Which is a DIFFERENT question from DESIGN.md §14's "one storm
+# session, not thirty" — that one is about the ~30 pods on a single
+# dead node, and the kind scenario already proves it (33 affected
+# objects, 3 session creates). What only a fleet can ask is what
+# happens when the thing that fails is many NODES. Measured here:
+# thirty sessions, one per node, because nothing keys a storm across
+# nodes — issue #334. examples/kwok/scenarios/node-storm is that drill
+# with assertions attached.
+#
+# What to watch:
+#   kubectl -n agent-triage logs deploy/lookout-watch -f
+#   kubectl -n agent-triage logs deploy/stub-daemon -f     # the wire
+#   lookout health           # nodes category
+#   lookout triage radius --workload=...
+#
+# Recovery is examples/kwok/node-heal: drop the label, kwok's ordinary
+# node-initialize stage rebuilds the status, the node goes Ready again
+# and the closed loop fires.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+require_kwok_installed
+
+COUNT="${1:-1}"
+[[ "$COUNT" =~ ^[0-9]+$ ]] && ((COUNT > 0)) || {
+  echo "ERROR: node count must be a positive integer (got '$COUNT')" >&2
+  exit 2
+}
+
+mapfile -t candidates < <(fake_nodes)
+if ((${#candidates[@]} == 0)); then
+  echo "ERROR: no fake nodes — run examples/kwok/scale-up first" >&2
+  exit 1
+fi
+if ((COUNT > ${#candidates[@]})); then
+  echo "ERROR: asked for $COUNT nodes, only ${#candidates[@]} fake nodes exist." >&2
+  echo "This script will never touch a real node: they have no kubelet to fake," >&2
+  echo "and stopping one is examples/scenarios/node-failure's job, not this one." >&2
+  exit 2
+fi
+
+targets=("${candidates[@]:0:COUNT}")
+
+if ! kubectl get stage lookout-node-unreachable >/dev/null 2>&1; then
+  echo "ERROR: the lookout-node-unreachable Stage is missing — re-run examples/kwok/up" >&2
+  exit 1
+fi
+
+echo "▸ stopping the simulated kubelet on $COUNT node(s)"
+printf '  %s\n' "${targets[@]:0:10}"
+((COUNT > 10)) && printf '  … and %d more\n' $((COUNT - 10))
+
+# One call for the whole set: the point of the drill is that they fail
+# in the same instant, not in a rolling sequence.
+kubectl label node "${targets[@]}" "$FAILED_NODE_LABEL" --overwrite >/dev/null
+
+echo "▸ waiting for the nodes to leave Ready"
+deadline=$((SECONDS + 300))
+while :; do
+  down=0
+  for node in "${targets[@]}"; do
+    status="$(kubectl get node "$node" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+    [[ "$status" != "True" ]] && down=$((down + 1))
+  done
+  ((down >= COUNT)) && break
+  if ((SECONDS >= deadline)); then
+    printf '\r  ⚠ only %s/%s nodes left Ready after 300s\n' "$down" "$COUNT" >&2
+    break
+  fi
+  printf '\r  … %s/%s no longer Ready ' "$down" "$COUNT"
+  sleep 5
+done
+((down >= COUNT)) && printf '\r  ✓ %s/%s nodes no longer Ready          \n' "$down" "$COUNT"
+
+echo
+kubectl get nodes -l "$FAKE_NODE_LABEL" --no-headers \
+  | awk '{print $2}' | sort | uniq -c | sed 's/^/  /'
+echo
+echo "Undo with: examples/kwok/node-heal"

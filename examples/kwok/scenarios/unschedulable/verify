@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+NS=kwok-scenario-unschedulable
+EXPECTED_PENDING=10
+
+echo "▸ verify unschedulable"
+
+# The fixture first: an unschedulable scenario that accidentally
+# schedules is a broken fixture, not a finding, and the count is the
+# cheapest way to know which one you are looking at.
+_pending_count() {
+  [[ "$(kubectl -n "$NS" get pods --field-selector=status.phase=Pending \
+    --no-headers 2>/dev/null | grep -c .)" == "$EXPECTED_PENDING" ]]
+}
+await 120 "exactly $EXPECTED_PENDING pods Pending" _pending_count
+
+# --pending-age shortens the 5m grace so the drill does not spend it
+# waiting; the grace itself is covered by the kind `pending` scenario.
+delta=(triage delta --namespace="$NS" --pending-age=30s)
+
+await_finding 180 "kind=pod.pending severity=critical.*reason=Unschedulable" -- "${delta[@]}"
+
+# The actual claim of this scenario: three workloads, three verdicts.
+# lookout carries the scheduler's own message through, so a reader can
+# tell a config error from a capacity wall from a topology limit —
+# which is the distinction that decides what you do next.
+await_finding 60 "name=zone-orphan.*didn't match Pod's node affinity/selector" -- "${delta[@]}"
+await_finding 60 "name=oversized.*Insufficient cpu" -- "${delta[@]}"
+await_finding 60 "name=spread.*didn't match pod anti-affinity rules" -- "${delta[@]}"
+
+# spread is the interesting one: PARTIALLY placed, so it is degraded
+# rather than down, and the fleet has thousands of idle cores while
+# oversized cannot place a single pod. Neither shape exists on two
+# real workers.
+await_finding 60 "kind=workload.rollout.*name=spread.*ready=3" -- triage delta --namespace="$NS"
+
+# The scorecard rollup, on the command's own default grace.
+await_finding 420 "category=pending status=degraded" -- health

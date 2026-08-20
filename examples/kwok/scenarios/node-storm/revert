@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+COUNT="$(cat "$STATE_DIR/node-storm.count" 2>/dev/null || echo 30)"
+
+echo "▸ revert node-storm"
+"$(kwok_root)/node-heal"
+
+# The closed loop is half of what this scenario is for, so revert
+# asserts rather than just cleaning up (same contract as
+# examples/scenarios/node-failure). Recovery has to travel the whole way
+# back on its own: the sentinel notices the nodes are Ready again, holds
+# them for --recovery-stable-for, and injects into the SESSIONS THAT
+# ALREADY EXIST. No agent polls anything.
+_all_nodes_resolved() {
+  local out cleared
+  out="$(stub_since node-storm)"
+  cleared="$(grep 'kind=resolved' <<<"$out" | grep -o 'kwok-node-[0-9]*' | sort -u | wc -l || true)"
+  ((cleared >= COUNT))
+}
+if await 420 "all $COUNT node sessions closed by a recovery inject" _all_nodes_resolved; then
+  out="$(stub_since node-storm)"
+  total="$(grep -c 'kind=resolved' <<<"$out" || true)"
+  recovered="$(grep -c 'kind=resolved.*resolution\\":\\"recovered' <<<"$out" || true)"
+  echo "    wire: $total resolved injects, $recovered of them resolution=recovered"
+else
+  echo "  ✗ recovery did not close every node session" >&2
+  exit 1
+fi
+
+# Nothing to delete: node-storm plants no objects. The fleet it runs
+# against belongs to scale-up, and scale-down owns removing it.
+echo "  ✓ nodes healed; the fleet is scale-up's to remove"

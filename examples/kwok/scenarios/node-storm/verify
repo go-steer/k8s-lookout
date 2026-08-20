@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+COUNT="$(cat "$STATE_DIR/node-storm.count" 2>/dev/null || echo 30)"
+
+echo "▸ verify node-storm ($COUNT nodes)"
+
+# ---- the fixture -----------------------------------------------------
+
+_nodes_down() {
+  local down
+  down="$(kubectl get nodes -l "$FAKE_NODE_LABEL" \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+    2>/dev/null | grep -c '^Unknown$' || true)"
+  ((down >= COUNT))
+}
+await 300 "$COUNT fake nodes report Ready=Unknown" _nodes_down
+
+# ---- detection: every dead node reaches the wire ---------------------
+
+# The floor: at this scale the sentinel must not drop node failures on
+# the floor, whatever it decides to do about grouping them.
+await_inject node-storm 300 'kind=objectstate.node_notready'
+
+# Count nodes named as the SUBJECT of a node_notready inject, not every
+# node the capture happens to mention: the pod incidents and the storms
+# name their nodes too, so a loose match here would pass on the healthy
+# ones and assert nothing.
+_all_nodes_on_wire() {
+  local named
+  named="$(stub_since node-storm | grep 'kind=objectstate.node_notready' \
+    | grep -o '\\"name\\":\\"kwok-node-[0-9]*' | sort -u | wc -l || true)"
+  ((named >= COUNT))
+}
+await 300 "all $COUNT failed nodes named on the wire" _all_nodes_on_wire
+
+# ---- the read path summarizes the same event in one line -------------
+
+# Worth asserting next to the wire check, because the two disagree (see
+# the soft check below): `health` rolls the whole outage into a single
+# nodes-category line carrying the count.
+await_finding 300 "category=nodes status=degraded total=$COUNT" -- health
+
+# ---- the pod fallout DOES correlate ----------------------------------
+
+# Eviction starts on the real tolerationSeconds (~5 minutes), and the
+# pods that go with the nodes are what §7.5 was built for: they share
+# declared ancestors — their Deployment, their Namespace — so they form
+# storms instead of one session each. This half works, and locking it
+# down is what keeps the soft check below honest: the correlator is not
+# broken, it just has no key for nodes.
+_storm_formed() {
+  local out
+  out="$(stub_since node-storm)"
+  grep -q 'INJECT .* kind=storm ' <<<"$out"
+}
+if await 600 "the evicted pods form at least one storm session" _storm_formed; then
+  storms="$(stub_since node-storm | grep -c 'INJECT .* kind=storm ' || true)"
+  echo "    wire: $storms storm session(s) from the pod fallout"
+fi
+
+# ---- GAP (#334): nothing groups the NODES ----------------------------
+
+# Thirty nodes lose their kubelet in the same second and the sentinel
+# opens thirty sessions: each Node incident's only blast-radius key is
+# its own Node (graphfeed.go, Ancestors), the mined dimensions are
+# image/node/container (mined.go), and although the nodes carry
+# topology.kubernetes.io/zone and Signal.Zone is already plumbed into
+# the correlator, zone is used only in the storm fingerprint — never
+# offered as a candidate key. All thirty incidents even compute the
+# SAME fingerprint and still open thirty sessions.
+#
+# Soft, not hard, for the reason the other kwok gaps are soft: a driver
+# that goes red on a filed defect stops being a signal. When #334 lands
+# this becomes a hard assertion — flip `soft` off and tighten the bound.
+echo "▸ gap (#334): the node failures correlate with each other"
+_nodes_correlate() {
+  local sessions
+  sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
+  # One page per zone would be 3 here, one per cluster 1. Anything at or
+  # near COUNT is the fragmentation #334 describes.
+  ((sessions > 0 && sessions < COUNT))
+}
+soft await 30 "fewer than $COUNT sessions for one $COUNT-node outage" _nodes_correlate
+sessions="$(stub_since node-storm | grep -c 'SESSION-CREATE' || true)"
+echo "    wire: $sessions sessions opened for one $COUNT-node outage"

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Time every target-free read-path command against the current cluster
+# and report what each one costs at this scale.
+#
+#   examples/kwok/bench
+#
+# Two numbers per command, and the second is the point:
+#
+#   elapsed   wall clock under a generous --timeout, so the command
+#             gets to finish and report a real cost
+#   default   whether the command SURVIVES its own shipped --timeout
+#             default (10s). Every read command documents that default
+#             in --help, and a command that cannot answer a 400-node
+#             cluster inside it fails closed for every operator who
+#             does not know to override it — which is exactly the class
+#             of defect a two-node kind cluster can never surface.
+#
+# Findings counts come from each command's summary line, so a command
+# that returns fast because it silently scanned nothing is visible as
+# scanned=0 rather than passing as fast.
+
+. "$(dirname "$0")/lib.sh"
+require_examples_context
+
+BENCH_TIMEOUT="${BENCH_TIMEOUT:-300s}"
+bin="$(lookout_bin)"
+
+nodes="$(kubectl get nodes -o name | grep -c . || true)"
+pods="$(kubectl get pods -A -o name | grep -c . || true)"
+echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) nodes faked by kwok)"
+echo "▸ binary:  $bin"
+echo
+
+printf '%-28s %9s %9s %9s %9s\n' COMMAND ELAPSED SCANNED FINDINGS 'DEFAULT-TO'
+printf '%-28s %9s %9s %9s %9s\n' '----------------------------' --------- --------- --------- ---------
+
+bench_one() {
+  local label="$1"
+  shift
+  local out start elapsed scanned findings default
+
+  start="$(date +%s.%N)"
+  out="$("$bin" "$@" --timeout="$BENCH_TIMEOUT" 2>/dev/null || true)"
+  elapsed="$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1fs", b - a}')"
+
+  # The summary line is the contract: scanned=<n> findings=<n> elapsed=<d>.
+  # Its absence means the stream was void — a failure, not a zero.
+  local summary
+  summary="$(grep -E '(^| )scanned=' <<<"$out" | tail -n1 || true)"
+  if [[ -z "$summary" ]]; then
+    scanned="void"
+    findings="void"
+  else
+    scanned="$(grep -oE 'scanned=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
+    findings="$(grep -oE 'findings=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
+  fi
+
+  # Now the same command with NO --timeout override: does it survive
+  # the default the operator actually gets?
+  if "$bin" "$@" >/dev/null 2>&1; then
+    default="ok"
+  else
+    default="TIMEOUT"
+  fi
+
+  printf '%-28s %9s %9s %9s %9s\n' "$label" "$elapsed" "$scanned" "$findings" "$default"
+}
+
+# Target-free commands only: anything needing --workload measures one
+# object and says nothing about scale. (state edges, triage radius,
+# triage changes and friends are all single-target by contract.)
+bench_one "health"               health
+bench_one "scan"                 scan
+bench_one "audit workloads -A"   audit workloads -A
+bench_one "audit hardening -A"   audit hardening -A
+bench_one "audit netpol -A"      audit netpol -A
+bench_one "triage delta -A"      triage delta -A
+bench_one "triage events -A"     triage events -A
+bench_one "triage top -A"        triage top -A
+bench_one "stab drain -A"        stab drain -A
+bench_one "stab drift"           stab drift
+bench_one "state webhooks"       state webhooks
+bench_one "state storage"        state storage
+
+echo
+echo "DEFAULT-TO = the command's own shipped --timeout default (see its --help)."
+echo "A TIMEOUT there is a real operator-facing failure at this cluster size,"
+echo "not a benchmark artefact."

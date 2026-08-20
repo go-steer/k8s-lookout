@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+require_kwok_installed
+
+# How many nodes lose their kubelet at once. Thirty is the number in
+# DESIGN.md §14's shorthand and comfortably past DefaultStormMin=3.
+WANT="${NODE_STORM_COUNT:-30}"
+
+# This is the one kwok scenario that asserts the WIRE, so unlike its
+# neighbours it needs the sentinel actually deployed. Say so up front
+# rather than failing in verify with an empty capture — an empty wire
+# reads exactly like a silent sentinel.
+if ! kubectl -n "$SENTINEL_NS" get deploy lookout-watch >/dev/null 2>&1; then
+  echo "ERROR: no sentinel in namespace $SENTINEL_NS." >&2
+  echo "This scenario asserts what reaches the daemon, not just what a read" >&2
+  echo "command prints. Deploy it first: examples/sentinel/up" >&2
+  exit 1
+fi
+if ! kubectl -n "$SENTINEL_NS" get deploy stub-daemon >/dev/null 2>&1; then
+  echo "ERROR: no stub-daemon in namespace $SENTINEL_NS (examples/sentinel/up)." >&2
+  exit 1
+fi
+
+mapfile -t candidates < <(fake_nodes)
+have="${#candidates[@]}"
+if ((have < 12)); then
+  echo "ERROR: $have fake nodes. The whole claim is about MANY nodes failing at" >&2
+  echo "once — run examples/kwok/scale-up first (40 is plenty)." >&2
+  exit 1
+fi
+COUNT="$WANT"
+((COUNT > have)) && COUNT="$have"
+
+mkdir -p "$STATE_DIR"
+echo "$COUNT" >"$STATE_DIR/node-storm.count"
+
+echo "▸ inject node-storm ($COUNT of $have fake nodes)"
+
+# The storm correlator's window is in-memory, so a sentinel that has
+# been absorbing another scenario's incidents for the last hour may
+# still hold open storms whose keys these incidents could join. Restart
+# it: the drill measures how ONE event correlates, not how it merges
+# with the last one.
+echo "▸ clearing the correlator's in-memory window (sentinel restart)"
+kubectl -n "$SENTINEL_NS" rollout restart deploy/lookout-watch >/dev/null
+kubectl -n "$SENTINEL_NS" rollout status deploy/lookout-watch --timeout=180s >/dev/null
+echo "  ✓ sentinel restarted"
+
+# Let the sources warm and any rollout churn leave the 60s window
+# before marking the wire, so the capture contains this fault and
+# nothing else.
+echo "▸ letting the fleet go quiet before marking the wire"
+sleep "${NODE_STORM_SETTLE:-120}"
+
+stub_mark node-storm
+
+# One call for the whole set — the point is that they fail in the same
+# instant. node-fail owns the mechanics (see stages/node-unreachable.yaml
+# for why letting kwok stop heartbeating does not work).
+"$(kwok_root)/node-fail" "$COUNT"

@@ -1,0 +1,113 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The Stage behind examples/kwok/node-fail.
+#
+# WHAT IT SIMULATES, precisely: a kubelet that stopped posting node
+# status — the machine died, the network partitioned, the kubelet
+# crashed. The status written here is what the real
+# node-lifecycle-controller writes in that case: the four kubelet-owned
+# conditions all Unknown, reason NodeStatusUnknown, message "Kubelet
+# stopped posting node status.", and the heartbeat frozen at its last
+# real value rather than advanced.
+#
+# WHY A STAGE, and not simply letting kwok stop heartbeating: kwok
+# scopes node ownership at its informer, and dropping the
+# kwok.x-k8s.io/node annotation from a LIVE node does not stop the lease
+# controller renewing its lease — the node stays Ready indefinitely.
+# Writing the condition is the mechanism kwok itself ships for this
+# (kustomize/stage/node/chaos/node-not-ready.yaml); this Stage differs
+# only in writing Unknown rather than False, because Unknown is what a
+# *vanished* kubelet produces and False is what a *sick* one does.
+#
+# Only the condition is authored. Everything downstream of it is the
+# real thing: the node-lifecycle-controller's taint manager sees
+# Ready=Unknown and applies node.kubernetes.io/unreachable NoSchedule +
+# NoExecute, and real pod eviction follows on the real tolerationSeconds
+# (300s by default — a node-fail drill will churn its pods five minutes
+# in, exactly as a real one would).
+#
+# TWO THINGS ABOUT THE SELECTOR AND WEIGHT ARE LOAD-BEARING, and both
+# were learned the hard way:
+#
+#  1. It must NOT require Ready=True. stage-fast.yaml's node-initialize
+#     selects on Ready NotIn ["True"] and nothing else, so it re-Readies
+#     any node it can reach. A failure Stage that stops matching once it
+#     has fired hands the node straight back to node-initialize, and the
+#     node oscillates instead of staying down.
+#  2. weight: 10000 is what starves node-initialize. kwok picks one
+#     stage per event by weighted random choice, and skips every stage
+#     with weight 0 as long as some matching stage has a weight
+#     (pkg/utils/lifecycle/lifecycle.go). node-initialize ships with
+#     weight 0, so while this Stage keeps matching it always loses.
+#
+# There is deliberately no recovery Stage: node-initialize IS the
+# recovery path. examples/kwok/node-heal drops the label, this Stage
+# stops matching, and node-initialize — now the only match — rebuilds
+# the full healthy status, addresses and nodeInfo included.
+#
+# The rendered status is deterministic (both timestamps come from the
+# node's own frozen heartbeat, not from Now), so after the first write
+# kwok's checkNeedPatchWithTyped sees no change and stops patching. A
+# failed node is quiet, not a write loop, however long it stays down.
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: Stage
+metadata:
+  name: lookout-node-unreachable
+spec:
+  resourceRef:
+    apiGroup: v1
+    kind: Node
+  selector:
+    matchExpressions:
+      # Set by examples/kwok/node-fail, removed by node-heal.
+      - key: '.metadata.labels["lookout.examples/kwok-node-failed"]'
+        operator: 'In'
+        values: ['true']
+      # Never fight node-initialize over a node it has not finished
+      # bringing up in the first place.
+      - key: '.status.phase'
+        operator: 'In'
+        values: ['Running']
+  weight: 10000
+  delay:
+    durationMilliseconds: 1000
+  next:
+    statusSubresource: status
+    statusTemplate: |
+      {{ $stamp := "" }}
+      {{ range .status.conditions }}
+      {{ if eq .type "Ready" }}
+      {{ $stamp = .lastHeartbeatTime }}
+      {{ end }}
+      {{ end }}
+      {{ $stamp = or $stamp .metadata.creationTimestamp }}
+      conditions:
+      {{ range .status.conditions }}
+      {{ if or (eq .type "Ready") (eq .type "MemoryPressure") (eq .type "DiskPressure") (eq .type "PIDPressure") }}
+      - lastHeartbeatTime: {{ $stamp | Quote }}
+        lastTransitionTime: {{ $stamp | Quote }}
+        message: "Kubelet stopped posting node status."
+        reason: "NodeStatusUnknown"
+        status: "Unknown"
+        type: {{ .type | Quote }}
+      {{ else }}
+      - lastHeartbeatTime: {{ .lastHeartbeatTime | Quote }}
+        lastTransitionTime: {{ .lastTransitionTime | Quote }}
+        message: {{ .message | Quote }}
+        reason: {{ .reason | Quote }}
+        status: {{ .status | Quote }}
+        type: {{ .type | Quote }}
+      {{ end }}
+      {{ end }}

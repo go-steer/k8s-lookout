@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+NS=kwok-scenario-pdb
+
+echo "▸ verify pdb-gridlock"
+
+# disruptionsAllowed=0 on exactly the three stuck-* PDBs, and on none of
+# the ok-* ones. Assert the fixture before assert the finding.
+_gridlock_ready() {
+  local stuck ok
+  stuck="$(kubectl -n "$NS" get pdb -o \
+    jsonpath='{range .items[?(@.status.disruptionsAllowed==0)]}{.metadata.name}{"\n"}{end}' \
+    2>/dev/null | grep -c '^stuck-' || true)"
+  ok="$(kubectl -n "$NS" get pdb -o \
+    jsonpath='{range .items[?(@.status.disruptionsAllowed==0)]}{.metadata.name}{"\n"}{end}' \
+    2>/dev/null | grep -c '^ok-' || true)"
+  [[ "$stuck" == 3 && "$ok" == 0 ]]
+}
+await 180 "3 stuck-* PDBs gridlocked, 0 ok-* PDBs gridlocked" _gridlock_ready
+
+# -A rolls up per NODE, and that is the scale claim: the gridlock is
+# attributed to the handful of fake nodes that happen to hold a stuck-*
+# pod, picked out of the whole fleet. On two real workers every blocker
+# lands on one of two nodes and the attribution proves nothing.
+await_finding 180 "kind=drain.node severity=critical.*pdb_gridlock=[1-9]" -- stab drain -A
+
+# Drill into one of those nodes by name: the blocker becomes its own
+# finding and has to name the pod that causes it.
+node="$(kubectl -n "$NS" get pods -l app=stuck-00 \
+  -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
+if [[ -z "$node" ]]; then
+  echo "  ✗ no node holds a stuck-00 pod — fixture broken" >&2
+  exit 1
+fi
+echo "  → drilling into $node"
+await_finding 120 "kind=drain.pdb_gridlock severity=critical.*stuck-00" \
+  -- stab drain --node="$node"
+
+# The negative half, and the one that actually costs something to get
+# right: nine sound PDBs of the identical shape sit beside the three
+# broken ones, and not one of them may be reported.
+echo "▸ the haystack stays quiet"
+if run_lookout stab drain -A 2>/dev/null | grep -E 'ok-[0-9]'; then
+  echo "  ✗ a sound PDB was reported as a drain blocker" >&2
+  exit 1
+fi
+echo "  ✓ no ok-* PDB reported"
