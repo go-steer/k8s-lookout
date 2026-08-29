@@ -90,21 +90,31 @@ var frozenFields = map[string][]string{
 	// key_source added 2026-08-20 (issue #334), additive + omitempty:
 	// present only when the correlation key did NOT come from the
 	// topology graph's ancestor relation, so every storm that had a
-	// modelled key stays byte-identical. See docs/signal-schema-v1.md
+	// modelled key stays byte-identical.
+	// member_fingerprints_truncated added 2026-08-29 (issue #336),
+	// additive + omitempty: present only on a storm the fit guard had
+	// to cut to clear the daemon's per-inject ceiling, which is to say
+	// never on a storm that fit. See docs/signal-schema-v1.md
 	// §Amendments.
 	"StormPayload": {"kind", "fingerprint", "severity", "cluster",
 		"ancestor_kind", "ancestor_namespace", "ancestor_name", "reason",
 		"message", "affected_count", "namespaces_count", "first_seen",
 		"last_seen", "representative_incidents", "member_fingerprints",
-		"context", "enrichment", "key_source"},
+		"member_fingerprints_truncated", "context", "enrichment",
+		"key_source"},
 	"StormMemberPayload": {"kind", "storm_fingerprint", "storm_session_id",
 		"ancestor_kind", "ancestor_namespace", "ancestor_name", "cluster",
 		"message", "incident"},
 	"StormUpdatePayload": {"kind", "storm_fingerprint", "ancestor_kind",
 		"ancestor_namespace", "ancestor_name", "cluster", "message",
 		"affected_count", "namespaces_count", "new_members_since_last"},
+	// entries_dropped added 2026-08-29 (issue #337), additive +
+	// omitempty: present only on a digest the fit guard had to cut to
+	// clear the daemon's per-inject ceiling. See
+	// docs/signal-schema-v1.md §Amendments.
 	"WatchboardDigestPayload": {"kind", "cluster", "board_generation",
-		"sequence", "window_start", "window_end", "entries"},
+		"sequence", "window_start", "window_end", "entries",
+		"entries_dropped"},
 	"WatchboardRotatedPayload": {"kind", "cluster", "board_generation",
 		"successor_session_id", "injects_count", "rotated_at"},
 	"TriageRegressedPayload": {"kind", "reason", "namespace",

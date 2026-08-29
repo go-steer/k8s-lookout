@@ -15,7 +15,10 @@
 package inject
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +205,167 @@ func TestStormPayloadFitTo(t *testing.T) {
 	}
 	if p.AncestorName != "gke-node-xyz" || p.Reason != "NodeNotReady" {
 		t.Errorf("storm fit dropped identity")
+	}
+}
+
+// stormWithMembers builds a kind=storm payload whose only bulk is its
+// member list — no enrichment, a short message — so the fit guard has
+// nothing to shed but the fingerprints (issue #336).
+func stormWithMembers(n int) StormPayload {
+	fps := make([]string, 0, n)
+	for i := range n {
+		fps = append(fps, fmt.Sprintf("%016x", i*7919))
+	}
+	return StormPayload{
+		Kind:               KindStorm,
+		Fingerprint:        "a1b2c3d4e5f60718",
+		Severity:           "critical",
+		Cluster:            "prod",
+		AncestorKind:       "Zone",
+		AncestorName:       "zone-0",
+		Reason:             "NodeNotReady",
+		Message:            "Zone/zone-0: incidents share this blast-radius key",
+		AffectedCount:      n,
+		NamespacesCount:    6,
+		MemberFingerprints: fps,
+	}
+}
+
+// TestStormPayloadFitTo_ShedsMemberFingerprints is the #336 regression:
+// before it, a storm's member list was uncapped and unsheddable, so
+// past ~330 members FitTo shed the message, gave up, and returned a
+// payload STILL over the ceiling — which the daemon 400s, landing the
+// storm as a bound-but-empty session (the #198 failure).
+func TestStormPayloadFitTo_ShedsMemberFingerprints(t *testing.T) {
+	for _, n := range []int{400, 500, 1000, 20000} {
+		p := stormWithMembers(n)
+		if WireSize(p) <= MaxInjectBytes {
+			t.Fatalf("test setup: %d members should start over the ceiling, got %d", n, WireSize(p))
+		}
+		shed := p.FitTo(MaxInjectBytes)
+		if got := WireSize(p); got > MaxInjectBytes {
+			t.Errorf("members=%d: still over the ceiling after fit: %d > %d", n, got, MaxInjectBytes)
+		}
+		if !slices.Contains(shed, "member_fingerprints") {
+			t.Errorf("members=%d: shed = %v, want it to include member_fingerprints", n, shed)
+		}
+		if !p.MemberFingerprintsTruncated {
+			t.Errorf("members=%d: MemberFingerprintsTruncated not set on a cut list", n)
+		}
+		// Identity and the true count survive; the kept members are the
+		// earliest arrivals, in order.
+		if p.AffectedCount != n || p.AncestorName != "zone-0" || p.Reason != "NodeNotReady" {
+			t.Errorf("members=%d: fit dropped identity or the true count", n)
+		}
+		full := stormWithMembers(n).MemberFingerprints
+		if kept := len(p.MemberFingerprints); kept >= n {
+			t.Errorf("members=%d: kept %d, want fewer than %d", n, kept, n)
+		} else if !slices.Equal(p.MemberFingerprints, full[:kept]) {
+			t.Errorf("members=%d: kept members are not the earliest arrivals in order", n)
+		}
+		// The message is worth more than the fingerprints, so it must
+		// survive when shedding the list alone was enough.
+		if p.Message == "" {
+			t.Errorf("members=%d: message truncated even though shedding members sufficed", n)
+		}
+	}
+}
+
+// A storm that fits keeps its list whole and its wire shape pinned —
+// member_fingerprints_truncated is omitempty precisely so this stays
+// byte-identical to the pre-#336 payload.
+func TestStormPayloadFitTo_UntouchedWhenItFits(t *testing.T) {
+	p := stormWithMembers(100)
+	before, _ := json.Marshal(p)
+	if shed := p.FitTo(MaxInjectBytes); shed != nil {
+		t.Errorf("FitTo shed %v on a storm that fits", shed)
+	}
+	after, _ := json.Marshal(p)
+	if string(before) != string(after) {
+		t.Errorf("FitTo mutated a storm that fits:\n before %s\n after  %s", before, after)
+	}
+	if bytes.Contains(after, []byte("member_fingerprints_truncated")) {
+		t.Errorf("omitempty broken: truncation marker present on an untruncated storm")
+	}
+}
+
+// digestWith builds a watchboard digest of n entries, each entry
+// distinguishable by name so the test can prove WHICH ones survived.
+func digestWith(n int) WatchboardDigestPayload {
+	es := make([]WatchboardEntry, 0, n)
+	for i := range n {
+		es = append(es, WatchboardEntry{
+			Kind:         "objectstate.pod_pending",
+			Fingerprint:  fmt.Sprintf("%016x", i),
+			Reason:       "Unschedulable",
+			Namespace:    "lookout-examples",
+			KindOfObject: "Pod",
+			Name:         fmt.Sprintf("fleet-svc-6d4b9c8f7a-%05d", i),
+			UID:          "7503ea47-d147-4342-92b2-743a1d88cd4b",
+			Count:        3,
+			FirstSeen:    time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
+			LastSeen:     time.Date(2026, 8, 29, 12, 5, 0, 0, time.UTC),
+		})
+	}
+	return WatchboardDigestPayload{
+		Kind:            KindWatchboardDigest,
+		Cluster:         "prod",
+		BoardGeneration: 1,
+		Sequence:        42,
+		WindowStart:     time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
+		WindowEnd:       time.Date(2026, 8, 29, 12, 5, 0, 0, time.UTC),
+		Entries:         es,
+	}
+}
+
+// TestWatchboardDigestFitTo_DropsOldest is the #337 regression: the
+// digest had no fit guard, so a --watchboard-batch past ~22 made every
+// flush 400 and discard its whole buffer.
+func TestWatchboardDigestFitTo_DropsOldest(t *testing.T) {
+	for _, n := range []int{25, 50, 200, 5000} {
+		p := digestWith(n)
+		if WireSize(p) <= MaxInjectBytes {
+			t.Fatalf("test setup: %d entries should start over the ceiling, got %d", n, WireSize(p))
+		}
+		shed := p.FitTo(MaxInjectBytes)
+		if got := WireSize(p); got > MaxInjectBytes {
+			t.Errorf("entries=%d: still over the ceiling after fit: %d > %d", n, got, MaxInjectBytes)
+		}
+		if !slices.Contains(shed, "entries") {
+			t.Errorf("entries=%d: shed = %v, want it to include entries", n, shed)
+		}
+		kept := len(p.Entries)
+		if kept == 0 || kept >= n {
+			t.Errorf("entries=%d: kept %d, want 0 < kept < %d", n, kept, n)
+		}
+		if p.EntriesDropped != n-kept {
+			t.Errorf("entries=%d: EntriesDropped = %d, want %d", n, p.EntriesDropped, n-kept)
+		}
+		// Newest-wins: the survivors are the TAIL of the window, in order.
+		full := digestWith(n).Entries
+		if !slices.Equal(p.Entries, full[n-kept:]) {
+			t.Errorf("entries=%d: survivors are not the newest %d entries in order", n, kept)
+		}
+		// Identity of the digest itself is untouched.
+		if p.Sequence != 42 || p.BoardGeneration != 1 || p.Cluster != "prod" ||
+			!p.WindowStart.Equal(full[0].FirstSeen) {
+			t.Errorf("entries=%d: fit disturbed the digest's own identity", n)
+		}
+	}
+}
+
+func TestWatchboardDigestFitTo_UntouchedWhenItFits(t *testing.T) {
+	p := digestWith(5) // the --watchboard-batch default
+	before, _ := json.Marshal(p)
+	if shed := p.FitTo(MaxInjectBytes); shed != nil {
+		t.Errorf("FitTo shed %v on a digest that fits", shed)
+	}
+	after, _ := json.Marshal(p)
+	if string(before) != string(after) {
+		t.Errorf("FitTo mutated a digest that fits:\n before %s\n after  %s", before, after)
+	}
+	if bytes.Contains(after, []byte("entries_dropped")) {
+		t.Errorf("omitempty broken: drop count present on an uncut digest")
 	}
 }
 

@@ -336,6 +336,30 @@ first external consumer deploys.
   same change adds `Zone` and the synthetic `Cluster` to the values
   `ancestor_kind` can take — always an open object-class string, never
   an enum, so this is not a v1 break either.
+- **2026-08-29 — `member_fingerprints_truncated` added to
+  `StormPayload` (#336):** boolean, omitempty, after
+  `member_fingerprints`. Set only when the fit guard had to cut the
+  member list to bring the payload under the daemon's per-inject
+  ceiling; a storm that fit whole omits it, so the pinned `kind=storm`
+  bytes are unchanged for every storm that ever fit. When it is true,
+  `member_fingerprints` holds the EARLIEST arrivals only and
+  `affected_count` remains the true member count — consumers counting
+  members must read `affected_count`, never `len(member_fingerprints)`,
+  which was already the documented contract. The list was previously
+  uncapped and unsheddable, so a storm past ~330 members exceeded the
+  ceiling even after a full fit and was rejected whole.
+- **2026-08-29 — `entries_dropped` added to
+  `WatchboardDigestPayload` (#337):** integer, omitempty, last field.
+  Set only when the fit guard had to cut the digest to clear the
+  daemon's per-inject ceiling; a digest that fit whole omits it, so the
+  pinned `kind=watchboard.digest` bytes are unchanged at the default
+  `--watchboard-batch`. When it is non-zero, `entries` holds the NEWEST
+  warnings in the window and the count names how many older ones were
+  shed — the opposite end from a truncated storm's member list, because
+  the watchboard reports current state rather than one event's leading
+  symptom. The digest previously had no fit guard at all, so a
+  `--watchboard-batch` past roughly 22 made every flush fail and
+  discard its whole buffer.
 
 ## Evolution
 

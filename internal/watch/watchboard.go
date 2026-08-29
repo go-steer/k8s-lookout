@@ -63,6 +63,10 @@ type watchboardConfig struct {
 	batch         int           // --watchboard-batch: flush at this many buffered warnings
 	flushInterval time.Duration // --watchboard-flush: flush this long after the first buffered warning
 	rotateAfter   int           // --watchboard-rotate: digests per session before rotating
+	// injectMaxBytes is --inject-max-bytes, the sink's per-inject wire
+	// ceiling, applied to the digest before it goes out (issue #337).
+	// <= 0 means no ceiling, matching dispatcher.fitInject.
+	injectMaxBytes int
 }
 
 // boardEntry is one buffered warning: the signal plus its dedup
@@ -428,7 +432,7 @@ func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestP
 			LastSeen:     e.sig.LastSeen,
 		})
 	}
-	return inject.WatchboardDigestPayload{
+	payload := inject.WatchboardDigestPayload{
 		Kind:            inject.KindWatchboardDigest,
 		Cluster:         b.cluster,
 		BoardGeneration: b.generation,
@@ -437,6 +441,20 @@ func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestP
 		WindowEnd:       now,
 		Entries:         entries,
 	}
+	// Fit under the sink's per-inject ceiling here rather than at each
+	// call site: all three digest paths (append into a live session,
+	// the stateless open-WITH-digest, and the post-rotation append)
+	// build their payload through this one seam. An unfitted digest is
+	// 400d whole and its buffer discarded (#337).
+	if b.injectMaxBytes > 0 {
+		if shed := payload.FitTo(b.injectMaxBytes); len(shed) > 0 {
+			log.Printf("watchboard: digest exceeded --inject-max-bytes=%d; dropped the %d oldest of %d entries to fit "+
+				"(--watchboard-batch=%d is too large for this sink's inject ceiling)",
+				b.injectMaxBytes, payload.EntriesDropped, len(entries), b.batch)
+			b.metrics.injectShrinks.WithLabelValues("watchboard_entries").Inc()
+		}
+	}
+	return payload
 }
 
 func (b *watchboard) clearBufferLocked() {

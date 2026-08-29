@@ -142,7 +142,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"reason", "http_code"}),
 		injectShrinks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_inject_shrinks_total",
-			Help: "Total new-incident payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment|message). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling.",
+			Help: "Total payloads shrunk to fit --inject-max-bytes before delivery (issue #198), by what was shed (enrichment|message|member_fingerprints|watchboard_entries). Identity is never dropped; a counted incident still routed. A rising enrichment count means --enrich-cap is set too high for the sink's inject ceiling; member_fingerprints means a storm outgrew the ceiling and its member list was cut to the earliest arrivals (#336); watchboard_entries means --watchboard-batch is too large for it and the oldest warnings in the digest were dropped (#337).",
 		}, []string{"shed"}),
 		sessionCreates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_session_creates_total",
