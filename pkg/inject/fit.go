@@ -92,8 +92,24 @@ func (p *Payload) FitTo(maxBytes int) []string {
 // FitTo is the StormPayload counterpart of Payload.FitTo: a storm's
 // initial inject carries a (radius-only, so usually smaller) enrichment
 // bundle and an aggregate message, and breaches the same daemon ceiling
-// the same way. Same least-signal-first order and same never-touch-
-// identity guarantee.
+// the same way. Same never-touch-identity guarantee, with one extra
+// step wedged in the middle of the shrink order (issue #336).
+//
+// MemberFingerprints holds one entry per member and is otherwise
+// uncapped, so on a large storm it — not the enrichment, not the
+// message — IS the payload. Shedding enrichment and truncating a
+// ~150-byte message cannot claw back a 22 KiB body, so before #336 a
+// storm past ~330 members stayed over the ceiling after a full fit, the
+// daemon 400d the initial inject, and the storm landed as a
+// bound-but-empty session — the exact #198 failure the guard exists to
+// prevent. It is shed BEFORE Message for that reason: the message is a
+// generated summary derivable from the structured fields, but shedding
+// it first buys almost nothing and leaves the payload over anyway.
+//
+// Truncation keeps the earliest arrivals (the leading symptom, the same
+// end representatives are drawn from) and sets
+// MemberFingerprintsTruncated so a reader can tell a cut list from a
+// short storm. AffectedCount still carries the true member count.
 func (p *StormPayload) FitTo(maxBytes int) []string {
 	if WireSize(p) <= maxBytes {
 		return nil
@@ -106,6 +122,20 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 			return shed
 		}
 	}
+	if len(p.MemberFingerprints) > 0 {
+		full := p.MemberFingerprints
+		if shrinkFingerprints(full, maxBytes,
+			func(fps []string) {
+				p.MemberFingerprints = fps
+				p.MemberFingerprintsTruncated = len(fps) < len(full)
+			},
+			func() int { return WireSize(p) }) {
+			shed = append(shed, "member_fingerprints")
+		}
+		if WireSize(p) <= maxBytes {
+			return shed
+		}
+	}
 	if p.Message != "" {
 		if shrinkText(p.Message, maxBytes,
 			func(s string) { p.Message = s },
@@ -114,6 +144,54 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 		}
 	}
 	return shed
+}
+
+// FitTo shrinks a watchboard digest under maxBytes by dropping its
+// OLDEST entries, returning what it shed (issue #337). The digest has
+// no enrichment and no prose message — its entries ARE the payload —
+// so there is exactly one thing to shed.
+//
+// Newest-wins, the opposite of StormPayload.FitTo's keep-the-earliest:
+// a storm's first arrivals are the leading symptom of one event, while
+// the watchboard is a rolling board of independent warnings where the
+// current state is what an operator acts on. The count dropped is
+// reported in EntriesDropped rather than silently, and the entries
+// were already counted in watchboard_entries_total.
+//
+// Without this the digest went to the wire unfitted: a
+// --watchboard-batch past roughly 22 (or fewer, with long
+// namespace/name pairs) made every flush 400 and drop its whole
+// buffer, permanently, from a legal flag value.
+func (p *WatchboardDigestPayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	if len(p.Entries) == 0 {
+		return nil
+	}
+	full := p.Entries
+	// Binary-search the largest SUFFIX (the newest k entries) that fits.
+	lo, hi, best := 0, len(full), -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		p.Entries = full[len(full)-mid:]
+		p.EntriesDropped = len(full) - mid
+		if WireSize(p) <= maxBytes {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best < 0 {
+		best = 0
+	}
+	p.Entries = full[len(full)-best:]
+	p.EntriesDropped = len(full) - best
+	if p.EntriesDropped == 0 {
+		return nil
+	}
+	return []string{"entries"}
 }
 
 // shrinkText binary-searches the largest rune prefix of text that, once
@@ -145,4 +223,34 @@ func shrinkText(text string, maxBytes int, set func(string), size func() int) bo
 	out := string(runes[:best]) + truncMarker
 	set(out)
 	return out != text
+}
+
+// shrinkFingerprints is the slice counterpart of shrinkText (issue
+// #336): it binary-searches the largest PREFIX of fps that, written
+// back through set and re-measured through size, keeps the wire within
+// maxBytes. A prefix, not a sample, so the members kept are the
+// earliest arrivals. Converges by measurement for the same reason
+// shrinkText does — the double-JSON escaping makes each entry's byte
+// cost nonlinear, and the surrounding payload counts too.
+//
+// Reports whether it dropped anything. An empty result (not even one
+// fingerprint fits) is a legitimate outcome: AffectedCount survives, so
+// the storm still says how big it was.
+func shrinkFingerprints(fps []string, maxBytes int, set func([]string), size func() int) bool {
+	lo, hi, best := 0, len(fps), -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		set(fps[:mid])
+		if size() <= maxBytes {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best < 0 {
+		best = 0
+	}
+	set(fps[:best])
+	return best < len(fps)
 }

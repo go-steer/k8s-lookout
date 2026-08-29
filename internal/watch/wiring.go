@@ -571,13 +571,14 @@ func (r *runner) run(ctx context.Context) error {
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
-			injector:      r.sink,
-			metrics:       m,
-			cluster:       r.clusterName,
-			dryRun:        f.dryRun,
-			batch:         f.watchboardBatch,
-			flushInterval: f.watchboardFlush,
-			rotateAfter:   f.watchboardRotate,
+			injector:       r.sink,
+			metrics:        m,
+			cluster:        r.clusterName,
+			dryRun:         f.dryRun,
+			batch:          f.watchboardBatch,
+			flushInterval:  f.watchboardFlush,
+			rotateAfter:    f.watchboardRotate,
+			injectMaxBytes: f.injectMaxBytes,
 		})
 		board.bind = disp.bindWatchboardIncident
 		disp.board = board

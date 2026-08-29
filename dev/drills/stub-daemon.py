@@ -26,6 +26,11 @@ No auth validation beyond noting whether a bearer token was present —
 this is a capture stub for staging drills, never a daemon substitute in
 a real deployment. Used by docs/milestones/M2.md's kind drills and by
 dev/drills/node-failure.md's GKE replay.
+
+The ONE daemon behavior the stub does reproduce faithfully is the
+per-inject body ceiling (issue #338), because a stub that accepts any
+size makes every drill blind to the fit guard --inject-max-bytes exists
+to provide.
 """
 
 import json
@@ -33,6 +38,14 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 counter = 0
+
+# The real daemon's per-inject request-body cap: core-agent's
+# pkg/attach/handlers.go injectMaxBytes = 8 * 1024, applied to POST
+# /sessions/<sid>/inject only (not /sessions). An over-limit body comes
+# back 400 — NOT 413 — so it is permanent, non-retryable, and costs the
+# whole inject; lookout's inject.MaxInjectBytes mirrors this value and
+# the dispatcher fits payloads under it before POSTing.
+INJECT_MAX_BYTES = 8 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -49,10 +62,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _reply_text(self, code, text):
+        """Plain-text error, matching the daemon's http.Error shape."""
+        body = (text + "\n").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         global counter
         length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length).decode(errors="replace")
+        body_bytes = self.rfile.read(length)
+        raw = body_bytes.decode(errors="replace")
         token = "present" if self.headers.get("Authorization") else "MISSING"
         caller = self.headers.get("X-Asserted-Caller", "")
         if self.path == "/sessions":
@@ -70,6 +93,16 @@ class Handler(BaseHTTPRequestHandler):
                 kind = json.loads(msg).get("kind", "")
             except (ValueError, AttributeError):
                 pass
+            if len(body_bytes) > INJECT_MAX_BYTES:
+                # Deliberately NOT an `INJECT` line, and `kind_rejected=`
+                # rather than `kind=`: a rejected payload never reached
+                # the session, so it must not satisfy a drill's
+                # "delivered" grep. An assertion that counts injects
+                # SHOULD go red when the fit guard lets one through.
+                print("REJECT sid=%s bytes=%d limit=%d kind_rejected=%s head=%s" % (
+                    sid, len(body_bytes), INJECT_MAX_BYTES, kind, raw[:200]), flush=True)
+                self._reply_text(400, "request body too large (max %d bytes)" % INJECT_MAX_BYTES)
+                return
             print("INJECT sid=%s kind=%s token=%s body=%s" % (sid, kind, token, raw), flush=True)
             self._reply(200, {})
             return

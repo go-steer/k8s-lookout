@@ -55,6 +55,20 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
 		}
 	}
+	// Fit under the sink's per-inject ceiling HERE, before the mode
+	// branch, so all three ways this payload can leave use the same
+	// fitted bytes: the per-incident open (openSession fits its own
+	// copy, making that call a no-op), the shared-mode Append below —
+	// which reaches the wire without an open and so was never fitted
+	// at all — and the dry-run print, which should show what would
+	// really go out. A storm is the payload shape most likely to
+	// breach the ceiling, since its member list grows with the burst
+	// (#336).
+	if d.injectMaxBytes > 0 {
+		if shed := payload.FitTo(d.injectMaxBytes); len(shed) > 0 {
+			d.noteInjectShrunk(payload.AncestorNamespace, payload.AncestorName, shed)
+		}
+	}
 	sid := d.targetSid
 	// openErr carries a partial OpenIncident failure (storm session
 	// opened, initial delivery failed): counted below like the

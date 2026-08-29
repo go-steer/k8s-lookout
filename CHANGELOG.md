@@ -168,6 +168,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always an open object-class string, so `Zone` and `Cluster` are not a
   v1 break either.
 
+### Fixed
+
+- The per-inject wire ceiling is now enforced on every payload that can
+  breach it, not just the ones that could when `--inject-max-bytes`
+  landed. The daemon rejects an over-limit inject with **400** — a
+  permanent error that costs the whole payload — so anything the fit
+  guard misses is not degraded, it is lost.
+
+  **Storms past roughly 330 members were rejected whole (#336).**
+  `member_fingerprints` carries one entry per member and was both
+  uncapped and unsheddable: `FitTo` could drop the enrichment bundle
+  and truncate the message, neither of which claws back a 22 KiB body,
+  so the payload stayed over the ceiling after a full fit and the storm
+  landed as a bound-but-empty session — exactly the failure the guard
+  exists to prevent. The member list is now shed between enrichment and
+  message, keeping the earliest arrivals. This was reachable in
+  practice only after the zone key and simultaneity fallback above: a
+  Node-keyed storm is bounded by pods-per-node, but a zone storm over a
+  large fleet is not. Shared mode reached the wire without an open and
+  so was never fitted at all; storms are now fitted before the mode
+  branch, which also makes `--dry-run` print what would really go out.
+
+  **A `--watchboard-batch` past ~22 discarded every buffered warning
+  (#337).** The digest flushes through `Append`, which no fit guard
+  covered, and a failed flush clears the buffer. At ~370 wire bytes per
+  entry the default of 5 was never at risk, but nothing rejected a
+  larger value, so a legal setting made every flush fail permanently
+  and silently lose warnings. Digests are now fitted by dropping their
+  oldest entries — newest-wins, the opposite end from a storm, because
+  the watchboard reports current state rather than one event's leading
+  symptom.
+
+  Wire: `StormPayload` gains `member_fingerprints_truncated` and
+  `WatchboardDigestPayload` gains `entries_dropped`, both omitempty and
+  set only on a payload that had to be cut, so everything that ever fit
+  keeps its pinned bytes. Consumers counting storm members must read
+  `affected_count`, never `len(member_fingerprints)` — already the
+  documented contract. Both are dated amendments in
+  `docs/signal-schema-v1.md`. `lookout_inject_shrinks_total` gains the
+  `member_fingerprints` and `watchboard_entries` values for `shed`.
+
+- `dev/drills/stub-daemon.py` now enforces the same 8192-byte
+  per-inject limit as the real daemon, returning the same 400 (#338).
+  The stub is the sink behind every drill and every `examples/`
+  scenario, so accepting any size made the whole end-to-end layer blind
+  to a breach — both bugs above were invisible to it. A rejected inject
+  logs `REJECT`, deliberately not matching the `INJECT`/`kind=` greps
+  the scenarios assert on, so a payload that stops fitting turns a
+  drill red instead of passing unnoticed.
+
 ## [0.22.0] - 2026-08-19
 
 This release answers a question the tool could not previously be

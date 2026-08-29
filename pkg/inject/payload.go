@@ -215,7 +215,14 @@ type StormPayload struct {
 	LastSeen           time.Time          `json:"last_seen"`
 	Representatives    []StormIncidentRef `json:"representative_incidents"`
 	MemberFingerprints []string           `json:"member_fingerprints"`
-	Context            PayloadContext     `json:"context"`
+	// MemberFingerprintsTruncated marks a MemberFingerprints list the
+	// fit guard cut to clear the daemon's per-inject ceiling (issue
+	// #336) — the list holds the earliest arrivals only, and
+	// AffectedCount is still the true member count. Additive +
+	// omitempty, so every storm that fit whole keeps its pinned wire
+	// shape byte-for-byte.
+	MemberFingerprintsTruncated bool           `json:"member_fingerprints_truncated,omitempty"`
+	Context                     PayloadContext `json:"context"`
 	// Enrichment is the §7.6 attachment for the storm's ancestor
 	// object — deliberately radius-only (a storm's first question is
 	// "what hangs off this ancestor?", and N member log fetches would
@@ -422,6 +429,11 @@ type WatchboardDigestPayload struct {
 	WindowStart     time.Time         `json:"window_start"`
 	WindowEnd       time.Time         `json:"window_end"`
 	Entries         []WatchboardEntry `json:"entries"`
+	// EntriesDropped counts entries the fit guard shed to clear the
+	// daemon's per-inject ceiling (issue #337) — the OLDEST in the
+	// window, so Entries holds the most current warnings. Additive +
+	// omitempty: a digest that fit whole keeps its pinned wire shape.
+	EntriesDropped int `json:"entries_dropped,omitempty"`
 }
 
 // WatchboardRotatedPayload is the JSON body of the FINAL inject into
