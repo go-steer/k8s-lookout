@@ -38,10 +38,12 @@
 # session, not thirty" — that one is about the ~30 pods on a single
 # dead node, and the kind scenario already proves it (33 affected
 # objects, 3 session creates). What only a fleet can ask is what
-# happens when the thing that fails is many NODES. Measured here:
-# thirty sessions, one per node, because nothing keys a storm across
-# nodes — issue #334. examples/kwok/scenarios/node-storm is that drill
-# with assertions attached.
+# happens when the thing that fails is many NODES. Measured here first
+# as thirty sessions, one per node, because nothing keyed a storm
+# across nodes; issue #334 added the zone key (and, for unlabelled
+# fleets, the cluster fallback) and the same drill now groups by
+# failure domain. examples/kwok/scenarios/node-storm is that drill with
+# assertions attached.
 #
 # What to watch:
 #   kubectl -n agent-triage logs deploy/lookout-watch -f

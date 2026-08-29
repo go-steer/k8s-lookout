@@ -16,6 +16,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -220,7 +221,49 @@ const (
 	// ongoing storm keeps refreshing itself through dedup's retry
 	// safety net.
 	stormIdleTTL = 30 * time.Minute
+
+	// The cluster fallback (issue #334). A Node incident whose only
+	// modelled key is the node itself — no topology.kubernetes.io/zone
+	// on the node, so the fleet tier has nothing to join on — is also
+	// offered a synthetic Cluster ancestor, so that thirty nodes
+	// losing their kubelet in the same second are one page instead of
+	// thirty. That key groups on a coincidence of TIMING rather than
+	// on a modelled relationship, so like a mined key it is ranked
+	// last and held to stricter rules than a declared one:
+	//
+	//   - simultaneityWindow, not --storm-window: "in the same
+	//     second", not "somewhere in the last minute". A rolling
+	//     upgrade draining nodes one at a time must not accumulate
+	//     into a cluster-wide page.
+	//   - at least simultaneityMinMembers AND at least
+	//     simultaneityFleetFraction of the fleet: three nodes out of
+	//     three thousand is not a cluster event, it is three nodes.
+	//   - simultaneityIdleTTL, not stormIdleTTL: the coarsest key in
+	//     the system must not sit open for half an hour absorbing
+	//     every unrelated node failure that follows it.
+	simultaneityWindow        = 20 * time.Second
+	simultaneityIdleTTL       = 5 * time.Minute
+	simultaneityMinMembers    = 3
+	simultaneityFleetFraction = 0.20
 )
+
+// ClusterAncestorKind is the Kind of the synthetic ancestor behind
+// the cluster fallback. It is not a Kubernetes kind and never
+// resolves to an object: it names the cluster itself as the blast
+// radius, which is the honest answer when a fifth of the fleet goes
+// at once and nothing smaller explains it.
+const ClusterAncestorKind = "Cluster"
+
+// KeySourceSimultaneity is the KeySource of a storm keyed on the
+// cluster fallback: these incidents are one incident because they
+// happened together, not because anything models them as related.
+// Consumers should read it as the weakest claim the correlator makes.
+const KeySourceSimultaneity = "simultaneity"
+
+// unnamedCluster is the cluster ancestor's Name when --cluster-name
+// is unset. A storm still forms — the key is per-correlator and a
+// correlator watches one cluster — but the page says so.
+const unnamedCluster = "unnamed"
 
 // pendingIncident is one windowed incident that is not (yet) part of
 // a storm.
@@ -261,6 +304,10 @@ type stormState struct {
 	members     []StormMember
 	resolved    map[EventKey]bool
 	unresolved  int
+	// idleTTL is this storm's own inactivity bound, so that a key
+	// formed on a coincidence expires faster than one formed on a
+	// modelled relationship (see simultaneityIdleTTL).
+	idleTTL time.Duration
 	// reportedCount / reportedAt track the last size report on the
 	// wire (formation, then each kind=storm.update) for the
 	// SizeUpdate thresholds.
@@ -292,6 +339,14 @@ type StormCorrelator struct {
 	// off, which is the default; EnableMining turns it on.
 	mined    []MinedDimension
 	minedMin int
+
+	// fleetSize reports how many nodes the topology index knows
+	// about, for the cluster fallback's fraction test. nil — the
+	// engine default, and every caller that does not install one —
+	// keeps the fallback off entirely: without a denominator there is
+	// no way to tell a cluster-wide outage from three unlucky nodes,
+	// and the fallback must never be the cheaper key.
+	fleetSize func() int
 
 	pending []*pendingIncident
 	storms  map[string]*stormState
@@ -342,6 +397,32 @@ func (c *StormCorrelator) EnableMining(dims []MinedDimension, min int) error {
 	}
 	c.mined = dims
 	c.minedMin = min
+	return nil
+}
+
+// EnableClusterFallback turns on the simultaneity tier (issue #334):
+// a Node incident with no coarser modelled key than its own node is
+// also offered a synthetic Cluster ancestor, ranked last, which forms
+// only when a fifth of the fleet — and at least
+// simultaneityMinMembers nodes — fails inside simultaneityWindow.
+//
+// fleetSize is the denominator of that fraction, called under the
+// correlator's lock at formation time; it must be cheap and must not
+// re-enter the correlator. It reports the nodes the topology index
+// currently knows about, so it shrinks as nodes are deleted (a
+// downscale) but NOT as they go NotReady — during an outage the
+// denominator is the fleet, which is the reading that keeps the
+// threshold from falling as the outage grows.
+//
+// Unlike mining, this is on by default in the sentinel: the failure
+// it groups is the one a human already calls a single event.
+func (c *StormCorrelator) EnableClusterFallback(fleetSize func() int) error {
+	if fleetSize == nil {
+		return fmt.Errorf("storm: cluster fallback needs a fleet-size function")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fleetSize = fleetSize
 	return nil
 }
 
@@ -408,6 +489,12 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 	for _, a := range topo {
 		cands = append(cands, a)
 		sources = append(sources, KeySourceTopology)
+	}
+	// Last, below every modelled key: the cluster itself, offered only
+	// when nothing models this node's blast radius (issue #334).
+	if a, ok := c.clusterCandidate(sig, cands); ok {
+		cands = append(cands, a)
+		sources = append(sources, KeySourceSimultaneity)
 	}
 
 	minedVals := minedValues(c.mined, sig)
@@ -483,13 +570,30 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 	}
 
 	for _, k := range p.order {
+		min, window := c.min, c.window
+		if p.source[k] == KeySourceSimultaneity {
+			m, ok := c.simultaneityMin()
+			if !ok {
+				continue
+			}
+			min, window = m, simultaneityWindow
+		}
+		cutoff := now.Add(-window)
 		var group []*pendingIncident
 		for _, q := range c.pending {
-			if _, shares := q.keys[k]; shares {
-				group = append(group, q)
+			if _, shares := q.keys[k]; !shares {
+				continue
 			}
+			// A no-op for every declared key (prune already dropped
+			// everything older than c.window); the tighter
+			// simultaneity window is applied here rather than in
+			// prune, which is global.
+			if !q.at.After(cutoff) {
+				continue
+			}
+			group = append(group, q)
 		}
-		if len(group) < c.min {
+		if len(group) < min {
 			continue
 		}
 		st := c.form(p.keys[k], p.source[k], group, now)
@@ -515,6 +619,47 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		}
 	}
 	return StormVerdict{Kind: StormNone}
+}
+
+// clusterCandidate offers the synthetic cluster ancestor for a Node
+// incident that nothing else groups (issue #334). Caller holds mu.
+//
+// "Nothing else" is strict: any candidate that is not the node itself
+// — a Zone from the topology graph, an external dependency — is a
+// modelled explanation for the same incidents, and the fallback would
+// only shatter it into a coarser duplicate. The fallback exists for
+// the fleet that carries no zone labels at all.
+func (c *StormCorrelator) clusterCandidate(sig Signal, cands []Ancestor) (Ancestor, bool) {
+	if c.fleetSize == nil || sig.KindOfObject != "Node" {
+		return Ancestor{}, false
+	}
+	for _, a := range cands {
+		if a.Kind != "Node" {
+			return Ancestor{}, false
+		}
+	}
+	name := sig.Cluster
+	if name == "" {
+		name = unnamedCluster
+	}
+	return Ancestor{Kind: ClusterAncestorKind, Name: name}, true
+}
+
+// simultaneityMin is the cluster fallback's formation threshold: a
+// fifth of the fleet, never fewer than simultaneityMinMembers, and
+// never cheaper than the declared min. ok=false when the fleet size
+// is unknown or zero — with no denominator the fallback stays off
+// rather than guessing. Caller holds mu.
+func (c *StormCorrelator) simultaneityMin() (int, bool) {
+	if c.fleetSize == nil {
+		return 0, false
+	}
+	fleet := c.fleetSize()
+	if fleet <= 0 {
+		return 0, false
+	}
+	share := int(math.Ceil(float64(fleet) * simultaneityFleetFraction))
+	return max(c.min, simultaneityMinMembers, share), true
 }
 
 // mineKey looks for a discovered key covering the observed incident:
@@ -603,6 +748,10 @@ func registryAncestor(sig Signal) (Ancestor, bool) {
 // holds mu.
 func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pendingIncident, now time.Time) *stormState {
 	first := group[0]
+	idleTTL := stormIdleTTL
+	if keySource == KeySourceSimultaneity {
+		idleTTL = simultaneityIdleTTL
+	}
 	st := &stormState{
 		id:          ancestor.Key(),
 		ancestor:    ancestor,
@@ -613,6 +762,7 @@ func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pen
 		firstSeen:   first.member.FirstSeen,
 		lastSeen:    first.seen,
 		lastActive:  now,
+		idleTTL:     idleTTL,
 		resolved:    make(map[EventKey]bool),
 	}
 	inGroup := make(map[EventKey]bool, len(group))
@@ -747,7 +897,11 @@ func (c *StormCorrelator) prune(now time.Time) {
 	}
 	c.pending = kept
 	for id, st := range c.storms {
-		if now.Sub(st.lastActive) > stormIdleTTL {
+		ttl := st.idleTTL
+		if ttl <= 0 {
+			ttl = stormIdleTTL
+		}
+		if now.Sub(st.lastActive) > ttl {
 			c.close(id, st)
 		}
 	}

@@ -93,6 +93,7 @@ type flags struct {
 	stormMin              int
 	stormMine             bool
 	stormMineMin          int
+	stormClusterFallback  bool
 	severity              severityFlag
 	watchboardBatch       int
 	watchboardFlush       time.Duration
@@ -274,6 +275,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// one to make on an operator's behalf without being asked.
 	fs.BoolVar(&f.stormMine, "storm-mine", false, "Also correlate on DISCOVERED keys (issue #225): when --storm-mine-min incidents in the window share an exact image reference, node or container, group them into one storm even though no topology ancestor or external dependency connects them. Off by default — a mined key is circumstantial, so it needs more members than a modelled one, and every mined storm names what it grouped on. Requires storm correlation on.")
 	fs.IntVar(&f.stormMineMin, "storm-mine-min", 0, fmt.Sprintf("Minimum incidents sharing a mined attribute value to form a storm. 0 (the default) means auto: the larger of %d and --storm-min. An explicit value must be >= --storm-min — a discovered key must never be cheaper to form than a modelled one. Effective only with --storm-mine.", engine.DefaultMinedMin))
+	fs.BoolVar(&f.stormClusterFallback, "storm-cluster-fallback", true, "Group simultaneous NODE failures that nothing else groups (issue #334) under a synthetic Cluster ancestor, so a fleet-wide outage is one page instead of one per node. Applies only to nodes carrying no topology.kubernetes.io/zone label (a zone key is the modelled answer and always wins) and is deliberately expensive to trigger: a fifth of the fleet, at least 3 nodes, all inside 20s, and the storm expires after 5 idle minutes. Set false to keep one session per node. Requires storm correlation on.")
 
 	// Severity routing (§7.7). ADDITIVE flags: with no --severity
 	// overrides the routes follow the source-stamped defaults, and the

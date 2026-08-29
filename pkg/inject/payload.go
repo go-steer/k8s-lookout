@@ -222,6 +222,15 @@ type StormPayload struct {
 	// multiply the cost §7.5 exists to collapse). Additive + omitempty
 	// like Payload.Enrichment; the storm wire pin passes unchanged.
 	Enrichment *PayloadEnrichment `json:"enrichment,omitempty"`
+	// KeySource names what produced the correlation key when it was
+	// NOT the topology graph's ancestor relation: an external
+	// extractor ("registry-host"), a mined attribute ("mined:image"),
+	// or "simultaneity" — the cluster fallback, which groups on
+	// timing alone and is the weakest claim the correlator makes
+	// (issue #334). Absent — the common case — means the modelled
+	// §7.5 key, so the initial payload's pinned wire shape is
+	// unchanged for every storm that had one.
+	KeySource string `json:"key_source,omitempty"`
 }
 
 // StormMemberPayload is the JSON body for kind=storm.member (a late

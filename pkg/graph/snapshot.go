@@ -60,6 +60,21 @@ func (s *Snapshot) NumNodes() int { return len(s.nodes) }
 // NumEdges returns the number of directed edges.
 func (s *Snapshot) NumEdges() int { return s.edges }
 
+// CountKind returns how many nodes of the given kind the snapshot
+// holds, counting referenced-but-unobserved identities alongside
+// observed objects (both are topology the graph can key on). O(n) in
+// the snapshot's node count — a scan, not an index; call it per
+// query, not per edge.
+func (s *Snapshot) CountKind(kind NodeKind) int {
+	n := 0
+	for _, info := range s.nodes {
+		if info.kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
 // Lookup resolves a (kind, namespace, name) identity to its NodeID
 // in this snapshot. Cluster-scoped kinds pass namespace "".
 func (s *Snapshot) Lookup(kind NodeKind, namespace, name string) (NodeID, bool) {
