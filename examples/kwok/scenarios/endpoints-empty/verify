@@ -45,32 +45,31 @@ fi
 echo "  ✓ no wired-* service reported"
 
 # ---------------------------------------------------------------------------
-# Two gaps this scenario exists to hold open. Both are soft: they are
-# product defects, not fixture problems, and a driver that goes red on
-# a known defect stops being a signal. Both go away when the defects do,
-# at which point these become hard assertions.
+# Two gaps this scenario was built to hold open, both now closed. They
+# were `soft` while the defects were open — a driver that goes red on a
+# known defect stops being a signal — and are hard assertions now that
+# the fixes have landed, which is what the scenario was for.
 # ---------------------------------------------------------------------------
 
-# GAP 1 (#331) — a bare `scan` never sees this. Stage 2 drills only into
-# workloads stage 1 already flagged, and all twelve Deployments here are
-# Available with every pod Running: `drilldown=0`. Three services
-# routing nowhere behind twelve healthy workloads is precisely the
-# "something is wrong and I don't know what" case scan is the entry
-# point for. It surfaces under `--include=all`, but only as a side
-# effect of unrelated posture warnings flagging the workloads.
-echo "▸ gap 1: bare scan reaches the broken services"
-soft await_finding 60 'unplugged-0' -- scan --namespace="$NS"
+# WAS GAP 1 (#331) — a bare `scan` used to miss this entirely. Stage 2
+# drilled only into workloads stage 1 had already flagged, and all
+# twelve Deployments here are Available with every pod Running:
+# `drilldown=0`, three findings, none of them about the three services
+# routing nowhere. That is precisely the "something is wrong and I don't
+# know what" case scan is the entry point for. Stage 2 now ends with a
+# target-free sweep for the edge faults no workload owns.
+echo "▸ bare scan reaches the broken services"
+await_finding 60 'unplugged-0' -- scan --namespace="$NS"
 
-# GAP 2 (#332) — `edge.selector_empty` is documented as "a Service selector
-# aimed at THIS workload selects zero pods", and the intent heuristic
-# (edges_checks.go, selectorIntends) tests only that the selector's
-# label KEYS exist among the workload's pod labels — values are not
-# compared. Every workload in this namespace uses the key `app`, so
-# querying the sound `wired-00` reports all three unplugged services
-# and stamps `workload=Deployment/…/wired-00` on findings that have
-# nothing to do with it. Invisible with one workload per namespace,
-# which is the only shape examples/scenarios/ can build.
-echo "▸ gap 2: a sound workload's edges stay clean"
+# WAS GAP 2 (#332) — the selector-intent heuristic used to compare only
+# the selector's label KEYS against the workload's pod labels. Every
+# workload in this namespace uses the key `app`, so querying the sound
+# `wired-00` reported all three unplugged services and stamped
+# `workload=Deployment/…/wired-00` on findings that had nothing to do
+# with it. Values are compared now, and the best match in the namespace
+# wins. Invisible with one workload per namespace, which is the only
+# shape examples/scenarios/ can build — the reason this tier exists.
+echo "▸ a sound workload's edges stay clean"
 # Captured, not piped: `! lookout … | grep -q` under `set -o pipefail`
 # reports CLEAN when lookout dies of SIGPIPE, which is what happens as
 # soon as the output outgrows a pipe buffer. Same trap as await_finding.
@@ -79,4 +78,4 @@ _wired_clean() {
   out="$(run_lookout state edges --workload="Deployment/$NS/wired-00" 2>/dev/null || true)"
   ! grep -qE 'kind=edge\.selector_empty' <<<"$out"
 }
-soft await 30 "state edges on wired-00 reports no selector_empty" _wired_clean
+await 30 "state edges on wired-00 reports no selector_empty" _wired_clean

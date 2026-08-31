@@ -46,10 +46,20 @@
 //     `findings diff` transition stream with a flat backlog. The
 //     groups left out are named in the summary line so they stay
 //     discoverable while off.
-//  2. Edge drill-down. Every workload stage 1 flagged at warning or
-//     above gets the `state edges` dependency checks — from ONE
-//     state.LoadCluster pass and N in-memory EdgeFindings calls, not N
-//     List passes. Bounded by --max-drilldown.
+//  2. Edge drill-down, in two halves off ONE state.LoadCluster pass —
+//     N in-memory EdgeFindings calls, not N List passes.
+//     Every workload stage 1 flagged at warning or above gets the
+//     `state edges` dependency checks, bounded by --max-drilldown; then
+//     a target-free sweep asks the edge questions no workload owns —
+//     a Service selecting nothing, an Ingress backend or class that
+//     resolves to nothing, a certificate about to expire. The sweep
+//     exists because the drill-down explains workloads something else
+//     already flagged, so a fault whose only symptom is on an edge was
+//     structurally unreachable: traffic black-holing while every
+//     Deployment reports Available is close to the canonical thing a
+//     zero-argument scan is for, and it was the one shape scan could
+//     not answer (#331). Stage 2 therefore runs even when stage 1 found
+//     nothing; --max-drilldown=0 still disables it whole.
 //  3. The standard §4.2 envelope, so `lookout scan | lookout findings
 //     diff --store=…` works with no glue.
 //
@@ -466,7 +476,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	scanned, ran, notRun := runStages(ctx, reg, inv, s, stages)
 
 	drilled, truncated, drillScanned := 0, 0, 0
-	if len(notRun) == 0 && maxDrill > 0 && len(s.subjects) > 0 {
+	if len(notRun) == 0 && maxDrill > 0 {
 		drilled, truncated, drillScanned = drilldown(ctx, deps, inv, s, maxDrill, certWarn)
 		scanned += drillScanned
 	}
@@ -582,10 +592,11 @@ func emitStageResult(inv emit.Invocation, s *scanner, name string, err error) {
 }
 
 // drilldown is stage 2: one List pass, then the `state edges`
-// dependency checks in memory for each workload stage 1 flagged. The
-// gap analysis worried about an unbounded fan-out of List calls; there
-// is exactly one, and EdgeFindings runs over the objects it already
-// returned.
+// dependency checks in memory for each workload stage 1 flagged,
+// followed by the target-free sweep for the edge faults no workload
+// owns. The gap analysis worried about an unbounded fan-out of List
+// calls; there is exactly one, and both halves run over the objects it
+// already returned.
 func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, maxDrill int, certWarn time.Duration) (drilled, truncated, scanned int) {
 	s.stage = "state edges"
 	_ = inv.Out.Stamp("check", "state edges")
@@ -620,6 +631,12 @@ func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, 
 	targets, truncated := resolveTargets(cluster, s.subjects, maxDrill)
 	now := deps.now()
 	seen := map[string]bool{}
+	// Subjects the attributed half already reported a selector_empty
+	// for. That kind is the one both halves can produce with different
+	// wording — the attributed one names the owner's pod labels, which
+	// is the more useful of the two — so it is deduplicated on the
+	// subject rather than on the message.
+	claimed := map[string]bool{}
 	for _, wl := range targets {
 		if ctx.Err() != nil {
 			break
@@ -640,8 +657,25 @@ func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, 
 				continue
 			}
 			seen[key] = true
+			if f.Kind == kindSelectorEmpty {
+				claimed[subjectKey(f)] = true
+			}
 			_ = inv.Out.Emit(f)
 		}
+	}
+
+	if ctx.Err() != nil {
+		return drilled, truncated, scanned
+	}
+	for _, f := range cluster.EdgeSweepFindings(certWarn, now) {
+		if seen[edgeKey(f)] {
+			continue
+		}
+		if f.Kind == kindSelectorEmpty && claimed[subjectKey(f)] {
+			continue
+		}
+		seen[edgeKey(f)] = true
+		_ = inv.Out.Emit(f)
 	}
 	return drilled, truncated, scanned
 }
@@ -681,8 +715,17 @@ func severityRank(s string) int {
 	return 1
 }
 
+// kindSelectorEmpty is the one edge kind both halves of stage 2 can
+// report about the same Service, worded differently.
+const kindSelectorEmpty = "edge.selector_empty"
+
 // edgeKey identifies one drill-down finding for deduplication across
 // targets: the subject plus the claim, not the details.
 func edgeKey(f emit.Finding) string {
 	return strings.Join([]string{f.Kind, f.Namespace, f.KindOfObject, f.Name, f.Reason, f.Message}, "\x00")
+}
+
+// subjectKey identifies what a finding is about, without the wording.
+func subjectKey(f emit.Finding) string {
+	return strings.Join([]string{f.Kind, f.Namespace, f.KindOfObject, f.Name}, "\x00")
 }
