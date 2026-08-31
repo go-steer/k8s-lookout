@@ -7,218 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `examples/kwok/` — a scale tier for the e2e layer, built on
-  [KWOK](https://github.com/kubernetes-sigs/kwok). It installs the kwok
-  controller **into the existing kind cluster** and grows hundreds of
-  fake nodes beside the three real ones: `up`, `scale-up`, `bench`,
-  `node-fail`/`node-heal`, `scale-down`, `down`.
-
-  Every scenario in `examples/scenarios/` runs on two workers and about
-  ten pods, which is the right size for asserting *what* lookout
-  reports and no size at all for asserting what it costs. A fake node
-  costs one etcd object, so a laptop holds three hundred. The split
-  that makes this sound is kubelet-versus-control-plane: kwok simulates
-  only the kubelet, so anything a controller decides — scheduling,
-  ReplicaSet progress, EndpointSlices, PDB status, node lifecycle — is
-  the real code path, while kubelet-observed event grammar (`BackOff`,
-  `ErrImagePull`, `FailedMount`, `OOMKilled`) is not, and those four
-  scenarios stay on kind.
-
-  `scale-up` generates ten posture archetypes across nine namespaces in
-  three Pod Security Admission tiers, so a scan has to separate sound
-  workloads from six different defects under partial coverage rather
-  than reporting one finding N times. `bench` then times every
-  target-free read command twice: once under a generous timeout for a
-  real cost, and once under the command's own shipped 10s `--timeout`
-  default, because a command that cannot answer a 300-node cluster
-  inside the default it documents fails closed for every operator who
-  does not know to override it.
-
-  First result, at 303 nodes / 1615 pods / 400 workloads: nothing fell
-  over. The whole target-free read path finishes in 0.1–1.3s and every
-  command clears its 10s default by two orders of magnitude.
-
-  `node-fail N` is the drill kind cannot run: thirty nodes lose their
-  kubelet in the same second. Only the node condition is authored; the
-  taint manager and pod eviction that follow are the real controllers
-  on real timing — measured, 163 pods on the failed nodes, 86 left five
-  minutes later, the survivors being exactly the DaemonSet pods that
-  tolerate `unreachable`.
-
-  `examples/kwok/scenarios/` then plants faults in that fleet, on the
-  same `inject`/`verify`/`revert` contract as `examples/scenarios/` and
-  driven by `examples/kwok/e2e`: `logs`, `unschedulable`,
-  `pdb-gridlock`, `endpoints-empty`, plus the opt-in `node-storm`. Each
-  exists because its claim is unassertable on two workers, and in every
-  case the claim has two halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
-  among nine sound ones of the identical shape and asserts both that
-  the three are named *and* that the nine are not; `endpoints-empty`
-  does the same with three Services whose selector is one label value
-  off. Reporting the needle is easy when the haystack has one straw in
-  it, and a cluster with a single PDB in it cannot tell a detector that
-  discriminates from one that reports everything.
-
-  `unschedulable` gets three *different* verdicts out of the real
-  scheduler at once — a nonexistent zone, a 64-CPU request against
-  32-CPU nodes, and required anti-affinity over a bounded node pool —
-  so `pod.pending` has to carry enough of the scheduler's own message
-  to tell a config error from a capacity wall from a topology limit.
-  The middle one is the shape a small cluster cannot make at all: a
-  workload that cannot place a single pod while the fleet has thousands
-  of idle cores. `logs` asserts the reduction rather than the parse:
-  forty-eight streams in, and twenty-four pods emitting one line arrive
-  as **one** finding carrying `pods=24`.
-
-  `node-storm` is the one that asserts the **wire** rather than the read
-  path, so unlike its neighbours it needs the sentinel deployed and is
-  not in `e2e`'s default set. It fails thirty nodes at once and measures
-  what a daemon receives. Two halves, and they disagree. The recovery
-  closed loop scales cleanly: `node-heal` produced 48 `resolved`
-  injects, every one `resolution=recovered`, closing all thirty node
-  sessions plus the pod storms with no new sessions and no agent
-  polling. Correlation does not: the sentinel opens **thirty sessions,
-  one per node**, while `lookout health` reports the identical event in
-  a single line (`category=nodes status=degraded total=30`). Each Node
-  incident's only blast-radius key is its own Node, the mined dimensions
-  are image/node/container, and although the nodes carry
-  `topology.kubernetes.io/zone` and `Signal.Zone` already reaches the
-  correlator, zone feeds only the storm fingerprint and is never offered
-  as a key — so all thirty incidents compute the same fingerprint and
-  still open thirty sessions. Filed as #334 and held open as a `soft`
-  check, the same way `endpoints-empty` holds #331 and #332.
-
-  Note this is a *different* claim from DESIGN.md §14's "one storm
-  session, not thirty", which is about the ~30 pods on a single dead
-  node and which `examples/scenarios/node-failure` already proves on
-  kind. Earlier drafts of this layer's docs conflated the two.
-
-  Serving those logs took three things, and all three fail *green* —
-  as a healthy-looking scan rather than an error. kwok's shipped config
-  leaves `enableDebuggingHandlers` off, and with it off `/containerLogs`
-  answers "Debug endpoints are disabled." however correct the
-  `ClusterLogs` CR is; the log file must be in CRI format
-  (`<RFC3339Nano> <stream> <F|P> <msg>`) or the kubelet shim rejects it
-  outright; and the fixture's timestamps must be fresh, because every
-  read path asks for a `--since` window and a stale fixture is simply
-  filtered out. `up` handles the first, and `lib.sh`'s `cri_log` helper
-  handles the other two.
-
-  Running them turned up a latent bug in the shared `examples/lib.sh`:
-  `await_finding` piped lookout into `grep -q`, and once a command
-  emits more than a pipe buffer of findings, grep exits at the first
-  match, lookout takes SIGPIPE, and `set -o pipefail` turns a passing
-  assertion into an exit 141 that kills the scenario. It now captures
-  the output and matches against the capture. Unreachable on a
-  two-worker cluster, deterministic at fleet scale.
-
-  Fake nodes now advertise the kwok controller's **host** IP as their
-  InternalIP, with the controller running `hostNetwork` and
-  `--node-ip=$(HOST_IP)`. A fake node's address has two consumers that
-  want incompatible things: kindnet needs it on-link or it panics
-  installing pod routes, and the apiserver needs something listening on
-  `:10247` or `kubectl logs`/`exec` gets "no route to host". A real node
-  IP that the controller is actually serving on is the one value that
-  satisfies both, and it replaces the synthetic addresses this layer
-  handed out before.
-
-  The layer is additive and reversible: the kwok controller is
-  annotation-scoped (asserted by `up`, which refuses to leave it
-  running otherwise), every fake node is tainted, every fake pod is
-  pinned, and teardown deletes only by those selectors.
-
-- **Storm correlation now groups simultaneous NODE failures** (#334).
-  §7.5's opening line — a node failure opening ~30 sessions for 30
-  evicted pods — is about the pods on *one* node, and the topology tier
-  has always answered it. The multi-node version had the opposite
-  answer: the `node-storm` fleet drill measured thirty nodes losing
-  their kubelet in the same second and thirty sessions opening, because
-  a Node's only blast-radius ancestor is itself, while `lookout health`
-  summarized the identical outage in one line. Two keys close that gap.
-
-  **Zone** (`ancestor_kind=Zone`) is now a storm key for **node**
-  incidents, ranked last so it can never outrank the node itself. The
-  topology graph has always derived a Zone node from
-  `topology.kubernetes.io/zone`; the resolver simply excluded it.
-  Pods are deliberately *not* offered their zone — they reach it
-  transitively through their node, and grouping on that would fold
-  every unrelated workload in a failure domain into one storm.
-
-  **Simultaneity** (`key_source=simultaneity`,
-  `ancestor_kind=Cluster`) is a fourth, last-resort tier for the fleets
-  that carry no zone labels at all — bare metal, kind, kwok. It groups
-  on *timing* rather than on a modelled relationship, which is the
-  weakest claim the correlator makes, so it is offered only to Node
-  incidents that nothing else groups and is deliberately expensive to
-  trigger: at least a fifth of the fleet, at least 3 nodes, all inside
-  20s rather than the 60s `--storm-window` (so a rolling upgrade
-  draining nodes one at a time never accumulates into a cluster-wide
-  page), and the storm expires after 5 idle minutes instead of 30. With
-  no fleet size available — before the topology index publishes its
-  first snapshot — it does not form at all. On by default, unlike
-  mining, because it groups a failure a human already calls one event;
-  `--storm-cluster-fallback=false` restores one session per node.
-
-  Wire: `StormPayload` gains `key_source` (last field, omitempty), set
-  only when the key did *not* come from the topology ancestor
-  relation — so `kind=storm` payloads for modelled keys are
-  byte-identical and the pinned wire shapes are unchanged. Recorded as
-  a dated amendment in `docs/signal-schema-v1.md`; `ancestor_kind` was
-  always an open object-class string, so `Zone` and `Cluster` are not a
-  v1 break either.
-
-### Fixed
-
-- The per-inject wire ceiling is now enforced on every payload that can
-  breach it, not just the ones that could when `--inject-max-bytes`
-  landed. The daemon rejects an over-limit inject with **400** — a
-  permanent error that costs the whole payload — so anything the fit
-  guard misses is not degraded, it is lost.
-
-  **Storms past roughly 330 members were rejected whole (#336).**
-  `member_fingerprints` carries one entry per member and was both
-  uncapped and unsheddable: `FitTo` could drop the enrichment bundle
-  and truncate the message, neither of which claws back a 22 KiB body,
-  so the payload stayed over the ceiling after a full fit and the storm
-  landed as a bound-but-empty session — exactly the failure the guard
-  exists to prevent. The member list is now shed between enrichment and
-  message, keeping the earliest arrivals. This was reachable in
-  practice only after the zone key and simultaneity fallback above: a
-  Node-keyed storm is bounded by pods-per-node, but a zone storm over a
-  large fleet is not. Shared mode reached the wire without an open and
-  so was never fitted at all; storms are now fitted before the mode
-  branch, which also makes `--dry-run` print what would really go out.
-
-  **A `--watchboard-batch` past ~22 discarded every buffered warning
-  (#337).** The digest flushes through `Append`, which no fit guard
-  covered, and a failed flush clears the buffer. At ~370 wire bytes per
-  entry the default of 5 was never at risk, but nothing rejected a
-  larger value, so a legal setting made every flush fail permanently
-  and silently lose warnings. Digests are now fitted by dropping their
-  oldest entries — newest-wins, the opposite end from a storm, because
-  the watchboard reports current state rather than one event's leading
-  symptom.
-
-  Wire: `StormPayload` gains `member_fingerprints_truncated` and
-  `WatchboardDigestPayload` gains `entries_dropped`, both omitempty and
-  set only on a payload that had to be cut, so everything that ever fit
-  keeps its pinned bytes. Consumers counting storm members must read
-  `affected_count`, never `len(member_fingerprints)` — already the
-  documented contract. Both are dated amendments in
-  `docs/signal-schema-v1.md`. `lookout_inject_shrinks_total` gains the
-  `member_fingerprints` and `watchboard_entries` values for `shed`.
-
-- `dev/drills/stub-daemon.py` now enforces the same 8192-byte
-  per-inject limit as the real daemon, returning the same 400 (#338).
-  The stub is the sink behind every drill and every `examples/`
-  scenario, so accepting any size made the whole end-to-end layer blind
-  to a breach — both bugs above were invisible to it. A rejected inject
-  logs `REJECT`, deliberately not matching the `INJECT`/`kind=` greps
-  the scenarios assert on, so a payload that stops fitting turns a
-  drill red instead of passing unnoticed.
-
-## [0.22.0] - 2026-08-19
+## [0.22.0] - 2026-08-31
 
 This release answers a question the tool could not previously be
 asked: "something is wrong with this cluster — what?" Thirty-odd
@@ -247,6 +36,23 @@ a signed OCI artifact, an SBOM attestation, the governance files a
 repository needs before anyone outside it can join, and
 `docs/adding-a-check.md` for what to do once they have).
 
+A second thread runs alongside that one. `examples/kwok/` grows the
+end-to-end layer a scale tier. The existing scenarios run on two
+workers and about ten pods, which is the right size for asserting
+*what* lookout reports and no size at all for asserting what it costs
+or how it correlates. A fake node costs one etcd object, so a laptop
+holds three hundred, and because kwok simulates only the kubelet,
+every controller decision underneath — scheduling, ReplicaSet
+progress, EndpointSlices, node lifecycle — stays the real code path.
+At 303 nodes, 1615 pods and 400 workloads nothing fell over, and every
+target-free read command cleared the 10s default it documents by two
+orders of magnitude. The tier earned its keep on the claims two
+workers cannot express: thirty nodes losing their kubelet in the same
+second opened thirty sessions where an operator sees one event, which
+is the storm-correlation work below, and the payloads that fix
+produced turned out to be the ones that outgrow the inject ceiling,
+which is the tail of the Fixed section.
+
 The Fixed section is longer than usual, and most of it is one kind of
 bug: something reporting what it had not actually established. The
 hand-written coverage map named 32 signal kinds against a ledger of
@@ -256,7 +62,10 @@ restart; `stab drift` invented drift on clusters running no GitOps
 controller at all; `/readyz` reported a lifecycle phase in the field
 meant for a cluster name. The last two were found by running the
 thing against a live kind cluster and reading the output, which no
-amount of unit testing had done.
+amount of unit testing had done. The three ceiling bugs at the
+end have the same provenance one tier up: a fit guard that was correct
+for every payload that existed when it landed, finally measured
+against payloads that did not.
 
 ### Added
 
@@ -768,6 +577,169 @@ amount of unit testing had done.
   commands that take no arguments and need nothing deployed, which is
   the shortest honest path from "I have a kubeconfig" to output.
 
+- `examples/kwok/` — a scale tier for the e2e layer, built on
+  [KWOK](https://github.com/kubernetes-sigs/kwok). It installs the kwok
+  controller **into the existing kind cluster** and grows hundreds of
+  fake nodes beside the three real ones: `up`, `scale-up`, `bench`,
+  `node-fail`/`node-heal`, `scale-down`, `down`.
+
+  Every scenario in `examples/scenarios/` runs on two workers and about
+  ten pods, which is the right size for asserting *what* lookout
+  reports and no size at all for asserting what it costs. A fake node
+  costs one etcd object, so a laptop holds three hundred. The split
+  that makes this sound is kubelet-versus-control-plane: kwok simulates
+  only the kubelet, so anything a controller decides — scheduling,
+  ReplicaSet progress, EndpointSlices, PDB status, node lifecycle — is
+  the real code path, while kubelet-observed event grammar (`BackOff`,
+  `ErrImagePull`, `FailedMount`, `OOMKilled`) is not, and those four
+  scenarios stay on kind.
+
+  `scale-up` generates ten posture archetypes across nine namespaces in
+  three Pod Security Admission tiers, so a scan has to separate sound
+  workloads from six different defects under partial coverage rather
+  than reporting one finding N times. `bench` then times every
+  target-free read command twice: once under a generous timeout for a
+  real cost, and once under the command's own shipped 10s `--timeout`
+  default, because a command that cannot answer a 300-node cluster
+  inside the default it documents fails closed for every operator who
+  does not know to override it.
+
+  First result, at 303 nodes / 1615 pods / 400 workloads: nothing fell
+  over. The whole target-free read path finishes in 0.1–1.3s and every
+  command clears its 10s default by two orders of magnitude.
+
+  `node-fail N` is the drill kind cannot run: thirty nodes lose their
+  kubelet in the same second. Only the node condition is authored; the
+  taint manager and pod eviction that follow are the real controllers
+  on real timing — measured, 163 pods on the failed nodes, 86 left five
+  minutes later, the survivors being exactly the DaemonSet pods that
+  tolerate `unreachable`.
+
+  `examples/kwok/scenarios/` then plants faults in that fleet, on the
+  same `inject`/`verify`/`revert` contract as `examples/scenarios/` and
+  driven by `examples/kwok/e2e`: `logs`, `unschedulable`,
+  `pdb-gridlock`, `endpoints-empty`, plus the opt-in `node-storm`. Each
+  exists because its claim is unassertable on two workers, and in every
+  case the claim has two halves. `pdb-gridlock` plants three undrainable PodDisruptionBudgets
+  among nine sound ones of the identical shape and asserts both that
+  the three are named *and* that the nine are not; `endpoints-empty`
+  does the same with three Services whose selector is one label value
+  off. Reporting the needle is easy when the haystack has one straw in
+  it, and a cluster with a single PDB in it cannot tell a detector that
+  discriminates from one that reports everything.
+
+  `unschedulable` gets three *different* verdicts out of the real
+  scheduler at once — a nonexistent zone, a 64-CPU request against
+  32-CPU nodes, and required anti-affinity over a bounded node pool —
+  so `pod.pending` has to carry enough of the scheduler's own message
+  to tell a config error from a capacity wall from a topology limit.
+  The middle one is the shape a small cluster cannot make at all: a
+  workload that cannot place a single pod while the fleet has thousands
+  of idle cores. `logs` asserts the reduction rather than the parse:
+  forty-eight streams in, and twenty-four pods emitting one line arrive
+  as **one** finding carrying `pods=24`.
+
+  `node-storm` is the one that asserts the **wire** rather than the read
+  path, so unlike its neighbours it needs the sentinel deployed and is
+  not in `e2e`'s default set. It fails thirty nodes at once and measures
+  what a daemon receives. Two halves, and they disagree. The recovery
+  closed loop scales cleanly: `node-heal` produced 48 `resolved`
+  injects, every one `resolution=recovered`, closing all thirty node
+  sessions plus the pod storms with no new sessions and no agent
+  polling. Correlation does not: the sentinel opens **thirty sessions,
+  one per node**, while `lookout health` reports the identical event in
+  a single line (`category=nodes status=degraded total=30`). Each Node
+  incident's only blast-radius key is its own Node, the mined dimensions
+  are image/node/container, and although the nodes carry
+  `topology.kubernetes.io/zone` and `Signal.Zone` already reaches the
+  correlator, zone feeds only the storm fingerprint and is never offered
+  as a key — so all thirty incidents compute the same fingerprint and
+  still open thirty sessions. That was filed as #334 and is fixed below
+  in the same release, which is what the tier is for. The gaps it found
+  that are *not* fixed yet stay as `soft` checks — reported by the
+  scenario, not failed on, the way `endpoints-empty` holds #331 and
+  #332 — because a driver that goes red on a known defect stops being a
+  signal.
+
+  Note this is a *different* claim from DESIGN.md §14's "one storm
+  session, not thirty", which is about the ~30 pods on a single dead
+  node and which `examples/scenarios/node-failure` already proves on
+  kind. Earlier drafts of this layer's docs conflated the two.
+
+  Serving those logs took three things, and all three fail *green* —
+  as a healthy-looking scan rather than an error. kwok's shipped config
+  leaves `enableDebuggingHandlers` off, and with it off `/containerLogs`
+  answers "Debug endpoints are disabled." however correct the
+  `ClusterLogs` CR is; the log file must be in CRI format
+  (`<RFC3339Nano> <stream> <F|P> <msg>`) or the kubelet shim rejects it
+  outright; and the fixture's timestamps must be fresh, because every
+  read path asks for a `--since` window and a stale fixture is simply
+  filtered out. `up` handles the first, and `lib.sh`'s `cri_log` helper
+  handles the other two.
+
+  Running them turned up a latent bug in the shared `examples/lib.sh`:
+  `await_finding` piped lookout into `grep -q`, and once a command
+  emits more than a pipe buffer of findings, grep exits at the first
+  match, lookout takes SIGPIPE, and `set -o pipefail` turns a passing
+  assertion into an exit 141 that kills the scenario. It now captures
+  the output and matches against the capture. Unreachable on a
+  two-worker cluster, deterministic at fleet scale.
+
+  Fake nodes now advertise the kwok controller's **host** IP as their
+  InternalIP, with the controller running `hostNetwork` and
+  `--node-ip=$(HOST_IP)`. A fake node's address has two consumers that
+  want incompatible things: kindnet needs it on-link or it panics
+  installing pod routes, and the apiserver needs something listening on
+  `:10247` or `kubectl logs`/`exec` gets "no route to host". A real node
+  IP that the controller is actually serving on is the one value that
+  satisfies both, and it replaces the synthetic addresses this layer
+  handed out before.
+
+  The layer is additive and reversible: the kwok controller is
+  annotation-scoped (asserted by `up`, which refuses to leave it
+  running otherwise), every fake node is tainted, every fake pod is
+  pinned, and teardown deletes only by those selectors.
+
+- **Storm correlation now groups simultaneous NODE failures** (#334).
+  §7.5's opening line — a node failure opening ~30 sessions for 30
+  evicted pods — is about the pods on *one* node, and the topology tier
+  has always answered it. The multi-node version had the opposite
+  answer: the `node-storm` fleet drill measured thirty nodes losing
+  their kubelet in the same second and thirty sessions opening, because
+  a Node's only blast-radius ancestor is itself, while `lookout health`
+  summarized the identical outage in one line. Two keys close that gap.
+
+  **Zone** (`ancestor_kind=Zone`) is now a storm key for **node**
+  incidents, ranked last so it can never outrank the node itself. The
+  topology graph has always derived a Zone node from
+  `topology.kubernetes.io/zone`; the resolver simply excluded it.
+  Pods are deliberately *not* offered their zone — they reach it
+  transitively through their node, and grouping on that would fold
+  every unrelated workload in a failure domain into one storm.
+
+  **Simultaneity** (`key_source=simultaneity`,
+  `ancestor_kind=Cluster`) is a fourth, last-resort tier for the fleets
+  that carry no zone labels at all — bare metal, kind, kwok. It groups
+  on *timing* rather than on a modelled relationship, which is the
+  weakest claim the correlator makes, so it is offered only to Node
+  incidents that nothing else groups and is deliberately expensive to
+  trigger: at least a fifth of the fleet, at least 3 nodes, all inside
+  20s rather than the 60s `--storm-window` (so a rolling upgrade
+  draining nodes one at a time never accumulates into a cluster-wide
+  page), and the storm expires after 5 idle minutes instead of 30. With
+  no fleet size available — before the topology index publishes its
+  first snapshot — it does not form at all. On by default, unlike
+  mining, because it groups a failure a human already calls one event;
+  `--storm-cluster-fallback=false` restores one session per node.
+
+  Wire: `StormPayload` gains `key_source` (last field, omitempty), set
+  only when the key did *not* come from the topology ancestor
+  relation — so `kind=storm` payloads for modelled keys are
+  byte-identical and the pinned wire shapes are unchanged. Recorded as
+  a dated amendment in `docs/signal-schema-v1.md`; `ancestor_kind` was
+  always an open object-class string, so `Zone` and `Cluster` are not a
+  v1 break either.
+
 ### Fixed
 
 - "What the sentinel watches" is a complete coverage map again. The
@@ -887,6 +859,54 @@ amount of unit testing had done.
   (retry) from "you typed it wrong" (do not retry). The distinction is
   preserved where it is real: a well-formed target naming an object
   that does not exist is still a runtime error.
+
+- The per-inject wire ceiling is now enforced on every payload that can
+  breach it, not just the ones that could when `--inject-max-bytes`
+  landed. The daemon rejects an over-limit inject with **400** — a
+  permanent error that costs the whole payload — so anything the fit
+  guard misses is not degraded, it is lost.
+
+  **Storms past roughly 330 members were rejected whole (#336).**
+  `member_fingerprints` carries one entry per member and was both
+  uncapped and unsheddable: `FitTo` could drop the enrichment bundle
+  and truncate the message, neither of which claws back a 22 KiB body,
+  so the payload stayed over the ceiling after a full fit and the storm
+  landed as a bound-but-empty session — exactly the failure the guard
+  exists to prevent. The member list is now shed between enrichment and
+  message, keeping the earliest arrivals. This was reachable in
+  practice only after the zone key and simultaneity fallback above: a
+  Node-keyed storm is bounded by pods-per-node, but a zone storm over a
+  large fleet is not. Shared mode reached the wire without an open and
+  so was never fitted at all; storms are now fitted before the mode
+  branch, which also makes `--dry-run` print what would really go out.
+
+  **A `--watchboard-batch` past ~22 discarded every buffered warning
+  (#337).** The digest flushes through `Append`, which no fit guard
+  covered, and a failed flush clears the buffer. At ~370 wire bytes per
+  entry the default of 5 was never at risk, but nothing rejected a
+  larger value, so a legal setting made every flush fail permanently
+  and silently lose warnings. Digests are now fitted by dropping their
+  oldest entries — newest-wins, the opposite end from a storm, because
+  the watchboard reports current state rather than one event's leading
+  symptom.
+
+  Wire: `StormPayload` gains `member_fingerprints_truncated` and
+  `WatchboardDigestPayload` gains `entries_dropped`, both omitempty and
+  set only on a payload that had to be cut, so everything that ever fit
+  keeps its pinned bytes. Consumers counting storm members must read
+  `affected_count`, never `len(member_fingerprints)` — already the
+  documented contract. Both are dated amendments in
+  `docs/signal-schema-v1.md`. `lookout_inject_shrinks_total` gains the
+  `member_fingerprints` and `watchboard_entries` values for `shed`.
+
+- `dev/drills/stub-daemon.py` now enforces the same 8192-byte
+  per-inject limit as the real daemon, returning the same 400 (#338).
+  The stub is the sink behind every drill and every `examples/`
+  scenario, so accepting any size made the whole end-to-end layer blind
+  to a breach — both bugs above were invisible to it. A rejected inject
+  logs `REJECT`, deliberately not matching the `INJECT`/`kind=` greps
+  the scenarios assert on, so a payload that stops fitting turns a
+  drill red instead of passing unnoticed.
 
 ## [0.21.0] - 2026-08-16
 
