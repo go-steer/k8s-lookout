@@ -35,39 +35,46 @@ before it asserts anything about lookout.
 
 ## What to expect
 
+- `scan --namespace=kwok-scenario-endpoints` → the three
+  `unplugged-*` Services, `severity=critical`, with `drilldown=0`.
 - `state edges --workload=Deployment/kwok-scenario-endpoints/unplugged-00`
-  → `edge.selector_empty severity=critical name=unplugged-00`.
-- **Nothing at all** about `wired-00` … `wired-08`.
+  → `edge.selector_empty severity=critical name=unplugged-00`, and the
+  label the pods actually carry.
+- **Nothing at all** about `wired-00` … `wired-08`, from either.
 
-## Two gaps this scenario holds open
+## Two defects this scenario found, both now fixed
 
-Both were found by running it, both are product defects rather than
-fixture problems, and both are `soft` in `verify` — a driver that goes
-red on a known defect stops being a signal. They become hard assertions
-when the defects are fixed. Filed as
+Both were found by running it, both were product defects rather than
+fixture problems, and both were `soft` in `verify` while they were open
+— a driver that goes red on a known defect stops being a signal. Both
+are hard assertions now. Filed as
 [#331](https://github.com/go-steer/k8s-lookout/issues/331) and
 [#332](https://github.com/go-steer/k8s-lookout/issues/332).
 
-**A bare `scan` never sees this (#331).** Stage 2 drills only into workloads
-stage 1 already flagged, and all twelve Deployments here are Available
-with every pod Running, so `drilldown=0` and `scan` reports nothing.
-Three Services routing nowhere behind twelve healthy workloads is
-exactly the "something is wrong and I don't know what" case `scan` is
-the entry point for. It does surface under `--include=all`, but only as
-a side effect: the posture checks flag every workload at warning, and
-*that* is what triggers the drill-down.
+**A bare `scan` never saw this (#331).** Stage 2 drilled only into
+workloads stage 1 had already flagged, and all twelve Deployments here
+are Available with every pod Running, so `drilldown=0` and `scan`
+reported nothing. Three Services routing nowhere behind twelve healthy
+workloads is exactly the "something is wrong and I don't know what"
+case `scan` is the entry point for. It did surface under
+`--include=all`, but only as a side effect: the posture checks flag
+every workload at warning, and *that* is what triggered the drill-down
+— so fixing the posture hid the incident. Stage 2 now ends with a
+target-free sweep for the edge faults no workload owns, and runs even
+when stage 1 found nothing.
 
-**`edge.selector_empty` misattributes (#332).** The kind is documented as *"a
-Service selector aimed at **this workload** selects zero pods"*, and
-the intent heuristic (`selectorIntends` in
-`pkg/checks/state/edges_checks.go`) tests only that the selector's
-label *keys* exist among the workload's pod labels — the values are
+**`edge.selector_empty` misattributed (#332).** The intent heuristic in
+`pkg/checks/state/edges_checks.go` tested only that the selector's
+label *keys* existed among the workload's pod labels — the values were
 never compared. Every workload here uses the key `app`, so querying the
-perfectly sound `wired-00` reports all three `unplugged-*` Services and
-stamps `workload=Deployment/…/wired-00` on findings that have nothing
+perfectly sound `wired-00` reported all three `unplugged-*` Services and
+stamped `workload=Deployment/…/wired-00` on findings that had nothing
 to do with it. With one workload per namespace — the only shape
 `examples/scenarios/` can build — key-matching and
-workload-identification are the same test, and the bug is invisible.
+workload-identification are the same test, and the bug was invisible.
+The heuristic now scores label *values* and only the best match in the
+namespace claims a Service; a Service nobody can be shown to own is
+reported unattributed by the `scan` sweep instead.
 
 ## Explore by hand
 

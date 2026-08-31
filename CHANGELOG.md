@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lookout scan` now finds faults that live on an edge rather than on a
+  workload. Its drill-down explained workloads stage 1 had already
+  flagged, so a Service whose selector is one label value off — traffic
+  black-holing while every Deployment reports Available — was
+  structurally unreachable: `drilldown=0`, and a namespace with three
+  services routing nowhere read as clean. It surfaced under
+  `--include=all`, but only because posture warnings made every
+  workload a drill-down candidate, so *fixing* the posture hid the
+  incident. Stage 2 now ends with a target-free sweep over every
+  Service and Ingress in scope — a selector that selects nothing, an
+  Ingress backend or class that resolves to nothing, a certificate
+  expiring — and runs even when stage 1 found nothing. It costs no
+  extra API calls: the sweep reads the objects the one List pass
+  already returned. `--max-drilldown=0` still disables stage 2 whole.
+  ([#331](https://github.com/go-steer/k8s-lookout/issues/331))
+- `edge.selector_empty` no longer blames the wrong workload. Deciding
+  which workload a zero-selecting Service was *meant* for compared the
+  selector's label keys against the workload's pod labels and never
+  looked at the values, so in any namespace following one label
+  convention — `app`, `app.kubernetes.io/name` — a single broken
+  Service was reported against every sound workload in the namespace
+  with each one's name stamped in `workload=`. Values are compared now,
+  a renamed value counts for less than an exact one, and only the best
+  match in the namespace claims the Service. The message names the
+  disagreement instead of the agreement: "the workload's pods carry
+  `app=api`" rather than the true-but-useless "the pods carry the same
+  label keys", and the value is repeated in a `pod_labels` field. A
+  Service nobody can be shown to own is still reported — unattributed,
+  by the `scan` sweep above. Every fixture in the tree had one workload
+  per namespace, where the broken rule and a correct one are the same
+  test; the unit tests now grow a second workload.
+  ([#332](https://github.com/go-steer/k8s-lookout/issues/332))
 - The release workflow now signs the Helm chart it publishes. `cosign`
   reads `~/.docker/config.json` and the `publish-chart` job only ran
   `helm registry login`, which writes helm's own registry config — so

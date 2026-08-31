@@ -601,7 +601,92 @@ func TestEdgesSelectorEmpty(t *testing.T) {
 	c.slice = apiSlice()                                     // controller mirrors: no endpoints
 	got := findings(t, c)
 	wantFindings(t, got, []string{
-		`kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (workload's pods carry the same label keys)" workload=Deployment/prod/api selector="app=api-v2"`,
+		`kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (the workload's pods carry app=api)" workload=Deployment/prod/api selector="app=api-v2" pod_labels="app=api"`,
+	})
+}
+
+// sibling returns a bare Deployment in the same namespace whose pod
+// template carries the given labels. No ReplicaSet and no pods: the
+// selector-intent heuristic reads other workloads from their declared
+// templates, and the scanned workload falls back to its own template
+// when it has no pods, which is all these cases need.
+func sibling(name string, labels map[string]string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: labels},
+		}},
+	}
+}
+
+// Every fixture in this file had one workload per namespace, where
+// "does this Service use my label keys" and "was this Service meant
+// for me" are the same test — so the discriminator was never exercised
+// and a key-only match passed for years. Real namespaces share a label
+// convention, and under the old rule one broken Service was reported
+// against every sound workload in the namespace with that workload's
+// name stamped on it (#332).
+func TestEdgesSelectorEmptyDoesNotClaimAnotherWorkloadsService(t *testing.T) {
+	// `web` is sound and unrelated. The broken Service belongs to
+	// `api`: both pod templates carry the key `app`, and only the
+	// values say which workload the selector was reaching for.
+	t.Run("unrelated workload is silent", func(t *testing.T) {
+		c := healthy(t)
+		c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
+		c.slice = apiSlice()
+		c.extra = append(c.extra, sibling("web", map[string]string{"app": "web"}))
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Deployment/prod/web")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if strings.Contains(res.Stdout, "edge.selector_empty") {
+			t.Errorf("a sound workload claimed another workload's broken Service:\n%s", res.Stdout)
+		}
+	})
+
+	// The owner still gets it — the guard must not silence everyone.
+	t.Run("the real owner still reports it", func(t *testing.T) {
+		c := healthy(t)
+		c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
+		c.slice = apiSlice()
+		c.extra = append(c.extra, sibling("web", map[string]string{"app": "web"}))
+		got := findings(t, c)
+		wantFindings(t, got, []string{
+			`kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (the workload's pods carry app=api)" workload=Deployment/prod/api selector="app=api-v2" pod_labels="app=api"`,
+		})
+	})
+
+	// Value proximity ties, so the best-match guard is what decides.
+	// Both siblings share the key vocabulary and neither is selected;
+	// `runner` agrees with the selector on `tier` outright and only
+	// misses on a renamed `app`, which beats `walker` agreeing on
+	// neither.
+	t.Run("the better match wins outright", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, workload string
+			wantFinding    bool
+		}{
+			{"weaker match stays quiet", "walker", false},
+			{"stronger match reports", "runner", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := healthy(t)
+				c.svc.Spec.Selector = map[string]string{"app": "api", "tier": "web"}
+				c.slice = apiSlice()
+				c.extra = append(c.extra,
+					sibling("walker", map[string]string{"app": "api", "tier": "api"}),
+					sibling("runner", map[string]string{"app": "api-v2", "tier": "web"}),
+				)
+				res := checktest.Run(t, testCommand(c.objects()...), "--workload=Deployment/prod/"+tc.workload)
+				if res.Code != emit.ExitData {
+					t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+				}
+				if got := strings.Contains(res.Stdout, "edge.selector_empty"); got != tc.wantFinding {
+					t.Errorf("selector_empty present = %v, want %v:\n%s", got, tc.wantFinding, res.Stdout)
+				}
+			})
+		}
 	})
 }
 
@@ -733,7 +818,7 @@ func TestEdgesScaledToZeroUsesTemplate(t *testing.T) {
 	c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
 	got := findings(t, c)
 	wantFindings(t, got, []string{
-		`kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (workload's pods carry the same label keys)" workload=Deployment/prod/api selector="app=api-v2"`,
+		`kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (the workload's pods carry app=api)" workload=Deployment/prod/api selector="app=api-v2" pod_labels="app=api"`,
 		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=ServiceAccount name=api-sa reason=FailedCreate message="serviceaccount not found — new pods cannot be created" workload=Deployment/prod/api service_account=api-sa`,
 	})
 }

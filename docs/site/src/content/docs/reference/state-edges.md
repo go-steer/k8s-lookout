@@ -45,7 +45,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
 | `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
 | `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
-| `edge.selector_empty` | critical | a Service selector aimed at this workload selects zero pods |
+| `edge.selector_empty` | critical | a Service selector selects zero pods, so the service routes nowhere |
 | `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
 | `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
 | `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |

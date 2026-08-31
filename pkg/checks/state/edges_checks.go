@@ -64,7 +64,7 @@ func EdgeKinds() []checks.KindField {
 		checks.Kind("edge.missing_key", "the referenced key is absent from an existing ConfigMap/Secret", emit.SeverityCritical),
 		checks.Kind("edge.invalid_ref", "the referenced object exists but is the wrong type to serve the reference", emit.SeverityWarning),
 		checks.Kind("edge.unclassed", "the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it", emit.SeverityWarning),
-		checks.Kind("edge.selector_empty", "a Service selector aimed at this workload selects zero pods", emit.SeverityCritical),
+		checks.Kind("edge.selector_empty", "a Service selector selects zero pods, so the service routes nowhere", emit.SeverityCritical),
 		checks.Kind("edge.selector_unready", "the Service selects pods but some are not Ready; critical when none are", emit.SeverityCritical, emit.SeverityWarning),
 		checks.Kind("edge.endpoints_missing", "a selecting Service has no EndpointSlices at all", emit.SeverityCritical),
 		checks.Kind("edge.endpoints_orphaned", "an endpoint targetRef names a pod that no longer exists", emit.SeverityWarning),
@@ -87,6 +87,11 @@ type edgeScan struct {
 	id       graph.NodeID
 	now      time.Time
 	certWarn time.Duration
+
+	// sweep is the target-free mode: no workload, every Service and
+	// Ingress in the loaded scope, and only the checks whose subject is
+	// the edge rather than the workload (#331). See runSweep.
+	sweep bool
 
 	pods   []*corev1.Pod // the workload's pods, sorted by name
 	podSet map[string]bool
@@ -129,6 +134,63 @@ func (e *edgeScan) run() []emit.Finding {
 	e.checkCerts()
 	e.checkRBAC()
 	return e.findings
+}
+
+// runSweep is the target-free pass: the same validity checks over
+// every Service and Ingress in the loaded scope, with no workload to
+// trace from.
+//
+// The checks it runs are exactly the ones whose subject is not the
+// workload — a Service selecting nothing, an Ingress backend or class
+// that does not resolve, an expiring TLS certificate. Each of those is
+// unreachable from a workload-first drill-down when every workload is
+// healthy, which is the whole of #331: a Service can black-hole
+// traffic while `kubectl get deploy` looks perfect, and the drill-down
+// only ever explains workloads something else already flagged.
+//
+// The workload-scoped checks (mount refs, image-pull secrets,
+// StatefulSet governance, endpoint agreement, RBAC) are deliberately
+// absent: they need a workload, and their faults do surface a sick pod
+// for stage 1 to catch.
+func (e *edgeScan) runSweep() []emit.Finding {
+	e.sweep = true
+	e.podSet = map[string]bool{}
+	e.candidates = map[string]*candidate{}
+	e.secretRefs = map[string]bool{}
+	e.ingressTLS = map[string]string{}
+
+	e.sweepCandidates()
+	e.checkSelectors()
+	e.checkIngresses()
+	e.checkCerts()
+	return e.findings
+}
+
+// sweepCandidates is buildCandidates with the workload removed: every
+// Service in scope whose selector selects nothing. There is no owner
+// to name and none is needed — "this Service routes nowhere" is true
+// of the Service alone. Attribution is the harder question and it
+// belongs to `state edges --workload=X`, which is where the
+// selector-intent heuristic lives (#331, #332).
+func (e *edgeScan) sweepCandidates() {
+	for _, k := range sortedKeys(e.ix.services) {
+		svc := e.ix.services[k]
+		if len(svc.Spec.Selector) == 0 || len(e.selectedPods(svc)) > 0 {
+			continue
+		}
+		e.candidates[k] = &candidate{svc: svc, emptyIntent: true}
+	}
+}
+
+// workloadDetail is the `workload=` field every edge finding leads
+// with — the workload whose edges were being traced. A sweep finding
+// has no such workload, and inventing one is exactly the
+// misattribution #332 was about, so it carries none.
+func (e *edgeScan) workloadDetail() []emit.Field {
+	if e.sweep {
+		return nil
+	}
+	return []emit.Field{{Key: "workload", Value: e.wl.String()}}
 }
 
 func (e *edgeScan) add(f emit.Finding) { e.findings = append(e.findings, f) }
@@ -602,7 +664,7 @@ func (e *edgeScan) checkStatefulSet() {
 // Selects edges onto the workload's pods and the
 // Service→EndpointSlice→Pod routing chain — and one heuristic adds
 // the failure case no edge can represent: a service whose selector
-// matches nothing but shares its label keys with the workload's pods
+// matches nothing but looks like it was aimed at this workload's pods
 // (the service that was *meant* to select this workload).
 func (e *edgeScan) buildCandidates() {
 	edges := e.snap.WorkloadEdges(e.id)
@@ -650,7 +712,10 @@ func (e *edgeScan) buildCandidates() {
 		}
 	}
 
-	// Intent heuristic for zero-selection services.
+	// Intent heuristic for zero-selection services. Attribution has to
+	// be earned: the finding claims this Service was meant for THIS
+	// workload, and `state edges --workload=X` is the command whose
+	// whole contract is single-workload scoping (#332).
 	tpl := e.templateLabels()
 	for _, k := range sortedKeys(e.ix.services) {
 		svc := e.ix.services[k]
@@ -663,27 +728,127 @@ func (e *edgeScan) buildCandidates() {
 		if len(e.selectedPods(svc)) > 0 {
 			continue // selects some other workload's pods — not ours
 		}
-		if !selectorIntends(svc.Spec.Selector, tpl) {
+		score := selectorAffinity(svc.Spec.Selector, tpl)
+		if score <= 0 || !e.bestOwnerInNamespace(svc, score) {
 			continue
 		}
 		e.candidates[k] = &candidate{svc: svc, viaSelector: true, emptyIntent: true}
 	}
 }
 
-// selectorIntends reports whether a zero-result selector was plausibly
-// aimed at pods labeled like tpl: non-empty, and every selector key
-// exists among the pod labels (values differing is exactly the
-// broken-selector symptom).
-func selectorIntends(selector, tpl map[string]string) bool {
+// selectorAffinity scores how plausibly a zero-result selector was
+// aimed at pods labeled like tpl. -1 means it cannot have been: some
+// selector key is absent from the pod labels entirely, so the two are
+// written in different label vocabularies.
+//
+// Key membership on its own is NOT evidence, which is what this
+// heuristic used to test (#332). In any namespace whose workloads
+// follow one convention — `app`, `app.kubernetes.io/name` — every
+// selector shares its keys with every workload's pods, so a single
+// broken Service was reported against every sound workload in the
+// namespace with each one's name stamped on it. Values are the only
+// thing that discriminates.
+//
+// A zero-scoring selector is deliberately not a candidate: it shares
+// the vocabulary and agrees on nothing, which describes some other
+// workload's Service. Detecting a broken Service nobody can be shown
+// to own is a target-free question, not this workload's.
+func selectorAffinity(selector, tpl map[string]string) int {
 	if len(selector) == 0 || len(tpl) == 0 {
+		return -1
+	}
+	score := 0
+	for k, want := range selector {
+		got, ok := tpl[k]
+		if !ok {
+			return -1
+		}
+		switch {
+		case want == got:
+			// This pair agrees; a different key is what broke the
+			// selection. The strongest evidence available.
+			score += 4
+		case relatedValues(want, got):
+			score += 2
+		}
+	}
+	return score
+}
+
+// relatedValues reports whether two label values look like versions of
+// one name rather than two different names: one a prefix of the other
+// at a separator boundary. That is the `api` → `api-v2` rename this
+// heuristic exists to catch, and it rejects `unplugged-00-v2` against
+// `wired-00` — the case that made every workload claim every broken
+// Service. The boundary requirement keeps `api` from matching
+// `apiserver`, which are two workloads, not one renamed.
+func relatedValues(a, b string) bool {
+	long, short := a, b
+	if len(short) > len(long) {
+		long, short = short, long
+	}
+	if short == "" || !strings.HasPrefix(long, short) {
 		return false
 	}
-	for k := range selector {
-		if _, ok := tpl[k]; !ok {
+	switch long[len(short)] {
+	case '-', '.', '_':
+		return true
+	}
+	return false
+}
+
+// bestOwnerInNamespace reports whether the scanned workload is as
+// plausible an owner of a zero-selecting Service as anything else in
+// its namespace — insurance for the shapes value proximity cannot
+// separate on its own.
+//
+// Ties are allowed through rather than suppressed: two workloads that
+// tie scored identically against the same selector, which means their
+// pods carry the same labels, which means the Service really was aimed
+// at both and repairing it would select both. Only a strictly better
+// match elsewhere disqualifies this one.
+//
+// Other workloads are scored from their declared pod templates while
+// the scanned workload is scored from its live pods when it has any
+// (templateLabels). The asymmetry only ever makes this workload harder
+// to disqualify, so the guard cannot suppress a finding that the
+// value-proximity test already earned.
+func (e *edgeScan) bestOwnerInNamespace(svc *corev1.Service, score int) bool {
+	self := e.wl.Kind + "/" + key(e.wl.Namespace, e.wl.Name)
+	for _, tk := range sortedKeys(e.ix.templates) {
+		if tk == self {
+			continue
+		}
+		// templates are keyed "Kind/ns/name"; the Services considered
+		// here are already namespace-local to the workload.
+		if _, rest, ok := strings.Cut(tk, "/"); !ok || !strings.HasPrefix(rest, e.wl.Namespace+"/") {
+			continue
+		}
+		if selectorAffinity(svc.Spec.Selector, e.ix.templates[tk].labels) > score {
 			return false
 		}
 	}
 	return true
+}
+
+// selectorDiff renders why a selector missed the workload's pods: the
+// keys it agrees on are noise, the ones it disagrees on are the fix.
+// "the pods carry the same label keys" — the message this replaces —
+// was both true and useless, since sharing `app` is what every
+// workload in a namespace does.
+func selectorDiff(selector, tpl map[string]string) string {
+	var diffs []string
+	for _, k := range sortedKeys(selector) {
+		got, ok := tpl[k]
+		if !ok || got == selector[k] {
+			continue
+		}
+		diffs = append(diffs, fmt.Sprintf("%s=%s", k, got))
+	}
+	if len(diffs) == 0 {
+		return ""
+	}
+	return strings.Join(diffs, ",")
 }
 
 // selectedPods returns the pods a service's selector currently
@@ -714,6 +879,16 @@ func (e *edgeScan) checkSelectors() {
 	for _, k := range sortedKeys(e.candidates) {
 		c := e.candidates[k]
 		if c.emptyIntent {
+			diff := selectorDiff(c.svc.Spec.Selector, e.templateLabels())
+			msg := fmt.Sprintf("selector %s selects no pods", selectorString(c.svc.Spec.Selector))
+			details := append(e.workloadDetail(),
+				emit.Field{Key: "selector", Value: selectorString(c.svc.Spec.Selector)})
+			// Name the disagreement rather than the agreement: the
+			// value the pods actually carry IS the fix (#332).
+			if diff != "" {
+				msg += fmt.Sprintf(" (the workload's pods carry %s)", diff)
+				details = append(details, emit.Field{Key: "pod_labels", Value: diff})
+			}
 			e.add(emit.Finding{
 				Kind:         "edge.selector_empty",
 				Severity:     emit.SeverityCritical,
@@ -721,12 +896,8 @@ func (e *edgeScan) checkSelectors() {
 				KindOfObject: "Service",
 				Name:         c.svc.Name,
 				Reason:       "NoMatchingPods",
-				Message: fmt.Sprintf("selector %s selects no pods (workload's pods carry the same label keys)",
-					selectorString(c.svc.Spec.Selector)),
-				Details: []emit.Field{
-					{Key: "workload", Value: e.wl.String()},
-					{Key: "selector", Value: selectorString(c.svc.Spec.Selector)},
-				},
+				Message:      msg,
+				Details:      details,
 			})
 			continue
 		}
@@ -882,7 +1053,7 @@ func (e *edgeScan) checkEndpoints() {
 // expiry check.
 func (e *edgeScan) checkIngresses() {
 	for _, ing := range e.ix.ingresses {
-		if ing.Namespace != e.wl.Namespace {
+		if !e.sweep && ing.Namespace != e.wl.Namespace {
 			continue
 		}
 		type backendAt struct {
@@ -912,7 +1083,10 @@ func (e *edgeScan) checkIngresses() {
 				break
 			}
 		}
-		if !routesToWorkload {
+		// A sweep has no workload to route to: every Ingress in scope
+		// is in scope, which is what makes a backend or class that
+		// resolves to nothing findable at all (#331).
+		if !routesToWorkload && !e.sweep {
 			continue
 		}
 
@@ -924,10 +1098,8 @@ func (e *edgeScan) checkIngresses() {
 			}
 			name := ba.b.Service.Name
 			details := func(port string) []emit.Field {
-				d := []emit.Field{
-					{Key: "workload", Value: e.wl.String()},
-					{Key: "service", Value: name},
-				}
+				d := append(e.workloadDetail(),
+					emit.Field{Key: "service", Value: name})
 				if port != "" {
 					d = append(d, emit.Field{Key: "port", Value: port})
 				}
@@ -1003,7 +1175,7 @@ func (e *edgeScan) checkIngressClass(ing *netv1.Ingress) {
 	if ing.Annotations[legacyIngressClassAnnotation] != "" {
 		return // pre-1.18 selection; controllers still honour it
 	}
-	details := []emit.Field{{Key: "workload", Value: e.wl.String()}, {Key: "ingress", Value: ing.Name}}
+	details := append(e.workloadDetail(), emit.Field{Key: "ingress", Value: ing.Name})
 
 	if name := ing.Spec.IngressClassName; name != nil && *name != "" {
 		if e.ix.ingressClasses[*name] || builtinIngressClasses[*name] {
@@ -1092,10 +1264,7 @@ func (e *edgeScan) checkCerts() {
 			via = "ingress"
 		}
 		baseDetails := func() []emit.Field {
-			d := []emit.Field{
-				{Key: "workload", Value: e.wl.String()},
-				{Key: "via", Value: via},
-			}
+			d := append(e.workloadDetail(), emit.Field{Key: "via", Value: via})
 			if fromIngress {
 				d = append(d, emit.Field{Key: "ingress", Value: ingress})
 			}
@@ -1111,7 +1280,7 @@ func (e *edgeScan) checkCerts() {
 				e.add(emit.Finding{
 					Kind:         "edge.missing_ref",
 					Severity:     emit.SeverityCritical,
-					Namespace:    e.wl.Namespace,
+					Namespace:    namespaceOf(k),
 					KindOfObject: "Secret",
 					Name:         nameOf(k),
 					Reason:       "MissingTLSSecret",
@@ -1311,6 +1480,12 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// namespaceOf splits the namespace out of an ns/name index key.
+func namespaceOf(k string) string {
+	ns, _, _ := strings.Cut(k, "/")
+	return ns
 }
 
 // nameOf splits the name out of an ns/name index key.

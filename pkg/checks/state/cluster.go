@@ -472,3 +472,21 @@ func (c *Cluster) EdgeFindings(wl emit.WorkloadRef, certWarn time.Duration, now 
 	}
 	return scan.run(), nil
 }
+
+// EdgeSweepFindings runs the target-free half of the `state edges`
+// validity checks over every Service and Ingress this Cluster loaded:
+// the faults whose subject is the edge, not a workload. It takes no
+// target and needs no additional List — see edgeScan.runSweep for what
+// it covers and why (#331).
+func (c *Cluster) EdgeSweepFindings(certWarn time.Duration, now time.Time) []emit.Finding {
+	if certWarn <= 0 {
+		certWarn = 720 * time.Hour
+	}
+	scan := &edgeScan{
+		ix:       c.ix,
+		snap:     c.snap,
+		now:      now.UTC(),
+		certWarn: certWarn,
+	}
+	return scan.runSweep()
+}

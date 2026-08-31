@@ -357,6 +357,92 @@ func TestScan_UsageErrors(t *testing.T) {
 	}
 }
 
+// TestScan_EdgeSweepFindsAFaultNoWorkloadOwns: #331. A Service whose
+// selector is one label value off routes nowhere, and nothing about
+// the workloads behind it is wrong — every pod Running, every rollout
+// Available, nothing for stage 1 to flag. Before the target-free
+// sweep, stage 2 only ever explained workloads stage 1 had already
+// flagged, so this fault was structurally unreachable and a bare scan
+// reported a clean namespace. "Traffic is black-holing but every
+// deployment says Available" is close to the canonical question scan
+// exists to answer.
+func TestScan_EdgeSweepFindsAFaultNoWorkloadOwns(t *testing.T) {
+	objs := selectedWorkload("prod", "api", map[string]string{"app": "api"})
+	objs = append(objs,
+		service("prod", "api", map[string]string{"app": "api-v2"}), // the rename that missed
+		service("prod", "web", map[string]string{"app": "web"}),    // sound: selects its own pod
+	)
+	objs = append(objs, selectedWorkload("prod", "web", map[string]string{"app": "web"})...)
+
+	c := newScan(t, objs, stage("triage delta", emits()))
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	want := "kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api " +
+		"reason=NoMatchingPods message=\"selector app=api-v2 selects no pods\" check=\"state edges\" " +
+		"selector=\"app=api-v2\""
+	if !strings.Contains(res.Stdout, want) {
+		t.Errorf("stdout missing %q:\n%s", want, res.Stdout)
+	}
+	// No workload was flagged, and the sweep does not invent one: the
+	// finding is about the Service. Naming a plausible owner is the
+	// attributed drill-down's job (#332).
+	if strings.Contains(res.Stdout, "workload=") {
+		t.Errorf("a sweep finding attributed itself to a workload:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "drilldown=0") {
+		t.Errorf("stdout should still report drilldown=0 — no workload needed explaining:\n%s", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "name=web") {
+		t.Errorf("the sound Service was reported:\n%s", res.Stdout)
+	}
+	if err := checktest.Verify(c, res.Stdout, emit.FormatLogfmt); err != nil {
+		t.Errorf("output contract violated: %v", err)
+	}
+}
+
+// TestScan_EdgeSweepDoesNotDoubleReportAnAttributedService: both halves
+// of stage 2 can reach the same broken Service when its workload also
+// happens to be sick. The attributed wording is the better of the two —
+// it names the label the pods actually carry — so it wins and the sweep
+// stays quiet.
+func TestScan_EdgeSweepDoesNotDoubleReportAnAttributedService(t *testing.T) {
+	objs := selectedWorkload("prod", "api", map[string]string{"app": "api"})
+	objs = append(objs, service("prod", "api", map[string]string{"app": "api-v2"}))
+
+	c := newScan(t, objs, stage("triage delta", emits(crashloop("prod", "api-rs-0"))))
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if got := strings.Count(res.Stdout, "kind=edge.selector_empty"); got != 1 {
+		t.Errorf("selector_empty reported %d times, want 1:\n%s", got, res.Stdout)
+	}
+	want := "message=\"selector app=api-v2 selects no pods (the workload's pods carry app=api)\" " +
+		"check=\"state edges\" workload=Deployment/prod/api"
+	if !strings.Contains(res.Stdout, want) {
+		t.Errorf("the attributed wording should be the one kept, missing %q:\n%s", want, res.Stdout)
+	}
+}
+
+// TestScan_MaxDrilldownZeroDisablesTheSweepToo: stage 2 now runs even
+// when stage 1 found nothing, so --max-drilldown=0 is the only way to
+// opt out of its List pass. It has to keep meaning that.
+func TestScan_MaxDrilldownZeroDisablesTheSweepToo(t *testing.T) {
+	objs := selectedWorkload("prod", "api", map[string]string{"app": "api"})
+	objs = append(objs, service("prod", "api", map[string]string{"app": "api-v2"}))
+
+	c := newScan(t, objs, stage("triage delta", emits()))
+	res := checktest.Run(t, c, "--max-drilldown=0")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "edge.selector_empty") {
+		t.Errorf("--max-drilldown=0 should disable stage 2 whole:\n%s", res.Stdout)
+	}
+}
+
 // TestScan_ContractInBothFormats runs the full §13 round-trip: every
 // key scan emits, including the stamped check= and its own summary
 // notes, must be declared in its glossary.
@@ -389,6 +475,24 @@ func ownedPods(ns, name string, n int) []runtime.Object {
 		}})
 	}
 	return out
+}
+
+// selectedWorkload is ownedPods with labels: the pod template and the
+// one pod both carry them, which is what a Service selector has to
+// agree with for the edge to exist.
+func selectedWorkload(ns, name string, labels map[string]string) []runtime.Object {
+	objs := ownedPods(ns, name, 1)
+	objs[0].(*appsv1.Deployment).Spec.Template.Labels = labels
+	objs[1].(*appsv1.ReplicaSet).Spec.Template.Labels = labels
+	objs[2].(*corev1.Pod).Labels = labels
+	return objs
+}
+
+func service(ns, name string, selector map[string]string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: apitypes.UID(ns + "/svc/" + name)},
+		Spec:       corev1.ServiceSpec{Selector: selector},
+	}
 }
 
 func owns(kind, name, uid string) metav1.OwnerReference {
