@@ -454,7 +454,10 @@ jobs:
   # single job yields one artifact dir and ONE SHA256SUMS covering
   # every archive (signed keyless via cosign sign-blob).
   build-binaries:
-    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    # chart_only skips this too: github-release only runs on a tag
+    # push, so on a chart repair these archives are cross-compiled,
+    # smoke-tested, signed and then attached to nothing.
+    if: (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')) && !inputs.chart_only
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
