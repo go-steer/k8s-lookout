@@ -116,6 +116,13 @@ var workloadKinds = map[string]graph.NodeKind{
 	"CronJob":     graph.KindCronJob,
 }
 
+// serviceKind is the extra entry kind `state edges` accepts on
+// --workload (#233). It is deliberately NOT in workloadKinds: that map
+// is what `WorkloadNode`, `TopWorkload` and `state wi` mean by a
+// workload, and a Service is not one — it is the other end of the edge
+// this command validates.
+const serviceKind = "Service"
+
 func workloadKindNames() string {
 	names := make([]string, 0, len(workloadKinds))
 	for k := range workloadKinds {
@@ -136,14 +143,15 @@ func EdgesCommand(deps Deps) checks.Command {
 		Name:        "state edges",
 		MCPName:     "k8s_state_edges",
 		MCPProfiles: []string{"triage"},
-		Summary:     "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.",
+		Summary:     "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for.",
 		Flags: []emit.FlagSpec{
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window"},
 		},
 		Kinds: EdgeKinds(),
 		Output: []checks.OutputField{
-			{Name: "workload", Doc: "the targeted workload as <Kind>/<namespace>/<name>, stamped on every finding"},
+			{Name: "workload", Doc: "the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side"},
+			{Name: "likely_workload", Doc: "on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess"},
 			{Name: "pods", Doc: "how many of the workload's pods carry the broken reference"},
 			{Name: "container", Doc: "container declaring the broken env/envFrom reference"},
 			{Name: "env", Doc: "environment variable whose valueFrom reference is broken"},
@@ -171,6 +179,7 @@ func EdgesCommand(deps Deps) checks.Command {
 			"lookout state edges --workload=Deployment/prod/api",
 			"lookout state edges --workload=Pod/prod/api-6d5f8c-x2v9k --format=json",
 			"lookout state edges --workload=StatefulSet/db/postgres --cert-warn=336h",
+			"lookout state edges --workload=Service/prod/api",
 		},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
 			return runEdges(ctx, deps, inv)
@@ -183,8 +192,13 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if wl.IsZero() {
 		return 0, emit.UsageErrorf("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>)")
 	}
-	if _, ok := workloadKinds[wl.Kind]; !ok {
-		return 0, emit.UsageErrorf("unsupported workload kind %q (want %s)", wl.Kind, workloadKindNames())
+	// Service is an entry kind, not a workload kind: the evidence for a
+	// broken selector arrives on the Service side, and requiring the
+	// workload behind it asks the caller for the answer (#233).
+	_, isWorkload := workloadKinds[wl.Kind]
+	if !isWorkload && wl.Kind != serviceKind {
+		return 0, emit.UsageErrorf("unsupported target kind %q (want %s, or %s to enter from the service side)",
+			wl.Kind, workloadKindNames(), serviceKind)
 	}
 	if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
 		return 0, emit.UsageErrorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
@@ -204,7 +218,12 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	findings, err := cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+	var findings []emit.Finding
+	if isWorkload {
+		findings, err = cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+	} else {
+		findings, err = cluster.ServiceEdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+	}
 	if err != nil {
 		return 0, err
 	}

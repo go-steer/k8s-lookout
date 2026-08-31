@@ -368,6 +368,79 @@ func TestDiffAcceptsJSONReports(t *testing.T) {
 	}
 }
 
+// TestDiffSkipsRecordsThatNameNoObject: the documented pipeline is
+// `lookout health | lookout findings diff`, and `health` emits one
+// health.category scorecard row per category. Those rows name no
+// object, so every one of them composed the key <cluster>//// and
+// they all collided into a single stored subject that referred to
+// nothing and stayed `ongoing` forever (#247). They are skipped now,
+// and the summary says how many.
+func TestDiffSkipsRecordsThatNameNoObject(t *testing.T) {
+	path := newStore(t)
+	scorecard := []string{
+		`kind=health.category severity=info category=nodes status=healthy`,
+		`kind=health.category severity=critical category=crashloops status=degraded total=1`,
+		`kind=scan.check_skipped severity=info reason=NotApplicable message="no Gateway API" check="state edges"`,
+	}
+	res := checktest.RunStdin(t, DiffCommand(fixedClock(t0)),
+		report(append(scorecard, crashPod)...), diffArgs(path)...)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "subject_key=prod-east////") {
+		t.Errorf("an empty subject key reached the wire:\n%s", res.Stdout)
+	}
+	for _, want := range []string{
+		"subject_key=" + crashSubject,
+		"scanned=1 findings=1",
+		"skipped_no_subject=3",
+	} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, res.Stdout)
+		}
+	}
+
+	// And nothing subject-less was persisted, so the next digest cannot
+	// carry it as `ongoing`.
+	s, err := store.OpenRead(path)
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	rows, err := s.FindingStates(context.Background(), "prod-east")
+	_ = s.Close()
+	if err != nil {
+		t.Fatalf("FindingStates: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("stored %d subjects, want 1 (only the pod): %+v", len(rows), rows)
+	}
+	// A report with nothing to skip must not carry the key at all.
+	clean := checktest.RunStdin(t, DiffCommand(fixedClock(t0.Add(time.Minute))), report(crashPod), diffArgs(newStore(t))...)
+	if strings.Contains(clean.Stdout, "skipped_no_subject") {
+		t.Errorf("skipped_no_subject present with nothing skipped:\n%s", clean.Stdout)
+	}
+}
+
+// TestDiffSubjectKeyIsNotRedacted: subject_key is built by lookout out
+// of object identity and exists to be pasted into `findings ack`, but
+// it is long, slash-separated and mixed-class, and its name ends in
+// _key — so the sanitizer's key-anchored branch replaced it with
+// [REDACTED] whenever a name happened to contain a digit (#246).
+func TestDiffSubjectKeyIsNotRedacted(t *testing.T) {
+	path := newStore(t)
+	digitPod := `kind=pod.imagepull severity=critical namespace=shop kind_of_object=Pod name=api-1 reason=ImagePullBackOff message=x fingerprint=sha256:pull`
+	res := checktest.RunStdin(t, DiffCommand(fixedClock(t0)), report(digitPod), diffArgs(path)...)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, emit.Redacted) {
+		t.Fatalf("a subject key was redacted:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "subject_key=prod-east/shop/Pod/api-1/ImagePullBackOff") {
+		t.Errorf("subject key not emitted verbatim:\n%s", res.Stdout)
+	}
+}
+
 // TestUsageErrors pins the exit-2 misuse surface.
 func TestUsageErrors(t *testing.T) {
 	path := newStore(t)

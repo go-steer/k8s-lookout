@@ -171,7 +171,15 @@ path.
 Tool names are the commands' MCP names — `triage delta` →
 `k8s_triage_delta`, `bundle` → `k8s_triage_workload` — with input
 schemas mirrored from the CLI flags (plus a `target` property where a
-command takes a positional argument). The current surface:
+command takes a positional argument).
+
+Two conveniences for clients that guess: on every other tool `target`
+is accepted as a synonym for `workload`, and an argument name the tool
+does not know is rejected with the nearest one it does —
+`unknown argument "form" for tool k8s_scan; did you mean "format"?
+(accepts: …)`. Only the canonical names appear in the schemas.
+
+The current surface:
 
 | Tool | Command |
 | --- | --- |

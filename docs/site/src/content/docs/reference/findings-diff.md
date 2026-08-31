@@ -60,6 +60,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `last_seen` | when this subject was last observed, RFC 3339 |
 | `ack_until` | expiry of the operator ack window on a `suppressed` subject, RFC 3339 |
 | `ack_by` | who took the ack, as forwarded by the caller |
+| `skipped_no_subject` | summary line only, present when non-zero: report records that named no object and were therefore not diffed — `health.category` scorecard rows, `scan.check_skipped`, and the other narration kinds. A diff is over subjects; those lines are not subjects, and diffing them would collapse them all into one empty key |
 
 ## Output contract
 

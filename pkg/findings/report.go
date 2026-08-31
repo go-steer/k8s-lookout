@@ -73,15 +73,29 @@ func ObservationOf(f emit.Finding, cluster string) Observation {
 // a report is an OUTPUT contract being re-read as input, and the
 // summary is part of it.
 //
+// Also skipped, and COUNTED into the second return value: a record
+// that names no object at all (no `kind_of_object` and no `name`).
+// Those are the narration lines of a §4.2 stream — `health.category`
+// scorecard rows, `scan.check_skipped`, `scan.check_failed`,
+// `scan.incomplete`, `*.unavailable` — and a diff is over subjects,
+// which they are not. Left in, every one of them composed the same
+// key `<cluster>////` (or `<cluster>/<ns>///<reason>`), so they
+// collided with each other and stuck in the store as permanent
+// `ongoing` rows attached to nothing (#247). This is not the silent
+// drop the paragraph below warns about: nothing that identifies an
+// object is dropped, and the caller is expected to say how many
+// records it ignored.
+//
 // A line that parses but carries no `kind` and no summary shape is a
 // hard error rather than a skip — silently dropping records from a
 // transition surface would report false `resolved` transitions, which
 // is precisely the failure this package exists to prevent.
-func ParseReport(r io.Reader, cluster string) ([]Observation, error) {
+func ParseReport(r io.Reader, cluster string) ([]Observation, int, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxReportLine)
 
 	var out []Observation
+	var noSubject int
 	line := 0
 	for sc.Scan() {
 		line++
@@ -91,13 +105,17 @@ func ParseReport(r io.Reader, cluster string) ([]Observation, error) {
 		}
 		fields, err := parseRecord(text)
 		if err != nil {
-			return nil, fmt.Errorf("report line %d: %w", line, err)
+			return nil, 0, fmt.Errorf("report line %d: %w", line, err)
 		}
 		if _, ok := fields["kind"]; !ok {
 			if isSummary(fields) {
 				continue
 			}
-			return nil, fmt.Errorf("report line %d: record has no kind and is not the summary line: %q", line, truncateForError(text))
+			return nil, 0, fmt.Errorf("report line %d: record has no kind and is not the summary line: %q", line, truncateForError(text))
+		}
+		if fields["kind_of_object"] == "" && fields["name"] == "" {
+			noSubject++
+			continue
 		}
 		out = append(out, ObservationOf(emit.Finding{
 			Kind:         fields["kind"],
@@ -111,9 +129,9 @@ func ParseReport(r io.Reader, cluster string) ([]Observation, error) {
 		}, cluster))
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read report: %w", err)
+		return nil, 0, fmt.Errorf("read report: %w", err)
 	}
-	return out, nil
+	return out, noSubject, nil
 }
 
 // isSummary reports whether a kind-less record is the §4.2 summary

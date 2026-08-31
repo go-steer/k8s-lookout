@@ -82,7 +82,7 @@ var reportFindings = []emit.Finding{
 func TestParseReportBothFormats(t *testing.T) {
 	for _, format := range []emit.Format{emit.FormatLogfmt, emit.FormatJSON} {
 		t.Run(string(format), func(t *testing.T) {
-			got, err := ParseReport(strings.NewReader(renderReport(t, format, reportFindings)), "")
+			got, _, err := ParseReport(strings.NewReader(renderReport(t, format, reportFindings)), "")
 			if err != nil {
 				t.Fatalf("ParseReport: %v", err)
 			}
@@ -116,11 +116,11 @@ func TestParseReportBothFormats(t *testing.T) {
 // contains a space, an `=`, and a `"`, which is exactly the value
 // emit quotes with strconv.Quote.
 func TestParseReportFormatsAgree(t *testing.T) {
-	fromLogfmt, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "prod-east")
+	fromLogfmt, _, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "prod-east")
 	if err != nil {
 		t.Fatalf("logfmt: %v", err)
 	}
-	fromJSON, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatJSON, reportFindings)), "prod-east")
+	fromJSON, _, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatJSON, reportFindings)), "prod-east")
 	if err != nil {
 		t.Fatalf("json: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestParseReportFormatsAgree(t *testing.T) {
 }
 
 func TestParseReportSubjectKeys(t *testing.T) {
-	got, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "prod-east")
+	got, _, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "prod-east")
 	if err != nil {
 		t.Fatalf("ParseReport: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestParseReportCanonicalizesLikeScanFingerprint(t *testing.T) {
 func TestParseReportSkipsBlankAndSummaryOnly(t *testing.T) {
 	// A clean run: zero nominal state means the stream is nothing but
 	// the summary line.
-	got, err := ParseReport(strings.NewReader("scanned=412 findings=0 elapsed=1.2s\n"), "")
+	got, _, err := ParseReport(strings.NewReader("scanned=412 findings=0 elapsed=1.2s\n"), "")
 	if err != nil {
 		t.Fatalf("ParseReport: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestParseReportSkipsBlankAndSummaryOnly(t *testing.T) {
 
 	// JSON summary encodes scanned/findings as NUMBERS, which is why
 	// the parser decodes through RawMessage.
-	got, err = ParseReport(strings.NewReader(`{"scanned":412,"findings":0,"elapsed":"1.2s"}`+"\n\n"), "")
+	got, _, err = ParseReport(strings.NewReader(`{"scanned":412,"findings":0,"elapsed":"1.2s"}`+"\n\n"), "")
 	if err != nil {
 		t.Fatalf("ParseReport(json summary): %v", err)
 	}
@@ -203,12 +203,52 @@ func TestParseReportSummaryWithNotes(t *testing.T) {
 		"scanned=10 findings=2 elapsed=1s source=history at=2026-08-13T12:00:00Z\n",
 		`{"scanned":10,"findings":2,"elapsed":"1s","source":"history"}` + "\n",
 	} {
-		got, err := ParseReport(strings.NewReader(line), "")
+		got, _, err := ParseReport(strings.NewReader(line), "")
 		if err != nil {
 			t.Fatalf("ParseReport(%q): %v", line, err)
 		}
 		if len(got) != 0 {
 			t.Errorf("ParseReport(%q) returned %d observations, want 0", line, len(got))
+		}
+	}
+}
+
+// TestParseReportSkipsRecordsWithNoObject: a §4.2 stream carries
+// narration as well as findings — health's scorecard rows, scan's
+// check_skipped/check_failed/incomplete, the *.unavailable notices —
+// and none of those name an object. Diffed, they all composed the
+// same empty subject key and collided (#247). They are skipped and
+// counted; anything that names an object is not.
+func TestParseReportSkipsRecordsWithNoObject(t *testing.T) {
+	in := strings.Join([]string{
+		`kind=health.category severity=info category=nodes status=healthy`,
+		`kind=health.category severity=critical category=crashloops status=degraded`,
+		`kind=scan.check_skipped severity=info reason=NotApplicable check="state edges"`,
+		`kind=cloud.unavailable severity=info reason=NoCredentials`,
+		`kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-1 reason=CrashLoopBackOff`,
+		// Cluster-scoped and namespace-less, but it still names an
+		// object, so it is a subject like any other.
+		`kind=node.notready severity=critical kind_of_object=Node name=gke-pool-a-vmxq reason=NodeNotReady`,
+		`scanned=6 findings=6 elapsed=1s`,
+	}, "\n") + "\n"
+
+	got, skipped, err := ParseReport(strings.NewReader(in), "prod-east")
+	if err != nil {
+		t.Fatalf("ParseReport: %v", err)
+	}
+	if skipped != 4 {
+		t.Errorf("skipped = %d, want 4", skipped)
+	}
+	want := []string{
+		"prod-east/prod/Pod/api-1/CrashLoopBackOff",
+		"prod-east//Node/gke-pool-a-vmxq/NodeNotReady",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d observations, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].SubjectKey != w {
+			t.Errorf("observation %d subject key = %q, want %q", i, got[i].SubjectKey, w)
 		}
 	}
 }
@@ -229,7 +269,7 @@ func TestParseReportRejectsUnparseableRecords(t *testing.T) {
 		{"empty key", "=value kind=pod.x\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ParseReport(strings.NewReader(tc.in), ""); err == nil {
+			if _, _, err := ParseReport(strings.NewReader(tc.in), ""); err == nil {
 				t.Errorf("ParseReport(%q) succeeded, want an error", tc.in)
 			}
 		})
@@ -240,7 +280,7 @@ func TestParseReportRejectsUnparseableRecords(t *testing.T) {
 // to know WHICH line, and must not be handed a megabyte of it.
 func TestParseReportErrorNamesTheLine(t *testing.T) {
 	in := "kind=pod.a name=x\nkind=pod.b name=y\nbroken-line-no-equals\n"
-	_, err := ParseReport(strings.NewReader(in), "")
+	_, _, err := ParseReport(strings.NewReader(in), "")
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -249,7 +289,7 @@ func TestParseReportErrorNamesTheLine(t *testing.T) {
 	}
 
 	long := "kind=pod.x message=" + strings.Repeat("z", 5000) + " " + strings.Repeat("q", 5000) + "\n"
-	if _, err := ParseReport(strings.NewReader(long+"nope\n"), ""); err != nil {
+	if _, _, err := ParseReport(strings.NewReader(long+"nope\n"), ""); err != nil {
 		if len(err.Error()) > 500 {
 			t.Errorf("error message is %d bytes — a malformed long line must not become a huge error", len(err.Error()))
 		}
@@ -260,7 +300,7 @@ func TestParseReportErrorNamesTheLine(t *testing.T) {
 // consumer actually runs: render a report, parse it, diff it against
 // the previous run's state.
 func TestParseReportRoundTripsThroughDiff(t *testing.T) {
-	run1, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "")
+	run1, _, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, reportFindings)), "")
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
@@ -280,7 +320,7 @@ func TestParseReportRoundTripsThroughDiff(t *testing.T) {
 	second = append(second, reportFindings[0], reportFindings[1])
 	second[0].Name = "payment-backend-7d9f8-q4m7p"
 
-	run2, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, second)), "")
+	run2, _, err := ParseReport(strings.NewReader(renderReport(t, emit.FormatLogfmt, second)), "")
 	if err != nil {
 		t.Fatalf("run 2: %v", err)
 	}

@@ -93,6 +93,16 @@ type edgeScan struct {
 	// the edge rather than the workload (#331). See runSweep.
 	sweep bool
 
+	// intended / intendedTpl are the Service-entry mode's answer to
+	// "which workload was this Service meant for" (#233): the best
+	// scoring pod template in the Service's namespace, as
+	// <Kind>/<ns>/<name> and its labels. Empty when nothing scored, or
+	// when two workloads tied and naming one would be a guess. In
+	// workload mode both are unset and templateLabels reads the target's
+	// own pods as before.
+	intended    string
+	intendedTpl map[string]string
+
 	pods   []*corev1.Pod // the workload's pods, sorted by name
 	podSet map[string]bool
 
@@ -166,6 +176,113 @@ func (e *edgeScan) runSweep() []emit.Finding {
 	return e.findings
 }
 
+// runService is the Service-entry pass: one Service as the target
+// instead of a workload (#233).
+//
+// This is the direction the evidence arrives from. Something reports
+// that a Service has no ready endpoints, and the next question is why —
+// but to enter from a workload the caller must first name the workload
+// behind the Service, and in the selector-mismatch case there is no
+// such workload BY SELECTOR, which is the entire fault. So the one path
+// from evidence to explanation used to be closed in the only direction
+// anyone travels it.
+//
+// It runs the checks whose subject is this Service or something in
+// front of it: its selector, its EndpointSlices, the Ingresses whose
+// backend it is (checkIngresses already scopes itself to Ingresses
+// routing to a candidate), and those Ingresses' certificates. The
+// workload-scoped checks are absent for the same reason as in the
+// sweep: there is no workload here to trace.
+//
+// Unlike the sweep it does attribute — naming the workload the Service
+// was probably meant for is most of the answer — but it attributes from
+// the Service outwards, scoring every pod template in the namespace and
+// claiming nothing when two tie. See likelyOwner.
+func (e *edgeScan) runService(svc *corev1.Service) []emit.Finding {
+	e.podSet = map[string]bool{}
+	e.candidates = map[string]*candidate{}
+	e.secretRefs = map[string]bool{}
+	e.ingressTLS = map[string]string{}
+
+	c := &candidate{svc: svc}
+	if len(svc.Spec.Selector) > 0 {
+		if len(e.selectedPods(svc)) == 0 {
+			c.emptyIntent = true
+			e.likelyOwner(svc)
+		} else {
+			c.viaSelector = true
+		}
+	}
+	e.candidates[key(svc.Namespace, svc.Name)] = c
+
+	e.checkSelectors()
+	e.checkEndpoints()
+	e.checkIngresses()
+	e.checkCerts()
+	return e.findings
+}
+
+// likelyOwner records the workload a zero-selecting Service was most
+// plausibly aimed at: the strictly best-scoring pod template in the
+// Service's namespace, by the same selectorAffinity that governs
+// attribution in workload mode (#332).
+//
+// A tie names nobody. Two templates that tie carry the same labels, so
+// the Service was aimed at both or at neither, and picking the first
+// alphabetically would be exactly the invented attribution #332 was
+// about. The finding is still emitted — the Service routes nowhere
+// either way — it just stops short of a name.
+func (e *edgeScan) likelyOwner(svc *corev1.Service) {
+	best, bestScore, tied := "", 0, false
+	for _, tk := range sortedKeys(e.ix.templates) {
+		kind, rest, ok := strings.Cut(tk, "/")
+		if !ok || !strings.HasPrefix(rest, svc.Namespace+"/") {
+			continue
+		}
+		if e.ownedByWorkload(kind, svc.Namespace, nameOf(rest)) {
+			continue
+		}
+		switch score := selectorAffinity(svc.Spec.Selector, e.ix.templates[tk].labels); {
+		case score > bestScore:
+			best, bestScore, tied = tk, score, false
+		case score == bestScore && best != "":
+			tied = true
+		}
+	}
+	if best == "" || bestScore <= 0 || tied {
+		return
+	}
+	e.intended = best
+	e.intendedTpl = e.ix.templates[best].labels
+}
+
+// ownedByWorkload reports whether a workload is itself controlled by
+// another workload — the ReplicaSet under a Deployment. Both carry the
+// same pod template and so score identically, which would make every
+// Deployment tie with its own ReplicaSet and suppress every
+// attribution likelyOwner exists to make. The outer controller is also
+// the more useful name: it is the object an operator edits.
+func (e *edgeScan) ownedByWorkload(kind, namespace, name string) bool {
+	nk, ok := workloadKinds[kind]
+	if !ok {
+		return false
+	}
+	id, ok := e.snap.Lookup(nk, namespace, name)
+	if !ok {
+		return false
+	}
+	for _, owner := range e.snap.OwnerChain(id) {
+		ref, resolved := e.snap.Resolve(owner)
+		if !resolved || !ref.Observed {
+			continue
+		}
+		if _, isWorkload := workloadKinds[ref.Kind.String()]; isWorkload {
+			return true
+		}
+	}
+	return false
+}
+
 // sweepCandidates is buildCandidates with the workload removed: every
 // Service in scope whose selector selects nothing. There is no owner
 // to name and none is needed — "this Service routes nowhere" is true
@@ -227,6 +344,11 @@ func (e *edgeScan) resolvePods() {
 // live pod when one exists, else from the workload's pod template) —
 // the reference point for the selector-intent heuristic.
 func (e *edgeScan) templateLabels() map[string]string {
+	// Service-entry mode has no target workload; the reference point is
+	// the workload the Service was probably meant for (#233).
+	if e.intendedTpl != nil {
+		return e.intendedTpl
+	}
 	if len(e.pods) > 0 {
 		return e.pods[0].Labels
 	}
@@ -886,8 +1008,15 @@ func (e *edgeScan) checkSelectors() {
 			// Name the disagreement rather than the agreement: the
 			// value the pods actually carry IS the fix (#332).
 			if diff != "" {
-				msg += fmt.Sprintf(" (the workload's pods carry %s)", diff)
+				owner := "the workload's pods"
+				if e.intended != "" {
+					owner = "the pods of " + e.intended
+				}
+				msg += fmt.Sprintf(" (%s carry %s)", owner, diff)
 				details = append(details, emit.Field{Key: "pod_labels", Value: diff})
+				if e.intended != "" {
+					details = append(details, emit.Field{Key: "likely_workload", Value: e.intended})
+				}
 			}
 			e.add(emit.Finding{
 				Kind:         "edge.selector_empty",

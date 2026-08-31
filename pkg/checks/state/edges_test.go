@@ -690,6 +690,82 @@ func TestEdgesSelectorEmptyDoesNotClaimAnotherWorkloadsService(t *testing.T) {
 	})
 }
 
+// The fault arrives on the Service side — "this service has no
+// endpoints" — and the workload-only entry asked the caller to name
+// the workload behind it, which in the selector-mismatch case is
+// precisely what does not exist by selector (#233).
+func TestEdgesEntersFromAService(t *testing.T) {
+	t.Run("names the workload the selector was meant for", func(t *testing.T) {
+		c := healthy(t)
+		c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
+		c.slice = apiSlice()
+		c.extra = append(c.extra, sibling("web", map[string]string{"app": "web"}))
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Service/prod/api")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		want := `kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods message="selector app=api-v2 selects no pods (the pods of Deployment/prod/api carry app=api)" workload=Service/prod/api selector="app=api-v2" pod_labels="app=api" likely_workload=Deployment/prod/api`
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("output does not contain\n  %s\ngot:\n%s", want, res.Stdout)
+		}
+	})
+
+	// Two workloads carrying the same labels fit the broken selector
+	// equally well; picking one alphabetically would be the invented
+	// attribution #332 was about. The Service still routes nowhere and
+	// is still reported — just without a name.
+	t.Run("a tie names nobody", func(t *testing.T) {
+		c := healthy(t)
+		c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
+		c.slice = apiSlice()
+		c.extra = append(c.extra, sibling("twin", map[string]string{"app": "api"}))
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Service/prod/api")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if !strings.Contains(res.Stdout, "kind=edge.selector_empty") {
+			t.Errorf("the broken Service went unreported:\n%s", res.Stdout)
+		}
+		if strings.Contains(res.Stdout, "likely_workload=") {
+			t.Errorf("a tie was attributed anyway:\n%s", res.Stdout)
+		}
+	})
+
+	// A Service entry reports the Service's OWN edges, not the
+	// workload's: no mount refs, no imagePullSecrets, no RBAC. Here the
+	// service is fine and the ingress in front of it is not.
+	t.Run("reports the ingress in front of the service", func(t *testing.T) {
+		c := healthy(t)
+		c.sa = nil // a workload-scoped fault: must not appear
+		c.ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = netv1.ServiceBackendPort{Number: 9999}
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Service/prod/api")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if !strings.Contains(res.Stdout, "kind=edge.backend_missing") {
+			t.Errorf("the broken ingress backend was not reported:\n%s", res.Stdout)
+		}
+		if strings.Contains(res.Stdout, "service_account=") {
+			t.Errorf("a Service entry reported a workload-scoped fault:\n%s", res.Stdout)
+		}
+	})
+
+	// A healthy Service says nothing, like every other entry.
+	t.Run("a healthy service is silent", func(t *testing.T) {
+		c := healthy(t)
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Service/prod/api")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if !strings.Contains(res.Stdout, "findings=0") {
+			t.Errorf("a healthy service reported something:\n%s", res.Stdout)
+		}
+	})
+}
+
 func TestEdgesSelectorUnready(t *testing.T) {
 	c := healthy(t)
 	c.podB = apiPod("api-"+hash+"-bbbbb", c.podB.Labels, false) // not Ready
@@ -838,7 +914,10 @@ func TestEdgesUsageErrors(t *testing.T) {
 		useArgs bool
 	}{
 		{"workload required", []string{}, "requires --workload", emit.ExitUsage, true},
-		{"unsupported kind", []string{"--workload=Service/prod/api"}, "unsupported workload kind", emit.ExitUsage, true},
+		{"unsupported kind", []string{"--workload=ConfigMap/prod/api"}, "unsupported target kind", emit.ExitUsage, true},
+		// Service IS an entry kind (#233), so naming one that does not
+		// exist is a lookup failure, not a misuse.
+		{"service not found", []string{"--workload=Service/prod/nonesuch"}, "not found", emit.ExitRuntime, true},
 		{"namespace contradiction", []string{"--workload=" + wl, "--namespace=other"}, "contradicts", emit.ExitUsage, true},
 		{"workload not found", []string{"--workload=Deployment/prod/nonesuch"}, "not found", emit.ExitRuntime, true},
 	}

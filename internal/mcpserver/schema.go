@@ -31,6 +31,12 @@ import (
 // positional argument (commands declare at most one — checks.Command).
 const targetProperty = "target"
 
+// workloadProperty is the scoping property every tool declares (the
+// §4.2 --workload common flag). targetProperty is the property name on
+// the three tools that take a positional instead, and clients
+// generalize it to the other twenty — see argv (#232).
+const workloadProperty = "workload"
+
 // durationPattern documents the Go duration syntax on duration-typed
 // properties. It is advisory (the authoritative validation is the
 // command's own flag parsing, which reports invalid-params); the
@@ -148,6 +154,17 @@ func toolDescription(c checks.Command) string {
 // declared FlagType; everything else (duration syntax, flag
 // combinations, target syntax) is validated by the one authoritative
 // parser, emit.Run, whose usage errors surface as invalid params.
+//
+// It is deliberately tolerant in one place: `target` is accepted as
+// `workload` on the tools that have no positional (#232). `target` is
+// the real property name on three tools, models generalize it to the
+// rest, and a rejection there costs a full round trip and returns
+// nothing — an agent eval measured a retry ladder of
+// `{"request": …}`, `{"target": …}`, `{}`, `{"workload": …}` on one
+// call. Only the canonical name is advertised in the schema, so the
+// tool surface still has one vocabulary; the intake just does not
+// punish a near miss, and the unknown-argument error below teaches
+// the right name for every other guess.
 func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 	var args map[string]json.RawMessage
 	if len(raw) > 0 {
@@ -179,9 +196,19 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 			target = &s
 			continue
 		}
-		spec, ok := specs[prop]
+		name := prop
+		if prop == targetProperty {
+			if _, both := args[workloadProperty]; both {
+				return nil, fmt.Errorf("arguments %q and %q name the same parameter for tool %s; pass only %q",
+					targetProperty, workloadProperty, c.MCPName, workloadProperty)
+			}
+			if _, ok := specs[workloadProperty]; ok {
+				name = workloadProperty
+			}
+		}
+		spec, ok := specs[name]
 		if !ok {
-			return nil, fmt.Errorf("unknown argument %q for tool %s", prop, c.MCPName)
+			return nil, unknownArgument(c, prop)
 		}
 		switch spec.Type {
 		case emit.FlagBool:
@@ -208,6 +235,93 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 		out = append(out, *target)
 	}
 	return out, nil
+}
+
+// unknownArgument rejects a property the tool does not declare, and
+// says what it should have been (#232).
+//
+// The no-argument errors on this surface already self-correct — "no
+// scope: pass --namespace=<ns>, -A …, or --workload=…" tells the
+// caller the move — and the unknown-argument path did not: it named
+// the wrong parameter and stopped. Naming the nearest accepted
+// property and then listing them all fixes every wrong guess in one
+// round trip, not just the `target` one the alias above absorbs.
+func unknownArgument(c checks.Command, prop string) error {
+	accepted := acceptedProperties(c)
+	msg := fmt.Sprintf("unknown argument %q for tool %s", prop, c.MCPName)
+	if near := nearestProperty(prop, accepted); near != "" {
+		msg += fmt.Sprintf("; did you mean %q?", near)
+	}
+	return fmt.Errorf("%s (accepts: %s)", msg, strings.Join(accepted, ", "))
+}
+
+// acceptedProperties lists a tool's schema properties, sorted.
+func acceptedProperties(c checks.Command) []string {
+	specs := schemaSpecs(c)
+	out := make([]string, 0, len(specs)+1)
+	for _, s := range specs {
+		out = append(out, propertyName(s.Name))
+	}
+	if c.Positional != nil {
+		out = append(out, targetProperty)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// nearestProperty picks the accepted property a wrong name most likely
+// meant, or "" when nothing is close enough to suggest without
+// guessing. A unique prefix match wins first ("form" → "format"), then
+// a unique edit distance of at most two ("namespaces" → "namespace").
+// Ambiguity suggests nothing: the full list is printed either way, and
+// a wrong suggestion is worse than none.
+func nearestProperty(prop string, accepted []string) string {
+	prop = strings.ToLower(prop)
+	var prefix []string
+	for _, a := range accepted {
+		if a != prop && strings.HasPrefix(a, prop) {
+			prefix = append(prefix, a)
+		}
+	}
+	if len(prefix) == 1 {
+		return prefix[0]
+	}
+
+	best, bestDist, ties := "", 3, 0
+	for _, a := range accepted {
+		switch d := editDistance(prop, a); {
+		case d < bestDist:
+			best, bestDist, ties = a, d, 1
+		case d == bestDist:
+			ties++
+		}
+	}
+	if ties != 1 {
+		return ""
+	}
+	return best
+}
+
+// editDistance is Levenshtein distance, two rows rather than a full
+// matrix. Property names are short; this runs once, on an error path.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
 }
 
 func decodeString(prop string, val json.RawMessage) (string, error) {

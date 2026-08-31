@@ -369,3 +369,38 @@ func TestSanitizeFinding_PrecisionControls(t *testing.T) {
 		t.Errorf("over-redaction of message: %q", f.Message)
 	}
 }
+
+// The subject keys `findings diff` and `triage status` emit are built
+// by lookout out of object identity, and the whole point of printing
+// them is that the operator pastes one back into `findings ack`. They
+// are also long, slash-separated and mixed-class, so secretShaped
+// matched them while credentialKey matched the "key" in their name
+// (#246).
+func TestSanitizeFinding_StructuralKeysSurvive(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"subject_key", "demo/prod/Deployment/api-1/CrashLoopBackOff"},
+		{"subject_key", "prod-eu-1/kube-system/DaemonSet/fluent-bit/Unschedulable"},
+		{"resource_key", "Pod/prod/payment-7d5b9c6f4-x2k9q"},
+	} {
+		f := SanitizeFinding(Finding{
+			Kind:    "findings.transition",
+			Details: []Field{{Key: tc.key, Value: tc.value}},
+		})
+		if got := f.Details[0].Value; got != tc.value {
+			t.Errorf("%s=%q was rewritten to %q", tc.key, tc.value, got)
+		}
+	}
+}
+
+// The allowlist is by exact key, not by word: a detail that really
+// does name credential material must still be redacted even if its
+// key ends in _key.
+func TestSanitizeFinding_StructuralAllowlistIsExact(t *testing.T) {
+	f := SanitizeFinding(Finding{
+		Kind:    "config.drift",
+		Details: []Field{{Key: "signing_key", Value: "9f8b3c1d4e5a6b7c8d9e0f1a2b3c4d5e"}},
+	})
+	if f.Details[0].Value != Redacted {
+		t.Errorf("signing_key survived: %q", f.Details[0].Value)
+	}
+}
