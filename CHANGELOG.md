@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow now signs the Helm chart it publishes. `cosign`
+  reads `~/.docker/config.json` and the `publish-chart` job only ran
+  `helm registry login`, which writes helm's own registry config — so
+  the chart pushed cleanly and then `cosign sign` failed UNAUTHORIZED
+  pushing the signature. v0.22.0 is the first release to publish a
+  chart and so the first to run this job for real; its chart went out
+  unsigned and has been re-signed. The job also read `github.ref_name`
+  directly, which meant the `workflow_dispatch` republish path the
+  workflow documents never actually worked for it; it now resolves the
+  tag the same way `build-binaries` does, and a new `chart_only` input
+  repairs the chart of an already published release without rebuilding
+  images and moving their digests.
+
 ## [0.22.0] - 2026-08-31
 
 This release answers a question the tool could not previously be

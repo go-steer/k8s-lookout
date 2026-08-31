@@ -75,6 +75,8 @@ name: Release images
 #
 # Manual republish (e.g. for a tag pushed before this workflow
 # existed): use the workflow_dispatch entrypoint with the tag input.
+# Add chart_only=true to repair just the Helm chart of an already
+# published release, leaving every image digest where it is.
 
 on:
   push:
@@ -84,6 +86,10 @@ on:
       tag:
         description: 'Tag to publish (e.g. v0.1.0). Empty = use the current ref.'
         required: false
+      chart_only:
+        description: 'Republish and sign only the Helm chart for `tag`, skipping the image build. Repairs a release whose chart step failed without moving any published image digest.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -97,6 +103,10 @@ env:
 
 jobs:
   build-and-push:
+    # chart_only repairs a chart against images that already published,
+    # so rebuilding them would move digests under an existing release
+    # for no reason.
+    if: ${{ !inputs.chart_only }}
     name: ${{ matrix.job_name }}
     runs-on: ubuntu-24.04
 
@@ -587,17 +597,56 @@ jobs:
   # failure rather than a silent overwrite of whatever was published
   # last.
   publish-chart:
-    if: github.ref_type == 'tag'
+    # Runs on a tag push, and on a workflow_dispatch carrying a tag —
+    # the republish path the header comment documents, which this job
+    # did not actually implement (it read github.ref_name directly).
+    # always() so a chart_only dispatch survives build-and-push being
+    # skipped rather than being skipped along with it.
+    if: >-
+      always()
+      && (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
+      && (needs.build-and-push.result == 'success' || inputs.chart_only)
     needs: build-and-push
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A chart_only dispatch runs off a branch, so check out the
+          # tag being repaired: the chart packaged here must be the one
+          # that release cut, not whatever main has drifted to.
+          ref: ${{ inputs.tag || github.ref_name }}
       - uses: azure/setup-helm@v5
       - uses: sigstore/cosign-installer@v3
+
+      # cosign reads ~/.docker/config.json; `helm registry login` below
+      # writes helm's OWN registry config and nothing else. Without
+      # this the chart pushes fine and then `cosign sign` fails
+      # UNAUTHORIZED pushing the signature — which is exactly how
+      # v0.22.0 shipped with an unsigned chart, this job's first run on
+      # a real tag.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the tag being published
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Chart version matches the tag
         run: |
           set -euo pipefail
-          want="${{ github.ref_name }}"
+          want="${{ steps.tag.outputs.tag }}"
           got="v$(helm show chart deploy/chart | yq -r .version)"
           app="$(helm show chart deploy/chart | yq -r .appVersion)"
           if [[ "$got" != "$want" || "$app" != "$want" ]]; then
@@ -610,7 +659,7 @@ jobs:
           set -euo pipefail
           # helm package names the tarball <name>-<version>.tgz, and
           # the chart version has no leading v.
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ steps.tag.outputs.version }}"
           helm package deploy/chart --destination /tmp/chart
           helm registry login "${REGISTRY}" \
             --username "${{ github.actor }}" \
@@ -640,10 +689,10 @@ jobs:
           # cannot template is a release nobody finds until an install
           # fails, and the round trip is two seconds.
           helm template lookout-watch "$ref" \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${{ steps.tag.outputs.version }}" \
             --namespace agent-triage >/tmp/rendered.yaml
-          grep -q "image: ghcr.io/go-steer/lookout:${{ github.ref_name }}" /tmp/rendered.yaml \
-            || { echo "::error::published chart does not render the ${{ github.ref_name }} image"; exit 1; }
+          grep -q "image: ghcr.io/go-steer/lookout:${{ steps.tag.outputs.tag }}" /tmp/rendered.yaml \
+            || { echo "::error::published chart does not render the ${{ steps.tag.outputs.tag }} image"; exit 1; }
           echo "chart published and verified: ${ref} ${{ steps.push.outputs.digest }}"
 
   # GitHub Release object (#146, core-agent's discoverability model):
