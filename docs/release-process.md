@@ -53,6 +53,20 @@ wrong flavor with nothing to catch it.
    `internal/version/version.go` `Version = "vX.(Y+1).0-dev"`.
    `dev/ci/presubmits/verify-version-fallback` fails CI until done.
 
+## Repairing a published release
+
+`publish-chart` is the one job the Release does not depend on, so a
+failure there leaves images, binaries and the Release intact and only
+the chart wrong. Re-publish and sign it without touching anything else:
+
+```bash
+gh workflow run release-images.yml --ref main -f tag=vX.Y.Z -f chart_only=true
+```
+
+`chart_only` skips `build-and-push` so no published image digest moves,
+and the job checks out `tag` rather than main so it packages the chart
+that release cut.
+
 ## Verifying a release
 
 ```bash
