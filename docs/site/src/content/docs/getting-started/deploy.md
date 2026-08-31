@@ -16,7 +16,7 @@ its bearer token):
 kubectl create namespace agent-triage
 kubectl -n agent-triage create secret generic lookout-watch-token \
   --from-literal=token="$WATCHER_TOKEN"
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.22.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy?ref=v0.23.0"
 ```
 
 Pin `?ref=` to the release you are deploying — each tag's manifest
@@ -87,21 +87,21 @@ registry as the images and signed with the same keyless identity:
 
 ```sh
 helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
-  --version 0.22.0 \
+  --version 0.23.0 \
   --namespace agent-triage --create-namespace \
   --set-string 'args[0]=--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777' \
   --set-string 'args[4]=--cluster-name=prod-us-east1'
 ```
 
-The chart version tracks the release, minus the `v` — chart `0.22.0`
-deploys `v0.22.0`. There is no compatibility matrix to consult because
+The chart version tracks the release, minus the `v` — chart `0.23.0`
+deploys `v0.23.0`. There is no compatibility matrix to consult because
 there is only one version line. (v0.22.0 is the first release that
 publishes a chart; for anything earlier, `helm install lookout-watch
 deploy/chart` from a clone is the only route.) Verify it the same way
 you verify an image:
 
 ```sh
-cosign verify ghcr.io/go-steer/charts/lookout:0.22.0 \
+cosign verify ghcr.io/go-steer/charts/lookout:0.23.0 \
   --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
