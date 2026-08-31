@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-31
+
+A short release, and everything in it is the same kind of finding: a
+path a caller actually takes that nobody had walked end to end. None
+of it came from reading the code. Two items came from the scale tier
+`examples/kwok/` added last release, two from an agent eval's
+transcript, and two from pasting a command's own output back into the
+command it tells you to paste it into.
+
+The pair that matters most is `lookout scan` and the Service it could
+not see. A selector one label value off black-holes traffic while
+every Deployment behind it reports Available, and `scan`'s drill-down
+only explained workloads stage 1 had already flagged — so a namespace
+with three services routing nowhere read as clean, and the fault was
+reachable only by knowing to ask about it, which is the one thing
+`scan` exists so you don't have to. Underneath it sat a second bug of
+the same provenance: the rule deciding which workload a zero-selecting
+Service was *meant* for compared the selector's label keys and never
+their values, so one broken Service was reported against every sound
+workload in the namespace. Both were invisible to every fixture in the
+tree, because a fixture with one workload per namespace cannot tell a
+detector that reports the right thing from one that reports
+everything. `state edges` closes the same gap from the other side: it
+takes `--workload=Service/<namespace>/<name>` now, which is the
+direction the evidence arrives from, and names the workload the
+selector was probably meant for rather than making you already know
+it.
+
+The rest is smaller and equally literal. `findings diff` printed
+`subject_key=[REDACTED]` — the sanitizer read a key named `subject_key`
+as credential-shaped — but only when an object's name contained a
+digit, which is why no fixture ever caught the one field the command
+tells you to paste into `findings ack`. On its documented
+`health | findings diff` pipeline it also stored every scorecard row
+under the same empty subject, where they collided into a single row
+that referred to nothing and came back `ongoing` forever. And an agent
+eval measured 28 of 115 MCP calls rejected on an argument *name*,
+recovered by guessing: `target` is accepted as `workload` everywhere
+now, and every other wrong guess gets told the name it meant.
+
 ### Added
 
 - `lookout state edges` can be entered from a Service:

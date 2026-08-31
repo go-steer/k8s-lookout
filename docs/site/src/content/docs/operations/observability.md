@@ -103,7 +103,7 @@ graph worth looking at.
 additionally apply the ServiceMonitor:
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=v0.22.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=v0.23.0"
 ```
 
 It ships outside the base bundle because `ServiceMonitor` is a CRD and

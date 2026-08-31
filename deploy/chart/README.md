@@ -47,7 +47,7 @@ Then, from the published OCI artifact:
 
 ```sh
 helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
-  --version 0.22.0 \
+  --version 0.23.0 \
   --namespace agent-triage --create-namespace \
   --set-string 'args[0]=--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777' \
   --set-string 'args[4]=--cluster-name=prod-us-east1'
@@ -58,7 +58,7 @@ chart version is the release version without the `v`, and it is signed
 with the same keyless identity as the images:
 
 ```sh
-cosign verify ghcr.io/go-steer/charts/lookout:0.22.0 \
+cosign verify ghcr.io/go-steer/charts/lookout:0.23.0 \
   --certificate-identity-regexp '^https://github.com/go-steer/k8s-lookout' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
