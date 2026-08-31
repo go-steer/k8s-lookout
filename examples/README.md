@@ -22,6 +22,9 @@ examples/
 ├── scenarios/       # one dir per failure: README + inject / verify / revert
 ├── kwok/            # + hundreds of fake nodes on the same cluster: scale, bench, fleet scenarios, mass node failure
 ├── e2e              # driver: inject → verify → revert per scenario, PASS/FAIL summary
+├── uat              # driver: the read-path half — every command's output contract
+├── uat-cases/       # one file per UAT case, discovered by filename
+├── uat-lib.sh       # UAT assertions (exit code, summary line, stdout purity, JSON)
 ├── lib.sh           # shared helpers (context guard, wire/read-path await)
 ├── agent-harness.md # testing the CLI via skills / MCP in Claude, core-agent, etc.
 └── gke/             # deltas for running the same scenarios on a GKE staging cluster
@@ -106,13 +109,40 @@ It is additive, not a replacement: kubelet-observed event grammar
 on a simulated kubelet, so those scenarios stay on kind. See
 [`kwok/README.md`](kwok/README.md) for the full split.
 
+## The read-path tier
+
+`examples/e2e` asks whether breaking a workload produces the right
+signal on the wire. `examples/uat` asks the other half: does every
+read-path command return correct, well-shaped, secret-safe output?
+
+```sh
+examples/uat                # every case this tier can run
+examples/uat contract       # one case file
+UAT_TIER=T1 examples/uat    # also the cases that need metrics-server
+```
+
+It needs the cluster and the demo app, but **not** a sentinel — every
+command reads the cluster directly through your kubeconfig. It breaks
+nothing and reverts nothing, so it is safe to run at any point,
+including immediately after a scenario.
+
+The cross-cutting case (`uat-cases/00-contract.sh`) enumerates commands
+from the registry via `lookout mcp --list-tools` rather than a list
+kept by hand, and fails if a newly registered command has no invocation
+in its table — so the coverage cannot silently rot as commands are
+added. `UAT_TIER` (default `T0`) gates cases needing more than a bare
+kind cluster; anything above the running tier is reported as skipped
+rather than failed. The design, the per-command matrix and the tier
+definitions are in [`docs/testing/cli-uat.md`](../docs/testing/cli-uat.md).
+
 ## CI
 
 `.github/workflows/e2e-kind.yml` runs these scenarios non-blocking
 against an image built from HEAD (`kind/up --build`): a smoke subset
 (crashloop, failed-mount, bad-rollout) on every push to main, and the
 full set plus node-failure weekly (or on demand via
-workflow_dispatch). PR presubmits stay hermetic — a live cluster never
+workflow_dispatch). Both tiers then run `examples/uat` at T0 against
+the same cluster. PR presubmits stay hermetic — a live cluster never
 gates a PR. CI sets `LOOKOUT_E2E_TIMEOUT_SCALE=2` because runners are
 slower than a workstation; set it locally if your machine needs more
 headroom too.

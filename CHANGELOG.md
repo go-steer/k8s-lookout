@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `examples/uat`, the read-path half of the e2e layer. `examples/e2e`
+  asks whether breaking a workload produces the right signal on the
+  wire; this asks whether every command that reads a cluster returns
+  correct, well-shaped output. It reuses the same cluster, demo app,
+  context guard and binary resolution, needs no sentinel, and mutates
+  nothing — so it is safe to run at any point, including straight
+  after a scenario. `UAT_TIER` (default `T0`) gates the cases that
+  need more than a bare kind cluster, and a case above the running
+  tier is reported as skipped rather than failed. Design, per-command
+  matrix and tier definitions in `docs/testing/cli-uat.md`.
+- The first UAT case is the cross-cutting contract, and it enumerates
+  its own subject matter: it reads the command registry through
+  `lookout mcp --list-tools` and asserts, for all 34 read-path
+  commands, that a valid invocation exits 0, ends in a summary line,
+  keeps stdout to payload only, parses as JSON under `--format=json`,
+  and treats an unknown flag as a usage error. On top of that it
+  checks the flags whose failure mode is silence rather than an
+  error: a command that cannot read namespaced objects must *reject*
+  `-A` instead of accepting and ignoring it, `--at` must be a usage
+  error anywhere it cannot be answered from a store (and on the two
+  graph-backed commands, a usage error without one, since reporting
+  *now* is the one wrong answer a post-mortem must never give), and
+  an impossible `--timeout` must expire cleanly rather than crash on
+  the cancelled context. Enumerating from the registry means a newly
+  registered command with no entry in the invocation table fails the
+  run, so the coverage cannot rot as commands are added.
+- The kind e2e workflow runs the T0 UAT after its scenarios, on both
+  the post-merge smoke tier and the weekly full tier. It runs even
+  when the scenarios failed: signal routing is the legitimately flaky
+  part, the CLI output contract is not, and letting a scenario flake
+  hide a contract regression would defeat the point of checking them
+  separately.
+
 ## [0.23.0] - 2026-08-31
 
 A short release, and everything in it is the same kind of finding: a

@@ -24,6 +24,9 @@ name: E2E (kind)
 #   - weekly / manual → the full non-destructive set + node-failure
 #                      (~40 min)
 #
+# Both tiers then run the T0 CLI UAT (examples/uat) against the same
+# cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
+#
 # Deliberately NOT a pull_request job: signal routing legitimately
 # varies with cluster history (storms, dedup, resolved.reverted — see
 # examples/README.md), and a ~98%-reliable required check taxes every
@@ -119,6 +122,21 @@ jobs:
               examples/e2e node-failure
               ;;
           esac
+
+      - name: CLI UAT (T0)
+        # The read-path half of the e2e layer (docs/testing/cli-uat.md):
+        # every registered command's exit code, summary line, stdout
+        # purity, JSON, scope flags and --timeout. Reuses this cluster
+        # rather than standing up a second one — it only reads, so the
+        # state the scenarios just left behind is a HARDER input than a
+        # fresh cluster, not a contaminated one.
+        #
+        # Runs even when the scenarios failed: signal routing is the
+        # flaky part (see the header), the CLI contract is not, and
+        # letting a scenario flake hide a real contract regression
+        # defeats the point of checking it separately.
+        if: ${{ !cancelled() }}
+        run: examples/uat
 
       - name: Collect forensics
         if: failure()
