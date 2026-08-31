@@ -16,6 +16,7 @@ package findings
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -58,6 +59,7 @@ func DiffCommand(deps Deps) checks.Command {
 			{Name: "last_seen", Doc: "when this subject was last observed, RFC 3339"},
 			{Name: "ack_until", Doc: "expiry of the operator ack window on a `suppressed` subject, RFC 3339"},
 			{Name: "ack_by", Doc: "who took the ack, as forwarded by the caller"},
+			{Name: "skipped_no_subject", Doc: "summary line only, present when non-zero: report records that named no object and were therefore not diffed — `health.category` scorecard rows, `scan.check_skipped`, and the other narration kinds. A diff is over subjects; those lines are not subjects, and diffing them would collapse them all into one empty key"},
 		},
 		Examples: []string{
 			"lookout health --store=/var/lib/lookout/lookout.db | lookout findings diff --report=- --store=/var/lib/lookout/lookout.db --cluster=prod-east",
@@ -89,9 +91,20 @@ func runDiff(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	defer func() { _ = st.Close() }()
 
 	cluster := inv.Flags.String("cluster")
-	observations, err := findingstate.ParseReport(report, cluster)
+	observations, noSubject, err := findingstate.ParseReport(report, cluster)
 	if err != nil {
 		return 0, err
+	}
+	// The scorecard and narration lines of the upstream report name no
+	// object, so they are not diffable subjects and were skipped (#247).
+	// Say how many in the summary line rather than let the counts differ
+	// from the report's without explanation — `health` emits one
+	// health.category row per category, so on the documented
+	// `health | findings diff` pipeline this key is always present.
+	if noSubject > 0 {
+		if err := inv.Out.Note("skipped_no_subject", strconv.Itoa(noSubject)); err != nil {
+			return 0, err
+		}
 	}
 	prev, err := st.FindingStates(ctx, cluster)
 	if err != nil {

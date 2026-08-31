@@ -473,6 +473,29 @@ func (c *Cluster) EdgeFindings(wl emit.WorkloadRef, certWarn time.Duration, now 
 	return scan.run(), nil
 }
 
+// ServiceEdgeFindings runs the `state edges` checks that a Service is
+// the subject of — its selector, its EndpointSlices, and the Ingresses
+// and certificates in front of it — for the named Service (#233). It
+// reports a lookup failure if this List pass never saw that Service.
+// certWarn <= 0 means the command's 720h default.
+func (c *Cluster) ServiceEdgeFindings(svc emit.WorkloadRef, certWarn time.Duration, now time.Time) ([]emit.Finding, error) {
+	obj := c.ix.services[key(svc.Namespace, svc.Name)]
+	if obj == nil {
+		return nil, fmt.Errorf("service %s/%s not found (%d objects listed)", svc.Namespace, svc.Name, c.ix.scanned)
+	}
+	if certWarn <= 0 {
+		certWarn = 720 * time.Hour
+	}
+	scan := &edgeScan{
+		wl:       svc,
+		ix:       c.ix,
+		snap:     c.snap,
+		now:      now.UTC(),
+		certWarn: certWarn,
+	}
+	return scan.runService(obj), nil
+}
+
 // EdgeSweepFindings runs the target-free half of the `state edges`
 // validity checks over every Service and Ingress this Cluster loaded:
 // the faults whose subject is the edge, not a workload. It takes no

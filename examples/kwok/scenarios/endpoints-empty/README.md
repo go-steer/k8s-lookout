@@ -82,6 +82,8 @@ reported unattributed by the `scan` sweep instead.
 kubectl -n kwok-scenario-endpoints get svc,endpointslices
 lookout scan --namespace=kwok-scenario-endpoints
 lookout state edges --workload=Deployment/kwok-scenario-endpoints/unplugged-00
+# or from the side the evidence arrives on:
+lookout state edges --workload=Service/kwok-scenario-endpoints/unplugged-00
 ```
 
 Agent-harness prompt to try:

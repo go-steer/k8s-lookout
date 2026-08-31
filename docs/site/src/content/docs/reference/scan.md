@@ -332,7 +332,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `latest` | the newest aligned value in the window |
 | `threshold` | the crossed threshold: the critical one when severity=critical, else the warning one |
 | `trend` | startup pack: second-half vs first-half mean delta of the window, e.g. "+34%" — the p95 trend direction |
-| `workload` | the targeted workload as \<Kind>/\<namespace>/\<name>, stamped on every finding |
+| `workload` | the target the edges were traced from as \<Kind>/\<namespace>/\<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
+| `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
 | `volume` | pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken |
 | `key` | the referenced key that is missing from the ConfigMap/Secret |
 | `selector` | the Service label selector under scrutiny |

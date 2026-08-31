@@ -78,11 +78,26 @@ func SanitizeFinding(f Finding) Finding {
 	return f
 }
 
+// structuralKeys are detail keys whose value lookout builds itself
+// out of object identity — cluster, namespace, kind, name and a
+// canonical reason joined with "/". Nothing in them comes from
+// Secret data, but they are long, slash-separated and mixed-class,
+// so secretShaped matches them, and keyWords splits subject_key to
+// {subject,key} where "key" is a credential word: the key-anchored
+// branch redacted them outright (#246). These values exist to be
+// copied back into a command (`lookout findings ack --subject=…`),
+// so redacting them breaks the documented workflow. They still run
+// through the value-shape heuristics below.
+var structuralKeys = map[string]bool{
+	"subject_key":  true, // findings diff / findings ack
+	"resource_key": true, // triage status
+}
+
 // maskKeyedValue applies the key-anchored heuristics (credential key
 // name AND secret-shaped value → fully redacted) and then the
 // position-independent value-shape heuristics.
 func maskKeyedValue(key, value string) string {
-	if value != "" && credentialKey(key) && secretShaped(value) {
+	if value != "" && !structuralKeys[key] && credentialKey(key) && secretShaped(value) {
 		return Redacted
 	}
 	return MaskString(value)

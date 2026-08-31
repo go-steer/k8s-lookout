@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `lookout state edges` can be entered from a Service:
+  `--workload=Service/<namespace>/<name>`. That is the direction the
+  evidence arrives from — something reports a service with no ready
+  endpoints, and the next question is why — but the command used to
+  demand the workload *behind* the Service, which in the
+  selector-mismatch case is exactly what does not exist by selector.
+  A Service entry reports that Service's own edges: its selector, its
+  EndpointSlices, the Ingresses whose backend it is, and their
+  certificates. When the selector selects nothing it also names the
+  workload in that namespace whose pod labels best fit it — the one it
+  was probably meant for — as `likely_workload=`, and says nothing
+  when two workloads fit equally well.
+  ([#233](https://github.com/go-steer/k8s-lookout/issues/233))
+
+### Changed
+
+- The MCP surface accepts `target` wherever it accepts `workload`, and
+  its unknown-argument error now names the parameter the caller
+  probably meant. `target` is the real property on the three tools
+  that take a positional and clients generalize it to the other
+  twenty; in a 10-fixture agent eval, 28 of 115 calls were rejected on
+  an argument name and the recovery behaviour was a retry ladder —
+  `{"request": …}`, `{"target": …}`, `{}`, `{"workload": …}` until one
+  stuck. The rejection reads
+  `unknown argument "form" for tool k8s_triage_demo; did you mean
+  "format"? (accepts: …)` now, which recovers every wrong guess and
+  not only that one. Only the canonical names are advertised in the
+  tool schemas, so the vocabulary a client learns is unchanged.
+  ([#232](https://github.com/go-steer/k8s-lookout/issues/232))
+
 ### Fixed
 
 - `lookout scan` now finds faults that live on an edge rather than on a
@@ -41,6 +73,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per namespace, where the broken rule and a correct one are the same
   test; the unit tests now grow a second workload.
   ([#332](https://github.com/go-steer/k8s-lookout/issues/332))
+- `lookout findings diff` no longer prints `subject_key=[REDACTED]`.
+  The sanitizer masks a detail whose key names a credential and whose
+  value looks like key material, and a subject key is both by
+  accident: `subject_key` splits to the words `{subject, key}`, and
+  `demo/shop/Pod/api-1/ImagePullBackOff` is long, slash-separated and
+  mixes case with digits. So the one field the command tells you to
+  paste into `lookout findings ack --subject=…` was redacted — but
+  only when some object's name happened to contain a digit, which is
+  why it survived the fixtures. `subject_key` and `triage status`'s
+  `resource_key`, both composed by lookout out of object identity, are
+  exempt from the key-anchored rule now; the value-shape heuristics
+  still run over them.
+  ([#246](https://github.com/go-steer/k8s-lookout/issues/246))
+- `lookout findings diff` no longer stores a subject for report
+  records that name no object. The pipeline the command documents is
+  `lookout health | lookout findings diff`, and `health` ends with one
+  `health.category` scorecard row per category — rows with no
+  namespace, kind, or name, which every one of them turned into the
+  same subject key `<cluster>////`. They collided into a single stored
+  row that referred to nothing and reappeared as `ongoing` in every
+  later digest. The same was true of `scan.check_skipped`,
+  `scan.check_failed`, `scan.incomplete` and the `*.unavailable`
+  notices: a diff is over subjects, and narration is not a subject.
+  Those records are skipped now and counted in the summary line as
+  `skipped_no_subject=<n>`, present only when non-zero. Nothing that
+  names an object is affected. Empty-key rows left in a store by an
+  earlier version report `resolved` once on the next run and are then
+  gone. ([#247](https://github.com/go-steer/k8s-lookout/issues/247))
 - The release workflow now signs the Helm chart it publishes. `cosign`
   reads `~/.docker/config.json` and the `publish-chart` job only ran
   `helm registry login`, which writes helm's own registry config — so

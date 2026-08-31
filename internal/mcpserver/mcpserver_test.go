@@ -293,6 +293,45 @@ func TestCallTool_UnknownArgumentIsInvalidParams(t *testing.T) {
 	wantInvalidParams(t, err, `unknown argument "bogus"`)
 }
 
+// An MCP client that guesses a parameter name must be able to recover
+// from the error itself, in one round trip. Before #232 the rejection
+// named only the wrong parameter, and the measured behaviour was a
+// retry ladder of four guesses on one call.
+func TestCallTool_UnknownArgumentNamesTheRightOne(t *testing.T) {
+	cs := connect(t, New(testRegistry(t), "test"))
+	for _, tc := range []struct{ arg, want string }{
+		{"namespaces", `did you mean "namespace"?`},
+		{"form", `did you mean "format"?`},
+		// Nothing is close to "request": no suggestion, but the list
+		// of accepted names still answers the question.
+		{"request", "(accepts: "},
+	} {
+		_, err := callTool(t, cs, "k8s_triage_demo", map[string]any{tc.arg: "x"})
+		wantInvalidParams(t, err, tc.want)
+		wantInvalidParams(t, err, "workload")
+	}
+}
+
+// `target` is the property name on the three tools that take a
+// positional, and clients apply it to the other twenty. Accept it as
+// `workload` rather than spend a round trip on the rejection (#232).
+func TestCallTool_TargetIsAcceptedAsWorkload(t *testing.T) {
+	cs := connect(t, New(testRegistry(t), "test"))
+	res, err := callTool(t, cs, "k8s_triage_demo", map[string]any{"target": "Deployment/prod/api"})
+	if err != nil {
+		t.Fatalf("target was rejected: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("target produced a tool error: %s", text(t, res))
+	}
+	// Saying it twice is a mistake worth naming, not a silent
+	// last-one-wins.
+	_, err = callTool(t, cs, "k8s_triage_demo", map[string]any{
+		"target": "Deployment/prod/api", "workload": "Deployment/prod/other",
+	})
+	wantInvalidParams(t, err, "name the same parameter")
+}
+
 func TestCallTool_WrongTypeIsInvalidParams(t *testing.T) {
 	cs := connect(t, New(testRegistry(t), "test"))
 	_, err := callTool(t, cs, "k8s_triage_demo", map[string]any{"count": "three"})

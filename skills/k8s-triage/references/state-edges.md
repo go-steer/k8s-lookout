@@ -2,7 +2,7 @@
 
 # lookout state edges
 
-Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones.
+Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for.
 
 MCP tool: `k8s_state_edges` (MCP profile: `triage`)
 
@@ -57,7 +57,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 
 | Field | Meaning |
 | --- | --- |
-| `workload` | the targeted workload as <Kind>/<namespace>/<name>, stamped on every finding |
+| `workload` | the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
+| `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
 | `pods` | how many of the workload's pods carry the broken reference |
 | `container` | container declaring the broken env/envFrom reference |
 | `env` | environment variable whose valueFrom reference is broken |
@@ -96,4 +97,5 @@ on stderr only), 2 usage.
 lookout state edges --workload=Deployment/prod/api
 lookout state edges --workload=Pod/prod/api-6d5f8c-x2v9k --format=json
 lookout state edges --workload=StatefulSet/db/postgres --cert-warn=336h
+lookout state edges --workload=Service/prod/api
 ```
