@@ -601,17 +601,31 @@ Independent of any single command, wrap the whole matrix in these checks
 
 ---
 
-# Part 5 — Proposed automation & coverage checklist
+# Part 5 — Automation & coverage checklist
 
-Add an `examples/uat` driver alongside `examples/e2e` (same `lib.sh`,
-same context guard, same PASS/FAIL summary): it applies the fixtures,
-runs the Part-1 matrix, applies the Part-3 cross-cutting checks, and
-reverts. Wire a **kind-tier (T0/T1) subset into
-`.github/workflows/e2e-kind.yml`** as another non-blocking job; keep
-T2–T4 as `dev/drills/` runbooks (they need real GKE / cloud / the cost
-stack).
+`examples/uat` is the driver, alongside `examples/e2e` and sharing its
+`lib.sh` — same context guard, same binary resolution, same PASS/FAIL
+summary. `examples/uat-lib.sh` holds the assertions; each case is a
+file in `examples/uat-cases/` defining `uat_case_<name>`, discovered by
+filename, so adding coverage means adding a file. `UAT_TIER` (default
+`T0`) gates the cases that need more than a bare kind cluster; a case
+above the running tier is reported as skipped and does not fail the
+run. The kind tier runs in `.github/workflows/e2e-kind.yml`; T2–T4 stay
+as `dev/drills/` runbooks, because they need real GKE / cloud / the
+cost stack.
 
-**Command coverage checklist** (tick when a UAT case exists):
+The **cross-cutting** checks (Part 3) are enumerated from the command
+registry rather than a list kept by hand: `uat-cases/00-contract.sh`
+reads `lookout mcp --list-tools` and asserts the generic contract
+against every command it finds. It carries a guard in both directions —
+a newly registered command with no invocation in the table fails the
+run, as does a table entry for a command that no longer exists. That is
+what keeps this checklist from quietly going stale.
+
+**Command coverage checklist** (tick when a UAT case exists). The
+cross-cutting contract already covers every command below for exit
+code, summary line, stdout purity, JSON, scope flags and `--timeout`;
+these ticks are for the command's *own* behaviour.
 
 - [ ] `version`
 - [ ] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast,
@@ -637,7 +651,8 @@ stack).
 - [ ] `perf probe` (unavailable + real packs)
 - [ ] `cloud orphans` / `quota` / `ipspace` / `stockout` (+ GCP-free refusal)
 - [ ] `net probe` (reachable + unreachable, no mutation)
-- [ ] Cross-cutting: exit codes, stdout purity, summary line, JSON, secret-safety, scope flags, `--timeout`, healthy-path
+- [x] Cross-cutting: exit codes, stdout purity, summary line, JSON, scope flags, `--at`, `--timeout`
+- [ ] Cross-cutting: secret-safety and healthy-path (both need fixtures — no demo workload mounts a Secret, and the shared cluster is never clean)
 - [ ] MCP tool-vs-CLI parity for every check
 
 ---
@@ -649,5 +664,3 @@ stack).
 - [`docs/signal-schema-v1.md`](../signal-schema-v1.md) — the 48 signal kinds the fixtures provoke
 - [`docs/cli-stability-policy.md`](../cli-stability-policy.md) — the output/flag contract these UAT cases assert
 - [`dev/drills/`](../../dev/drills/) — the human-run GKE runbooks for T2–T4
-</content>
-</invoke>
