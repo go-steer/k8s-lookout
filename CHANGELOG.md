@@ -182,6 +182,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fresh_namespace`, which waits out a Terminating predecessor — and
   only a Terminating one, so the ordinary re-inject does not pay a
   timeout.
+- MCP parity no longer fails on a log window that is still filling
+  (#367). The normalizer left counters alone on the stated grounds that
+  a window is a fixed size, so `count=` reads the same twice — true
+  only once it has saturated. On a six-minute-old CI cluster `web`'s
+  readiness probe writes a `GET /` line every 5s, so the distilled
+  template's `count=` (and the summary's `scanned=`, which counts log
+  lines) moved between the CLI call and the tool call, and one parity
+  check in 34 landed either side of one. Both are now normalized, but
+  only where a window is behind them — `count=` on a line that also
+  carries `first_seen=`, `scanned=` when the payload contains such a
+  line — so `findings=` and a windowless `count=` stay compared. A
+  mismatch now also re-runs the CLI first: if it cannot reproduce
+  itself the comparison was void, and that is a skip naming the drift
+  rather than a failure blaming the tool.
+- A failing UAT check shows all of its evidence. `uat_bad` capped each
+  evidence *argument* at 300 characters, and a diff is passed as one
+  multi-line argument — so the cap fell mid-diff and #367's failure
+  named a difference while showing only the left-hand side of it. The
+  cap is now per line.
 - An object name whose interior hyphen precedes a credential word no
   longer redacts the next word of the message (#357). The
   credential-flag heuristic matched `--?` anywhere, so inside the
