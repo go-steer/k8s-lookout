@@ -35,7 +35,9 @@ import (
 // the workload the bundle should be about: the reference's topmost
 // observed owning workload (Pod → ReplicaSet → Deployment), falling
 // back to controllerRef ("Kind/name", the inject payload's
-// context.controller_ref) when the object itself is already gone.
+// context.controller_ref) when the object itself is already gone. A
+// Service goes sideways instead of up, to the workload its selector
+// picks (issue #366).
 // This is exactly the --incident resolution `lookout bundle` runs;
 // the sentinel calls it with the Signal's object fields (§7.6).
 func ResolveIncidentTarget(cluster *state.Cluster, ref emit.WorkloadRef, controllerRef string) (emit.WorkloadRef, error) {

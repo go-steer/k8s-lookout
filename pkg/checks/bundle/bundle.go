@@ -116,7 +116,7 @@ func New(deps Deps) checks.Command {
 		Summary:     "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.",
 		Flags: []emit.FlagSpec{
 			{Name: "incident", Type: emit.FlagString, Default: "",
-				Help: "inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain — alternative to --workload"},
+				Help: "inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain, or for a Service via its selector — alternative to --workload"},
 			{Name: "depth", Type: emit.FlagInt, Default: "2",
 				Help: "blast-radius traversal depth: graph edges followed per direction in the radius section"},
 			{Name: "max-templates", Type: emit.FlagInt, Default: "15",
@@ -451,9 +451,20 @@ var workloadNodeKinds = map[graph.NodeKind]bool{
 // owning workload (Pod → ReplicaSet → Deployment), falling back to
 // the payload's controller_ref when the object itself is already
 // gone.
+//
+// A Service goes sideways rather than up: it owns nothing, so the
+// chain is empty, but its selector names the workload the signal is
+// actually about (issue #366).
 func resolveTarget(cluster *state.Cluster, s seed) (emit.WorkloadRef, error) {
 	if !s.fromIncident {
 		return s.wl, nil
+	}
+	if s.wl.Kind == "Service" {
+		if wl, ok := cluster.ServiceBackend(s.wl.Namespace, s.wl.Name); ok {
+			return wl, nil
+		}
+		return emit.WorkloadRef{}, fmt.Errorf("--incident object %s: no single workload behind this Service "+
+			"(its selector matches nothing, or more than one workload)", s.wl)
 	}
 	snap := cluster.Snapshot()
 	id, err := cluster.WorkloadNode(s.wl)

@@ -385,6 +385,101 @@ func (c *Cluster) TopWorkload(kind, namespace, name string) (emit.WorkloadRef, b
 	return out, true
 }
 
+// ServiceBackend resolves a Service to the workload behind it: the
+// one its selector picks. A Service is not a workload and never
+// becomes one, but "this Service has no ready endpoints" is an
+// observation whose useful attachment is the thing that was supposed
+// to serve it — its pods, their state, their logs. That is the
+// workload the selector names, which is also what `state edges`
+// already reasons about (issue #366).
+//
+// Two ways round, because the interesting case is the one with no
+// pods left:
+//
+//   - The Selects edges, when the selector still picks pods. Their
+//     outermost controllers are the answer, and there has to be
+//     exactly one — a Service fronting two workloads (a blue/green
+//     cutover) has no single backend, and guessing would attach the
+//     wrong half of it.
+//   - Otherwise the pod TEMPLATES. `endpoints_empty` on a workload
+//     scaled to zero is the canonical case, and there are no pods
+//     left to read labels from; the template labels the List pass
+//     kept for exactly this are what the selector would have matched.
+//     Match is exact — every selector pair present and equal — not
+//     the affinity heuristic, which answers a different question
+//     ("was this Service MEANT for that workload") and is allowed to
+//     be wrong in a way a bundle target is not.
+//
+// Reports false when there is no single answer, which is the
+// caller's cue that this signal has no workload to enrich rather
+// than an invitation to guess.
+func (c *Cluster) ServiceBackend(namespace, name string) (emit.WorkloadRef, bool) {
+	svc := c.ix.services[key(namespace, name)]
+	if svc == nil || len(svc.Spec.Selector) == 0 {
+		return emit.WorkloadRef{}, false
+	}
+	if id, ok := c.snap.Lookup(graph.KindService, namespace, name); ok {
+		var owners []emit.WorkloadRef
+		for _, edge := range c.snap.Out(id) {
+			if edge.Kind != graph.EdgeSelects {
+				continue
+			}
+			ref, resolved := c.snap.Resolve(edge.To)
+			if !resolved {
+				continue
+			}
+			if wl, ok := c.TopWorkload(ref.Kind.String(), ref.Namespace, ref.Name); ok && !slices.Contains(owners, wl) {
+				owners = append(owners, wl)
+			}
+		}
+		if len(owners) > 0 {
+			if len(owners) == 1 {
+				return owners[0], true
+			}
+			return emit.WorkloadRef{}, false
+		}
+	}
+	var matched []emit.WorkloadRef
+	for _, tk := range sortedKeys(c.ix.templates) {
+		kind, rest, ok := strings.Cut(tk, "/")
+		if !ok {
+			continue
+		}
+		ns, wname, ok := strings.Cut(rest, "/")
+		if !ok || ns != namespace {
+			continue
+		}
+		if !selectsLabels(svc.Spec.Selector, c.ix.templates[tk].labels) {
+			continue
+		}
+		// A Deployment and its ReplicaSet both carry the template, so
+		// roll up before deciding whether the answer is ambiguous.
+		wl, ok := c.TopWorkload(kind, ns, wname)
+		if !ok || slices.Contains(matched, wl) {
+			continue
+		}
+		matched = append(matched, wl)
+	}
+	if len(matched) == 1 {
+		return matched[0], true
+	}
+	return emit.WorkloadRef{}, false
+}
+
+// selectsLabels reports whether a Service selector (an equality-only
+// label set, per the API) matches a pod template's labels.
+func selectsLabels(selector, tpl map[string]string) bool {
+	if len(selector) == 0 || len(tpl) == 0 {
+		return false
+	}
+	for k, want := range selector {
+		if got, ok := tpl[k]; !ok || got != want {
+			return false
+		}
+	}
+	return true
+}
+
 // WorkloadPods resolves wl to its live pods via the graph's
 // owner-chain traversal (PodsUnder), sorted by name.
 func (c *Cluster) WorkloadPods(wl emit.WorkloadRef) ([]*corev1.Pod, error) {

@@ -250,7 +250,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"cause"}),
 		enrichments: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_enrichments_total",
-			Help: "Total §7.6 enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers).",
+			Help: "Total §7.6 enrichment runs, by outcome (ok: every stage succeeded; partial: some stage failed, the rest attached; failed: no section computed — the inject still fires, carrying enrichment_error trailers; skipped: nothing to build, the incident object is not a workload and names none, so the inject fires with no bundle at all rather than one describing the resolver).",
 		}, []string{"outcome"}),
 		enrichmentBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "lookout_enrichment_bytes",

@@ -154,6 +154,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A critical signal on a Service now enriches to the workload behind
+  it. `objectstate.endpoints_empty` carries `kind_of_object=Service`,
+  and a Service owns nothing, so both enrichment resolve paths — which
+  walk the owner chain — refused it: the bundle slot on the signal
+  that most needs one held 198 bytes of the resolver's complaint about
+  workload kinds. A Service goes sideways instead of up, to the
+  workload its selector picks; when the backing workload is scaled to
+  zero (which is the case that provokes the signal in the first place)
+  the pod templates answer, since there are no pods left to match. Two
+  workloads behind one selector is no answer rather than a guess, and
+  is reported as such. Also `lookout bundle --incident` on a Service
+  payload, which is the same resolver.
+- Enrichment no longer spends the inject's budget describing its own
+  resolver. A `node_notready`/`node_pressure`/`eviction_burst` signal
+  targets a Node, which is not a workload and names none: with the
+  topology graph on, that bundle now carries the radius — the pods on
+  that node, which is what the incident is about — and reports spec,
+  delta and edges as absent sections pointing at `lookout triage delta
+  --only=nodes`, instead of an `unsupported workload kind "Node"`
+  error trailer. Without the graph there is nothing to build at all,
+  so the inject fires with no bundle rather than a 173-byte one about
+  kinds; those are counted as `lookout_enrichments_total{outcome=
+  "skipped"}`, apart from `failed`. A read that genuinely came back
+  empty still reports honestly.
 - A `--timeout` that expires now says so, whatever noticed it first.
   Which layer sees the deadline is a race the cluster's speed decides:
   on a slower apiserver client-go's rate limiter got there first and
