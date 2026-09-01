@@ -305,6 +305,16 @@ func TestMaskString(t *testing.T) {
 		{"flag equals", "exec --db-password=hunter2 --listen=:80", "exec --db-password=[REDACTED] --listen=:80"},
 		{"flag space", "run --token abc123def", "run --token [REDACTED]"},
 		{"flag ref suffix survives", "--secret-name=db-credentials", "--secret-name=db-credentials"},
+		// #357: the flag's dash must start a word. An object name
+		// whose interior hyphen precedes a credential word is prose,
+		// not a flag, and redacting the word after it inverted
+		// "not found" into "[REDACTED] found".
+		{"object name ending in -secret is not a flag", "secret edgy-absent-secret not found (envFrom in container edgy)", "secret edgy-absent-secret not found (envFrom in container edgy)"},
+		{"object name ending in -token is not a flag", "sa-token expired yesterday", "sa-token expired yesterday"},
+		{"object name ending in -key is not a flag", "signing-api-key rotated at 03:00", "signing-api-key rotated at 03:00"},
+		{"quoted flag still masked", `args ["--db-password", "hunter2"] and --token abc123`, `args ["--db-password", "hunter2"] and --token [REDACTED]`},
+		{"flag at start of string still masked", "--token abc123def", "--token [REDACTED]"},
+		{"single-dash flag still masked", "cmd -password hunter2", "cmd -password [REDACTED]"},
 		{"image digest untouched", "image@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "image@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
 		{"uid untouched", "uid 550e8400-e29b-41d4-a716-446655440000", "uid 550e8400-e29b-41d4-a716-446655440000"},
 	}

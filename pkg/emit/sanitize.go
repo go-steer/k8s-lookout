@@ -158,7 +158,15 @@ var (
 	// matching, so a naive `pass` alternative would over-mask --bypass=.
 	// The `--?(?:[a-z0-9-]*-)?` prefix requires a dash immediately
 	// before the word, so "bypass" (no dash before "pass") never matches.
-	reCredentialFlag = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*|--?(?:[a-z0-9-]*-)?(?:passphrase|pass))(=|[ \t]+)(\S+)`)
+	//
+	// The leading (^|[^0-9A-Za-z_-]) group is load-bearing (#357): the
+	// flag's dash must START a word. Without it `--?` happily matches
+	// the interior hyphen of an ordinary object name, so
+	// "secret edgy-absent-secret not found" reads `-absent-secret` as
+	// a flag and redacts `not` — inverting the sentence. RE2 has no
+	// lookbehind, so the boundary is captured and re-emitted by
+	// maskCredentialFlags.
+	reCredentialFlag = regexp.MustCompile(`(?i)(^|[^0-9A-Za-z_-])(--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*|--?(?:[a-z0-9-]*-)?(?:passphrase|pass))(=|[ \t]+)(\S+)`)
 
 	// reCredentialFlagName matches a bare credential flag with no
 	// attached value, for args/command lists in the two-element
@@ -201,10 +209,12 @@ func MaskString(s string) string {
 func maskCredentialFlags(s string) string {
 	return reCredentialFlag.ReplaceAllStringFunc(s, func(m string) string {
 		parts := reCredentialFlag.FindStringSubmatch(m)
-		if credentialFlagIsRef(parts[1]) {
+		// parts[1] is the word boundary the pattern had to consume
+		// (#357) and is put back verbatim; the flag is parts[2].
+		if credentialFlagIsRef(parts[2]) {
 			return m // reference to a secret, not a secret
 		}
-		return parts[1] + parts[2] + Redacted
+		return parts[1] + parts[2] + parts[3] + Redacted
 	})
 }
 

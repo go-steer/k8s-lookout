@@ -67,6 +67,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hide a contract regression would defeat the point of checking them
   separately.
 
+### Fixed
+
+- An object name whose interior hyphen precedes a credential word no
+  longer redacts the next word of the message (#357). The
+  credential-flag heuristic matched `--?` anywhere, so inside the
+  ordinary name `edgy-absent-secret` it read `-absent-secret` as a
+  flag and masked what followed: `state edges` reported
+  `secret edgy-absent-secret [REDACTED] found`, which reads as the
+  opposite of the `not found` it meant. The flag's dash must now
+  start a word. Kubernetes names end in `-secret`, `-token` and
+  `-key` constantly, so this corrupted diagnostics broadly; it never
+  under-masked, so nothing leaked.
+
 ## [0.23.0] - 2026-08-31
 
 A short release, and everything in it is the same kind of finding: a
