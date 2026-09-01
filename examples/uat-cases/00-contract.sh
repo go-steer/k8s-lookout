@@ -175,16 +175,16 @@ uat_case_contract() {
   # all; anything above 1 is a crash on a context that got cancelled,
   # which is the bug this check exists for.
   #
-  # The wording is deliberately not pinned to lookout's own "timed out
-  # after 1ms". Which layer notices the deadline first is a race the
-  # cluster's speed decides: on a slow apiserver client-go's rate
-  # limiter gets there first and surfaces its own phrasing. Both are
-  # the same event, so the check accepts either and only insists the
-  # message names a deadline. (That client-go phrasing leaking to the
-  # user is a real wart — #352 — but it is a message-quality bug, not a
-  # cancellation bug, and this check is for the latter. Tighten this
-  # back to the single message when #352 lands.)
-  local deadline_re='timed out|context deadline|deadline exceeded|DeadlineExceeded'
+  # The wording IS pinned, and that is the #352 regression test. Which
+  # layer notices the deadline first is a race the cluster's speed
+  # decides — on a slow apiserver client-go's rate limiter gets there
+  # first — so this check used to accept either phrasing and only
+  # insist the message named a deadline. It no longer has to: the
+  # headline is the caller's own --timeout whatever noticed it, and
+  # anything the client said rides behind it as detail. A run where
+  # this fails on "rate: Wait(n=1) would exceed context deadline" is
+  # #352 back.
+  local deadline_re="timed out after 1ms"
   for cmd in "${commands[@]}"; do
     [[ -v UAT_INVOCATION[$cmd] ]] || continue
     uat_tier_enabled "${UAT_COMMAND_TIER[$cmd]:-T0}" || continue

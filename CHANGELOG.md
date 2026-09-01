@@ -154,6 +154,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `--timeout` that expires now says so, whatever noticed it first.
+  Which layer sees the deadline is a race the cluster's speed decides:
+  on a slower apiserver client-go's rate limiter got there first and
+  its phrasing reached the user unmodified — `client rate limiter Wait
+  returned an error: rate: Wait(n=1) would exceed context deadline`,
+  on 10 of 33 commands in one CI run and none of 33 locally. The exit
+  code and the behaviour were already right; the message read like an
+  internal defect and sent the caller after rate limits instead of the
+  flag they set. The `timed out after <d>` wording is now the headline
+  on both paths, with whatever the client said kept behind it as
+  detail.
 - `lookout scan` no longer exits 0 against a cluster it could not
   reach. Per-check resilience is what scan is for and it stays — one
   check failing must not lose the other six — but the degenerate case

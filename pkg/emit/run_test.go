@@ -189,6 +189,63 @@ func TestRunEnforcesTimeout(t *testing.T) {
 	}
 }
 
+// TestRunTimeoutOwnsTheHeadlineWhateverNoticedIt: client-go's rate
+// limiter returns "rate: Wait(n=1) would exceed context deadline",
+// which wraps nothing — errors.Is cannot see the deadline in it. Which
+// layer notices the deadline first is a race the cluster's speed
+// decides, so the same command produced either message depending on
+// the run, and the client-go one reads like an internal defect and
+// sends the caller after rate limits instead of the --timeout they
+// set (issue #352). The deadline is the headline; the client's words
+// stay as detail.
+func TestRunTimeoutOwnsTheHeadlineWhateverNoticedIt(t *testing.T) {
+	// Verbatim from a real run, wrapped by the check the way every
+	// command wraps what it was doing.
+	opaque := func(ctx context.Context, _ Invocation) (int, error) {
+		<-ctx.Done()
+		return 0, errors.New("listing deployments: client rate limiter Wait returned an error: " +
+			"rate: Wait(n=1) would exceed context deadline")
+	}
+	var out, errBuf bytes.Buffer
+	code := Run(context.Background(), RunConfig{
+		Name:   "lookout audit hardening",
+		Check:  opaque,
+		Stdout: &out,
+		Stderr: &errBuf,
+	}, []string{"--timeout=50ms"})
+	if code != ExitRuntime {
+		t.Fatalf("exit = %d, want %d", code, ExitRuntime)
+	}
+	got := errBuf.String()
+	if !strings.HasPrefix(got, "lookout audit hardening: timed out after 50ms") {
+		t.Errorf("the deadline must lead, got %q", got)
+	}
+	if !strings.Contains(got, "rate: Wait(n=1) would exceed context deadline") {
+		t.Errorf("what noticed the deadline is still worth keeping, got %q", got)
+	}
+}
+
+// TestRunRuntimeErrorInsideTheDeadlineIsNotRelabelled: the guard on
+// the other side of #352 — a check that fails on its own terms before
+// the deadline must not be reported as a timeout.
+func TestRunRuntimeErrorInsideTheDeadlineIsNotRelabelled(t *testing.T) {
+	boom := func(context.Context, Invocation) (int, error) {
+		return 0, errors.New("listing deployments: connection refused")
+	}
+	var out, errBuf bytes.Buffer
+	if code := Run(context.Background(), RunConfig{
+		Name:   "lookout state edges",
+		Check:  boom,
+		Stdout: &out,
+		Stderr: &errBuf,
+	}, []string{"--timeout=30s"}); code != ExitRuntime {
+		t.Fatalf("exit = %d, want %d", code, ExitRuntime)
+	}
+	if want := "lookout state edges: listing deployments: connection refused\n"; errBuf.String() != want {
+		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+	}
+}
+
 func TestRunScopePlumbing(t *testing.T) {
 	var got Scope
 	capture := func(ctx context.Context, inv Invocation) (int, error) {
