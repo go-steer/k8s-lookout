@@ -63,9 +63,16 @@ uat_bad() {
   UAT_FAIL=$((UAT_FAIL + 1))
   UAT_FAILURES+=("$desc")
   printf '  \033[31m✗\033[0m %s\n' "$desc" >&2
-  local line
-  for line in "$@"; do
-    printf '      %s\n' "${line:0:300}" >&2
+  # Per LINE, not per argument. Evidence is routinely a multi-line blob
+  # (a diff, a tail of stderr) passed as one argument, and capping the
+  # argument threw away everything after the first 300 characters — in
+  # #367 that was the entire right-hand side of the diff, leaving a
+  # failure that named a difference and then declined to show it.
+  local arg line
+  for arg in "$@"; do
+    while IFS= read -r line; do
+      printf '      %s\n' "${line:0:300}" >&2
+    done <<<"$arg"
   done
 }
 
@@ -425,16 +432,38 @@ uat_free_port() {
 #                 workstation cluster is days old and hides this
 #                 entirely; a CI cluster is six minutes old and every
 #                 inventory line drifts.
+#   count=        ONLY on a line that also carries first_seen=: an
+#                 aggregate over that same sliding window. The window is
+#                 bounded, not full — until it saturates, every log line
+#                 the workload writes and every repeat the kubelet
+#                 records raises the count, so two calls a second apart
+#                 legitimately disagree. #367: `web`'s readiness probe
+#                 writes a GET line every 5s, and one parity check in 34
+#                 landed either side of one.
+#   scanned=      only when the payload contains such a window, because
+#                 that is when the summary is counting window items
+#                 rather than objects (bundle: scanned=307 = 294 log
+#                 lines + 13 objects).
 #
-# Counters are NOT normalized — count= and scanned= are stable across
-# calls (the window is a fixed size), so a change in one is a real
-# difference and should fail. Anything else differing between the CLI
-# and the MCP tool is the regression this exists to catch.
+# Counters are NOT otherwise normalized: findings=, and count= on a line
+# with no window behind it, are values the command chose, so a change in
+# one is a real difference and should fail. Anything else differing
+# between the CLI and the MCP tool is the regression this exists to
+# catch.
 uat_normalize_payload() {
-  sed -E \
+  local text
+  text="$(sed -E \
     -e 's/elapsed=[0-9.]+[a-zµ]*/elapsed=NORM/' \
     -e 's/(first_seen|last_seen|window)=[^ ]+/\1=NORM/g' \
     -e 's/sample="([^"\\]|\\.)*"/sample="NORM"/g' \
-    -e 's/(^|[[:space:]])age=[^ ]*/\1age=NORM/g' |
-    sed -e 's/[[:space:]]*$//' -e '/^$/d'
+    -e 's/(^|[[:space:]])age=[^ ]*/\1age=NORM/g' \
+    -e '/(first_seen|last_seen)=NORM/ s/(^|[[:space:]])count=[^ ]*/\1count=NORM/g')"
+
+  # The summary is one line and the window lines are others, so this
+  # needs the whole payload in hand rather than a per-line rule.
+  if grep -Eq '(first_seen|last_seen)=NORM' <<<"$text"; then
+    text="$(sed -E 's/(^|[[:space:]])scanned=[0-9]+/\1scanned=NORM/' <<<"$text")"
+  fi
+
+  sed -e 's/[[:space:]]*$//' -e '/^$/d' <<<"$text"
 }

@@ -714,22 +714,36 @@ that the CLI-name-to-tool-name mapping is *read* from the registry and
 never derived: 20 of the 34 differ (`bundle` is served as
 `k8s_triage_workload`, `state webhooks` as `k8s_admission_webhooks`).
 
-Parity is byte-for-byte after normalizing six fields, and the list is
-kept short on purpose because each entry is something the check stops
-covering. All six are observations of something that moves on its own
-between two calls rather than values a command chooses: `elapsed=`,
-the `first_seen=`/`last_seen=` ends of the sliding log window, the
-`sample=` line drawn from it, the `window=` lookback `triage changes`
-anchors to now, and `age=`, which is now minus a creation or
-transition timestamp and renders to the second below 48h. Counters are
-deliberately *not* normalized — `count=` and `scanned=` are stable
-across calls, so a change in one is a real difference and should fail.
+Parity is byte-for-byte after normalizing a short list of fields, kept
+short on purpose because each entry is something the check stops
+covering. Every one is an observation of something that moves on its
+own between two calls rather than a value a command chooses:
+`elapsed=`, the `first_seen=`/`last_seen=` ends of the sliding log
+window, the `sample=` line drawn from it, the `window=` lookback
+`triage changes` anchors to now, and `age=`, which is now minus a
+creation or transition timestamp and renders to the second below 48h.
 
-`age=` is the entry worth knowing about, because a workstation cluster
-hides it completely: objects there are days old, so `age=12d` reads the
-same twice, while on a six-minute-old CI cluster every inventory line
-ticks between the CLI run and the tool call. Local green is not
-evidence for this class of field; the post-merge `e2e-kind` run is.
+Two counters join them, but only where a window is behind them:
+`count=` **on a line that also carries `first_seen=`**, and `scanned=`
+when the payload contains such a line. A window is bounded, not full —
+until it saturates, every log line the workload writes and every repeat
+the kubelet records raises the count, so two calls a second apart
+legitimately disagree (#367). `findings=`, and a `count=` with no
+window behind it, stay compared: those are values the command chose.
+
+`age=` and the window counters are the entries worth knowing about,
+because a workstation cluster hides both completely: objects there are
+days old, so `age=12d` reads the same twice, and a log window that
+saturated hours ago reports the same `count=` twice. On a six-minute-old
+CI cluster every inventory line ticks and every window is still
+filling. Local green is not evidence for this class of field; the
+post-merge `e2e-kind` run is.
+
+When the two halves do differ, the case asks the CLI the same question
+a second time before blaming the tool. If the CLI cannot reproduce
+itself, the comparison was void — that is reported as a **skip naming
+the drift**, not a failure. Only a difference that survives a stable
+CLI is a parity bug.
 
 **Command coverage checklist** (tick when a UAT case exists). The
 cross-cutting contract already covers every command below for exit
@@ -767,8 +781,8 @@ these ticks are for the command's *own* behaviour.
       supplies both: one canary string consumed four ways, swept across
       every command's output, in a namespace that is otherwise quiet)
 - [x] MCP tool-vs-CLI parity for every check (`uat-cases/10-mcp.sh`,
-      byte-for-byte after normalizing the six fields two invocations
-      cannot agree on — see `uat_normalize_payload`)
+      byte-for-byte after normalizing the fields two invocations cannot
+      agree on — see `uat_normalize_payload`)
 
 ---
 

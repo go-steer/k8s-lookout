@@ -180,10 +180,27 @@ uat_case_mcp() {
     if [[ "$cli_out" == "$mcp_out" ]]; then
       uat_ok "$cmd ↔ $tool → same payload"
     else
-      uat_bad "$cmd ↔ $tool → same payload" \
-        "tool result differs from CLI stdout (elapsed= normalized)" \
-        "args: $args
-$(diff <(echo "$cli_out") <(echo "$mcp_out") | head -12)"
+      # A mismatch has two possible causes and they deserve different
+      # verdicts: the tool path really does differ from the CLI, or the
+      # cluster moved between the two calls and nothing was comparable
+      # in the first place. The control for the second is to ask the
+      # CLI the same question twice — if it cannot reproduce itself,
+      # the comparison is void, so say that instead of blaming the
+      # tool. (#367: `web` writes a probe log line every 5s, and the
+      # count of them is in the payload.)
+      uat_store_rewind
+      uat_run "${argv[@]}"
+      local cli_again
+      cli_again="$(uat_normalize_payload <<<"$UAT_OUT")"
+      if [[ "$cli_again" != "$cli_out" ]]; then
+        uat_skipped "$cmd ↔ $tool → parity" \
+          "the cluster moved between two identical CLI calls, so the halves are not comparable: $(diff <(echo "$cli_out") <(echo "$cli_again") | grep -E '^[<>]' | head -2 | cut -c1-120 | tr '\n' '|')"
+      else
+        uat_bad "$cmd ↔ $tool → same payload" \
+          "tool result differs from CLI stdout, and the CLI reproduced itself" \
+          "args: $args" \
+          "$(diff <(echo "$cli_out") <(echo "$mcp_out") | head -12)"
+      fi
     fi
   done
 
