@@ -952,6 +952,31 @@ func assessProgress(d *appsv1.Deployment, fraction float64, now time.Time) (fire
 		// and the k8s-events source owns the reactive signal.
 		return false, ""
 	}
+	if d.Status.Replicas == d.Status.UpdatedReplicas &&
+		progressing.Reason == "NewReplicaSetAvailable" {
+		// Every replica belongs to the current template and the last
+		// thing the controller concluded is that the rollout finished:
+		// there is only one active ReplicaSet, so no rollout is in
+		// flight and this condition's timestamp measures the LAST one.
+		//
+		// This is the deployment controller's own isCompleteDeployment
+		// predicate (syncRolloutStatus), and it skips its deadline
+		// check on the same terms. Without it, the transient in the
+		// middle of a SCALE fires: Spec.Replicas moves first, so for a
+		// second or so the deployment reads as incomplete while the
+		// condition still carries the timestamp of a rollout that
+		// finished minutes ago — and the threshold is 7.5 minutes at
+		// the defaults, which every settled workload is past. Any HPA
+		// scale would have produced a warning that a rollout is
+		// stalling when none is happening (issue #365).
+		//
+		// A real stall keeps its own clock: the controller records
+		// progress the moment the new ReplicaSet gets a pod, which
+		// flips the reason to ReplicaSetUpdated with a fresh
+		// LastUpdateTime, and Replicas != UpdatedReplicas throughout a
+		// rollout that never gets that far.
+		return false, ""
+	}
 	elapsed := now.Sub(progressing.LastUpdateTime.Time)
 	budget := time.Duration(deadline) * time.Second
 	if elapsed < time.Duration(fraction*float64(budget)) {

@@ -154,6 +154,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scaling a settled Deployment no longer fires a spurious
+  `objectstate.progress_deadline` warning. The signal is a leading
+  indicator of a stalling rollout and clocks itself off the
+  `Progressing` condition, which the deployment controller advances on
+  rollout progress and not on a scale. `Spec.Replicas` moves before
+  `Status` does, so for the second in the middle of any scale the
+  workload read as an incomplete rollout whose clock had not been
+  touched since the last real one — and the threshold is 7.5 minutes
+  at the defaults, which every settled workload is past. A manual
+  `kubectl scale`, a GitOps `replicas:` change and, most often, an HPA
+  each produced a warning that a rollout was stalling when none was
+  happening. The assessment now mirrors the deployment controller's own
+  "there is only one active ReplicaSet, so do not estimate progress"
+  predicate, which is the same reason it skips its own deadline check.
+  A rollout that stalls after its pods appear still fires on its own
+  fresh clock, and one whose new ReplicaSet never gets a pod still
+  fires on the same timestamp the control plane will use.
 - `lookout watch` now exits when a source it was explicitly asked for
   cannot run, instead of wedging with the reason unprinted. The
   fail-fast path is the strict posture a sentinel is supposed to have:

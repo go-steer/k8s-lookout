@@ -718,6 +718,44 @@ func TestDeployment_ProgressDeadlineMath(t *testing.T) {
 			generation: 1, observedGeneration: 1, replicas: 2, updated: 1, available: 1, total: 2,
 			noCondition: true,
 		}, false},
+
+		// Issue #365. The settled state before a scale and the settled
+		// state after it both read as complete, so the bug lived
+		// entirely in the second between them: Spec.Replicas moves
+		// first and Status follows. Every case below is that second.
+		{"scale-down transient of a settled deployment", deploymentFixture{
+			// kubectl scale --replicas=0 on a Deployment whose last
+			// rollout finished 12m ago. Spec says 0, Status still says
+			// the one pod is there and current, and the condition has
+			// not been touched since the rollout.
+			generation: 2, observedGeneration: 2, replicas: 0, updated: 1, available: 1, total: 1,
+			progressingSince: now.Add(-12 * time.Minute), progressingReason: "NewReplicaSetAvailable",
+		}, false},
+		{"scale-up transient of a settled deployment", deploymentFixture{
+			// The same second in the other direction — an HPA scaling
+			// out the workloads that have been stable long enough to
+			// qualify, which is the common case.
+			generation: 2, observedGeneration: 2, replicas: 5, updated: 2, available: 2, total: 2,
+			progressingSince: now.Add(-12 * time.Minute), progressingReason: "NewReplicaSetAvailable",
+		}, false},
+		{"stalled rollout the controller has clocked still fires", deploymentFixture{
+			// The discriminator, not the guard: a new template whose
+			// pods came up but never became ready. The controller
+			// recorded that progress, so the reason is ReplicaSetUpdated
+			// and the clock is the rollout's own.
+			generation: 3, observedGeneration: 3, replicas: 2, updated: 2, available: 1, total: 3,
+			progressingSince: now.Add(-9 * time.Minute), progressingReason: "ReplicaSetUpdated",
+		}, true},
+		{"rollout that never got a pod still fires on the stale clock", deploymentFixture{
+			// The new ReplicaSet exists but is stuck at zero (quota,
+			// admission), so the controller never recorded progress and
+			// the reason is still the last rollout's. Replicas !=
+			// UpdatedReplicas is what says a second ReplicaSet is
+			// active, and the control plane will declare
+			// ProgressDeadlineExceeded off this same timestamp.
+			generation: 3, observedGeneration: 3, replicas: 1, updated: 0, available: 1, total: 1,
+			progressingSince: now.Add(-9 * time.Minute), progressingReason: "NewReplicaSetAvailable",
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
