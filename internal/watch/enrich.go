@@ -162,11 +162,39 @@ func (e *enricher) enabledFor(sev engine.Severity) bool {
 func (e *enricher) Incident(ctx context.Context, sig engine.Signal) string {
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+	what := fmt.Sprintf("%s/%s", sig.Namespace, sig.Name)
 	b := newEnrichBundle(e.cap)
 	if e.snapshot == nil || !e.liveIncident(ctx, sig, b) {
+		if !scopedTargetKinds[sig.KindOfObject] {
+			// Nothing to build: the scoped path can only produce a
+			// workload bundle, and this kind is not one and has no
+			// workload behind it (Node, in practice). Sending the
+			// resolver's complaint instead would spend the inject's
+			// enrichment budget saying so on every node signal
+			// forever — a fact about the enricher, not about the
+			// incident (issue #366). The live path above DOES have
+			// something to say about a Node (the pods on it), which
+			// is why this gate is here and not in front of it.
+			return e.skipped(what, "no workload behind a "+sig.KindOfObject)
+		}
 		e.scopedIncident(ctx, sig, b)
 	}
-	return e.finish(b, fmt.Sprintf("%s/%s", sig.Namespace, sig.Name))
+	return e.finish(b, what)
+}
+
+// scopedTargetKinds are the incident object kinds the scoped path can
+// resolve to a workload: the seven workload kinds, plus Service —
+// which is not a workload but names one through its selector, and
+// endpoints_empty is the signal that needs it (issue #366).
+var scopedTargetKinds = map[string]bool{
+	"Pod":         true,
+	"Deployment":  true,
+	"ReplicaSet":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+	"Job":         true,
+	"CronJob":     true,
+	"Service":     true,
 }
 
 // Storm builds the (deliberately cheap) storm enrichment: the
@@ -211,6 +239,20 @@ func (e *enricher) Storm(ctx context.Context, info engine.StormInfo) string {
 		return bundle.RadiusFindings(snap, id, enrichRadiusDepth), nil
 	})
 	return e.finish(b, "storm "+info.Ancestor.Display())
+}
+
+// skipped records an enrichment that had nothing to build: no bytes
+// at all, which is what the inject wants when the alternative is a
+// trailer about the resolver (issue #366). Counted under its own
+// outcome so "we chose not to" stays distinguishable from "we tried
+// and failed".
+func (e *enricher) skipped(what, why string) string {
+	if e.metrics != nil {
+		e.metrics.enrichments.WithLabelValues("skipped").Inc()
+		e.metrics.enrichmentBytes.Observe(0)
+	}
+	log.Printf("enrich %s: skipped (%s)", what, why)
+	return ""
 }
 
 // finish renders, records metrics, and logs one line.
@@ -266,6 +308,15 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 	if err != nil {
 		return false
 	}
+	if sig.KindOfObject == "Service" {
+		// A Service names its workload through its selector, and the
+		// live informer set has no Service index or pod templates to
+		// evaluate one against (see the file comment: this is the
+		// same gap that makes edges an overflow here). The scoped
+		// fallback's List pass has both, so hand it over — the live
+		// path is an optimization, never the correctness (#366).
+		return false
+	}
 	kind, ok := stormObjectKinds[sig.KindOfObject]
 	if !ok {
 		return false
@@ -293,22 +344,37 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 	})
 	b.setTarget(wl, len(pods))
 
-	// spec + delta share the one API GET this path pays.
 	var obj any
-	b.stage(ctx, enrichSectionSpec, specCmd(wl), func() ([]emit.Finding, error) {
-		o, err := e.workloadObject(ctx, wl)
-		if err != nil {
-			return nil, err
-		}
-		obj = o
-		return checks.SpecFindings(wl.Kind, wl.Namespace, wl.Name, o)
-	})
-	b.stage(ctx, enrichSectionDelta, deltaCmd(wl), func() ([]emit.Finding, error) {
-		return delta.ScanObjects(e.now(), delta.Config{}, bundle.DeltaObjectsFor(obj, pods)), nil
-	})
-	// edges: not computable from the live informer set (see file
-	// comment) — the trailer names the command that computes it.
-	b.skip(enrichSectionEdges, edgesCmd(wl))
+	if workloadObjectKinds[wl.Kind] {
+		// spec + delta share the one API GET this path pays.
+		b.stage(ctx, enrichSectionSpec, specCmd(wl), func() ([]emit.Finding, error) {
+			o, err := e.workloadObject(ctx, wl)
+			if err != nil {
+				return nil, err
+			}
+			obj = o
+			return checks.SpecFindings(wl.Kind, wl.Namespace, wl.Name, o)
+		})
+		b.stage(ctx, enrichSectionDelta, deltaCmd(wl), func() ([]emit.Finding, error) {
+			return delta.ScanObjects(e.now(), delta.Config{}, bundle.DeltaObjectsFor(obj, pods)), nil
+		})
+		// edges: not computable from the live informer set (see file
+		// comment) — the trailer names the command that computes it.
+		b.skip(enrichSectionEdges, edgesCmd(wl))
+	} else {
+		// A target that is not a workload — a Node, from the
+		// node_notready family — has no workload object to GET and no
+		// workload edges to validate. Those sections are absent, not
+		// broken: running them put `unsupported workload kind "Node"`
+		// in every such bundle, which describes the enricher rather
+		// than the incident (issue #366). The radius below is the
+		// part that IS about the incident, so this bundle still earns
+		// its bytes.
+		cmd := nonWorkloadCmd(wl)
+		b.skip(enrichSectionSpec, cmd)
+		b.skip(enrichSectionDelta, cmd)
+		b.skip(enrichSectionEdges, cmd)
+	}
 	b.stage(ctx, enrichSectionRadius, radiusCmd(wl), func() ([]emit.Finding, error) {
 		return bundle.RadiusFindings(snap, wid, enrichRadiusDepth), nil
 	})
@@ -416,6 +482,26 @@ func (e *enricher) podByName(ctx context.Context, namespace, name string) (*core
 		}
 	}
 	return e.client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// workloadObjectKinds is workloadObject's switch as a set: the kinds
+// there is a workload object to read at all.
+var workloadObjectKinds = map[string]bool{
+	"Pod":         true,
+	"Deployment":  true,
+	"ReplicaSet":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+	"Job":         true,
+	"CronJob":     true,
+}
+
+// nonWorkloadCmd names the closest real read for a target that is not
+// a workload, so the sections enrichment cannot build still point at
+// an invocation the agent can actually run (§7.6: overflow keys are
+// real commands).
+func nonWorkloadCmd(wl emit.WorkloadRef) string {
+	return ancestorRadiusCmd(engine.Ancestor{Kind: wl.Kind, Namespace: wl.Namespace, Name: wl.Name})
 }
 
 // workloadObject GETs the resolved target object — the live path's

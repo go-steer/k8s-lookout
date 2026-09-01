@@ -14,7 +14,7 @@ MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--incident` | — | inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain — alternative to --workload |
+| `--incident` | — | inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain, or for a Service via its selector — alternative to --workload |
 | `--depth` | 2 | blast-radius traversal depth: graph edges followed per direction in the radius section |
 | `--max-templates` | 15 | cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget) |
 | `--cert-warn` | 720h | report TLS certificates expiring within this window (edges section) |

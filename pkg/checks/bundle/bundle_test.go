@@ -392,6 +392,50 @@ func TestIncidentPayloadObjectGoneFallsBackToController(t *testing.T) {
 	}
 }
 
+// TestIncidentPayloadOnAServiceResolvesThroughTheSelector is issue
+// #366: objectstate.endpoints_empty carries kind_of_object=Service,
+// which owns nothing, so the owner chain has nothing to walk. The
+// selector does: the bundle targets the workload behind the Service,
+// which is the thing whose pods and logs answer "why are there no
+// endpoints".
+func TestIncidentPayloadOnAServiceResolvesThroughTheSelector(t *testing.T) {
+	incident := `{"kind":"object-state","reason":"NoEndpoints","namespace":"prod",` +
+		`"kind_of_object":"Service","name":"api"}`
+	res := checktest.Run(t, testCommand(brokenLogs(), brokenObjects()...), "--incident="+incident)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	first := strings.SplitN(res.Stdout, "\n", 2)[0]
+	if !strings.Contains(first, "kind_of_object=Deployment") || !strings.Contains(first, "name=api") {
+		t.Errorf("a Service incident should target the workload its selector picks, head = %s", first)
+	}
+	// And it is a whole bundle, not a target line: the sections are
+	// the point of resolving at all.
+	for _, want := range []string{"section=spec", "section=edges", "section=logs"} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("Service-targeted bundle missing %q:\n%s", want, res.Stdout)
+		}
+	}
+}
+
+// TestIncidentPayloadOnAnUnbackedServiceSaysSo: no selector, no
+// backend. The error names the Service and the reason rather than
+// leaking the workload-kind list, which was the wrong diagnosis #366
+// reported.
+func TestIncidentPayloadOnAnUnbackedServiceSaysSo(t *testing.T) {
+	incident := `{"namespace":"prod","kind_of_object":"Service","name":"nowhere"}`
+	res := checktest.Run(t, testCommand(brokenLogs(), brokenObjects()...), "--incident="+incident)
+	if res.Code != emit.ExitRuntime {
+		t.Fatalf("exit %d, want %d, stderr: %s", res.Code, emit.ExitRuntime, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "no single workload behind this Service") {
+		t.Errorf("stderr should explain the Service has no backend, got: %s", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "unsupported workload kind") {
+		t.Errorf("a Service is a supported incident target now (#366), got: %s", res.Stderr)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	cases := []struct {
 		name string
