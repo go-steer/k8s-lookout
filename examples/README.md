@@ -24,7 +24,8 @@ examples/
 ├── e2e              # driver: inject → verify → revert per scenario, PASS/FAIL summary
 ├── uat              # driver: the read-path half — every command's output contract
 ├── uat-cases/       # one file per UAT case, discovered by filename
-├── uat-lib.sh       # UAT assertions (exit code, summary line, stdout purity, JSON)
+├── uat-invocations.sh # what a valid call looks like per command, shared by the cases
+├── uat-lib.sh       # UAT assertions (exit code, summary line, stdout purity, JSON) + an MCP client
 ├── lib.sh           # shared helpers (context guard, wire/read-path await)
 ├── agent-harness.md # testing the CLI via skills / MCP in Claude, core-agent, etc.
 └── gke/             # deltas for running the same scenarios on a GKE staging cluster
@@ -134,6 +135,16 @@ added. `UAT_TIER` (default `T0`) gates cases needing more than a bare
 kind cluster; anything above the running tier is reported as skipped
 rather than failed. The design, the per-command matrix and the tier
 definitions are in [`docs/testing/cli-uat.md`](../docs/testing/cli-uat.md).
+
+The MCP case (`uat-cases/10-mcp.sh`) replays those same invocations
+through a real `lookout mcp --listen` server and compares each tool
+result against the CLI's stdout, which is the strongest single check
+that no command regresses its output contract — the MCP surface is how
+agents consume lookout, and nothing else exercises it. It also covers
+the bind rules: a non-loopback bind is refused, each opt-in flag alone
+is still refused, and the one accepted off-host configuration answers
+401 without the token and records tool calls to its mandatory access
+log.
 
 ## CI
 

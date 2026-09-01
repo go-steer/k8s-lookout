@@ -622,6 +622,26 @@ a newly registered command with no invocation in the table fails the
 run, as does a table entry for a command that no longer exists. That is
 what keeps this checklist from quietly going stale.
 
+The **MCP surface** (Part 4) is checked by replaying those same
+invocations — from the shared table in `examples/uat-invocations.sh` —
+through a real server over HTTP and comparing the tool result against
+the CLI's stdout byte for byte. Driving both sides from one description
+of a valid call is what makes the comparison mean anything; two
+hand-written lists would eventually agree about the wrong thing. Note
+that the CLI-name-to-tool-name mapping is *read* from the registry and
+never derived: 20 of the 34 differ (`bundle` is served as
+`k8s_triage_workload`, `state webhooks` as `k8s_admission_webhooks`).
+
+Parity is byte-for-byte after normalizing five fields, and the list is
+kept short on purpose because each entry is something the check stops
+covering. All five are observations of something that moves on its own
+between two calls rather than values a command chooses: `elapsed=`,
+the `first_seen=`/`last_seen=` ends of the sliding log window, the
+`sample=` line drawn from it, and the `window=` lookback `triage
+changes` anchors to now. Counters are deliberately *not* normalized —
+`count=` and `scanned=` are stable across calls, so a change in one is
+a real difference and should fail.
+
 **Command coverage checklist** (tick when a UAT case exists). The
 cross-cutting contract already covers every command below for exit
 code, summary line, stdout purity, JSON, scope flags and `--timeout`;
@@ -630,8 +650,9 @@ these ticks are for the command's *own* behaviour.
 - [ ] `version`
 - [ ] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast,
       `/healthz`+`/metrics`, and `/readyz` red-then-green
-- [ ] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
-      `--access-log`, and the three-flag off-host bind with a 401)
+- [x] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
+      `--access-log`, and the three-flag off-host bind with a 401);
+      also `--profile` / `--tools` surface selection
 - [ ] `bundle` (+ `--incident`, `--store`)
 - [ ] `health` (+ healthy-path)
 - [ ] `triage delta` (+ `--only`)
@@ -653,7 +674,9 @@ these ticks are for the command's *own* behaviour.
 - [ ] `net probe` (reachable + unreachable, no mutation)
 - [x] Cross-cutting: exit codes, stdout purity, summary line, JSON, scope flags, `--at`, `--timeout`
 - [ ] Cross-cutting: secret-safety and healthy-path (both need fixtures — no demo workload mounts a Secret, and the shared cluster is never clean)
-- [ ] MCP tool-vs-CLI parity for every check
+- [x] MCP tool-vs-CLI parity for every check (`uat-cases/10-mcp.sh`,
+      byte-for-byte after normalizing the five fields two invocations
+      cannot agree on — see `uat_normalize_payload`)
 
 ---
 

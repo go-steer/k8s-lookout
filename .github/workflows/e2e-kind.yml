@@ -126,7 +126,9 @@ jobs:
       - name: CLI UAT (T0)
         # The read-path half of the e2e layer (docs/testing/cli-uat.md):
         # every registered command's exit code, summary line, stdout
-        # purity, JSON, scope flags and --timeout. Reuses this cluster
+        # purity, JSON, scope flags and --timeout, then the same
+        # commands again through a real MCP server compared byte for
+        # byte against the CLI. Reuses this cluster
         # rather than standing up a second one — it only reads, so the
         # state the scenarios just left behind is a HARDER input than a
         # fresh cluster, not a contaminated one.

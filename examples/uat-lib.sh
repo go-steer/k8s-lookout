@@ -243,3 +243,115 @@ uat_accepts_flag() {
   local cmd=("${@:1:$#-1}")
   run_lookout "${cmd[@]}" --help 2>&1 | grep -Eq -- "(^|[[:space:]])${flag}(=|[[:space:]]|$)"
 }
+
+# uat_tool_names — the registry again, as "<tool_name> <cli path>" per
+# line. The two are NOT a mechanical transform of each other: `bundle`
+# is served as k8s_triage_workload and `state webhooks` as
+# k8s_admission_webhooks, so anything pairing a CLI command with its
+# tool has to read the mapping rather than derive it.
+uat_tool_names() {
+  run_lookout mcp --list-tools 2>/dev/null |
+    awk '$1 ~ /^k8s_/ { name=$1; $1=""; $2=""; sub(/^ +/, ""); print name, $0 }'
+}
+
+# ---- an MCP client, in curl -------------------------------------------------
+
+# The server speaks streamable HTTP: responses come back as SSE frames
+# ("event: message" / "data: {...}"), and every request after the
+# handshake must echo the session id the handshake handed out.
+UAT_MCP_URL=""
+UAT_MCP_SID=""
+UAT_MCP_PID=""
+UAT_MCP_LOG=""
+
+# uat_mcp_start [extra flags...] — start a server on a free loopback
+# port and complete the handshake. Returns non-zero if it never came
+# up, so a case can report that once instead of failing every call.
+uat_mcp_start() {
+  local port
+  port="$(uat_free_port)"
+  UAT_MCP_URL="http://127.0.0.1:$port"
+  UAT_MCP_LOG="$UAT_WORKDIR/mcp-$port.log"
+
+  "$(lookout_bin)" mcp --listen="127.0.0.1:$port" "$@" >"$UAT_MCP_LOG" 2>&1 &
+  UAT_MCP_PID=$!
+
+  local i
+  for i in $(seq 1 50); do
+    UAT_MCP_SID="$(curl -sS -m 5 -X POST "$UAT_MCP_URL" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lookout-uat","version":"0"}}}' \
+      -D - -o /dev/null 2>/dev/null | grep -i '^Mcp-Session-Id:' | tr -d '\r' | awk '{print $2}')"
+    [[ -n "$UAT_MCP_SID" ]] && break
+    kill -0 "$UAT_MCP_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  [[ -n "$UAT_MCP_SID" ]] || return 1
+
+  uat_mcp_raw '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+}
+
+uat_mcp_stop() {
+  [[ -n "$UAT_MCP_PID" ]] && kill "$UAT_MCP_PID" 2>/dev/null
+  wait "$UAT_MCP_PID" 2>/dev/null
+  UAT_MCP_PID=""
+  UAT_MCP_SID=""
+}
+
+# uat_mcp_raw <json> — one JSON-RPC request, SSE unwrapped to the bare
+# JSON response (or empty for a notification).
+uat_mcp_raw() {
+  curl -sS -m 120 -X POST "$UAT_MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "Mcp-Session-Id: $UAT_MCP_SID" \
+    -d "$1" 2>/dev/null | sed -n 's/^data: //p'
+}
+
+# uat_mcp_call <tool> <arguments-json> — a tools/call, leaving the
+# result in UAT_MCP_RESULT (the full JSON-RPC response). Sets
+# UAT_MCP_TEXT to the concatenated text content, which is where a
+# command's payload arrives.
+UAT_MCP_RESULT=""
+UAT_MCP_TEXT=""
+uat_mcp_call() {
+  local tool="$1" args="${2:-\{\}}"
+  UAT_MCP_RESULT="$(uat_mcp_raw "$(jq -cn --arg n "$tool" --argjson a "$args" \
+    '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$n,arguments:$a}}')")"
+  UAT_MCP_TEXT="$(jq -r '(.result.content // []) | map(select(.type=="text") | .text) | join("")' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+}
+
+# uat_free_port — ask the kernel for an unused one rather than guessing
+# a constant; parallel jobs on a CI runner do collide.
+uat_free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+}
+
+# uat_normalize_payload — strip what two invocations of the same
+# command cannot agree on, so that everything else can be compared byte
+# for byte.
+#
+# The normalizer is deliberately small and every entry has to earn its
+# place, because each one is a field the parity check stops covering.
+# All four are observations of something that moves on its own between
+# two calls, not values a command chooses:
+#
+#   elapsed=      how long this run took
+#   first_seen=   \ the ends of a sliding log window: the log tail is a
+#   last_seen=    / fixed size, so new lines push old ones out
+#   sample=       an example line drawn from that window
+#   window=       a lookback anchored to now (triage changes reports
+#                 the span it approximated over)
+#
+# Counters are NOT normalized — count= and scanned= are stable across
+# calls (the window is a fixed size), so a change in one is a real
+# difference and should fail. Anything else differing between the CLI
+# and the MCP tool is the regression this exists to catch.
+uat_normalize_payload() {
+  sed -E \
+    -e 's/elapsed=[0-9.]+[a-zµ]*/elapsed=NORM/' \
+    -e 's/(first_seen|last_seen|window)=[^ ]+/\1=NORM/g' \
+    -e 's/sample="([^"\\]|\\.)*"/sample="NORM"/g' |
+    sed -e 's/[[:space:]]*$//' -e '/^$/d'
+}
