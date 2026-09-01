@@ -125,7 +125,7 @@ Find spec fields of Deployments/StatefulSets/DaemonSets owned by a manager other
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
-| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, resources) |
+| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env) |
 
 ## Stage 2 — the dependency-edge drill-down
 

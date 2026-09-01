@@ -66,7 +66,7 @@ frozen vocabulary — see [Signal kinds](/reference/signal-kinds/).
 | `drain.node` | critical, warning | the -A roll-up: this node is not cleanly drainable, with the blocker classes counted; critical when a PDB gridlock is among them | [`stab drain`](/reference/stab-drain/) |
 | `drain.pdb_gridlock` | critical | a PodDisruptionBudget covering pods on this node allows zero disruptions: the eviction API refuses and the drain hangs | [`stab drain`](/reference/stab-drain/) |
 | `drain.singleton` | warning | a pod on this node is the only replica of its controller — evicting it is an outage | [`stab drain`](/reference/stab-drain/) |
-| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, resources) | [`scan`](/reference/scan/), [`stab drift`](/reference/stab-drift/) |
+| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env) | [`scan`](/reference/scan/), [`stab drift`](/reference/stab-drift/) |
 | `edge.backend_missing` | critical | an Ingress backend service, or the port it names, does not exist | [`bundle`](/reference/bundle/), [`scan`](/reference/scan/), [`state edges`](/reference/state-edges/) |
 | `edge.cert_expired` | critical | a TLS certificate's NotAfter is in the past | [`bundle`](/reference/bundle/), [`scan`](/reference/scan/), [`state edges`](/reference/state-edges/) |
 | `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn | [`bundle`](/reference/bundle/), [`scan`](/reference/scan/), [`state edges`](/reference/state-edges/) |
