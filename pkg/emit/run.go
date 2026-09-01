@@ -248,9 +248,22 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		if IsUsageError(err) {
 			return usageError(stderr, cfg.Name, err)
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
 			fmt.Fprintf(stderr, "%s: timed out after %s\n", cfg.Name, timeout)
-		} else {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			// The deadline expired, but some layer below reported it in
+			// its own words without wrapping context.DeadlineExceeded —
+			// client-go's rate limiter is the usual one, with "rate:
+			// Wait(n=1) would exceed context deadline". Which layer
+			// notices first is a race the cluster's speed decides, so
+			// the same command produces either message depending on the
+			// run, and the client-go one reads like an internal defect
+			// and sends the caller after rate limits instead of the
+			// --timeout they set. The deadline is the headline; what
+			// noticed it stays as detail (issue #352).
+			fmt.Fprintf(stderr, "%s: timed out after %s: %v\n", cfg.Name, timeout, err)
+		default:
 			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		}
 		return ExitRuntime
