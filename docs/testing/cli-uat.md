@@ -126,7 +126,17 @@ UAT cases that don't need the full stub-daemon loop:
   logs disabled, watch stays up.
 - **`--sources=<explicit>` fail-fast** — naming a source whose grant is
   missing must be a **startup FAILURE** (exit non-zero), the strict-§11
-  posture. Assert the process exits with the missing-grant named.
+  posture. Assert the process exits with the missing-grant named. The
+  message half holds today; the *exit* does not — issue #364 wedges the
+  process on the watchboard join, so `uat-cases/30-root.sh` reports that
+  half as a skip naming the issue and will start asserting it the moment
+  the process exits on its own.
+
+> Note on exit codes: the read path follows §4.2 (2 for a usage error),
+> but `watch` deliberately keeps the standalone sentinel's 0/1
+> convention (`internal/watch/main.go`) — it is a daemon, and its
+> supervisor only ever asks whether it came up. The UAT case asserts 1
+> and spends its weight on the diagnosis instead.
 - **`--metrics-addr=:9090`** — **assert** `/healthz` returns 200 and
   `/metrics` exposes Prometheus counters.
 - **`/readyz` is not `/healthz`** — poll both from the first instant the
@@ -404,12 +414,20 @@ the wire, no sentinel needs to be running, and `verify` is a smoke
 check rather than a contract — the contract lives in
 `examples/uat-cases/20-fixtures.sh`.
 
-The distinction matters because five commands have nothing to report
+The distinction matters because several commands have nothing to report
 about a healthy cluster. `state webhooks`, `state edges`, `stab drift`,
 `stab drain` and `triage logs` all return a perfectly well-formed
 `findings=0` against stock kind, and a check that only ever sees
 `findings=0` is not testing the check — it is testing that the binary
 starts.
+
+Two fixtures exist for the opposite reason. `health` and `triage delta`
+have *too much* to say about a shared cluster: what is broken right now
+is whatever the last scenario left behind, so an assertion either fails
+on a clean cluster or passes for the wrong reason on a dirty one —
+hence `broken-workloads`, a namespace whose contents are known exactly.
+And no demo workload mounts a Secret, so the redaction contract had
+nothing to redact until `secret-workload`.
 
 **Every fixture owns its own `lookout-uat-*` namespace.** Nothing a
 fixture creates may sit in `lookout-demo`, where the demo app and the
@@ -439,6 +457,8 @@ they cost when ignored:
 | [`broken-webhook`](../../examples/scenarios/broken-webhook/README.md) | `lookout-uat-webhook` | `state webhooks` | `lookout-uat-slow`, live and not reported dead |
 | [`config-drift`](../../examples/scenarios/config-drift/README.md) | `lookout-uat-drift` | `stab drift` | `drift-clean`, never edited |
 | [`drain-blockers`](../../examples/scenarios/drain-blockers/README.md) | `lookout-uat-drain` | `stab drain` | — (the cluster supplies plenty) |
+| [`broken-workloads`](../../examples/scenarios/broken-workloads/README.md) | `lookout-uat-broken` | `health`, `triage delta`, `bundle`, `watch --dry-run`, `findings ack` | `steady`, healthy and named by none of them |
+| [`secret-workload`](../../examples/scenarios/secret-workload/README.md) | `lookout-uat-secrets` | secret-safety across every command; the healthy path | the workload is the control — nothing about it is a finding |
 
 Each one carries a negative control on purpose. A check that fires on
 everything is indistinguishable from a check that fires correctly
@@ -716,19 +736,20 @@ cross-cutting contract already covers every command below for exit
 code, summary line, stdout purity, JSON, scope flags and `--timeout`;
 these ticks are for the command's *own* behaviour.
 
-- [ ] `version`
-- [ ] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast,
-      `/healthz`+`/metrics`, and `/readyz` red-then-green
+- [x] `version`
+- [x] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast,
+      `/healthz`+`/metrics`, and `/readyz` red-then-green (the fail-fast
+      *exit* is skipped, not asserted — issue #364)
 - [x] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
       `--access-log`, and the three-flag off-host bind with a 401);
       also `--profile` / `--tools` surface selection
-- [ ] `bundle` (+ `--incident`, `--store`)
-- [ ] `health` (+ healthy-path)
-- [ ] `triage delta` (+ `--only`)
+- [x] `bundle` (+ `--incident`, `--depth`, `--max-templates`; `--store` still open)
+- [x] `health` (+ healthy-path)
+- [x] `triage delta` (+ `--only`, thresholds, the shared §8 fingerprint)
 - [ ] `triage events` (+ HPA thrash)
 - [x] `triage logs` (+ `--keep-probes`, `--max-templates`, `--previous`)
 - [ ] `triage top` (+ `--history` degradation)
-- [ ] `triage spec` (+ `--diff`, secret-safety)
+- [x] `triage spec` (+ `--diff` as declared-unimplemented, secret-safety)
 - [ ] `triage status` (write→read round-trip, `triage.regressed`)
 - [ ] `triage radius` (live + `--at`)
 - [ ] `triage changes` (live + `--at`)
@@ -742,7 +763,9 @@ these ticks are for the command's *own* behaviour.
 - [ ] `cloud orphans` / `quota` / `ipspace` / `stockout` (+ GCP-free refusal)
 - [x] `net probe` (reachable + unreachable, no mutation)
 - [x] Cross-cutting: exit codes, stdout purity, summary line, JSON, scope flags, `--at`, `--timeout`
-- [ ] Cross-cutting: secret-safety and healthy-path (both need fixtures — no demo workload mounts a Secret, and the shared cluster is never clean)
+- [x] Cross-cutting: secret-safety and healthy-path (`secret-workload`
+      supplies both: one canary string consumed four ways, swept across
+      every command's output, in a namespace that is otherwise quiet)
 - [x] MCP tool-vs-CLI parity for every check (`uat-cases/10-mcp.sh`,
       byte-for-byte after normalizing the six fields two invocations
       cannot agree on — see `uat_normalize_payload`)

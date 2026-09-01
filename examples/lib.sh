@@ -144,6 +144,40 @@ await() {
   done
 }
 
+# await_namespace_settled <name>
+#
+# Block while a previous incarnation of <name> finishes terminating.
+#
+# Every UAT fixture owns a namespace and reverts by deleting it with
+# --wait=false, which returns long before the namespace is gone. Two
+# runs back to back — the normal loop while writing a case — then race:
+# `kubectl apply` of a Namespace already in Terminating succeeds and
+# every object created inside it is rejected, so the inject fails a
+# step later with an error that says nothing about the real cause.
+await_namespace_settled() {
+  # Terminating specifically, not merely present: waiting for the
+  # delete of a namespace that is simply already there — the ordinary
+  # re-inject — would block for the whole timeout and then carry on.
+  if [[ "$(kubectl get namespace "$1" -o jsonpath='{.status.phase}' 2>/dev/null)" == Terminating ]]; then
+    kubectl wait --for=delete "namespace/$1" --timeout=180s >/dev/null 2>&1 || true
+  fi
+}
+
+# fresh_namespace <name> — await_namespace_settled, then create it.
+# Fixtures that need extra labels on the namespace call the two halves
+# themselves.
+fresh_namespace() {
+  local ns="$1"
+  await_namespace_settled "$ns"
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $ns
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+YAML
+}
+
 # await_inject <name> <timeout> <grep-pattern...>
 #
 # Waits until a single stub-log line appended after stub_mark <name>

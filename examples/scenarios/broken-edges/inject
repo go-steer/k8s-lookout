@@ -33,13 +33,7 @@ echo "▸ creating the edgy workload and its broken references"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-kubectl apply -f - <<YAML
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: $NS
-  labels: { app.kubernetes.io/part-of: lookout-examples }
-YAML
+fresh_namespace "$NS"
 
 # A TLS certificate that expires inside --cert-warn=336h but is
 # otherwise valid — the "renew this" case, not the "this is broken" one.

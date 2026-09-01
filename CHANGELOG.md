@@ -90,6 +90,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stack and reverts it in reverse order from its `EXIT` trap, so a
   failed assertion or a Ctrl-C still leaves the cluster as it found
   it.
+- Root and infra UAT coverage (`uat-cases/30-root.sh`): what the
+  binary does when it is handed nothing (usage on stderr, exit 2, an
+  empty stdout for whoever captured it), a typo, or `--help`, and that
+  the root's command list names every group the registry serves —
+  enumerated from `mcp --list-tools`, so a group that becomes
+  undiscoverable fails the run. `version` is checked for the two
+  fields that tie a running binary to a tree, for `--version` and
+  `-version` being byte-identical to the subcommand (#146), and for
+  answering the same thing with no reachable cluster, which is when it
+  is actually asked.
+- The four claims `lookout watch` makes at startup, asserted against a
+  real process: the `--sources=auto` probe (every one of the eleven
+  portable sources must log enabled or disabled — a source that says
+  nothing at all is off with no trace), the §11 loud skip (the missing
+  Gateway API names the capability *and* the flag that would make it
+  fatal, and the sentinel keeps running), the liveness/readiness split
+  (`/healthz` is 200 while `/readyz` is still 503 naming what it waits
+  on — collapsing the two costs a restart loop on a big cluster), the
+  metrics listener on that same port, and `--dry-run`, which runs the
+  whole pipeline with no `--daemon-url` at all and prints payloads to
+  stdout while every diagnostic stays on stderr. The strict-§11
+  fail-fast is asserted for its diagnosis; the *exit* is reported as a
+  skip naming #364, and starts asserting itself the moment that
+  process exits on its own.
+- The top-level incident commands (`uat-cases/40-toplevel.sh`):
+  `bundle` (all five sections in one call, `--max-templates` overflow
+  accounted rather than silently dropped, `--depth` bounding the
+  directed walk while laterals still surface at hop 2, and
+  `--incident` taking the JSON inline and resolving a Pod up its owner
+  chain), `health` (all ten categories answer; the degraded ones name
+  objects inline; `--top` caps the names and not the totals; a
+  cluster-scoped category under `--namespace` is `unavailable` **with
+  a reason** rather than quietly healthy), `triage delta` (each class,
+  `--only`, and the fact that a count threshold does not gate a
+  sustained state), and `triage spec` (`--diff` failing honestly as
+  declared-unimplemented; a missing object as a runtime error and a
+  missing target as a usage error). Two workloads failing alike are
+  asserted to share **one** `fingerprint=`: the §8 hash is over the
+  incident class, not the object, which is what lets a fleet roll them
+  up.
+- Two more fixtures, for the two problems a shared cluster creates.
+  `broken-workloads` is a namespace whose contents are known exactly —
+  a crash loop, an unschedulable pod, and a healthy workload beside
+  them — because `health` and `triage delta` otherwise report whatever
+  the last scenario left behind, and an assertion then either fails on
+  a clean cluster or passes for the wrong reason on a dirty one.
+  `secret-workload` supplies the redaction contract with something to
+  redact: one distinctive canary string consumed four ways (`envFrom`,
+  `secretKeyRef`, a mount, and an `imagePullSecrets` dockerconfigjson),
+  swept across every command's output at once. A grep for a canary is
+  a complete answer in a way that looking for the word "REDACTED" is
+  not — it cannot be satisfied by a command that prints nothing. Being
+  healthy and alone in its namespace, it is also the healthy-path
+  fixture: "reports nothing when nothing is wrong" is a claim in its
+  own right.
 - The kind e2e workflow runs the T0 UAT after its scenarios, on both
   the post-merge smoke tier and the weekly full tier. It runs even
   when the scenarios failed: signal routing is the legitimately flaky
@@ -110,6 +165,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deployments read back from `examples/workloads/`, and a degraded app
   is a warning rather than an abort — several commands have more to
   say about a broken cluster than a healthy one.
+- A UAT fixture whose `inject` failed no longer reports a cascade of
+  unrelated failures. `uat_fixture` is idempotent so that two cases can
+  ask for the same fixture, but it cached the *attempt* rather than the
+  verdict: the second caller was told the fixture was present and every
+  assertion under it failed on its own terms, burying the one real
+  error under half a dozen invented ones. Failures are now remembered
+  separately from the revert stack — a half-applied fixture still needs
+  reverting, and a second caller still needs to be told no.
+- A UAT fixture re-injected straight after a revert no longer fails a
+  step late with an error that says nothing about the cause. Revert
+  deletes the namespace with `--wait=false`, which returns long before
+  the namespace is gone; `kubectl apply` of a Namespace already
+  Terminating then succeeds while every object created inside it is
+  rejected. Fixtures now create their namespace through
+  `fresh_namespace`, which waits out a Terminating predecessor — and
+  only a Terminating one, so the ordinary re-inject does not pay a
+  timeout.
 - An object name whose interior hyphen precedes a credential word no
   longer redacts the next word of the message (#357). The
   credential-flag heuristic matched `--?` anywhere, so inside the

@@ -234,23 +234,51 @@ uat_expect_stderr() {
 # revert is loud but does not stop the others.
 UAT_FIXTURES=()
 
+# Fixtures whose inject FAILED. Kept separately from UAT_FIXTURES,
+# which is the revert stack: a half-applied fixture still needs
+# reverting, and a second caller still needs to be told no.
+UAT_FIXTURES_FAILED=()
+
 # uat_fixture <name> — inject examples/scenarios/<name> and register its
 # revert. Returns non-zero if the inject failed, so a case can report
 # one failure instead of asserting against a fixture that never landed.
 uat_fixture() {
-  local name="$1" dir
+  local name="$1" dir already dir_log
   dir="$(examples_root)/scenarios/$name"
   if [[ ! -x "$dir/inject" ]]; then
     uat_bad "fixture $name → inject" "no executable $dir/inject"
     return 1
   fi
+  # Idempotent within a run: two cases may need the same fixture, and
+  # the second one's precondition is already satisfied. Re-injecting
+  # would also push a second revert onto the stack and run it against
+  # a namespace the first revert already deleted.
+  #
+  # The verdict is cached, not just the attempt. Caching only "we tried
+  # this one" would make the SECOND caller of a fixture that failed to
+  # inject proceed as though it had landed, and every assertion in that
+  # section would then fail one at a time against an empty namespace —
+  # a page of red that all means the same thing, with the actual cause
+  # scrolled off the top.
+  for already in ${UAT_FIXTURES[@]+"${UAT_FIXTURES[@]}"}; do
+    [[ "$already" == "$name" ]] && return 0
+  done
+  for already in ${UAT_FIXTURES_FAILED[@]+"${UAT_FIXTURES_FAILED[@]}"}; do
+    [[ "$already" == "$name" ]] && return 1
+  done
   # Registered BEFORE running, not after: a half-applied inject still
   # has objects to clean up.
   UAT_FIXTURES+=("$name")
-  if ! "$dir/inject" >/dev/null 2>&1; then
-    uat_bad "fixture $name → inject" "$dir/inject failed; re-run it by hand to see why"
+  dir_log="$(mktemp)"
+  if ! "$dir/inject" >"$dir_log" 2>&1; then
+    UAT_FIXTURES_FAILED+=("$name")
+    uat_bad "fixture $name → inject" \
+      "$dir/inject failed; last lines below, or re-run it by hand" \
+      "$(tail -n 3 "$dir_log" | tr '\n' '|')"
+    rm -f "$dir_log"
     return 1
   fi
+  rm -f "$dir_log"
   return 0
 }
 
@@ -265,6 +293,7 @@ uat_fixtures_revert() {
       printf '  ⚠ revert failed for %s — run %s by hand\n' "$name" "$dir/revert" >&2
   done
   UAT_FIXTURES=()
+  UAT_FIXTURES_FAILED=()
 }
 
 # ---- the command registry -------------------------------------------------

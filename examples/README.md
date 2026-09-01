@@ -84,11 +84,14 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
-`scenarios/` also holds five **UAT fixtures** — `chatty-logs`,
-`broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`.
-Same three scripts, different job: nothing is expected on the wire and
-`examples/e2e` skips them. They exist to give a read-path command
-something to report; see [the read-path tier](#the-read-path-tier).
+`scenarios/` also holds seven **UAT fixtures** — `chatty-logs`,
+`broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`,
+`broken-workloads`, `secret-workload`. Same three scripts, different
+job: nothing is expected on the wire and `examples/e2e` skips them.
+They exist to give a read-path command something to report — or, for
+the last two, to make a shared cluster answerable at all: one namespace
+whose contents are known exactly, and one canary string consumed four
+ways. See [the read-path tier](#the-read-path-tier).
 
 ## The scale tier
 
@@ -133,12 +136,18 @@ command reads the cluster directly through your kubeconfig. It never
 touches the demo app, so it is safe to run at any point, including
 immediately after a scenario.
 
-Mostly it only reads. The exception is the **fixtures** case
-(`uat-cases/20-fixtures.sh`): five commands — `triage logs`,
-`state edges`, `state webhooks`, `stab drift`, `stab drain` — have
-nothing to say about a healthy cluster, and a check that only ever
-sees `findings=0` is not being tested. So that case injects a fixture
-scenario for each, and the driver reverts them in reverse order from
+Mostly it only reads. The exception is the cases that need a
+**fixture**. Five commands — `triage logs`, `state edges`,
+`state webhooks`, `stab drift`, `stab drain` — have nothing to say
+about a healthy cluster, and a check that only ever sees `findings=0`
+is not being tested (`uat-cases/20-fixtures.sh`). Two more —
+`health` and `triage delta` — have the opposite problem: on a shared
+cluster they report whatever the last scenario left behind, so
+`uat-cases/30-root.sh` and `uat-cases/40-toplevel.sh` scope them to a
+namespace they staged themselves — the same namespace the contract case
+stages up front, because `findings ack` needs a finding that is
+genuinely open and a healthy cluster has none. Those cases inject a
+fixture scenario each, and the driver reverts them in reverse order from
 its `EXIT` trap, including on failure and on Ctrl-C. Every fixture
 lives in its own `lookout-uat-*` namespace and never in `lookout-demo`,
 which is what makes revert a single `kubectl delete namespace` and

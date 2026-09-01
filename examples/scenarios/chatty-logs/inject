@@ -23,13 +23,7 @@ NS=lookout-uat-logs
 
 echo "▸ starting the chatty pod"
 
-kubectl apply -f - <<YAML
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: $NS
-  labels: { app.kubernetes.io/part-of: lookout-examples }
-YAML
+fresh_namespace "$NS"
 
 # The log volume is emitted ONCE, up front, and then the container
 # sleeps. That matters: `triage logs` reads a window of the tail, so a
