@@ -39,13 +39,7 @@ echo "▸ staging a GitOps-managed namespace and then editing it by hand"
 # spec; no pod has to exist for an edit to have drifted, so the fixture
 # schedules nothing and costs nothing.
 
-kubectl apply -f - <<YAML
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: $NS
-  labels: { app.kubernetes.io/part-of: lookout-examples }
-YAML
+fresh_namespace "$NS"
 
 for name in drift-hot drift-cold drift-clean; do
   # --force-conflicts so a re-inject over an already-drifted namespace

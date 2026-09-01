@@ -23,13 +23,7 @@ NS=lookout-uat-drain
 
 echo "▸ creating drain blockers"
 
-kubectl apply -f - <<YAML
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: $NS
-  labels: { app.kubernetes.io/part-of: lookout-examples }
-YAML
+fresh_namespace "$NS"
 
 # `stab drain` reports per NODE, so a fixture that scatters its pods
 # across a multi-node cluster proves nothing about the roll-up: each

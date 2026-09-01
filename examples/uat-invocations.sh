@@ -145,12 +145,31 @@ UAT_SCOPE_REJECTERS=(
 
 # ---- fixtures the invocations above refer to ------------------------------
 
+# Each call gets its own store file. A store is stateful in a way the
+# other fixtures are not: `findings ack` closes the row it names, so a
+# second case reusing the first case's store finds the subject it was
+# handed already acked and the command correctly refuses it — a green
+# check turns red for a reason that has nothing to do with the command.
+# (It stayed hidden while the cluster was healthy: with no open finding
+# to ack, `findings ack` was skipped outright.)
+UAT_STORE_ROUND=0
+
 uat_contract_fixtures() {
   UAT_WORKLOAD="Deployment/$DEMO_NS/web"
   UAT_NODE="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  UAT_STORE="$UAT_WORKDIR/contract.db"
+  UAT_STORE_ROUND=$((UAT_STORE_ROUND + 1))
+  UAT_STORE="$UAT_WORKDIR/contract-$UAT_STORE_ROUND.db"
   UAT_REPORT="$UAT_WORKDIR/contract-report.logfmt"
   UAT_EXEMPTIONS="$UAT_WORKDIR/contract-exemptions.yaml"
+
+  # `findings ack` needs a finding that is actually open, so the
+  # cluster has to have something wrong with it that this suite put
+  # there. broken-workloads is that namespace; without it the ack
+  # invocation depends on whatever the cluster happens to be suffering
+  # from, which is either nothing (skip) or something that disappears
+  # mid-run. The driver reverts it, and the later cases that want the
+  # same fixture reuse this injection rather than paying for it twice.
+  uat_fixture broken-workloads || true
 
   # The report `findings diff` consumes is produced by the pipeline the
   # command documents — `lookout health | lookout findings diff` — so
@@ -173,12 +192,13 @@ YAML
   # while the table claims it should exit 0. Whether the cluster has an
   # open finding is a property of the environment — a healthy cluster
   # legitimately has none — so when there is no subject, say so and
-  # skip rather than manufacture one. #175's fixtures will guarantee it.
+  # skip rather than manufacture one. broken-workloads above is what
+  # normally guarantees there is one.
   UAT_SUBJECT="$(run_lookout findings diff --store="$UAT_STORE" --report="$UAT_REPORT" --cluster=uat 2>/dev/null |
     grep -Eo 'subject_key=[^ ]+' | head -n1 | cut -d= -f2- | tr -d '"')"
   if [[ -z "$UAT_SUBJECT" ]]; then
     UAT_SUBJECT="uat/$DEMO_NS/Deployment/web/NoOpenFinding"
-    UAT_COMMAND_SKIP["findings ack"]="no open finding in the store to ack — the cluster is healthy (needs a fixture, #175)"
+    UAT_COMMAND_SKIP["findings ack"]="no open finding in the store to ack — the broken-workloads fixture did not land"
   fi
 
   # The store as it stands right now, before anything acks or re-diffs
@@ -196,6 +216,9 @@ YAML
 # written.
 uat_store_snapshot() {
   local f
+  # A previous round's golden set would otherwise be restored alongside
+  # this one — same directory, different store name.
+  rm -f "$UAT_WORKDIR"/golden.*
   for f in "$UAT_STORE" "$UAT_STORE-wal" "$UAT_STORE-shm"; do
     [[ -f "$f" ]] && cp -p "$f" "$UAT_WORKDIR/golden.$(basename "$f")"
   done

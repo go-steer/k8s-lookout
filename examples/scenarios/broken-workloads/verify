@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# A fixture, not a failure: nothing here is expected on the wire, so
+# this is a read-path smoke check that all three workloads reached the
+# state the case assumes. The category-by-category contract lives in
+# examples/uat-cases/40-toplevel.sh.
+echo "▸ verify broken-workloads"
+NS=lookout-uat-broken
+
+await_finding 120 'kind=health.category category=crashloops status=degraded' \
+  -- health --namespace="$NS"
+await_finding 120 'kind=health.category category=pending status=degraded' \
+  -- health --namespace="$NS"
+
+# The negative control, checked once rather than polled: the assertion
+# is that steady is NEVER reported, and polling for an absence just
+# means waiting for a timeout to prove it.
+if "$(lookout_bin)" triage delta --namespace="$NS" --restarts=1 --pending-age=10s |
+  grep -q 'name=steady'; then
+  echo "✗ steady, the healthy control, was reported abnormal" >&2
+  exit 1
+fi
+echo "  ✓ two degraded categories, and the healthy control is not among them"

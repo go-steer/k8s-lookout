@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# Its own namespace, like every UAT fixture: nothing a fixture creates
+# may sit in $DEMO_NS, where the scenarios and the demo app live. See
+# docs/testing/cli-uat.md § Fixtures.
+NS=lookout-uat-broken
+
+echo "▸ staging one namespace with a known set of abnormal workloads"
+
+# `health` and `triage delta` are the two commands whose job is to
+# answer "what is wrong here", and they are the two hardest to assert
+# on a shared cluster: whatever is broken at the moment is whatever the
+# last scenario left behind, so an assertion either fails on a clean
+# cluster or passes for the wrong reason on a dirty one.
+#
+# So this fixture makes a namespace whose contents are known exactly,
+# and the UAT case scopes both commands to it with --namespace. Three
+# workloads, chosen so each lands in a DIFFERENT category:
+#
+#   faulty  → crash loops (health), pods (triage delta)
+#   stuck   → pending     (health), pods (triage delta)
+#   steady  → the negative control: healthy, and must be named by
+#             neither
+#
+# The control is the point. A scorecard that reports two degraded
+# categories out of a namespace containing two broken workloads is
+# indistinguishable from one that reports everything it sees, until
+# there is something healthy sitting next to them that it leaves alone.
+
+fresh_namespace "$NS"
+
+kubectl apply -f - <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: faulty
+  namespace: lookout-uat-broken
+  labels: { app.kubernetes.io/name: faulty, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: faulty }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: faulty, app.kubernetes.io/part-of: lookout-examples }
+    spec:
+      containers:
+        - name: faulty
+          image: python:3.12-alpine
+          # Prints before it dies, on purpose: a bundle of a crash
+          # looping workload is worth little without the last thing the
+          # container said, so the fixture gives the log distiller
+          # something to find in the PREVIOUS container's output.
+          command:
+            - python
+            - -u
+            - -c
+            - |
+              import sys
+              for i in range(40):
+                  print(f"boot step={i} phase=init")
+              print("FATAL config key 'endpoint' missing — refusing to start", file=sys.stderr)
+              sys.exit(1)
+          resources:
+            requests: { cpu: "5m", memory: "24Mi" }
+---
+# A Service in front of a workload that never becomes ready: 0 ready
+# endpoints, which is the broken dependency edge the bundle should
+# report alongside the crash loop.
+apiVersion: v1
+kind: Service
+metadata:
+  name: faulty
+  namespace: lookout-uat-broken
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  selector: { app.kubernetes.io/name: faulty }
+  ports:
+    - { name: http, port: 80, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stuck
+  namespace: lookout-uat-broken
+  labels: { app.kubernetes.io/name: stuck, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: stuck }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: stuck, app.kubernetes.io/part-of: lookout-examples }
+    spec:
+      containers:
+        - name: stuck
+          image: python:3.12-alpine
+          command: ["python", "-u", "-c", "import time; time.sleep(86400)"]
+          # 200 cores fits on no node in any tier this suite runs on,
+          # including the kwok fake nodes (32 allocatable), which are
+          # NoSchedule-tainted anyway. Unschedulable by arithmetic, not
+          # by a selector the scheduler might satisfy later.
+          resources:
+            requests: { cpu: "200" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: steady
+  namespace: lookout-uat-broken
+  labels: { app.kubernetes.io/name: steady, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: steady }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: steady, app.kubernetes.io/part-of: lookout-examples }
+    spec:
+      containers:
+        - name: steady
+          image: python:3.12-alpine
+          command: ["python", "-u", "-c", "import time; print('steady up'); time.sleep(86400)"]
+          resources:
+            requests: { cpu: "5m", memory: "24Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: steady
+  namespace: lookout-uat-broken
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  selector: { app.kubernetes.io/name: steady }
+  ports:
+    - { name: http, port: 80, targetPort: 8080 }
+YAML
+
+kubectl -n "$NS" rollout status deploy/steady --timeout=180s
+
+# Wait for the two broken ones to actually BE broken. Both commands
+# gate on state, not on existence: `triage delta` wants a restart count
+# and a pending age, and `health` wants the pod to have reached
+# CrashLoopBackOff rather than merely having exited once.
+#
+# Four restarts, not the first CrashLoopBackOff: the state is only
+# STABLE once the backoff window is long. Early on the container spends
+# most of each 10s/20s cycle running, so a scan a second later sees a
+# Running container with no waiting reason and the case fails for
+# timing, not for behaviour. By the fourth restart the window is ~80s
+# and grows to a 300s cap, which comfortably covers the several delta,
+# health and bundle invocations the case makes.
+await 240 "faulty is durably in CrashLoopBackOff (>=4 restarts)" bash -c \
+  "restarts=\$(kubectl -n '$NS' get pods -l app.kubernetes.io/name=faulty \
+     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null); \
+   [[ -n \"\$restarts\" && \"\$restarts\" -ge 4 ]] \
+   && kubectl -n '$NS' get pods -l app.kubernetes.io/name=faulty \
+        -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' \
+      | grep -q CrashLoopBackOff"
+await 120 "stuck is Pending and unschedulable" bash -c \
+  "kubectl -n '$NS' get pods -l app.kubernetes.io/name=stuck \
+     -o jsonpath='{.items[*].status.conditions[?(@.type==\"PodScheduled\")].reason}' \
+   | grep -q Unschedulable"
+
+echo "  ✓ $NS: faulty crash-loops, stuck is unschedulable, steady is healthy"

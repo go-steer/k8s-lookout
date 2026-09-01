@@ -38,6 +38,7 @@ echo "▸ creating admission webhooks with broken backends"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+await_namespace_settled "$NS"
 kubectl apply -f - <<YAML
 apiVersion: v1
 kind: Namespace

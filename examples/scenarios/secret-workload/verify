@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# A fixture, not a failure: read-path smoke only. The redaction
+# contract — the canary must not appear in ANY command's output — is
+# asserted by examples/uat-cases/40-toplevel.sh.
+echo "▸ verify secret-workload"
+await_finding 60 'kind=spec.container.*name=keeper' \
+  -- triage spec Deployment/lookout-uat-secrets/keeper
+
+if run_lookout triage spec Deployment/lookout-uat-secrets/keeper 2>/dev/null |
+  grep -q 'c4nary-Sh0uld-Never-Appear-9f3a2b'; then
+  echo "  ✗ the canary secret value appeared in triage spec output" >&2
+  exit 1
+fi
+echo "  ✓ triage spec names the secret and prints none of its values"

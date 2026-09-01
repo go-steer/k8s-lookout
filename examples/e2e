@@ -36,8 +36,9 @@ require_examples_context
 # The list is explicit rather than a glob of scenarios/, because not
 # every directory there is a failure scenario: the UAT fixtures
 # (chatty-logs, broken-edges, broken-webhook, config-drift,
-# drain-blockers) expect nothing on the wire and belong to
-# examples/uat. node-failure is destructive and stays opt-in.
+# drain-blockers, broken-workloads, secret-workload) expect nothing on
+# the wire and belong to examples/uat. node-failure is destructive and
+# stays opt-in.
 DEFAULT_SCENARIOS=(
   crashloop
   image-pull
