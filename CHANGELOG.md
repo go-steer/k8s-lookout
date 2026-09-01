@@ -79,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start a word. Kubernetes names end in `-secret`, `-token` and
   `-key` constantly, so this corrupted diagnostics broadly; it never
   under-masked, so nothing leaked.
+- `drift.manual_edit`'s description named the wrong field classes
+  (#359). It promised `critical` for a hand-edited `resources` block,
+  which has always been a `warning`, and never mentioned `env`, which
+  has always been `critical`. Behaviour is unchanged — image, replicas
+  and env are the escalating classes — but the sentence appeared in
+  four generated reference pages and both skill references, so the
+  regenerated docs are part of the fix.
 
 ## [0.23.0] - 2026-08-31
 

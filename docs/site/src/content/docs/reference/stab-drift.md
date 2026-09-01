@@ -42,7 +42,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 
 | Kind | Severity | Claim |
 | --- | --- | --- |
-| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, resources) |
+| `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env) |
 
 ## Output fields
 
