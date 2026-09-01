@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks whether breaking a workload produces the right signal on the
   wire; this asks whether every command that reads a cluster returns
   correct, well-shaped output. It reuses the same cluster, demo app,
-  context guard and binary resolution, needs no sentinel, and mutates
-  nothing — so it is safe to run at any point, including straight
-  after a scenario. `UAT_TIER` (default `T0`) gates the cases that
+  context guard and binary resolution, needs no sentinel, and never
+  touches the demo app — so it is safe to run at any point, including
+  straight after a scenario. `UAT_TIER` (default `T0`) gates the cases that
   need more than a bare kind cluster, and a case above the running
   tier is reported as skipped rather than failed. Design, per-command
   matrix and tier definitions in `docs/testing/cli-uat.md`.
@@ -42,12 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts a real server, replays the *same* invocations the contract
   case uses, and compares each tool result against the CLI's stdout
   byte for byte — driving both sides from one description of a valid
-  call is what makes the comparison mean anything. Five fields are
+  call is what makes the comparison mean anything. Six fields are
   normalized first, all of them observations of something that moves
   on its own between two calls rather than values a command chooses:
   `elapsed=`, the `first_seen=`/`last_seen=` ends of the sliding log
-  window, the `sample=` line drawn from it, and the `window=` lookback
-  `triage changes` anchors to now. Counters are deliberately not
+  window, the `sample=` line drawn from it, the `window=` lookback
+  `triage changes` anchors to now, and `age=`, which is now minus a
+  creation or transition timestamp. Counters are deliberately not
   normalized, so a change in `count=` or `scanned=` still fails. The
   CLI-name-to-tool-name mapping is read from the registry rather than
   derived, because 20 of the 34 differ.
@@ -60,6 +61,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at mode 0600. `--profile` and `--tools` are checked to actually
   narrow the advertised surface, since every tool costs tokens and
   choice accuracy on every model call.
+- UAT fixtures, for the five commands that have nothing to say about
+  a healthy cluster. `triage logs`, `state edges`, `state webhooks`,
+  `stab drift` and `stab drain` all return a perfectly well-formed
+  `findings=0` against stock kind, and a check that only ever sees
+  `findings=0` is not testing the check — it is testing that the
+  binary starts. Five new `examples/scenarios/` directories
+  (`chatty-logs`, `broken-edges`, `broken-webhook`, `config-drift`,
+  `drain-blockers`) give each one something real to report, and
+  `uat-cases/20-fixtures.sh` asserts the per-command contract against
+  them: the missing ConfigMap *key* rather than the ConfigMap, the
+  same dead webhook backend reported critical or warning on one
+  `failurePolicy` field, a drifted image as critical and a drifted
+  grace period as a warning, a bare pod and its emptyDir volumes as
+  two findings rather than one, and `--cert-warn` narrowing in both
+  directions. `net probe` is exercised the same way against a
+  loopback listener, since a ClusterIP is not reachable from where
+  the CLI runs and a cluster-side fixture would prove nothing.
+- Each fixture carries a **negative control** — an object of the same
+  shape that must *not* be reported — because a check that fires on
+  everything is indistinguishable from one that fires correctly. Each
+  also owns its own `lookout-uat-*` namespace and never puts anything
+  in `lookout-demo`: revert becomes a single
+  `kubectl delete namespace`, later cases never see leftovers, and a
+  fixture is free to wedge a Deployment permanently (`broken-edges`
+  does, by design) without poisoning the namespace the demo app and
+  the failure scenarios share. The driver registers each fixture on a
+  stack and reverts it in reverse order from its `EXIT` trap, so a
+  failed assertion or a Ctrl-C still leaves the cluster as it found
+  it.
 - The kind e2e workflow runs the T0 UAT after its scenarios, on both
   the post-merge smoke tier and the weekly full tier. It runs even
   when the scenarios failed: signal routing is the legitimately flaky
@@ -69,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/uat`'s preflight no longer hangs for its full timeout when
+  a demo Deployment is unavailable. It waited on
+  `--for=condition=Available deploy --all`, which is sequential
+  against a shared deadline: one Deployment that never arrives blocks
+  the whole 180s and then every Deployment `kubectl` never reached is
+  reported as timed out. A still-injected scenario legitimately leaves
+  a demo Deployment down, so this contradicted the driver's own claim
+  to be safe to run straight after one. It now waits only on the
+  Deployments read back from `examples/workloads/`, and a degraded app
+  is a warning rather than an abort — several commands have more to
+  say about a broken cluster than a healthy one.
 - An object name whose interior hyphen precedes a credential word no
   longer redacts the next word of the message (#357). The
   credential-flag heuristic matched `--?` anywhere, so inside the

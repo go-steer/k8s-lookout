@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+NS=lookout-uat-webhook
+
+echo "▸ creating admission webhooks with broken backends"
+
+# SAFETY, and it is the whole design of this fixture: a
+# ValidatingWebhookConfiguration is CLUSTER-scoped, and one with
+# failurePolicy=Fail and a dead backend rejects every matching write.
+# So every webhook here is fenced twice —
+#
+#   * namespaceSelector matches ONE sacrificial namespace ($NS), which
+#     this fixture owns and nothing else in the examples touches; and
+#   * rules match configmaps CREATE only.
+#
+# Worst case is that you cannot create a ConfigMap in $NS. The
+# namespace is created FIRST so that the kube-root-ca.crt ConfigMap the
+# API server injects into every new namespace is already there before
+# the fail-closed webhook exists — otherwise namespace creation itself
+# would wedge.
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $NS
+  labels:
+    lookout-uat-webhook: "true"
+    app.kubernetes.io/part-of: lookout-examples
+YAML
+
+await 60 "$NS has its injected kube-root-ca.crt" \
+  bash -c "kubectl -n '$NS' get configmap kube-root-ca.crt >/dev/null 2>&1"
+
+# A live backend for the slow-timeout case. slow_risk only fires when
+# the backend is NOT dead — a dead backend is reported as
+# failing_closed instead, never both — so this one has to genuinely
+# serve, on the port the webhook names.
+kubectl -n "$NS" apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wh-backend
+  namespace: $NS
+  labels: { app.kubernetes.io/name: wh-backend, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: wh-backend }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: wh-backend }
+    spec:
+      containers:
+        - name: web
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "http.server", "8443"]
+          ports:
+            - { name: https, containerPort: 8443 }
+          resources:
+            requests: { cpu: "5m", memory: "16Mi" }
+            limits: { cpu: "50m", memory: "64Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wh-backend
+  namespace: $NS
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  selector: { app.kubernetes.io/name: wh-backend }
+  ports:
+    # 443 is the ServiceReference default and what the webhook asks
+    # for; a service that exposed some other port would be reported
+    # dead ("port 443 not on service") rather than slow.
+    - { name: https, port: 443, targetPort: 8443 }
+YAML
+
+kubectl -n "$NS" rollout status deploy/wh-backend --timeout=120s
+await 60 "wh-backend has a ready endpoint" \
+  bash -c "[ -n \"\$(kubectl -n '$NS' get endpoints wh-backend -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)\" ]"
+
+# --- CA bundles ------------------------------------------------------
+#
+# An EXPIRED certificate cannot be generated with `openssl req -x509`
+# before OpenSSL 3.2 (`-not_after` does not exist, and -days rejects a
+# negative), so it is checked in as a literal. It is a self-signed
+# throwaway with no private key anywhere — a caBundle holds only the
+# public certificate — and its NotAfter is 2021-01-01, which is a
+# property that stays true rather than a fixture that rots.
+cat >"$tmp/expired.pem" <<'PEM'
+-----BEGIN CERTIFICATE-----
+MIIC/zCCAeegAwIBAgIBATANBgkqhkiG9w0BAQsFADAhMR8wHQYDVQQDExZsb29r
+b3V0LXVhdC1leHBpcmVkLWNhMB4XDTIwMDEwMTAwMDAwMFoXDTIxMDEwMTAwMDAw
+MFowITEfMB0GA1UEAxMWbG9va291dC11YXQtZXhwaXJlZC1jYTCCASIwDQYJKoZI
+hvcNAQEBBQADggEPADCCAQoCggEBAKAqiiMlQDbgjacgUAzZK1v1MCbraaCAbh1g
+9RgPZCxzf19vMpR6+EUYeIRM/k7qHM36092+rzUsl1nOAWlFBZHsjRqMT5/69jec
+HyMLEJslH+qB/8OzlJvvKtDOUvnCcuKgOZNlsv7WF/Ch/+BJ1482NfrjIf3g9Vy0
+zBeizSR1JCwVYQXEsI71HMpquKtLNkeaWjehy+SJyLpF+HyyRxf/NCBsiLZdlPWz
+UhdETtNA1i72IzA0b+rS6dOFJhUyLSANqNEHwo69s7oNQKxqg9jyQn9+8TjEbenN
+3U4d1oagDOE1WsjPRJYaVqqKafio6IFTa+MFkuUjiQUtI9U6mW0CAwEAAaNCMEAw
+DgYDVR0PAQH/BAQDAgKEMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFH23C7vZ
+Ui0DCvFsnUMeoKk65TNPMA0GCSqGSIb3DQEBCwUAA4IBAQBrW1oYrq7zZii4g68p
+a90l99LXHVF+8y0QNrHPbP0MNJuiHD47JcWFpCt60zHbJSlxOT2lERBix4rwZrdd
+KU+gsBkBcLFUNMjWMdF9NwvnjiYwsHqfxUzMVjDNo3sk6GvKjySDDwkcz2dgsU6A
+Zza52loUo+heMQS5zZxhrQ6hlywzE1AfVSck4UTUEk5UQi9kiXjTaeflnKBCTdGk
+tB22+qakfXIMZLwAfXKD/Qe9X8lhmQ8OfhI7PxL7dh07lROPl2zTYE+qqEZ6fdgy
+HnSPvekvgTt+BgTorYgHWDd/H/nr/F2q+sDXAYA3x7+8nh9RehNvEFMzVzG5zzrP
+qxq8
+-----END CERTIFICATE-----
+PEM
+
+# The expiring one, by contrast, has to be generated: "10 days from
+# now" is only inside --cert-warn=336h if `now` is now.
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout "$tmp/soon.key" -out "$tmp/soon.pem" \
+  -days 10 -subj "/CN=lookout-uat-expiring-ca" >/dev/null 2>&1
+
+EXPIRED_B64="$(base64 -w0 <"$tmp/expired.pem")"
+SOON_B64="$(base64 -w0 <"$tmp/soon.pem")"
+
+kubectl apply -f - <<YAML
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: lookout-uat-failclosed
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+webhooks:
+  # (a) dead backend + failurePolicy Fail → writes are REJECTED.
+  - name: failclosed.uat.lookout.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchLabels: { lookout-uat-webhook: "true" }
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        # No such Service. Deliberately not "a Service with no
+        # endpoints" — that is a different reason string, and the
+        # fixture wants to prove the two are told apart.
+        name: wh-absent
+        namespace: $NS
+        path: /validate
+        port: 443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: lookout-uat-slow
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+webhooks:
+  # (b) LIVE backend + failurePolicy Fail + a long timeout → not broken
+  # now, but a hung backend stalls every matching write for 25s.
+  # Also carries the soon-expiring caBundle.
+  - name: slow.uat.lookout.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 25
+    namespaceSelector:
+      matchLabels: { lookout-uat-webhook: "true" }
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: $SOON_B64
+      service:
+        name: wh-backend
+        namespace: $NS
+        path: /validate
+        port: 443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: lookout-uat-ignore
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+webhooks:
+  # (c) dead backend + failurePolicy Ignore → nothing is rejected and
+  # nothing is enforced either, which is the quiet failure this check
+  # exists for. Also carries the EXPIRED caBundle.
+  - name: ignore.uat.lookout.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchLabels: { lookout-uat-webhook: "true" }
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: $EXPIRED_B64
+      service:
+        name: wh-absent
+        namespace: $NS
+        path: /mutate
+        port: 443
+YAML
+
+echo "  ✓ three webhook configurations, fenced to namespace $NS"

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# Its own namespace, like every UAT fixture: nothing a fixture creates
+# may sit in $DEMO_NS, where the scenarios and the demo app live. See
+# docs/testing/cli-uat.md § Fixtures.
+NS=lookout-uat-drain
+
+echo "▸ creating drain blockers"
+
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $NS
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+YAML
+
+# `stab drain` reports per NODE, so a fixture that scatters its pods
+# across a multi-node cluster proves nothing about the roll-up: each
+# node would carry one blocker class and no single --node run would
+# show more than one. So the bare pod is created first, and everything
+# else is pinned to whichever node the scheduler gave it.
+
+kubectl -n "$NS" apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drain-bare
+  namespace: $NS
+  labels: { app.kubernetes.io/name: drain-bare, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  # No ownerReference of any kind — this pod was created directly, so
+  # evicting it deletes it and nothing brings it back. Two blockers in
+  # one object: the bare pod, and the emptyDir whose contents a drain
+  # discards.
+  containers:
+    - name: app
+      image: python:3.12-alpine
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "86400"]
+      volumeMounts:
+        - { name: scratch, mountPath: /scratch }
+        - { name: ramdisk, mountPath: /ramdisk }
+      resources:
+        requests: { cpu: "5m", memory: "16Mi" }
+        limits: { cpu: "50m", memory: "32Mi" }
+  volumes:
+    - name: scratch
+      emptyDir: {}
+    - name: ramdisk
+      emptyDir: { medium: Memory }
+YAML
+
+await 120 "drain-bare is scheduled" \
+  bash -c "[ -n \"\$(kubectl -n '$NS' get pod drain-bare -o jsonpath='{.spec.nodeName}' 2>/dev/null)\" ]"
+
+NODE="$(kubectl -n "$NS" get pod drain-bare -o jsonpath='{.spec.nodeName}')"
+echo "  ▸ pinning the rest to node $NODE"
+
+kubectl -n "$NS" apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drain-solo
+  namespace: $NS
+  labels: { app.kubernetes.io/name: drain-solo, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  # replicas: 1 is the entire fixture. Nothing is broken; evicting the
+  # one pod is simply an outage, and a drain will do it without asking.
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: drain-solo }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: drain-solo }
+    spec:
+      nodeName: $NODE
+      containers:
+        - name: app
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "86400"]
+          resources:
+            requests: { cpu: "5m", memory: "16Mi" }
+            limits: { cpu: "50m", memory: "32Mi" }
+YAML
+
+kubectl -n "$NS" rollout status deploy/drain-solo --timeout=120s
+await 120 "drain-bare is running" \
+  bash -c "[ \"\$(kubectl -n '$NS' get pod drain-bare -o jsonpath='{.status.phase}' 2>/dev/null)\" = Running ]"
+
+echo "  ✓ node $NODE now carries a bare pod, emptyDir data and a singleton"
