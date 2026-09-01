@@ -68,6 +68,11 @@
 // emits its own explicit unavailable finding and scan names it in the
 // summary's `unavailable` note. A scan that could not run a check says
 // so; it never reports a clean bill of health it did not earn (§11).
+//
+// The limit of that resilience is the degenerate case: every check
+// failed and none read a single object. There is no partial result to
+// preserve there, so scan exits 1 with the cause once instead of
+// reporting the same connectivity error as N cluster warnings.
 package scan
 
 import (
@@ -98,6 +103,12 @@ const (
 	// broken check must not void the other twelve, and the §4.2
 	// alternative (exit 1, no summary) would discard everything
 	// already found.
+	//
+	// The exception is the degenerate case, where there is nothing to
+	// discard: every check failed and none of them read a single
+	// object. That is not a partial result dressed as warnings, it is
+	// the runtime error §4.2 reserves exit 1 for — see
+	// scanner.degenerate.
 	KindCheckFailed = "scan.check_failed"
 	// KindIncomplete: the --timeout expired with stages still to run.
 	KindIncomplete = "scan.incomplete"
@@ -263,7 +274,7 @@ func ownKinds() []checks.KindField {
 			"a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks (§11)",
 			emit.SeverityInfo),
 		checks.Kind(KindCheckFailed,
-			"a stage errored; the scan continued without it, so this run saw less than a whole cluster",
+			"a stage errored; the scan continued without it, so this run saw less than a whole cluster — unless EVERY stage failed and none read anything, which is a runtime error (exit 1) rather than a scan",
 			emit.SeverityWarning),
 		checks.Kind(KindIncomplete,
 			"the --timeout expired with stages still to run; not_run names them",
@@ -410,6 +421,28 @@ type scanner struct {
 	stage       string // the check currently running ("" = scan itself)
 	subjects    []subject
 	unavailable []string
+
+	// Stage outcomes, for the degenerate-scan decision.
+	results    []stageResult
+	failed     int   // stages that errored (usage declines are not failures)
+	productive int   // stages that returned cleanly having actually read something
+	firstErr   error // the first real failure, which is the one worth reporting
+}
+
+// stageResult is one deferred bookkeeping finding — a check_failed or
+// a check_skipped — held with the stage it belongs to so the flush can
+// restamp it.
+//
+// Deferred rather than emitted in place because whether these records
+// are the answer depends on how the rest of the scan goes: if every
+// check fails and none of them reads anything, the honest output is
+// one runtime error, not a stream of warnings that a caller has to
+// read the message text of to realize none of them is about the
+// cluster (issue #348). The cost is that they group at the end of
+// stage 1 instead of interleaving; each still carries check=<name>.
+type stageResult struct {
+	name    string
+	finding emit.Finding
 }
 
 // observe is the emit.Writer tap: every finding any stage writes
@@ -473,7 +506,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	s := &scanner{}
 	inv.Out.Watch(s.observe)
 
-	scanned, ran, notRun := runStages(ctx, reg, inv, s, stages)
+	scanned, ran, notRun, err := runStages(ctx, reg, inv, s, stages)
+	if err != nil {
+		return scanned, err
+	}
 
 	drilled, truncated, drillScanned := 0, 0, 0
 	if len(notRun) == 0 && maxDrill > 0 {
@@ -507,8 +543,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 // runStages executes stage 1 (and any included opt-in group) in
 // order, returning the summed scanned count, how many checks actually
-// ran, and the names the timeout left unrun.
-func runStages(ctx context.Context, reg *checks.Registry, inv emit.Invocation, s *scanner, stages []string) (scanned, ran int, notRun []string) {
+// ran, and the names the timeout left unrun. A non-nil error is the
+// degenerate scan — see scanner.degenerate — and is the one shape in
+// which a stage failure voids the invocation.
+func runStages(ctx context.Context, reg *checks.Registry, inv emit.Invocation, s *scanner, stages []string) (scanned, ran int, notRun []string, err error) {
 	for i, name := range stages {
 		if ctx.Err() != nil {
 			notRun = stages[i:]
@@ -518,21 +556,34 @@ func runStages(ctx context.Context, reg *checks.Registry, inv emit.Invocation, s
 		if !ok {
 			continue
 		}
+		// A stage that only reports its own unavailability read
+		// nothing; it is a deliberate degradation, not evidence that
+		// the cluster is reachable.
+		unavailableBefore := len(s.unavailable)
 		n, err := stage(ctx, c, inv, s)
 		scanned += n
 		if err == nil {
 			ran++
+			if len(s.unavailable) == unavailableBefore {
+				s.productive++
+			}
 			continue
 		}
 		if ctx.Err() != nil {
 			notRun = stages[i:]
 			break
 		}
-		emitStageResult(inv, s, name, err)
+		recordStageResult(s, name, err)
 		ran++
 	}
 	s.stage = ""
 	_ = inv.Out.Stamp("check", "")
+	if err := s.degenerate(scanned, notRun); err != nil {
+		return scanned, ran, notRun, err
+	}
+	if err := s.flushStageResults(inv); err != nil {
+		return scanned, ran, notRun, err
+	}
 	if len(notRun) > 0 {
 		_ = inv.Out.Emit(emit.Finding{
 			Kind:     KindIncomplete,
@@ -542,7 +593,7 @@ func runStages(ctx context.Context, reg *checks.Registry, inv emit.Invocation, s
 			Details:  []emit.Field{{Key: "not_run", Value: strings.Join(notRun, ",")}},
 		})
 	}
-	return scanned, ran, notRun
+	return scanned, ran, notRun, nil
 }
 
 // stage runs one registered command through a child Invocation that
@@ -571,11 +622,12 @@ func stage(ctx context.Context, c checks.Command, inv emit.Invocation, s *scanne
 	})
 }
 
-// emitStageResult records one stage's failure in the stream. A usage
-// error from a stage is not a failure: it means the check needs
-// something a zero-argument scan does not supply, which is a coverage
-// statement, not a fault.
-func emitStageResult(inv emit.Invocation, s *scanner, name string, err error) {
+// recordStageResult records one stage's failure. A usage error from a
+// stage is not a failure: it means the check needs something a
+// zero-argument scan does not supply, which is a coverage statement,
+// not a fault — so it counts toward neither half of the degenerate
+// test.
+func recordStageResult(s *scanner, name string, err error) {
 	f := emit.Finding{
 		Kind:     KindCheckFailed,
 		Severity: emit.SeverityWarning,
@@ -584,11 +636,55 @@ func emitStageResult(inv emit.Invocation, s *scanner, name string, err error) {
 	}
 	if emit.IsUsageError(err) {
 		f.Kind, f.Severity, f.Reason = KindCheckSkipped, emit.SeverityInfo, "NotApplicable"
+	} else {
+		s.failed++
+		if s.firstErr == nil {
+			s.firstErr = err
+		}
 	}
-	// Emitted under the stage's own stamp, so the finding carries
-	// check=<name> like everything else that stage produced.
-	s.stage = name
-	_ = inv.Out.Emit(f)
+	s.results = append(s.results, stageResult{name: name, finding: f})
+}
+
+// degenerate reports the one shape in which stage-1 failures are not a
+// partial result: every check that ran failed, none of them read a
+// single object, and the timeout is not what stopped them (that has
+// its own scan.incomplete, which is a better diagnosis than this one).
+//
+// Per-check resilience is the whole point of scan and stays — one
+// check failing must not lose the other six. But an unreachable
+// cluster, or a --context that does not exist, produced seven warnings
+// and `scanned=0 findings=8` and exited 0, which is the wrong answer
+// twice over: an agent has to read the message text to work out that
+// none of these is about the cluster, and a wrapper that branches on
+// the exit code of the documented "start here" command saw success
+// (issue #348).
+//
+// Capability degradations count toward neither side. `state wi` on a
+// cluster with no cloud provider is a deliberate unavailability, not a
+// read that succeeded — and not a connectivity failure either.
+func (s *scanner) degenerate(scanned int, notRun []string) error {
+	if s.failed == 0 || s.productive > 0 || scanned > 0 || len(notRun) > 0 {
+		return nil
+	}
+	return fmt.Errorf("no check could read the cluster: all %d failed and nothing was scanned, "+
+		"so this is a runtime error rather than a partial result: %w", s.failed, s.firstErr)
+}
+
+// flushStageResults writes the deferred bookkeeping findings, each
+// under its own stage's stamp so it carries check=<name> like
+// everything else that stage produced.
+func (s *scanner) flushStageResults(inv emit.Invocation) error {
+	for _, r := range s.results {
+		s.stage = r.name
+		if err := inv.Out.Stamp("check", r.name); err != nil {
+			return err
+		}
+		if err := inv.Out.Emit(r.finding); err != nil {
+			return err
+		}
+	}
+	s.stage = ""
+	return inv.Out.Stamp("check", "")
 }
 
 // drilldown is stage 2: one List pass, then the `state edges`

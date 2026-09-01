@@ -154,6 +154,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lookout scan` no longer exits 0 against a cluster it could not
+  reach. Per-check resilience is what scan is for and it stays — one
+  check failing must not lose the other six — but the degenerate case
+  is not a partial result: an unreachable cluster, or a `--context`
+  that does not exist, produced seven `scan.check_failed` warnings and
+  `scanned=0 findings=8` at exit 0. An agent had to read the message
+  text to work out that none of those findings was about the cluster,
+  and a wrapper branching on the exit code of the documented "start
+  here" command saw success. When every check that ran failed and none
+  of them read a single object, scan now exits 1 and names the cause
+  once on stderr instead of repeating it per check. A capability
+  degradation (`state wi` with no cloud provider) counts toward neither
+  side, and a timeout still reports itself as `scan.incomplete`, which
+  is the better diagnosis of the two.
 - Scaling a settled Deployment no longer fires a spurious
   `objectstate.progress_deadline` warning. The signal is a leading
   indicator of a stalling rollout and clocks itself off the

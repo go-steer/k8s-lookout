@@ -190,6 +190,105 @@ func TestScan_FailedStageDoesNotVoidTheScan(t *testing.T) {
 	}
 }
 
+// unreachable is the shape every stage-1 check takes against a
+// cluster that cannot be reached at all: same error, nothing read.
+func unreachable(context.Context, emit.Invocation) (int, error) {
+	return 0, errors.New("default kubeconfig: invalid configuration: no configuration has been provided")
+}
+
+// TestScan_EverythingFailedIsARuntimeError: the limit of per-check
+// resilience. Seven warnings and `scanned=0 findings=8` at exit 0 is a
+// connectivity error dressed as data — an agent has to read the
+// message text to work out that none of these findings is about the
+// cluster, and a wrapper branching on the exit code of the documented
+// "start here" command sees success (#348).
+func TestScan_EverythingFailedIsARuntimeError(t *testing.T) {
+	c := newScan(t, nil,
+		stage("triage delta", unreachable),
+		stage("state webhooks", unreachable),
+	)
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitRuntime {
+		t.Fatalf("exit %d, want %d (runtime error); stdout:\n%s", res.Code, emit.ExitRuntime, res.Stdout)
+	}
+	// Once, on stderr, with the cause — not twice on stdout as
+	// warnings about the cluster.
+	if !strings.Contains(res.Stderr, "no check could read the cluster: all 2 failed") ||
+		!strings.Contains(res.Stderr, "no configuration has been provided") {
+		t.Errorf("stderr does not name the cause once:\n%s", res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "scan.check_failed") {
+		t.Errorf("the per-check warnings are the thing this replaces:\n%s", res.Stdout)
+	}
+	// §4.2: exit 1 is a void result, so there is no summary line to
+	// mistake for one — no `findings=8` for a caller to act on.
+	if strings.Contains(res.Stdout, "scanned=") {
+		t.Errorf("a runtime error must not terminate in a summary:\n%s", res.Stdout)
+	}
+}
+
+// TestScan_OneCheckThatReadSomethingIsAPartialResult: the other side
+// of #348, and the reason the test is on "read nothing" rather than on
+// "some check failed". A single stage that got through is a real
+// partial result and the failures beside it are the right way to say
+// what is missing.
+func TestScan_OneCheckThatReadSomethingIsAPartialResult(t *testing.T) {
+	c := newScan(t, nil,
+		stage("triage delta", emits()), // scanned=1, no findings
+		stage("state webhooks", unreachable),
+		stage("state volumes", unreachable),
+	)
+	res := checktest.Run(t, c, "--max-drilldown=0")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if got := strings.Count(res.Stdout, "kind=scan.check_failed"); got != 2 {
+		t.Errorf("check_failed count = %d, want 2:\n%s", got, res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "scanned=1 findings=2") {
+		t.Errorf("summary should report the partial read:\n%s", res.Stdout)
+	}
+}
+
+// TestScan_UnavailableIsNotAReadThatSucceeded: `state wi` with no
+// cloud provider emits an explicit unavailable finding and returns
+// cleanly. That is a deliberate degradation, not evidence the cluster
+// is reachable, so it must not rescue a run in which everything else
+// failed — the transcript in #348 has exactly this stage in it.
+func TestScan_UnavailableIsNotAReadThatSucceeded(t *testing.T) {
+	degraded := func(_ context.Context, inv emit.Invocation) (int, error) {
+		return 0, inv.Out.Emit(emit.Finding{
+			Kind: "cloud.unavailable", Severity: emit.SeverityInfo,
+			Reason: "CapabilityUnavailable", Message: "no cloud provider configured",
+		})
+	}
+	c := newScan(t, nil,
+		stage("triage delta", unreachable),
+		stage("state wi", degraded),
+	)
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitRuntime {
+		t.Fatalf("exit %d, want %d; stdout:\n%s", res.Code, emit.ExitRuntime, res.Stdout)
+	}
+}
+
+// TestScan_TimeoutStillReportsItselfNotTheFailures: a timeout that
+// leaves every check that did run failed still belongs to
+// scan.incomplete, which is the more useful diagnosis of the two.
+func TestScan_TimeoutStillReportsItselfNotTheFailures(t *testing.T) {
+	c := newScan(t, nil,
+		stage("triage delta", unreachable),
+		stage("state webhooks", unreachable),
+	)
+	res := checktest.Run(t, c, "--timeout=1ns")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "kind=scan.incomplete") {
+		t.Errorf("stdout should carry the timeout diagnosis:\n%s", res.Stdout)
+	}
+}
+
 // TestScan_TimeoutIsReportedNotHidden: a partial scan that looked
 // complete would be the worst possible failure mode — an agent would
 // read findings=0 as "healthy" (§11, no coverage lies).

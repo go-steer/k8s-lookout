@@ -137,7 +137,7 @@ frozen vocabulary — see [Signal kinds](/reference/signal-kinds/).
 | `route.missing_backend` | critical | the route's backendRef Service does not exist | [`scan`](/reference/scan/), [`state gateway`](/reference/state-gateway/) |
 | `route.missing_parent` | critical | the route's parentRef names a Gateway that does not exist | [`scan`](/reference/scan/), [`state gateway`](/reference/state-gateway/) |
 | `route.not_accepted` | critical | the Gateway refused the route's attachment (listener, hostname, or namespace policy) | [`scan`](/reference/scan/), [`state gateway`](/reference/state-gateway/) |
-| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster | [`scan`](/reference/scan/) |
+| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster — unless EVERY stage failed and none read anything, which is a runtime error (exit 1) rather than a scan | [`scan`](/reference/scan/) |
 | `scan.check_skipped` | info | a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks | [`scan`](/reference/scan/) |
 | `scan.incomplete` | warning | the --timeout expired with stages still to run; not_run names them | [`scan`](/reference/scan/) |
 | `spec.condition` | warning | a status condition of the target that is not in its nominal state | [`bundle`](/reference/bundle/), [`triage spec`](/reference/triage-spec/) |
