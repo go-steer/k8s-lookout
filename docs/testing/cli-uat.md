@@ -632,15 +632,22 @@ that the CLI-name-to-tool-name mapping is *read* from the registry and
 never derived: 20 of the 34 differ (`bundle` is served as
 `k8s_triage_workload`, `state webhooks` as `k8s_admission_webhooks`).
 
-Parity is byte-for-byte after normalizing five fields, and the list is
+Parity is byte-for-byte after normalizing six fields, and the list is
 kept short on purpose because each entry is something the check stops
-covering. All five are observations of something that moves on its own
+covering. All six are observations of something that moves on its own
 between two calls rather than values a command chooses: `elapsed=`,
 the `first_seen=`/`last_seen=` ends of the sliding log window, the
-`sample=` line drawn from it, and the `window=` lookback `triage
-changes` anchors to now. Counters are deliberately *not* normalized —
-`count=` and `scanned=` are stable across calls, so a change in one is
-a real difference and should fail.
+`sample=` line drawn from it, the `window=` lookback `triage changes`
+anchors to now, and `age=`, which is now minus a creation or
+transition timestamp and renders to the second below 48h. Counters are
+deliberately *not* normalized — `count=` and `scanned=` are stable
+across calls, so a change in one is a real difference and should fail.
+
+`age=` is the entry worth knowing about, because a workstation cluster
+hides it completely: objects there are days old, so `age=12d` reads the
+same twice, while on a six-minute-old CI cluster every inventory line
+ticks between the CLI run and the tool call. Local green is not
+evidence for this class of field; the post-merge `e2e-kind` run is.
 
 **Command coverage checklist** (tick when a UAT case exists). The
 cross-cutting contract already covers every command below for exit
@@ -675,7 +682,7 @@ these ticks are for the command's *own* behaviour.
 - [x] Cross-cutting: exit codes, stdout purity, summary line, JSON, scope flags, `--at`, `--timeout`
 - [ ] Cross-cutting: secret-safety and healthy-path (both need fixtures — no demo workload mounts a Secret, and the shared cluster is never clean)
 - [x] MCP tool-vs-CLI parity for every check (`uat-cases/10-mcp.sh`,
-      byte-for-byte after normalizing the five fields two invocations
+      byte-for-byte after normalizing the six fields two invocations
       cannot agree on — see `uat_normalize_payload`)
 
 ---

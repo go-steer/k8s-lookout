@@ -334,8 +334,8 @@ uat_free_port() {
 #
 # The normalizer is deliberately small and every entry has to earn its
 # place, because each one is a field the parity check stops covering.
-# All four are observations of something that moves on its own between
-# two calls, not values a command chooses:
+# Every one is an observation of something that moves on its own
+# between two calls, not a value a command chooses:
 #
 #   elapsed=      how long this run took
 #   first_seen=   \ the ends of a sliding log window: the log tail is a
@@ -343,6 +343,12 @@ uat_free_port() {
 #   sample=       an example line drawn from that window
 #   window=       a lookback anchored to now (triage changes reports
 #                 the span it approximated over)
+#   age=          now minus creationTimestamp (or a condition's last
+#                 transition), rendered to the second below 48h — so it
+#                 ticks between two calls on any young object. A
+#                 workstation cluster is days old and hides this
+#                 entirely; a CI cluster is six minutes old and every
+#                 inventory line drifts.
 #
 # Counters are NOT normalized — count= and scanned= are stable across
 # calls (the window is a fixed size), so a change in one is a real
@@ -352,6 +358,7 @@ uat_normalize_payload() {
   sed -E \
     -e 's/elapsed=[0-9.]+[a-zµ]*/elapsed=NORM/' \
     -e 's/(first_seen|last_seen|window)=[^ ]+/\1=NORM/g' \
-    -e 's/sample="([^"\\]|\\.)*"/sample="NORM"/g' |
+    -e 's/sample="([^"\\]|\\.)*"/sample="NORM"/g' \
+    -e 's/(^|[[:space:]])age=[^ ]*/\1age=NORM/g' |
     sed -e 's/[[:space:]]*$//' -e '/^$/d'
 }
