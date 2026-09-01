@@ -190,18 +190,32 @@ func (b *watchboard) run(ctx context.Context) {
 	}
 }
 
-// startBoard runs the watchboard flush loop in a goroutine and
-// returns a wait func that blocks until run has returned — i.e.
-// until the final shutdown FlushNow has completed. wait is never nil.
-// The wiring shutdown path calls wait so a terminating sentinel does
-// not exit before the board's last flush lands (issue #108).
+// startBoard runs the watchboard flush loop in a goroutine and returns
+// a wait func that STOPS the board and blocks until run has returned —
+// i.e. until the final shutdown FlushNow has completed. wait is never
+// nil. The wiring shutdown path calls wait so a terminating sentinel
+// does not exit before the board's last flush lands (issue #108).
+//
+// The board gets its own cancel scope rather than running on the
+// caller's ctx, and wait cancels it. That is what makes the join
+// unconditional: the caller reaches it on two paths, and on only one
+// of them is the parent ctx already cancelled. Running on the caller's
+// ctx meant a runner exiting because a SOURCE failed joined a board
+// that had been given no reason to stop, and the process wedged with
+// its diagnosis unprinted (issue #364). The final FlushNow does its
+// delivery on a fresh background ctx, so cancelling here does not cost
+// the buffered warnings #108 exists to keep.
 func startBoard(ctx context.Context, board *watchboard) (wait func()) {
+	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		board.run(ctx)
 	}()
-	return func() { <-done }
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // flushLocked injects the buffered warnings as one digest, rotating
