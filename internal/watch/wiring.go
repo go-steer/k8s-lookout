@@ -918,11 +918,17 @@ func (r *runner) run(ctx context.Context) error {
 	if snapErr := dedup.Snapshot(); snapErr != nil {
 		log.Printf("dedup snapshot on shutdown: %v", snapErr)
 	}
-	// Block on the watchboard's final flush (§7.7, issue #108): run's
-	// shutdown branch does a best-effort FlushNow when ctx cancels, and
+	// Stop the watchboard and block on its final flush (§7.7, issue
+	// #108): run's shutdown branch does a best-effort FlushNow, and
 	// this join keeps the process alive until it lands so buffered
 	// warnings aren't dropped on SIGTERM. Nil-guarded: the board is
 	// optional (per-incident mode without warning routing).
+	//
+	// Reached on TWO paths — a cancelled ctx (SIGTERM) and a fatal
+	// source error from RunAll, which does not cancel this ctx. waitBoard
+	// stops the board itself so both behave the same; before #364 the
+	// error path blocked here forever and the process wedged instead of
+	// exiting with the diagnosis §7.2 promises.
 	if waitBoard != nil {
 		waitBoard()
 	}

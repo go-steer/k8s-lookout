@@ -126,11 +126,11 @@ UAT cases that don't need the full stub-daemon loop:
   logs disabled, watch stays up.
 - **`--sources=<explicit>` fail-fast** — naming a source whose grant is
   missing must be a **startup FAILURE** (exit non-zero), the strict-§11
-  posture. Assert the process exits with the missing-grant named. The
-  message half holds today; the *exit* does not — issue #364 wedges the
-  process on the watchboard join, so `uat-cases/30-root.sh` reports that
-  half as a skip naming the issue and will start asserting it the moment
-  the process exits on its own.
+  posture. Assert the process exits with the missing-grant named — both
+  halves, the exit and the diagnosis. The exit was missing until #364:
+  the watchboard join waited on a context the error path never
+  cancelled, so a sentinel that could not run its sources kept `/healthz`
+  at 200 and printed the reason only when someone sent it a SIGTERM.
 
 > Note on exit codes: the read path follows §4.2 (2 for a usage error),
 > but `watch` deliberately keeps the standalone sentinel's 0/1
@@ -752,8 +752,7 @@ these ticks are for the command's *own* behaviour.
 
 - [x] `version`
 - [x] `watch --dry-run`, `--sources=auto` probe, `--sources` fail-fast,
-      `/healthz`+`/metrics`, and `/readyz` red-then-green (the fail-fast
-      *exit* is skipped, not asserted — issue #364)
+      `/healthz`+`/metrics`, and `/readyz` red-then-green
 - [x] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
       `--access-log`, and the three-flag off-host bind with a 401);
       also `--profile` / `--tools` surface selection

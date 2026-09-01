@@ -531,12 +531,14 @@ uat_root_watch_refusals() {
       uat_bad "an explicitly named source that cannot run → the process exits non-zero" "got exit 0"
     fi
   else
-    # Issue #364: RunAll returns the error, but the watchboard join
-    # waits on a context that never cancels, so the process wedges
-    # instead of exiting and the error only prints on SIGTERM. The
-    # message below is still asserted — it is the exit that is missing.
-    uat_skipped "an explicitly named source that cannot run → the process exits non-zero" \
-      "still running after 90s — issue #364, the fatal-source path wedges on the watchboard join"
+    # This is the #364 shape: RunAll returns the error, but the
+    # watchboard join waits on a context nothing cancelled, so the
+    # process wedges with its diagnosis unprinted and only speaks on
+    # SIGTERM. Fixed — the board is stopped by the join itself — so a
+    # process still running here is that defect returning, not an
+    # environment quirk.
+    uat_bad "an explicitly named source that cannot run → the process exits non-zero" \
+      "still running after 90s — the fatal-source path is wedged on the watchboard join again (#364)"
     uat_watch_stop
   fi
 

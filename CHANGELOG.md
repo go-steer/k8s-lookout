@@ -154,6 +154,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lookout watch` now exits when a source it was explicitly asked for
+  cannot run, instead of wedging with the reason unprinted. The
+  fail-fast path is the strict posture a sentinel is supposed to have:
+  a named source whose grant is missing must stop the process rather
+  than leave it running blind. It reported the error internally and
+  then blocked forever on the watchboard join — the join waited for a
+  context cancellation that only ever arrived on the SIGTERM path, so
+  the process stayed up with `/healthz` answering 200, `/readyz`
+  blaming informer caches, and the actual diagnosis printed only once
+  someone thought to kill it. A supervisor watching health endpoints
+  saw a sentinel that was fine; nothing was being watched. The board
+  now owns its own cancel scope and shutting it down is what the join
+  does, so both paths behave identically, and the final flush that
+  keeps buffered warnings from being dropped still runs on either one.
 - `examples/uat`'s preflight no longer hangs for its full timeout when
   a demo Deployment is unavailable. It waited on
   `--for=condition=Available deploy --all`, which is sequential
