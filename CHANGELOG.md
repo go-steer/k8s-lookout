@@ -35,6 +35,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cancelled context. Enumerating from the registry means a newly
   registered command with no entry in the invocation table fails the
   run, so the coverage cannot rot as commands are added.
+- MCP tool-vs-CLI parity, as the second UAT case. `lookout mcp` is a
+  second way into every read-path command and the one an agent
+  actually uses; its documented contract is that "tool results carry
+  the same payload the CLI prints", and nothing checked it. The case
+  starts a real server, replays the *same* invocations the contract
+  case uses, and compares each tool result against the CLI's stdout
+  byte for byte — driving both sides from one description of a valid
+  call is what makes the comparison mean anything. Five fields are
+  normalized first, all of them observations of something that moves
+  on its own between two calls rather than values a command chooses:
+  `elapsed=`, the `first_seen=`/`last_seen=` ends of the sliding log
+  window, the `sample=` line drawn from it, and the `window=` lookback
+  `triage changes` anchors to now. Counters are deliberately not
+  normalized, so a change in `count=` or `scanned=` still fails. The
+  CLI-name-to-tool-name mapping is read from the registry rather than
+  derived, because 20 of the 34 differ.
+- The same case covers the MCP bind rules, which are a security
+  property rather than a convenience — the whole surface reads the
+  cluster. A non-loopback bind is refused; each opt-in flag on its own
+  is still refused; and the one accepted off-host configuration
+  answers 401 without the bearer token and with a wrong one, serves it
+  with the right one, and records the call to its mandatory access log
+  at mode 0600. `--profile` and `--tools` are checked to actually
+  narrow the advertised surface, since every tool costs tokens and
+  choice accuracy on every model call.
 - The kind e2e workflow runs the T0 UAT after its scenarios, on both
   the post-merge smoke tier and the weekly full tier. It runs even
   when the scenarios failed: signal routing is the legitimately flaky

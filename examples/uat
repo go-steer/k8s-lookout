@@ -35,6 +35,7 @@
 
 . "$(dirname "$0")/lib.sh"
 . "$(dirname "$0")/uat-lib.sh"
+. "$(dirname "$0")/uat-invocations.sh"
 require_examples_context
 
 UAT_CASES_DIR="$(examples_root)/uat-cases"
