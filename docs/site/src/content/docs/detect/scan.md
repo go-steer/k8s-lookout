@@ -234,7 +234,7 @@ empty scan means "nothing is wrong" and not "nothing ran".
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `scan.check_skipped` | info | a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks |
-| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster |
+| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster — unless EVERY stage failed and none read anything, which is a runtime error (exit 1) rather than a scan |
 | `scan.incomplete` | warning | the --timeout expired with stages still to run; not_run names them |
 
 ## See also
