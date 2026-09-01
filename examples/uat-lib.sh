@@ -220,6 +220,53 @@ uat_expect_stderr() {
   return 1
 }
 
+# ---- fixtures -------------------------------------------------------------
+
+# Some commands have nothing to say about a healthy cluster: `state
+# webhooks` on a stock kind cluster is a correct `findings=0`, and a
+# check that only ever sees findings=0 is not testing the command. Those
+# cases inject a fixture from examples/scenarios/ first.
+#
+# Every injected fixture is pushed onto a stack the DRIVER reverts on
+# exit (examples/uat), not the case — a case that dies mid-way must not
+# leave a dead admission webhook or a broken Deployment behind for the
+# next run to trip over. Reverts run in reverse order, and a failing
+# revert is loud but does not stop the others.
+UAT_FIXTURES=()
+
+# uat_fixture <name> — inject examples/scenarios/<name> and register its
+# revert. Returns non-zero if the inject failed, so a case can report
+# one failure instead of asserting against a fixture that never landed.
+uat_fixture() {
+  local name="$1" dir
+  dir="$(examples_root)/scenarios/$name"
+  if [[ ! -x "$dir/inject" ]]; then
+    uat_bad "fixture $name → inject" "no executable $dir/inject"
+    return 1
+  fi
+  # Registered BEFORE running, not after: a half-applied inject still
+  # has objects to clean up.
+  UAT_FIXTURES+=("$name")
+  if ! "$dir/inject" >/dev/null 2>&1; then
+    uat_bad "fixture $name → inject" "$dir/inject failed; re-run it by hand to see why"
+    return 1
+  fi
+  return 0
+}
+
+# uat_fixtures_revert — called from the driver's EXIT trap.
+uat_fixtures_revert() {
+  local i name dir
+  for ((i = ${#UAT_FIXTURES[@]} - 1; i >= 0; i--)); do
+    name="${UAT_FIXTURES[$i]}"
+    dir="$(examples_root)/scenarios/$name"
+    printf '▸ reverting fixture: %s\n' "$name"
+    "$dir/revert" >/dev/null 2>&1 ||
+      printf '  ⚠ revert failed for %s — run %s by hand\n' "$name" "$dir/revert" >&2
+  done
+  UAT_FIXTURES=()
+}
+
 # ---- the command registry -------------------------------------------------
 
 # uat_read_commands — every read-path check, as its CLI command path,

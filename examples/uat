@@ -19,9 +19,15 @@
 # workload breaks?" (the watch path). This asks the other half: "does
 # every read-path command return correct, well-shaped, secret-safe
 # output?" It reuses the same cluster, demo app, context guard and
-# binary resolution; it does not deploy anything and, unlike the
-# scenarios, it does not break workloads — the fixtures it needs live
-# in examples/scenarios/ and are injected by name.
+# binary resolution.
+#
+# Most of it only reads. The exception is the fixture cases: a command
+# with nothing to say about a healthy cluster (`state webhooks`,
+# `stab drift`) cannot be tested by reading one, so those cases inject a
+# fixture from examples/scenarios/ and the driver reverts it on exit —
+# including on failure and on Ctrl-C. The fixtures are additive
+# (a throwaway Deployment, a narrowly scoped webhook); none of them
+# breaks the demo app the scenarios use.
 #
 # Usage:
 #   examples/uat                  # every case this tier can run
@@ -69,8 +75,26 @@ if ! kubectl get namespace "$DEMO_NS" >/dev/null 2>&1; then
   echo "▸ demo workloads missing — applying examples/workloads/"
   kubectl apply -f "$(examples_root)/workloads/"
 fi
-kubectl -n "$DEMO_NS" wait --for=condition=Available deploy --all --timeout=180s >/dev/null
-echo "  ✓ demo workloads ready"
+# Wait for the DEMO app specifically, not for every Deployment in the
+# namespace. `--all` was both too slow and fatal: a scenario that is
+# still injected (image-pull, crashloop) legitimately leaves a demo
+# Deployment unavailable, and kubectl waits the full timeout on the
+# first one that never arrives and then reports every Deployment it
+# never got to. The names come from the manifests so the list cannot go
+# stale, and a degraded app is a warning — several commands have more
+# to say about a broken cluster than a healthy one.
+mapfile -t demo_deploys < <(
+  kubectl apply -f "$(examples_root)/workloads/" --dry-run=client -o name 2>/dev/null |
+    grep '^deployment.apps/'
+)
+if ((${#demo_deploys[@]} == 0)); then
+  echo "  ⚠ could not read examples/workloads/ — skipping the readiness wait" >&2
+elif kubectl -n "$DEMO_NS" wait --for=condition=Available "${demo_deploys[@]}" --timeout=180s >/dev/null 2>&1; then
+  echo "  ✓ demo workloads ready"
+else
+  echo "  ⚠ demo workloads are not all Available — continuing anyway" >&2
+  kubectl -n "$DEMO_NS" get "${demo_deploys[@]}" >&2 || true
+fi
 echo "  ✓ lookout binary: $(lookout_bin)"
 echo "  ✓ tier: $UAT_TIER"
 
@@ -78,7 +102,7 @@ echo "  ✓ tier: $UAT_TIER"
 # build. Removed on exit including on failure — a UAT run must not
 # leave a SQLite store behind for the next one to read stale state from.
 UAT_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/lookout-uat.XXXXXX")"
-trap 'rm -rf "$UAT_WORKDIR"' EXIT
+trap 'uat_fixtures_revert; rm -rf "$UAT_WORKDIR"' EXIT
 echo "  ✓ workdir: $UAT_WORKDIR"
 
 for c in "${cases[@]}"; do

@@ -393,7 +393,69 @@ above need the following **new** fixtures. Model each as an
 
 > All snippets below are sketches to adapt into the scenario scripts —
 > they assume the `lookout-examples` kind context and the `lookout-demo`
-> namespace unless noted.
+> namespace unless noted. **Fixtures** (immediately below) records what
+> was actually built and supersedes the sketches for those five.
+
+## Fixtures
+
+A *fixture* is a scenario directory that exists to give a command
+something to say. It is not a failure scenario: nothing is expected on
+the wire, no sentinel needs to be running, and `verify` is a smoke
+check rather than a contract — the contract lives in
+`examples/uat-cases/20-fixtures.sh`.
+
+The distinction matters because five commands have nothing to report
+about a healthy cluster. `state webhooks`, `state edges`, `stab drift`,
+`stab drain` and `triage logs` all return a perfectly well-formed
+`findings=0` against stock kind, and a check that only ever sees
+`findings=0` is not testing the check — it is testing that the binary
+starts.
+
+**Every fixture owns its own `lookout-uat-*` namespace.** Nothing a
+fixture creates may sit in `lookout-demo`, where the demo app and the
+failure scenarios live. Three reasons, in increasing order of how much
+they cost when ignored:
+
+1. `revert` becomes one `kubectl delete namespace` and cannot miss an
+   object.
+2. Later UAT cases never see fixture leftovers, and a fixture never
+   perturbs a scenario's `verify`.
+3. A fixture is allowed to create something that never becomes
+   healthy — `broken-edges` deliberately wedges a Deployment in
+   `CreateContainerConfigError` forever. In `lookout-demo` that
+   poisons anything waiting on the namespace. It did: the driver's
+   preflight used to `kubectl wait --for=condition=Available deploy
+   --all`, which blocks the whole timeout on the first Deployment that
+   never arrives and then reports every Deployment it never reached as
+   timed out. The preflight now waits only on the Deployments read back
+   from `examples/workloads/`, and warns rather than aborting if they
+   are degraded — a still-injected scenario is a legitimate state, and
+   several commands have *more* to say about a broken cluster.
+
+| Fixture | Namespace | Feeds | Negative control |
+| --- | --- | --- | --- |
+| [`chatty-logs`](../../examples/scenarios/chatty-logs/README.md) | `lookout-uat-logs` | `triage logs` | probe lines survive `--keep-probes` |
+| [`broken-edges`](../../examples/scenarios/broken-edges/README.md) | `lookout-uat-edges` | `state edges` | `edgy-ok`/`edgy-web`, ready and in the Endpoints |
+| [`broken-webhook`](../../examples/scenarios/broken-webhook/README.md) | `lookout-uat-webhook` | `state webhooks` | `lookout-uat-slow`, live and not reported dead |
+| [`config-drift`](../../examples/scenarios/config-drift/README.md) | `lookout-uat-drift` | `stab drift` | `drift-clean`, never edited |
+| [`drain-blockers`](../../examples/scenarios/drain-blockers/README.md) | `lookout-uat-drain` | `stab drain` | — (the cluster supplies plenty) |
+
+Each one carries a negative control on purpose. A check that fires on
+everything is indistinguishable from a check that fires correctly
+unless something adjacent stays quiet, so every fixture holds at least
+one object of the same shape that must *not* be reported.
+
+The cases register a fixture with `uat_fixture <name>`, which injects
+it and pushes it onto a stack; the driver reverts the stack in reverse
+order from its `EXIT` trap, so a failure or a Ctrl-C leaves the cluster
+as it found it. A fixture that fails to inject skips its section rather
+than failing the run.
+
+One case has no scenario directory: `net probe` is exercised against a
+listener the case starts on `127.0.0.1`. A ClusterIP is not reachable
+from where the CLI runs, so a cluster-side fixture would test nothing;
+the point of `net probe` is precisely that it answers from the caller's
+vantage point.
 
 ### `hpa-thrash` (T1) — for `triage events` HPA-thrash, `autoscaling.*`
 An HPA whose target oscillates so scale direction flips repeatedly, plus
@@ -664,21 +726,21 @@ these ticks are for the command's *own* behaviour.
 - [ ] `health` (+ healthy-path)
 - [ ] `triage delta` (+ `--only`)
 - [ ] `triage events` (+ HPA thrash)
-- [ ] `triage logs` (+ `--previous`)
+- [x] `triage logs` (+ `--keep-probes`, `--max-templates`, `--previous`)
 - [ ] `triage top` (+ `--history` degradation)
 - [ ] `triage spec` (+ `--diff`, secret-safety)
 - [ ] `triage status` (write→read round-trip, `triage.regressed`)
 - [ ] `triage radius` (live + `--at`)
 - [ ] `triage changes` (live + `--at`)
-- [ ] `state edges`
-- [ ] `state webhooks`
+- [x] `state edges` (+ `--cert-warn` both directions)
+- [x] `state webhooks` (+ `--cert-warn`)
 - [ ] `state wi` (unavailable + real)
 - [ ] `state volumes` (clean + Multi-Attach)
-- [ ] `stab drift` (+ `--identity` degradation)
-- [ ] `stab drain`
+- [x] `stab drift` (+ `--manager`, the no-GitOps path; `--identity` degradation still open)
+- [x] `stab drain` (+ `--node`, `-A` roll-up)
 - [ ] `perf probe` (unavailable + real packs)
 - [ ] `cloud orphans` / `quota` / `ipspace` / `stockout` (+ GCP-free refusal)
-- [ ] `net probe` (reachable + unreachable, no mutation)
+- [x] `net probe` (reachable + unreachable, no mutation)
 - [x] Cross-cutting: exit codes, stdout purity, summary line, JSON, scope flags, `--at`, `--timeout`
 - [ ] Cross-cutting: secret-safety and healthy-path (both need fixtures — no demo workload mounts a Secret, and the shared cluster is never clean)
 - [x] MCP tool-vs-CLI parity for every check (`uat-cases/10-mcp.sh`,

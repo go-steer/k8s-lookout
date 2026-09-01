@@ -19,7 +19,7 @@ examples/
 ├── kind/            # cluster.yaml + up/down (metrics-server, image pre-pull, --build)
 ├── sentinel/        # sentinel + stub daemon deploy (uses deploy/ manifests unmodified)
 ├── workloads/       # the lookout-demo baseline app: web, api(+PDB), worker, vantage
-├── scenarios/       # one dir per failure: README + inject / verify / revert
+├── scenarios/       # one dir per failure (and per UAT fixture): README + inject / verify / revert
 ├── kwok/            # + hundreds of fake nodes on the same cluster: scale, bench, fleet scenarios, mass node failure
 ├── e2e              # driver: inject → verify → revert per scenario, PASS/FAIL summary
 ├── uat              # driver: the read-path half — every command's output contract
@@ -84,6 +84,12 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
+`scenarios/` also holds five **UAT fixtures** — `chatty-logs`,
+`broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`.
+Same three scripts, different job: nothing is expected on the wire and
+`examples/e2e` skips them. They exist to give a read-path command
+something to report; see [the read-path tier](#the-read-path-tier).
+
 ## The scale tier
 
 Every scenario above runs on two real workers and ~10 pods, which is
@@ -123,9 +129,24 @@ UAT_TIER=T1 examples/uat    # also the cases that need metrics-server
 ```
 
 It needs the cluster and the demo app, but **not** a sentinel — every
-command reads the cluster directly through your kubeconfig. It breaks
-nothing and reverts nothing, so it is safe to run at any point,
-including immediately after a scenario.
+command reads the cluster directly through your kubeconfig. It never
+touches the demo app, so it is safe to run at any point, including
+immediately after a scenario.
+
+Mostly it only reads. The exception is the **fixtures** case
+(`uat-cases/20-fixtures.sh`): five commands — `triage logs`,
+`state edges`, `state webhooks`, `stab drift`, `stab drain` — have
+nothing to say about a healthy cluster, and a check that only ever
+sees `findings=0` is not being tested. So that case injects a fixture
+scenario for each, and the driver reverts them in reverse order from
+its `EXIT` trap, including on failure and on Ctrl-C. Every fixture
+lives in its own `lookout-uat-*` namespace and never in `lookout-demo`,
+which is what makes revert a single `kubectl delete namespace` and
+keeps a deliberately-wedged Deployment out of the namespace the demo
+app and the scenarios share. Each also carries a negative control — an
+object of the same shape that must *not* be reported — because a check
+that fires on everything looks identical to one that fires correctly.
+See [§ Fixtures](../docs/testing/cli-uat.md#fixtures).
 
 The cross-cutting case (`uat-cases/00-contract.sh`) enumerates commands
 from the registry via `lookout mcp --list-tools` rather than a list
