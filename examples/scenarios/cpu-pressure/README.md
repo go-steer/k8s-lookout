@@ -22,7 +22,7 @@ examples/scenarios/cpu-pressure/revert
 | Pod | Spec | Lands in |
 | --- | --- | --- |
 | `cpuhog` | `limits.cpu: 200m`, runs `yes >/dev/null` | `top.saturation` `resource=cpu` `reason=CPUNearLimit`, ~100%, **warning** |
-| `memhog` | `limits.memory: 128Mi`, holds ~100Mi resident | `top.saturation` `resource=memory` `reason=MemoryNearLimit`, ~86%, warning |
+| `memhog` | `limits.memory: 128Mi`, holds ~112Mi resident | `top.saturation` `resource=memory` `reason=MemoryNearLimit`, ~90%, warning |
 | `nolimits` | no limits, no requests, idle | `top.unlimited` (and `top.unrequested`) census — never a saturation row |
 | `steady` | limits set, near idle | nothing — the negative control |
 
@@ -55,12 +55,12 @@ fixture forgets.
 `nolimits` is the one container with no bound, and it is idle for
 exactly that reason — `nolimits` describes the spec, not the workload.
 
-## Why memhog stops at ~86%
+## Why memhog stops at ~90%
 
 `judge` sends memory ≥95% to **critical**, and 95% of 128Mi leaves ~6Mi
 of headroom before the kernel kills the container. Aiming there would
 make this a flaky OOM scenario, which `examples/scenarios/oom/` already
-owns properly. ~86% is past `--top-warn` and clear of the critical band.
+owns properly. ~90% is past `--top-warn` and clear of the critical band.
 
 CPU has no equivalent risk and needs no equivalent care: over-limit CPU
 is throttled, never killed, so `cpuhog` can sit pinned at its quota
@@ -78,7 +78,7 @@ for a pod until it has scraped it at least once (~15s resolution, longer
 right after start). Waiting on pod readiness is not enough — the
 assertion would run against an empty sample and fail on timing rather
 than behaviour. The inject gates on the numbers the assertions use:
-cpuhog past 150m of 200m, memhog past 100Mi of 128Mi.
+cpuhog past 150m of 200m, memhog past 108Mi of 128Mi.
 
 ## What to expect
 
@@ -89,7 +89,7 @@ lookout triage top --namespace=lookout-uat-top --all
 ```
 
 - Two `top.saturation` findings, both **warning**: `cpuhog` on `cpu`
-  near 100%, `memhog` on `memory` near 86%. Neither is critical.
+  near 100%, `memhog` on `memory` near 90%. Neither is critical.
 - One `top.unlimited` census line counting `nolimits`;
   `--show-unlimited` adds a `top.unlimited_container` row naming it.
 - Nothing about `steady` at any point — until `--all`, which dumps every

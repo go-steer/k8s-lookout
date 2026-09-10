@@ -85,7 +85,7 @@ message instead).
 | Tier | Environment | Unlocks |
 | --- | --- | --- |
 | **T0** | kind, no cloud | `version`, `bundle`, `health`, `triage delta/events/logs/spec/status/radius/changes`, `state edges/webhooks/volumes*`, `stab drift/drain`, `net probe`, `mcp`; graceful-degradation of the cloud/GKE commands |
-| **T1** | kind **+ metrics-server** (`examples/kind/up` installs it) | `triage top`, HPA-thrash in `triage events`, saturation ramps |
+| **T1** | kind **+ metrics-server** (`examples/kind/up` installs it) | `triage top`, saturation ramps |
 | **T2** | GKE staging cluster | `state wi`, `state volumes` (cross-node Multi-Attach), `perf probe` real packs, `triage top --history`, `ingress`/`gateway` signals, `stab drift --identity` |
 | **T3** | GKE **+ cloud APIs + `-gke` image** | `cloud orphans/quota/ipspace/stockout`, quota/capacity-decision/notifications signals |
 | **T4** | core-agent cost stack v2.7.0 | `bundle --incident` / `triage status` against a real daemon, tokenburn signals |
@@ -93,6 +93,11 @@ message instead).
 `*` `state volumes` runs at T0 for the "no conflicts / explicit
 empty" path; provoking a real Multi-Attach needs a provisioner that
 supports cross-node RWO races (T2).
+
+HPA thrash was originally listed at T1 and is not: the detector reads
+`SuccessfulRescale` event *messages*, and the `hpa-thrash` fixture
+writes that history rather than waiting out a real oscillation, so
+nothing in the path touches metrics-server. It runs at **T0**.
 
 ---
 
@@ -204,12 +209,12 @@ Every abnormal object in one scan.
   `--only=pods` restricts to that category; `--quota-warn` gates the
   quota category. A clean cluster → `findings=0`.
 
-### `lookout triage events` — T0/T1
+### `lookout triage events` — T0
 Deduped event timeline + HPA thrash detection.
-- **Provoke (T0):** `crashloop` or `image-pull` (rich event stream).
-- **Provoke HPA thrash (T1):** **new fixture `hpa-thrash`** (Part 2) —
-  an HPA driven to flip scale direction ≥ `--hpa-flips` within
-  `--hpa-window`.
+- **Provoke:** `crashloop` or `image-pull` (rich event stream).
+- **Provoke HPA thrash:** fixture [`hpa-thrash`](../../examples/scenarios/hpa-thrash/README.md)
+  (Part 2) — two real HPAs, one with a `3→1→3→1` rescale history and one
+  with a monotonic `2→4→6` ramp.
 - **Assert:** events deduped and ordered chronologically over the owner
   tree; the HPA-thrash annotation appears only when flips exceed the
   threshold.
@@ -227,14 +232,22 @@ kubectl logs distilled via Drain clustering into templates + counts.
 
 ### `lookout triage top` — T1
 Point-in-time CPU/memory vs limits, OOM-asymmetry judged.
-- **Provoke:** **new fixture `cpu-pressure`** (Part 2) — a container
-  with a CPU limit under sustained load; and reuse the `oom` leaker
-  mid-ramp for the memory-vs-limit path.
-- **Assert:** the hot container is flagged past `--top-warn`; memory
-  pressure is judged more severely than CPU (OOM asymmetry);
-  `--show-unlimited` surfaces limitless containers; `--all`/`--limit`
-  paginate. **`--history` is T2** (needs the cloud provider window
-  stats) — on kind assert it degrades to an explicit unavailable note.
+- **Provoke:** fixture [`cpu-pressure`](../../examples/scenarios/cpu-pressure/README.md)
+  — a container pinned at 100% of its CPU limit, one held at ~90% of
+  its memory limit, one with no requests or limits at all, and one
+  limited-but-quiet control.
+- **Assert:** the hot containers are flagged past `--top-warn` and the
+  quiet one is not; the OOM asymmetry, read off the two *messages*
+  rather than off two severities — CPU says warning is its ceiling
+  however hard it is pushed, memory at the same severity says "critical
+  from 95%"; `--show-unlimited`/`--show-unrequested` surface the two
+  censuses and name the container behind each count; `--top-warn` moves
+  the attention line and the censuses do not move with it; `--all`/
+  `--limit` paginate. **`--history` is T2** (needs the cloud provider
+  window stats) — on kind assert it degrades to an explicit unavailable
+  note. The **critical** band is deliberately not exercised here: 95% of
+  a small limit is a few megabytes of headroom, so a fixture aimed there
+  is a flaky OOM, and the `oom` scenario owns a real one.
 
 ### `lookout triage spec` — T0
 Read one resource's spec, token-dense, secret-safe, default-elided.
@@ -404,7 +417,7 @@ above need the following **new** fixtures. Model each as an
 > All snippets below are sketches to adapt into the scenario scripts —
 > they assume the `lookout-examples` kind context and the `lookout-demo`
 > namespace unless noted. **Fixtures** (immediately below) records what
-> was actually built and supersedes the sketches for those five.
+> was actually built and supersedes the sketches for those it lists.
 
 ## Fixtures
 
@@ -412,14 +425,15 @@ A *fixture* is a scenario directory that exists to give a command
 something to say. It is not a failure scenario: nothing is expected on
 the wire, no sentinel needs to be running, and `verify` is a smoke
 check rather than a contract — the contract lives in
-`examples/uat-cases/20-fixtures.sh`.
+`examples/uat-cases/20-fixtures.sh` (and `50-t1.sh` for the one fixture
+that needs metrics-server).
 
 The distinction matters because several commands have nothing to report
 about a healthy cluster. `state webhooks`, `state edges`, `stab drift`,
-`stab drain` and `triage logs` all return a perfectly well-formed
-`findings=0` against stock kind, and a check that only ever sees
-`findings=0` is not testing the check — it is testing that the binary
-starts.
+`stab drain`, `triage logs`, `triage events`' HPA-thrash detector and
+`triage top` all return a perfectly well-formed `findings=0` against
+stock kind, and a check that only ever sees `findings=0` is not testing
+the check — it is testing that the binary starts.
 
 Two fixtures exist for the opposite reason. `health` and `triage delta`
 have *too much* to say about a shared cluster: what is broken right now
@@ -457,6 +471,8 @@ they cost when ignored:
 | [`broken-webhook`](../../examples/scenarios/broken-webhook/README.md) | `lookout-uat-webhook` | `state webhooks` | `lookout-uat-slow`, live and not reported dead |
 | [`config-drift`](../../examples/scenarios/config-drift/README.md) | `lookout-uat-drift` | `stab drift` | `drift-clean`, never edited |
 | [`drain-blockers`](../../examples/scenarios/drain-blockers/README.md) | `lookout-uat-drain` | `stab drain` | — (the cluster supplies plenty) |
+| [`hpa-thrash`](../../examples/scenarios/hpa-thrash/README.md) | `lookout-uat-hpa` | `triage events` HPA thrash | `ramp`, a monotonic `2→4→6` that is not thrash |
+| [`cpu-pressure`](../../examples/scenarios/cpu-pressure/README.md) **(T1)** | `lookout-uat-top` | `triage top` | `steady`, limited on both dimensions and quiet on both |
 | [`broken-workloads`](../../examples/scenarios/broken-workloads/README.md) | `lookout-uat-broken` | `health`, `triage delta`, `bundle`, `watch --dry-run`, `findings ack` | `steady`, healthy and named by none of them |
 | [`secret-workload`](../../examples/scenarios/secret-workload/README.md) | `lookout-uat-secrets` | secret-safety across every command; the healthy path | the workload is the control — nothing about it is a finding |
 
@@ -477,23 +493,37 @@ from where the CLI runs, so a cluster-side fixture would test nothing;
 the point of `net probe` is precisely that it answers from the caller's
 vantage point.
 
-### `hpa-thrash` (T1) — for `triage events` HPA-thrash, `autoscaling.*`
-An HPA whose target oscillates so scale direction flips repeatedly, plus
-(held long enough) a pin at max and a metrics-dead variant.
+### `hpa-thrash` (T0) — for `triage events` HPA-thrash
+**Built** — see [the fixture's README](../../examples/scenarios/hpa-thrash/README.md);
+this sketch is superseded.
 
-```sh
-# inject
-kubectl -n lookout-demo autoscale deploy/web --min=1 --max=6 \
-  --cpu-percent=50
-# oscillate load: alternate a CPU burst and idle so utilization
-# crosses the target back and forth faster than the stabilization window
-kubectl -n lookout-demo run thrash --image=python:3.12-alpine --restart=Never -- \
-  sh -c 'while true; do timeout 40 yes >/dev/null; sleep 40; done'
-```
-- Drives `triage events` HPA-thrash (flips ≥ `--hpa-flips` in
-  `--hpa-window`).
-- Hold at max for **10m+** → `autoscaling.hpa_pinned` (warn);
-  break metrics-server and wait **15m** → `autoscaling.hpa_metrics_dead`.
+Two real HPAs in `lookout-uat-hpa`, both pinned at `minReplicas=1` so
+neither controller has a reason to move, plus the `SuccessfulRescale`
+history each would have written:
+
+- `web` — sizes **3 → 1 → 3 → 1** across t−8m…t−2m: three moves, two
+  direction changes, exactly the default `--hpa-flips=2`.
+- `ramp` — sizes **2 → 4 → 6**: enough points to analyze, zero
+  direction changes. The negative control, and the important one, since
+  a fast monotonic ramp is what a *correctly* scaling HPA looks like.
+
+The history is **synthesized** rather than provoked, which is the one
+place in this tree a fixture does not reproduce its own mechanism. A
+real oscillation means alternating a CPU burst against a 5-minute
+scale-down stabilization window: ~15 minutes of wall clock for one
+up→down→up, and only a fuzzy `flips >= 2` at the end of it. Writing the
+events makes `replicas=3->1->3->1` and `flips=2` exact. What stays real
+is everything the code reads as an object: the HPAs, their
+`scaleTargetRef`s (the `target=` join), the Deployments, and the
+controller's message format, which is the actual parsing contract.
+
+This is why the fixture is **T0**, not T1 as first guessed: no part of
+the path needs metrics-server.
+
+`autoscaling.hpa_pinned` (held at max 10m+) and
+`autoscaling.hpa_metrics_dead` (metrics broken 15m) are **sentinel
+source** signals, not read-path findings — they belong to the watch-path
+e2e layer, not here.
 
 ### `chatty-logs` (T0) — for `triage logs`
 A container emitting a few high-count templates with variable fields
@@ -514,17 +544,43 @@ for i in range(100000):
   template and the distinct `ERROR db connection refused` template
   cluster with correct counts and abstracted variables.
 
-### `cpu-pressure` (T1) — for `triage top`, `saturation.forecast` (cpu)
-A container with a CPU limit held under sustained load.
+### `cpu-pressure` (T1) — for `triage top`
+**Built** — see [the fixture's README](../../examples/scenarios/cpu-pressure/README.md);
+this sketch is superseded.
 
-```sh
-# inject
-kubectl -n lookout-demo run cpuhog --image=python:3.12-alpine --restart=Never \
-  --limits=cpu=200m,memory=64Mi -- \
-  sh -c 'yes >/dev/null'
-```
-- `lookout triage top -n lookout-demo` → assert `cpuhog` past
-  `--top-warn`. Sustain ~45m with a ramp for `saturation.forecast`.
+Four pods in `lookout-uat-top`, one per part of the output:
+
+- `cpuhog` — `yes > /dev/null` against a **200m** CPU limit. The kernel
+  throttles it to exactly the limit, so the row sits at ~100% forever
+  and must still be a **warning**.
+- `memhog` — ~112Mi resident against a **128Mi** limit, ~**90%**: past
+  `--top-warn` and clear of the ≥95% critical band.
+- `nolimits` — no requests, no limits. Invisible to every judgment
+  above, which is precisely why both censuses must count it. Idle, too:
+  `nolimits` names the pod spec, not the workload.
+- `steady` — the negative control. Limited on both dimensions and quiet
+  on both. A `top` that names two saturated containers in a namespace
+  holding two saturated containers is indistinguishable from one that
+  names everything it samples, until there is a limited-but-quiet
+  container sitting next to them that it leaves alone.
+
+Every load-generating container is **limit-bound on purpose**: an
+earlier version of this fixture ran the same hogs unbounded and, with a
+second cluster up, took the workstation to load ~28 of 32 and starved
+out the IDE server running the session. `cap_kind_nodes` in
+`examples/lib.sh` is the second, independent layer (4 cpu / 8g per node,
+at the docker layer so it stays invisible to the API server and cannot
+default-inject limits into `nolimits` the way a LimitRange would).
+
+The OOM asymmetry is asserted from the two **messages**, not from two
+severities. Both rows are warnings; the CPU one says warning is this
+dimension's point-in-time ceiling, the memory one says "critical from
+95%". Driving memory into the critical band would mean aiming a fixture
+at a few megabytes of headroom on an incompressible resource — a flaky
+OOM scenario, and the `oom` scenario owns a real OOM kill already.
+
+`saturation.forecast` needs a ~45m ramp and a running sentinel; like the
+`autoscaling.*` signals it is watch-path, not read-path.
 
 ### `broken-edges` (T0) — for `state edges`
 One workload with several broken dependency edges at once.
@@ -759,9 +815,12 @@ these ticks are for the command's *own* behaviour.
 - [x] `bundle` (+ `--incident`, `--depth`, `--max-templates`; `--store` still open)
 - [x] `health` (+ healthy-path)
 - [x] `triage delta` (+ `--only`, thresholds, the shared §8 fingerprint)
-- [ ] `triage events` (+ HPA thrash)
+- [x] `triage events` (+ HPA thrash, both thresholds, the dedup collapse,
+      and the monotonic negative control)
 - [x] `triage logs` (+ `--keep-probes`, `--max-templates`, `--previous`)
-- [ ] `triage top` (+ `--history` degradation)
+- [x] `triage top` (T1: the OOM asymmetry off the two messages, the
+      limited-but-quiet control, both censuses, `--top-warn` as a dial,
+      `--all`/`--limit`, `-A` node rows, `--history` degradation)
 - [x] `triage spec` (+ `--diff` as declared-unimplemented, secret-safety)
 - [ ] `triage status` (write→read round-trip, `triage.regressed`)
 - [ ] `triage radius` (live + `--at`)

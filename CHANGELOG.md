@@ -145,12 +145,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   healthy and alone in its namespace, it is also the healthy-path
   fixture: "reports nothing when nothing is wrong" is a claim in its
   own right.
-- The kind e2e workflow runs the T0 UAT after its scenarios, on both
-  the post-merge smoke tier and the weekly full tier. It runs even
-  when the scenarios failed: signal routing is the legitimately flaky
-  part, the CLI output contract is not, and letting a scenario flake
-  hide a contract regression would defeat the point of checking them
-  separately.
+- `examples/kind/up` now caps every kind node at 4 cpu / 8g at the
+  docker layer (`LOOKOUT_KIND_NODE_CPUS`, `LOOKOUT_KIND_NODE_MEMORY`,
+  either `none` to opt out), including on the reuse path, so re-running
+  it retrofits an existing cluster. kind creates its nodes with no
+  limit at all, so with two clusters up the only thing bounding a
+  saturation fixture was the workstation. The cap is deliberately not a
+  LimitRange: that would default-inject limits into `cpu-pressure`'s
+  `nolimits` pod and invalidate the one case that exists to prove
+  `triage top` counts an unlimited container instead of rating it.
+- `triage events`' HPA-thrash detector gets a fixture (#176). The
+  `hpa-thrash` scenario stands up two real HPAs and their Deployments
+  and then writes the `SuccessfulRescale` history the detector actually
+  reads — the HPA object keeps no replica history, so the sequence is
+  recovered from event messages. Synthesizing it is what makes
+  `replicas=3->1->3->1` and `flips=2` exact rather than approximate; a
+  real oscillation would cost fifteen minutes of stabilization windows
+  to arrive at a fuzzier claim. `ramp` scales three times in one
+  direction beside it, as the negative control that separates
+  *changing* from *oscillating*. The case also pins `--hpa-flips`,
+  `--hpa-window` and `--since` as three independent ways to silence the
+  finding, and the timeline dedup that collapses four rescale events on
+  one HPA into a single row with `count=4`. It runs at **T0**, not T1
+  as the tier table had it: the detector reads event messages, so it
+  needs no metrics-server.
+- `triage top` gets a UAT case (`uat-cases/50-t1.sh`, #176) against the
+  `cpu-pressure` fixture, and it is the first case at **T1** — kind
+  plus metrics-server. The whole case probes `metrics.k8s.io` itself
+  and reports a named skip rather than a failure when nothing is
+  answering, so a cluster without it cannot turn into a red run. The
+  OOM asymmetry is asserted off the two *messages* rather than off two
+  severities: both hogs are warnings, but the CPU one says warning is
+  this dimension's point-in-time ceiling and the memory one says
+  "critical from 95%". Driving the fixture into the critical band would
+  mean aiming at a few megabytes of headroom on an incompressible
+  resource, which is a flaky OOM scenario — and the `oom` scenario owns
+  a real OOM kill already. Also covered: the limited-but-quiet control
+  that must be named by nothing, `--top-warn` as a dial that moves the
+  attention line and not the censuses, both censuses and the two
+  `--show-*` listings behind them, `--all`'s below-threshold rows
+  carrying no verdict, `--limit`, `-A`'s node rows measured against
+  allocatable, and `--history` degrading to an explicit
+  `cloud.unavailable` finding plus a summary marker instead of silence
+  or an error.
+- The kind e2e workflow runs the UAT at **T1** after its scenarios, on
+  both the post-merge smoke tier and the weekly full tier —
+  `examples/kind/up` installs metrics-server, so that cluster can run
+  `triage top` for real. It runs even when the scenarios failed: signal
+  routing is the legitimately flaky part, the CLI output contract is
+  not, and letting a scenario flake hide a contract regression would
+  defeat the point of checking them separately.
 
 ### Fixed
 

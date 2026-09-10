@@ -32,6 +32,13 @@
 # failure here cannot leave a dead admission webhook behind.
 #
 # Everything in this file is T0: the fixtures build what they need.
+#
+# That includes the HPA-thrash section, which the tier table originally
+# guessed at T1. It is not: the detector reads SuccessfulRescale event
+# MESSAGES, and the hpa-thrash fixture writes the history rather than
+# waiting out a real oscillation, so nothing in the path needs
+# metrics-server. `triage top` is the only genuinely T1 case, and it
+# lives in 50-t1.sh.
 
 # ---- triage logs: a fixed corpus to distill --------------------------------
 
@@ -316,6 +323,83 @@ uat_fixture_drain() {
     "stab drain -A → the summary says how many nodes were examined and how many are blocked"
 }
 
+# ---- triage events: an autoscaler fighting itself --------------------------
+
+uat_fixture_hpa() {
+  uat_section "triage events: HPA thrash vs a monotonic ramp (hpa-thrash)"
+
+  if ! uat_fixture hpa-thrash; then
+    uat_skipped "triage events HPA thrash → the whole section" "fixture hpa-thrash did not inject"
+    return 0
+  fi
+
+  local ns=lookout-uat-hpa
+  local web=(--workload="Deployment/$ns/web")
+
+  uat_run triage events "${web[@]}"
+  uat_expect_exit 0 "triage events → exit 0 over the HPA's owner tree"
+
+  # The whole reconstruction, asserted as exact numbers rather than as
+  # "something fired". The fixture writes a known sequence precisely so
+  # these can be exact — see its README for why the history is
+  # synthesized and what stays real.
+  uat_expect_stdout 'kind=event\.hpa_thrash.*severity=warning.*name=web' \
+    "triage events → the oscillating HPA is reported, as a warning"
+  uat_expect_stdout 'kind=event\.hpa_thrash.*replicas=3->1->3->1' \
+    "triage events → the replica sequence is recovered from the rescale messages"
+  uat_expect_stdout 'kind=event\.hpa_thrash.*flips=2 window=30m0s' \
+    "triage events → two direction changes, counted inside the default window"
+  # The one live join in this section: scaleTargetRef read off the real
+  # HPA object, not parsed out of an event message.
+  uat_expect_stdout 'kind=event\.hpa_thrash.*target=Deployment/web' \
+    "triage events → and names what the HPA actually scales"
+
+  # Dedup, on the same events: four SuccessfulRescale objects on one
+  # HPA collapse to ONE timeline row carrying count=4. A timeline that
+  # printed four rows would still be "correct" event output and would
+  # be exactly what this command exists not to do.
+  uat_expect_stdout 'kind=event\.normal.*name=web reason=SuccessfulRescale.*count=4' \
+    "triage events → the four rescales collapse into one timeline entry"
+  uat_expect_stdout 'name=web reason=SuccessfulRescale.*source=horizontal-pod-autoscaler' \
+    "triage events → and the entry names the component that reported them"
+
+  # Both thresholds, both directions. Asserting only that the finding
+  # appears would pass just as well against a detector that always
+  # fires.
+  uat_run triage events "${web[@]}" --hpa-flips=3
+  uat_expect_exit 0 "triage events --hpa-flips=3 → exit 0"
+  uat_refute_stdout 'kind=event\.hpa_thrash' \
+    "triage events --hpa-flips=3 → two flips is below the bar, so nothing is reported"
+
+  # The flips are 2m apart, so a 1m window can never hold both.
+  uat_run triage events "${web[@]}" --hpa-window=1m
+  uat_expect_exit 0 "triage events --hpa-window=1m → exit 0"
+  uat_refute_stdout 'kind=event\.hpa_thrash' \
+    "triage events --hpa-window=1m → the flips no longer fall in one window"
+
+  uat_run triage events "${web[@]}" --since=1m
+  uat_expect_exit 0 "triage events --since=1m → exit 0"
+  uat_refute_stdout 'kind=event\.hpa_thrash' \
+    "triage events --since=1m → the rescales are outside the lookback, so there is nothing to analyze"
+
+  # Namespace mode sees both HPAs, which is what makes the negative
+  # control meaningful: `ramp` scaled 2->4->6 in the same window, three
+  # moves in five minutes, and is NOT thrash — a monotonic ramp has no
+  # direction change to count. This is the shape a busy, correctly
+  # scaling HPA makes.
+  uat_run triage events --namespace="$ns"
+  uat_expect_exit 0 "triage events --namespace → exit 0"
+  uat_expect_stdout 'kind=event\.hpa_thrash.*name=web' \
+    "triage events --namespace → the oscillating HPA is still reported"
+  uat_refute_stdout 'kind=event\.hpa_thrash.*name=ramp' \
+    "triage events --namespace → a monotonic ramp, however fast, is NOT thrash"
+  # #377: namespace mode resolves no HPA objects, so the scaleTargetRef
+  # join is workload-mode only. Asserted so the gap is visible rather
+  # than discovered.
+  uat_refute_stdout 'kind=event\.hpa_thrash.*target=' \
+    "triage events --namespace → target= is a workload-mode join (#377)"
+}
+
 # ---- net probe: the one fixture that is not in the cluster -----------------
 
 uat_fixture_netprobe() {
@@ -400,5 +484,6 @@ uat_case_fixtures() {
   uat_fixture_webhooks
   uat_fixture_drift
   uat_fixture_drain
+  uat_fixture_hpa
   uat_fixture_netprobe
 }
