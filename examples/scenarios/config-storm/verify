@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+. "$(dirname "$0")/ns.sh"
+NS="$(config_storm_ns)"
+
+echo "▸ verify config-storm ($NS)"
+
+# The per-pod symptom: each consumer cannot mount the deleted ConfigMap.
+await_inject config-storm 300 'FailedMount|failed_mount' 'consumer-'
+
+# The point of the scenario: FOUR faults, ONE incident. --storm-min is
+# 3, so four consumers clear the threshold with a member to spare.
+#
+# Pin the ANCESTOR, not just "a storm formed". Any co-located burst
+# forms a storm keyed on its node; what is specific to this scenario is
+# that the key is the shared ConfigMap — the tier below node and below
+# the owner chain, reached only because inject spread the consumers and
+# the four Deployments are unrelated. Matching bare `kind=storm` would
+# have passed on a Node-keyed storm and told us nothing.
+# The trailing space is deliberate: `kind=storm` also matches
+# kind=storm.member and kind=storm.update, so without it this passes on
+# a storm that formed in an earlier run and merely grew. Requiring the
+# formation payload means a timeout here says "no storm FORMED in this
+# window", which is the truth rather than a false negative if a
+# previous run's storm is still open on the same key. Both keys this
+# scenario can produce are namespaced, and ns.sh mints a new namespace
+# per run, so neither is reachable twice.
+await_inject config-storm 240 'kind=storm ' \
+  'ancestor_kind[^,]*ConfigMap' 'ancestor_name[^,]*shared-config'
+
+# How many incidents the correlator folded, taken from the storm's own
+# payload rather than counted off the wire. The two are not the same
+# number and the difference is the trap: affected_count is every folded
+# incident, while the wire only carries a record for those that had
+# already opened a session (kind=storm.member_superseded) or arrived
+# after formation (kind=storm.member). An incident whose event lands
+# inside the window but before formation is folded SILENTLY. A first
+# version of this check counted only `storm.member` and failed a
+# perfect run with "saw 0" — all four consumers had been folded at
+# formation, which is the best possible outcome.
+#
+# Everything is scoped to THIS storm's fingerprint: breaking the mount
+# also stalls four rollouts, and that collateral storm emits member
+# records of its own (see README § Why it owns a namespace).
+echo "▸ reading the storm's membership"
+storm_line="$(stub_since config-storm | grep -E 'kind=storm ' | grep 'ConfigMap' | head -n1)"
+sfp="$(grep -oE 'sha256:[0-9a-f]{64}' <<<"$storm_line" | head -n1)"
+affected="$(grep -oE 'affected_count[^0-9]+[0-9]+' <<<"$storm_line" | grep -oE '[0-9]+$')"
+records="$(stub_since config-storm | grep -E 'kind=storm\.member(_superseded)? ' |
+  grep -c "$sfp" || true)"
+echo "    storm fingerprint: ${sfp:-<none>}"
+echo "    affected_count at formation: ${affected:-<none>}"
+echo "    member records on the wire: $records"
+if [[ -z "$affected" ]] || ((affected < 3)); then
+  echo "  ✗ expected the storm to fold >= --storm-min (3) incidents" >&2
+  echo "    (if the four restarts drifted past --storm-window=60s the" >&2
+  echo "     correlator is right to leave them separate — re-inject)" >&2
+  exit 1
+fi
+if ((records < 1)); then
+  echo "  ✗ no storm.member/storm.member_superseded record for $sfp — the" >&2
+  echo "    storm formed but nothing on the wire says which incidents" >&2
+  echo "    route to it" >&2
+  exit 1
+fi
+echo "  ✓ $affected incidents folded into one storm, $records on the wire"
+
+# Read-path: the blast radius is answerable without reading the wire.
+#
+# One workload at a time — `state edges` traces the edges OF a target
+# and rejects a bare --namespace outright ("state edges requires
+# --workload"). await suppresses the command's stderr, so getting this
+# wrong does not fail fast; it burns the whole timeout and reads like a
+# missing finding. Asking all four is the stronger claim anyway: every
+# consumer independently names the same ConfigMap, which is precisely
+# why that ConfigMap is the right storm key.
+echo "▸ read-path: every consumer names the same broken reference"
+for d in consumer-a consumer-b consumer-c consumer-d; do
+  await_finding 120 'kind=edge.missing_ref.*shared-config' \
+    -- state edges --workload="Deployment/$NS/$d"
+done

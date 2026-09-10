@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify hpa-metrics-dead (sustain window is 15m — be patient)"
+
+await_inject hpa-metrics-dead 1500 'autoscaling.hpa_metrics_dead' 'unscalable'
+
+# The silence half: nothing else in the cluster is complaining. The
+# Deployment is Available, the pod is Ready, and the HPA object exists
+# and looks configured. Autoscaling is simply not happening.
+avail="$(kubectl -n "$DEMO_NS" get deploy unscalable \
+  -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')"
+echo "    Deployment Available: $avail"
+if [[ "$avail" != "True" ]]; then
+  echo "  ✗ the Deployment is unhealthy — this scenario is only" >&2
+  echo "    meaningful while the workload itself looks fine" >&2
+  exit 1
+fi
+echo "  ✓ workload healthy, autoscaler silently dead"
+
+# Read-path: `audit workloads`, NOT `health`.
+#
+# The first version of this asked `health` and burned 180s finding
+# nothing, because `health`'s scorecard is delta-backed over pods,
+# nodes, system and quota — there is no autoscaler category and a dead
+# metric source is not a symptom on any pod. Nothing was broken; the
+# question was addressed to the wrong command.
+#
+# `audit workloads` is the right one and makes the better point. It
+# reads the same defect STATICALLY — an HPA whose utilization target
+# divides by a request the pod template does not declare can never
+# compute a replica count — so it answers in one call what the
+# sentinel takes MetricsDeadSustain (15m) to say. Posture finds it
+# before it matters; the sentinel finds it once it does.
+# Pinned to the reason, not just the kind: audit.hpa_cannot_scale
+# covers three unrelated defects (min==max, a missing scale target,
+# and this one) and only HPATargetMissingRequests is the claim this
+# scenario builds.
+# Envelope order is kind, severity, namespace, kind_of_object, name,
+# reason — so the object name comes first in the line.
+await_finding 120 'audit.hpa_cannot_scale.*unscalable.*HPATargetMissingRequests' \
+  -- audit workloads --namespace="$DEMO_NS"

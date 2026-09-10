@@ -1,0 +1,31 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The fault: the CronJob controller's Job creations start coming back
+# Forbidden, so status.lastScheduleTime stops advancing. The CronJob
+# object itself stays unsuspended and perfectly valid.
+#
+# Scoped to count/jobs.batch ONLY. A quota that covered cpu/memory
+# would start rejecting the demo app's pods too and turn one clean
+# fault into cluster-wide noise.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: no-jobs
+  namespace: lookout-demo
+  labels:
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  hard:
+    count/jobs.batch: "0"

@@ -458,7 +458,15 @@ func deltaCategory(kind string) string {
 		return "addons"
 	case strings.HasPrefix(kind, "quota."):
 		return "quota"
-	case strings.HasPrefix(kind, "workload.") || strings.HasPrefix(kind, "job."):
+	// cron.* belongs here and not in the default arm: the defining
+	// property of cron.missed is that no Job and so no pod was ever
+	// created, and a reader sent to the crash-loop category has
+	// nothing to find. job.* — a Job that ran and failed — is already
+	// here, so this also keeps a CronJob's two failure modes in one
+	// place.
+	case strings.HasPrefix(kind, "workload."),
+		strings.HasPrefix(kind, "job."),
+		strings.HasPrefix(kind, "cron."):
 		return "rollouts"
 	default: // pod.crashloop, pod.imagepull, pod.oomkilled, restarts, waiting, notready, failed
 		return "crashloops"

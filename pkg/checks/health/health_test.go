@@ -38,6 +38,7 @@ import (
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -476,6 +477,62 @@ func TestBrokenClusterPerCategory(t *testing.T) {
 	}
 	if status["control-plane"] != "unavailable" {
 		t.Errorf("control-plane = %q, want unavailable", status["control-plane"])
+	}
+}
+
+// stalledCron is an unsuspended every-minute CronJob whose
+// lastScheduleTime is two hours stale: overdue well past --cron-grace
+// (5m), with the anchor saying it did not run.
+func stalledCron(ns, name string) *batchv1.CronJob {
+	last := ago(2 * time.Hour)
+	return &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       batchv1.CronJobSpec{Schedule: "*/1 * * * *"},
+		Status:     batchv1.CronJobStatus{LastScheduleTime: &last},
+	}
+}
+
+// TestCronCategoryIsRollouts pins the scorecard bucket of a CronJob
+// that stopped firing (#398).
+//
+// Worth a test of its own because the failure is silent: deltaCategory
+// buckets by kind prefix and its default arm is "crashloops", so a
+// kind nobody mapped is not a compile error or an empty category — it
+// is a schedule with no Job and no pod at all, filed under crash loops
+// and sending the reader to look for a container that never existed.
+// job.* (a Job that ran and failed) is already in rollouts, so this
+// also keeps a CronJob's two failure modes in one place.
+func TestCronCategoryIsRollouts(t *testing.T) {
+	res := checktest.Run(t, testCommand(stalledCron("batch", "beat")))
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	var found bool
+	status := map[string]string{}
+	for _, line := range lines[:len(lines)-1] { // last line is the summary
+		rec := parseLine(t, line)
+		if rec["kind"] == "health.category" {
+			status[rec["category"]] = rec["status"]
+			continue
+		}
+		if rec["kind"] != "cron.missed" {
+			continue
+		}
+		found = true
+		if got := rec["category"]; got != "rollouts" {
+			t.Errorf("cron.missed category = %q, want rollouts", got)
+		}
+	}
+	if !found {
+		t.Fatalf("no cron.missed finding in:\n%s", res.Stdout)
+	}
+	if status["rollouts"] != "degraded" {
+		t.Errorf("rollouts = %q, want degraded", status["rollouts"])
+	}
+	if status["crashloops"] != "healthy" {
+		t.Errorf("crashloops = %q, want healthy — a missed schedule is not a crash loop",
+			status["crashloops"])
 	}
 }
 

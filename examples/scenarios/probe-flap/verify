@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify probe-flap"
+
+# Four readiness flips inside --degradation-window (15m) — at a 20s
+# cycle that is ~80s, plus scheduling and image pull.
+#
+# It arrives as a family.member, not as its own incident, and that is
+# the contract worth pinning. A probe that fails often enough to flip
+# the gate four times also drives the k8s Event's Count past
+# unhealthyMinCount (3), so the reactive Unhealthy path opens a
+# session FIRST; probe_flap then finds that its blast-radius ancestor
+# (the Node the pod is on) already owns a live incident and is
+# reattached there as a followup rather than buffered into a
+# watchboard digest (§7.7). One fault, one session — asserting the
+# reattachment is what makes this a test of that seam rather than an
+# accident of ordering.
+await_inject probe-flap 420 'kind=family.member' 'degradation.probe_flap' 'flapper'
+
+# The exit criterion that makes this scenario worth having: the
+# container never restarted. A flapping readiness gate is invisible to
+# every "is it crashlooping" check, including the reactive path.
+restarts="$(kubectl -n "$DEMO_NS" get pods \
+  -l app.kubernetes.io/name=flapper \
+  -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')"
+echo "    restartCount: ${restarts:-<none>}"
+for r in $restarts; do
+  if ((r > 0)); then
+    echo "  ✗ container restarted ($r) — the flap should never restart it;" >&2
+    echo "    a liveness probe crept into flapper.yaml" >&2
+    exit 1
+  fi
+done
+echo "  ✓ zero restarts: the pod is failing without ever crashing"
+
+# The other half of "one fault, one session": the reactive event and
+# the leading signal share a session id rather than opening two.
+#
+# Compare the two SPECIFIC lines rather than counting distinct sids in
+# the window. Counting is the tempting version and it is wrong on any
+# cluster with traffic of its own: one unrelated warning in the same
+# minute would fail a scenario that behaved perfectly.
+_sid_of() { stub_since probe-flap | grep -E "$1" | grep -oE 'sid=[a-z0-9-]+' | head -n1; }
+reactive_sid="$(_sid_of 'kind=k8s-event.*flapper.*Unhealthy|kind=k8s-event.*Unhealthy.*flapper')"
+leading_sid="$(_sid_of 'kind=family.member.*degradation.probe_flap.*flapper')"
+echo "    reactive Unhealthy: ${reactive_sid:-<none>}"
+echo "    leading probe_flap: ${leading_sid:-<none>}"
+if [[ -z "$reactive_sid" || -z "$leading_sid" ]]; then
+  echo "  ✗ expected BOTH a reactive Unhealthy event and a probe_flap join" >&2
+  exit 1
+fi
+if [[ "$reactive_sid" != "$leading_sid" ]]; then
+  echo "  ✗ two sessions for one fault: $reactive_sid vs $leading_sid" >&2
+  exit 1
+fi
+echo "  ✓ reactive event and probe_flap landed in the same session"

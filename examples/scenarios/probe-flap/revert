@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ removing flapper"
+kubectl delete -f "$(dirname "$0")/flapper.yaml" --ignore-not-found
+
+# A probe-flap incident clears when the pod stops flapping OR goes
+# away: resolution=object_deleted, the other half of the resolved
+# contract that a fix-in-place scenario never exercises.
+#
+# Pin the pod name. object_deleted is the commonest resolution in the
+# suite — every scenario that reverts by deleting something emits one —
+# and an unpinned match will happily go green on a *different*
+# scenario's teardown that happened to land in this window. It has:
+# a run of the default order caught this passing at 0s against a
+# lookout-storm consumer's FailedMount resolving.
+soft await_inject probe-flap 300 'kind=resolved' 'object_deleted' 'flapper'

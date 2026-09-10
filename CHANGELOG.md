@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Four e2e scenarios for failures a pod-centric check cannot see, each
+  chosen because the pod either never dies or never exists.
+  `probe-flap` flips a readiness gate every 20s with no liveness
+  probe, so `restartCount` stays 0 and the only symptom is the
+  endpoint dropping; it is also the suite's only §7.7 ancestor
+  reattachment, asserting that the reactive `Unhealthy` event and
+  `degradation.probe_flap` land in *one* session. `cron-missed` blocks
+  a CronJob's Job creations with a `count/jobs.batch: "0"` quota, so
+  the schedule silently stops with nothing to look at — no Job, no
+  pod, no event on the workload. `config-storm` deletes a ConfigMap
+  four unrelated Deployments share and asserts the correlator folds
+  four incidents into one storm keyed on *the ConfigMap*, not the node
+  and not the namespace. `hpa-metrics-dead` points an HPA at a
+  utilization target its pod template carries no request for, so
+  autoscaling is dead while everything reports healthy. The first
+  three join `DEFAULT_SCENARIOS`; `hpa-metrics-dead` stays opt-in
+  because `MetricsDeadSustain` is 15m and no flag shortens it.
+- `examples/sentinel/up` names its `--sources` explicitly rather than
+  relying on `auto`, and now includes `workload` and `autoscaling`. An
+  explicit list makes a missing RBAC grant fatal (§11), which is what
+  a test rig wants; under `auto` a source the scenarios depend on can
+  be quietly probed away and its scenario then times out looking like
+  a detection miss rather than a misconfiguration.
+
+### Fixed
+
+- A §7.4 clearance that carries no `StableSince` now resolves after the
+  stability window instead of never (#397). The window is anchored when
+  the predicate first reads clear, and re-read on every tick so that a
+  `StableSince` jumping forward — a container that restarted between
+  ticks and came back Ready — restarts it. But `stabilityStart`
+  substitutes *now* for a zero `StableSince` ("the observer vouches for
+  this instant only"), so a zero one read as a fresh forward jump every
+  tick: the anchor was dragged along with the clock and the window never
+  closed. That is the shape of every source-specific observer's
+  `object_deleted` arm — a deleted object leaves no timestamp to vouch
+  with — so *no* source-scoped incident could resolve as
+  `object_deleted`: delete the failing workload and the incident stayed
+  open, silently, with no outcome record and nothing logged. Only an
+  observed `StableSince` restarts the window now. The pod and node
+  observers were unaffected throughout (they carry the tombstone's
+  `deletedAt`), which is why the closed loop looked healthy: the two
+  observers that resolve most incidents are the two that fill the field
+  in. Found from `examples/scenarios/config-storm`, where a stalled
+  rollout on a deleted Deployment held a namespace-keyed storm open for
+  its full 30m idle TTL and captured the next run's incidents.
+- `lookout health` now files a missed CronJob run under `rollouts`
+  rather than `crashloops` (#398). `deltaCategory` routed `workload.*`
+  and `job.*` to `rollouts` but had no case for `cron.*`, so
+  `cron.missed` fell through the default arm into the crash-loop
+  category — and the defining property of that signal is that no Job
+  and therefore no pod was ever created, so a reader sent to look at
+  crash-looping pods finds nothing at all. A CronJob's two failure
+  modes (a run that never started, a run that started and failed) now
+  score the same category.
+
 ## [0.24.0] - 2026-09-10
 
 This release is one program and its yield. `examples/uat` is the
@@ -587,6 +645,11 @@ arrived as `Error: ImagePullBackOff`.
   and env are the escalating classes — but the sentence appeared in
   four generated reference pages and both skill references, so the
   regenerated docs are part of the fix.
+- `examples/kind/up` passes `--name` to `kind create cluster`, so
+  `LOOKOUT_EXAMPLES_CLUSTER` selects a cluster instead of silently
+  creating a second one. The name in `cluster.yaml` won every time,
+  and the reuse check above it — which does read the variable — then
+  never matched.
 
 ## [0.23.0] - 2026-08-31
 

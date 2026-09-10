@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify cron-missed"
+
+# First confirm the fault is the one we meant to inject: the schedule
+# is stalled, not suspended, not invalid, not deleted. If the control
+# plane advanced lastScheduleTime anyway (a Job create that failed
+# AFTER the status write), the scenario proves nothing and should say
+# so rather than time out looking like a detection miss.
+before="$(kubectl -n "$DEMO_NS" get cronjob beat \
+  -o jsonpath='{.status.lastScheduleTime}')"
+echo "    lastScheduleTime at check start: $before"
+
+# workload's Grace is 5m (not flag-tunable), swept on a 30s tick, so
+# the first miss lands ~5-6m after the first blocked activation.
+await_inject cron-missed 720 'workload.cron_missed' 'beat'
+
+after="$(kubectl -n "$DEMO_NS" get cronjob beat \
+  -o jsonpath='{.status.lastScheduleTime}')"
+if [[ "$after" != "$before" ]]; then
+  echo "  ✗ lastScheduleTime advanced ($before → $after) — the quota did" >&2
+  echo "    not actually stall the schedule; see the README's fallback" >&2
+  exit 1
+fi
+echo "  ✓ lastScheduleTime never advanced: the schedule is silently dead"
+
+# The read-path half: a stalled CronJob is a workload-health finding,
+# not something you would notice by looking at pods (there are none).
+soft await_finding 120 'beat' -- health

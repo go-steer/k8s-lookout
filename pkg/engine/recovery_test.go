@@ -252,6 +252,37 @@ func TestRecoveryTracker_ObjectDeletedResolution(t *testing.T) {
 	}
 }
 
+// A clearance with NO StableSince ("cleared as of this instant")
+// must still resolve after the window. Every source-specific
+// observer's object_deleted path reports exactly that — there is no
+// object left to carry a timestamp — and the forward-jump rule used
+// to re-read the substituted `now` as a fresh jump on every tick,
+// pushing the deadline along with the clock so the window never
+// closed. Live effect: a rollout_stall whose Deployment was deleted
+// stayed open forever, and so did the storm it was keying.
+func TestRecoveryTracker_ZeroStableSinceResolves(t *testing.T) {
+	t.Parallel()
+	h := newRecoveryHarness(t, 5*time.Minute)
+	h.tracker.Track(h.incident)
+
+	verdict := Clearance{Cleared: true, Resolution: ResolutionObjectDeleted}
+	// Tick every 15s (the shipped recovery interval) across the
+	// window: the streak is anchored by the first clear tick, not by
+	// the last one.
+	for elapsed := time.Duration(0); elapsed < 6*time.Minute; elapsed += 15 * time.Second {
+		h.tickAt(15*time.Second, verdict, true)
+	}
+	if len(h.emitted) != 1 {
+		t.Fatalf("want 1 resolved from a zero-StableSince clearance, got %d", len(h.emitted))
+	}
+	if got := h.emitted[0].Recovery.Resolution; got != ResolutionObjectDeleted {
+		t.Errorf("Resolution = %q, want object_deleted", got)
+	}
+	if got := h.emitted[0].Recovery.ObservedStableFor; got < 5*time.Minute {
+		t.Errorf("ObservedStableFor = %v, want at least the 5m window", got)
+	}
+}
+
 // An incident no observer can judge (this PR ships only the
 // pod-scoped observer) must not be tracked forever.
 func TestRecoveryTracker_UncoveredIncidentExpires(t *testing.T) {

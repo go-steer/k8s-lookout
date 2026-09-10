@@ -294,8 +294,18 @@ func (t *RecoveryTracker) Tick() {
 			// A forward jump of StableSince (container restarted
 			// between ticks, then went Ready again) restarts the
 			// window even though the predicate never read false.
-			if s := t.stabilityStart(ti.inc, verdict, now); s.After(ti.stabilityStart) {
-				ti.stabilityStart = s
+			// Only an OBSERVED StableSince can do that: a zero one
+			// carries no timestamp, and stabilityStart substitutes
+			// now for it — which every tick would read as a fresh
+			// forward jump, pushing the deadline along with the
+			// clock so the window never closes. An observer that
+			// vouches only for this instant (object_deleted, where
+			// there is no object left to timestamp) is already
+			// anchored by the symptomatic → clearing transition.
+			if !verdict.StableSince.IsZero() {
+				if s := t.stabilityStart(ti.inc, verdict, now); s.After(ti.stabilityStart) {
+					ti.stabilityStart = s
+				}
 			}
 			if now.Sub(ti.stabilityStart) >= t.stableFor {
 				rec := Recovery{
