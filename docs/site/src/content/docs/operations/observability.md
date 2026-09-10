@@ -93,6 +93,28 @@ Every other exit is still transient and still restarts, now with a
 backoff that doubles from 10s to a 5m ceiling and resets after a runner
 has stayed up two minutes (`lookout_runner_restarts_total`).
 
+### A grant that goes away later
+
+The same thing happens to a cluster whose grant is revoked *while* the
+sentinel is running, because the startup probe is only a point-in-time
+answer. Every source's declared access is re-reviewed every
+`--access-recheck` (default `2m`), and a denial confirmed over two
+consecutive sweeps sets:
+
+```
+lookout_source_denied{cluster="prod-ap",source="k8s-events",resource="events",required="true"} 1
+```
+
+Back to `0` if the grant returns — the series is "is coverage missing
+right now", not "was it ever". A **required** permission takes the
+cluster down the terminal path above; an **optional** one
+(`required="false"`, saturation's `nodes/proxy`) leaves the source
+running with one dimension dark. Either way a
+`kind=sentinel.access_revoked` signal is injected, because a source
+that has gone quiet because it lost permission to look is not a source
+reporting a healthy cluster. Full walkthrough in
+[Troubleshooting](/operations/troubleshooting/#a-grant-revoked-after-startup).
+
 Readiness matters most during a rollout: the Deployment uses
 `strategy: Recreate` with one replica, so the new pod must come up
 before anything is watching again, and `/readyz` is what tells you when
@@ -181,6 +203,7 @@ Prefix `lookout_` omitted:
 | `recovery_drops_total{cause="unknown_session"}` | A resolved outcome had nowhere to go — the incident binding was lost, typically a restart without `--dedup-persist`. Fix the volume; every drop is a fix-verify loop that could not close. |
 | `info_dropped_total` | Info-class signals counted and discarded because no `--store` is set. Not a fault, but if you expected the store to have them, this is the tell. |
 | `watchboard_buffered` (gauge) | Stuck above `--watchboard-batch` across scrapes means flushes are failing — see `inject_errors_total`. |
+| `source_denied` | A permission the sentinel held at startup is denied now (`--access-recheck`). Any series at `1` means coverage you used to have is gone, so that source's silence no longer means the cluster is healthy — `required="true"` also means the cluster's runner has stopped. |
 | `findings_total{severity="critical"}` | The only entry here that is about the cluster rather than the sentinel. A rate step change means something broke; a rate that goes to zero on a cluster that normally has one means the sentinel stopped seeing, which the machine metrics above will not tell you. |
 
 `active_incidents`, `storms_active`, and `recovery_tracking` are the

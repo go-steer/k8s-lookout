@@ -30,6 +30,7 @@ breaking change to running deployments, never a refactor.
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `--access-recheck` | duration | `2m0s` | How often to re-run the SelfSubjectAccessReview probe over every enabled source's declared access, so a grant revoked AFTER startup surfaces as a kind=sentinel.access_revoked signal instead of a silently empty watch. A denial must repeat across two consecutive sweeps before it counts, so IAM propagation does not read as a revocation. Losing a REQUIRED permission stops this cluster's runner (the same terminal path a startup refusal takes); an optional one degrades loudly and keeps running. 0 disables the re-check. |
 | `--backoff-min-count` | int | `3` | Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event. |
 | `--burn-eta` | duration | `30m0s` | Budget-exhaustion projection inside this window fires token.burn at critical (with the linear forecast); clearance requires the ETA to recede beyond 2x this threshold. Must be > 0. |
 | `--burn-multiple` | float | `4` | Session token rate at or above this multiple of the cross-session trailing-median baseline (sustained 2 polls) fires token.burn at warning. Must be > 1. |

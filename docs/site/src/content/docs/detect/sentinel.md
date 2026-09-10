@@ -48,7 +48,7 @@ grants (the shipped `deploy/` manifests carry all of them) — a miss
 skips the source with a startup line naming the missing grant and the
 fix, never silently.
 
-Every kind these sources can emit — 48 in the frozen schema — is
+Every kind these sources can emit — 49 in the frozen schema — is
 cataloged in the [Signal kinds reference](/reference/signal-kinds/);
 every threshold above is a flag documented in the
 [`lookout watch` reference](/reference/watch/).

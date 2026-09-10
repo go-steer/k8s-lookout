@@ -25,6 +25,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
@@ -61,6 +62,7 @@ type flags struct {
 	namespaces            string
 	excludeNamespaces     string
 	sources               string
+	accessRecheck         time.Duration
 	rolloutObserve        time.Duration
 	saturationInterval    time.Duration
 	saturationWindow      time.Duration
@@ -183,6 +185,11 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
 	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
+
+	// §11 capability re-check (issue #385). The startup probe is a
+	// point-in-time answer; this is the same question asked again for
+	// as long as the process runs.
+	fs.DurationVar(&f.accessRecheck, "access-recheck", sources.DefaultAccessRecheck, "How often to re-run the §11 SelfSubjectAccessReview probe over every enabled source's declared access, so a grant revoked AFTER startup surfaces as a kind=sentinel.access_revoked signal instead of a silently empty watch. A denial must repeat across two consecutive sweeps before it counts, so IAM propagation does not read as a revocation. Losing a REQUIRED permission stops this cluster's runner (the same terminal path a startup refusal takes); an optional one degrades loudly and keeps running. 0 disables the re-check.")
 
 	// Rollout source thresholds (§7.2 row 3). ADDITIVE flag; only
 	// meaningful with --sources=...,rollout.
@@ -675,6 +682,9 @@ func (f *flags) validate() error {
 	}
 	if f.snapshotInterval < 0 {
 		return errors.New("--snapshot-interval must be >= 0")
+	}
+	if f.accessRecheck < 0 {
+		return errors.New("--access-recheck must be >= 0 (0 disables the §11 capability re-check)")
 	}
 	return nil
 }
