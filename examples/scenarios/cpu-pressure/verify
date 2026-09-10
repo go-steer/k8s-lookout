@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# A fixture, not a failure: nothing here is expected on the wire, so
+# this is a read-path smoke check that each container landed in the part
+# of the output the case assumes. The per-field contract lives in
+# examples/uat-cases/40-toplevel.sh.
+#
+# The patterns below are ordered, not alternations: emit.pairs() flattens
+# every finding in a fixed envelope order (kind, severity, namespace,
+# kind_of_object, name, reason, message, ...) before the check's own
+# Details, so the sequence is deterministic and worth asserting as one.
+echo "▸ verify cpu-pressure"
+NS=lookout-uat-top
+
+# cpu: warning, and NEVER critical however hard it is pushed — over-limit
+# cpu is throttled rather than killed, so judge() caps this dimension at
+# warning point-in-time. Asserting the severity inline is what makes that
+# a test rather than a comment.
+await_finding 180 \
+  "kind=top\.saturation severity=warning namespace=$NS kind_of_object=Pod name=cpuhog reason=CPUNearLimit.*resource=cpu" \
+  -- triage top --namespace="$NS"
+
+# memory: warning too, deliberately. The fixture targets ~86% so it stays
+# out of the >=95% critical band that belongs to the oom/ scenario; if
+# this ever reports critical the ballast has drifted toward the limit.
+await_finding 180 \
+  "kind=top\.saturation severity=warning namespace=$NS kind_of_object=Pod name=memhog reason=MemoryNearLimit.*resource=memory" \
+  -- triage top --namespace="$NS"
+
+# The unlimited container is counted, not rated: no limit means no
+# denominator. `severity=info` also pins this to the census line rather
+# than the top.unlimited_container row that --show-unlimited adds, which
+# a bare `kind=top.unlimited` would match as a prefix.
+await_finding 180 'kind=top\.unlimited severity=info' \
+  -- triage top --namespace="$NS"
+
+top_out="$("$(lookout_bin)" triage top --namespace="$NS" 2>/dev/null || true)"
+
+# The two negative controls, checked once rather than polled: both
+# assertions are absences, and polling for an absence just means waiting
+# for a timeout to prove it.
+if grep -E 'kind=top\.saturation' <<<"$top_out" | grep -q 'name=nolimits'; then
+  echo "✗ nolimits has no limit to be a percentage of, but was rated as saturated" >&2
+  exit 1
+fi
+if grep -q 'name=steady' <<<"$top_out"; then
+  echo "✗ steady, the limited-but-quiet control, was reported" >&2
+  exit 1
+fi
+
+echo "  ✓ cpu and memory saturation named at warning, unlimited counted,"
+echo "    and neither control reported"

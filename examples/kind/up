@@ -26,6 +26,13 @@
 #   --build   build the lookout image from HEAD (tag lookout:examples-dev)
 #             and side-load it, instead of using the GHCR image later.
 #             Prints the LOOKOUT_IMAGE export to use with sentinel/up.
+#
+# Env:
+#   LOOKOUT_KIND_NODE_CPUS    per-node docker cpu cap (default 4)
+#   LOOKOUT_KIND_NODE_MEMORY  per-node docker memory cap (default 8g)
+#             Either accepts `none` to opt out. Uncapped kind nodes let
+#             the UAT hogs take the whole workstation down with them —
+#             see cap_kind_nodes in lib.sh.
 
 . "$(dirname "$0")/../lib.sh"
 
@@ -45,6 +52,9 @@ else
   echo "▸ creating kind cluster '$CLUSTER_NAME'"
   kind create cluster --config "$(examples_root)/kind/cluster.yaml"
 fi
+# Outside the if: the caps are idempotent, and applying them on the reuse
+# path is what retrofits a cluster brought up before they existed.
+cap_kind_nodes
 kubectl config use-context "$EXAMPLES_CONTEXT" >/dev/null
 
 echo "▸ waiting for nodes Ready"

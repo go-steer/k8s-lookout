@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+# Its own namespace, like every UAT fixture: nothing a fixture creates
+# may sit in $DEMO_NS, where the scenarios and the demo app live. See
+# docs/testing/cli-uat.md § Fixtures.
+NS=lookout-uat-top
+
+echo "▸ saturating one cpu limit and one memory limit"
+
+# `triage top` rates each container as a percentage OF ITS OWN LIMIT and
+# emits nothing below --top-warn (default 80, §4.2 zero nominal state).
+# So the fixture needs containers whose percentage is known by
+# construction, which means small limits held under load — never a big
+# workload, and never an unbounded one.
+#
+# EVERY LOAD-GENERATING CONTAINER HERE IS LIMIT-BOUND ON PURPOSE. An
+# earlier uncommitted version of this fixture ran the same hogs with no
+# limits: cpuhog alone then took a whole core, and with a second cluster
+# up the workstation went to load ~28 and the IDE server was starved out
+# from under the run — the inject itself was SIGKILLed mid-apply. The
+# limits below are the fixture's own blast radius control and are what
+# make it assertable; the docker-level node caps in lib.sh
+# (cap_kind_nodes) are the second, independent layer.
+#
+# Four containers, chosen so each lands in a DIFFERENT part of the
+# output:
+#
+#   cpuhog    → top.saturation resource=cpu, reason=CPUNearLimit
+#   memhog    → top.saturation resource=memory, reason=MemoryNearLimit
+#   nolimits  → top.unlimited: no limit, so no percentage exists and it
+#               is invisible to saturation analysis — the census counts
+#               it instead. Idle by design: unlimited AND busy is the
+#               combination that took the box down.
+#   steady    → the negative control: limits set, sits near idle, and
+#               must be named by nothing.
+#
+# The control is the point. A `top` that names two saturated containers
+# in a namespace containing two saturated containers is
+# indistinguishable from one that names everything it samples, until
+# there is a limited-but-quiet container sitting next to them that it
+# leaves alone.
+
+fresh_namespace "$NS"
+
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpuhog
+  namespace: lookout-uat-top
+  labels: { app.kubernetes.io/name: cpuhog, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: burn
+      image: python:3.12-alpine
+      # `yes` is a pure spin loop: it will consume every cycle the
+      # cgroup allows, so throttling pins usage AT the quota and the
+      # percentage lands ~100 rather than drifting with machine load.
+      # Over-limit cpu is throttled, never killed, so this is safe to
+      # hold indefinitely — and `judge` caps cpu at warning severity for
+      # exactly that reason (a point-in-time sample cannot prove
+      # sustained starvation).
+      command: ["sh", "-c", "yes >/dev/null"]
+      resources:
+        requests: { cpu: "200m", memory: "32Mi" }
+        limits: { cpu: "200m", memory: "64Mi" }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memhog
+  namespace: lookout-uat-top
+  labels: { app.kubernetes.io/name: memhog, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: hold
+      image: python:3.12-alpine
+      # ~100Mi of ballast against a 128Mi limit: with the interpreter's
+      # own ~10Mi that is ~86% — past --top-warn (80) and clear of the
+      # ≥95% critical band. Deliberately NOT critical: memory is
+      # incompressible and 95% of 128Mi leaves ~6Mi of headroom, so
+      # aiming there turns this fixture into a flaky OOM scenario. The
+      # oom/ scenario owns that case.
+      #
+      # Every page is touched because the limit is enforced on RESIDENT
+      # memory: an untouched allocation is virtual, never faults in, and
+      # reports ~0% no matter how large it is.
+      command:
+        - python
+        - -u
+        - -c
+        - |
+          import time
+          ballast = bytearray(100 * 1024 * 1024)
+          for i in range(0, len(ballast), 4096):
+              ballast[i] = 1
+          print("memhog resident", flush=True)
+          time.sleep(86400)
+      resources:
+        requests: { cpu: "10m", memory: "128Mi" }
+        limits: { cpu: "100m", memory: "128Mi" }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nolimits
+  namespace: lookout-uat-top
+  labels: { app.kubernetes.io/name: nolimits, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: idle
+      image: python:3.12-alpine
+      # No limits and no requests, on purpose and in that order of
+      # importance: no limit means no denominator, so this container
+      # cannot produce a top.saturation row at any usage and is counted
+      # by the top.unlimited census instead. No request additionally
+      # puts it in top.unrequested, where the scheduler bin-packs it as
+      # zero.
+      #
+      # Idle, though. `nolimits` describes the SPEC, not the workload —
+      # an unlimited container running a spin loop is bounded by the
+      # machine, which is the exact combination this fixture used to
+      # take the workstation down with.
+      command: ["python", "-u", "-c", "import time; time.sleep(86400)"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: steady
+  namespace: lookout-uat-top
+  labels: { app.kubernetes.io/name: steady, app.kubernetes.io/part-of: lookout-examples }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: quiet
+      image: python:3.12-alpine
+      # The negative control: limited on both dimensions, and uses
+      # almost none of either. Same shape as cpuhog and memhog, so if
+      # `top` names it the check is reporting rows rather than
+      # saturation.
+      command: ["python", "-u", "-c", "import time; print('steady up'); time.sleep(86400)"]
+      resources:
+        requests: { cpu: "10m", memory: "32Mi" }
+        limits: { cpu: "500m", memory: "128Mi" }
+YAML
+
+kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=180s
+
+# Wait for the load to be REAL, not merely scheduled. `triage top` reads
+# metrics.k8s.io, and metrics-server serves nothing for a pod until it
+# has scraped it at least once (~15s resolution, longer right after the
+# pod starts). Asserting before then fails on an empty sample rather
+# than on behaviour — the same class of timing flake broken-workloads
+# waits out with its four-restart rule.
+#
+# Gate on the numbers the assertions actually use, not on pod phase:
+# cpu past 150m of the 200m limit (75%, comfortably on the way to the
+# ~100% throttled steady state) and memory past 100Mi of the 128Mi
+# limit.
+await 240 "cpuhog cpu is at/above 150m of its 200m limit" bash -c \
+  "cpu=\$(kubectl -n '$NS' top pod cpuhog --no-headers --containers 2>/dev/null | awk '{print \$3}' | tr -d 'm'); \
+   [[ -n \"\$cpu\" && \"\$cpu\" -ge 150 ]]"
+await 240 "memhog memory is at/above 100Mi of its 128Mi limit" bash -c \
+  "mem=\$(kubectl -n '$NS' top pod memhog --no-headers --containers 2>/dev/null | awk '{print \$4}' | tr -d 'Mi'); \
+   [[ -n \"\$mem\" && \"\$mem\" -ge 100 ]]"
+
+echo "  ✓ $NS: cpuhog pinned at its cpu limit, memhog ~86% of its memory limit,"
+echo "    nolimits unlimited-but-idle, steady limited-and-quiet (the control)"
