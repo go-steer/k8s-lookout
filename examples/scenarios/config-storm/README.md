@@ -100,15 +100,21 @@ unlikely.
 
 Deleting the namespace does **not** take the namespace-keyed storm
 with it, which the third live run discovered by failing the way the
-second one did. `objectstate.onDeploymentDelete` drops its tracking
-entry and emits nothing, so a `rollout_stall` whose Deployment is
-deleted is never resolved — no `resolution=object_deleted`, no
-member clearance, and the storm sits open on `Namespace//<ns>` for
-the full 30m `stormIdleTTL`. Re-running inside that window recreates
-the same namespace name, and step 1 of `StormCorrelator.Observe`
-attaches the new `FailedMount`s to the *stale* storm before key
-priority is ever consulted. No ConfigMap storm forms and `verify`
-times out at 240s blaming the tier it was testing.
+second one did. A storm key is a *name*, not an object identity:
+`Namespace//<ns>` stays keyable for as long as the storm is open, and
+an open storm lives for the full 30m `stormIdleTTL` — refreshed on
+every attach. Re-running inside that window recreates the same
+namespace name, and step 1 of `StormCorrelator.Observe` attaches the
+new `FailedMount`s to the *stale* storm before key priority is ever
+consulted. No ConfigMap storm forms and `verify` times out at 240s
+blaming the tier it was testing.
+
+What held that first storm open for the whole TTL was #397 — a
+`rollout_stall` whose Deployment is deleted never resolved, so its
+members never cleared. That is fixed here, and the storm now closes
+when its last member does. It does not make the fixed name safe: a
+storm that is still open (a run in progress, a scenario left
+un-reverted) is still re-attachable by name.
 
 So `inject` mints `lookout-storm-<epoch>` per run and records it in
 `$STATE_DIR/config-storm.ns` for `verify`/`revert` (`ns.sh`);

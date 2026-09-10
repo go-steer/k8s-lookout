@@ -20,15 +20,20 @@
 # cannot, and the reason is the scenario's own collateral damage.
 # Breaking the mount also stalls four rollouts, and four rollout_stall
 # incidents that share no finer key form a storm on
-# `Namespace//<ns>`. That storm outlives the namespace: objectstate's
-# onDeploymentDelete drops its tracking entry without emitting a
-# clearance, so deleting the Deployments never resolves the members
-# and the storm sits open for the full 30m stormIdleTTL. A second run
-# inside that half hour recreates the same namespace name, and step 1
-# of StormCorrelator.Observe attaches the new FailedMounts to the
-# stale storm — no ConfigMap storm forms and verify times out at 240s
-# blaming the tier it was testing. A fresh name each run makes the key
-# unreachable.
+# `Namespace//<ns>`. That storm outlives the namespace: a storm key is
+# a name, not an object identity, so it stays open for the full 30m
+# stormIdleTTL no matter what happens to the objects it was keyed on.
+# A second run inside that half hour recreates the same namespace
+# name, and step 1 of StormCorrelator.Observe attaches the new
+# FailedMounts to the stale storm — no ConfigMap storm forms and
+# verify times out at 240s blaming the tier it was testing. A fresh
+# name each run makes the key unreachable.
+#
+# (What held that first storm open for the whole TTL was #397: a
+# rollout_stall whose Deployment is deleted never resolved, so the
+# members never cleared. That is fixed, but resolving every member
+# only closes the storm — it does not un-key it, and the key is
+# re-attachable for as long as the storm is open.)
 #
 # CI never saw this (each run gets a new cluster and a new sentinel);
 # it only shows up in the workflow the examples are actually for —

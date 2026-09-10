@@ -27,13 +27,12 @@
 # generates a fresh `lookout-storm-<epoch>` per run and applies with
 # `-n`, which kubectl refuses to do against an explicit namespace. The
 # name has to be new every time because the namespace-keyed storm
-# above outlives the namespace: rollout_stall is never cleared when
-# its Deployment is deleted (objectstate's onDeploymentDelete just
-# drops the entry), so the storm sits open on the key
-# `Namespace//lookout-storm` for the full 30m idle TTL — and a later
-# run that recreates the same name attaches its FailedMounts to that
-# stale storm instead of forming the ConfigMap one this scenario is
-# about. Apply this file by hand with `kubectl apply -n <ns> -f`.
+# above outlives the namespace: a storm key is a name, not an object
+# identity, so `Namespace//lookout-storm` stays keyable for as long as
+# the storm is open — and a later run that recreates the same name
+# attaches its FailedMounts to that stale storm instead of forming the
+# ConfigMap one this scenario is about.
+# Apply this file by hand with `kubectl apply -n <ns> -f`.
 # See README § Why it owns a namespace.
 apiVersion: v1
 kind: ConfigMap

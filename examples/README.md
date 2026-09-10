@@ -133,10 +133,11 @@ keyed on. `Namespace//x` stays open for the 30m `stormIdleTTL` after
 `x` is deleted, so recreating `x` re-attaches to the stale storm —
 `StormCorrelator.Observe` checks open storms *before* it consults key
 priority, so a lower tier that is already open beats a higher tier
-that is not. What keeps a namespace storm alive that long here is a
-`rollout_stall` on a deleted Deployment, which is never resolved
-(`objectstate.onDeploymentDelete` drops the entry and emits no
-clearance). A scenario that forms a storm should therefore use a
+that is not. What kept a namespace storm alive that long here was a
+`rollout_stall` on a deleted Deployment that never resolved — the
+engine defect behind #397, fixed, but the storm-key lifetime it
+exposed is the durable lesson. A scenario that forms a storm should
+therefore use a
 **fresh namespace name per run** rather than a fixed one; see
 `scenarios/config-storm/ns.sh`. CI never sees this, because every CI
 run gets a new cluster and a new sentinel — it only shows up when a
