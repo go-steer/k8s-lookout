@@ -123,9 +123,9 @@ type CapabilityStatus struct {
 // additionally implements when it can resolve where it runs
 // (explicit config pins, well-known env vars, or an instance
 // metadata server — pkg/cloud/gke resolves all three). The sentinel
-// type-asserts it to stamp the §8 zone/project fields when no
-// explicit --project/--zone flag pins them (precedence: explicit
-// flag > provider metadata > empty; docs/signal-schema-v1.md).
+// type-asserts it to stamp the §8 project/region/zone fields when no
+// explicit --project/--region/--zone flag pins them (precedence:
+// explicit flag > provider metadata > empty; docs/signal-schema-v1.md).
 // NoProvider deliberately does not implement it: vanilla deployments
 // stamp only what flags supply.
 type Identity interface {
@@ -134,9 +134,36 @@ type Identity interface {
 	Project() string
 	// Location is the resolved cluster location — a zone for zonal
 	// clusters, a region for regional ones; "" if undetectable. It
-	// is the best failure-domain string the provider has, and what
-	// the sentinel stamps as the §8 zone.
+	// is the provider's own single-string spelling of where the
+	// cluster runs, and the failure domain the fingerprint hashes.
 	Location() string
+	// Region is the resolved cluster region ("" if undetectable) —
+	// always a region, for zonal and regional clusters alike.
+	//
+	// A separate method rather than something the caller derives,
+	// because deriving it means parsing a location and location
+	// naming is the provider's business: GKE spells a zone as
+	// region + "-<suffix>", and the next provider need not. Given the
+	// pair, the sentinel gets the cluster's ZONE without parsing
+	// anything — Location() when it differs from Region(), empty when
+	// it does not, since a regional cluster has no zone of its own
+	// (its nodes are spread across the region's zones).
+	Region() string
+}
+
+// ZoneOf derives a cluster's zone from a provider's (location, region)
+// pair — the one line every caller of Identity or ClusterRef would
+// otherwise write. A location that IS the region belongs to a regional
+// cluster, which has no zone; anything else is the zone itself.
+//
+// Deliberately string equality rather than name parsing: it holds for
+// any provider whose location is either a region or a zone, which is
+// the contract both surfaces already state.
+func ZoneOf(location, region string) string {
+	if location == region {
+		return ""
+	}
+	return location
 }
 
 // Provider is one cloud environment (GKE first; EKS/AKS are future

@@ -125,6 +125,7 @@ type flags struct {
 	clusters            string
 	clustersFrom        string
 	project             string
+	region              string
 	zone                string
 	logLevel            string
 	dryRun              bool
@@ -353,7 +354,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// zone-less fingerprints byte-identical — deployments that set
 	// nothing behave exactly as before.
 	fs.StringVar(&f.project, "project", "", "Cloud project/account the cluster runs in, stamped into §8 payloads. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly.")
-	fs.StringVar(&f.zone, "zone", "", "Failure domain (zone, or region for regional clusters) stamped into §8 payloads and the signal fingerprint hash. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly (e.g. from a topology label). Unset zones produce zone-less fingerprints — stable, but cross-cluster joins within a zone need it stamped.")
+	fs.StringVar(&f.region, "region", "", "Region the cluster runs in, stamped into §8 payloads. Set for zonal and regional clusters alike. Empty = detect from the cloud provider's metadata when a provider is compiled in; vanilla clusters can set it explicitly. Setting either --region or --zone stops metadata detection for BOTH — a half-flagged location would mix a flag's region with a metadata zone somewhere else.")
+	fs.StringVar(&f.zone, "zone", "", "Zone the cluster runs in, stamped into §8 payloads. Set it only for a ZONAL cluster: a regional cluster has no zone of its own (its nodes are spread across the region's zones), and leaving it empty there is the correct answer, not a gap. The failure domain — this zone when set, else --region — is what enters the signal fingerprint hash, so a deployment that stamps neither produces domain-less fingerprints: stable, but cross-cluster joins within a failure domain need one stamped.")
 
 	// Operational.
 	fs.StringVar(&f.logLevel, "log-level", "info", "One of: debug, info, warn, error.")

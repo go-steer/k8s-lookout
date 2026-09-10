@@ -118,6 +118,11 @@ func (p *Provider) Project() string { return p.project }
 // Location is the resolved cluster location ("" if undetectable).
 func (p *Provider) Location() string { return p.location }
 
+// Region is the resolved cluster region ("" if undetectable), for
+// zonal and regional clusters alike — the GKE location with a zone
+// suffix trimmed off it.
+func (p *Provider) Region() string { return locationRegion(p.location) }
+
 // Cluster is the resolved cluster name ("" if undetectable).
 func (p *Provider) Cluster() string { return p.cluster }
 

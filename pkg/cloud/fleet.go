@@ -25,10 +25,18 @@ import (
 // name the sentinel stamps as Signal.Cluster; Endpoint is the
 // control-plane host the rest.Config dials (GKE: the *.gke.goog
 // DNS endpoint).
+//
+// Location and Region mirror the Identity pair for a cluster the
+// process does NOT run in: Location is the provider's single-string
+// spelling (a zone for zonal clusters, a region for regional ones) and
+// Region is always the region. A provider must set both; the sentinel
+// reads the cluster's zone off the pair without parsing either
+// (Location when it differs from Region, empty when it does not).
 type ClusterRef struct {
 	Name     string
 	Project  string
 	Location string
+	Region   string
 	Endpoint string
 }
 

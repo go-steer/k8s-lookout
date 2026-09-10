@@ -56,6 +56,7 @@ func TestDiscoverClusters(t *testing.T) {
 	lister := &fakeFleetLister{clusters: []*container.Cluster{
 		withDNS("prod-us", "us-central1", "aaa.us-central1.gke.goog"),
 		{Name: "legacy", Location: "us-east1"}, // no DNS endpoint configured
+		withDNS("zonal", "us-central1-b", "bbb.us-central1.gke.goog"),
 	}}
 
 	got, err := discoverClusters(context.Background(), "prod-project", "", lister)
@@ -67,15 +68,29 @@ func TestDiscoverClusters(t *testing.T) {
 	if lister.parent != "projects/prod-project/locations/-" {
 		t.Errorf("parent = %q, want the all-locations wildcard", lister.parent)
 	}
-	if len(got) != 2 {
-		t.Fatalf("refs = %+v, want 2", got)
+	if len(got) != 3 {
+		t.Fatalf("refs = %+v, want 3", got)
 	}
-	if got[0] != (cloud.ClusterRef{Name: "prod-us", Project: "prod-project", Location: "us-central1", Endpoint: "aaa.us-central1.gke.goog"}) {
+	// A REGIONAL cluster: location and region are the same string, so
+	// the sentinel reads no zone off it (cloud.ZoneOf) — a regional
+	// cluster has none of its own.
+	if got[0] != (cloud.ClusterRef{Name: "prod-us", Project: "prod-project", Location: "us-central1", Region: "us-central1", Endpoint: "aaa.us-central1.gke.goog"}) {
 		t.Errorf("ref[0] = %+v", got[0])
+	}
+	if z := cloud.ZoneOf(got[0].Location, got[0].Region); z != "" {
+		t.Errorf("regional cluster resolved zone %q, want none", z)
 	}
 	// The DNS-less cluster still surfaces; RESTConfig fails loudly for it.
 	if got[1].Endpoint != "" {
 		t.Errorf("ref[1].Endpoint = %q, want empty for a cluster with no DNS endpoint", got[1].Endpoint)
+	}
+	// A ZONAL cluster: the region is the location one level up, and the
+	// zone is the location itself.
+	if got[2].Region != "us-central1" {
+		t.Errorf("ref[2].Region = %q, want us-central1 derived from the zonal location", got[2].Region)
+	}
+	if z := cloud.ZoneOf(got[2].Location, got[2].Region); z != "us-central1-b" {
+		t.Errorf("zonal cluster resolved zone %q, want us-central1-b", z)
 	}
 }
 

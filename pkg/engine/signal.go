@@ -180,14 +180,27 @@ type Signal struct {
 
 	// Deployment identity (§8): where this signal was observed.
 	// Stamped by the pipeline from sentinel configuration, not by
-	// sources: Cluster from --cluster-name, Zone/Project by the
-	// documented precedence (explicit --zone/--project flag >
-	// provider metadata via cloud.Identity > empty). Zone
-	// participates in the fingerprint hash; deployments that stamp
-	// nothing keep zone-less fingerprints — stable, but cross-cluster
-	// joins within a failure domain need zones stamped.
+	// sources: Cluster from --cluster-name, the rest by the
+	// documented precedence (explicit --project/--region/--zone flag
+	// > provider metadata via cloud.Identity > empty).
+	//
+	// Region and Zone are two distinct cluster properties, not two
+	// spellings of one (amended 2026-09-10, docs/signal-schema-v1.md
+	// §Amendments). A zonal cluster has both; a REGIONAL cluster has
+	// a region and no zone of its own — its nodes are spread across
+	// the region's zones. Before the amendment there was a single
+	// Zone field holding whichever the provider reported, so half the
+	// fleet reported a region in a field called zone.
+	//
+	// FailureDomain — Zone when set, else Region — is what
+	// participates in the fingerprint hash, which is why the split
+	// changed no fingerprint: it is the same string the single field
+	// used to hold, for both cluster shapes. Deployments that stamp
+	// nothing keep domain-less fingerprints — stable, but
+	// cross-cluster joins within a failure domain need one stamped.
 	Cluster string
 	Project string
+	Region  string
 	Zone    string
 
 	// TriageEvent is the frozen per-object core; see type comment.
@@ -203,6 +216,17 @@ type Signal struct {
 	// not ride the wire (Signal is never marshalled; the frozen inject
 	// payloads are composed field by field).
 	PullClass PullClass
+
+	// PullCause is the registry's own error text for an image-pull
+	// failure whose OWN message does not carry it (issue #387) —
+	// inherited from the last cause-bearing event for the same object
+	// or registry host. Empty when the message already says it, and
+	// on every signal outside the image-pull family. Unlike PullClass
+	// this DOES ride the wire, as the frozen pair's `pull_cause`:
+	// kubelet states the cause once and then folds three causeless
+	// events onto the same dedup key, so whichever crosses the
+	// debounce first is usually not the one that explains anything.
+	PullCause string
 
 	// Forecast is set by trend sources only (§8); nil otherwise.
 	Forecast *Forecast

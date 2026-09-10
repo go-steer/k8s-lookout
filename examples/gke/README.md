@@ -29,10 +29,14 @@ Notes:
   the drill fidelity dev/drills/bad-deploy.md wants anyway.
 - **Sentinel placement**: the kind worker-pinning in sentinel/up is
   skipped automatically on non-kind contexts.
-- **--project/--zone**: on the `-gke` image these are detected from
-  metadata and stamped into every payload (zone participates in the
-  fingerprint); on the default image pass them explicitly in
-  sentinel/up's args if you want zone-scoped fingerprints.
+- **--project/--region/--zone**: on the `-gke` image these are
+  detected from metadata and stamped into every payload; the failure
+  domain (zone if the cluster has one, else region) participates in
+  the fingerprint. A regional cluster has a region and no zone of its
+  own, so an empty `zone` there is the right answer, not a gap. On the
+  default image pass them explicitly in sentinel/up's args if you want
+  domain-scoped fingerprints — `--region` and `--zone` resolve as a
+  pair, so setting either one stops metadata detection for both.
 
 ## What to run from dev/drills instead
 

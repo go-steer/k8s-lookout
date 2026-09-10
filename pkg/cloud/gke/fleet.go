@@ -110,6 +110,7 @@ func discoverClusters(ctx context.Context, project, location string, lister flee
 			Name:     c.Name,
 			Project:  project,
 			Location: c.Location,
+			Region:   locationRegion(c.Location),
 			Endpoint: dnsEndpoint(c),
 		})
 	}

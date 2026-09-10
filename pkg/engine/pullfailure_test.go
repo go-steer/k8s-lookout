@@ -232,24 +232,24 @@ func TestPullClassMemo_CarriesCauseToCauselessBackOff(t *testing.T) {
 	t.Parallel()
 	m := NewPullClassMemo()
 
-	if got := m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429)); got != PullClassRetryable {
+	if got, _ := m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429)); got != PullClassRetryable {
 		t.Fatalf("cause-bearing Failed event: class = %v, want PullClassRetryable", got)
 	}
 	// The follow-on back-off for the SAME pod says only "still
 	// happening" — it must inherit the cause we already learned.
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
 		t.Errorf("causeless BackOff for the same pod: class = %v, want the inherited PullClassRetryable", got)
 	}
 	// A DIFFERENT pod with no evidence of its own, pulling from the
 	// SAME host: it inherits the host's retryable cause (issue #225).
 	// The 429 was never a fact about pod-1 — it is a fact about the
 	// registry, and pod-2 is pulling from the same one.
-	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
+	if got, _ := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassRetryable {
 		t.Errorf("causeless BackOff on a rate-limited host: class = %v, want the host-inherited PullClassRetryable", got)
 	}
 	// A pod pulling from an UNRELATED host has no evidence at any
 	// scope: unknown, fires. The host scope must not leak sideways.
-	if got := m.Resolve(pullSignal("pod-3", "BackOff", `Back-off pulling image "docker.io/library/nginx:1.25"`)); got != PullClassUnknown {
+	if got, _ := m.Resolve(pullSignal("pod-3", "BackOff", `Back-off pulling image "docker.io/library/nginx:1.25"`)); got != PullClassUnknown {
 		t.Errorf("causeless BackOff on an unrelated host: class = %v, want PullClassUnknown", got)
 	}
 }
@@ -262,10 +262,10 @@ func TestPullClassMemo_CarriesCauseToCauselessBackOff(t *testing.T) {
 func TestPullClassMemo_TerminalCauseDoesNotPropagateHostWide(t *testing.T) {
 	t.Parallel()
 	m := NewPullClassMemo()
-	if got := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "gcr.io/team/app:nope": manifest unknown`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "gcr.io/team/app:nope": manifest unknown`)); got != PullClassTerminal {
 		t.Fatalf("bad tag: class = %v, want PullClassTerminal", got)
 	}
-	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "gcr.io/team/other:v1"`)); got != PullClassUnknown {
+	if got, _ := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "gcr.io/team/other:v1"`)); got != PullClassUnknown {
 		t.Errorf("unrelated pod on a host with one bad tag: class = %v, want PullClassUnknown", got)
 	}
 }
@@ -280,10 +280,10 @@ func TestPullClassMemo_ObjectScopeBeatsHostScope(t *testing.T) {
 	// The host is known to be throttling...
 	m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429))
 	// ...but pod-2 stated a terminal cause of its own.
-	if got := m.Resolve(pullSignal("pod-2", "Failed", `Failed to pull image "us-east1-artifactregistry.gcr.io/gke-release/x:nope": manifest unknown`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-2", "Failed", `Failed to pull image "us-east1-artifactregistry.gcr.io/gke-release/x:nope": manifest unknown`)); got != PullClassTerminal {
 		t.Fatalf("pod-2 own cause: class = %v, want PullClassTerminal", got)
 	}
-	if got := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:nope"`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-2", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:nope"`)); got != PullClassTerminal {
 		t.Errorf("pod-2 back-off during a host-wide 429: class = %v, want its OWN PullClassTerminal", got)
 	}
 }
@@ -303,12 +303,12 @@ func TestPullClassMemo_HostScopeExpiresFasterThanObject(t *testing.T) {
 	now = now.Add(hostPullMemoTTL + time.Second)
 
 	backOff := `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`
-	if got := m.Resolve(pullSignal("pod-2", "BackOff", backOff)); got != PullClassUnknown {
+	if got, _ := m.Resolve(pullSignal("pod-2", "BackOff", backOff)); got != PullClassUnknown {
 		t.Errorf("stale host evidence: class = %v, want PullClassUnknown", got)
 	}
 	// Still inside defaultPullMemoTTL: the reporting object keeps its
 	// own cause well after the host scope has lapsed.
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", backOff)); got != PullClassRetryable {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", backOff)); got != PullClassRetryable {
 		t.Errorf("object scope at the same instant: class = %v, want PullClassRetryable", got)
 	}
 }
@@ -320,10 +320,10 @@ func TestPullClassMemo_HostScopeExpiresFasterThanObject(t *testing.T) {
 func TestPullClassMemo_TerminalCauseAlsoCarries(t *testing.T) {
 	t.Parallel()
 	m := NewPullClassMemo()
-	if got := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "nginx:nope": manifest unknown`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "nginx:nope": manifest unknown`)); got != PullClassTerminal {
 		t.Fatalf("bad tag: class = %v, want PullClassTerminal", got)
 	}
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "nginx:nope"`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "nginx:nope"`)); got != PullClassTerminal {
 		t.Errorf("back-off after a bad tag: class = %v, want PullClassTerminal (must still fire fast)", got)
 	}
 }
@@ -334,10 +334,10 @@ func TestPullClassMemo_FreshCauseSupersedes(t *testing.T) {
 	t.Parallel()
 	m := NewPullClassMemo()
 	m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429))
-	if got := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "nginx:nope": manifest unknown`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-1", "Failed", `Failed to pull image "nginx:nope": manifest unknown`)); got != PullClassTerminal {
 		t.Fatalf("new cause: class = %v, want PullClassTerminal", got)
 	}
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "nginx:nope"`)); got != PullClassTerminal {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "nginx:nope"`)); got != PullClassTerminal {
 		t.Errorf("back-off inherits the NEWEST cause: class = %v, want PullClassTerminal", got)
 	}
 }
@@ -354,7 +354,7 @@ func TestPullClassMemo_Expires(t *testing.T) {
 	now = now.Add(defaultPullMemoTTL + time.Second)
 	// Same host as artifactRegistry429, so this one lookup probes —
 	// and so drops — both the object and the host scope it wrote.
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassUnknown {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`)); got != PullClassUnknown {
 		t.Errorf("expired cause: class = %v, want PullClassUnknown", got)
 	}
 	if m.Len() != 0 {
@@ -384,10 +384,10 @@ func TestPullClassMemo_NonPullSignalsUntouched(t *testing.T) {
 	t.Parallel()
 	m := NewPullClassMemo()
 	crash := pullSignal("pod-1", "BackOff", "Back-off restarting failed container server in pod web-1")
-	if got := m.Resolve(crash); got != PullClassNA {
+	if got, _ := m.Resolve(crash); got != PullClassNA {
 		t.Errorf("crash-loop BackOff: class = %v, want PullClassNA", got)
 	}
-	if got := m.Resolve(pullSignal("pod-1", "OOMKilled", "")); got != PullClassNA {
+	if got, _ := m.Resolve(pullSignal("pod-1", "OOMKilled", "")); got != PullClassNA {
 		t.Errorf("OOMKilled: class = %v, want PullClassNA", got)
 	}
 	if m.Len() != 0 {
@@ -401,10 +401,114 @@ func TestPullClassMemo_NonPullSignalsUntouched(t *testing.T) {
 func TestPullClassMemo_NilIsMessageOnly(t *testing.T) {
 	t.Parallel()
 	var m *PullClassMemo
-	if got := m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429)); got != PullClassRetryable {
+	if got, _ := m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429)); got != PullClassRetryable {
 		t.Errorf("nil memo: class = %v, want PullClassRetryable", got)
 	}
-	if got := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "gcr.io/x/y:v1"`)); got != PullClassUnknown {
+	if got, _ := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "gcr.io/x/y:v1"`)); got != PullClassUnknown {
 		t.Errorf("nil memo must not carry forward: class = %v, want PullClassUnknown", got)
+	}
+}
+
+// --- issue #387: the cause TEXT, not just the verdict ---------------
+//
+// The classifier reads a cause out of a message and keeps its answer.
+// Until #387 it discarded the words, so the payload a reader actually
+// received — the causeless follow-on that crossed the debounce first —
+// said `Error: ImagePullBackOff` and explained nothing. A 429 and a
+// typo'd tag are opposite incidents; reporting neither defeats the
+// point of telling them apart.
+
+// TestPullCause pins the extraction against the four real messages one
+// failed pull emits. Only the first has anything to give.
+func TestPullCause(t *testing.T) {
+	t.Parallel()
+	const ref = `us-east1-artifactregistry.gcr.io/gke-release/x:v1`
+	cases := []struct {
+		name, message, want string
+	}{
+		{"cause-bearing Failed", `Failed to pull image "` + ref + `": manifest unknown`, "manifest unknown"},
+		{"causeless back-off", `Back-off pulling image "` + ref + `"`, ""},
+		{"ErrImagePull has no reference at all", "Error: ErrImagePull", ""},
+		{"ImagePullBackOff has no reference at all", "Error: ImagePullBackOff", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PullCause(tc.message); got != tc.want {
+				t.Errorf("PullCause = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// The real 429 is long and multi-line; assert it survives whole
+	// rather than pinning the same blob twice.
+	if got := PullCause(artifactRegistry429); !strings.Contains(got, "429 Too Many Requests") ||
+		!strings.Contains(got, "Quota exceeded for quota metric") {
+		t.Errorf("the 429's own words did not survive extraction: %q", got)
+	}
+}
+
+// TestPullClassMemo_CarriesCauseTextToCauselessBackOff is the cause
+// half of TestPullClassMemo_CarriesCauseToCauselessBackOff: the same
+// scopes, the same TTLs, the same inheritance — because the reason the
+// CLASS has to be carried forward is the reason the words do.
+func TestPullClassMemo_CarriesCauseTextToCauselessBackOff(t *testing.T) {
+	t.Parallel()
+	m := NewPullClassMemo()
+
+	// The cause-bearing event reports no cause of its own: the reader
+	// already has the words in the payload's `message`.
+	if _, cause := m.Resolve(pullSignal("pod-1", "Failed", artifactRegistry429)); cause != "" {
+		t.Errorf("cause-bearing event: cause = %q, want empty (the message already says it)", cause)
+	}
+	const backOff = `Back-off pulling image "us-east1-artifactregistry.gcr.io/gke-release/x:v1"`
+	_, cause := m.Resolve(pullSignal("pod-1", "BackOff", backOff))
+	if !strings.Contains(cause, "429 Too Many Requests") {
+		t.Errorf("causeless BackOff for the same pod: cause = %q, want the inherited 429 text", cause)
+	}
+	// The registry host carries the cause too — that scope exists
+	// precisely because the cause-bearing event is a minority (#225).
+	if _, cause := m.Resolve(pullSignal("pod-2", "BackOff", backOff)); !strings.Contains(cause, "429 Too Many Requests") {
+		t.Errorf("causeless BackOff on the rate-limited host: cause = %q, want the host-inherited 429 text", cause)
+	}
+	if _, cause := m.Resolve(pullSignal("pod-3", "BackOff", `Back-off pulling image "docker.io/library/nginx:1.25"`)); cause != "" {
+		t.Errorf("causeless BackOff on an unrelated host: cause = %q, want empty", cause)
+	}
+}
+
+// TestPullClassMemo_UnclassifiedCauseStillCarries: a registry error we
+// have no marker for is the text a reader most needs forwarded, so it
+// is recorded even though it produced no verdict.
+//
+// And recording it must not change what the CLASS resolves to. The
+// object scope now holds an entry where it previously held none, and
+// the host scope's retryable verdict has to stay reachable underneath
+// it — otherwise #387 would have quietly narrowed #225.
+func TestPullClassMemo_UnclassifiedCauseStillCarries(t *testing.T) {
+	t.Parallel()
+	m := NewPullClassMemo()
+	const host = "us-east1-artifactregistry.gcr.io"
+	const novel = `Failed to pull image "` + host + `/team/app:v1": rpc error: code = Unknown desc = something nobody has a matcher for`
+	if class, cause := m.Resolve(pullSignal("pod-1", "Failed", novel)); class != PullClassUnknown || cause != "" {
+		t.Fatalf("novel error: (class, cause) = (%v, %q), want (PullClassUnknown, empty)", class, cause)
+	}
+	class, cause := m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "`+host+`/team/app:v1"`))
+	if !strings.Contains(cause, "something nobody has a matcher for") {
+		t.Errorf("causeless follow-on: cause = %q, want the unclassified error text carried forward", cause)
+	}
+	if class != PullClassUnknown {
+		t.Errorf("an unclassified cause must not invent a verdict: class = %v", class)
+	}
+	// Now the host earns a retryable verdict from another pod. pod-1's
+	// next causeless event must still reach it — its own object entry
+	// holds words, not a judgement.
+	if got, _ := m.Resolve(pullSignal("pod-9", "Failed", artifactRegistry429)); got != PullClassRetryable {
+		t.Fatalf("host-wide 429: class = %v, want PullClassRetryable", got)
+	}
+	class, cause = m.Resolve(pullSignal("pod-1", "BackOff", `Back-off pulling image "`+host+`/team/app:v1"`))
+	if class != PullClassRetryable {
+		t.Errorf("host verdict unreachable under an unclassified object entry: class = %v, want PullClassRetryable (#225)", class)
+	}
+	if !strings.Contains(cause, "something nobody has a matcher for") {
+		t.Errorf("the narrower object cause should win over the host's: cause = %q", cause)
 	}
 }

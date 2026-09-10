@@ -60,12 +60,15 @@ type dispatcher struct {
 	injector inject.Sink
 	metrics  *metrics
 	cluster  string
-	// project / zone are the resolved §8 deployment identity (see
-	// resolveIdentity: explicit flag > provider metadata > empty),
-	// stamped onto every signal whose source left them blank. Zone
-	// participates in the fingerprint hash; empty values reproduce
-	// the pre-wiring zone-less fingerprints exactly.
+	// project / region / zone are the resolved §8 deployment identity
+	// (see resolveIdentity: explicit flag > provider metadata >
+	// empty), stamped onto every signal whose source left them blank.
+	// A regional cluster has an empty zone; the failure domain
+	// (zone, else region) participates in the fingerprint hash, and
+	// empty values reproduce the pre-wiring domain-less fingerprints
+	// exactly.
 	project   string
+	region    string
 	zone      string
 	mode      string // "per-incident" or "shared"
 	targetSid string // for shared mode
@@ -181,6 +184,9 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Project == "" {
 		sig.Project = d.project
 	}
+	if sig.Region == "" {
+		sig.Region = d.region
+	}
 	if sig.Zone == "" {
 		sig.Zone = d.zone
 	}
@@ -211,9 +217,15 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	// registry-scoped blast-radius key in the storm correlator — must
 	// agree on whether kubelet's own retry cycle is expected to clear
 	// this. Nil-safe: an unset memo classifies from the message alone.
-	sig.PullClass = d.pullClass.Resolve(sig)
+	//
+	// The same call now also recovers the cause TEXT for a message
+	// that does not carry it (issue #387) — same memo, same scopes,
+	// same TTLs, because the reason the class has to be inherited is
+	// the reason the words do.
+	sig.PullClass, sig.PullCause = d.pullClass.Resolve(sig)
 	if sig.Fingerprint == "" {
-		sig.Fingerprint = engine.Fingerprint(sig.Kind, key.Reason, sig.KindOfObject, sig.Zone)
+		sig.Fingerprint = engine.Fingerprint(sig.Kind, key.Reason, sig.KindOfObject,
+			engine.FailureDomain(sig.Region, sig.Zone))
 	}
 	// Effective severity (§7.7): the source-stamped per-kind default,
 	// unless config overrides the kind via --severity. Stamped before
@@ -549,10 +561,16 @@ func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payloa
 		Container:    sig.Container,
 		UID:          sig.Key.UID,
 		Message:      maskString(sig.Message), // §6.5 inject surface (issue #82)
-		Count:        result.Count,
-		FirstSeen:    sig.FirstSeen,
-		LastSeen:     sig.LastSeen,
-		Cluster:      sig.Cluster,
+		// Masked on the same terms as Message: this IS message text,
+		// borrowed from an earlier event for the same object (#387),
+		// so it reaches the same inject surface and must not be a way
+		// around §6.5. Empty for everything that is not an image-pull
+		// failure whose own message went silent on the cause.
+		PullCause: maskString(sig.PullCause),
+		Count:     result.Count,
+		FirstSeen: sig.FirstSeen,
+		LastSeen:  sig.LastSeen,
+		Cluster:   sig.Cluster,
 		Context: inject.PayloadContext{
 			ControllerRef: sig.ControllerRef,
 			Node:          sig.Node,
@@ -868,62 +886,81 @@ func (d *dispatcher) countResolved(sig engine.Signal) {
 	d.metrics.recoveriesObserved.WithLabelValues(string(sig.Recovery.Resolution)).Inc()
 }
 
-// resolveIdentity resolves the §8 zone/project deployment identity:
-// explicit --project/--zone flags win; blanks are filled best-effort
-// from a compiled-in provider's metadata (cloud.Identity — the gke
-// provider resolves config pins, well-known env vars, then the GCE
-// metadata server); whatever remains stays empty. Never fatal: a
-// vanilla (untagged) build resolves the NoProvider sentinel — which
-// implements no Identity — instantly, and a provider error only
-// means empty fields, i.e. the zone-less fingerprints deployments
-// hashed before this wiring, byte-identical.
-func resolveIdentity(ctx context.Context, f *flags) (project, zone string) {
-	project, zone = f.project, f.zone
-	if project != "" && zone != "" {
-		return project, zone
+// resolveIdentity resolves the §8 project/region/zone deployment
+// identity: explicit --project/--region/--zone flags win; blanks are
+// filled best-effort from a compiled-in provider's metadata
+// (cloud.Identity — the gke provider resolves config pins, well-known
+// env vars, then the GCE metadata server); whatever remains stays
+// empty. Never fatal: a vanilla (untagged) build resolves the
+// NoProvider sentinel — which implements no Identity — instantly, and
+// a provider error only means empty fields, i.e. the domain-less
+// fingerprints deployments hashed before this wiring, byte-identical.
+func resolveIdentity(ctx context.Context, f *flags) (project, region, zone string) {
+	project, region, zone = f.project, f.region, f.zone
+	if project != "" && region != "" {
+		return project, region, zone
 	}
 	p, err := cloud.New(ctx, cloud.Config{Project: f.project, Cluster: f.clusterName})
 	if err != nil {
-		log.Printf("identity: cloud provider unavailable for zone/project detection: %v (stamping flag values only)", err)
-		return project, zone
+		log.Printf("identity: cloud provider unavailable for project/region/zone detection: %v (stamping flag values only)", err)
+		return project, region, zone
 	}
-	return identityFromProvider(p, project, zone)
+	return identityFromProvider(p, project, region, zone)
 }
 
 // identityFromProvider applies the documented precedence — explicit
 // flag > provider metadata > empty — against an already-constructed
 // provider. Split from resolveIdentity so the precedence table is
 // unit-testable without the global provider registry.
-func identityFromProvider(p cloud.Provider, flagProject, flagZone string) (project, zone string) {
-	project, zone = flagProject, flagZone
+//
+// Region and zone are resolved as a PAIR, not field by field: the
+// provider reports a location and a region, and which of the two the
+// cluster's zone is follows from whether they differ (cloud.ZoneOf).
+// Filling one from metadata while the other came from a flag would let
+// a --region=us-east1 override sit next to a metadata zone in
+// us-central1, so a flag on either wins for both.
+func identityFromProvider(p cloud.Provider, flagProject, flagRegion, flagZone string) (project, region, zone string) {
+	project, region, zone = flagProject, flagRegion, flagZone
 	id, ok := p.(cloud.Identity)
 	if !ok {
-		return project, zone
+		return project, region, zone
 	}
 	if project == "" {
 		project = id.Project()
 	}
-	if zone == "" {
-		zone = id.Location()
+	if region == "" && zone == "" {
+		region, zone = id.Region(), cloud.ZoneOf(id.Location(), id.Region())
 	}
-	return project, zone
+	return project, region, zone
 }
 
-// stampIdentity completes the §8 schema on a source-namespaced
-// payload (docs/signal-schema-v1.md, the M5 v1 freeze): fingerprint +
-// source + severity + zone/project ride the wire so a fleet-level
-// consumer can roll up a
-// fleet-wide symptom as a join on (fingerprint, cluster/project/zone)
-// instead of parsing payloads. The frozen kinds — k8s-event and
-// k8s-event-followup — are deliberately excluded: their payloads stay
-// byte-identical to M0 (the frozen wire pins), and their Signal-only
-// fields remain in-process per the M0 contract.
+// stampIdentity completes the §8 schema on a payload
+// (docs/signal-schema-v1.md, the M5 v1 freeze): fingerprint + source +
+// severity + project/region/zone ride the wire so a fleet-level
+// consumer can roll up a fleet-wide symptom as a join on
+// (fingerprint, cluster/project/region/zone) instead of parsing
+// payloads.
+//
+// The frozen kinds — k8s-event and k8s-event-followup — used to be
+// excluded so their payloads stayed byte-identical to M0. As of the
+// 2026-09-10 amendment (issue #389) they carry the IDENTITY half:
+// `cluster` alone cannot identify a cluster in a fleet process, since
+// a GKE cluster name is unique only within a (project, location) pair,
+// so a consumer could neither tell two clusters named `prod` apart nor
+// build a context to reach either. Every field is omitempty, so the
+// single-cluster deployment that stamps no identity still emits the
+// M0 bytes exactly; only a fleet deployment sees the new keys.
+//
+// Source/severity/fingerprint stay excluded from the frozen pair: they
+// are OUR pipeline's verdicts about a signal rather than facts about
+// where it happened, and the M0 contract keeps them in-process.
 func stampIdentity(p *inject.Payload, sig engine.Signal) {
+	p.Project = sig.Project
+	p.Region = sig.Region
+	p.Zone = sig.Zone
 	if p.Kind == engine.KindK8sEvent || p.Kind == engine.KindK8sEventFollowup {
 		return
 	}
-	p.Project = sig.Project
-	p.Zone = sig.Zone
 	p.Source = sig.Source
 	p.Severity = string(sig.Severity)
 	p.Fingerprint = sig.Fingerprint
