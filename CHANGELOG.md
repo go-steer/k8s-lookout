@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-10
+
+This release is one program and its yield. `examples/uat` is the
+read-path half of the e2e layer: `examples/e2e` asks whether breaking
+a workload puts the right signal on the wire, and this asks whether
+every command that *reads* a cluster returns correct, well-shaped
+output. It enumerates its own subject matter from the command
+registry, so all 34 read-path commands are covered by construction and
+a newly registered one with no entry in the invocation table fails the
+run. It replays each of them through a real MCP server and diffs the
+result against the CLI byte for byte, since "tool results carry the
+same payload the CLI prints" was a documented contract nothing
+checked. And it ships ten fixtures, because a check that has only ever
+been pointed at stock kind and always answered `findings=0` is not
+tested — it has merely been started. Around six hundred assertions,
+gated by tier, running on every push to main.
+
+The rest of the release is what that program found, which is the point
+of writing it and the reason the list below is long. Two of the
+findings would have cost an operator real time. `lookout watch` asked
+for a source whose grant was missing reported the error internally and
+then blocked forever on the watchboard join: the process stayed up
+with `/healthz` answering 200 while nothing at all was being watched,
+and the diagnosis printed only once someone thought to kill it.
+`lookout scan` against a cluster it could not reach — a typo'd
+`--context` is enough — exited 0 with `scanned=0 findings=8`, so a
+wrapper branching on the exit code of the documented "start here"
+command saw success. Beside those: a `progress_deadline` warning that
+fired on every scale of a settled Deployment, which means an HPA
+raised a stalling-rollout alert several times an hour; a `--timeout`
+that expired and blamed client-go's rate limiter instead of the flag
+the caller set; an enrichment path that answered a Service incident
+with 198 bytes of complaint about workload kinds, on the signal that
+most needs a bundle; and a redaction heuristic that read the interior
+hyphen of `edgy-absent-secret` as a credential flag and masked the
+word after it, turning "not found" into its opposite across a name
+shape Kubernetes uses constantly. None of them under-masked and none
+of them were reachable by reading the code.
+
+The last of them arrived after this section was written, which is the
+best argument for the program there is. One CI run was slow enough
+that the crash-loop fixture was six minutes old by the time the
+assertions reached it, and eight checks failed at once: a container in
+a *steady* crash loop turns out to be reported as two different
+incidents, `pod.crashloop`/critical and `pod.restarts`/warning,
+alternating every forty seconds or so with a sub-phase of the
+kubelet's restart cycle — two §8 fingerprints, so dedup counted one
+fault twice and a `triage status` record could go missing between two
+reads a minute apart. The share of each cycle spent in the wrong one
+grows with the backoff, so the longer a workload had been broken, the
+likelier lookout was to call it a warning.
+
+Independently of the UAT program, the frozen `k8s-event` payloads
+learned where they came from. They had carried no cluster identity
+since M0 — correct while a sentinel watched one cluster, wrong the
+moment `--clusters` made one process watch a fleet, since a GKE
+cluster name is unique only within a (project, location) pair and two
+clusters called `prod` were indistinguishable on the wire. Location is
+now two fields rather than one, because a regional cluster has a
+region and no zone of its own and roughly half of any real fleet had
+been reporting a region in a field named `zone`. No fingerprint moved.
+And image-pull failures finally say *why*: the classifier had been
+reading the registry's own error text, keeping its verdict and
+throwing the words away, so a rate-limit 429 and a typo'd tag both
+arrived as `Error: ImagePullBackOff`.
+
 ### Added
 
 - `examples/uat`, the read-path half of the e2e layer. `examples/e2e`
