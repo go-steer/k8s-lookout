@@ -93,12 +93,18 @@ spec:
   containers:
     - name: hold
       image: python:3.12-alpine
-      # ~100Mi of ballast against a 128Mi limit: with the interpreter's
-      # own ~10Mi that is ~86% — past --top-warn (80) and clear of the
+      # ~112Mi of ballast against a 128Mi limit: with the interpreter's
+      # own ~3Mi that is ~90% — past --top-warn (80) and clear of the
       # ≥95% critical band. Deliberately NOT critical: memory is
       # incompressible and 95% of 128Mi leaves ~6Mi of headroom, so
       # aiming there turns this fixture into a flaky OOM scenario. The
       # oom/ scenario owns that case.
+      #
+      # The band is narrow (80 < pct < 95 is 19Mi wide here) so the
+      # ballast is sized to sit in the MIDDLE of it, not at an edge.
+      # 100Mi was the first try and measured 81% on a kind worker —
+      # one point above the threshold it has to clear, which is a
+      # coin-flip rather than a fixture.
       #
       # Every page is touched because the limit is enforced on RESIDENT
       # memory: an untouched allocation is virtual, never faults in, and
@@ -109,7 +115,7 @@ spec:
         - -c
         - |
           import time
-          ballast = bytearray(100 * 1024 * 1024)
+          ballast = bytearray(112 * 1024 * 1024)
           for i in range(0, len(ballast), 4096):
               ballast[i] = 1
           print("memhog resident", flush=True)
@@ -172,16 +178,18 @@ kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=180s
 # than on behaviour — the same class of timing flake broken-workloads
 # waits out with its four-restart rule.
 #
-# Gate on the numbers the assertions actually use, not on pod phase:
-# cpu past 150m of the 200m limit (75%, comfortably on the way to the
-# ~100% throttled steady state) and memory past 100Mi of the 128Mi
-# limit.
+# Gate PAST the threshold the assertions depend on, not merely near it:
+# cpu at 150m of the 200m limit (75%, comfortably on the way to the
+# ~100% throttled steady state) and memory at 108Mi of the 128Mi limit
+# — 84%, so the gate itself cannot pass while `triage top` would still
+# report nothing. A gate set below --top-warn hands the flake it exists
+# to prevent straight to the assertion.
 await 240 "cpuhog cpu is at/above 150m of its 200m limit" bash -c \
   "cpu=\$(kubectl -n '$NS' top pod cpuhog --no-headers --containers 2>/dev/null | awk '{print \$3}' | tr -d 'm'); \
    [[ -n \"\$cpu\" && \"\$cpu\" -ge 150 ]]"
-await 240 "memhog memory is at/above 100Mi of its 128Mi limit" bash -c \
+await 240 "memhog memory is at/above 108Mi of its 128Mi limit" bash -c \
   "mem=\$(kubectl -n '$NS' top pod memhog --no-headers --containers 2>/dev/null | awk '{print \$4}' | tr -d 'Mi'); \
-   [[ -n \"\$mem\" && \"\$mem\" -ge 100 ]]"
+   [[ -n \"\$mem\" && \"\$mem\" -ge 108 ]]"
 
-echo "  ✓ $NS: cpuhog pinned at its cpu limit, memhog ~86% of its memory limit,"
+echo "  ✓ $NS: cpuhog pinned at its cpu limit, memhog ~90% of its memory limit,"
 echo "    nolimits unlimited-but-idle, steady limited-and-quiet (the control)"

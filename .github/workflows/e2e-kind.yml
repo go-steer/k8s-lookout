@@ -24,7 +24,7 @@ name: E2E (kind)
 #   - weekly / manual → the full non-destructive set + node-failure
 #                      (~40 min)
 #
-# Both tiers then run the T0 CLI UAT (examples/uat) against the same
+# Both tiers then run the T1 CLI UAT (examples/uat) against the same
 # cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
 #
 # Deliberately NOT a pull_request job: signal routing legitimately
@@ -123,7 +123,7 @@ jobs:
               ;;
           esac
 
-      - name: CLI UAT (T0)
+      - name: CLI UAT (T1)
         # The read-path half of the e2e layer (docs/testing/cli-uat.md):
         # every registered command's exit code, summary line, stdout
         # purity, JSON, scope flags and --timeout, then the same
@@ -137,7 +137,16 @@ jobs:
         # flaky part (see the header), the CLI contract is not, and
         # letting a scenario flake hide a real contract regression
         # defeats the point of checking it separately.
+        #
+        # T1, not T0: examples/kind/up installs metrics-server (the
+        # saturation source refuses to start without it), so this
+        # cluster can run `triage top` for real. The T1 case probes
+        # metrics.k8s.io itself and skips loudly if it is not
+        # answering, so this cannot turn an infrastructure problem
+        # into a UAT failure.
         if: ${{ !cancelled() }}
+        env:
+          UAT_TIER: T1
         run: examples/uat
 
       - name: Collect forensics

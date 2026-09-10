@@ -84,14 +84,20 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
-`scenarios/` also holds seven **UAT fixtures** — `chatty-logs`,
+`scenarios/` also holds nine **UAT fixtures** — `chatty-logs`,
 `broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`,
-`broken-workloads`, `secret-workload`. Same three scripts, different
-job: nothing is expected on the wire and `examples/e2e` skips them.
-They exist to give a read-path command something to report — or, for
-the last two, to make a shared cluster answerable at all: one namespace
-whose contents are known exactly, and one canary string consumed four
-ways. See [the read-path tier](#the-read-path-tier).
+`hpa-thrash`, `cpu-pressure`, `broken-workloads`, `secret-workload`.
+Same three scripts, different job: nothing is expected on the wire and
+`examples/e2e` skips them. They exist to give a read-path command
+something to report — or, for the last two, to make a shared cluster
+answerable at all: one namespace whose contents are known exactly, and
+one canary string consumed four ways. `cpu-pressure` is the only one
+that needs more than a bare cluster (metrics-server, i.e. UAT tier T1),
+and the only one whose own load has to be bounded — every container it
+starts is limit-bound, and `examples/kind/up` additionally caps each
+node at 4 cpu / 8g (`cap_kind_nodes`, tunable via
+`LOOKOUT_KIND_NODE_CPUS` / `LOOKOUT_KIND_NODE_MEMORY`).
+See [the read-path tier](#the-read-path-tier).
 
 ## The scale tier
 
@@ -137,10 +143,13 @@ touches the demo app, so it is safe to run at any point, including
 immediately after a scenario.
 
 Mostly it only reads. The exception is the cases that need a
-**fixture**. Five commands — `triage logs`, `state edges`,
-`state webhooks`, `stab drift`, `stab drain` — have nothing to say
-about a healthy cluster, and a check that only ever sees `findings=0`
-is not being tested (`uat-cases/20-fixtures.sh`). Two more —
+**fixture**. Six commands — `triage logs`, `state edges`,
+`state webhooks`, `stab drift`, `stab drain`, and the HPA-thrash half of
+`triage events` — have nothing to say about a healthy cluster, and a
+check that only ever sees `findings=0` is not being tested
+(`uat-cases/20-fixtures.sh`). `triage top` is the same problem one tier
+up, in `uat-cases/50-t1.sh`: every row on an idle cluster sits near
+zero, and without metrics-server there is no row at all. Two more —
 `health` and `triage delta` — have the opposite problem: on a shared
 cluster they report whatever the last scenario left behind, so
 `uat-cases/30-root.sh` and `uat-cases/40-toplevel.sh` scope them to a

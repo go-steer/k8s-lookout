@@ -19,7 +19,7 @@ require_examples_context
 # A fixture, not a failure: nothing here is expected on the wire, so
 # this is a read-path smoke check that each container landed in the part
 # of the output the case assumes. The per-field contract lives in
-# examples/uat-cases/40-toplevel.sh.
+# examples/uat-cases/50-t1.sh.
 #
 # The patterns below are ordered, not alternations: emit.pairs() flattens
 # every finding in a fixed envelope order (kind, severity, namespace,
@@ -36,7 +36,7 @@ await_finding 180 \
   "kind=top\.saturation severity=warning namespace=$NS kind_of_object=Pod name=cpuhog reason=CPUNearLimit.*resource=cpu" \
   -- triage top --namespace="$NS"
 
-# memory: warning too, deliberately. The fixture targets ~86% so it stays
+# memory: warning too, deliberately. The fixture targets ~90% so it stays
 # out of the >=95% critical band that belongs to the oom/ scenario; if
 # this ever reports critical the ballast has drifted toward the limit.
 await_finding 180 \
