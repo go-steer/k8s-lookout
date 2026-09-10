@@ -93,7 +93,7 @@ func startObserver(t *testing.T, pods ...*corev1.Pod) (*podClearanceObserver, *f
 			t.Fatalf("seed pod %s: %v", p.Name, err)
 		}
 	}
-	obs := newPodClearanceObserver(client)
+	obs := newPodClearanceObserver(client, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if err := obs.Start(ctx); err != nil {

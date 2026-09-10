@@ -237,6 +237,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not, and letting a scenario flake hide a contract regression would
   defeat the point of checking them separately.
 
+### Changed
+
+- The sentinel now watches each object type exactly once per cluster.
+  One shared informer factory per cluster runner serves every typed
+  informer — the sources, the graph feed, and the recovery pod
+  clearance observer — where before it was built only under `--storm`
+  and carried only four sources. A default deployment opened 18
+  LIST+WATCH streams per cluster and held three separate pod caches,
+  three event caches and two node caches; it now opens 13, one per
+  distinct object type, which is the floor. Nothing about which
+  signals fire changes: same informers, same handlers, fewer copies.
+  Two consequences worth knowing. `--storm` no longer decides how many
+  caches the process holds — with it off, sources used to fall back to
+  a private factory each, so an unrelated correlation flag (and its
+  RBAC probe) silently set the memory footprint. And the saving
+  multiplies per runner in multi-cluster mode, where ten clusters held
+  thirty pod caches and now hold ten. The `gateway` source keeps its
+  own `dynamicinformer` factory: different client type, cannot merge.
+  Every source keeps its private-factory fallback, so one used outside
+  the sentinel is unaffected.
+
 ### Fixed
 
 - The frozen `k8s-event` / `k8s-event-followup` payloads now carry
@@ -294,6 +315,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check ends the trace *and* goes back through the normal clustering
   path instead of disappearing. A chained exception still reads as one
   trace per traceback, unchanged. (#394)
+- Client-go informer errors are no longer all attributed to the
+  `k8s-events` source. The handler installed on `runtime.ErrorHandlers`
+  is process-global and client-go passes it no informer identity, so
+  every reflector failure in the binary — whichever source's watch
+  raised it — was logged as `k8s-events: informer error: ...`. Under
+  the shared factory most watches belong to no single source at all,
+  which would have made the misattribution the common case. The line
+  now names no source and logs the message client-go actually supplies.
+  (#384)
+- A source failing at runtime no longer risks wedging the runner. Every
+  informer-backed source called `factory.Shutdown()` on the way out,
+  including when the factory was the shared one it did not own —
+  and `Shutdown` blocks until every handler goroutine exits, which for
+  informers started under the runner's context (the graph feed's) meant
+  blocking until a shutdown that the failing source was supposed to
+  trigger. A source now shuts down only a factory it built itself; the
+  shared one stops with the runner's context. Same shape as #364, on a
+  path that fix did not cover.
 - A critical signal on a Service now enriches to the workload behind
   it. `objectstate.endpoints_empty` carries `kind_of_object=Service`,
   and a Service owns nothing, so both enrichment resolve paths — which

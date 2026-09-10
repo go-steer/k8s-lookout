@@ -162,7 +162,7 @@ func TestSetupRecovery_TokenBurnObserverWithoutPodRBAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), bs); err != nil {
+	if err := setupRecovery(ctx, f, client, nil, dedup, disp, newMetrics(), bs); err != nil {
 		t.Fatalf("setupRecovery: %v", err)
 	}
 	if disp.tracker == nil {

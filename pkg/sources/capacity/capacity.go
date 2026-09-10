@@ -278,6 +278,13 @@ type Source struct {
 	decisions   cloud.CapacityAPI
 	unavailable string
 	cfg         Config
+	// factory, when set via WithFactory, is the externally owned
+	// shared informer factory (§6.3: one informer set serves the
+	// sentinel's sources and the graph). This source's pods/nodes are
+	// the same objects objectstate, rollout, degradation and the graph
+	// feed watch, so sharing removes two pod caches and one node cache
+	// from the process.
+	factory informers.SharedInformerFactory
 
 	mu   sync.Mutex
 	emit func(engine.Signal)
@@ -348,6 +355,14 @@ func (s *Source) Name() string { return Name }
 // cluster-wide and the status ConfigMap lives in kube-system, so the
 // source needs cluster RBAC (§11).
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// WithFactory directs Run to register its informers on an externally
+// owned shared factory (§6.3). Call before Run; nil is ignored.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.factory = f
+	}
+}
 
 // RequiredAccess implements sources.AccessDeclarer (§11): the three
 // informers' list+watch (events, pods, and — for the cluster
@@ -428,7 +443,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		s.logPrintf("capacity: provider scale-decision sub-source enabled (poll %s)", s.cfg.PollInterval)
 	}
 
-	factory := informers.NewSharedInformerFactory(s.client, 0)
+	factory, owned := s.factory, false
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(s.client, 0)
+		owned = true
+	}
 	eventInformer := factory.Core().V1().Events().Informer()
 	eventH, err := eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
@@ -483,6 +502,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Unlock()
 
 	factory.Start(ctx.Done())
+	if owned {
+		// Only the owner shuts a factory down: Shutdown blocks until
+		// every handler goroutine exits, and on a shared factory those
+		// belong to other sources and the graph feed (§6.3).
+		defer factory.Shutdown()
+	}
 	if !cache.WaitForCacheSync(ctx.Done(), eventH.HasSynced, podH.HasSynced, nodeInformer.HasSynced) {
 		return fmt.Errorf("capacity: cache sync failed (informer stopped before initial list completed)")
 	}

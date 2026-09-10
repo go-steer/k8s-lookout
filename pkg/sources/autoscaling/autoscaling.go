@@ -264,6 +264,12 @@ type hpaEntry struct {
 type Source struct {
 	client kubernetes.Interface
 	cfg    Config
+	// factory, when set via WithFactory, is the externally owned
+	// shared informer factory (§6.3). Nothing else watches HPAs, so
+	// this saves no cache — it shares the factory's client, workqueue
+	// and shutdown with every other source instead of standing up a
+	// seventh factory for one informer.
+	factory informers.SharedInformerFactory
 
 	mu sync.Mutex
 	// armed flips true after the informer cache syncs; the sweep (the
@@ -295,6 +301,14 @@ func (s *Source) Name() string { return Name }
 // Scope implements sources.Source: the informer lists HPAs
 // cluster-wide.
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// WithFactory directs Run to register its informer on an externally
+// owned shared factory (§6.3). Call before Run; nil is ignored.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.factory = f
+	}
+}
 
 // ClearanceObserver returns the §7.4 clearance predicate for this
 // source's incidents, backed by its informer mirror.
@@ -341,17 +355,20 @@ func (s *Source) send(sigs []engine.Signal) {
 	}
 }
 
-// Run implements sources.Source: starts the HPA informer on a private
-// factory, arms after the cache syncs, then drives the sustain sweep
-// until ctx is cancelled. The factory is private on purpose — the
-// §6.3 shared factory carries the pods/nodes/workloads informers the
-// graph and other sources share; nothing else watches HPAs.
+// Run implements sources.Source: starts the HPA informer, arms after
+// the cache syncs, then drives the sustain sweep until ctx is
+// cancelled. The informer rides the §6.3 shared factory when the
+// sentinel supplies one (WithFactory) and a private one otherwise.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()
 
-	factory := informers.NewSharedInformerFactory(s.client, 0)
+	factory, owned := s.factory, false
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(s.client, 0)
+		owned = true
+	}
 	h, err := factory.Autoscaling().V2().HorizontalPodAutoscalers().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { s.asHPA(obj, s.onHPA) },
 		UpdateFunc: func(_, obj any) { s.asHPA(obj, s.onHPA) },
@@ -364,7 +381,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	factory.Start(ctx.Done())
 	// Shutdown blocks until every handler goroutine exits, upholding
 	// the Source contract that emit is never called after Run returns.
-	defer factory.Shutdown()
+	// Only for a factory this source owns: on the shared factory those
+	// goroutines belong to other sources and the graph feed (§6.3), and
+	// they stop with the runner's ctx, not with this Run.
+	if owned {
+		defer factory.Shutdown()
+	}
 
 	if !cache.WaitForCacheSync(ctx.Done(), h.HasSynced) {
 		return fmt.Errorf("autoscaling: cache sync failed (informer stopped before initial list completed)")

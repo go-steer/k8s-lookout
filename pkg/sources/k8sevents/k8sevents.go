@@ -49,7 +49,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -73,6 +72,10 @@ const Name = "k8s-events"
 type Source struct {
 	client       kubernetes.Interface
 	resyncPeriod time.Duration
+	// factory, when set via WithFactory, is the externally owned
+	// shared informer factory (§6.3: one informer set serves the
+	// sentinel's sources and the graph).
+	factory informers.SharedInformerFactory
 
 	mu sync.Mutex
 	// armed flips true once the informer's initial LIST has drained.
@@ -100,6 +103,20 @@ func (s *Source) Name() string { return Name }
 // RBAC.
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 
+// WithFactory directs Run to register its informer on an externally
+// owned shared factory (§6.3) instead of building a private one. Call
+// before Run; nil is ignored.
+//
+// A non-zero resyncPeriod is honored over the shared factory: resync is
+// a per-factory property, so riding a factory built with a different
+// period would silently drop the cadence the caller asked for. Both
+// in-tree call sites pass 0, so they share.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f != nil && s.resyncPeriod == 0 {
+		s.factory = f
+	}
+}
+
 // RequiredAccess implements sources.AccessDeclarer (§11): the
 // informer's initial List plus the Watch it maintains. Matches the
 // shipped ClusterRole in deploy/12-clusterrole-watcher.yaml.
@@ -116,7 +133,11 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 // but not returned so callers can distinguish "startup failed,
 // restart me" from "clean shutdown."
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
-	factory := informers.NewSharedInformerFactory(s.client, s.resyncPeriod)
+	factory, owned := s.factory, false
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(s.client, s.resyncPeriod)
+		owned = true
+	}
 	eventInformer := factory.Core().V1().Events().Informer()
 
 	handler, err := eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -157,9 +178,16 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("k8s-events: register event handler: %w", err)
 	}
-	installErrorHandler()
+	sources.InstallInformerErrorHandler()
 
 	factory.Start(ctx.Done())
+	if owned {
+		// Only the owner shuts a factory down: Shutdown blocks until
+		// every handler goroutine exits, and on a shared factory those
+		// belong to other sources and the graph feed (§6.3). See the
+		// same guard in the other informer-backed sources.
+		defer factory.Shutdown()
+	}
 	// WaitForCacheSync blocks until the initial list is done —
 	// without this, the first N events after startup would
 	// arrive without their prior Count/LastTimestamp, breaking
@@ -173,30 +201,6 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.arm()
 	<-ctx.Done()
 	return nil
-}
-
-// errorHandlerOnce guards the one write to runtime.ErrorHandlers.
-var errorHandlerOnce sync.Once
-
-// installErrorHandler routes client-go internal errors ("unknown
-// object type in cache" on shutdown ctx.Done races, reflector list
-// failures) through our logger.
-//
-// Two properties matter and neither is obvious. APPEND, never
-// replace: runtime.ErrorHandlers is package-global process state
-// shared by every client-go consumer in this binary, and replacing
-// the slice silently discarded the default handlers. And append
-// exactly ONCE per process: Run is restarted by the supervisor, so an
-// unguarded append grows the global slice — and the number of log
-// lines per informer error — without bound across a restart loop.
-func installErrorHandler() {
-	errorHandlerOnce.Do(func() {
-		runtime.ErrorHandlers = append(runtime.ErrorHandlers,
-			func(_ context.Context, err error, _ string, _ ...any) {
-				log.Printf("k8s-events: informer error: %v", err)
-			},
-		)
-	})
 }
 
 // arm enables emission — called once, after the initial LIST drains.
