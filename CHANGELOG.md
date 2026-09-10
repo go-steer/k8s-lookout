@@ -198,6 +198,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The frozen `k8s-event` / `k8s-event-followup` payloads now carry
+  cluster identity — `project`, `region` and `zone` — which they had
+  been excluded from since M0. That exclusion was correct while a
+  sentinel watched one cluster, but a GKE cluster name is unique only
+  within a (project, location) pair, so once `--clusters` made one
+  process watch a fleet, two clusters called `prod` were
+  indistinguishable on the wire and nothing downstream could build a
+  context to reach either. Every field is omitempty, so a deployment
+  that stamps no identity emits exactly the bytes it did before.
+  `source`, `severity` and `fingerprint` stay off the frozen pair:
+  those are our verdicts about a signal, not facts about where it
+  happened. (#389)
+- A cluster's **region and zone are now two fields, because they are
+  two things.** A zonal cluster has both; a regional cluster has a
+  region and no zone of its own, since its nodes are spread across the
+  region's zones. `Payload` carried a single `zone` holding whichever
+  one the provider reported as the cluster's *location*, so roughly
+  half of any real fleet reported a region in a field named zone. The
+  new `--region` flag sets it explicitly, and a compiled-in provider
+  resolves both from its metadata; setting either `--region` or
+  `--zone` stops metadata detection for both, so a half-flagged
+  location cannot mix a flag's region with a metadata zone somewhere
+  else. **No fingerprint moved**: the hash's location input is the
+  failure domain — zone when set, else region — which is byte-for-byte
+  the string the single old field held, for both cluster shapes.
+  (#389)
+- Image-pull failures now report *why*. The classifier read the cause
+  out of kubelet's message, kept its verdict and threw the words away,
+  so the payload a reader received said `Error: ImagePullBackOff` and
+  explained nothing — a 429 from a registry rate limit and a typo'd
+  tag looked identical, which is the exact distinction the classifier
+  exists to draw. kubelet states the cause once and then emits three
+  causeless follow-ons that all fold onto the same dedup key, so which
+  one reaches the wire is a race the cause usually loses. The new
+  `pull_cause` field carries the registry's own error text forward
+  from the last cause-bearing event for the same object or registry
+  host, on the memo's existing scopes and TTLs. It is omitted when
+  `message` already states the cause, and it is recorded even for an
+  error we cannot classify — a registry error with no matcher is
+  precisely the text a reader most needs. Masked on the same §6.5
+  terms as `message`, because it is message text. (#387)
 - A critical signal on a Service now enriches to the workload behind
   it. `objectstate.endpoints_empty` carries `kind_of_object=Service`,
   and a Service owns nothing, so both enrichment resolve paths — which

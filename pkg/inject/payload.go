@@ -33,20 +33,43 @@ type Payload struct {
 	FirstSeen    time.Time `json:"first_seen"`
 	LastSeen     time.Time `json:"last_seen"`
 	Cluster      string    `json:"cluster"`
-	// Project / Zone / Source / Severity / Fingerprint complete the
-	// §8 schema on SOURCE-NAMESPACED kinds (docs/signal-schema-v1.md,
-	// the M5 v1 freeze): fingerprint + cluster/project/zone are what
-	// make fleet rollup a fleet-layer join instead of a parsing
-	// project.
-	// ADDITIVE via omitempty, and the dispatcher stamps them ONLY on
-	// kinds other than the frozen k8s-event / k8s-event-followup pair
-	// — those payloads stay byte-identical to M0 (the frozen wire
-	// pins pass unchanged). Zone/Project come from the sentinel's
-	// cluster-metadata wiring (explicit --zone/--project flag >
-	// provider metadata > empty) and ride the wire only when set;
-	// Zone also participates in the fingerprint hash when set.
-	Project     string         `json:"project,omitempty"`
-	Zone        string         `json:"zone,omitempty"`
+	// Project / Region / Zone / Source / Severity / Fingerprint
+	// complete the §8 schema (docs/signal-schema-v1.md, the M5 v1
+	// freeze): fingerprint + cluster/project/region/zone are what make
+	// fleet rollup a fleet-layer join instead of a parsing project.
+	// All are ADDITIVE via omitempty, so a deployment that stamps no
+	// identity emits payloads byte-identical to M0.
+	//
+	// Amended 2026-09-10 (§Amendments) in two ways. First, the
+	// identity fields are now stamped on the frozen k8s-event /
+	// k8s-event-followup pair too, not only on source-namespaced
+	// kinds: `cluster` alone does not identify a cluster in a fleet
+	// process, since a cluster name is unique only within a
+	// (project, location) pair. Second, Region joined Zone — a
+	// cluster has both, and the single old Zone field held whichever
+	// one the provider reported, so regional clusters reported a
+	// region in a field called zone. A REGIONAL cluster now sets
+	// Region and leaves Zone empty; a zonal cluster sets both.
+	// Consumers wanting the provider's one-string location read
+	// Zone, else Region — which is also the failure domain the
+	// fingerprint hashes, so no fingerprint moved.
+	//
+	// The values come from the sentinel's cluster-metadata wiring
+	// (explicit --project/--region/--zone flag > provider metadata >
+	// empty) and ride the wire only when set.
+	Project string `json:"project,omitempty"`
+	Region  string `json:"region,omitempty"`
+	Zone    string `json:"zone,omitempty"`
+	// PullCause is the registry's own error text for an image-pull
+	// failure whose Message does not carry it (issue #387, amended
+	// 2026-09-10). kubelet states the cause once and then emits three
+	// causeless follow-ons that fold onto the same dedup key, so the
+	// payload that reaches a reader is usually the one that says only
+	// `Error: ImagePullBackOff`; this carries the 429 or the
+	// `manifest unknown` forward from the event that did explain.
+	// Omitted when Message already states it — the reader has the
+	// words already — and on every non-pull kind.
+	PullCause   string         `json:"pull_cause,omitempty"`
 	Source      string         `json:"source,omitempty"`
 	Severity    string         `json:"severity,omitempty"`
 	Fingerprint string         `json:"fingerprint,omitempty"`

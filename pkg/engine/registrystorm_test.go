@@ -117,7 +117,7 @@ func TestRegistryStorm_CauselessBackOffsJoinTheStorm(t *testing.T) {
 				LastSeen:     *now,
 			},
 		}
-		sig.PullClass = memo.Resolve(sig)
+		sig.PullClass, sig.PullCause = memo.Resolve(sig)
 		if sig.PullClass != PullClassRetryable {
 			t.Errorf("event %d (%s): PullClass = %v, want PullClassRetryable — "+
 				"every one of these is the same registry fault", i, e.name, sig.PullClass)
@@ -202,7 +202,7 @@ func TestRegistryStorm_FormsWithNoTopologyAtAll(t *testing.T) {
 				LastSeen:     *now,
 			},
 		}
-		sig.PullClass = memo.Resolve(sig)
+		sig.PullClass, sig.PullCause = memo.Resolve(sig)
 		switch v := c.Observe(sig); v.Kind {
 		case StormFormed:
 			formed++

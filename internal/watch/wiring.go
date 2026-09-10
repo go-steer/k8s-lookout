@@ -266,7 +266,8 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		r := newRunner(&rf, ref.Name, sink, token, reg)
 		r.restCfg = cfg
 		r.project = ref.Project
-		r.zone = ref.Location
+		r.region = ref.Region
+		r.zone = cloud.ZoneOf(ref.Location, ref.Region)
 		runners = append(runners, r)
 		log.Printf("multi-cluster: runner %q → %s (project=%q, location=%q, project-tier sources=%t)",
 			ref.Name, ref.Endpoint, ref.Project, ref.Location, keepProjectTier)
@@ -445,9 +446,11 @@ type runner struct {
 	// cluster (multi-cluster GKE-endpoint mode: ADC over the DNS
 	// endpoint; issue #208). Nil in the single-cluster default, where
 	// run resolves the config from --in-cluster/--kubeconfig. Set,
-	// project/zone override the §8 identity for this cluster.
+	// project/region/zone override the §8 identity for this cluster
+	// (zone empty for a regional cluster).
 	restCfg *rest.Config
 	project string
+	region  string
 	zone    string
 }
 
@@ -493,20 +496,24 @@ func (r *runner) run(ctx context.Context) error {
 	// per-cluster values take precedence over the local provider
 	// metadata — the on-host metadata server describes the sentinel's
 	// own node, not the remote cluster it's watching.
-	project, zone := r.project, r.zone
-	if project == "" || zone == "" {
+	project, region, zone := r.project, r.region, r.zone
+	if project == "" || region == "" {
 		idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
-		p, z := resolveIdentity(idCtx, f)
+		p, rg, z := resolveIdentity(idCtx, f)
 		cancelID()
 		if project == "" {
 			project = p
 		}
-		if zone == "" {
-			zone = z
+		// Region and zone move together (see identityFromProvider):
+		// a fleet runner that knows its cluster's location knows both,
+		// and one that knows neither must not mix a local metadata
+		// zone into a remote cluster's region.
+		if region == "" {
+			region, zone = rg, z
 		}
 	}
-	if project != "" || zone != "" {
-		log.Printf("identity: stamping project=%q zone=%q (precedence: explicit flag > provider metadata > empty; zone participates in the §8 fingerprint hash)", project, zone)
+	if project != "" || region != "" || zone != "" {
+		log.Printf("identity: stamping project=%q region=%q zone=%q (precedence: explicit flag > provider metadata > empty; a regional cluster has no zone, and the failure domain — zone else region — participates in the §8 fingerprint hash)", project, region, zone)
 	}
 
 	disp := &dispatcher{
@@ -517,6 +524,7 @@ func (r *runner) run(ctx context.Context) error {
 		metrics:   m,
 		cluster:   r.clusterName,
 		project:   project,
+		region:    region,
 		zone:      zone,
 		mode:      f.mode,
 		targetSid: f.targetSession,

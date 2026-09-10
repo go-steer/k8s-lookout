@@ -79,9 +79,20 @@ var frozenFields = map[string][]string{
 	// "context" to match their wire byte-for-byte on the k8s-event
 	// kinds. NOT omitempty (their contract); empty for synthetic
 	// source signals. See docs/signal-schema-v1.md §Amendments.
+	//
+	// "region" and "pull_cause" landed 2026-09-10 (pre-consumer
+	// amendment, issues #389 and #387), both additive + omitempty and
+	// both inserted mid-struct rather than appended — the identity
+	// block and the message block are where a reader looks for them,
+	// and field ORDER is only observable to a byte-pin, which this
+	// ledger re-baselines in the same change. The same amendment
+	// started stamping the identity block on the frozen k8s-event
+	// pair; that changes no TAG, so it shows up in the wire-shape
+	// pins rather than here.
 	"Payload": {"kind", "reason", "namespace", "kind_of_object", "name",
 		"container", "uid", "message", "count", "first_seen", "last_seen",
-		"cluster", "project", "zone", "source", "severity", "fingerprint",
+		"cluster", "project", "region", "zone", "pull_cause", "source",
+		"severity", "fingerprint",
 		"context", "type", "enrichment", "forecast", "quota_increase_draft"},
 	"ResolvedPayload": {"kind", "reason", "namespace", "kind_of_object",
 		"name", "container", "uid", "fingerprint", "cluster", "first_seen",

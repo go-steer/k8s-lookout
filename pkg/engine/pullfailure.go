@@ -284,6 +284,33 @@ func quotedImageRef(message string) (string, bool) {
 	return rest[:j], true
 }
 
+// PullCause returns the registry's own error text out of a kubelet
+// pull-failure message, or "" when the message is one of the causeless
+// follow-ons (issue #387).
+//
+// The distinction is positional, not a marker list. kubelet's
+// cause-bearing message is `Failed to pull image "REF": <error>` — the
+// cause is everything after the quoted reference. The three follow-ons
+// have nothing there to take: `Back-off pulling image "REF"` ends at
+// the reference, and `Error: ErrImagePull` / `Error: ImagePullBackOff`
+// carry no reference at all. That keeps this independent of
+// ClassifyPullFailure's marker vocabulary, which is the point: a
+// registry error we cannot classify is precisely the text a reader
+// most needs forwarded.
+func PullCause(message string) string {
+	ref, ok := quotedImageRef(message)
+	if !ok {
+		return ""
+	}
+	i := strings.Index(message, `"`+ref+`"`)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(message[i+len(ref)+2:])
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, ":"))
+	return rest
+}
+
 // PullClassMemo resolves a signal's PullClass, remembering what the
 // last CAUSE-BEARING message said — per object, and for retryable
 // causes per registry host as well (see causeScope).
@@ -352,6 +379,13 @@ type causeScope struct {
 
 type pullMemoEntry struct {
 	class PullClass
+	// cause is the registry's own error text from the message this
+	// entry was recorded off (issue #387). Kept alongside the verdict
+	// because the causeless follow-ons are what usually reach the
+	// wire, and a reader handed "ImagePullBackOff" with no cause
+	// cannot tell a 429 from a typo'd tag — the exact distinction the
+	// classifier exists to make.
+	cause string
 	at    time.Time
 	// ttl is the scope's freshness bound, carried per entry because
 	// the scopes expire at very different rates.
@@ -423,14 +457,19 @@ func (m *PullClassMemo) clock() time.Time {
 // against the alternative — a cluster-wide registry fault arriving as
 // N separate incidents, which is the thing that actually happens —
 // this is the cheaper mistake.
-func (m *PullClassMemo) Resolve(sig Signal) PullClass {
+// Resolve returns the class and, when the signal's own message does
+// not state it, the inherited cause text (issue #387). A cause-bearing
+// message returns an empty cause: the reader already has the words in
+// the payload's `message`, and repeating them there would be noise.
+func (m *PullClassMemo) Resolve(sig Signal) (PullClass, string) {
 	if CanonicalReasonForEvent(sig.Key.Reason, sig.Message) != "ImagePullBackOff" {
-		return PullClassNA
+		return PullClassNA, ""
 	}
 	class := ClassifyPullFailure(sig.Message)
 	if m == nil {
-		return class
+		return class, ""
 	}
+	cause := PullCause(sig.Message)
 	object := causeScope{kind: scopeObject, id: sig.Key.UID}
 	host, hasHost := causeScope{}, false
 	if h := RegistryHost(sig.Message); h != "" {
@@ -439,42 +478,52 @@ func (m *PullClassMemo) Resolve(sig Signal) PullClass {
 	now := m.clock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if class != PullClassUnknown {
+	if class != PullClassUnknown || cause != "" {
 		// This message names a cause: it is the new evidence of
 		// record for the object, and — when the registry itself is
-		// what is unhappy — for the host.
+		// what is unhappy — for the host. Recorded even when the
+		// wording did not classify, so an unrecognized registry error
+		// still reaches the follow-ons that cannot supply it
+		// themselves; lookup below keeps such an entry from voting on
+		// the CLASS, which is the pre-#387 behaviour exactly.
 		m.evictIfFull(now)
-		m.entries[object] = pullMemoEntry{class: class, at: now, ttl: defaultPullMemoTTL}
+		m.entries[object] = pullMemoEntry{class: class, cause: cause, at: now, ttl: defaultPullMemoTTL}
 		if hasHost && class == PullClassRetryable {
-			m.entries[host] = pullMemoEntry{class: class, at: now, ttl: hostPullMemoTTL}
+			m.entries[host] = pullMemoEntry{class: class, cause: cause, at: now, ttl: hostPullMemoTTL}
 		}
-		return class
+		return class, ""
 	}
 	// Causeless message (the bare back-off, a sync-result error):
-	// inherit from the narrowest fresh scope.
+	// inherit from the narrowest fresh scope. Class and cause are
+	// inherited on the same walk but independently — the object scope
+	// may hold a cause we could not classify, and the host scope's
+	// verdict must still be reachable underneath it.
 	if prior, ok := m.lookup(object, now); ok {
-		return prior
+		class, cause = prior.class, prior.cause
 	}
-	if hasHost {
+	if class == PullClassUnknown && hasHost {
 		if prior, ok := m.lookup(host, now); ok {
-			return prior
+			class = prior.class
+			if cause == "" {
+				cause = prior.cause
+			}
 		}
 	}
-	return PullClassUnknown
+	return class, cause
 }
 
 // lookup reads one scope's evidence, dropping it if it has aged out.
 // Caller holds mu.
-func (m *PullClassMemo) lookup(s causeScope, now time.Time) (PullClass, bool) {
+func (m *PullClassMemo) lookup(s causeScope, now time.Time) (pullMemoEntry, bool) {
 	prior, ok := m.entries[s]
 	if !ok {
-		return PullClassNA, false
+		return pullMemoEntry{class: PullClassNA}, false
 	}
 	if now.Sub(prior.at) > prior.ttl {
 		delete(m.entries, s)
-		return PullClassNA, false
+		return pullMemoEntry{class: PullClassNA}, false
 	}
-	return prior.class, true
+	return prior, true
 }
 
 // evictIfFull is called under lock: drops expired entries, and if that

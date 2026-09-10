@@ -39,15 +39,21 @@ The §8 incident-class key, `pkg/engine.Fingerprint`:
   (`engine.CanonicalReason`) keep the reason-only mapping.
 - `object-class` — the KIND of the affected object (`Pod`, `Node`,
   `NodeGroup`), never its name or UID.
-- `zone` — the failure domain, empty when unknown. Zone is inside the
-  hash (cluster is NOT) because zone-scoped causes — stockouts, zonal
-  outages — are exactly what fleet rollup must group: the same
+- `zone` — the **failure domain**, empty when unknown:
+  `engine.FailureDomain(region, zone)`, i.e. the cluster's zone when it
+  has one and its region when it does not (a regional cluster has no
+  zone of its own). The parameter keeps the name it was frozen under;
+  the value is what the schema's single pre-2026-09-10 `zone` field
+  held, which is why splitting that field into `region` + `zone`
+  (§Amendments) moved no fingerprint. The failure domain is inside the
+  hash (cluster is NOT) because domain-scoped causes — stockouts,
+  zonal outages — are exactly what fleet rollup must group: the same
   stockout hitting 40 clusters in a zone carries 40 identical
   fingerprints, and `cluster`/`project` ride alongside as join
   dimensions.
 
 **The fleet rollup is a join, not a parse**: group by `fingerprint`,
-fan out by `cluster`/`project`/`zone`. Demonstrated as a test
+fan out by `cluster`/`project`/`region`/`zone`. Demonstrated as a test
 assertion in `internal/watch/m5_corpus_rollup_test.go`
 (`TestDrill_MultiClusterRollup_Stockout`: two sentinel instances, one
 staged zonal stockout, one fleet-level group).
@@ -251,10 +257,12 @@ post-M5, #130), `token.burn`.
 
 ## Frozen field sets
 
-`Payload` (the §8 superset, M5-final + 2026-07-27 amendment): `kind`,
+`Payload` (the §8 superset, M5-final + the 2026-07-27 and 2026-09-10
+amendments): `kind`,
 `reason`, `namespace`, `kind_of_object`, `name`, `container`\*,
 `uid`, `message`, `count`, `first_seen`, `last_seen`, `cluster`,
-`project`\*, `zone`\*, `source`\*, `severity`\*, `fingerprint`\*,
+`project`\*, `region`\*, `zone`\*, `pull_cause`\*, `source`\*,
+`severity`\*, `fingerprint`\*,
 `context` (`controller_ref`\*, `node`\*, `labels`\*), `type` (the
 k8s `Event.Type`, `Normal`/`Warning`; empty for synthetic source
 signals — NOT omitempty, positioned after `context` to match
@@ -266,13 +274,19 @@ kube-agents' watcher wire), `enrichment`\* (`bundle`), `forecast`\*
 
 **The M0 freeze inside the freeze:** on `kind=k8s-event` /
 `k8s-event-followup` the dispatcher never stamps
-`project`/`zone`/`source`/`severity`/`fingerprint` — those payloads
-stay byte-identical to the original watcher (playbook back-compat;
-wire pins in `internal/watch`), re-baselined ONCE on 2026-07-27 to add
-`type` (see §Amendments). Every OTHER kind carries the full §8
-identity. Consumers needing the k8s-event class key compute it from
-the frozen fields (`ScanFingerprint`) or take it from the incident's
-outcome record, which always carries `fingerprint`.
+`source`/`severity`/`fingerprint` — those payloads stay byte-identical
+to the original watcher (playbook back-compat; wire pins in
+`internal/watch`), re-baselined twice: 2026-07-27 to add `type`, and
+2026-09-10 to stamp the IDENTITY block (`project`/`region`/`zone`) and
+add `pull_cause` (see §Amendments). Identity was excluded until a
+single process could watch a fleet, at which point `cluster` alone
+stopped identifying a cluster — a name is unique only within a
+(project, location) pair. The three still excluded are the pipeline's
+verdicts about a signal rather than facts about where it happened;
+every OTHER kind carries them. Consumers needing the k8s-event class
+key compute it from the frozen fields (`ScanFingerprint`) or take it
+from the incident's outcome record, which always carries
+`fingerprint`.
 
 `ResolvedPayload`: `kind`, `reason` (canonical reason-class),
 `namespace`, `kind_of_object`, `name`, `container`\*, `uid`,
@@ -360,6 +374,56 @@ first external consumer deploys.
   symptom. The digest previously had no fit guard at all, so a
   `--watchboard-batch` past roughly 22 made every flush fail and
   discard its whole buffer.
+- **2026-09-10 — cluster identity split into `region` + `zone`, and
+  stamped on the frozen `k8s-event` pair (#389); `pull_cause` added
+  (#387). M0 byte pins re-baselined.** One amendment, because both
+  land on the same frozen payload.
+
+  *Identity.* A cluster has a **region and a zone**, and they are
+  different properties: a zonal cluster has both, a **regional cluster
+  has a region and no zone of its own** — its nodes are spread across
+  the region's zones. `Payload` carried a single `zone` holding
+  whichever one the provider reported as the cluster's *location*, so
+  roughly half of a real fleet reported a region in a field named
+  zone. `region` is now its own field (omitempty, before `zone`), and
+  `zone` means a zone. A consumer wanting the provider's one-string
+  location reads `zone`, else `region` — which is also kube-agents'
+  `location`, so nothing needs a third field to interoperate.
+
+  *No fingerprint moved.* The hash's location input is the FAILURE
+  DOMAIN (`engine.FailureDomain` — zone when set, else region), which
+  is byte-for-byte the string the single old field held, for both
+  cluster shapes. The `Fingerprint` recipe, separator and field order
+  are untouched and the pinned vectors stand.
+
+  *Frozen pair.* `project`/`region`/`zone` are now stamped on
+  `k8s-event` and `k8s-event-followup` too, which the M0 contract had
+  excluded. A cluster NAME is unique only within a (project, location)
+  pair, so once `--clusters` made one process watch a fleet, two
+  clusters called `prod` were indistinguishable on the wire and a
+  consumer could not build a context to reach either.
+  `source`/`severity`/`fingerprint` stay excluded: those are the
+  pipeline's verdicts about a signal, not facts about where it
+  happened.
+
+  *`pull_cause`.* Omitempty, after `zone`. The registry's own error
+  text for an image-pull failure whose own `message` does not carry
+  it, inherited from the last cause-bearing event for the same object
+  or registry host. kubelet states the cause exactly once and then
+  emits three causeless follow-ons that fold onto the same dedup key,
+  so the single payload that reaches a reader was usually
+  `Error: ImagePullBackOff` and nothing else — a 429 and a typo'd tag
+  read identically, which defeats the classifier that already tells
+  them apart. Omitted when `message` already states the cause, and on
+  every non-pull kind. Masked on the same §6.5 terms as `message`,
+  because it *is* message text.
+
+  *Additive throughout.* Every new field is omitempty and every new
+  stamp lands on a field that is, so a deployment that stamps no
+  identity and sees no pull failure emits the M0 bytes exactly. The
+  `Payload` entry in `frozenFields` was re-baselined once for the two
+  insertions — the only observable change is field ORDER, and only to
+  a byte-pin.
 
 ## Evolution
 

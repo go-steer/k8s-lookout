@@ -37,11 +37,16 @@ import (
 //     fingerprint, mirroring the dedup family collapse.
 //   - objectClass: the KIND of the affected object ("Pod", "Node",
 //     "Deployment") — never its name or UID.
-//   - zone: the failure domain, empty when unknown. Zone is in the
-//     hash (not cluster) because zone-scoped causes — stockouts,
-//     zonal outages — are exactly what fleet rollup must group; the
-//     cluster dimension rides alongside the fingerprint in the
-//     schema, not inside it.
+//   - zone: the FAILURE DOMAIN, empty when unknown — the signal's
+//     zone when it has one, else its region (engine.FailureDomain).
+//     The parameter keeps its original name because the hash input is
+//     frozen and the value is unchanged: the schema's single pre-2026-09-10
+//     zone field held exactly this string for both cluster shapes, so
+//     splitting it into region + zone shifted no fingerprint. The
+//     failure domain is in the hash (not cluster) because
+//     domain-scoped causes — stockouts, zonal outages — are exactly
+//     what fleet rollup must group; the cluster dimension rides
+//     alongside the fingerprint in the schema, not inside it.
 //
 // FROZEN CONTRACT — do not change without a design revision: the
 // definition is
@@ -67,6 +72,24 @@ func Fingerprint(kind, reasonClass, objectClass, zone string) string {
 	h.Write([]byte{0})
 	h.Write([]byte(zone))
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// FailureDomain is the fingerprint's location input, derived from the
+// two identity fields a cluster actually has: the zone when the
+// cluster is zonal, the region when it is regional (a regional
+// cluster has no zone of its own — its nodes are spread across the
+// region's zones).
+//
+// It exists so the split of the old single zone field into region +
+// zone (2026-09-10, docs/signal-schema-v1.md §Amendments) is invisible
+// to the frozen hash. The old field held whatever the provider called
+// the cluster's location — a zone for zonal clusters, a region for
+// regional ones — which is precisely what this returns.
+func FailureDomain(region, zone string) string {
+	if zone != "" {
+		return zone
+	}
+	return region
 }
 
 // ScanFingerprint is the FROZEN scan-source mapping of the §8
