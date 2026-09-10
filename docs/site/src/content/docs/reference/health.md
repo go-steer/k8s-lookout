@@ -49,7 +49,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `cert.expired` | critical | a TLS secret's certificate has expired |
 | `cert.expiring` | warning | a TLS secret's certificate expires within --cert-warn |
 | `cert.invalid` | warning | a TLS secret's tls.crt does not contain a parseable X.509 certificate |
-| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.crashloop` | critical | a container is crash looping |
 | `pod.imagepull` | critical | a container cannot pull its image |
 | `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
 | `pod.oomkilled` | warning | a container's last termination was an OOM kill |

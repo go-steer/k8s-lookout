@@ -86,6 +86,39 @@ func crashloopPod(ns, name string) *corev1.Pod {
 	return p
 }
 
+// crashloopTerminatedPod is the SAME crash loop as crashloopPod, in
+// the other half of the kubelet's restart cycle: the container has
+// just died and its status still reads `terminated`, which the
+// kubelet holds for roughly the length of the previous backoff before
+// flipping to `waiting{CrashLoopBackOff}` with the new one (#403).
+func crashloopTerminatedPod(ns, name string) *corev1.Pod {
+	p := basePod(ns, name)
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "app", Ready: false, RestartCount: 12,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Error", ExitCode: 1,
+		}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Error", ExitCode: 1,
+		}},
+	}}
+	return p
+}
+
+// completedPod restarts under an Always policy having exited 0 — a
+// container that finished its work, not one that is failing. It must
+// never read as a crash loop however many times it has restarted.
+func completedPod(ns, name string) *corev1.Pod {
+	p := basePod(ns, name)
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "app", Ready: false, RestartCount: 12,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Completed", ExitCode: 0,
+		}},
+	}}
+	return p
+}
+
 func imagePullPod(ns, name string) *corev1.Pod {
 	p := basePod(ns, name)
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{{

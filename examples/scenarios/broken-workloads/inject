@@ -54,6 +54,10 @@ metadata:
   labels: { app.kubernetes.io/name: faulty, app.kubernetes.io/part-of: lookout-examples }
 spec:
   replicas: 1
+  # See the note on `stuck` below: both broken Deployments opt out of
+  # the progress deadline so their finding CLASS cannot change under
+  # the suite's own clock.
+  progressDeadlineSeconds: 86400
   selector:
     matchLabels: { app.kubernetes.io/name: faulty }
   template:
@@ -102,6 +106,21 @@ metadata:
   labels: { app.kubernetes.io/name: stuck, app.kubernetes.io/part-of: lookout-examples }
 spec:
   replicas: 1
+  # Ten minutes after a Deployment stops progressing the controller
+  # sets Progressing=False/ProgressDeadlineExceeded, and lookout stops
+  # reporting workload.rollout for it and reports workload.stalled
+  # instead — a different reason, so a different fingerprint. That is
+  # correct behaviour and a nuisance to assert against: it means the
+  # two broken workloads here share a fingerprint early in a run and
+  # not late in one, so a suite slow enough to cross the deadline
+  # would see the pair drift apart mid-flight. Worse, they drift APART
+  # rather than together, because `faulty`'s pod gets recreated (see
+  # refresh_crashloop) and that resets its clock while `stuck` sits
+  # still. A day-long deadline takes the suite's own runtime out of
+  # the assertions. Nothing in the UAT layer covers workload.stalled;
+  # when something does, it wants its own fixture with a SHORT
+  # deadline rather than a long wait bolted onto this one.
+  progressDeadlineSeconds: 86400
   selector:
     matchLabels: { app.kubernetes.io/name: stuck }
   template:
@@ -159,20 +178,21 @@ kubectl -n "$NS" rollout status deploy/steady --timeout=180s
 # and a pending age, and `health` wants the pod to have reached
 # CrashLoopBackOff rather than merely having exited once.
 #
-# Four restarts, not the first CrashLoopBackOff: the state is only
-# STABLE once the backoff window is long. Early on the container spends
-# most of each 10s/20s cycle running, so a scan a second later sees a
-# Running container with no waiting reason and the case fails for
-# timing, not for behaviour. By the fourth restart the window is ~80s
-# and grows to a 300s cap, which comfortably covers the several delta,
-# health and bundle invocations the case makes.
-await 240 "faulty is durably in CrashLoopBackOff (>=4 restarts)" bash -c \
-  "restarts=\$(kubectl -n '$NS' get pods -l app.kubernetes.io/name=faulty \
-     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null); \
-   [[ -n \"\$restarts\" && \"\$restarts\" -ge 4 ]] \
-   && kubectl -n '$NS' get pods -l app.kubernetes.io/name=faulty \
-        -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' \
-      | grep -q CrashLoopBackOff"
+# Four restarts, not the first CrashLoopBackOff: below the `--restarts`
+# threshold a failing container is a single failure rather than a loop,
+# and several of the assertions want a restart count to read.
+#
+# What four restarts does NOT buy is a stable pod status, though this
+# fixture used to claim it did — "by the fourth restart the window is
+# ~80s", as if a long backoff meant a durable CrashLoopBackOff. It is
+# the other way round: the kubelet publishes `terminated` first and
+# holds it for roughly the length of the PREVIOUS backoff, so the share
+# of each cycle spent outside CrashLoopBackOff grows as the loop ages,
+# and the assertions this fixture serves were failing in CI on any run
+# slow enough to reach it late. That was #403, fixed in the product —
+# lookout now reports one incident across both sub-phases — and the
+# wait stays because the restart count is what it was really for.
+await_crashloop "$NS" faulty 4
 await 120 "stuck is Pending and unschedulable" bash -c \
   "kubectl -n '$NS' get pods -l app.kubernetes.io/name=stuck \
      -o jsonpath='{.items[*].status.conditions[?(@.type==\"PodScheduled\")].reason}' \

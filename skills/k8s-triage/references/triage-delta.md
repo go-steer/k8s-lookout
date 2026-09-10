@@ -40,7 +40,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 
 | Kind | Severity | Claim |
 | --- | --- | --- |
-| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.crashloop` | critical | a container is crash looping |
 | `pod.imagepull` | critical | a container cannot pull its image |
 | `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
 | `pod.oomkilled` | warning | a container's last termination was an OOM kill |

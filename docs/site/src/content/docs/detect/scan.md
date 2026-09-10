@@ -31,7 +31,7 @@ Every abnormal object in one scan — the first call for "anything wrong in this
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
-| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.crashloop` | critical | a container is crash looping |
 | `pod.imagepull` | critical | a container cannot pull its image |
 | `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
 | `pod.oomkilled` | warning | a container's last termination was an OOM kill |
