@@ -234,6 +234,7 @@ Cross-cutting kinds, each with its own schema-stable struct
 | `watchboard.rotated` | `WatchboardRotatedPayload` | §15 Q2 rotation pointer |
 | `triage.regressed` | `TriageRegressedPayload` | §9.4 regression evidence |
 | `family.member` | `FamilyMemberPayload` | §10.3 cross-source join notice (added post-M5, #132): a different source family attached to the session's incident — max one per source family per incident per window; never fanned out to storm sessions (§7.5). Carries the joining signal's identity, the canonical `family`, the `opened_by` source family, and `design_ref` |
+| `sentinel.access_revoked` | `Payload` | §11 coverage loss (added post-M5, #385 — kinds are append-only): a permission the sentinel held at startup is denied now, confirmed over consecutive SSAR sweeps (`--access-recheck`). Not owned by a source — the subject is the sentinel's own capability, so `kind_of_object` is the synthetic `Grant` and `name` is the source that lost the permission. `critical` when the requirement was required (that cluster's runner stops, terminally — #383), `warning` when optional (one dimension goes dark and the source keeps running) |
 
 Source-namespaced kinds — all ride `Payload`: `objectstate.
 node_notready|node_flapping|progress_deadline|endpoints_empty|

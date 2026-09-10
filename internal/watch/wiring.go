@@ -1048,6 +1048,16 @@ func (r *runner) run(ctx context.Context) error {
 			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}
 	m.runnerUp.Set(1)
+	// §11 capability re-check (issue #385). The startup Probe above is
+	// a point-in-time answer; a grant revoked afterwards leaves the
+	// informer retrying a 403 on client-go's backoff forever with
+	// HasSynced still latched true, so the source goes quiet and reads
+	// downstream as "cluster healthy". Same question, asked on an
+	// interval, for as long as this runner lives.
+	var recheck accessRecheck
+	recheck.start(ctx, cancel, f.accessRecheck, sources.NewAccessReviewer(client), registry.All(), m, func(sig engine.Signal) {
+		disp.DispatchSignal(ctx, sig)
+	})
 	// Readiness (#285): this cluster is ready once every source with
 	// an initial-LIST barrier has crossed it. Registered before RunAll
 	// so the probe reports "syncing" rather than "not started" for the
@@ -1089,6 +1099,13 @@ func (r *runner) run(ctx context.Context) error {
 		feedMu.Lock()
 		err = feedErr
 		feedMu.Unlock()
+	}
+	// A revoked required grant cancelled this runner, so RunAll
+	// returned nil (a cancelled ctx is a clean exit). Surface it the
+	// same way the feed failure is surfaced — and after it, because a
+	// feed that died on its own did so first.
+	if err == nil {
+		err = recheck.failure()
 	}
 	return err
 }

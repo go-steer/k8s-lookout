@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The §11 capability probe now runs for the life of the process, not
+  just its first second (#385). A grant revoked *after* startup left
+  the informer retrying a refused LIST/WATCH on client-go's backoff
+  forever with its sync barrier still latched true, so the source went
+  quiet and quiet reads downstream as "cluster healthy" — the silent
+  empty watch §11 exists to prevent, moved in time rather than
+  eliminated. Every enabled source's declared access is now
+  re-reviewed every `--access-recheck` (new flag, default `2m`, `0`
+  disables), and a denial confirmed across two consecutive sweeps
+  injects a new `kind=sentinel.access_revoked` signal and sets
+  `lookout_source_denied{cluster,source,resource,required}` — back to
+  0 if the grant returns, which only an SSAR sweep can observe, since
+  the refused call is no longer being made. Losing a **required**
+  permission stops that cluster's runner down #383's terminal path
+  (degraded on `/readyz?verbose`, siblings untouched, non-zero exit at
+  N=1 so the kubelet restarts into the loud startup refusal); losing an
+  **optional** one degrades that dimension and keeps running, the same
+  posture the startup probe takes. A sweep the API server cannot answer
+  is logged and otherwise ignored — "could not verify" is not "denied".
 - `/readyz?verbose` renders one line per cluster — `[+]` watching,
   `[-]` not there yet, `[!]` given up on — followed by the same verdict
   the bare body carries. Served on the `200` as well as the `503`,

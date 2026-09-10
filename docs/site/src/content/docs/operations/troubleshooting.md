@@ -73,6 +73,54 @@ source "…": capability probe for "…" failed: …
 That means the API server rejected or could not answer the access
 review — a cluster/credentials problem, not a Role problem.
 
+## A grant revoked *after* startup
+
+The startup probe is a point-in-time answer. If a grant goes away
+while the sentinel is running — someone narrows the ClusterRole, a
+`resourceNames`-pinned rule stops matching, a fleet cluster's RBAC
+diverges — the informer just retries the refused LIST/WATCH on
+client-go's backoff forever. Its sync barrier latched `true` when it
+first armed and never un-latches, so the source simply goes quiet, and
+quiet reads downstream as "cluster healthy". That is the §11 failure
+mode moved in time rather than eliminated.
+
+So every source's declared access is re-reviewed on an interval
+(`--access-recheck`, default `2m`; `0` disables it). A denial has to
+repeat across two consecutive sweeps before it counts, so IAM
+propagation does not read as a revocation. When it does count:
+
+```
+access recheck: source "k8s-events" lost permission to "watch events cluster-wide"
+(scope: Cluster) while running: this ServiceAccount does not have it; grant it or
+disable the source
+```
+
+- **`lookout_source_denied{source,resource,required}`** goes to 1, and
+  back to 0 if the grant returns — the series answers "is coverage
+  missing right now", not "was it ever". This is the one to alert on.
+- A **`kind=sentinel.access_revoked`** signal is injected: `critical`
+  when the permission was required, `warning` when it was one of the
+  optional dimensions. A log line reaches whoever is tailing logs; the
+  signal reaches the session an operator is already reading.
+- Losing a **required** permission stops that cluster's runner down the
+  same terminal path a startup refusal takes — it is marked degraded on
+  [`/readyz?verbose`](/operations/observability/#readyzverbose) and
+  `lookout_runner_terminal{reason="access_denied"}` goes to 1. In the
+  single-cluster default that ends the process, so the kubelet restarts
+  it into the loud startup refusal above.
+- Losing an **optional** one (saturation's `nodes/proxy`) degrades that
+  dimension and the source keeps running, exactly as at startup.
+
+A sweep the API server cannot answer is logged as `access recheck:
+could not verify: …` and otherwise ignored — "could not verify" is not
+"denied", the same rule the startup probe follows.
+
+The one case this does not catch is an authorizer that answers the
+access review "allowed" and then denies the real call (a webhook
+authorizer, GKE Autopilot's Warden). A re-review there returns allowed,
+so there is nothing to report; the informer's own retry is the only
+handling that case has.
+
 ## What each source needs
 
 | Source / feature | Requires |

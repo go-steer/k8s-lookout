@@ -87,6 +87,7 @@ func MetricsInventory() []MetricDoc {
 		{m.runnerUp, "gauge", nil},
 		{m.runnerRestarts, "counter", nil},
 		{m.runnerTerminal, "gauge", []string{"reason"}},
+		{m.sourceDenied, "gauge", []string{"source", "resource", "required"}},
 	}
 	out := make([]MetricDoc, 0, len(rows))
 	for _, r := range rows {

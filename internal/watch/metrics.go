@@ -81,6 +81,7 @@ type metrics struct {
 	runnerUp             prometheus.Gauge
 	runnerRestarts       prometheus.Counter
 	runnerTerminal       *prometheus.GaugeVec
+	sourceDenied         *prometheus.GaugeVec
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -307,6 +308,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_runner_terminal",
 			Help: "1 when the supervisor has GIVEN UP on this cluster: the runner exited for a reason no retry can fix (access_denied — the authorizer refused a required permission), so it is no longer being watched and no longer being restarted (issue #383). ADDITIVE metric rather than a label on lookout_runner_up, which keeps its exact series identity. The alert to write: a series at 1 means a cluster in the fleet is dark until someone changes a grant. Stays absent in the single-cluster default, where such an exit ends the process instead.",
 		}, []string{"reason"}),
+		sourceDenied: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "lookout_source_denied",
+			Help: "1 when a permission this source held at STARTUP is denied now, confirmed over consecutive SelfSubjectAccessReview sweeps (--access-recheck, issue #385); back to 0 when the grant returns. required=true means the source cannot run at all and this cluster's runner is stopping for it; required=false is one degraded dimension on a source that keeps going. The alert to write: any series at 1 means the sentinel has lost coverage it used to have — the silence from that source no longer means the cluster is healthy.",
+		}, []string{"source", "resource", "required"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -350,6 +355,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.runnerUp,
 		m.runnerRestarts,
 		m.runnerTerminal,
+		m.sourceDenied,
 	)
 	return m
 }

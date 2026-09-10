@@ -32,6 +32,7 @@ package schema
 
 import (
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
@@ -110,6 +111,12 @@ var kinds = []KindSpec{
 	// §10.3 cross-source join notice.
 	{inject.KindFamilyMember, inject.FamilyMemberPayload{}, "",
 		"§10.3 cross-source join: a signal from a different source family attached to this session's incident (leading↔reactive) — at most one per source family per incident per dedup window; storm members never fan these out."},
+
+	// §11 capability loss. Not owned by any one source: the subject
+	// is the sentinel's own coverage, and the denied source is the
+	// signal's `name`.
+	{sources.KindAccessRevoked, inject.Payload{}, "",
+		"§11 coverage loss: a permission the sentinel held at startup is denied now, confirmed over consecutive SSAR sweeps — from here that source sees nothing, and its silence means less than it did."},
 
 	// Source-namespaced kinds (§7.3): all ride inject.Payload with
 	// the full §8 identity stamped.
