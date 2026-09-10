@@ -65,6 +65,64 @@ is_kind_context() {
   [[ "$EXAMPLES_CONTEXT" == kind-* ]]
 }
 
+# ---- node resource caps --------------------------------------------------
+
+# kind nodes are plain docker containers created with NO cpu or memory
+# limit, so the only thing bounding a fixture is the workstation itself.
+# The saturation fixtures push exactly there: see
+# examples/scenarios/cpu-pressure/, whose cpuhog holds a cpu limit under
+# a spin loop and whose `nolimits` pod sets no limit at all. That
+# fixture bounds its own hogs — but the uncommitted version that
+# preceded it did not, and with two clusters up (the normal state once a
+# worktree brings up its own) six unbounded kubelets took the box to
+# load ~28 of 32. What died first was not the test: it was the IDE's own
+# server (code-oss `server-main.js`), so the web session dropped and
+# took the terminal watching the run with it.
+#
+# Cap the NODES, not the pods. A LimitRange on the fixture namespace is
+# the obvious reflex and it is wrong here — it would inject default
+# limits into `nolimits` and quietly invalidate the one case that exists
+# to prove lookout flags an unlimited pod. A docker-level quota is
+# invisible to the API server, so every pod spec still reads exactly as
+# the fixture wrote it.
+LOOKOUT_KIND_NODE_CPUS="${LOOKOUT_KIND_NODE_CPUS:-4}"
+LOOKOUT_KIND_NODE_MEMORY="${LOOKOUT_KIND_NODE_MEMORY:-8g}"
+
+# cap_kind_nodes — clamp every node of $CLUSTER_NAME to the caps above.
+#
+# Idempotent, and applied on the reuse path too, so re-running kind/up is
+# also how you retrofit a cap onto a cluster that predates it. Set either
+# variable to `none` to opt out of that dimension.
+cap_kind_nodes() {
+  is_kind_context || return 0
+  local cpus="$LOOKOUT_KIND_NODE_CPUS" mem="$LOOKOUT_KIND_NODE_MEMORY"
+  [[ "$cpus" == none && "$mem" == none ]] && return 0
+
+  local args=()
+  [[ "$cpus" != none ]] && args+=(--cpus "$cpus")
+  # --memory-swap pinned to --memory: without it docker grants swap equal
+  # to the limit again, and a memory-capped node just swaps past it.
+  [[ "$mem" != none ]] && args+=(--memory "$mem" --memory-swap "$mem")
+
+  local nodes
+  nodes="$(kind get nodes --name "$CLUSTER_NAME" 2>/dev/null || true)"
+  if [[ -z "$nodes" ]]; then
+    echo "  ⚠ no kind nodes found for '$CLUSTER_NAME' — nodes left UNCAPPED" >&2
+    return 0
+  fi
+
+  echo "▸ capping nodes at ${cpus} cpu / ${mem} mem (LOOKOUT_KIND_NODE_CPUS=none to opt out)"
+  local n
+  while read -r n; do
+    [[ -n "$n" ]] || continue
+    if ! docker update "${args[@]}" "$n" >/dev/null 2>&1; then
+      # Never fatal: an uncapped cluster still runs, and failing setup
+      # outright over a guard would be worse than the warning.
+      echo "  ⚠ could not cap node '$n' — it stays UNCAPPED" >&2
+    fi
+  done <<<"$nodes"
+}
+
 # ---- the lookout binary (read-path verification) -------------------------
 
 # Resolution order: $LOOKOUT_BIN, `lookout` on PATH, then a one-time
