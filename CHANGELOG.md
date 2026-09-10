@@ -587,6 +587,11 @@ arrived as `Error: ImagePullBackOff`.
   and env are the escalating classes — but the sentence appeared in
   four generated reference pages and both skill references, so the
   regenerated docs are part of the fix.
+- `examples/kind/up` passes `--name` to `kind create cluster`, so
+  `LOOKOUT_EXAMPLES_CLUSTER` selects a cluster instead of silently
+  creating a second one. The name in `cluster.yaml` won every time,
+  and the reuse check above it — which does read the variable — then
+  never matched.
 
 ## [0.23.0] - 2026-08-31
 

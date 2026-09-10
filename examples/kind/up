@@ -50,7 +50,9 @@ if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   echo "▸ kind cluster '$CLUSTER_NAME' already exists — reusing"
 else
   echo "▸ creating kind cluster '$CLUSTER_NAME'"
-  kind create cluster --config "$(examples_root)/kind/cluster.yaml"
+  # --name overrides the config's `name:`, so LOOKOUT_EXAMPLES_CLUSTER
+  # actually creates a second cluster instead of reusing the first.
+  kind create cluster --name "$CLUSTER_NAME" --config "$(examples_root)/kind/cluster.yaml"
 fi
 # Outside the if: the caps are idempotent, and applying them on the reuse
 # path is what retrofits a cluster brought up before they existed.
