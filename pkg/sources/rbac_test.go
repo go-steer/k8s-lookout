@@ -66,6 +66,45 @@ func TestProbe_FailsLoudlyNamingSourceAndPermission(t *testing.T) {
 			t.Errorf("fail-loudly error missing %q; got: %v", want, err)
 		}
 	}
+
+	// The same refusal, typed (issue #383): a caller that has to
+	// decide whether retrying could ever help needs to ask the error,
+	// not parse it. Both questions must answer — errors.Is for the
+	// classification, errors.As for the detail.
+	if !errors.Is(err, ErrAccessDenied) {
+		t.Error("a denied requirement must satisfy errors.Is(err, ErrAccessDenied) — the supervisor classifies retryability off it")
+	}
+	var denied *DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("Probe returned %T, want a *DeniedError", err)
+	}
+	if denied.Source != "k8s-events" {
+		t.Errorf("DeniedError.Source = %q, want %q", denied.Source, "k8s-events")
+	}
+	if denied.Requirement.Verb != "watch" || denied.Requirement.Resource != "events" {
+		t.Errorf("DeniedError.Requirement = %v, want the watch-events one", denied.Requirement)
+	}
+	if denied.Scope != ScopeCluster {
+		t.Errorf("DeniedError.Scope = %v, want ScopeCluster", denied.Scope)
+	}
+}
+
+// A reviewer that could not be reached is NOT a denial: "could not
+// verify" must stay retryable, or one apiserver blip would
+// permanently stop a runner (#383).
+func TestProbe_AReviewerErrorIsNotADenial(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{
+		name: "k8s-events",
+		reqs: []Requirement{{Resource: "events", Verb: "watch"}},
+	}
+	_, err := Probe(context.Background(), scriptedReviewer{err: errors.New("connection refused")}, src)
+	if err == nil {
+		t.Fatal("Probe should fail when the reviewer itself errors")
+	}
+	if errors.Is(err, ErrAccessDenied) {
+		t.Errorf("an unreachable reviewer classified as a settled denial: %v", err)
+	}
 }
 
 func TestProbe_PassesWhenAllAllowed(t *testing.T) {

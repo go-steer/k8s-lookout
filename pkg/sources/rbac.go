@@ -16,6 +16,7 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -170,6 +171,56 @@ func DenialRemedy(d Decision) string {
 	return DenialDetail(d) + " and the source (or dimension) cannot run on this platform; otherwise grant it or disable the source"
 }
 
+// ErrAccessDenied marks an error as a settled authorization refusal:
+// the authorizer said no, and it will keep saying no until an
+// operator changes a grant or a platform policy. Callers test for it
+// with errors.Is.
+//
+// A sentinel alongside DeniedError so that startup checks with their
+// own bespoke wording — probeGraphAccess, say — can join the same
+// classification by wrapping it, without pretending to be a source's
+// declared requirement.
+var ErrAccessDenied = errors.New("access denied by the cluster's authorizer")
+
+// DeniedError is Probe's verdict that a source cannot run here
+// because the authorizer refused one of its REQUIRED permissions.
+//
+// A typed error, not a formatted string, because the answer changes
+// the caller's behaviour and not just its logging (issue #383): a
+// denial is settled — the authorizer will keep saying no until an
+// operator changes a grant or a platform policy — so a supervisor
+// that would otherwise restart the runner forever can recognise this
+// exit as terminal and stop. Every other startup failure (API
+// unreachable, a cluster mid-upgrade) is transient and still earns a
+// retry, so the classification has to be by type rather than by
+// "did startup fail".
+//
+// The message is unchanged from the untyped error it replaces: it is
+// the §11 loud-refusal wording operators already grep for.
+type DeniedError struct {
+	// Source is the Name() of the source whose requirement was denied.
+	Source string
+	// Requirement is the specific permission the authorizer refused.
+	Requirement Requirement
+	// Scope is the source's tier (§11) — a namespaced Role cannot
+	// satisfy a cluster-scoped requirement, and naming the tier is
+	// half the remedy.
+	Scope Scope
+	// Decision is the authorizer's verdict verbatim, including any
+	// reason it offered (#145: a platform policy no grant can fix).
+	Decision Decision
+}
+
+func (e *DeniedError) Error() string {
+	return fmt.Sprintf("source %q requires permission to %q (scope: %s) and %s — refusing to run a silently empty watch",
+		e.Source, e.Requirement, e.Scope, DenialRemedy(e.Decision))
+}
+
+// Unwrap joins the ErrAccessDenied classification so that
+// errors.Is(err, ErrAccessDenied) is the single question a caller has
+// to ask, whichever startup check refused.
+func (e *DeniedError) Unwrap() error { return ErrAccessDenied }
+
 // Probe verifies every requirement declared by every source before
 // anything starts watching. The failure mode it exists to prevent is
 // the silent empty watch (§11): an informer without list/watch
@@ -206,7 +257,7 @@ func Probe(ctx context.Context, reviewer AccessReviewer, srcs ...Source) ([]stri
 				notes = append(notes, fmt.Sprintf("source %q: %q denied — %s; the source runs with that dimension disabled", s.Name(), req, DenialDetail(d)))
 				continue
 			}
-			return notes, fmt.Errorf("source %q requires permission to %q (scope: %s) and %s — refusing to run a silently empty watch", s.Name(), req, s.Scope(), DenialRemedy(d))
+			return notes, &DeniedError{Source: s.Name(), Requirement: req, Scope: s.Scope(), Decision: d}
 		}
 	}
 	return notes, nil

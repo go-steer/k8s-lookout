@@ -369,11 +369,25 @@ func newRunner(f *flags, cluster string, sink inject.Sink, token string, reg *pr
 	}
 }
 
-// runnerRestartBackoff bounds how fast a crash-looping runner restarts
-// in a multi-cluster process. Fixed, not a flag: the goal is only to
-// keep a hot loop from pegging a core; the kubelet's CrashLoopBackoff
-// plays this role for the single-cluster default.
+// runnerRestartBackoff is the FIRST delay before a crash-looping
+// runner restarts in a multi-cluster process. Fixed, not a flag: the
+// goal is only to keep a hot loop from pegging a core; the kubelet's
+// CrashLoopBackoff plays this role for the single-cluster default.
 const runnerRestartBackoff = 10 * time.Second
+
+// runnerRestartBackoffMax caps the doubling. A runner that keeps
+// failing gets exponential backoff (issue #383) rather than a fixed
+// 10s forever: a cluster that is down for an hour was, before this,
+// 360 full startup attempts — each one a client-go dial, an SSAR
+// sweep and a log line. Capped at 5m so a cluster that comes back is
+// still picked up promptly without an operator restarting the pod.
+const runnerRestartBackoffMax = 5 * time.Minute
+
+// runnerHealthyFor is how long a runner must have stayed up before
+// its next exit is treated as a fresh problem and the backoff resets
+// to runnerRestartBackoff. Without this, a runner that flaps once an
+// hour would inherit the previous hour's grown delay forever.
+const runnerHealthyFor = 2 * time.Minute
 
 // superviseRunners drives the process's cluster runners to completion.
 //
@@ -382,47 +396,141 @@ const runnerRestartBackoff = 10 * time.Second
 // kubelet owns restart, exactly as before the runner refactor. With
 // multiple runners (issue #208) each is supervised independently so one
 // cluster's failure takes down neither its siblings nor the process —
-// supervise restarts it in place with backoff. Returns when every
-// runner has stopped (only reachable on ctx cancellation in the
-// multi-runner case).
+// supervise restarts it in place with backoff, or gives up on it if the
+// failure is terminal (#383). Returns on ctx cancellation, or when
+// every cluster has failed terminally, which is an error: a process
+// watching nothing must not idle as a healthy-looking no-op.
 func superviseRunners(ctx context.Context, runners []*runner) error {
 	if len(runners) == 1 {
 		return runners[0].run(ctx)
 	}
-	var wg sync.WaitGroup
+	specs := make([]supervision, 0, len(runners))
 	for _, r := range runners {
+		specs = append(specs, supervision{
+			name:       r.clusterName,
+			backoff:    runnerRestartBackoff,
+			maxBackoff: runnerRestartBackoffMax,
+			healthyFor: runnerHealthyFor,
+			restarts:   r.metrics.runnerRestarts,
+			onTerminal: func(reason terminalReason, _ error) {
+				r.metrics.runnerTerminal.WithLabelValues(string(reason)).Set(1)
+				if r.ready != nil {
+					r.ready.degrade(r.clusterName, string(reason))
+				}
+			},
+			run: r.run,
+		})
+	}
+	return superviseAll(ctx, specs)
+}
+
+// superviseAll runs every supervision concurrently and returns when
+// they have all stopped: nil-or-ctx.Err() on shutdown, and an error
+// when the reason they all stopped is that every cluster failed
+// terminally. Split from superviseRunners so the total-loss guard is
+// testable without a live cluster.
+func superviseAll(ctx context.Context, specs []supervision) error {
+	var mu sync.Mutex
+	lost := make(map[string]error, len(specs))
+
+	var wg sync.WaitGroup
+	for _, s := range specs {
+		caller := s.onTerminal
+		s.onTerminal = func(reason terminalReason, err error) {
+			if caller != nil {
+				caller(reason, err)
+			}
+			mu.Lock()
+			lost[s.name] = err
+			mu.Unlock()
+		}
 		wg.Add(1)
-		go func(r *runner) {
+		go func(s supervision) {
 			defer wg.Done()
-			supervise(ctx, r.clusterName, runnerRestartBackoff, r.metrics.runnerRestarts, r.run)
-		}(r)
+			supervise(ctx, s)
+		}(s)
 	}
 	wg.Wait()
-	return ctx.Err()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// supervise only returns on shutdown or on a terminal exit, so
+	// reaching here with a live ctx means every cluster is gone. A
+	// process watching nothing must not idle as a healthy-looking
+	// no-op — exiting hands the retry to the kubelet, which backs off,
+	// stays visible in the pod's restart count, and re-reads a fixed
+	// ClusterRoleBinding on the way back up.
+	names := make([]string, 0, len(lost))
+	for name := range lost {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return fmt.Errorf("every cluster this process watches failed terminally (%s) — nothing is being watched; see the per-cluster errors above", strings.Join(names, ", "))
+}
+
+// supervision is one runner's restart policy, as parameters so the
+// loop is testable without a live cluster.
+type supervision struct {
+	name string
+	// backoff is the first delay, maxBackoff the ceiling the doubling
+	// stops at, and healthyFor the uptime that resets the doubling.
+	backoff    time.Duration
+	maxBackoff time.Duration
+	healthyFor time.Duration
+	restarts   prometheus.Counter
+	// onTerminal is called at most once, from supervise's goroutine,
+	// with the exit that ended supervision for good. Optional.
+	onTerminal func(terminalReason, error)
+	run        func(context.Context) error
 }
 
 // supervise runs one runner to exit and restarts it while the process
-// is up. A clean ctx cancellation (shutdown) ends supervision; any
-// other exit — error or nil — is a runner that stopped watching its
-// cluster, so it restarts after backoff, counted in restarts
-// (lookout_runner_restarts_total). run and the backoff are parameters
-// so the loop is testable without a live cluster.
-func supervise(ctx context.Context, name string, backoff time.Duration, restarts prometheus.Counter, run func(context.Context) error) {
+// is up.
+//
+// A clean ctx cancellation (shutdown) ends supervision. A TERMINAL
+// exit (classifyExit, #383) also ends it: the authorizer has refused
+// this runner and will go on refusing it, so restarting only burns an
+// SSAR sweep and a client-go dial per attempt while burying the one
+// log line that explains the problem. Any other exit — error or nil —
+// is a runner that stopped watching its cluster for a reason that may
+// resolve on its own, so it restarts after a backoff that doubles up
+// to maxBackoff, counted in restarts (lookout_runner_restarts_total).
+func supervise(ctx context.Context, s supervision) {
+	delay := s.backoff
 	for {
-		err := run(ctx)
+		started := time.Now()
+		err := s.run(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		restarts.Inc()
+		if reason := classifyExit(err); reason != "" {
+			log.Printf("runner[%s]: exited: %v", s.name, err)
+			log.Printf("runner[%s]: NOT restarting — that failure is settled (%s), so every retry would be refused the same way. This cluster is now reported degraded on /readyz?verbose and by lookout_runner_terminal{reason=%q}; the process keeps watching its other clusters. Fix the grant and restart the sentinel.", s.name, reason, reason)
+			if s.onTerminal != nil {
+				s.onTerminal(reason, err)
+			}
+			return
+		}
+		s.restarts.Inc()
+		// A runner that stayed up long enough to be working starts
+		// over at the base delay; without this, one flap an hour
+		// would inherit the previous hour's grown backoff forever.
+		if s.healthyFor > 0 && time.Since(started) >= s.healthyFor {
+			delay = s.backoff
+		}
 		if err != nil {
-			log.Printf("runner[%s]: exited: %v; restarting in %s", name, err, backoff)
+			log.Printf("runner[%s]: exited: %v; restarting in %s", s.name, err, delay)
 		} else {
-			log.Printf("runner[%s]: watch loop returned while the process is up; restarting in %s", name, backoff)
+			log.Printf("runner[%s]: watch loop returned while the process is up; restarting in %s", s.name, delay)
 		}
 		select {
-		case <-time.After(backoff):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return
+		}
+		delay *= 2
+		if s.maxBackoff > 0 && delay > s.maxBackoff {
+			delay = s.maxBackoff
 		}
 	}
 }

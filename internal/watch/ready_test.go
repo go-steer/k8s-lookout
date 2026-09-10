@@ -235,3 +235,155 @@ func TestServeMetrics_ReadyzTracksTheRunners(t *testing.T) {
 		t.Errorf("serveMetrics returned %v, want nil on ctx cancel", err)
 	}
 }
+
+// A fleet sentinel that has given up on one cluster is still fit to
+// serve the others (#383): failing readiness would take the working
+// clusters out of the rollout too, and no restart brings the denied
+// one back. It is ready — and the degraded cluster is still visible,
+// which is what ?verbose is for.
+func TestReadiness_ADegradedClusterDoesNotFailTheFleet(t *testing.T) {
+	rd := newReadiness()
+	rd.expect([]string{"prod-us", "prod-eu", "prod-ap"})
+	rd.set("prod-us", func() bool { return true })
+	rd.set("prod-eu", func() bool { return true })
+	rd.set("prod-ap", func() bool { return true })
+
+	rd.degrade("prod-ap", string(reasonAccessDenied))
+
+	ok, why := rd.ready()
+	if !ok {
+		t.Fatalf("ready() = false (%s), want true — 2 of 3 clusters are watched and this replica can serve them", why)
+	}
+	want := "[!]prod-ap degraded: access_denied\n[+]prod-eu watching\n[+]prod-us watching\nreadyz check passed\n"
+	if got := rd.report(ok, why); got != want {
+		t.Errorf("report():\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// degrade withdraws the runner's probe on the way. A runner that is
+// never coming back must not leave a stale "synced" behind, or the
+// cluster reads as watched in every later answer.
+func TestReadiness_DegradeWithdrawsTheProbe(t *testing.T) {
+	rd := newReadiness()
+	rd.expect([]string{"a", "b"})
+	rd.set("a", func() bool { return true })
+	rd.set("b", func() bool { return true })
+	rd.degrade("b", string(reasonAccessDenied))
+	rd.degrade("b", string(reasonAccessDenied)) // idempotent
+
+	ok, why := rd.ready()
+	if !ok {
+		t.Fatalf("ready() = false (%s), want true", why)
+	}
+	if got := rd.report(ok, why); strings.Contains(got, "[+]b") {
+		t.Errorf("report() still calls b watching:\n%s", got)
+	}
+}
+
+// Total loss is the exception. A process whose every cluster has
+// failed terminally is watching nothing, and reporting ready there is
+// exactly the silently-empty-watch lie §11 exists to prevent.
+func TestReadiness_EveryClusterDegradedIsNotReady(t *testing.T) {
+	rd := newReadiness()
+	rd.expect([]string{"a", "b"})
+	rd.degrade("a", string(reasonAccessDenied))
+	rd.degrade("b", string(reasonAccessDenied))
+
+	ok, why := rd.ready()
+	if ok {
+		t.Fatal("ready() = true with no cluster being watched at all")
+	}
+	want := "every one of 2 cluster(s) failed terminally: [a (access_denied) b (access_denied)]"
+	if why != want {
+		t.Errorf("reason = %q, want %q", why, want)
+	}
+	// The unnamed single-cluster default (#321) says it without
+	// inventing a name.
+	solo := newReadiness()
+	solo.expect([]string{""})
+	solo.degrade("", string(reasonAccessDenied))
+	if _, why := solo.ready(); why != "cluster runner failed terminally (access_denied)" {
+		t.Errorf("unnamed reason = %q", why)
+	}
+}
+
+// The pinned ?verbose format, on the 503 side: one line per cluster
+// in name order, a [+]/[-]/[!] marker, and a trailer that repeats the
+// same reason the bare body would have given.
+func TestReadiness_VerboseReportFormat(t *testing.T) {
+	rd := newReadiness()
+	rd.expect([]string{"prod-us", "prod-eu", "prod-ap", "prod-sa"})
+	rd.set("prod-us", func() bool { return true })
+	rd.set("prod-eu", func() bool { return false }) // registered, still listing
+	rd.degrade("prod-ap", string(reasonAccessDenied))
+	// prod-sa: never registered a probe at all.
+
+	ok, why := rd.ready()
+	want := "[!]prod-ap degraded: access_denied\n" +
+		"[-]prod-eu syncing\n" +
+		"[-]prod-sa not started\n" +
+		"[+]prod-us watching\n" +
+		"readyz check failed: waiting on 2 of 3 cluster(s): [prod-eu (syncing) prod-sa (not started)]\n"
+	if got := rd.report(ok, why); got != want {
+		t.Errorf("report():\n%s\nwant:\n%s", got, want)
+	}
+	// The unnamed single-cluster default still needs a subject.
+	solo := newReadiness()
+	solo.expect([]string{""})
+	sok, swhy := solo.ready()
+	if got, want := solo.report(sok, swhy), "[-]cluster not started\nreadyz check failed: cluster runner not started\n"; got != want {
+		t.Errorf("unnamed report() = %q, want %q", got, want)
+	}
+}
+
+// ?verbose is served on the 200 as well as the 503 — the case it
+// exists for is the ready process quietly not watching a cluster.
+func TestServeMetrics_ReadyzVerbose(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	rd := newReadiness()
+	rd.expect([]string{"prod-us", "prod-ap"})
+	rd.set("prod-us", func() bool { return true })
+	rd.degrade("prod-ap", string(reasonAccessDenied))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- serveMetrics(ctx, addr, prometheus.NewRegistry(), rd) }()
+
+	var code int
+	var body string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, gerr := http.Get("http://" + addr + "/readyz?verbose") //nolint:noctx // short-lived test probe
+		if gerr != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("GET /readyz?verbose: %v", gerr)
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		code, body = resp.StatusCode, string(b)
+		break
+	}
+	if code != http.StatusOK {
+		t.Errorf("/readyz?verbose = %d, want 200 — one degraded cluster does not unready the replica", code)
+	}
+	want := "[!]prod-ap degraded: access_denied\n[+]prod-us watching\nreadyz check passed\n"
+	if body != want {
+		t.Errorf("/readyz?verbose body:\n%s\nwant:\n%s", body, want)
+	}
+
+	cancel()
+	if err := <-served; err != nil {
+		t.Errorf("serveMetrics returned %v, want nil on ctx cancel", err)
+	}
+}
