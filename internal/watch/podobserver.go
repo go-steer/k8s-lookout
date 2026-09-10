@@ -42,20 +42,27 @@ import (
 // incidents.
 type podClearanceObserver struct {
 	client kubernetes.Interface
+	// factory is the runner's shared informer factory (§6.3), so this
+	// observer's pods ride the same cache as the sources' and the
+	// graph's. nil only in tests that drive Start with a fake client.
+	factory informers.SharedInformerFactory
 	// state is the shared clearance state machine; the behavior
 	// contract lives there and is pinned by this package's tests.
 	state *objectstate.PodClearance
 }
 
-func newPodClearanceObserver(client kubernetes.Interface) *podClearanceObserver {
-	return &podClearanceObserver{client: client, state: objectstate.NewPodClearance()}
+func newPodClearanceObserver(client kubernetes.Interface, factory informers.SharedInformerFactory) *podClearanceObserver {
+	return &podClearanceObserver{client: client, factory: factory, state: objectstate.NewPodClearance()}
 }
 
 // Start launches the pod informer and blocks until its initial list
 // completes (so the first tracker tick judges against real state, not
 // an empty cache). The informer stops when ctx is cancelled.
 func (o *podClearanceObserver) Start(ctx context.Context) error {
-	factory := informers.NewSharedInformerFactory(o.client, 0)
+	factory := o.factory
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(o.client, 0)
+	}
 	informer := factory.Core().V1().Pods().Informer()
 	handler, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {

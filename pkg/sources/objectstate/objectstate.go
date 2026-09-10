@@ -598,9 +598,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
-	factory := s.factory
+	factory, owned := s.factory, false
 	if factory == nil {
 		factory = informers.NewSharedInformerFactory(s.client, 0)
+		owned = true
 	}
 
 	podH, err := factory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -650,7 +651,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	factory.Start(ctx.Done())
 	// Shutdown blocks until every handler goroutine exits, upholding
 	// the Source contract that emit is never called after Run returns.
-	defer factory.Shutdown()
+	// Only for a factory this source owns: on the shared factory those
+	// goroutines belong to other sources and the graph feed (§6.3), and
+	// they stop with the runner's ctx, not with this Run.
+	if owned {
+		defer factory.Shutdown()
+	}
 
 	// Arm-after-sync (§7.2): the initial LIST above rebuilt the
 	// transition memory silently; only from here do state changes

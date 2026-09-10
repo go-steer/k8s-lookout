@@ -711,11 +711,48 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	registry, objState := bs.registry, bs.objState
 
-	// Storm correlation (§7.5): ONE shared informer factory serves
-	// the sources and the graph (§6.3) — when enabled, the
-	// object-state source registers on the same factory as the graph
-	// feed, so pods/nodes are watched once.
-	var sharedFactory informers.SharedInformerFactory
+	// ONE shared informer factory per runner serves every typed
+	// informer in this cluster (§6.3): the sources, the graph feed, and
+	// the §7.4 pod clearance observer. Built unconditionally — the
+	// sharing is a property of the process, not of any one feature.
+	//
+	// It used to be built only under --storm, which made an unrelated
+	// correlation flag decide whether pods were watched once or three
+	// times: with storm off every source fell back to its own factory,
+	// and even with it on, capacity/k8s-events/ingress/autoscaling and
+	// the pod observer stayed outside. That was 18 LIST+WATCH streams
+	// per cluster (3× pods, 3× events, 2× nodes) against a 256Mi
+	// default limit, multiplied per runner in multi-cluster mode. Now
+	// it is 13 — one per distinct object type, the floor.
+	//
+	// Gateway keeps its own dynamicinformer factory: different client
+	// type, cannot merge into this one.
+	sharedFactory := informers.NewSharedInformerFactory(client, 0)
+	if objState != nil {
+		objState.WithFactory(sharedFactory)
+	}
+	if bs.rollout != nil {
+		bs.rollout.WithFactory(sharedFactory)
+	}
+	if bs.degradation != nil {
+		bs.degradation.WithFactory(sharedFactory)
+	}
+	if bs.workload != nil {
+		bs.workload.WithFactory(sharedFactory)
+	}
+	if bs.k8sevents != nil {
+		bs.k8sevents.WithFactory(sharedFactory)
+	}
+	if bs.ingress != nil {
+		bs.ingress.WithFactory(sharedFactory)
+	}
+	if bs.autoscaling != nil {
+		bs.autoscaling.WithFactory(sharedFactory)
+	}
+	if bs.capacity != nil {
+		bs.capacity.WithFactory(sharedFactory)
+	}
+
 	var feed *graphFeed
 	if f.stormMine && !f.stormEnabled() {
 		// Not fatal: --storm=auto can resolve to off from a missing
@@ -726,21 +763,10 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("storm: --storm-mine ignored — it is a third correlation tier on top of storm correlation, which is off (issue #225)")
 	}
 	if f.stormEnabled() {
-		sharedFactory = informers.NewSharedInformerFactory(client, 0)
-		if objState != nil {
-			objState.WithFactory(sharedFactory)
-		}
-		if bs.rollout != nil {
-			// §6.3 again: the rollout source's pods/replicasets
-			// informers ride the same factory as the graph feed.
-			bs.rollout.WithFactory(sharedFactory)
-		}
-		if bs.degradation != nil {
-			bs.degradation.WithFactory(sharedFactory)
-		}
-		if bs.workload != nil {
-			bs.workload.WithFactory(sharedFactory)
-		}
+		// The graph feed joins the same factory the sources are already
+		// on, so its pods/nodes/replicasets informers are theirs — the
+		// §6.3 property, now independent of when the factory is built.
+		//
 		// Graph history (§6.6): with a store configured, every applied
 		// graph delta also logs a ChangeRecord through the store's
 		// buffered writer. Without one, onChange stays nil and the
@@ -827,7 +853,7 @@ func (r *runner) run(ctx context.Context) error {
 	// where "pod is Ready" is true between the flaps the incident is
 	// about.
 	if f.recoveryStableFor > 0 {
-		if err := setupRecovery(ctx, f, client, dedup, disp, m, bs); err != nil {
+		if err := setupRecovery(ctx, f, client, sharedFactory, dedup, disp, m, bs); err != nil {
 			return err
 		}
 	}
@@ -967,8 +993,10 @@ var recoveryAccess = []sources.Requirement{
 // observers.
 type builtSources struct {
 	registry    *sources.Registry
+	k8sevents   *k8sevents.Source
 	objState    *objectstate.Source
 	rollout     *rollout.Source
+	ingress     *ingress.Source
 	workload    *workload.Source
 	autoscaling *autoscaling.Source
 	saturation  *saturation.Source
@@ -1002,7 +1030,8 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 		var src sources.Source
 		switch name {
 		case k8sevents.Name:
-			src = k8sevents.New(client, 0)
+			bs.k8sevents = k8sevents.New(client, 0)
+			src = bs.k8sevents
 		case objectstate.Name:
 			bs.objState = objectstate.New(client, objectstate.DefaultConfig())
 			src = bs.objState
@@ -1051,10 +1080,12 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 		case ingress.Name:
 			// Post-M5 #135: source-owned ingress-gce failure events
 			// (Warning-only, the capacity-source precedent). Pure
-			// client-go — no cloud provider, no typed handle: it
-			// registers no §7.4 clearance observer and rides no
-			// shared factory.
-			src = ingress.New(client)
+			// client-go — no cloud provider. It registers no §7.4
+			// clearance observer; the typed handle exists so its Event
+			// informer joins the shared factory (§6.3) rather than
+			// opening a third watch on the same stream.
+			bs.ingress = ingress.New(client)
+			src = bs.ingress
 		case gateway.Name:
 			// Post-M5 #168: the Gateway-API sibling of ingress. Reads
 			// Gateway/HTTPRoute status conditions through the dynamic
@@ -1169,7 +1200,7 @@ func budgetDesc(usd float64) string {
 // a missed incident. So insufficient RBAC disables recovery with a
 // loud log naming the grant, instead of crash-looping existing
 // deployments.
-func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, dedup *engine.DedupCache, disp *dispatcher, m *metrics, bs *builtSources) error {
+func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, factory informers.SharedInformerFactory, dedup *engine.DedupCache, disp *dispatcher, m *metrics, bs *builtSources) error {
 	// Observer order is load-bearing (the tracker asks in order and
 	// the FIRST claim wins): every source-specific observer precedes
 	// any pod-scoped one, in source registration (§7.2) order. In
@@ -1243,7 +1274,7 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, d
 			}
 		}
 		if podRBAC {
-			obs := newPodClearanceObserver(client)
+			obs := newPodClearanceObserver(client, factory)
 			if err := obs.Start(ctx); err != nil {
 				return err
 			}

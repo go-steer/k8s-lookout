@@ -310,9 +310,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
-	factory := s.factory
+	factory, owned := s.factory, false
 	if factory == nil {
 		factory = informers.NewSharedInformerFactory(s.client, 0)
+		owned = true
 	}
 
 	depH, err := factory.Apps().V1().Deployments().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -351,7 +352,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	factory.Start(ctx.Done())
 	// Shutdown blocks until every handler goroutine exits, upholding
 	// the Source contract that emit is never called after Run returns.
-	defer factory.Shutdown()
+	// Only for a factory this source owns: on the shared factory those
+	// goroutines belong to other sources and the graph feed (§6.3), and
+	// they stop with the runner's ctx, not with this Run.
+	if owned {
+		defer factory.Shutdown()
+	}
 
 	if !cache.WaitForCacheSync(ctx.Done(), depH.HasSynced, rsH.HasSynced, stsH.HasSynced, podH.HasSynced) {
 		return fmt.Errorf("rollout: cache sync failed (informer stopped before initial list completed)")

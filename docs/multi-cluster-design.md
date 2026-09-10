@@ -180,10 +180,12 @@ already reports missing access loudly.
 The cost of multi-cluster is not the plumbing — it is the operational
 posture, and it is real:
 
-- **Footprint.** Each runner watches pods/nodes/etc. with its own
-  informer factories. Storm-mode's shared factory dedups *within* a
-  cluster, not across. Ten clusters in one pod is ~10× the watch/cache
-  memory — precisely what one-per-cluster avoids.
+- **Footprint.** Each runner has its own shared informer factory and
+  watches pods/nodes/etc. through it. That factory dedups *within* a
+  cluster — one informer per object type, 13 LIST+WATCH streams — but
+  never across clusters, because two clusters' pods are different
+  objects on different API servers. Ten clusters in one pod is ~10× the
+  watch/cache memory — precisely what one-per-cluster avoids.
 - **Blast radius.** One process becomes one failure domain for many
   clusters; restarts, OOMs, and rollout risk all get worse.
 - **Credentials/reachability.** Long-lived reach into remote control

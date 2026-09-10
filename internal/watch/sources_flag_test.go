@@ -288,7 +288,7 @@ func TestSetupRecovery_ObjectStateObserverAbsorbed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), &builtSources{objState: objState}); err != nil {
+	if err := setupRecovery(ctx, f, client, nil, dedup, disp, newMetrics(), &builtSources{objState: objState}); err != nil {
 		t.Fatalf("setupRecovery: %v", err)
 	}
 	if disp.tracker == nil {
@@ -310,7 +310,7 @@ func TestSetupRecovery_FallbackKeepsZeroConfigBehavior(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), &builtSources{}); err != nil {
+	if err := setupRecovery(ctx, f, client, nil, dedup, disp, newMetrics(), &builtSources{}); err != nil {
 		t.Fatalf("setupRecovery must not fail on missing RBAC in fallback mode: %v", err)
 	}
 	if disp.tracker != nil {
@@ -414,7 +414,7 @@ func TestSetupRecovery_TrendObserversWithoutPodRBAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f := &flags{recoveryStableFor: 5 * time.Minute}
-	if err := setupRecovery(ctx, f, client, dedup, disp, newMetrics(), bs); err != nil {
+	if err := setupRecovery(ctx, f, client, nil, dedup, disp, newMetrics(), bs); err != nil {
 		t.Fatalf("setupRecovery: %v", err)
 	}
 	if disp.tracker == nil {

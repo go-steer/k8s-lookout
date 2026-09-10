@@ -133,6 +133,11 @@ var eventKinds = map[string]map[string]string{
 // Source implements sources.Source for the ingress row of §7.2.
 type Source struct {
 	client kubernetes.Interface
+	// factory, when set via WithFactory, is the externally owned
+	// shared informer factory (§6.3). The Events this source reads are
+	// the same stream k8s-events and capacity watch, so sharing
+	// collapses three event caches into one.
+	factory informers.SharedInformerFactory
 
 	mu   sync.Mutex
 	emit func(engine.Signal)
@@ -156,6 +161,14 @@ func (s *Source) Name() string { return Name }
 // cluster-wide (an Ingress can live in any namespace), so the source
 // needs cluster RBAC (§11).
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// WithFactory directs Run to register its informer on an externally
+// owned shared factory (§6.3). Call before Run; nil is ignored.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.factory = f
+	}
+}
 
 // RequiredAccess implements sources.AccessDeclarer (§11): the Event
 // informer's list+watch — the same grant the k8s-events source rides
@@ -270,7 +283,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
-	factory := informers.NewSharedInformerFactory(s.client, 0)
+	factory, owned := s.factory, false
+	if factory == nil {
+		factory = informers.NewSharedInformerFactory(s.client, 0)
+		owned = true
+	}
 	h, err := factory.Core().V1().Events().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if ev, ok := obj.(*corev1.Event); ok {
@@ -292,7 +309,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	factory.Start(ctx.Done())
 	// Shutdown blocks until the handler goroutines exit, upholding the
 	// Source contract that emit is never called after Run returns.
-	defer factory.Shutdown()
+	// Only for a factory this source owns: on the shared factory those
+	// goroutines belong to other sources and the graph feed (§6.3), and
+	// they stop with the runner's ctx, not with this Run.
+	if owned {
+		defer factory.Shutdown()
+	}
 
 	if !cache.WaitForCacheSync(ctx.Done(), h.HasSynced) {
 		return fmt.Errorf("ingress: cache sync failed (informer stopped before initial list completed)")
