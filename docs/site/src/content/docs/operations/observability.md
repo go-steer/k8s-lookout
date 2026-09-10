@@ -43,6 +43,56 @@ each at them:
   backoff withdraws from readiness too — `not ready: cluster runner
   not started`, or `… (not started)` in the named-fleet form.
 
+Neither probe fails because of RBAC. A permission the sentinel does not
+have is a config problem an operator has to fix; restarting the pod or
+pulling it out of a rollout does not fix it, and doing either turns one
+missing grant into an outage. What a denial does instead is [give up on
+that one cluster](#a-cluster-the-sentinel-has-given-up-on).
+
+### `?verbose`
+
+`/readyz?verbose` adds a line per cluster — on the `200` as well as the
+`503`, in the same shape kube-apiserver uses:
+
+```
+$ curl -s localhost:9090/readyz?verbose
+[!]prod-ap degraded: access_denied
+[-]prod-eu syncing
+[+]prod-us watching
+readyz check failed: waiting on 1 of 2 cluster(s): [prod-eu (syncing)]
+```
+
+`[+]` watching, `[-]` not there yet, `[!]` given up on — excluded from
+the verdict, which is why the count says 2 and not 3.
+
+### A cluster the sentinel has given up on
+
+When a runner's startup probe is refused by the cluster's authorizer
+(§11), retrying cannot help: the answer will be the same until someone
+edits a ClusterRoleBinding. So the supervisor stops restarting that
+runner, logs the refusal once, and marks the cluster degraded:
+
+```
+runner[prod-ap]: exited: source "k8sevents" requires permission to "watch events cluster-wide" …
+runner[prod-ap]: NOT restarting — that failure is settled (access_denied), so every retry would be refused the same way …
+```
+
+The process keeps watching every other cluster and stays ready, because
+it is still fit to serve them. **The alert to write is on the metric**:
+
+```
+lookout_runner_terminal{cluster="prod-ap",reason="access_denied"} 1
+```
+
+A series at `1` means a cluster in your fleet is dark and will stay dark
+until a grant changes. If *every* cluster goes that way the process
+exits non-zero instead — there is nothing left to be ready for, and the
+kubelet's backoff is the right retry.
+
+Every other exit is still transient and still restarts, now with a
+backoff that doubles from 10s to a 5m ceiling and resets after a runner
+has stayed up two minutes (`lookout_runner_restarts_total`).
+
 Readiness matters most during a rollout: the Deployment uses
 `strategy: Recreate` with one replica, so the new pod must come up
 before anything is watching again, and `/readyz` is what tells you when

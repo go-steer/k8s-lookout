@@ -212,10 +212,24 @@ case — not large production fleets, which keep the per-cluster sentinel.
 
 1. **Runner restart policy** — bounded backoff. A runner that exits
    while the process is up is logged, counted (`lookout_runner_up`,
-   `lookout_runner_restarts_total`), and restarted after a fixed backoff;
+   `lookout_runner_restarts_total`), and restarted after a backoff;
    ctx cancellation (shutdown) is not a restart. At N=1 the single
    runner's error is returned so the kubelet still owns the restart
    (one-per-cluster behaviour is byte-identical).
+
+   *Amended for issue #383.* The backoff was fixed at 10s and applied
+   to every exit alike. Two changes: it now doubles to a 5m ceiling
+   (resetting once a runner has stayed up 2m), and exits are
+   classified. A **terminal** exit — today, only a settled
+   authorization refusal, which the sentinel knows because it asked
+   the authorizer and got a decision — ends supervision for that
+   cluster instead of retrying it forever: the runner stops, the
+   cluster is marked degraded on `/readyz?verbose`, and
+   `lookout_runner_terminal{cluster,reason}` goes to 1. A degraded
+   cluster is dropped from the readiness expectation rather than held
+   against it (a process watching 24 of 26 clusters is fit to serve
+   those 24); if *every* cluster goes terminal the process exits
+   non-zero, because there is nothing left to be ready for.
 2. **Which loops are per-runner vs. process-global** — process-global:
    the sink, the metrics registry, the signal context, and the
    `--metrics-addr` HTTP server. Per-runner: clients, sources, informers,

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/readyz?verbose` renders one line per cluster — `[+]` watching,
+  `[-]` not there yet, `[!]` given up on — followed by the same verdict
+  the bare body carries. Served on the `200` as well as the `503`,
+  because the case it exists for is a ready process that has quietly
+  stopped watching one of its clusters. Same query parameter and line
+  shape as kube-apiserver's `/readyz?verbose`.
 - Four e2e scenarios for failures a pod-centric check cannot see, each
   chosen because the pod either never dies or never exists.
   `probe-flap` flips a readiness gate every 20s with no liveness
@@ -35,6 +41,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A cluster whose authorizer refuses a required permission is no longer
+  restarted forever (#383). The supervisor classified every runner exit
+  the same way and retried it on a fixed 10s backoff, so a fleet
+  process with one denied cluster re-ran that cluster's whole startup
+  path — a client-go dial and a full SSAR sweep — six times a minute
+  for the life of the pod, burying the one log line that explained the
+  problem. Startup denials are now typed (`sources.ErrAccessDenied`),
+  and an exit carrying one is *terminal*: the runner stops, the refusal
+  is logged once, the cluster is reported degraded on `/readyz?verbose`
+  and by a new `lookout_runner_terminal{cluster,reason}` gauge, and the
+  process keeps watching every cluster that still works. If every
+  cluster goes terminal the process exits non-zero rather than idle as
+  a healthy-looking no-op. Every other exit stays retryable — a
+  reviewer that could not be reached is "could not verify", not
+  "denied" — and its backoff now doubles from 10s to a 5m ceiling,
+  resetting once a runner has stayed up 2m.
+- **Readiness does not fail on RBAC.** A degraded cluster is dropped
+  from the readiness expectation instead of held against it: a sentinel
+  watching 24 of 26 clusters is fit to serve those 24, and failing
+  `/readyz` there would pull the working 24 out of the rollout to fix
+  nothing. Total loss is the exception and is still `503`.
 - A §7.4 clearance that carries no `StableSince` now resolves after the
   stability window instead of never (#397). The window is anchored when
   the predicate first reads clear, and re-read on every tick so that a

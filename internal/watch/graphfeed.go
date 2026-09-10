@@ -124,7 +124,10 @@ func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) erro
 			return fmt.Errorf("storm: capability probe for %q failed: %w", req, err)
 		}
 		if !d.Allowed {
-			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and %s — grant it (deploy/12-clusterrole-watcher.yaml) if a grant can help, or drop --storm; refusing to run correlation over a silently empty graph", req, sources.DenialDetail(d))
+			// %w on ErrAccessDenied so the supervisor classifies this
+			// exit as terminal like any other settled denial (#383);
+			// the wording stays this check's own.
+			return fmt.Errorf("storm: --storm requires permission to %q for the topology graph informers and %s — grant it (deploy/12-clusterrole-watcher.yaml) if a grant can help, or drop --storm; refusing to run correlation over a silently empty graph%.0w", req, sources.DenialDetail(d), sources.ErrAccessDenied)
 		}
 	}
 	return nil

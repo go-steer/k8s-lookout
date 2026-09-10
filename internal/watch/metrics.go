@@ -80,6 +80,7 @@ type metrics struct {
 	sinkInfo             *prometheus.GaugeVec
 	runnerUp             prometheus.Gauge
 	runnerRestarts       prometheus.Counter
+	runnerTerminal       *prometheus.GaugeVec
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -302,6 +303,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_runner_restarts_total",
 			Help: "Total in-process restarts of this cluster's runner by the supervisor after it exited while the process stayed up (multi-cluster fate isolation, issue #208). Stays zero in the single-cluster default, where a runner exit ends the process and the kubelet owns restart.",
 		}),
+		runnerTerminal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "lookout_runner_terminal",
+			Help: "1 when the supervisor has GIVEN UP on this cluster: the runner exited for a reason no retry can fix (access_denied — the authorizer refused a required permission), so it is no longer being watched and no longer being restarted (issue #383). ADDITIVE metric rather than a label on lookout_runner_up, which keeps its exact series identity. The alert to write: a series at 1 means a cluster in the fleet is dark until someone changes a grant. Stays absent in the single-cluster default, where such an exit ends the process instead.",
+		}, []string{"reason"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -344,6 +349,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.sinkInfo,
 		m.runnerUp,
 		m.runnerRestarts,
+		m.runnerTerminal,
 	)
 	return m
 }
@@ -395,19 +401,38 @@ func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry, rd
 	// different answer (issue #285): "has this process established its
 	// watches", not "is it running". A sentinel whose informers are
 	// still listing is up but blind.
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	//
+	// ?verbose adds the per-cluster breakdown, on 200 as well as on
+	// 503 (issue #383). The 503 body already names what is missing;
+	// the case verbose exists for is the 200 — a fleet process is
+	// ready while watching 24 of its 26 clusters, and the two it has
+	// given up on are invisible in a bare "ok". Same query parameter
+	// and same [+]/[-] line shape as kube-apiserver's /readyz?verbose,
+	// because an operator reaching for it already knows that one.
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, req *http.Request) {
 		if rd == nil {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok\n"))
 			return
 		}
 		ok, why := rd.ready()
+		code := http.StatusOK
 		if !ok {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			code = http.StatusServiceUnavailable
+		}
+		if req.URL.Query().Has("verbose") {
+			// The verdict is passed in, not recomputed, so the trailer
+			// line can never disagree with the status code.
+			body := rd.report(ok, why)
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		w.WriteHeader(code)
+		if !ok {
 			_, _ = fmt.Fprintf(w, "not ready: %s\n", why)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	server := &http.Server{

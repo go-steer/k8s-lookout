@@ -17,6 +17,7 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -374,6 +375,18 @@ func TestProbeGraphAccess(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "replicasets") || !strings.Contains(err.Error(), "--storm") {
 		t.Errorf("error must name the grant and the flag: %v", err)
+	}
+	// This check has its own wording but the same nature, so it joins
+	// the same retryability classification (#383) — and the sentinel
+	// must not leak into the message an operator reads.
+	if !errors.Is(err, sources.ErrAccessDenied) {
+		t.Error("a graph-grant denial must satisfy errors.Is(err, sources.ErrAccessDenied)")
+	}
+	if classifyExit(err) != reasonAccessDenied {
+		t.Errorf("classifyExit = %q, want %q", classifyExit(err), reasonAccessDenied)
+	}
+	if strings.Contains(err.Error(), sources.ErrAccessDenied.Error()) {
+		t.Errorf("the wrapping sentinel leaked into the operator-facing message: %v", err)
 	}
 }
 
