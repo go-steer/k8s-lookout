@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# store-postmortem — not a break, a HARNESS. It manufactures the one
+# situation the §6.6 graph-history flags exist for: a question about a
+# cluster state that no longer exists.
+#
+# The shape:
+#   1. start a local sentinel writing a --store with snapshots on
+#   2. create a canary Pod + the ConfigMap it mounts
+#   3. wait until the STORE (not the API) can answer for the canary
+#   4. scale web 2→3 — a change to the target's own pods, inside the window
+#   5. record onset
+#   6. delete the canary
+#
+# After that the canary is gone from the cluster and present in the
+# store, so every --at assertion has a live control that must FAIL to
+# find what --at finds. A fixture that only proved `--at` returns rows
+# would pass just as well if --at silently answered live.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ local sentinel with a store (see lib.sh: why not the deployed one)"
+postmortem_sentinel_stop            # a leftover from an interrupted run
+rm -rf "$POSTMORTEM_DIR"
+mkdir -p "$POSTMORTEM_DIR"
+
+# Normalise web to 2 replicas BEFORE the sentinel starts, so the rescale
+# below is a real 2→3 and lands inside the window. An interrupted run
+# leaves web at 3, and `scale --replicas=3` on a Deployment already at 3
+# writes nothing at all — the fixture would then look like it worked and
+# the assertion would fail on a delta that was never recorded.
+kubectl -n "$DEMO_NS" scale deployment web --replicas=2 >/dev/null
+kubectl -n "$DEMO_NS" rollout status deploy/web --timeout=180s >/dev/null
+
+# --storm is a de-facto precondition, not a preference: the topology
+# graph the snapshots serialize exists only under storm correlation
+# (internal/watch/wiring.go arms the graph feed there), so --store
+# without it writes occurrences and no history at all.
+#
+# --dry-run is what lets this run with no daemon: the dispatcher prints
+# payloads instead of POSTing them, and --daemon-url stops being
+# required. The store is written either way — it hangs off --store, not
+# off the sink.
+#
+# --graph-snapshot-interval=10s against a 5m default so the fixture
+# finishes in fixture time. The bootstrap poll is already 10s, so this
+# is the interval the loop settles onto rather than a change of shape.
+"$(lookout_bin)" watch \
+  --dry-run \
+  --store="$POSTMORTEM_STORE" \
+  --graph-snapshot-interval=10s \
+  --storm=on \
+  --sources=k8s-events,object-state,rollout \
+  --cluster-name="$CLUSTER_NAME" \
+  --log-level=info \
+  >"$POSTMORTEM_LOG" 2>&1 &
+echo $! >"$POSTMORTEM_PID"
+echo "  sentinel pid $(cat "$POSTMORTEM_PID") → $POSTMORTEM_STORE"
+
+# The baseline snapshot, not merely "the process started": change
+# records logged before one exists are unreplayable, and GraphAt's
+# answer for any instant before the first snapshot is ErrNoHistory. This
+# is the line that says --at is answerable from here on.
+await 180 "graph history baseline snapshot stored" \
+  grep -q 'graph history: baseline snapshot stored' "$POSTMORTEM_LOG"
+
+echo "▸ the canary: a Pod that will exist only inside the window"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $POSTMORTEM_CANARY
+  namespace: $DEMO_NS
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+data:
+  note: "mounted by the canary pod so the store records a Mounts edge"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $POSTMORTEM_CANARY
+  namespace: $DEMO_NS
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  containers:
+    - name: canary
+      image: busybox:1.36
+      command: ["sleep", "86400"]
+      volumeMounts:
+        - { name: note, mountPath: /etc/note }
+      resources:
+        requests: { cpu: "10m", memory: "16Mi" }
+        limits: { cpu: "50m", memory: "32Mi" }
+  volumes:
+    - name: note
+      configMap: { name: $POSTMORTEM_CANARY }
+YAML
+kubectl -n "$DEMO_NS" wait --for=condition=Ready "pod/$POSTMORTEM_CANARY" --timeout=180s
+
+# Gate on the STORE, not on the API. Ready means the kubelet is happy;
+# what the assertions need is that a snapshot exists which already
+# contains the canary AND that the delta log has flushed its Add. Ask
+# the two questions the case will ask, five seconds in the past — if
+# either cannot be answered yet, the case is not ready to run.
+_canary_in_history() {
+  "$(lookout_bin)" triage radius "Pod/$DEMO_NS/$POSTMORTEM_CANARY" \
+    --at 5s --store "$POSTMORTEM_STORE" >/dev/null 2>&1
+}
+await 180 "the store can answer for $POSTMORTEM_CANARY" _canary_in_history
+
+_canary_in_changelog() {
+  local out
+  out="$("$(lookout_bin)" triage changes "Deployment/$DEMO_NS/web" \
+    --at 5s --store "$POSTMORTEM_STORE" --since=30m 2>/dev/null || true)"
+  grep -Eq "name=$POSTMORTEM_CANARY .*reason=Added" <<<"$out"
+}
+await 180 "the delta log has the canary's Added record" _canary_in_changelog
+
+# A second change class inside the window, this one on the target's own
+# workload: scaling web updates its ReplicaSet (relation=upstream, with
+# the count delta in `fields`) and adds a pod under it (relation=self).
+# The canary covers lateral; together the three relations are the whole
+# scoping vocabulary, and without this the case would assert one of them
+# and call the scoping tested.
+echo "▸ scaling web 2→3 (a rescale inside the window)"
+kubectl -n "$DEMO_NS" scale deployment web --replicas=3
+kubectl -n "$DEMO_NS" rollout status deploy/web --timeout=180s
+# Gate on the field delta, not on "some relation=self row": web's pods
+# churn for other reasons, so a bare relation=self match would go green
+# on an unrelated record and hand the flake to the assertion.
+_rescale_in_changelog() {
+  local out
+  out="$("$(lookout_bin)" triage changes "Deployment/$DEMO_NS/web" \
+    --at 5s --store "$POSTMORTEM_STORE" --since=30m 2>/dev/null || true)"
+  grep -Eq 'kind=change\.scale .*fields="replicas=2→3"' <<<"$out"
+}
+await 180 "the delta log has the rescale, as fields=replicas=2→3" _rescale_in_changelog
+
+# Onset, then a beat, then the delete. GraphAt's boundary is inclusive
+# on both cursors and these stamps have one-second resolution: taking
+# onset and deleting inside the same second would put the delete AT the
+# onset instant, and the fixture would be asking whether the canary
+# existed at the moment it stopped existing.
+date -u +%Y-%m-%dT%H:%M:%SZ >"$POSTMORTEM_ONSET"
+echo "▸ onset recorded: $(postmortem_onset)"
+sleep 2
+
+echo "▸ deleting the canary — from here it exists only in the store"
+kubectl -n "$DEMO_NS" delete pod "$POSTMORTEM_CANARY" --wait=true --timeout=120s
+kubectl -n "$DEMO_NS" delete configmap "$POSTMORTEM_CANARY"
+await 120 "$POSTMORTEM_CANARY is gone from the live API" \
+  bash -c "! kubectl -n '$DEMO_NS' get pod '$POSTMORTEM_CANARY' >/dev/null 2>&1"
+
+# The second stamp: an instant the store answers for in which the canary
+# is already gone. Gone from the API is not the same as gone from the
+# newest SNAPSHOT — the feed has to see the delete and the loop has to
+# take a snapshot after it — and the difference is a window of up to one
+# interval in which an --at query still finds the pod. Wait it out here,
+# once, rather than leaving every assertion to race it.
+_canary_out_of_history() {
+  local out
+  out="$("$(lookout_bin)" triage radius "Deployment/$DEMO_NS/web" \
+    --at 5s --store "$POSTMORTEM_STORE" 2>/dev/null || true)"
+  ! grep -q "$POSTMORTEM_CANARY" <<<"$out"
+}
+await 180 "the store's newest snapshot has lost $POSTMORTEM_CANARY too" \
+  _canary_out_of_history
+date -u +%Y-%m-%dT%H:%M:%SZ >"$POSTMORTEM_AFTER"
+echo "▸ after-delete instant recorded: $(postmortem_after)"
+
+echo
+echo "The window: onset $(postmortem_onset), store $POSTMORTEM_STORE"
+echo "  lookout triage radius  Pod/$DEMO_NS/$POSTMORTEM_CANARY --at $(postmortem_onset) --store $POSTMORTEM_STORE"
+echo "  lookout triage changes Deployment/$DEMO_NS/web --at $(postmortem_onset) --store $POSTMORTEM_STORE"
