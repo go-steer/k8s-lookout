@@ -239,6 +239,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error we cannot classify — a registry error with no matcher is
   precisely the text a reader most needs. Masked on the same §6.5
   terms as `message`, because it is message text. (#387)
+- One unrelated log line no longer eats a Python traceback. The
+  detector treated the first unindented line after the frames as the
+  exception, whatever it said — but a pod's log is stdout and stderr
+  already merged, and the runtime interleaves the two pipes with no
+  ordering guarantee, so an application line landing inside a trace on
+  the other pipe is ordinary rather than exotic. When it happened the
+  damage was threefold: the trace was reported with that line as its
+  exception, the line itself was swallowed so its own template came up
+  one short, and every real frame after it was lost. The terminator is
+  now shape-checked like the Go and Java ones already were — it has to
+  look like `Name` or `pkg.Name: message` — and a line that fails the
+  check ends the trace *and* goes back through the normal clustering
+  path instead of disappearing. A chained exception still reads as one
+  trace per traceback, unchanged. (#394)
 - A critical signal on a Service now enriches to the workload behind
   it. `objectstate.endpoints_empty` carries `kind_of_object=Service`,
   and a Service owns nothing, so both enrichment resolve paths — which
