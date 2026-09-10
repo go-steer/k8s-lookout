@@ -236,6 +236,54 @@ metadata:
 YAML
 }
 
+# await_crashloop <namespace> <app-label> <min-restarts>
+#
+# Block until a pod has crash-looped at least <min-restarts> times.
+#
+# The restart count is the whole predicate, deliberately. Waiting for
+# the CrashLoopBackOff reason to be showing as well is the obvious
+# thing to do and the wrong one: the kubelet publishes `terminated`
+# first and holds it for roughly the length of the previous backoff
+# before flipping to `waiting{CrashLoopBackOff}` with the new one, and
+# the share of each cycle spent terminated GROWS with the backoff. So
+# a caller that waits for the reason waits out an entire extra
+# half-cycle it has no use for, and does it at exactly the moment the
+# count is finally high enough — which is how a wait whose arithmetic
+# says 70s took 155s and then began timing out in CI. Nothing needs
+# the reason any more: lookout reports the same incident from either
+# sub-phase as of #403.
+await_crashloop() {
+  local ns="$1" app="$2" want="$3"
+  _crashlooping() {
+    local restarts
+    restarts="$(kubectl -n "$ns" get pods -l "app.kubernetes.io/name=$app" \
+      -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null)"
+    [[ -n "$restarts" && "$restarts" -ge "$want" ]]
+  }
+  # Generous, because what it is waiting on is the kubelet's own
+  # exponential backoff (10s, 20s, 40s, …) plus however long the image
+  # takes to pull the first time, and being stingy here buys a flake
+  # rather than a faster suite.
+  await 420 "$app has crash-looped >=$want times" _crashlooping
+}
+
+# refresh_crashloop <namespace> <app-label> <min-restarts>
+#
+# Delete the crash-looping pod and wait for its replacement to get
+# back to <min-restarts>, resetting the kubelet's backoff to 10s.
+#
+# For the pod STATUS nothing about a crash loop ages, but the kubelet's
+# `BackOff` EVENT is emitted once per backoff period — so a loop that
+# has been running for ten minutes produces one event every five, and a
+# caller watching a short window sees none at all. Anything asserting
+# on the event rather than the state has to start from a young loop.
+refresh_crashloop() {
+  local ns="$1" app="$2" want="$3"
+  echo "▸ restarting $ns/$app so its backoff (and its BackOff events) start over"
+  kubectl -n "$ns" delete pod -l "app.kubernetes.io/name=$app" --wait=false >/dev/null 2>&1 || true
+  await_crashloop "$ns" "$app" "$want"
+}
+
 # await_inject <name> <timeout> <grep-pattern...>
 #
 # Waits until a single stub-log line appended after stub_mark <name>

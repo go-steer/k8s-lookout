@@ -23,6 +23,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -179,6 +180,60 @@ func TestPodsClass(t *testing.T) {
 	// 11 pods + 3 deployments + 1 sts + 1 ds + 1 job.
 	if scanned != 17 {
 		t.Errorf("scanned = %d, want 17", scanned)
+	}
+}
+
+// TestCrashLoopIsOneIncidentAcrossBothSubPhases pins #403. The
+// kubelet publishes `terminated` for part of every restart cycle and
+// `waiting{CrashLoopBackOff}` for the rest, and the share spent
+// terminated GROWS with the backoff. Keying the diagnosis off the
+// waiting reason alone therefore reported one unchanged crash loop as
+// pod.crashloop/critical for part of each cycle and
+// pod.restarts/warning for the rest — and because the §8 fingerprint
+// hashes the reason, those are two incident classes: dedup saw two
+// incidents for one fault and a §9.4 triage-status record pinned in
+// one sub-phase went missing in the other. Comparing the whole line
+// is the point; matching kind and severity alone would not catch the
+// fingerprint moving.
+func TestCrashLoopIsOneIncidentAcrossBothSubPhases(t *testing.T) {
+	line := func(pod *corev1.Pod) string {
+		res := checktest.Run(t, testCommand(pod))
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
+		}
+		first, _, _ := strings.Cut(res.Stdout, "\n")
+		return first
+	}
+	waiting := line(crashloopPod("prod", "api-0"))
+	terminated := line(crashloopTerminatedPod("prod", "api-0"))
+	if !strings.Contains(waiting, "kind=pod.crashloop severity=critical") {
+		t.Fatalf("waiting sub-phase = %q, want a critical pod.crashloop", waiting)
+	}
+	if terminated != waiting {
+		t.Errorf("the two sub-phases of one crash loop report differently\n terminated: %s\n    waiting: %s", terminated, waiting)
+	}
+}
+
+// A container that exits 0 and restarts under Always finished its
+// work; the exit-code guard is what keeps it out of the branch above.
+func TestCompletedContainerIsNotACrashLoop(t *testing.T) {
+	got, _ := runFindings(t, testCommand(completedPod("prod", "done-1")), "--only=pods")
+	assertFindings(t, got, []finding{{"pod.restarts", "done-1", "warning"}})
+}
+
+// --restarts is a threshold for CHURN: how much restarting is too
+// much for a container that is up. A crash loop is a sustained state
+// and is reported whatever the threshold says, so neither sub-phase
+// may consult it — the first cut at #403 gated the terminated branch
+// on it and made an unreachable threshold hide the loop for part of
+// every cycle.
+func TestCrashLoopIgnoresTheRestartThreshold(t *testing.T) {
+	for _, pod := range []*corev1.Pod{
+		crashloopPod("prod", "api-0"),
+		crashloopTerminatedPod("prod", "api-0"),
+	} {
+		got, _ := runFindings(t, testCommand(pod), "--only=pods", "--restarts=100000")
+		assertFindings(t, got, []finding{{"pod.crashloop", "api-0", "critical"}})
 	}
 }
 

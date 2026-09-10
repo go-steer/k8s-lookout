@@ -213,6 +213,19 @@ uat_root_watch_runtime() {
     return 0
   fi
 
+  # The payload assertions below are the one place in the UAT that
+  # depends on the kubelet's BackOff EVENT rather than on pod state,
+  # and an event is emitted once per backoff period — so a fixture
+  # injected six minutes ago is deep in a 5m backoff and produces
+  # nothing at all inside a dry-run window measured in seconds. That is
+  # exactly what happened the first time a CI run was slow enough to
+  # reach this case late. Restarting the pod resets the backoff to 10s;
+  # the state-based assertions elsewhere need none of this.
+  #
+  # One restart, not the fixture's four: the event lands on the very
+  # first backoff, and nothing below reads a restart count.
+  refresh_crashloop "$UAT_ROOT_NS" faulty 1
+
   # --storm=off is not a convenience: with correlation on, three
   # incidents sharing a blast-radius key inside the window become ONE
   # kind=storm session and the members are suppressed, so which

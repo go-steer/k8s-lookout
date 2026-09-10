@@ -85,7 +85,10 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 				Help: "how late a CronJob activation may be before it counts as missed; absorbs normal controller scheduling latency"},
 		},
 		Kinds: []checks.KindField{
-			checks.Kind("pod.crashloop", "a container is in CrashLoopBackOff", emit.SeverityCritical),
+			// Not "is in CrashLoopBackOff": the kubelet only wears
+			// that label for part of each restart cycle, and this
+			// finding deliberately covers both halves. See #403.
+			checks.Kind("pod.crashloop", "a container is crash looping", emit.SeverityCritical),
 			checks.Kind("pod.imagepull", "a container cannot pull its image", emit.SeverityCritical),
 			checks.Kind("pod.waiting", "a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …)", emit.SeverityWarning),
 			checks.Kind("pod.oomkilled", "a container's last termination was an OOM kill", emit.SeverityWarning),

@@ -333,6 +333,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trigger. A source now shuts down only a factory it built itself; the
   shared one stops with the runner's context. Same shape as #364, on a
   path that fix did not cover.
+- A crash loop is **one** incident again, not two alternating ones. The
+  kubelet's restart cycle has two sub-phases: it publishes
+  `state.terminated` right after the container dies and holds it for
+  roughly the length of the previous backoff, and only then flips to
+  `state.waiting{CrashLoopBackOff}` with the new one. The diagnosis
+  keyed off the waiting reason alone, so the same unchanged crash loop
+  read as `pod.crashloop`/critical for part of every cycle and fell
+  through to `pod.restarts`/warning for the rest — and since the §8
+  fingerprint hashes the reason, those are two incident *classes*:
+  dedup saw two incidents for one fault, and a §9.4 `triage status`
+  record pinned in one sub-phase went missing thirty seconds later.
+  The share of each cycle spent terminated grows with the backoff, so
+  the longer a workload stayed broken the likelier lookout was to call
+  it a warning. A container that is down now with a failing exit and at
+  least one restart behind it is reported as the crash loop it is, under
+  the same reason on both paths. `--restarts` does not gate it — that
+  threshold is for churn, and a crash loop is a sustained state, so
+  neither sub-phase consults it. The exit-code guard keeps a
+  container that exits 0 under `restartPolicy: Always` out of it, and
+  `pod.restarts` keeps its real meaning — a container that is *up* now
+  and got there the hard way. (#403)
 - A critical signal on a Service now enriches to the workload behind
   it. `objectstate.endpoints_empty` carries `kind_of_object=Service`,
   and a Service owns nothing, so both enrichment resolve paths — which

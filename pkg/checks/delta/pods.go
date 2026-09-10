@@ -135,9 +135,10 @@ func (s *scanner) checkPending(pod *corev1.Pod) {
 
 // checkContainer emits at most one finding per container, worst
 // state first: crashloop > image pull > other waiting error >
-// OOM history > restart churn > not ready. It reports whether it
-// emitted, so checkPod can suppress the generic aged-pending
-// fallback when a container already carries the diagnosis.
+// OOM history > crashloop the kubelet has not relabelled yet >
+// restart churn > not ready. It reports whether it emitted, so
+// checkPod can suppress the generic aged-pending fallback when a
+// container already carries the diagnosis.
 func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, prefix string) bool {
 	name := prefix + cs.Name
 	base := emit.Finding{
@@ -150,21 +151,30 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 	}
 	restarts := emit.Field{Key: "restarts", Value: itoa32(cs.RestartCount)}
 
+	// crashloop builds the finding from whichever termination record
+	// is the freshest one available. The reason is pinned to the
+	// literal on both call sites rather than read from the status,
+	// because the §8 fingerprint hashes the reason and it must not
+	// move between the two sub-phases below.
+	crashloop := func(t *corev1.ContainerStateTerminated) emit.Finding {
+		f := base
+		f.Kind = "pod.crashloop"
+		f.Severity = emit.SeverityCritical
+		f.Reason = "CrashLoopBackOff"
+		f.Details = details(restarts)
+		if t != nil {
+			if t.Reason != "" {
+				f.Details = append(f.Details, emit.Field{Key: "last_state", Value: t.Reason})
+			}
+			f.Details = append(f.Details, emit.Field{Key: "exit_code", Value: itoa32(t.ExitCode)})
+		}
+		return f
+	}
+
 	if w := cs.State.Waiting; w != nil {
 		switch {
 		case w.Reason == "CrashLoopBackOff":
-			f := base
-			f.Kind = "pod.crashloop"
-			f.Severity = emit.SeverityCritical
-			f.Reason = w.Reason
-			f.Details = details(restarts)
-			if t := cs.LastTerminationState.Terminated; t != nil {
-				if t.Reason != "" {
-					f.Details = append(f.Details, emit.Field{Key: "last_state", Value: t.Reason})
-				}
-				f.Details = append(f.Details, emit.Field{Key: "exit_code", Value: itoa32(t.ExitCode)})
-			}
-			s.add(f)
+			s.add(crashloop(cs.LastTerminationState.Terminated))
 			return true
 		case imagePullReasons[w.Reason]:
 			f := base
@@ -197,6 +207,35 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 		return true
 	}
 
+	// A container that is DOWN right now with a failing exit and a
+	// restart count past the threshold is crash-looping, whether or
+	// not the kubelet has said so yet. Its restart cycle has two
+	// sub-phases: `terminated` is published first and held for
+	// roughly the length of the previous backoff, and only then does
+	// the state flip to `waiting{CrashLoopBackOff}` with the new one.
+	// Reading the waiting reason alone therefore reported one
+	// unchanged crash loop as pod.crashloop/critical for part of
+	// every cycle and pod.restarts/warning for the rest — two §8
+	// fingerprints, since the hash is over the reason, so dedup saw
+	// two incidents and a §9.4 triage-status record pinned in one
+	// sub-phase went missing in the other. The share of the cycle
+	// spent terminated grows with the backoff, so the longer a
+	// workload stayed broken the likelier lookout was to call it a
+	// warning. Below OOM on purpose: an OOM kill has its own remedy
+	// and is the better of the two diagnoses. (#403)
+	//
+	// Deliberately NOT gated on --restarts, exactly as the waiting
+	// branch above is not: a crash loop is a sustained state, and a
+	// count threshold is for churn. What makes it a loop rather than
+	// a single failure is the pair — a non-zero exit, and a kubelet
+	// that has already restarted it at least once.
+	if t := cs.State.Terminated; t != nil && t.ExitCode != 0 && cs.RestartCount > 0 {
+		s.add(crashloop(t))
+		return true
+	}
+
+	// Restart churn proper: a container that is UP now but got here
+	// the hard way.
 	if int(cs.RestartCount) >= s.th.restarts {
 		f := base
 		f.Kind = "pod.restarts"

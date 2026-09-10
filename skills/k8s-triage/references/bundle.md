@@ -48,7 +48,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `spec.resource` | info | the object itself: metadata, owner, and the kind-specific highlights (one per target) |
 | `spec.container` | info | one container of the target: image, resources, ports, probes, env (one per container) |
 | `spec.condition` | warning | a status condition of the target that is not in its nominal state |
-| `pod.crashloop` | critical | a container is in CrashLoopBackOff |
+| `pod.crashloop` | critical | a container is crash looping |
 | `pod.imagepull` | critical | a container cannot pull its image |
 | `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
 | `pod.oomkilled` | warning | a container's last termination was an OOM kill |
