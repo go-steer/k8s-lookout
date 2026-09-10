@@ -233,6 +233,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag they set. The `timed out after <d>` wording is now the headline
   on both paths, with whatever the client said kept behind it as
   detail.
+- …and it now says so on the path that actually occurs. The first fix
+  keyed off `ctx.Err()`, which cannot see this case:
+  `golang.org/x/time/rate` declines **predictively** — `Wait` hands
+  `reserveN` a `waitLimit` of `deadline.Sub(now)` and returns the
+  moment it calculates the delay will not fit, so the error arrives
+  *before* the deadline does and `ctx.Err()` is still nil. It also
+  wraps no sentinel, so `errors.Is` finds nothing either, and the raw
+  client-go phrasing reached the user again — six UAT checks in every
+  push-tier kind e2e run since, a different six each time. The test
+  that was meant to cover this waited on `ctx.Done()` before returning
+  the rate limiter's message, which put it through the `ctx.Err()`
+  branch and never exercised the real ordering; both orderings are now
+  covered separately.
 - `lookout scan` no longer exits 0 against a cluster it could not
   reach. Per-check resilience is what scan is for and it stays — one
   check failing must not lose the other six — but the degenerate case

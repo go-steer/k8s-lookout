@@ -201,8 +201,18 @@ func TestRunEnforcesTimeout(t *testing.T) {
 func TestRunTimeoutOwnsTheHeadlineWhateverNoticedIt(t *testing.T) {
 	// Verbatim from a real run, wrapped by the check the way every
 	// command wraps what it was doing.
-	opaque := func(ctx context.Context, _ Invocation) (int, error) {
-		<-ctx.Done()
+	//
+	// It is returned IMMEDIATELY, without waiting for the deadline, and
+	// that ordering is the whole test. golang.org/x/time/rate declines
+	// predictively: reserveN is given waitLimit = deadline.Sub(now) and
+	// returns this error the moment it calculates that the delay it
+	// needs will not fit, which is long before ctx is done. The first
+	// version of this test waited on ctx.Done() before returning the
+	// same string, so it passed through the ctx.Err() branch and never
+	// exercised the path that actually occurs — and the defect reached
+	// CI, where a slow runner makes the rate limiter the layer that
+	// notices first (six UAT checks, kind e2e run 34488923407).
+	opaque := func(context.Context, Invocation) (int, error) {
 		return 0, errors.New("listing deployments: client rate limiter Wait returned an error: " +
 			"rate: Wait(n=1) would exceed context deadline")
 	}
@@ -222,6 +232,30 @@ func TestRunTimeoutOwnsTheHeadlineWhateverNoticedIt(t *testing.T) {
 	}
 	if !strings.Contains(got, "rate: Wait(n=1) would exceed context deadline") {
 		t.Errorf("what noticed the deadline is still worth keeping, got %q", got)
+	}
+}
+
+// TestRunTimeoutHeadlineAlsoWhenTheDeadlineDidArrive keeps the other
+// ordering covered: the same error, but returned after ctx is done, so
+// the ctx.Err() branch is the one that classifies it. Both orderings
+// happen in the field and they must read identically.
+func TestRunTimeoutHeadlineAlsoWhenTheDeadlineDidArrive(t *testing.T) {
+	late := func(ctx context.Context, _ Invocation) (int, error) {
+		<-ctx.Done()
+		return 0, errors.New("listing deployments: client rate limiter Wait returned an error: " +
+			"rate: Wait(n=1) would exceed context deadline")
+	}
+	var out, errBuf bytes.Buffer
+	if code := Run(context.Background(), RunConfig{
+		Name:   "lookout audit hardening",
+		Check:  late,
+		Stdout: &out,
+		Stderr: &errBuf,
+	}, []string{"--timeout=50ms"}); code != ExitRuntime {
+		t.Fatalf("exit = %d, want %d", code, ExitRuntime)
+	}
+	if got := errBuf.String(); !strings.HasPrefix(got, "lookout audit hardening: timed out after 50ms") {
+		t.Errorf("the deadline must lead, got %q", got)
 	}
 }
 
