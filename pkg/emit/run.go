@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/exempt"
@@ -251,17 +252,18 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
 			fmt.Fprintf(stderr, "%s: timed out after %s\n", cfg.Name, timeout)
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			// The deadline expired, but some layer below reported it in
-			// its own words without wrapping context.DeadlineExceeded —
-			// client-go's rate limiter is the usual one, with "rate:
-			// Wait(n=1) would exceed context deadline". Which layer
-			// notices first is a race the cluster's speed decides, so
-			// the same command produces either message depending on the
-			// run, and the client-go one reads like an internal defect
-			// and sends the caller after rate limits instead of the
-			// --timeout they set. The deadline is the headline; what
-			// noticed it stays as detail (issue #352).
+		case errors.Is(ctx.Err(), context.DeadlineExceeded), declinedForTheDeadline(err):
+			// The deadline is responsible, but some layer below reported
+			// it in its own words without wrapping
+			// context.DeadlineExceeded — client-go's rate limiter is the
+			// usual one, with "rate: Wait(n=1) would exceed context
+			// deadline". Which layer notices first is a race the
+			// cluster's speed decides, so the same command produces
+			// either message depending on the run, and the client-go one
+			// reads like an internal defect and sends the caller after
+			// rate limits instead of the --timeout they set. The
+			// deadline is the headline; what noticed it stays as detail
+			// (issue #352).
 			fmt.Fprintf(stderr, "%s: timed out after %s: %v\n", cfg.Name, timeout, err)
 		default:
 			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
@@ -276,6 +278,32 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		return ExitRuntime
 	}
 	return ExitData
+}
+
+// declinedForTheDeadline reports whether err is a layer refusing to
+// start work it has already calculated cannot finish before the
+// deadline — a timeout reported BEFORE the timeout arrives.
+//
+// This is the half of #352 that ctx.Err() cannot see. golang.org/x/time
+// /rate is the one that does it: Wait gives reserveN a waitLimit of
+// deadline.Sub(now) and, when the delay it needs will not fit, returns
+//
+//	fmt.Errorf("rate: Wait(n=%d) would exceed context deadline", n)
+//
+// immediately. Two things follow, and both defeat the checks above. It
+// wraps nothing, so errors.Is finds no sentinel; and it returns early,
+// so ctx.Err() is still nil when Run classifies it. On a fast cluster
+// the round trip loses the race and the deadline fires normally, which
+// is why this only ever showed up on CI runners — six UAT checks in
+// kind e2e run 34488923407, a different six each run.
+//
+// Matching on the text is the only option, since the error carries no
+// type and no wrapped sentinel, so the match is deliberately on the
+// upstream clause alone rather than on client-go's wrapper around it:
+// the phrasing that matters belongs to x/time/rate, and any caller that
+// passes it through unwrapped should be attributed the same way.
+func declinedForTheDeadline(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "would exceed context deadline")
 }
 
 // scopeFromValues builds the Scope from parsed common flags,
