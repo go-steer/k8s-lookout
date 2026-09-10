@@ -41,13 +41,20 @@ type logadminLister struct {
 // newLogadminLister dials Cloud Logging for one project using
 // Application Default Credentials (on GKE: the node/workload
 // identity).
-func newLogadminLister(ctx context.Context, project string) (EntryLister, error) {
+//
+// Returns the concrete type, not EntryLister, so the caller can reach
+// Close — the client is gRPC-backed and outlives the call that dialed
+// it (issue #382). Provider.dialLogadmin is the seam that registers it.
+func newLogadminLister(ctx context.Context, project string) (*logadminLister, error) {
 	client, err := logadmin.NewClient(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	return &logadminLister{client: client}, nil
 }
+
+// Close releases the Cloud Logging connection.
+func (l *logadminLister) Close() error { return l.client.Close() }
 
 // ListEntries implements EntryLister: fetch every entry matching
 // filter, oldest first (the caller's poll windows are minutes wide;

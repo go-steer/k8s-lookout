@@ -326,6 +326,16 @@ arrived as `Error: ImagePullBackOff`.
 
 ### Fixed
 
+- A multi-cluster sentinel no longer strands a cloud client every time
+  it restarts a cluster runner. `cloud.Provider` gained a `Close`, and
+  `watch` defers it alongside the store's close. The provider is built
+  per run and its clients are dialed lazily on first use, so a runner
+  that touched Cloud Logging or Cloud Quotas before exiting left a live
+  gRPC connection — and its goroutines — behind on every restart,
+  unbounded. Only multi-cluster restarts a runner in place, so the
+  single-cluster default was never affected: there the process exits
+  and the OS reclaims. Off-cloud deployments are unaffected either way;
+  `NoProvider.Close` has nothing to release. (#382)
 - The frozen `k8s-event` / `k8s-event-followup` payloads now carry
   cluster identity — `project`, `region` and `zone` — which they had
   been excluded from since M0. That exclusion was correct while a

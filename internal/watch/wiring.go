@@ -703,6 +703,17 @@ func (r *runner) run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("cloud provider: %w", err)
 		}
+		// The provider is per-run, and multi-cluster restarts a runner
+		// in place — so without this every restart strands the gRPC
+		// clients the last one dialed (issue #382). Same treatment the
+		// store gets below; the provider was missed because at N=1 the
+		// process exits and the OS reclaims. Best-effort: a teardown
+		// error is worth a line, never worth failing a clean shutdown.
+		defer func() {
+			if cerr := provider.Close(); cerr != nil {
+				log.Printf("cloud: provider %q close: %v", provider.Name(), cerr)
+			}
+		}()
 		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
 	bs, err := buildSources(f, r.token, client, dyn, metricsClient, provider)

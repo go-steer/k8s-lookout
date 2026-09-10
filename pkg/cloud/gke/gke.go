@@ -35,7 +35,9 @@ package gke
 
 import (
 	"context"
+	"errors"
 	"os"
+	"sync"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
@@ -69,6 +71,56 @@ type Provider struct {
 	location     string
 	cluster      string
 	subscription string
+
+	// mu guards the teardown list. Capability getters and Close can
+	// be called from different goroutines, and a client dials on
+	// first use rather than here, so registration happens long after
+	// construction.
+	mu      sync.Mutex
+	closers []func() error
+	closed  bool
+}
+
+// track registers a dialed client's teardown with the provider, to be
+// run by Close. Called from inside a lazy dial, so it sees only the
+// clients that were actually built.
+//
+// Registering after Close closes immediately instead: a getter racing
+// the teardown must not park a live connection on a list nobody will
+// read again.
+func (p *Provider) track(closeFn func() error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = closeFn()
+		return
+	}
+	p.closers = append(p.closers, closeFn)
+	p.mu.Unlock()
+}
+
+// Close implements cloud.Provider: release every client this provider
+// dialed. Only the gRPC clients (cloud.google.com/go) are tracked —
+// the google.golang.org/api REST services hold an *http.Client whose
+// idle connections the transport reaps on its own and which exposes
+// no teardown to call.
+//
+// Every teardown runs even if an earlier one fails; the errors are
+// joined so a caller logging one line still sees all of them.
+func (p *Provider) Close() error {
+	p.mu.Lock()
+	closers := p.closers
+	p.closers = nil
+	p.closed = true
+	p.mu.Unlock()
+
+	var errs []error
+	for _, closeFn := range closers {
+		if err := closeFn(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // New constructs the GKE provider, resolving identity in precedence
@@ -219,8 +271,20 @@ func (p *Provider) Capacity() (cloud.CapacityAPI, bool) {
 		project:   p.project,
 		location:  p.location,
 		cluster:   p.cluster,
-		newLister: newLogadminLister,
+		newLister: p.dialLogadmin,
 	}, true
+}
+
+// dialLogadmin is capacityAPI's lister factory, wrapped so the client
+// it dials is released by Close rather than left to the GC — which
+// never collects a live gRPC connection's goroutines (issue #382).
+func (p *Provider) dialLogadmin(ctx context.Context, project string) (EntryLister, error) {
+	l, err := newLogadminLister(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	p.track(l.Close)
+	return l, nil
 }
 
 // Quota implements cloud.Provider (M4, quota.go).

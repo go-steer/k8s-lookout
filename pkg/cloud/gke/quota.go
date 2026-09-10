@@ -71,7 +71,7 @@ func newQuotaAPI(p *Provider) *quotaAPI {
 	return &quotaAPI{
 		location: p.location,
 		gce:      newGCEQuotaClient(p.project),
-		metadata: newPQMetadataClient(p.project),
+		metadata: newPQMetadataClient(p),
 		series:   newPQSeriesClient(p.project),
 	}
 }
