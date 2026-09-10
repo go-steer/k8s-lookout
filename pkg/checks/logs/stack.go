@@ -20,11 +20,19 @@ package logs
 // goroutine dump becomes one finding with five frames, and two panics
 // through the same call path become one finding with count=2.
 //
-// The detector is a per-stream state machine (traces never interleave
-// within one container stream; streams are fed separately). Lines
-// that only *might* start a trace (a Java exception header) are held
-// until the next line confirms (`at ...`) or refutes them, in which
-// case they are released to the normal clustering path in order.
+// The detector is a state machine over the lines as they arrive, and
+// it does NOT get to assume they arrive clean: the API serves a pod's
+// log as stdout and stderr already merged (fetch.go), and the runtime
+// interleaves those two pipes with no ordering guarantee between them,
+// so an unrelated application line inside a multi-line trace is the
+// normal case rather than an exotic one. Every terminator here is
+// therefore shape-checked, and a line that does not belong to the
+// trace ends it without being swallowed — it goes back through the
+// normal clustering path instead (issue #394).
+//
+// Lines that only *might* start a trace (a Java exception header) are
+// held until the next line confirms (`at ...`) or refutes them, in
+// which case they are released to the normal clustering path in order.
 
 import (
 	"strings"
@@ -105,7 +113,16 @@ func (d *stackDetector) feed(en entry) (release []entry, done *trace) {
 		return release, done
 
 	case sPy:
-		return nil, d.consumePy(en)
+		switch d.consumePy(en) {
+		case pyMore:
+			return nil, nil
+		case pyEnd:
+			return nil, d.finish()
+		default: // pyForeign — same shape as sGo/sJava: end, then reprocess
+			done = d.finish()
+			release, _ = d.feed(en)
+			return release, done
+		}
 	}
 
 	// sIdle
@@ -277,18 +294,88 @@ func javaFrameName(tr string) (string, bool) {
 // `File "...", line N, in func` frames or source echoes; the first
 // non-indented line is the exception message, which terminates (and
 // belongs to) the trace.
-func (d *stackDetector) consumePy(en entry) *trace {
+// What one line means to an open Python traceback.
+const (
+	pyMore    = iota // part of it, and it continues
+	pyEnd            // part of it, and it ends here (the exception line)
+	pyForeign        // not part of it at all
+)
+
+// consumePy classifies one line against the open Python traceback.
+//
+// The terminator is the EXCEPTION line, and it has to actually look
+// like one — `RuntimeError: queue backlog exceeded`, `KeyboardInterrupt`,
+// `psycopg2.OperationalError: connection timed out`: a dotted
+// identifier, optionally followed by a message. Taking any unindented
+// line instead is what shipped, and container logs break it routinely,
+// because stdout and stderr are two pipes and the runtime interleaves
+// them with no ordering guarantee between the two. One application
+// request line landing inside a traceback written to stderr was enough
+// to make the distiller report the request line as the exception —
+// wrong sample, wrong template, and the request line's own cluster one
+// short (issue #394).
+//
+// A line that is neither a frame nor an exception ends the trace
+// WITHOUT being swallowed: the caller reprocesses it from idle, so it
+// clusters as what it is. The head then stays the "Traceback (most
+// recent call last):" marker — less informative than the exception,
+// and honest, which the alternative was not.
+//
+// A chained exception ("During handling of the above exception…")
+// still becomes one trace per traceback, as before: the first
+// exception line closes the first trace, and the chain's own banner
+// falls out as a foreign line, which puts the nested marker back on
+// the idle path to open the next one.
+func (d *stackDetector) consumePy(en entry) int {
 	t := en.text
 	if t == "" || strings.HasPrefix(t, "  ") {
 		if name, ok := pyFrameName(t); ok {
 			d.cur.frames = append(d.cur.frames, name)
 		}
 		d.touch(en)
-		return nil
+		return pyMore
+	}
+	if !isPyExceptionLine(t) {
+		return pyForeign
 	}
 	d.cur.head = t
 	d.touch(en)
-	return d.finish()
+	return pyEnd
+}
+
+// isPyExceptionLine reports whether t has the shape of the line that
+// closes a traceback: a dotted identifier — the exception's qualified
+// class name — alone or followed by ": " and a message.
+func isPyExceptionLine(t string) bool {
+	name, _, ok := strings.Cut(t, ": ")
+	if !ok {
+		name = strings.TrimSuffix(t, ":")
+	}
+	if name == "" {
+		return false
+	}
+	for _, part := range strings.Split(name, ".") {
+		if !isPyIdentifier(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isPyIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // pyFrameName renders `  File "/app/svc/db.py", line 41, in connect`

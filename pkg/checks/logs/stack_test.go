@@ -192,6 +192,106 @@ func TestPythonTracebackTopFramesInnermostFirst(t *testing.T) {
 	}
 }
 
+// The defect that made kind e2e red (#394): stdout and stderr reach
+// this code already merged, so an application line lands inside a
+// traceback written to the other pipe. It used to be taken as the
+// exception line — which cost the trace its frames, cost the
+// application line's own cluster a count, and scattered the real
+// traceback across four templates.
+func TestPythonTracebackDoesNotSwallowAnInterleavedLine(t *testing.T) {
+	const intruder = "req id=2509 path=/api/v1/widgets status=200 ms=20"
+	eng := feedLines(t,
+		"Traceback (most recent call last):",
+		intruder, // stdout, cutting in before the first frame
+		`  File "/app/worker.py", line 88, in run`,
+		"    self.flush()",
+		"RuntimeError: queue backlog exceeded",
+	)
+	if len(eng.stackOrder) != 1 {
+		t.Fatalf("stack clusters = %d, want 1", len(eng.stackOrder))
+	}
+	if got := eng.stackOrder[0].sample; strings.HasPrefix(got, "req id=") {
+		t.Errorf("sample = %q, want the traceback — an interleaved request line is not the exception", got)
+	}
+	// The intruder is not lost either: it clusters as what it is, so
+	// its own template still counts it.
+	var found bool
+	for _, tmpl := range templates(eng.tree) {
+		if strings.HasPrefix(tmpl, "req id=") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the interleaved line was swallowed, not released: templates = %v", templates(eng.tree))
+	}
+}
+
+// The frames collected before an intruder survive it: ending the trace
+// early must not mean discarding what it already had.
+func TestPythonTracebackKeepsFramesSeenBeforeAnInterleavedLine(t *testing.T) {
+	eng := feedLines(t,
+		"Traceback (most recent call last):",
+		`  File "/app/main.py", line 90, in <module>`,
+		"    run()",
+		`  File "/app/svc/db.py", line 41, in execute`,
+		"    conn.execute(q)",
+		"GET /healthz 200 ua=kube-probe/1.34 ms=2",
+		"psycopg2.OperationalError: connection timed out",
+	)
+	if len(eng.stackOrder) != 1 {
+		t.Fatalf("stack clusters = %d, want 1", len(eng.stackOrder))
+	}
+	want := []string{"db.py:41:execute", "main.py:90:<module>"}
+	if !reflect.DeepEqual(eng.stackOrder[0].frames, want) {
+		t.Errorf("frames = %v, want %v", eng.stackOrder[0].frames, want)
+	}
+}
+
+// A chained exception is still one trace per traceback — unchanged by
+// the shape check, and pinned here because the check is what decides
+// it. Both halves keep their own exception line; neither absorbs the
+// banner CPython prints between them.
+func TestPythonChainedExceptionIsOneTracePerTraceback(t *testing.T) {
+	eng := feedLines(t,
+		"Traceback (most recent call last):",
+		`  File "/app/db.py", line 41, in connect`,
+		"    sock.connect(addr)",
+		"ConnectionRefusedError: [Errno 111] Connection refused",
+		"",
+		"During handling of the above exception, another exception occurred:",
+		"",
+		"Traceback (most recent call last):",
+		`  File "/app/svc.py", line 12, in start`,
+		"    self.db.connect()",
+		"app.errors.StartupError: database unreachable",
+	)
+	if len(eng.stackOrder) != 2 {
+		t.Fatalf("stack clusters = %d, want 2 (one per traceback in the chain)", len(eng.stackOrder))
+	}
+	for i, want := range []string{"ConnectionRefusedError", "app.errors.StartupError"} {
+		if got := eng.stackOrder[i].sample; !strings.HasPrefix(got, want) {
+			t.Errorf("trace %d sample = %q, want it to start with %q", i, got, want)
+		}
+	}
+}
+
+// A bare exception with no message still terminates the trace.
+func TestPythonExceptionWithoutAMessageEndsTheTrace(t *testing.T) {
+	eng := feedLines(t,
+		"Traceback (most recent call last):",
+		`  File "/app/main.py", line 90, in <module>`,
+		"    run()",
+		"KeyboardInterrupt",
+		"INFO shutting down",
+	)
+	if len(eng.stackOrder) != 1 {
+		t.Fatalf("stack clusters = %d, want 1", len(eng.stackOrder))
+	}
+	if got := eng.stackOrder[0].sample; got != "KeyboardInterrupt" {
+		t.Errorf("sample = %q, want KeyboardInterrupt", got)
+	}
+}
+
 func TestStreamEndFlushesOpenTrace(t *testing.T) {
 	eng := feedLines(t,
 		"panic: deadline exceeded",
