@@ -58,10 +58,21 @@ type pqMetadataClient struct {
 	client  func(ctx context.Context) (*cloudquotas.Client, error)
 }
 
-func newPQMetadataClient(project string) *pqMetadataClient {
+// newPQMetadataClient takes the provider, not just its project, so the
+// cloudquotas client can register its teardown when it is actually
+// dialed: it is gRPC-backed, and the provider outlives every call
+// through it (issue #382).
+func newPQMetadataClient(p *Provider) *pqMetadataClient {
 	return &pqMetadataClient{
-		project: project,
-		client:  lazyClient(func(ctx context.Context) (*cloudquotas.Client, error) { return cloudquotas.NewClient(ctx) }),
+		project: p.project,
+		client: lazyClient(func(ctx context.Context) (*cloudquotas.Client, error) {
+			c, err := cloudquotas.NewClient(ctx)
+			if err != nil {
+				return nil, err
+			}
+			p.track(c.Close)
+			return c, nil
+		}),
 	}
 }
 

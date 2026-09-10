@@ -205,4 +205,25 @@ type Provider interface {
 	// ClusterConfig reads the cluster's provider-side configuration
 	// (CapabilityClusterConfig).
 	ClusterConfig() (ClusterConfigAPI, bool)
+
+	// Close releases every client the provider dialed.
+	//
+	// Capability getters are cheap and offline-safe by design — the
+	// clients behind them are dialed on first use — so a provider that
+	// was never used has nothing to release and Close is a no-op. Once
+	// something IS dialed it is a real connection with its own
+	// goroutines (the cloud.google.com/go clients are gRPC), and it
+	// lives as long as the provider does.
+	//
+	// Owned by whoever built the provider. A one-shot command may skip
+	// it and let process exit reclaim, but a resident process that
+	// rebuilds a provider — the sentinel restarting a cluster runner in
+	// place (issue #382) — leaks one connection set per rebuild without
+	// it.
+	//
+	// Idempotent, safe on an unused provider, and safe to call
+	// concurrently with the capability getters: a client dialed after
+	// Close is closed rather than tracked, so the teardown cannot be
+	// outrun by a getter that was already in flight.
+	Close() error
 }

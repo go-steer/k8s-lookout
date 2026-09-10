@@ -18,10 +18,12 @@ package gke
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -247,5 +249,112 @@ func TestCapacityUnavailableWithoutProject(t *testing.T) {
 	u := cloud.Unavailable(p, cloud.CapabilityCapacity)
 	if u.Reason != reasonNoProject {
 		t.Errorf("reason = %q, want %q", u.Reason, reasonNoProject)
+	}
+}
+
+// Close releases what the provider dialed, and only that: clients are
+// built on first use, so an unused provider has an empty list and
+// Close must still succeed (issue #382).
+func TestCloseIsANoOpOnAnUnusedProvider(t *testing.T) {
+	p := &Provider{project: "p"}
+	if err := p.Close(); err != nil {
+		t.Errorf("Close on an unused provider: %v", err)
+	}
+}
+
+func TestCloseRunsEveryTrackedTeardown(t *testing.T) {
+	p := &Provider{project: "p"}
+	var closed []string
+	p.track(func() error { closed = append(closed, "logadmin"); return nil })
+	p.track(func() error { closed = append(closed, "cloudquotas"); return nil })
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(closed) != 2 {
+		t.Fatalf("closed = %v, want both tracked clients released", closed)
+	}
+}
+
+// One failing teardown must not strand the others — the whole point is
+// that no connection survives the runner that dialed it.
+func TestCloseRunsTheRestAfterAFailure(t *testing.T) {
+	p := &Provider{project: "p"}
+	boom := errors.New("logadmin: connection reset")
+	var second bool
+	p.track(func() error { return boom })
+	p.track(func() error { second = true; return nil })
+
+	err := p.Close()
+	if !second {
+		t.Error("a teardown after a failing one never ran")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("Close error = %v, want it to carry the failing teardown", err)
+	}
+}
+
+// A runner exits on more than one path and Close is deferred, so a
+// second call must not re-close a connection the first already took.
+func TestCloseIsIdempotent(t *testing.T) {
+	p := &Provider{project: "p"}
+	var calls int
+	p.track(func() error { calls++; return nil })
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("teardown ran %d times, want exactly 1", calls)
+	}
+}
+
+// A getter already in flight when Close runs would otherwise park a
+// live connection on a list nobody reads again — the very leak this
+// change exists to remove, arriving through the back door.
+func TestTrackAfterCloseClosesImmediately(t *testing.T) {
+	p := &Provider{project: "p"}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var closed bool
+	p.track(func() error { closed = true; return nil })
+	if !closed {
+		t.Error("a client dialed after Close was tracked instead of released")
+	}
+}
+
+// Teardowns register from inside a lazy dial, which runs on whichever
+// goroutine first used the capability. Run under -race.
+func TestTrackIsSafeUnderConcurrentDials(t *testing.T) {
+	p := &Provider{project: "p"}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var closed int
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.track(func() error {
+				mu.Lock()
+				closed++
+				mu.Unlock()
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if closed != 16 {
+		t.Errorf("released %d of 16 dialed clients", closed)
 	}
 }

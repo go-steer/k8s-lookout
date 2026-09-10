@@ -63,6 +63,20 @@ func TestNoProviderGettersUnavailable(t *testing.T) {
 // above stays one line per capability regardless of the impl type.
 func second[T any](_ T, ok bool) bool { return ok }
 
+// Close is on the interface so a caller can defer it over whatever
+// New handed back, without asking which provider it got. The sentinel
+// takes exactly that shape (issue #382), and off-cloud it gets this
+// one — twice, since Close is deferred on a function with several
+// return paths.
+func TestNoProviderCloseIsANoOp(t *testing.T) {
+	if err := NoProvider.Close(); err != nil {
+		t.Errorf("NoProvider.Close() = %v, want nil", err)
+	}
+	if err := NoProvider.Close(); err != nil {
+		t.Errorf("second NoProvider.Close() = %v, want nil", err)
+	}
+}
+
 func TestUnavailableMarker(t *testing.T) {
 	u := Unavailable(NoProvider, CapabilityQuota)
 	if u.Reason != NoProviderReason {

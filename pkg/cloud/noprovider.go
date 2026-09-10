@@ -59,3 +59,8 @@ func (u unconfigured) WorkloadIdentity() (WorkloadIdentityAPI, bool) { return ni
 func (u unconfigured) Audit() (AuditAPI, bool)                       { return nil, false }
 func (u unconfigured) Notifications() (NotificationsAPI, bool)       { return nil, false }
 func (u unconfigured) ClusterConfig() (ClusterConfigAPI, bool)       { return nil, false }
+
+// Close implements Provider: nothing was ever dialed, so there is
+// nothing to release. Present so a caller can defer Close over any
+// provider without asking which one it got.
+func (u unconfigured) Close() error { return nil }
