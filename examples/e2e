@@ -38,7 +38,22 @@ require_examples_context
 # (chatty-logs, broken-edges, broken-webhook, config-drift,
 # drain-blockers, hpa-thrash, cpu-pressure, broken-workloads,
 # secret-workload, store-postmortem) expect nothing on the wire and
-# belong to examples/uat. node-failure is destructive and stays opt-in.
+# belong to examples/uat. Also, the fixtures are the resource-hungry
+# ones (cpu-pressure holds two hogs against their limits) and the kind
+# nodes are capped at 4 cpu / 8g — see examples/README.md § The
+# resource budget a new scenario has to fit. node-failure is
+# destructive and stays opt-in; hpa-metrics-dead waits out a 15m
+# sustain window that no flag shortens, so it is opt-in too
+# (`examples/e2e hpa-metrics-dead`).
+#
+# config-storm runs last: it deliberately forms a storm, and
+# storm-member suppression swallows signals a later scenario expects to
+# see individually — a folded incident's own session is suppressed and
+# its cross-source joins are never fanned out, so the victim looks like
+# a detection miss. The scenario confines itself to its own namespace
+# for the namespace-keyed half of that (see its README), but the NODE
+# tier is not namespace-scoped, so last place is what makes the
+# remaining overlap impossible rather than unlikely.
 DEFAULT_SCENARIOS=(
   crashloop
   image-pull
@@ -48,7 +63,10 @@ DEFAULT_SCENARIOS=(
   cert-expiry
   pdb-gridlock
   endpoints-empty
+  probe-flap
+  cron-missed
   bad-rollout
+  config-storm
 )
 
 scenarios=("$@")

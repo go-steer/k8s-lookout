@@ -67,14 +67,22 @@ if is_kind_context; then
   fi
 fi
 
+# Named explicitly rather than `auto`, so a source this layer depends
+# on cannot be quietly probed away: with an explicit list a missing
+# grant is FATAL (§11), which is what we want from a test rig. The
+# flip side is that a source omitted here is simply never enabled and
+# its scenarios time out looking like detection misses — so a new
+# scenario means checking its source is in this list AND granted in
+# deploy/12-clusterrole-watcher.yaml.
+#
 # The saturation source refuses to start when metrics.k8s.io is
 # unavailable (by design — loud, not silent). Drop it if the API isn't
 # answering rather than crash-looping the sentinel.
-sources="k8s-events,object-state,rollout,saturation,degradation,expiry,capacity"
+sources="k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity"
 if ! kubectl top nodes >/dev/null 2>&1; then
   echo "⚠ metrics.k8s.io not answering — dropping the saturation source" >&2
   echo "  (examples/kind/up installs metrics-server; on other clusters install it and re-run)" >&2
-  sources="k8s-events,object-state,rollout,degradation,expiry,capacity"
+  sources="k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity"
 fi
 
 echo "▸ patching watcher: image=$image sources=$sources"

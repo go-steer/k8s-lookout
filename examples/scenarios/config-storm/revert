@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+. "$(dirname "$0")/ns.sh"
+NS="$(config_storm_ns)"
+
+echo "▸ restoring shared-config (fix-verify half of the drill)"
+# Re-apply the ConfigMap alone, so the four consumers recover from the
+# fault rather than from being recreated.
+kubectl apply -n "$NS" -f "$(dirname "$0")/manifests.yaml"
+for d in consumer-a consumer-b consumer-c consumer-d; do
+  kubectl -n "$NS" rollout status "deploy/$d" --timeout=240s
+done
+
+# The closed loop, at storm altitude: one fix clears the aggregate.
+#
+# Pinned to this scenario's namespace: kind=resolved on its own is the
+# commonest line on the wire, and an unpinned match goes green on any
+# other scenario's teardown that lands in the same window.
+soft await_inject config-storm 300 'kind=resolved' "$NS"
+
+echo "▸ removing the consumers"
+# The scenario owns its namespace, so one delete is the whole
+# teardown. It does NOT take the namespace-keyed rollout_stall storm
+# with it — nothing clears a rollout_stall whose Deployment was
+# deleted, so that storm stays open on `Namespace//$NS` until the 30m
+# idle TTL. Harmless only because the next run mints a new name; see
+# ns.sh.
+kubectl delete namespace "$NS" --ignore-not-found --wait=false

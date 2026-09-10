@@ -302,6 +302,29 @@ arrived as `Error: ImagePullBackOff`.
   routing is the legitimately flaky part, the CLI output contract is
   not, and letting a scenario flake hide a contract regression would
   defeat the point of checking them separately.
+- Four e2e scenarios for failures a pod-centric check cannot see, each
+  chosen because the pod either never dies or never exists.
+  `probe-flap` flips a readiness gate every 20s with no liveness
+  probe, so `restartCount` stays 0 and the only symptom is the
+  endpoint dropping; it is also the suite's only §7.7 ancestor
+  reattachment, asserting that the reactive `Unhealthy` event and
+  `degradation.probe_flap` land in *one* session. `cron-missed` blocks
+  a CronJob's Job creations with a `count/jobs.batch: "0"` quota, so
+  the schedule silently stops with nothing to look at — no Job, no
+  pod, no event on the workload. `config-storm` deletes a ConfigMap
+  four unrelated Deployments share and asserts the correlator folds
+  four incidents into one storm keyed on *the ConfigMap*, not the node
+  and not the namespace. `hpa-metrics-dead` points an HPA at a
+  utilization target its pod template carries no request for, so
+  autoscaling is dead while everything reports healthy. The first
+  three join `DEFAULT_SCENARIOS`; `hpa-metrics-dead` stays opt-in
+  because `MetricsDeadSustain` is 15m and no flag shortens it.
+- `examples/sentinel/up` names its `--sources` explicitly rather than
+  relying on `auto`, and now includes `workload` and `autoscaling`. An
+  explicit list makes a missing RBAC grant fatal (§11), which is what
+  a test rig wants; under `auto` a source the scenarios depend on can
+  be quietly probed away and its scenario then times out looking like
+  a detection miss rather than a misconfiguration.
 
 ### Changed
 

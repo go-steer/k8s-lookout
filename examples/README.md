@@ -79,6 +79,10 @@ Three surfaces to verify on, weakest to strongest:
 | `pdb-gridlock` | PDB headroom drops to 0 | `objectstate.pdb_gridlocked` | `stab drain -A` |
 | `endpoints-empty` | Service selector matches nothing | `objectstate.endpoints_empty` | `state edges` selected=0 |
 | `bad-rollout` | user-invisible bad deploy (maxUnavailable=0) | `rollout.stall`, then `resolved` on undo | `health` rollouts + 5×200 mid-stall |
+| `probe-flap` | readiness gate flips, container never restarts | `degradation.probe_flap`, `resolved`/`object_deleted` | zero `restartCount` alongside the signal |
+| `cron-missed` | CronJob's Jobs blocked by quota, schedule stalls | `workload.cron_missed`, then `resolved` | `health`; `lastScheduleTime` never advances |
+| `config-storm` | shared ConfigMap deleted, four consumers break (own namespace) | 4 incidents → ONE `storm` keyed on the **ConfigMap** + `storm.member`×N | `state edges` names `shared-config` |
+| `hpa-metrics-dead` | HPA on a Deployment with no cpu request (explicit) | `autoscaling.hpa_metrics_dead` after 15m sustain | `audit workloads` names it instantly; workload stays Available throughout |
 | `node-failure` | worker node dies (kind-only, explicit) | `objectstate.node_notready` + ONE `storm` | `health` nodes, `triage radius` |
 
 Each scenario's README explains the timeline, the manual-exploration
@@ -105,6 +109,69 @@ starts is limit-bound, and `examples/kind/up` additionally caps each
 node at 4 cpu / 8g (`cap_kind_nodes`, tunable via
 `LOOKOUT_KIND_NODE_CPUS` / `LOOKOUT_KIND_NODE_MEMORY`).
 See [the read-path tier](#the-read-path-tier).
+
+### Storms leak across scenarios
+
+Three things bit `config-storm` on its first live runs and will bite
+the next storm scenario the same way.
+
+**Assert the ancestor, never just `kind=storm`.** §7.5 keys on node >
+owner chain > shared ConfigMap/PVC > namespace, and four tiny pods
+that all land on one node form a *node* storm that matches a bare
+`kind=storm` while testing nothing you meant to test.
+
+**An open storm swallows whatever comes next.** A folded incident's
+own session is suppressed and its cross-source joins are never fanned
+out, so a later scenario in the same namespace reads as a detection
+miss. A storm scenario belongs in its own namespace and last in
+`DEFAULT_SCENARIOS` — the node tier is not namespace-scoped, so
+isolation alone does not close it.
+
+**Deleting the objects does not close the storm.** Storm keys are
+names, not object identities, and a key survives everything it was
+keyed on. `Namespace//x` stays open for the 30m `stormIdleTTL` after
+`x` is deleted, so recreating `x` re-attaches to the stale storm —
+`StormCorrelator.Observe` checks open storms *before* it consults key
+priority, so a lower tier that is already open beats a higher tier
+that is not. What keeps a namespace storm alive that long here is a
+`rollout_stall` on a deleted Deployment, which is never resolved
+(`objectstate.onDeploymentDelete` drops the entry and emits no
+clearance). A scenario that forms a storm should therefore use a
+**fresh namespace name per run** rather than a fixed one; see
+`scenarios/config-storm/ns.sh`. CI never sees this, because every CI
+run gets a new cluster and a new sentinel — it only shows up when a
+scenario is run twice against one long-lived sentinel, which is the
+workflow the examples exist for.
+
+### The resource budget a new scenario has to fit
+
+`examples/kind/up` caps every node at 4 cpu / 8g of docker
+(`cap_kind_nodes` in `lib.sh`), because two clusters of uncapped kind
+nodes once took a workstation down mid-run. Two facts follow, and both
+bite when writing a scenario rather than when running one:
+
+**The cap is invisible to the scheduler.** A kind node is a container
+sharing the host kernel, so cadvisor reports the *host's* cpu and
+memory as node capacity — `kubectl describe node` will happily
+advertise 32 cpu while the cgroup permits 4. Requests and limits are
+therefore never checked against the cap. Nothing rejects an
+over-budget scenario; it just runs slowly, or doesn't.
+
+**Memory is the dimension that kills.** Over-limit cpu is throttled,
+but a node whose pods exceed 8g gets the *node container* OOM-killed
+by the host kernel — `--memory-swap` is pinned to the limit, so there
+is no swap to escape into. That takes the kubelet with it and shows up
+as `objectstate.node_notready`: a scenario that overcommits memory
+does not fail, it manufactures a different signal and looks like a
+product bug.
+
+So: **bound every container's memory**, keep the sum of concurrent
+memory limits per worker well inside 8g, and bound cpu with a limit
+where you can. Where a missing request or limit *is* the fault —
+`cpu-pressure`'s `nolimits`, `hpa-metrics-dead`'s `unscalable` — leave
+unset only the exact dimension under test, set the other, and keep the
+workload idle. Note that a cpu limit with no cpu request is not a
+middle ground: admission defaults the request to the limit.
 
 ## The scale tier
 
