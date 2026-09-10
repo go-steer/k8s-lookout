@@ -37,8 +37,8 @@ require_examples_context
 # every directory there is a failure scenario: the UAT fixtures
 # (chatty-logs, broken-edges, broken-webhook, config-drift,
 # drain-blockers, hpa-thrash, cpu-pressure, broken-workloads,
-# secret-workload) expect nothing on the wire and belong to
-# examples/uat. node-failure is destructive and stays opt-in.
+# secret-workload, store-postmortem) expect nothing on the wire and
+# belong to examples/uat. node-failure is destructive and stays opt-in.
 DEFAULT_SCENARIOS=(
   crashloop
   image-pull

@@ -129,9 +129,16 @@ jobs:
         # purity, JSON, scope flags and --timeout, then the same
         # commands again through a real MCP server compared byte for
         # byte against the CLI. Reuses this cluster
-        # rather than standing up a second one — it only reads, so the
-        # state the scenarios just left behind is a HARDER input than a
-        # fresh cluster, not a contaminated one.
+        # rather than standing up a second one — the state the
+        # scenarios just left behind is a HARDER input than a fresh
+        # cluster, not a contaminated one.
+        #
+        # It reads, with two bounded exceptions it reverts: the fixtures
+        # (additive, each in its own namespace), and the store case,
+        # which runs a LOCAL `lookout watch --dry-run --store=…` on the
+        # runner to produce a graph history to query. That one also
+        # scales lookout-demo/web 2→3 and back; it is the last case for
+        # that reason.
         #
         # Runs even when the scenarios failed: signal routing is the
         # flaky part (see the header), the CLI contract is not, and

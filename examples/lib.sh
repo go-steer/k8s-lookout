@@ -298,6 +298,74 @@ await_finding() {
   return 1
 }
 
+# ---- the store-postmortem harness ----------------------------------------
+
+# scenarios/store-postmortem runs a sentinel of its own — a LOCAL,
+# out-of-cluster `lookout watch --dry-run --store=…` against the current
+# context — instead of adding --store to the deployed one. Three reasons,
+# in order of weight:
+#
+#   1. The shipped image is distroless, so `kubectl cp` cannot lift the
+#      SQLite file off a running pod. Reading it in-cluster means a PVC
+#      plus a debug pod that mounts it after the sentinel releases it —
+#      a lot of moving parts between the fixture and the assertion.
+#   2. A local sentinel is the binary UNDER TEST. The deployed one is
+#      whatever $LOOKOUT_IMAGE resolves to, which on a default run is
+#      ghcr.io/go-steer/lookout:latest — a released build. A post-mortem
+#      UAT that reads a released binary's store proves nothing about the
+#      working tree.
+#   3. It leaves examples/sentinel/up alone. The in-cluster sentinel is
+#      the subject of every other scenario's wire assertions; giving it
+#      a store and a PVC for one fixture would change what all of them
+#      are running against.
+#
+# The cost is that this fixture needs a kubeconfig with cluster-wide read
+# — true of a kind admin context and of nothing you should point it at in
+# production. require_examples_context already refuses anything else.
+POSTMORTEM_DIR="$STATE_DIR/store-postmortem"
+POSTMORTEM_STORE="$POSTMORTEM_DIR/lookout.db"
+POSTMORTEM_LOG="$POSTMORTEM_DIR/sentinel.log"
+POSTMORTEM_PID="$POSTMORTEM_DIR/sentinel.pid"
+POSTMORTEM_ONSET="$POSTMORTEM_DIR/onset"
+# The far edge of the window: an instant the store can answer for in
+# which the canary is already gone from the newest snapshot. Recorded
+# separately because "deleted from the API" and "absent from the
+# topology the store serves" are up to one snapshot interval apart.
+POSTMORTEM_AFTER="$POSTMORTEM_DIR/after"
+# The object that exists ONLY inside the post-mortem window: created by
+# inject, deleted by inject, and never present when the assertions run.
+# That is the whole differential — `--at` finds it, live cannot.
+POSTMORTEM_CANARY="postmortem-canary"
+
+# postmortem_onset — the recorded onset instant (RFC 3339, UTC).
+postmortem_onset() {
+  cat "$POSTMORTEM_ONSET" 2>/dev/null
+}
+
+# postmortem_after — the recorded after-the-delete instant (RFC 3339, UTC).
+postmortem_after() {
+  cat "$POSTMORTEM_AFTER" 2>/dev/null
+}
+
+# postmortem_sentinel_stop — stop the local sentinel, if one is running.
+# SIGINT, not SIGKILL: the store's change-record writer is buffered and
+# flushes on shutdown, so killing it hard is how you lose the tail of the
+# delta log the --at queries read.
+postmortem_sentinel_stop() {
+  local pid
+  pid="$(cat "$POSTMORTEM_PID" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 0
+  if kill -INT "$pid" 2>/dev/null; then
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && ((waited < 30)); do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$POSTMORTEM_PID"
+}
+
 # soft <command...> — run a check but only warn on failure (for signals
 # whose timing depends on cluster noise, e.g. storm formation).
 soft() {

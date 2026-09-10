@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ stopping the local sentinel"
+postmortem_sentinel_stop
+
+echo "▸ scaling web back to 2"
+kubectl -n "$DEMO_NS" scale deployment web --replicas=2 || true
+kubectl -n "$DEMO_NS" rollout status deploy/web --timeout=180s || true
+
+# The canary is deleted by inject, on purpose — it is the thing that
+# has to be absent for the assertions to mean anything. Cleaning up
+# again here is for the interrupted-inject case.
+kubectl -n "$DEMO_NS" delete pod "$POSTMORTEM_CANARY" --ignore-not-found --wait=false
+kubectl -n "$DEMO_NS" delete configmap "$POSTMORTEM_CANARY" --ignore-not-found
+
+# The store and the sentinel log stay: after a failed run they are the
+# only evidence of what the sentinel saw, and they live under
+# $LOOKOUT_EXAMPLES_STATE, which examples/kind/down removes wholesale.
+echo "  store + log kept for inspection: $POSTMORTEM_DIR"

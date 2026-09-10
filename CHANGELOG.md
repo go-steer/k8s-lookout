@@ -188,6 +188,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allocatable, and `--history` degrading to an explicit
   `cloud.unavailable` finding plus a summary marker instead of silence
   or an error.
+- The post-mortem commands get a UAT case (`uat-cases/60-store.sh`,
+  #177) — everything that needs a `--store`, which is everything that
+  can answer about a cluster state that no longer exists. Every claim
+  is a **pair**: what the store answers, and what the live cluster
+  answers to the same question. A case that only proved `--at` returns
+  rows would pass just as well if `--at` silently reported *now*, which
+  is the one wrong answer a post-mortem tool must never give, so the
+  new `store-postmortem` fixture manufactures an object that exists
+  only inside the window — created and deleted by the inject — and
+  every `--at` assertion has a live control that must fail to find what
+  `--at` finds. Covered: `triage radius --at` reconstructing a deleted
+  pod's edges where live exits 1 with *not found in the topology*;
+  `--depth` bounding the up/down walk from a Pod (laterals reflect off
+  downstream hits at hop+1 outside the bound, by design); the fidelity
+  markers that separate the two modes — `source=history at=` vs
+  `source=live`, `observed=unknown` on referenced-only kinds, no
+  `ready=` in history; `triage changes --at` reporting all three
+  relations from one query with a `fields="replicas=2→3"` delta and
+  `origin=log`, against live's `source=live-approximation` rebuilt from
+  Events; `triage status` written and read back by resource and by
+  fingerprint, with a sibling on the *same* fingerprint proving the pin
+  is the resource key; `health --store` turning that finding's critical
+  into a warning while the untriaged sibling and the category rollup
+  stay critical; `bundle --store`; and the guards, including `--at`
+  before the store's first snapshot as a runtime error rather than a
+  usage error or a silent answer about now.
+- The fixture runs a **local** `lookout watch --dry-run --store=…`
+  rather than extracting a store from the deployed sentinel. That is
+  what demotes the post-mortem coverage from a tier of its own to plain
+  **T0**: `--dry-run` waives the otherwise-required `--daemon-url` and
+  the store hangs off `--store` rather than off the sink, so it needs
+  nothing a bare kind cluster lacks — and unlike the deployed sentinel
+  it is the binary under test. It is also the only UAT fixture that
+  touches the demo app, scaling `lookout-demo/web` 2→3 inside the
+  window and back on revert, which is why its case file is numbered
+  last.
+- Two known gaps are pinned by the new case as refutations naming their
+  issues, so a fix breaks the assertion instead of going unnoticed:
+  `triage changes --at` cannot report a deletion (#393), and
+  `triage radius --at` silently drops the entire routing layer, because
+  the graph feed watches pods, nodes and replicasets only (#396).
 - The kind e2e workflow runs the UAT at **T1** after its scenarios, on
   both the post-merge smoke tier and the weekly full tier —
   `examples/kind/up` installs metrics-server, so that cluster can run

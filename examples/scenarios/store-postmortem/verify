@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scenario-level verify: the three headline claims, each as a PAIR —
+# what the store answers and what the live cluster cannot. The
+# per-field contract (every detail key, every exit code, the fidelity
+# gaps) is asserted by the UAT case in examples/uat-cases/60-store.sh.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify store-postmortem"
+
+onset="$(postmortem_onset)"
+if [[ -z "$onset" || ! -f "$POSTMORTEM_STORE" ]]; then
+  echo "  ✗ no recorded window — run examples/scenarios/store-postmortem/inject first" >&2
+  exit 1
+fi
+echo "  window onset: $onset"
+
+fail=0
+claim() { # claim <description> <exit-status>
+  if (($2 == 0)); then
+    echo "  ✓ $1"
+  else
+    echo "  ✗ $1" >&2
+    fail=1
+  fi
+}
+
+# 1. Blast radius as of onset. The canary's Mounts edge to its own
+#    ConfigMap is the payload: at onset the pod had it, and nothing
+#    live has ever heard of either object.
+radius_at="$(run_lookout triage radius "Pod/$DEMO_NS/$POSTMORTEM_CANARY" \
+  --at "$onset" --store "$POSTMORTEM_STORE" 2>&1 || true)"
+grep -Eq "kind_of_object=ConfigMap name=$POSTMORTEM_CANARY .*relation=Mounts" <<<"$radius_at"
+claim "radius --at reconstructs the canary's Mounts edge from the store" $?
+grep -Eq 'source=history' <<<"$radius_at"
+claim "radius --at says so: source=history in the summary" $?
+
+# The control. Not "returns fewer rows" — the target does not resolve
+# at all, which is a runtime error (exit 1), and that is the shape a
+# post-mortem tool has to get right.
+if run_lookout triage radius "Pod/$DEMO_NS/$POSTMORTEM_CANARY" >/dev/null 2>&1; then
+  claim "radius live cannot see the canary (the differential)" 1
+else
+  claim "radius live cannot see the canary (the differential)" 0
+fi
+
+# 2. What changed in the window. Two relations, one query.
+changes_at="$(run_lookout triage changes "Deployment/$DEMO_NS/web" \
+  --at "$onset" --store "$POSTMORTEM_STORE" --since=30m 2>&1 || true)"
+grep -Eq "name=$POSTMORTEM_CANARY .*reason=Added .*relation=lateral origin=log" <<<"$changes_at"
+claim "changes --at has the canary's Added record, at relation=lateral" $?
+grep -Eq 'kind=change\.scale .*relation=upstream origin=log fields="replicas=2→3"' <<<"$changes_at"
+claim "changes --at has the rescale, as a field delta on the ReplicaSet" $?
+grep -Eq 'kind_of_object=Pod name=web-.* reason=Added .*relation=self origin=log' <<<"$changes_at"
+claim "changes --at has the pod the rescale created, at relation=self" $?
+
+changes_live="$(run_lookout triage changes "Deployment/$DEMO_NS/web" --since=30m 2>&1 || true)"
+grep -Eq 'source=live-approximation' <<<"$changes_live"
+claim "changes without a store degrades honestly: source=live-approximation" $?
+! grep -Eq "name=$POSTMORTEM_CANARY" <<<"$changes_live"
+claim "changes live cannot see the canary either (the differential)" $?
+
+# 3. The write→read round-trip. `triage status` is the only read-path
+#    command that writes, and the store it writes to is this one.
+fp="sha256:$(printf 'store-postmortem-%s' "$onset" | sha256sum | cut -c1-64)"
+run_lookout triage status --store "$POSTMORTEM_STORE" \
+  --fingerprint="$fp" --resource="Deployment/$DEMO_NS/web" \
+  --status=triaged --session=store-postmortem \
+  --root-cause="scenario harness round-trip" --action="none — fixture reverts" \
+  >/dev/null 2>&1
+claim "triage status writes a record into the sentinel's store" $?
+read_back="$(run_lookout triage status --store "$POSTMORTEM_STORE" \
+  --resource="Deployment/$DEMO_NS/web" 2>&1 || true)"
+grep -Eq 'triage_status=triaged .*triage_root_cause="scenario harness round-trip"' <<<"$read_back"
+claim "triage status reads it back by resource key" $?
+
+if ((fail)); then
+  echo "  ✗ store-postmortem verify failed" >&2
+  exit 1
+fi
+echo "  ✓ store-postmortem: the store answers three questions the cluster cannot"

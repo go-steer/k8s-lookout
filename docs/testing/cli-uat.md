@@ -40,7 +40,7 @@ examples/e2e (kind, signal generation)    "does the RIGHT signal fire?"
         │
 ▶ CLI UAT (this doc)                       "does EVERY command return correct output?"
         │
-dev/drills/ (real GKE, human judgment)    quota, --at post-mortems, corpus
+dev/drills/ (real GKE, human judgment)    quota exhaustion, node failure, memory leak
 ```
 
 It reuses the `examples/` cluster, demo app, and helper library
@@ -261,34 +261,56 @@ Read one resource's spec, token-dense, secret-safe, default-elided.
 ### `lookout triage status` — T0 (needs a store)
 The **only read-path command that writes** — the §9.4 triage-status
 record.
-- **Provoke:** a running sentinel with `--store=<path>`; take an open
-  incident's fingerprint.
+- **Provoke:** `store-postmortem` supplies the store; `broken-workloads`
+  supplies the incident. The pair is chosen deliberately —
+  `broken-workloads` has two different Deployments carrying the **same**
+  `workload.rollout` fingerprint (it is an incident *class*), which is
+  what makes "the pin is the resource key" testable at all.
 - **Assert (write→read round-trip):** writing with
   `--status/--root-cause/--action/--severity-override` then reading back
-  (empty `--status`) returns the record; `bundle --store` and
-  `health --store` then surface it. Recur a resolved incident and assert
-  a `triage.regressed` record. Missing `--store` → usage error (exit 2).
+  (empty `--status`) returns the record, by `--resource` and by
+  `--fingerprint`; the sibling on the same fingerprint has **no** record.
+  `health --store` then turns that finding's `critical` into `warning`
+  and annotates it with `triage_status`/`triage_age`, while the sibling
+  stays critical and the `health.category` rollup stays critical with it;
+  `bundle --store` merges the same annotation onto the target head.
+  Missing `--store` → exit 2; a read with neither selector → exit 2.
+- **Not covered:** `triage.regressed`. It needs a downgraded incident
+  driven back to 3× its baseline inside a dedup window, with the
+  followup landing on the *wire* rather than in the store — a watch-path
+  assertion wearing a read-path command's name, and it belongs to the
+  e2e layer.
 
-### `lookout triage radius` — T0 live / T-store post-mortem
+### `lookout triage radius` — T0 (live and post-mortem)
 Blast radius (upstream / lateral / downstream); **graph-backed**.
-- **Provoke live (T0):** `endpoints-empty` or `node-failure` — a
-  workload with real dependents.
-- **Provoke post-mortem:** run the sentinel with `--store` +
-  `--graph-snapshot-interval`, inject `bad-rollout`, let it resolve,
-  then `triage radius --at <onset> --store <path>` — **assert the
-  radius reflects topology as of onset**, not now.
+- **Provoke live:** `endpoints-empty` or `node-failure` — a workload
+  with real dependents.
+- **Provoke post-mortem:** `store-postmortem`, which creates an object
+  that exists only inside the window. **Assert the radius reflects the
+  topology as of onset**, not now — and assert it as a pair, because
+  the same query live must exit 1 with *not found in the topology*.
 - **Assert:** upstream/lateral/downstream sets are correct; `--depth`
-  bounds traversal; without `--store`, `--at` on a live cluster is
-  best-effort with a clear caveat line.
+  bounds the up/down walk (assert from a **Pod**, not a Deployment:
+  laterals are a one-hop reflection off downstream hits, stamped hop+1
+  outside the bound, so they are `hop=2` at `--depth=1` by design);
+  `source=history at=…` vs `source=live`; history carries no `ready=`
+  and marks referenced-only kinds `observed=unknown`. `--at` **without**
+  `--store` is a usage error (exit 2), and `--at` before the store's
+  first snapshot is a runtime error (exit 1) — never a silent answer
+  about *now*.
 
-### `lookout triage changes` — T0 live / T-store post-mortem
+### `lookout triage changes` — T0 (live and post-mortem)
 What changed in the window before onset; **graph-backed**.
-- **Provoke:** `image-pull` or `bad-rollout` (a rollout *is* a change);
-  edit a ConfigMap/Secret the workload consumes; rescale it.
-- **Assert:** the rollout, config/secret update, and rescale are each
-  reported with direction and time; `--at`/`--store` gives full fidelity
-  from a sentinel store vs. best-effort live; `--since` bounds the
-  window.
+- **Provoke:** `store-postmortem` — a canary Added (`relation=lateral`)
+  and a rescale of `web` (`relation=upstream` on the ReplicaSet with
+  `fields="replicas=2→3"`, plus the new pod at `relation=self`), all
+  inside one window.
+- **Assert:** all three relations from one query, `origin=log`, and
+  `source=history at=… window=…`; live degrades to `source=
+  live-approximation` reconstructed from Events (`origin=event`) and
+  cannot see the canary at all; a field delta carries names, counts and
+  hashes only (§6.5). Deletions are a **known gap** (#393) and are
+  asserted as absent, naming the issue.
 
 ## `state` group
 
@@ -475,11 +497,23 @@ they cost when ignored:
 | [`cpu-pressure`](../../examples/scenarios/cpu-pressure/README.md) **(T1)** | `lookout-uat-top` | `triage top` | `steady`, limited on both dimensions and quiet on both |
 | [`broken-workloads`](../../examples/scenarios/broken-workloads/README.md) | `lookout-uat-broken` | `health`, `triage delta`, `bundle`, `watch --dry-run`, `findings ack` | `steady`, healthy and named by none of them |
 | [`secret-workload`](../../examples/scenarios/secret-workload/README.md) | `lookout-uat-secrets` | secret-safety across every command; the healthy path | the workload is the control — nothing about it is a finding |
+| [`store-postmortem`](../../examples/scenarios/store-postmortem/README.md) | `lookout-demo` (see below) | `triage radius --at`, `triage changes --at`, `triage status`, `health`/`bundle` `--store` | the same query **live**, which must fail to find what `--at` finds |
 
 Each one carries a negative control on purpose. A check that fires on
 everything is indistinguishable from a check that fires correctly
 unless something adjacent stays quiet, so every fixture holds at least
 one object of the same shape that must *not* be reported.
+
+`store-postmortem` is the exception to two of the rules above, both
+deliberately. Its control is not an adjacent object but **the same
+query in live mode**, because what it tests is a *mode*, not a check.
+And it is the only fixture that touches the demo app — it scales
+`lookout-demo/web` 2→3 to put a rescale inside the window, since it
+needs a workload the graph feed tracks and that already has upstream,
+lateral and downstream structure. Its revert scales back, its inject
+normalises to 2 first so an interrupted run cannot turn the rescale
+into a no-op, and its case file is numbered last so nothing that
+assumes a pristine `lookout-demo` runs after it.
 
 The cases register a fixture with `uat_fixture <name>`, which injects
 it and pushes it onto a stack; the driver reverts the stack in reverse
@@ -677,26 +711,33 @@ lookout net probe --dns no-such-host.invalid \
   NXDOMAIN / timeout — and that the cluster object inventory is
   unchanged (no mutation).
 
-### `store-postmortem` (T-store) — for `triage radius --at`, `changes --at`, `status`
-Not a break scenario but a **harness**: run the sentinel with a
-persistent store and snapshots, inject an existing scenario, let it
-resolve, then run the graph-backed queries against the store.
+### `store-postmortem` (T0) — for `triage radius --at`, `changes --at`, `status`
+**Built** — see [the fixture's README](../../examples/scenarios/store-postmortem/README.md);
+this sketch is superseded, in two ways worth recording.
 
-```sh
-# in examples/sentinel/up, add to the watcher args:
-#   --store=/var/lib/lookout/lookout.db
-#   --graph-snapshot-interval=30s
-# then:
-examples/scenarios/bad-rollout/inject
-onset=$(date -u +%FT%TZ)     # capture onset for --at
-examples/scenarios/bad-rollout/revert
-kubectl -n agent-triage cp <pod>:/var/lib/lookout/lookout.db /tmp/lookout.db  # or PVC
-lookout triage radius  --workload Deployment/lookout-demo/web --at "$onset" --store /tmp/lookout.db
-lookout triage changes --workload Deployment/lookout-demo/web --at "$onset" --store /tmp/lookout.db
-```
-- Note: the image is distroless (no tar) so `kubectl cp` off a live pod
-  doesn't work — mount the store on a PVC (see `deploy/51` PVC
-  alternative) and copy it from a debug pod, as the drills do.
+**The tier was wrong.** This was listed as a tier of its own
+("T-store") on the assumption that reading a store meant extracting one
+from the deployed sentinel's container — which the sketch below then
+had to route around a distroless image with a PVC and a debug pod. It
+does not. `lookout watch --dry-run --store=…` runs **locally, out of
+cluster**, against the same kubeconfig every other case already uses:
+`--dry-run` waives the otherwise-required `--daemon-url`, and the store
+hangs off `--store` rather than off the sink. So the fixture needs
+nothing a bare kind cluster lacks, and it runs at **T0**. It is also
+the *binary under test*, which the deployed sentinel — a released image
+on a default run — is not.
+
+**The control was missing.** The sketch runs the graph-backed queries
+against a store and stops there, which would pass equally well if
+`--at` silently reported *now* — the one wrong answer a post-mortem
+tool must never give. The built fixture creates an object that exists
+**only inside the window** (`postmortem-canary`, created and deleted by
+the inject) so every `--at` assertion has a live control that must fail
+to find what `--at` finds.
+
+The one thing the sketch got exactly right is `--storm`: the
+graph-history loop is wired inside the storm block, so `--store`
+without `--storm=on` writes occurrences and no history at all.
 
 ---
 
@@ -812,8 +853,9 @@ these ticks are for the command's *own* behaviour.
 - [x] `mcp --listen` tool listing + one tool call (+ non-loopback refusal,
       `--access-log`, and the three-flag off-host bind with a 401);
       also `--profile` / `--tools` surface selection
-- [x] `bundle` (+ `--incident`, `--depth`, `--max-templates`; `--store` still open)
-- [x] `health` (+ healthy-path)
+- [x] `bundle` (+ `--incident`, `--depth`, `--max-templates`, `--store`)
+- [x] `health` (+ healthy-path, `--store` severity override at finding
+      and scorecard altitude)
 - [x] `triage delta` (+ `--only`, thresholds, the shared §8 fingerprint)
 - [x] `triage events` (+ HPA thrash, both thresholds, the dedup collapse,
       and the monotonic negative control)
@@ -822,9 +864,13 @@ these ticks are for the command's *own* behaviour.
       limited-but-quiet control, both censuses, `--top-warn` as a dial,
       `--all`/`--limit`, `-A` node rows, `--history` degradation)
 - [x] `triage spec` (+ `--diff` as declared-unimplemented, secret-safety)
-- [ ] `triage status` (write→read round-trip, `triage.regressed`)
-- [ ] `triage radius` (live + `--at`)
-- [ ] `triage changes` (live + `--at`)
+- [x] `triage status` (write→read by resource and by fingerprint, the
+      same-fingerprint sibling, both usage guards; `triage.regressed` is
+      out of scope — see the command's entry)
+- [x] `triage radius` (live + `--at`, the deleted-object differential,
+      `--depth` from a Pod, the fidelity gaps, exit 1 before history)
+- [x] `triage changes` (live + `--at`, all three relations, the field
+      delta, live-approximation, #393 asserted as a gap)
 - [x] `state edges` (+ `--cert-warn` both directions)
 - [x] `state webhooks` (+ `--cert-warn`)
 - [ ] `state wi` (unavailable + real)

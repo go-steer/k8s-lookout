@@ -84,14 +84,21 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
-`scenarios/` also holds nine **UAT fixtures** — `chatty-logs`,
+`scenarios/` also holds ten **UAT fixtures** — `chatty-logs`,
 `broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`,
-`hpa-thrash`, `cpu-pressure`, `broken-workloads`, `secret-workload`.
+`hpa-thrash`, `cpu-pressure`, `broken-workloads`, `secret-workload`,
+`store-postmortem`.
 Same three scripts, different job: nothing is expected on the wire and
 `examples/e2e` skips them. They exist to give a read-path command
-something to report — or, for the last two, to make a shared cluster
-answerable at all: one namespace whose contents are known exactly, and
-one canary string consumed four ways. `cpu-pressure` is the only one
+something to report — or, for `broken-workloads` and `secret-workload`,
+to make a shared cluster answerable at all: one namespace whose
+contents are known exactly, and one canary string consumed four ways.
+`store-postmortem` is the odd one out twice over: it breaks nothing and
+instead runs a local sentinel writing a graph history, so the `--at`
+commands have a cluster state that no longer exists to answer about,
+and it is the only fixture that touches the demo app (it scales `web`
+2→3 inside the window and back on revert).
+`cpu-pressure` is the only one
 that needs more than a bare cluster (metrics-server, i.e. UAT tier T1),
 and the only one whose own load has to be bounded — every container it
 starts is limit-bound, and `examples/kind/up` additionally caps each
@@ -138,9 +145,10 @@ UAT_TIER=T1 examples/uat    # also the cases that need metrics-server
 ```
 
 It needs the cluster and the demo app, but **not** a sentinel — every
-command reads the cluster directly through your kubeconfig. It never
-touches the demo app, so it is safe to run at any point, including
-immediately after a scenario.
+command reads the cluster directly through your kubeconfig, and the one
+case that needs a sentinel's store starts its own, locally. It leaves
+the demo app as it found it, so it is safe to run at any point,
+including immediately after a scenario.
 
 Mostly it only reads. The exception is the cases that need a
 **fixture**. Six commands — `triage logs`, `state edges`,
@@ -161,7 +169,10 @@ its `EXIT` trap, including on failure and on Ctrl-C. Every fixture
 lives in its own `lookout-uat-*` namespace and never in `lookout-demo`,
 which is what makes revert a single `kubectl delete namespace` and
 keeps a deliberately-wedged Deployment out of the namespace the demo
-app and the scenarios share. Each also carries a negative control — an
+app and the scenarios share — the sole exception being
+`store-postmortem` (`uat-cases/60-store.sh`), which needs a rescale on
+a workload the graph feed actually tracks, so it scales `lookout-demo/web`
+and is numbered last. Each also carries a negative control — an
 object of the same shape that must *not* be reported — because a check
 that fires on everything looks identical to one that fires correctly.
 See [§ Fixtures](../docs/testing/cli-uat.md#fixtures).
@@ -185,13 +196,25 @@ is still refused, and the one accepted off-host configuration answers
 401 without the token and records tool calls to its mandatory access
 log.
 
+The store case (`uat-cases/60-store.sh`) is the post-mortem half:
+everything that needs a `--store`, which is everything that can answer
+about a cluster state that no longer exists. Every claim in it is a
+**pair** — what the store answers, and what the live cluster answers to
+the same question — because a case that only proved `--at` returns rows
+would pass just as well if `--at` silently reported *now*, which is the
+one wrong answer a post-mortem tool must never give. So its fixture
+manufactures an object that exists only inside the window, and each
+`--at` assertion has a live control that must fail to find what `--at`
+finds. It also pins two known gaps as refutations naming their issues
+(#393, #396), so a fix breaks the assertion instead of going unnoticed.
+
 ## CI
 
 `.github/workflows/e2e-kind.yml` runs these scenarios non-blocking
 against an image built from HEAD (`kind/up --build`): a smoke subset
 (crashloop, failed-mount, bad-rollout) on every push to main, and the
 full set plus node-failure weekly (or on demand via
-workflow_dispatch). Both tiers then run `examples/uat` at T0 against
+workflow_dispatch). Both tiers then run `examples/uat` at T1 against
 the same cluster. PR presubmits stay hermetic — a live cluster never
 gates a PR. CI sets `LOOKOUT_E2E_TIMEOUT_SCALE=2` because runners are
 slower than a workstation; set it locally if your machine needs more
