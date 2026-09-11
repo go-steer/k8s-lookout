@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -263,6 +264,12 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		if !keepProjectTier {
 			rf.sources = dropProjectTierSources(rf.sources)
 		}
+		// The dedup snapshot is per-cluster state on a single path
+		// (issue #386): every runner would otherwise open, reload and
+		// rewrite the same file, so the last renamer of each tick wins
+		// and a restart seeds every cluster with some other cluster's
+		// entries. Suffix it with the ref's own identity.
+		rf.dedupPersist = perClusterPath(f.dedupPersist, ref)
 		r := newRunner(&rf, ref.Name, sink, token, reg)
 		r.restCfg = cfg
 		r.project = ref.Project
@@ -271,6 +278,10 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		runners = append(runners, r)
 		log.Printf("multi-cluster: runner %q → %s (project=%q, location=%q, project-tier sources=%t)",
 			ref.Name, ref.Endpoint, ref.Project, ref.Location, keepProjectTier)
+		if rf.dedupPersist != "" {
+			log.Printf("multi-cluster: runner %q dedup snapshot → %s (per-cluster; --dedup-persist=%s is the stem)",
+				ref.Name, rf.dedupPersist, f.dedupPersist)
+		}
 	}
 	return runners, nil
 }
@@ -294,6 +305,65 @@ func dropProjectTierSources(sources string) string {
 		kept = append(kept, name)
 	}
 	return strings.Join(kept, ",")
+}
+
+// perClusterPath turns a single per-runner state path into one path per
+// cluster, so N runners in one process do not share one file (issue
+// #386):
+//
+//	/data/dedup.json → /data/dedup-my-proj-us-central1-a-prod-us.json
+//
+// The suffix is the full cluster triple — project, location, name — and
+// not the bare name, because two clusters in different locations (or
+// different projects) may legitimately share a name, and two clusters
+// that share a snapshot are the bug this is fixing. Whichever parts of
+// the triple the ref does not know are skipped; an explicit --clusters
+// endpoint knows only its name, which parseClusters has already forced
+// to be unique within the fleet.
+//
+// The stem is left exactly as given when there is nothing to suffix, so
+// the single-cluster default — where resolveRunners never calls this —
+// and an empty (disabled) path both stay byte-identical.
+func perClusterPath(base string, ref cloud.ClusterRef) string {
+	if base == "" {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	for _, p := range []string{ref.Project, ref.Location, ref.Name} {
+		if s := pathSlug(p); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return base
+	}
+	// Insert before the extension rather than appending, so the file
+	// keeps whatever suffix the operator (and their tooling) expects.
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext) + "-" + strings.Join(parts, "-") + ext
+}
+
+// pathSlug reduces one component of a cluster ref to something safe to
+// put in a filename. GKE projects, locations and cluster names are
+// already [a-z0-9-], but a --clusters pair carries an operator-supplied
+// name, and a name is not permitted to steer where the snapshot lands:
+// everything outside [A-Za-z0-9_-] — separators and dots included —
+// becomes a single dash, so the result can only ever be one path
+// component next to the stem.
+func pathSlug(s string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+			dash = false
+		case !dash && b.Len() > 0:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
 }
 
 // parseClustersFrom splits --clusters-from into project and optional

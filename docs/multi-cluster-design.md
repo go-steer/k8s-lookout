@@ -242,9 +242,32 @@ case — not large production fleets, which keep the per-cluster sentinel.
    become per-runner (discovery derives them). A config file is deferred
    until the cluster list outgrows a flag.
 
+## Per-cluster state paths
+
+`--dedup-persist` is per-cluster state on a single path. In multi-cluster
+mode `resolveRunners` treats the flag value as a **stem** and gives each
+runner its own file, suffixed with that cluster's project, location and
+name (issue #386):
+
+```
+--dedup-persist=/data/dedup.json
+  → /data/dedup-my-proj-us-central1-a-prod-us.json
+  → /data/dedup-my-proj-europe-west1-b-prod-eu.json
+```
+
+The suffix is the full triple rather than the bare cluster name because
+two clusters in different locations may share a name, and two clusters
+must never share a snapshot. Anything outside `[A-Za-z0-9_-]` in a
+component collapses to a dash, so an operator-supplied `--clusters` name
+can only ever produce one filename next to the stem. The single-cluster
+default never calls this, so an existing deployment's snapshot does not
+move on upgrade.
+
 ## Still deferred
 
-- **Per-cluster store paths.** `--store` and `--dedup-persist` are single
-  file paths that would collide across runners, so they are rejected in
-  multi-cluster mode rather than silently shared. Per-cluster paths are
-  future work.
+- **Per-cluster occurrence stores.** `--store` is a single SQLite path
+  that would collide across runners, so it is rejected in multi-cluster
+  mode rather than silently shared. Unlike the dedup snapshot it also
+  carries the prune loop, the size bound and the distiller's input
+  window, so per-cluster stores are a larger change — run one sentinel
+  per cluster when you need one.
