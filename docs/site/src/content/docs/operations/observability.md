@@ -115,6 +115,29 @@ that has gone quiet because it lost permission to look is not a source
 reporting a healthy cluster. Full walkthrough in
 [Troubleshooting](/operations/troubleshooting/#a-grant-revoked-after-startup).
 
+### A cluster that never got a runner
+
+The two cases above are clusters the sentinel *started* watching. A
+third never got that far: in a fleet, a cluster whose credentials cannot
+be resolved at startup — deleted but still in a discovery listing, or a
+stale kubeconfig context — is **skipped**, and the rest of the fleet
+starts normally.
+
+```
+multi-cluster: cluster "torn-down" SKIPPED — cannot resolve credentials: …
+multi-cluster: watching 2 of 3 cluster(s); skipped torn-down — this sentinel
+  reports nothing about the skipped clusters, so do not read their silence as healthy
+lookout_cluster_resolve_errors_total{cluster="torn-down"} 1
+```
+
+A skipped cluster does not appear in `/readyz?verbose` at all — not as
+`[!]`, not as anything. It was never expected, so it cannot hold
+readiness down, and there is no runner to report a state. **The metric
+is the only signal**, so alert on it: it is written once at startup and
+never again, which makes any non-zero series a standing coverage gap
+rather than a transient. If *no* cluster resolves the process exits
+non-zero instead of supervising an empty fleet.
+
 Readiness matters most during a rollout: the Deployment uses
 `strategy: Recreate` with one replica, so the new pod must come up
 before anything is watching again, and `/readyz` is what tells you when

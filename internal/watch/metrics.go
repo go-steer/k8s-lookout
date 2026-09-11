@@ -34,6 +34,31 @@ import (
 const reasonLabelCap = 100
 const reasonOther = "other"
 
+// fleetMetrics are the process-level sentinel metrics: the ones about
+// clusters rather than from inside one.
+//
+// Separate from the metrics bundle because that bundle is per runner
+// and carries a const cluster="<name>" label — which a cluster that
+// never got a runner cannot have. cluster is an ordinary label here for
+// exactly that reason (issue #388).
+type fleetMetrics struct {
+	clusterResolveErrors *prometheus.CounterVec
+}
+
+// newFleetMetrics registers the process-level metrics against the
+// shared scrape registry. Unwrapped: see fleetMetrics on why cluster is
+// a variable label here.
+func newFleetMetrics(reg prometheus.Registerer) *fleetMetrics {
+	fm := &fleetMetrics{
+		clusterResolveErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_cluster_resolve_errors_total",
+			Help: "Total clusters this process was told to watch and could not resolve credentials for, by cluster (issue #388). The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else.",
+		}, []string{"cluster"}),
+	}
+	reg.MustRegister(fm.clusterResolveErrors)
+	return fm
+}
+
 // metrics bundles the sidecar's Prometheus counters + gauges. Kept
 // as a struct so the wiring is testable — tests can construct a
 // registry, wire metrics into it, and assert values without

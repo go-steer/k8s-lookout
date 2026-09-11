@@ -24,9 +24,9 @@ import (
 
 // TestMetricsInventoryComplete is the presence check behind the
 // generated docs-site metrics page: every collector field of the
-// metrics struct must have exactly one MetricsInventory row, with a
-// derived (non-empty, correctly prefixed) name and help. Adding a
-// metric to metrics.go without extending the MetricsInventory
+// sentinel's metric structs must have exactly one MetricsInventory
+// row, with a derived (non-empty, correctly prefixed) name and help.
+// Adding a metric to metrics.go without extending the MetricsInventory
 // enumeration fails here — and the sitedoc drift test then fails
 // until dev/tools/gen-site-docs is re-run.
 func TestMetricsInventoryComplete(t *testing.T) {
@@ -37,17 +37,21 @@ func TestMetricsInventoryComplete(t *testing.T) {
 	// *prometheus.Registry is itself a Collector — it can nest — but it
 	// is the container, not a metric). Non-collector bookkeeping state
 	// (the #109 reason-cap mutex/map) is ignored, while a new metric
-	// collector added without a row still fails here.
+	// collector added without a row still fails here. Both structs are
+	// walked: the per-runner bundle and the process-level fleet metrics
+	// (#388), which are separate only because a cluster with no runner
+	// cannot carry the per-runner const cluster label.
 	collectorType := reflect.TypeOf((*prometheus.Collector)(nil)).Elem()
-	mt := reflect.TypeOf(metrics{})
 	collectors := 0
-	for i := 0; i < mt.NumField(); i++ {
-		f := mt.Field(i)
-		if f.Name == "registry" {
-			continue
-		}
-		if f.Type.Implements(collectorType) {
-			collectors++
+	for _, mt := range []reflect.Type{reflect.TypeOf(metrics{}), reflect.TypeOf(fleetMetrics{})} {
+		for i := 0; i < mt.NumField(); i++ {
+			f := mt.Field(i)
+			if f.Name == "registry" {
+				continue
+			}
+			if f.Type.Implements(collectorType) {
+				collectors++
+			}
 		}
 	}
 	if len(inv) != collectors {

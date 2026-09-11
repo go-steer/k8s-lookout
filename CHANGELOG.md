@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-cluster no longer requires a cloud provider, and one
+  unresolvable cluster no longer costs the whole fleet (#388). Two
+  changes. `--clusters-from=kubeconfig` (or
+  `--clusters-from=kubeconfig:<path>`) watches one cluster per
+  kubeconfig **context**, each with that context's own credentials — so
+  EKS, AKS, on-prem and kind fleets work on the default build, where an
+  untagged binary could previously only answer "build with `-tags gke`".
+  Context names are the cluster identities (unique within a merged
+  kubeconfig by construction), and the refs carry no project, location
+  or region, because a kubeconfig does not know them and a wrong failure
+  domain would land in the fingerprint. `kubeconfig` is therefore a
+  reserved `--clusters-from` value and cannot name a cloud project.
+  Separately, a cluster whose credentials cannot be resolved at startup
+  — deleted but still in a discovery listing, or a stale context — is
+  now **skipped** rather than returned as an error that aborted every
+  other cluster too: it gets no runner, the rest of the fleet starts,
+  and the gap is loud (a per-cluster log line, a fleet summary, and
+  `lookout_cluster_resolve_errors_total{cluster}`, a new process-level
+  counter written once at startup so any non-zero series is a standing
+  coverage gap). A skipped cluster is never in the `/readyz` expectation
+  set, so it cannot hold readiness down. If *every* cluster fails to
+  resolve the process still exits non-zero — that is credentials or a
+  build tag, and supervising an empty fleet would report ready while
+  watching nothing.
 - `--dedup-persist` now works in multi-cluster mode, where it was
   previously refused outright (#386). The flag value is treated as a
   stem and each runner gets its own file, suffixed with that cluster's
