@@ -350,7 +350,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// over the control-plane DNS endpoint), so they need a Fleet-capable
 	// provider (-tags gke); on a default build they fail loudly.
 	fs.StringVar(&f.clusters, "clusters", "", "Multi-cluster: comma-separated name=endpoint pairs to watch from one process, e.g. prod-us=abc.us-central1.gke.goog,prod-eu=def.europe-west1.gke.goog. A bare endpoint derives a short name from its first DNS label. Mutually exclusive with --clusters-from; needs a Fleet-capable provider (-tags gke). Leave empty for the one-sentinel-per-cluster default.")
-	fs.StringVar(&f.clustersFrom, "clusters-from", "", "Multi-cluster: discover the clusters to watch instead of listing them. Value is a project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project). Mutually exclusive with --clusters; needs a Fleet-capable provider (-tags gke).")
+	fs.StringVar(&f.clustersFrom, "clusters-from", "", "Multi-cluster: discover the clusters to watch instead of listing them. A project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project; needs a Fleet-capable provider, -tags gke). Or the reserved value kubeconfig (optionally kubeconfig:<path>) to watch one cluster per context in a kubeconfig instead — no cloud API and no build tag, so EKS, on-prem and kind fleets work; with no path it follows client-go's search ($KUBECONFIG, colon-separated and merged, else ~/.kube/config), which is also how you select a subset. Mutually exclusive with --clusters.")
 
 	// Deployment identity (§8). ADDITIVE flags: zone/project complete
 	// the (fingerprint, cluster/project/zone) fleet-rollup join on
@@ -451,10 +451,10 @@ func (f *flags) validate() error {
 			return errors.New("--cluster-name is per-cluster in multi-cluster mode: names come from --clusters pairs or discovery, not this flag")
 		}
 		if f.kubeconfig != "" {
-			return errors.New("--kubeconfig is not used in multi-cluster mode: clusters are reached kubeconfig-free via the cloud provider (GKE: ADC over the DNS endpoint)")
+			return errors.New("--kubeconfig is not used in multi-cluster mode: a cloud fleet is reached kubeconfig-free via the provider (GKE: ADC over the DNS endpoint), and a kubeconfig fleet names its file in the flag that selects it — --clusters-from=kubeconfig:<path>")
 		}
 		if f.inCluster {
-			return errors.New("--in-cluster is not used in multi-cluster mode: clusters are reached via the cloud provider's own credentials, not the local service account")
+			return errors.New("--in-cluster is not used in multi-cluster mode: clusters are reached with the cloud provider's own credentials or a kubeconfig context's, not the local service account")
 		}
 		if f.store != "" {
 			return errors.New("--store is per-cluster and not yet supported in multi-cluster mode (the SQLite path would collide across runners): run one sentinel per cluster for the occurrence store, or leave --store unset")

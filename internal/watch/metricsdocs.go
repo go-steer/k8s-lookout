@@ -38,9 +38,14 @@ type MetricDoc struct {
 // stamped here per collector because the Prometheus client does not
 // expose them pre-observation. The enumeration below is kept
 // complete by TestMetricsInventoryComplete, which fails when a field
-// is added to the metrics struct without a row here.
+// is added to either metrics struct without a row here.
+//
+// The per-runner bundle comes first, then the process-level fleet
+// metrics — every per-runner series additionally carries a const
+// cluster label, which the fleet ones cannot (see fleetMetrics).
 func MetricsInventory() []MetricDoc {
 	m := newMetrics()
+	fm := newFleetMetrics(prometheus.NewRegistry())
 	rows := []struct {
 		c      prometheus.Collector
 		typ    string
@@ -88,6 +93,7 @@ func MetricsInventory() []MetricDoc {
 		{m.runnerRestarts, "counter", nil},
 		{m.runnerTerminal, "gauge", []string{"reason"}},
 		{m.sourceDenied, "gauge", []string{"source", "resource", "required"}},
+		{fm.clusterResolveErrors, "counter", []string{"cluster"}},
 	}
 	out := make([]MetricDoc, 0, len(rows))
 	for _, r := range rows {

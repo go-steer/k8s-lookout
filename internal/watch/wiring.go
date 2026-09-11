@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -202,38 +203,40 @@ func realMain(argv []string) error {
 // resolveRunners builds the process's cluster runners. The default —
 // neither --clusters nor --clusters-from — is a single runner for
 // --cluster-name, byte-identical to the pre-multi-cluster wiring. In
-// multi-cluster mode (issue #208) it resolves a Fleet-capable cloud
-// provider, enumerates the target clusters (explicit --clusters pairs or
-// --clusters-from discovery), mints each cluster's kubeconfig-free
-// rest.Config, and returns one runner apiece — deduping the project-tier
-// sources to one runner per distinct project (they describe a project,
-// not a cluster).
+// multi-cluster mode (issue #208) it resolves a cluster fleet (a
+// Fleet-capable cloud provider, or a kubeconfig — see resolveFleet),
+// enumerates the target clusters (explicit --clusters pairs or
+// --clusters-from discovery), resolves each cluster's rest.Config, and
+// returns one runner apiece — deduping the project-tier sources to one
+// runner per distinct project (they describe a project, not a cluster).
+//
+// A cluster whose credentials cannot be resolved is SKIPPED, not fatal
+// (issue #388). resolveRunners runs before any runner starts, so
+// returning an error here means no cluster is watched at all — and the
+// likeliest cause, a discovery listing that names a cluster mid-teardown,
+// is precisely the case where the other clusters are fine. The skip is
+// loud (a log line and lookout_cluster_resolve_errors_total) and a
+// skipped cluster never enters readiness's expect set, so it cannot hold
+// /readyz down the way #383 describes. Only an empty result — every
+// cluster unresolvable — is fatal, because that really is misconfig.
 func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token string, reg *prometheus.Registry) ([]*runner, error) {
 	if f.clusters == "" && f.clustersFrom == "" {
 		return []*runner{newRunner(f, f.clusterName, sink, token, reg)}, nil
 	}
 
-	project, location := f.project, ""
-	if f.clustersFrom != "" {
-		project, location = parseClustersFrom(f.clustersFrom)
-	}
-	provider, err := cloud.New(ctx, cloud.Config{Project: project, Location: location})
+	fleet, err := resolveFleet(ctx, f)
 	if err != nil {
-		return nil, fmt.Errorf("multi-cluster: cloud provider: %w", err)
-	}
-	fleet, ok := provider.(cloud.Fleet)
-	if !ok {
-		return nil, fmt.Errorf("multi-cluster (--clusters/--clusters-from) needs a cloud provider that mints kubeconfig-free cluster credentials; provider %q does not — build with -tags gke", provider.Name())
+		return nil, err
 	}
 
 	var refs []cloud.ClusterRef
 	if f.clustersFrom != "" {
 		refs, err = fleet.DiscoverClusters(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("multi-cluster discovery: %w", err)
+			return nil, fmt.Errorf("multi-cluster discovery (%s): %w", fleet.Describe(), err)
 		}
 		if len(refs) == 0 {
-			return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters", f.clustersFrom)
+			return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters in %s", f.clustersFrom, fleet.Describe())
 		}
 	} else {
 		refs, err = parseClusters(f.clusters)
@@ -241,13 +244,23 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 			return nil, err
 		}
 	}
+	log.Printf("multi-cluster: %d cluster(s) from %s", len(refs), fleet.Describe())
 
+	fm := newFleetMetrics(reg)
 	runners := make([]*runner, 0, len(refs))
 	projectSeen := map[string]bool{}
+	var skipped []string
 	for _, ref := range refs {
 		cfg, cfgErr := fleet.RESTConfig(ctx, ref)
 		if cfgErr != nil {
-			return nil, fmt.Errorf("multi-cluster: cluster %q: %w", ref.Name, cfgErr)
+			// Degrade, don't abort: one cluster that was deleted,
+			// is unreachable, or whose credentials cannot be minted
+			// must not cost the fleet every other cluster.
+			fm.clusterResolveErrors.WithLabelValues(ref.Name).Inc()
+			skipped = append(skipped, ref.Name)
+			log.Printf("multi-cluster: cluster %q SKIPPED — cannot resolve credentials: %v (this sentinel will not watch it; the remaining clusters are unaffected, and lookout_cluster_resolve_errors_total{cluster=%q} counts this)",
+				ref.Name, cfgErr, ref.Name)
+			continue
 		}
 		// Per-runner flags: copy the shared flags, then dedup the
 		// §10 project-tier sources (quota, notifications) to the FIRST
@@ -282,6 +295,27 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 			log.Printf("multi-cluster: runner %q dedup snapshot → %s (per-cluster; --dedup-persist=%s is the stem)",
 				ref.Name, rf.dedupPersist, f.dedupPersist)
 		}
+	}
+	// Cluster names arrive from a discovery listing or a kubeconfig, so
+	// they are outside text on its way into a log line: quote each one,
+	// which escapes any newline a name could otherwise use to forge a
+	// following line (gosec G706).
+	quoted := make([]string, 0, len(skipped))
+	for _, name := range skipped {
+		quoted = append(quoted, strconv.Quote(name))
+	}
+	skippedList := strings.Join(quoted, ", ")
+	if len(runners) == 0 {
+		// Every cluster unresolvable is not one cluster's bad day — it
+		// is credentials, a build tag, or a kubeconfig that names
+		// nothing this process can reach. Fail loudly rather than
+		// supervise an empty fleet, which would report ready.
+		return nil, fmt.Errorf("multi-cluster: none of the %d cluster(s) from %s could be resolved (%s) — see the per-cluster errors above",
+			len(refs), fleet.Describe(), skippedList)
+	}
+	if len(skipped) > 0 {
+		log.Printf("multi-cluster: watching %d of %d cluster(s); skipped %s — this sentinel reports nothing about the skipped clusters, so do not read their silence as healthy", //nolint:gosec // G706: every name in skippedList is strconv.Quote'd above
+			len(runners), len(refs), skippedList)
 	}
 	return runners, nil
 }

@@ -154,6 +154,43 @@ client construction. `kube.Options` gains a third construction mode
 conceptually — `in-cluster` / `kubeconfig` / **provider-supplied** —
 but the GKE specifics never enter the default build.
 
+### The kubeconfig fleet: multi-cluster without a cloud
+
+A `cloud.Fleet` provider is one way to answer "which clusters, and with
+what credentials". It should not be the only one, and it was: an
+untagged build asked to watch a fleet could only refuse with *build with
+`-tags gke`* (issue #388). So `resolveRunners` sits behind a small
+in-package interface — `Describe` plus the Fleet pair — with a second
+implementation that reads a **kubeconfig**:
+
+```
+--clusters-from=kubeconfig            # $KUBECONFIG, else ~/.kube/config
+--clusters-from=kubeconfig:/etc/lookout/fleet.yaml
+```
+
+One runner per **context**, each reached with that context's own
+credentials. Contexts, not cluster entries, because context names are
+unique within a merged kubeconfig by construction — which is exactly
+what per-cluster metric labels, dedup snapshot paths and readiness
+entries need, and several contexts may share one server.
+
+`kubeconfig` is therefore a reserved `--clusters-from` value and cannot
+name a cloud project; it is checked before the `project/location` split,
+since a path contains slashes.
+
+The refs a kubeconfig yields carry **no project, location or region** —
+a kubeconfig does not know them, and inventing them would put a wrong
+failure domain into the §8 fingerprint. Each runner then resolves
+identity the way a single-cluster sentinel does (explicit flag >
+provider metadata > empty). The enumeration also never falls back to the
+sentinel's own in-cluster service account: an operator who listed
+contexts named their clusters, and silently adding the cluster the
+process happens to run in would watch something nobody asked for.
+
+This makes multi-cluster work against EKS, AKS, on-prem, kind, and a GKE
+cluster whose credentials the operator already holds — on the default
+build, with no cloud API call.
+
 ## The honest caveat: authN ≠ authZ
 
 OAuth solves *authentication* — one Google identity to every API server
@@ -200,8 +237,10 @@ case — not large production fleets, which keep the per-cluster sentinel.
   is already cross-cluster, but joining incidents *across* clusters into
   one thread is receiver-side, not sentinel-side (same posture as the
   agent-sink note's multi-sink fanout).
-- **Non-GKE kubeconfig-free auth.** EKS/AKS analogs are future provider
-  work; the kubeconfig path already serves them.
+- **Non-GKE kubeconfig-*free* auth.** EKS/AKS analogs are future
+  provider work — a second `cloud.Fleet` implementation. Watching those
+  fleets is not out of scope: `--clusters-from=kubeconfig` does it
+  today, with credentials the operator supplies.
 - **Per-runner sink selection.** One sink per process; all runners fan
   into it. A deployment wanting per-cluster routing does it receiver-side.
 - **Dynamic fleet membership.** Discovery runs at startup; clusters
@@ -262,6 +301,42 @@ component collapses to a dash, so an operator-supplied `--clusters` name
 can only ever produce one filename next to the stem. The single-cluster
 default never calls this, so an existing deployment's snapshot does not
 move on upgrade.
+
+## An unresolvable cluster is skipped, not fatal
+
+Fate isolation used to start only once the runners were running:
+`resolveRunners` resolved every cluster's credentials up front and
+returned the first error, so **one** deleted cluster still in a
+discovery listing — or one stale kubeconfig context — left the whole
+fleet unwatched (issue #388). That is the opposite of the §11 posture
+the supervisor already takes at run time.
+
+A cluster whose credentials cannot be resolved is now skipped:
+
+- it gets no runner, and the remaining clusters start normally;
+- `lookout_cluster_resolve_errors_total{cluster}` increments once;
+- two log lines say it — the per-cluster error naming the cluster, then
+  a fleet summary (`watching 2 of 3 cluster(s); skipped …`) spelling out
+  that the sentinel reports **nothing** about the skipped clusters, so
+  their silence must not be read as healthy.
+
+The metric is process-level, not part of the per-runner bundle: every
+per-runner series carries a *const* `cluster` label supplied by
+`prometheus.WrapRegistererWith`, and a cluster that never got a runner
+has no such wrapper. It is counted at startup only, so it moves on
+process restart and on nothing else — which makes any non-zero value a
+standing coverage gap, worth an alert.
+
+If **every** cluster fails to resolve, the process exits non-zero. That
+is not one cluster's bad day: it is credentials, a build tag, or a
+kubeconfig naming nothing reachable, and supervising an empty fleet
+would report ready while watching nothing. Same shape as the #383 rule
+that a fleet gone entirely terminal exits rather than serving an empty
+readiness set.
+
+The #383 readiness interaction needs no extra code: `realMain` builds
+its expected-cluster set from the runners `resolveRunners` returns, so a
+skipped cluster is never expected and cannot hold `/readyz` down.
 
 ## Still deferred
 
