@@ -138,6 +138,7 @@ func New(deps Deps) checks.Command {
 				Help: "report TLS certificates expiring within this window (certs category)"},
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override"},
+			emit.StoreClusterFlag(),
 		},
 		Kinds: append([]checks.KindField{
 			checks.Kind("health.category", "one scorecard line: how this category answered — healthy, degraded, or unavailable. The scorecard always answers, so healthy is explicit rather than silent; the line carries the worst severity found inside the category", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
@@ -380,7 +381,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// severity reflects the agent's judgment, so the scorecard's
 	// worst-severity and ordering below see triaged reality too.
 	// Unmatched findings (and runs without --store) are unchanged.
-	if storePath := inv.Flags.String("store"); storePath != "" {
+	if storePath := emit.StorePath(inv.Flags); storePath != "" {
 		st, err := store.OpenRead(storePath)
 		if err != nil {
 			return 0, err

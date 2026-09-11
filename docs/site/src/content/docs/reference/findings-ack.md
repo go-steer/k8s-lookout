@@ -22,6 +22,7 @@ lookout findings ack <subject-key> [flags]
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `--store` | string | — | path to the sentinel's SQLite store (its --store file). Required: finding state lives in the sentinel's --store SQLite file; a diff with nowhere to persist would report everything new on every run |
+| `--store-cluster` | string | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 | `--for` | duration | `4h0m0s` | how long to suppress the subject. The window is absolute from now and always expires; to end one early use --clear |
 | `--by` | string | — | who took the ack, recorded verbatim on the row and echoed in later `suppressed` records. Lookout does not authenticate this: the caller (mast) owns identity and the audit trail, `lookout` owns the state |
 | `--clear` | bool | — | end the ack window now instead of opening one; the subject goes back to being classified normally on the next diff |

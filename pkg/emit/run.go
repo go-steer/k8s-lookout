@@ -330,7 +330,12 @@ func scopeFromValues(v FlagValues, graphBacked bool, now func() time.Time) (Scop
 		return Scope{}, fmt.Errorf("--since must not be negative, got %s", s.Since)
 	}
 	if graphBacked {
-		s.Store = v.String("store")
+		// Resolved, not raw: a multi-cluster sentinel writes one store
+		// per cluster (#410) and graph history has no cluster column, so
+		// --store-cluster is how an --at query says whose topology it
+		// means. Every consumer reads Scope.Store, so deriving it here is
+		// what keeps them from each getting it right separately.
+		s.Store = StorePath(v)
 		atRaw := v.String("at")
 		if atRaw != "" {
 			at, err := ParseAt(atRaw, now())

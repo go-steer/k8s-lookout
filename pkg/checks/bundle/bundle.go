@@ -125,6 +125,7 @@ func New(deps Deps) checks.Command {
 				Help: "report TLS certificates expiring within this window (edges section)"},
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override"},
+			emit.StoreClusterFlag(),
 			{Name: "lists", Type: emit.FlagString, Default: "all",
 				Help: "which cluster resources the List pass reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) for a least-privilege posture. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never an error."},
 			{Name: "lists-preflight", Type: emit.FlagBool, Default: "false",
@@ -282,7 +283,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// mid-triage carries the diagnosis and paper trail instead of
 	// re-presenting the raw symptom.
 	var joiner *memory.Joiner
-	if storePath := inv.Flags.String("store"); storePath != "" {
+	if storePath := emit.StorePath(inv.Flags); storePath != "" {
 		st, err := store.OpenRead(storePath)
 		if err != nil {
 			return 0, err

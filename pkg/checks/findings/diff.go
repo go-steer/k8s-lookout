@@ -41,8 +41,9 @@ func DiffCommand(deps Deps) checks.Command {
 				Help: "the §4.2 finding report to classify: `-` reads stdin (the usual `lookout health | lookout findings diff --report -`), or a file path. Either wire format is accepted, detected per line, so the upstream command does not need --format=json"},
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to the sentinel's SQLite store (its --store file), where the previous run's state lives. Required: " + storeHint},
+			emit.StoreClusterFlag(),
 			{Name: "cluster", Type: emit.FlagString, Default: "",
-				Help: "cluster label to bind these findings to; becomes the first segment of every subject key. Give the same value on every run for a cluster — changing it makes every subject look new"},
+				Help: "cluster label to bind these findings to; becomes the first segment of every subject key. Give the same value on every run for a cluster — changing it makes every subject look new. This labels rows INSIDE the store; --store-cluster picks the store FILE. Left empty with --store-cluster set, it defaults to that name"},
 			{Name: "transitions", Type: emit.FlagString, Default: "",
 				Help: "emit only these transition classes, comma-separated: " + transitionList() + " (empty = all). `--transitions=new,escalated,resolved` is the digest view: everything that changed, nothing that didn't"},
 			{Name: "dry-run", Type: emit.FlagBool, Default: "false",
@@ -84,13 +85,21 @@ func runDiff(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	if closer != nil {
 		defer func() { _ = closer.Close() }()
 	}
-	st, err := openStore(inv.Flags.String("store"))
+	st, err := openStore(emit.StorePath(inv.Flags))
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = st.Close() }()
 
 	cluster := inv.Flags.String("cluster")
+	if cluster == "" {
+		// A caller that named the cluster to pick the store file (#410)
+		// has already said which cluster this is; making them say it
+		// twice only invites the two values disagreeing. --cluster still
+		// wins when both are given: it is the older flag, and it labels
+		// rows rather than files.
+		cluster = inv.Flags.String("store-cluster")
+	}
 	observations, noSubject, err := findingstate.ParseReport(report, cluster)
 	if err != nil {
 		return 0, err

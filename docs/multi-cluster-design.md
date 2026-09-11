@@ -283,24 +283,71 @@ case — not large production fleets, which keep the per-cluster sentinel.
 
 ## Per-cluster state paths
 
-`--dedup-persist` is per-cluster state on a single path. In multi-cluster
-mode `resolveRunners` treats the flag value as a **stem** and gives each
-runner its own file, suffixed with that cluster's project, location and
-name (issue #386):
+`--dedup-persist` (issue #386) and `--store` (issue #410) are both
+per-cluster state on a single path. In multi-cluster mode
+`resolveRunners` treats each flag value as a **stem** and gives every
+runner its own file, suffixed with the cluster name:
 
 ```
---dedup-persist=/data/dedup.json
-  → /data/dedup-my-proj-us-central1-a-prod-us.json
-  → /data/dedup-my-proj-europe-west1-b-prod-eu.json
+--dedup-persist=/data/dedup.json    --store=/var/lib/lookout/lookout.db
+  → /data/dedup-prod-us.json          → /var/lib/lookout/lookout-prod-us.db
+  → /data/dedup-prod-eu.json          → /var/lib/lookout/lookout-prod-eu.db
 ```
 
-The suffix is the full triple rather than the bare cluster name because
-two clusters in different locations may share a name, and two clusters
-must never share a snapshot. Anything outside `[A-Za-z0-9_-]` in a
-component collapses to a dash, so an operator-supplied `--clusters` name
-can only ever produce one filename next to the stem. The single-cluster
-default never calls this, so an existing deployment's snapshot does not
-move on upgrade.
+Anything outside `[A-Za-z0-9_-]` in a name collapses to a dash, so an
+operator-supplied `--clusters` pair or kubeconfig context can only ever
+produce one filename next to the stem — never a path of its choosing.
+The single-cluster default never calls this, so an existing deployment's
+files do not move on upgrade.
+
+**Why the store must split at all.** Three of its six tables carry a
+`cluster` column (`occurrences`, `finding_state`, `memory_facts`), and
+SQLite in WAL mode handles concurrent writers, so a shared file was
+genuinely considered. Two tables sink it: `triage_status` is keyed
+`(fingerprint, resource_key)`, so two same-named workloads in two
+clusters collide on one record, and graph history (`graph_snapshots` /
+`graph_changes`) is keyed by epoch and time with no cluster input at all,
+so `GraphAt` would answer with whichever cluster's snapshot was nearest
+in time. Sharing one file would need a schema v7 and a change to the
+documented §9.4 record key; one file per cluster needs neither.
+
+**`--store-max-mb` bounds each store, not their sum.** A fleet budget
+divided N ways would make one cluster's retention depend on how many
+clusters discovery found that morning — adding a cluster would silently
+shrink every other cluster's history. Startup logs the multiplication
+(`--store-max-mb=512 … 6 runner(s) … up to 3072 MiB in total`) so the
+footprint is stated rather than discovered on a full disk.
+
+**Reaching a fleet store from the CLI.** The store is not
+sentinel-private: `lookout triage status --store` *writes* §9.4 records
+that the sentinel's severity routing reads back, and `health`, `bundle`,
+`findings diff`, `findings ack` and the `--at` history family read it.
+Each of those takes `--store-cluster`, which says the `--store` value is
+the sentinel's stem and selects that cluster's file:
+
+```
+lookout triage status --store=/var/lib/lookout/lookout.db --store-cluster=prod-us \
+  --fingerprint=sha256:… --resource=Pod/prod/checkout-… --status=triaged
+```
+
+It is a separate flag from `findings diff --cluster` (which labels rows
+*inside* a store) and it is deliberately not implied by cluster identity:
+a single-cluster sentinel has a cluster name and still writes the literal
+`--store` path, so deriving from identity alone would send triage records
+to a file nothing reads. Both the sentinel and the CLI go through one
+implementation, `emit.PerClusterPath`.
+
+**Two clusters may not share a name.** The name is this sentinel's only
+handle on a cluster — the `cluster` metrics label, the frozen `cluster`
+wire field, the `/readyz` entry, `finding_state.cluster`, every distilled
+fact's scope, and now the store and snapshot files. GKE discovery takes
+the name straight from the Container API across a project, so a fleet can
+legitimately return the same name in two locations. Such a pair is
+ambiguous in all of those places at once, so **neither** cluster is
+watched: both are skipped with
+`lookout_cluster_resolve_errors_total{cause="duplicate_name"}`, and the
+rest of the fleet runs. Name them apart with explicit `--clusters` pairs
+to watch them.
 
 ## An unresolvable cluster is skipped, not fatal
 
@@ -340,9 +387,9 @@ skipped cluster is never expected and cannot hold `/readyz` down.
 
 ## Still deferred
 
-- **Per-cluster occurrence stores.** `--store` is a single SQLite path
-  that would collide across runners, so it is rejected in multi-cluster
-  mode rather than silently shared. Unlike the dedup snapshot it also
-  carries the prune loop, the size bound and the distiller's input
-  window, so per-cluster stores are a larger change — run one sentinel
-  per cluster when you need one.
+- **A fleet-wide memory view.** Every distilled fact's scope key already
+  contains the cluster (`{cluster, namespace, workload, reason_class}`
+  and friends), so no fact class groups across clusters and merging the
+  stores would not produce one. "This image's pull failures recur in 6 of
+  your 10 clusters" is a new fact class plus a reader over N stores, not
+  a storage layout.

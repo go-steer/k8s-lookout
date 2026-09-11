@@ -102,6 +102,7 @@ func GraphHistoryFlags() []FlagSpec {
 	return []FlagSpec{
 		{Name: "at", Type: FlagString, Default: "", Help: "answer as of this instant instead of live: RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m). Requires --store."},
 		{Name: "store", Type: FlagString, Default: "", Help: "path to a sentinel's SQLite store (its --store file); source for --at point-in-time topology"},
+		StoreClusterFlag(),
 	}
 }
 

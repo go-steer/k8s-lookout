@@ -16,7 +16,8 @@ MCP tool: `k8s_findings_diff` (MCP profile: `triage`)
 | --- | --- | --- |
 | `--report` | - | the §4.2 finding report to classify: `-` reads stdin (the usual `lookout health \| lookout findings diff --report -`), or a file path. Either wire format is accepted, detected per line, so the upstream command does not need --format=json |
 | `--store` | — | path to the sentinel's SQLite store (its --store file), where the previous run's state lives. Required: finding state lives in the sentinel's --store SQLite file (§9.1); a diff with nowhere to persist would report everything new on every run |
-| `--cluster` | — | cluster label to bind these findings to; becomes the first segment of every subject key. Give the same value on every run for a cluster — changing it makes every subject look new |
+| `--store-cluster` | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
+| `--cluster` | — | cluster label to bind these findings to; becomes the first segment of every subject key. Give the same value on every run for a cluster — changing it makes every subject look new. This labels rows INSIDE the store; --store-cluster picks the store FILE. Left empty with --store-cluster set, it defaults to that name |
 | `--transitions` | — | emit only these transition classes, comma-separated: new\|ongoing\|escalated\|resolved\|suppressed (empty = all). `--transitions=new,escalated,resolved` is the digest view: everything that changed, nothing that didn't |
 | `--dry-run` | — | classify and print, but do not advance the stored state. Use to preview a report without consuming it — a normal run is not repeatable, because after it the second run's findings are all `ongoing` |
 

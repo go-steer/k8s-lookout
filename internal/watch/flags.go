@@ -314,9 +314,9 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// signals are counted and dropped). The path is ALWAYS explicit —
 	// there is no default location (and never one under $HOME; the
 	// store belongs on the same volume as --dedup-persist).
-	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. Empty (default) disables the store.")
+	fs.StringVar(&f.store, "store", "", "Path to the sentinel-local SQLite occurrence store (§9.1), e.g. /var/lib/lookout/lookout.db — put it on the --dedup-persist volume. Every emitted signal is recorded with its routing outcome; info-severity signals are persisted instead of dropped. In multi-cluster mode this is a stem: each runner opens its own file, suffixed with the cluster name, and --store-max-mb bounds EACH one. Reach a fleet file from the CLI with the same stem plus --store-cluster. Empty (default) disables the store.")
 	fs.DurationVar(&f.storeTTL, "store-ttl", 720*time.Hour, "Retention for stored occurrences (§9.1 default 30 days); the prune loop deletes older rows. Must be > 0.")
-	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Must be >= 1.")
+	fs.IntVar(&f.storeMaxMB, "store-max-mb", 512, "Size bound for the occurrence store in MiB; when exceeded, the oldest occurrences are pruned first (loudly). Bounds EACH store, so a multi-cluster fleet may use this much per cluster — a deliberate choice over a fleet budget divided N ways, which would make one cluster's retention depend on how many clusters discovery found. Must be >= 1.")
 
 	// §9.4 regression evidence (M4 observation 3). ADDITIVE flag;
 	// only meaningful with --store (the triage-status records live
@@ -438,11 +438,10 @@ func (f *flags) validate() error {
 	// Multi-cluster (issue #208): --clusters / --clusters-from opt one
 	// process into watching several clusters. Mutually exclusive; the
 	// per-cluster identity comes from the pair name or discovery, so the
-	// scalar single-cluster flags don't apply. --dedup-persist is
-	// per-cluster state and resolveRunners now gives each runner its own
-	// path (issue #386); --store is still one SQLite path that would
-	// collide across runners (deferred — run one sentinel per cluster
-	// for the occurrence store).
+	// scalar single-cluster flags don't apply. --dedup-persist (#386)
+	// and --store (#410) are both per-cluster state, and resolveRunners
+	// gives each runner its own file derived from the flag value as a
+	// stem, so neither is refused any more.
 	if f.clusters != "" && f.clustersFrom != "" {
 		return errors.New("--clusters and --clusters-from are mutually exclusive: list endpoints OR discover them, not both")
 	}
@@ -455,9 +454,6 @@ func (f *flags) validate() error {
 		}
 		if f.inCluster {
 			return errors.New("--in-cluster is not used in multi-cluster mode: clusters are reached with the cloud provider's own credentials or a kubeconfig context's, not the local service account")
-		}
-		if f.store != "" {
-			return errors.New("--store is per-cluster and not yet supported in multi-cluster mode (the SQLite path would collide across runners): run one sentinel per cluster for the occurrence store, or leave --store unset")
 		}
 		if f.clusters != "" {
 			if _, err := parseClusters(f.clusters); err != nil {

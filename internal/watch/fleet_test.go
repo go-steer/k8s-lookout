@@ -192,9 +192,9 @@ func TestResolveRunnersSkipsUnresolvableCluster(t *testing.T) {
 	// A skipped cluster is loud on /metrics, because it is a coverage
 	// gap: nothing watches it and its silence means nothing.
 	const want = `
-# HELP lookout_cluster_resolve_errors_total Total clusters this process was told to watch and could not resolve credentials for, by cluster (issue #388). The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else.
+# HELP lookout_cluster_resolve_errors_total Total clusters this process was told to watch and did not, by cluster and cause (issues #388, #410). credentials: the cluster could not be resolved into a client. duplicate_name: two clusters in the fleet share this name, which is the only handle the sentinel has on a cluster, so neither is watched. The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else.
 # TYPE lookout_cluster_resolve_errors_total counter
-lookout_cluster_resolve_errors_total{cluster="torn-down"} 1
+lookout_cluster_resolve_errors_total{cause="credentials",cluster="torn-down"} 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "lookout_cluster_resolve_errors_total"); err != nil {
 		t.Error(err)

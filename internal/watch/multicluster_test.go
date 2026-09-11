@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
@@ -119,60 +120,27 @@ func TestResolveRunnersDefaultSingle(t *testing.T) {
 	}
 }
 
-// Multi-cluster mode used to refuse --dedup-persist outright, because
-// one path across N runners would have been silently shared. Now that
-// resolveRunners derives a path per cluster (#386) the flag is accepted
-// — while --store, still a single SQLite path, keeps its refusal.
-func TestMultiClusterAcceptsDedupPersistButNotStore(t *testing.T) {
-	validateWith := func(extra string) error {
-		f, err := parseFlags([]string{"--dry-run", "--clusters=a=x.gke.goog,b=y.gke.goog", extra})
+// Multi-cluster mode used to refuse both --dedup-persist and --store
+// outright, because one path across N runners would have been silently
+// shared. Now that resolveRunners derives a path per cluster from each
+// flag as a stem (#386 for the snapshot, #410 for the store), both are
+// accepted.
+func TestMultiClusterAcceptsPerClusterStatePaths(t *testing.T) {
+	validateWith := func(extra ...string) error {
+		f, err := parseFlags(append([]string{"--dry-run", "--clusters=a=x.gke.goog,b=y.gke.goog"}, extra...))
 		if err != nil {
-			t.Fatalf("parseFlags(%s): %v", extra, err)
+			t.Fatalf("parseFlags(%v): %v", extra, err)
 		}
 		return f.validate()
 	}
 	if err := validateWith("--dedup-persist=/data/dedup.json"); err != nil {
 		t.Errorf("multi-cluster --dedup-persist rejected: %v", err)
 	}
-	err := validateWith("--store=/data/lookout.db")
-	if err == nil || !strings.Contains(err.Error(), "--store is per-cluster") {
-		t.Errorf("multi-cluster --store err = %v, want the per-cluster refusal", err)
+	if err := validateWith("--store=/data/lookout.db"); err != nil {
+		t.Errorf("multi-cluster --store rejected: %v", err)
 	}
-}
-
-// TestPerClusterPath: the suffix is the full cluster triple, inserted
-// before the extension, and nothing an operator can type in a
-// --clusters pair can steer the file out of its directory.
-func TestPerClusterPath(t *testing.T) {
-	full := cloud.ClusterRef{Name: "prod-us", Project: "my-proj", Location: "us-central1-a"}
-	for _, tc := range []struct {
-		name, base string
-		ref        cloud.ClusterRef
-		want       string
-	}{
-		{"triple before the extension", "/data/dedup.json", full, "/data/dedup-my-proj-us-central1-a-prod-us.json"},
-		{"no extension", "/data/dedup", full, "/data/dedup-my-proj-us-central1-a-prod-us"},
-		{"disabled stays disabled", "", full, ""},
-		// An explicit --clusters endpoint knows only its name, and
-		// parseClusters has already rejected duplicates of it.
-		{"name only", "/data/dedup.json", cloud.ClusterRef{Name: "prod-us"}, "/data/dedup-prod-us.json"},
-		{"nothing to suffix", "/data/dedup.json", cloud.ClusterRef{}, "/data/dedup.json"},
-		{"dots collapse", "/data/dedup.json", cloud.ClusterRef{Name: "a.b.c"}, "/data/dedup-a-b-c.json"},
-		{"no traversal", "/data/dedup.json", cloud.ClusterRef{Name: "../../etc/passwd"}, "/data/dedup-etc-passwd.json"},
-		{"relative stem", "dedup.json", cloud.ClusterRef{Name: "prod"}, "dedup-prod.json"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := perClusterPath(tc.base, tc.ref); got != tc.want {
-				t.Errorf("perClusterPath(%q, %+v) = %q, want %q", tc.base, tc.ref, got, tc.want)
-			}
-		})
-	}
-	// The reason it is the triple and not the name: two clusters can
-	// share a name across locations, and they must not share a snapshot.
-	a := perClusterPath("/data/dedup.json", cloud.ClusterRef{Name: "prod", Project: "p", Location: "us-central1"})
-	b := perClusterPath("/data/dedup.json", cloud.ClusterRef{Name: "prod", Project: "p", Location: "europe-west1"})
-	if a == b {
-		t.Errorf("same name in two locations resolved to one path %q", a)
+	if err := validateWith("--dedup-persist=/data/dedup.json", "--store=/data/lookout.db"); err != nil {
+		t.Errorf("multi-cluster --dedup-persist + --store rejected: %v", err)
 	}
 }
 
@@ -184,9 +152,12 @@ func TestPerClusterPath(t *testing.T) {
 func TestPerClusterDedupSnapshotsDoNotClobber(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "dedup.json")
+	// Distinct names, because the name alone is what the path is keyed
+	// on (#410) and resolveRunners refuses a fleet that returns two
+	// clusters sharing one.
 	refs := []cloud.ClusterRef{
-		{Name: "prod", Project: "p", Location: "us-central1"},
-		{Name: "prod", Project: "p", Location: "europe-west1"}, // same name, other location
+		{Name: "prod-us", Project: "p", Location: "us-central1"},
+		{Name: "prod-eu", Project: "p", Location: "europe-west1"},
 		{Name: "staging", Project: "q", Location: "us-central1"},
 	}
 
@@ -195,7 +166,7 @@ func TestPerClusterDedupSnapshotsDoNotClobber(t *testing.T) {
 	}
 	paths := make([]string, len(refs))
 	for i, ref := range refs {
-		paths[i] = perClusterPath(base, ref)
+		paths[i] = emit.PerClusterPath(base, ref.Name)
 		cache, err := engine.NewDedupCache(time.Hour, paths[i])
 		if err != nil {
 			t.Fatalf("cluster %d: NewDedupCache: %v", i, err)
