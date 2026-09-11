@@ -16,6 +16,7 @@ package triage
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,5 +158,54 @@ func TestStatusUsageErrors(t *testing.T) {
 		if strings.Contains(res.Stdout, "findings=") {
 			t.Errorf("%s: usage error wrote a summary line to stdout: %q", tc.name, res.Stdout)
 		}
+	}
+}
+
+// TestStatusStoreClusterReachesTheSentinelFile closes #410's loop: the
+// sentinel splits its store one file per cluster, and the §9.4 WRITE
+// surface has to land in the same file or the record is written where
+// nothing reads it. The agent passes the stem the sentinel was given plus
+// --store-cluster, and the derivation happens in exactly one place
+// (emit.PerClusterPath) so the two cannot disagree.
+func TestStatusStoreClusterReachesTheSentinelFile(t *testing.T) {
+	stem := filepath.Join(t.TempDir(), "lookout.db")
+	// What a multi-cluster sentinel actually opens for this runner.
+	sentinelPath := emit.PerClusterPath(stem, "prod-us")
+	st, err := store.Open(sentinelPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	res := checktest.Run(t, StatusCommand(),
+		"--store="+stem,
+		"--store-cluster=prod-us",
+		"--fingerprint="+testFP,
+		"--resource="+testKey,
+		"--status=triaged",
+	)
+	if res.Code != emit.ExitData {
+		t.Fatalf("write exit = %d, stderr: %s", res.Code, res.Stderr)
+	}
+	// The record is in the runner's file...
+	read, err := store.OpenRead(sentinelPath)
+	if err != nil {
+		t.Fatalf("OpenRead: %v", err)
+	}
+	defer func() { _ = read.Close() }()
+	recs, err := read.TriageStatuses(context.Background(), memory.TriageQuery{Fingerprint: testFP})
+	if err != nil {
+		t.Fatalf("TriageStatuses: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Status != memory.StatusTriaged {
+		t.Fatalf("records in %s = %+v, want the one just written", sentinelPath, recs)
+	}
+	// ...and the stem was not created as a database of its own, which is
+	// the failure this test exists for: a write to a file the sentinel
+	// never opens looks exactly like success.
+	if _, err := os.Stat(stem); err == nil {
+		t.Errorf("the stem %s was opened as a store; the record went somewhere the sentinel does not read", stem)
 	}
 }

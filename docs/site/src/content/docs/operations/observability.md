@@ -125,10 +125,18 @@ starts normally.
 
 ```
 multi-cluster: cluster "torn-down" SKIPPED — cannot resolve credentials: …
-multi-cluster: watching 2 of 3 cluster(s); skipped torn-down — this sentinel
+multi-cluster: watching 2 of 3 cluster(s); skipped "torn-down" — this sentinel
   reports nothing about the skipped clusters, so do not read their silence as healthy
-lookout_cluster_resolve_errors_total{cluster="torn-down"} 1
+lookout_cluster_resolve_errors_total{cause="credentials",cluster="torn-down"} 1
 ```
+
+The other `cause` is `duplicate_name`: two clusters in one fleet
+answering to the same name. The name is the sentinel's only handle on a
+cluster — this metric's label, every per-runner series' `cluster` label,
+the wire field, the `/readyz` entry, and the per-cluster store and dedup
+files — so a duplicate is ambiguous everywhere at once and **neither**
+cluster is watched (the counter moves by the number dropped, so a pair
+reads `2`). Give them distinct names with explicit `--clusters` pairs.
 
 A skipped cluster does not appear in `/readyz?verbose` at all — not as
 `[!]`, not as anything. It was never expected, so it cannot hold

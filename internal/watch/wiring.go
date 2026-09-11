@@ -22,7 +22,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +43,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
@@ -249,14 +249,17 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 	fm := newFleetMetrics(reg)
 	runners := make([]*runner, 0, len(refs))
 	projectSeen := map[string]bool{}
-	var skipped []string
+	skipped := skipDuplicateNames(refs, fm)
 	for _, ref := range refs {
+		if slices.Contains(skipped, ref.Name) {
+			continue // ambiguous name, already reported above
+		}
 		cfg, cfgErr := fleet.RESTConfig(ctx, ref)
 		if cfgErr != nil {
 			// Degrade, don't abort: one cluster that was deleted,
 			// is unreachable, or whose credentials cannot be minted
 			// must not cost the fleet every other cluster.
-			fm.clusterResolveErrors.WithLabelValues(ref.Name).Inc()
+			fm.clusterResolveErrors.WithLabelValues(ref.Name, resolveSkipCredentials).Inc()
 			skipped = append(skipped, ref.Name)
 			log.Printf("multi-cluster: cluster %q SKIPPED — cannot resolve credentials: %v (this sentinel will not watch it; the remaining clusters are unaffected, and lookout_cluster_resolve_errors_total{cluster=%q} counts this)",
 				ref.Name, cfgErr, ref.Name)
@@ -277,12 +280,18 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		if !keepProjectTier {
 			rf.sources = dropProjectTierSources(rf.sources)
 		}
-		// The dedup snapshot is per-cluster state on a single path
-		// (issue #386): every runner would otherwise open, reload and
-		// rewrite the same file, so the last renamer of each tick wins
-		// and a restart seeds every cluster with some other cluster's
-		// entries. Suffix it with the ref's own identity.
-		rf.dedupPersist = perClusterPath(f.dedupPersist, ref)
+		// The dedup snapshot (#386) and the occurrence store (#410) are
+		// per-cluster state on a single path: every runner would
+		// otherwise open, reload and rewrite the same file. For the
+		// snapshot the last renamer of each tick wins and a restart
+		// seeds every cluster with some other cluster's entries; for
+		// the store, two of its tables carry no cluster column at all
+		// (triage_status is keyed (fingerprint, resource_key), and
+		// graph history is keyed by epoch and time), so one file would
+		// let one cluster's triage record and topology answer for
+		// another's. Both flags are stems here — one file per cluster.
+		rf.dedupPersist = emit.PerClusterPath(f.dedupPersist, ref.Name)
+		rf.store = emit.PerClusterPath(f.store, ref.Name)
 		r := newRunner(&rf, ref.Name, sink, token, reg)
 		r.restCfg = cfg
 		r.project = ref.Project
@@ -294,6 +303,10 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		if rf.dedupPersist != "" {
 			log.Printf("multi-cluster: runner %q dedup snapshot → %s (per-cluster; --dedup-persist=%s is the stem)",
 				ref.Name, rf.dedupPersist, f.dedupPersist)
+		}
+		if rf.store != "" {
+			log.Printf("multi-cluster: runner %q store → %s (per-cluster; --store=%s is the stem). Point `lookout triage status` and `lookout health` at the stem with --store-cluster=%s to reach this file",
+				ref.Name, rf.store, f.store, ref.Name)
 		}
 	}
 	// Cluster names arrive from a discovery listing or a kubeconfig, so
@@ -317,7 +330,63 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		log.Printf("multi-cluster: watching %d of %d cluster(s); skipped %s — this sentinel reports nothing about the skipped clusters, so do not read their silence as healthy", //nolint:gosec // G706: every name in skippedList is strconv.Quote'd above
 			len(runners), len(refs), skippedList)
 	}
+	if f.store != "" {
+		// --store-max-mb bounds EACH store, not their sum (#410): a
+		// fleet budget divided N ways would make one cluster's
+		// retention depend on how many clusters discovery found that
+		// morning, so adding a cluster would silently shrink every
+		// other one's history. The multiplication is stated here
+		// instead of being discovered on a full disk.
+		log.Printf("multi-cluster: --store-max-mb=%d bounds EACH cluster's store, so %d runner(s) may use up to %d MiB of occurrence store in total", //nolint:gosec // G706: all three arguments are ints, %d cannot carry an injected newline
+			f.storeMaxMB, len(runners), f.storeMaxMB*len(runners))
+	}
 	return runners, nil
+}
+
+// skipDuplicateNames returns the cluster names that appear more than
+// once in an enumerated fleet, counting and logging each as a skip.
+//
+// A cluster NAME is the fleet-wide cluster identity: the `cluster`
+// metrics label, the frozen `cluster` field on the wire, the /readyz
+// entry, finding_state.cluster, every distilled fact's scope — and,
+// since #410, the per-cluster store and dedup paths. Discovery can
+// legitimately return two clusters with one name (the same name in two
+// locations, or two projects), and such a pair is ambiguous in every one
+// of those places at once: one cluster's series, records and readiness
+// would silently stand in for the other's. Refuse the pair — the
+// operator can name them apart with explicit --clusters — and keep the
+// rest of the fleet, the same posture an unresolvable cluster gets
+// (#388).
+//
+// It takes the refs and the fleet metrics and nothing else, for two
+// reasons. A test can then hand it the pair no real fleet source can be
+// asked to produce on demand (--clusters refuses a repeated name at
+// parse time; a kubeconfig's contexts are a map). And a helper here
+// that also took *flags makes gosec's G706 taint analysis — which is
+// package-local and very coarse — treat the flags as an unknown taint
+// source, which then spreads to every log.Printf in this package,
+// including files that never touch a path. Keep the split this shape.
+func skipDuplicateNames(refs []cloud.ClusterRef, fm *fleetMetrics) []string {
+	byName := map[string][]cloud.ClusterRef{}
+	for _, ref := range refs {
+		byName[ref.Name] = append(byName[ref.Name], ref)
+	}
+	var skipped []string
+	for _, ref := range refs {
+		dupes := byName[ref.Name]
+		if len(dupes) < 2 || slices.Contains(skipped, ref.Name) {
+			continue
+		}
+		where := make([]string, 0, len(dupes))
+		for _, d := range dupes {
+			where = append(where, fmt.Sprintf("project=%q location=%q", d.Project, d.Location))
+		}
+		fm.clusterResolveErrors.WithLabelValues(ref.Name, resolveSkipDuplicateName).Add(float64(len(dupes)))
+		skipped = append(skipped, ref.Name)
+		log.Printf("multi-cluster: cluster %q SKIPPED — %d clusters in this fleet share that name (%s), and the name is this sentinel's only handle on a cluster (metrics label, wire field, /readyz entry, store and dedup file). None of them will be watched; list them under distinct names with --clusters to watch them",
+			ref.Name, len(dupes), strings.Join(where, "; "))
+	}
+	return skipped
 }
 
 // projectTierSources are the §10 project-scoped sources: they describe a
@@ -339,65 +408,6 @@ func dropProjectTierSources(sources string) string {
 		kept = append(kept, name)
 	}
 	return strings.Join(kept, ",")
-}
-
-// perClusterPath turns a single per-runner state path into one path per
-// cluster, so N runners in one process do not share one file (issue
-// #386):
-//
-//	/data/dedup.json → /data/dedup-my-proj-us-central1-a-prod-us.json
-//
-// The suffix is the full cluster triple — project, location, name — and
-// not the bare name, because two clusters in different locations (or
-// different projects) may legitimately share a name, and two clusters
-// that share a snapshot are the bug this is fixing. Whichever parts of
-// the triple the ref does not know are skipped; an explicit --clusters
-// endpoint knows only its name, which parseClusters has already forced
-// to be unique within the fleet.
-//
-// The stem is left exactly as given when there is nothing to suffix, so
-// the single-cluster default — where resolveRunners never calls this —
-// and an empty (disabled) path both stay byte-identical.
-func perClusterPath(base string, ref cloud.ClusterRef) string {
-	if base == "" {
-		return ""
-	}
-	parts := make([]string, 0, 3)
-	for _, p := range []string{ref.Project, ref.Location, ref.Name} {
-		if s := pathSlug(p); s != "" {
-			parts = append(parts, s)
-		}
-	}
-	if len(parts) == 0 {
-		return base
-	}
-	// Insert before the extension rather than appending, so the file
-	// keeps whatever suffix the operator (and their tooling) expects.
-	ext := filepath.Ext(base)
-	return strings.TrimSuffix(base, ext) + "-" + strings.Join(parts, "-") + ext
-}
-
-// pathSlug reduces one component of a cluster ref to something safe to
-// put in a filename. GKE projects, locations and cluster names are
-// already [a-z0-9-], but a --clusters pair carries an operator-supplied
-// name, and a name is not permitted to steer where the snapshot lands:
-// everything outside [A-Za-z0-9_-] — separators and dots included —
-// becomes a single dash, so the result can only ever be one path
-// component next to the stem.
-func pathSlug(s string) string {
-	var b strings.Builder
-	dash := false
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			b.WriteRune(r)
-			dash = false
-		case !dash && b.Len() > 0:
-			b.WriteByte('-')
-			dash = true
-		}
-	}
-	return strings.TrimRight(b.String(), "-")
 }
 
 // parseClustersFrom splits --clusters-from into project and optional

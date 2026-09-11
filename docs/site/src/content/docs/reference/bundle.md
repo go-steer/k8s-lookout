@@ -24,6 +24,7 @@ lookout bundle [flags]
 | `--max-templates` | int | `15` | cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget) |
 | `--cert-warn` | duration | `720h` | report TLS certificates expiring within this window (edges section) |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); merges open triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override |
+| `--store-cluster` | string | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 | `--lists` | string | `all` | which cluster resources the List pass reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) for a least-privilege posture. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never an error. |
 | `--lists-preflight` | bool | — | before listing, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s); falls back to reactive Forbidden-skip if SSAR is not permitted |
 

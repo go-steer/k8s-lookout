@@ -19,6 +19,7 @@ MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 | `--max-templates` | 15 | cap distilled log template clusters in the logs section (triage logs defaults to 40; the bundle keeps the tighter budget) |
 | `--cert-warn` | 720h | report TLS certificates expiring within this window (edges section) |
 | `--store` | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so the bundle's findings carry triage_* fields and severity reflects the agent's override |
+| `--store-cluster` | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 | `--lists` | all | which cluster resources the List pass reads: 'all' (default), a comma-separated allowlist (pods,deployments), or subtractions (all,-secrets) for a least-privilege posture. Denied or deselected lists degrade to a partial bundle with a skipped= note on the head, never an error. |
 | `--lists-preflight` | — | before listing, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s); falls back to reactive Forbidden-skip if SSAR is not permitted |
 

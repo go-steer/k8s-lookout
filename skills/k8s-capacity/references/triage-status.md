@@ -15,6 +15,7 @@ MCP tool: `k8s_triage_status`
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--store` | — | path to the sentinel's SQLite store (its --store file). Required: triage-status records live in the sentinel's --store SQLite file (§9.4); see docs/triage-status-write-design.md |
+| `--store-cluster` | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 | `--fingerprint` | — | the incident-class fingerprint from the inject payload or store row (§8, sha256:…). Required to write; to read, this or --resource selects the record(s) |
 | `--resource` | — | resource key pinning the record to one object: <KindOfObject>/<namespace>/<name> (namespace segment empty for cluster-scoped objects, e.g. Node//gke-node-1). Required to write |
 | `--status` | — | triage state to record: investigating\|triaged\|actioned\|escalated (resolved is written by the sentinel's §7.4 recovery flip, never by agents). Empty = read mode: print the current record(s) instead of writing |

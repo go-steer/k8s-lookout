@@ -71,6 +71,7 @@ func StatusCommand() checks.Command {
 		Flags: []emit.FlagSpec{
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to the sentinel's SQLite store (its --store file). Required: " + statusStoreHint},
+			emit.StoreClusterFlag(),
 			{Name: "fingerprint", Type: emit.FlagString, Default: "",
 				Help: "the incident-class fingerprint from the inject payload or store row (§8, sha256:…). Required to write; to read, this or --resource selects the record(s)"},
 			{Name: "resource", Type: emit.FlagString, Default: "",
@@ -108,7 +109,7 @@ func StatusCommand() checks.Command {
 }
 
 func runStatus(ctx context.Context, inv emit.Invocation) (int, error) {
-	storePath := inv.Flags.String("store")
+	storePath := emit.StorePath(inv.Flags)
 	if storePath == "" {
 		return 0, emit.UsageErrorf("--store is required: %s", statusStoreHint)
 	}

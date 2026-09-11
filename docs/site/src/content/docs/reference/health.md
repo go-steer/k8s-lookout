@@ -22,6 +22,7 @@ lookout health [flags]
 | `--top` | int | `3` | how many findings to name inline on a degraded category's scorecard line |
 | `--cert-warn` | duration | `720h` | report TLS certificates expiring within this window (certs category) |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); merges open triage-status records so findings carry triage_* fields and severity reflects the agent's override |
+| `--store-cluster` | string | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 
 ## Common flags (every `lookout` command)
 

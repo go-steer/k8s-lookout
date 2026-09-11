@@ -44,6 +44,7 @@ func AckCommand(deps Deps) checks.Command {
 		Flags: []emit.FlagSpec{
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to the sentinel's SQLite store (its --store file). Required: " + storeHint},
+			emit.StoreClusterFlag(),
 			{Name: "for", Type: emit.FlagDuration, Default: defaultAckWindow.String(),
 				Help: "how long to suppress the subject. The window is absolute from now and always expires; to end one early use --clear"},
 			{Name: "by", Type: emit.FlagString, Default: "",
@@ -82,7 +83,7 @@ func runAck(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 		return 0, emit.UsageErrorf("--for must be positive, got %s; to end an ack use --clear", window)
 	}
 
-	st, err := openStore(inv.Flags.String("store"))
+	st, err := openStore(emit.StorePath(inv.Flags))
 	if err != nil {
 		return 0, err
 	}

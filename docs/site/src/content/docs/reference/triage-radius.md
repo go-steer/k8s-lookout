@@ -45,6 +45,7 @@ This command answers from the topology graph and accepts the point-in-time flags
 | --- | --- | --- | --- |
 | `--at` | string | — | answer as of this instant instead of live: RFC3339 (2026-07-25T10:00:00Z) or a duration ago (20m). Requires --store. |
 | `--store` | string | — | path to a sentinel's SQLite store (its --store file); source for --at point-in-time topology |
+| `--store-cluster` | string | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 
 ## Finding kinds
 

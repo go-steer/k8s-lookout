@@ -45,6 +45,19 @@ type fleetMetrics struct {
 	clusterResolveErrors *prometheus.CounterVec
 }
 
+// Causes for lookout_cluster_resolve_errors_total. Both mean the same
+// thing to an alert — a cluster in the fleet is not being watched — and
+// differ only in what the operator has to fix.
+const (
+	// resolveSkipCredentials: the fleet named the cluster but its
+	// credentials could not be minted (deleted cluster still in a
+	// discovery listing, stale kubeconfig context, missing IAM).
+	resolveSkipCredentials = "credentials"
+	// resolveSkipDuplicateName: two clusters in the fleet share one
+	// name, which is the sentinel's only handle on a cluster (#410).
+	resolveSkipDuplicateName = "duplicate_name"
+)
+
 // newFleetMetrics registers the process-level metrics against the
 // shared scrape registry. Unwrapped: see fleetMetrics on why cluster is
 // a variable label here.
@@ -52,8 +65,8 @@ func newFleetMetrics(reg prometheus.Registerer) *fleetMetrics {
 	fm := &fleetMetrics{
 		clusterResolveErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_cluster_resolve_errors_total",
-			Help: "Total clusters this process was told to watch and could not resolve credentials for, by cluster (issue #388). The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else.",
-		}, []string{"cluster"}),
+			Help: "Total clusters this process was told to watch and did not, by cluster and cause (issues #388, #410). credentials: the cluster could not be resolved into a client. duplicate_name: two clusters in the fleet share this name, which is the only handle the sentinel has on a cluster, so neither is watched. The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else.",
+		}, []string{"cluster", "cause"}),
 	}
 	reg.MustRegister(fm.clusterResolveErrors)
 	return fm

@@ -33,20 +33,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve the process still exits non-zero — that is credentials or a
   build tag, and supervising an empty fleet would report ready while
   watching nothing.
+- `--store` now works in multi-cluster mode, where it was previously
+  refused outright, and the occurrence store is one file per cluster
+  (#410). The flag value is a stem and each runner opens its own
+  database: `/var/lib/lookout/lookout.db` becomes
+  `/var/lib/lookout/lookout-prod-us.db`. Three of the store's tables
+  carry a `cluster` column, but `triage_status` is keyed
+  `(fingerprint, resource_key)` and graph history is keyed by epoch and
+  time, so one shared file would let one cluster's triage record and
+  topology answer for another's. `--store-max-mb` bounds **each** store
+  rather than their sum — a fleet budget divided N ways would make one
+  cluster's retention depend on how many clusters discovery found that
+  morning — and startup logs the resulting fleet total. Because the
+  store is also a CLI surface, `triage status`, `health`, `bundle`,
+  `findings diff`, `findings ack` and the `--at` history family gained
+  **`--store-cluster`**: pass the same stem the sentinel was given plus
+  the cluster name to reach that cluster's file. It is a separate flag
+  from `findings diff --cluster` (which labels rows *inside* a store)
+  and is deliberately not implied by cluster identity, since a
+  single-cluster sentinel has a cluster name and still writes the
+  literal `--store` path. Single-cluster deployments are unchanged.
+- Two clusters in one fleet may no longer share a name (#410). A
+  cluster's name is the sentinel's only handle on it — the `cluster`
+  metrics label, the frozen `cluster` wire field, the `/readyz` entry,
+  `finding_state.cluster`, every distilled fact's scope, and now the
+  per-cluster store and snapshot files — and cloud discovery across a
+  project can legitimately return the same name twice. Such a pair is
+  ambiguous in all of those at once, so **neither** cluster is watched:
+  both are skipped, the rest of the fleet runs, and
+  `lookout_cluster_resolve_errors_total` (which gained a `cause` label:
+  `credentials` or `duplicate_name`) counts them. Give them distinct
+  names with explicit `--clusters` pairs to watch them.
 - `--dedup-persist` now works in multi-cluster mode, where it was
   previously refused outright (#386). The flag value is treated as a
-  stem and each runner gets its own file, suffixed with that cluster's
-  project, location and name — `/data/dedup.json` becomes
-  `/data/dedup-my-proj-us-central1-a-prod-us.json`. The suffix is the
-  full triple and not the bare cluster name because two clusters in
-  different locations may share a name, and two clusters must never
-  share a snapshot: N runners on one path means the last writer of each
-  tick wins, every runner reloads some other cluster's entries at
-  startup, and a noisy cluster's keys eat every other cluster's LRU
-  budget until a quiet cluster's own open incidents are evicted and
-  re-alerted. Single-cluster deployments — the default — keep the
-  literal flag value, so no existing snapshot moves on upgrade. `--store`
-  is still one SQLite path and still refused in multi-cluster mode.
+  stem and each runner gets its own file, suffixed with the cluster
+  name — `/data/dedup.json` becomes `/data/dedup-prod-us.json`. N
+  runners on one path means the last writer of each tick wins, every
+  runner reloads some other cluster's entries at startup, and a noisy
+  cluster's keys eat every other cluster's LRU budget until a quiet
+  cluster's own open incidents are evicted and re-alerted.
+  Single-cluster deployments — the default — keep the literal flag
+  value, so no existing snapshot moves on upgrade.
 - The §11 capability probe now runs for the life of the process, not
   just its first second (#385). A grant revoked *after* startup left
   the informer retrying a refused LIST/WATCH on client-go's backoff
