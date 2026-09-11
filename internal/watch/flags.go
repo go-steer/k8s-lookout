@@ -257,7 +257,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 
 	// Dedup.
 	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
-	fs.StringVar(&f.dedupPersist, "dedup-persist", "", "Optional path to persist dedup cache across sidecar restart.")
+	fs.StringVar(&f.dedupPersist, "dedup-persist", "", "Optional path to persist dedup cache across sidecar restart. In multi-cluster mode this is a stem: each runner gets its own file, suffixed with the cluster's project/location/name, so snapshots never clobber each other.")
 	fs.IntVar(&f.unhealthyMinCount, "unhealthy-min-count", 3, "Require this many consecutive Unhealthy events before firing.")
 	fs.IntVar(&f.backoffMinCount, "backoff-min-count", 3, "Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event.")
 	fs.IntVar(&f.imagePullTransientMin, "imagepull-transient-min-count", 3, "Require an image-pull failure whose cause is RETRYABLE (registry 429/quota, 5xx, timeout, connection reset) to reach this Event.Count before firing, so a rate limit kubelet clears on its own does not open a noise session. Terminal causes (bad tag, denied, no space) and unrecognized ones still fire on the first event. 1 fires on the first event.")
@@ -438,9 +438,11 @@ func (f *flags) validate() error {
 	// Multi-cluster (issue #208): --clusters / --clusters-from opt one
 	// process into watching several clusters. Mutually exclusive; the
 	// per-cluster identity comes from the pair name or discovery, so the
-	// scalar single-cluster flags don't apply, and the per-cluster
-	// stores/snapshots would collide on one path (deferred — run one
-	// sentinel per cluster for those).
+	// scalar single-cluster flags don't apply. --dedup-persist is
+	// per-cluster state and resolveRunners now gives each runner its own
+	// path (issue #386); --store is still one SQLite path that would
+	// collide across runners (deferred — run one sentinel per cluster
+	// for the occurrence store).
 	if f.clusters != "" && f.clustersFrom != "" {
 		return errors.New("--clusters and --clusters-from are mutually exclusive: list endpoints OR discover them, not both")
 	}
@@ -456,9 +458,6 @@ func (f *flags) validate() error {
 		}
 		if f.store != "" {
 			return errors.New("--store is per-cluster and not yet supported in multi-cluster mode (the SQLite path would collide across runners): run one sentinel per cluster for the occurrence store, or leave --store unset")
-		}
-		if f.dedupPersist != "" {
-			return errors.New("--dedup-persist is per-cluster and not yet supported in multi-cluster mode (the snapshot path would collide across runners): leave it unset")
 		}
 		if f.clusters != "" {
 			if _, err := parseClusters(f.clusters); err != nil {

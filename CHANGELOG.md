@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--dedup-persist` now works in multi-cluster mode, where it was
+  previously refused outright (#386). The flag value is treated as a
+  stem and each runner gets its own file, suffixed with that cluster's
+  project, location and name — `/data/dedup.json` becomes
+  `/data/dedup-my-proj-us-central1-a-prod-us.json`. The suffix is the
+  full triple and not the bare cluster name because two clusters in
+  different locations may share a name, and two clusters must never
+  share a snapshot: N runners on one path means the last writer of each
+  tick wins, every runner reloads some other cluster's entries at
+  startup, and a noisy cluster's keys eat every other cluster's LRU
+  budget until a quiet cluster's own open incidents are evicted and
+  re-alerted. Single-cluster deployments — the default — keep the
+  literal flag value, so no existing snapshot moves on upgrade. `--store`
+  is still one SQLite path and still refused in multi-cluster mode.
 - The §11 capability probe now runs for the life of the process, not
   just its first second (#385). A grant revoked *after* startup left
   the informer retrying a refused LIST/WATCH on client-go's backoff

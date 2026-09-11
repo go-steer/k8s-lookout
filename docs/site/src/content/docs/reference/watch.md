@@ -39,7 +39,7 @@ breaking change to running deployments, never a refactor.
 | `--clusters` | string | — | Multi-cluster: comma-separated name=endpoint pairs to watch from one process, e.g. prod-us=abc.us-central1.gke.goog,prod-eu=def.europe-west1.gke.goog. A bare endpoint derives a short name from its first DNS label. Mutually exclusive with --clusters-from; needs a Fleet-capable provider (-tags gke). Leave empty for the one-sentinel-per-cluster default. |
 | `--clusters-from` | string | — | Multi-cluster: discover the clusters to watch instead of listing them. Value is a project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project). Mutually exclusive with --clusters; needs a Fleet-capable provider (-tags gke). |
 | `--daemon-url` | string | — | Base URL of the core-agent daemon (http://... or https://...). Required. |
-| `--dedup-persist` | string | — | Optional path to persist dedup cache across sidecar restart. |
+| `--dedup-persist` | string | — | Optional path to persist dedup cache across sidecar restart. In multi-cluster mode this is a stem: each runner gets its own file, suffixed with the cluster's project/location/name, so snapshots never clobber each other. |
 | `--dedup-window` | duration | `5m0s` | Rolling window for (uid,reason) dedup. |
 | `--degradation-drop` | float | `0.3` | Minimum ready-ratio decline from window start (with >= 2 distinct downward steps) that fires degradation.capacity. Must be in (0, 1]. |
 | `--degradation-window` | duration | `15m0s` | Trend window for the degradation source's ready-ratio series and probe-flap counting. Must be > 0. |
