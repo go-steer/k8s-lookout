@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-11
+
+This release is about the distance between what a sentinel assumed at
+startup and what is true five minutes later. It began as a gap
+analysis rather than a plan: an event watcher in another project was
+OOMKilled retrying Event informers that RBAC had denied, and asking
+whether lookout would do the same turned up eight things it would.
+
+Three of them concern permissions in time. A cluster whose authorizer
+refuses a required grant was retried on a fixed backoff for the life
+of the pod, re-running that cluster's whole startup path six times a
+minute and burying the one log line that explained it; such an exit is
+now terminal for that cluster and only that cluster. A grant revoked
+*after* startup was worse than noisy: the informer retried a refused
+watch forever with its sync barrier still latched true, so the source
+went quiet, and quiet reads downstream as "cluster healthy" — the
+silent empty watch §11 exists to prevent, moved in time rather than
+eliminated. Every enabled source's declared access is now re-reviewed
+on an interval, a denial confirmed across two sweeps injects a signal
+and sets a metric, and a *re-granted* permission is observable for the
+same reason a sweep is the right instrument: the refused call is no
+longer being made. Underneath both sits a posture decision — a
+sentinel watching 24 of 26 clusters is fit to serve those 24, so a
+degraded cluster is dropped from the readiness expectation instead of
+failing `/readyz` for the whole fleet. `/readyz?verbose` now names
+each cluster and its state.
+
+The rest is multi-cluster state. `--dedup-persist` and `--store` were
+each a single path that N runners would have shared, so both were
+refused outright and a fleet ran with neither a dedup snapshot nor an
+occurrence store. Both are now stems resolving to one file per
+cluster, and because the store is a CLI surface as much as a sentinel
+one — an agent *writes* triage records through it — every command that
+takes `--store` gained `--store-cluster` to reach a fleet member's
+file. Deriving a path from the cluster name made a fleet with two
+clusters of one name, which cloud discovery can legitimately return,
+ambiguous in a filename as well as in a metrics label, a wire field
+and a readiness entry; such a pair is now skipped rather than silently
+merged. And a fleet no longer needs a cloud provider at all:
+`--clusters-from=kubeconfig` watches one cluster per context, which
+puts EKS, AKS, on-prem and kind fleets on the default build.
+
+Independently, four e2e scenarios for failures with no failing pod —
+a readiness gate flapping with `restartCount` at 0, a CronJob whose
+Job creations are quota-blocked, a shared ConfigMap deleted out from
+under four Deployments, an HPA pointed at a utilization target its pod
+template carries no request for — found two defects on their first
+run. A clearance carrying no `StableSince` never resolved, which is
+the shape of every source-specific observer's `object_deleted` arm, so
+no source-scoped incident had ever closed that way; and `lookout
+health` filed a missed CronJob run under crash loops, sending the
+reader to look at pods that by definition were never created.
+
 ### Added
 
 - Multi-cluster no longer requires a cloud provider, and one
