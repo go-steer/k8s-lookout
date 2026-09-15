@@ -2,6 +2,7 @@
 
 **Status:** Draft v0.3 — proposal. Spikes S9 and S10 resolved against this repo;
 S1 still gates the §7.7 data model.
+**Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
 **Language / stack:** Go, `k8s.io/client-go` shared informers
