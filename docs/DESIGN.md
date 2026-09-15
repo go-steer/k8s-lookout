@@ -414,10 +414,26 @@ correctly:
   object as a full decoded struct; at any cluster size, the graph's overhead is
   a fraction of what the informers already cost. Optimizing the small term
   first is backwards.
-- **Realistic targets:** typical single clusters are 1–15k pods; 100k is the
-  ceiling, not the design point. Real informer delta rates are hundreds to low
-  thousands of events/sec even on large clusters — the proposal's 50k events/s
-  target is fiction, and we drop it.
+- **Realistic targets, stated on two axes.** These are different questions and
+  conflating them is what produced the proposal's numbers:
+  - **Pods — a memory question.** Typical single clusters are 1–15k pods. The
+    design target is **200k pods**, and nothing in the model has a cliff before
+    ~500k. Cost here is linear in object count and is dominated by the informer
+    caches, so the answer is `GOMEMLIMIT` and cache trimming, not data-structure
+    heroics.
+  - **Events/sec — a CPU question, and the one that actually binds.** The design
+    target is **500 pods/sec sustained scheduling**, which at ~8 watch events per
+    pod lifecycle is roughly **5,000 events/sec** — still "low thousands", and
+    about a quarter of a core across the whole watch path. The proposal's 50k
+    events/s target remains fiction and stays dropped; a cluster does not reach
+    it by having more pods, only by churning them ten times faster than anything
+    we have measured.
+
+  A 200k-pod cluster is therefore not ten times harder than a 20k-pod one — it is
+  ten times more memory and roughly the same CPU. See
+  [`leeway-design.md`](./leeway-design.md) §6.6 for the tier table and §6.6.1 for
+  the per-event cost model these numbers come from, including the zone-outage
+  burst (~66k pod moves over ~130 s) that is the real stress case.
 
 So: the **interface** is designed for the compact representation (uint32
 `NodeID`s, typed edge kinds, readers query an `atomic.Pointer[Graph]` COW

@@ -1,7 +1,9 @@
 # leeway — Placement Drift Detection
 
-**Status:** Draft v0.3 — proposal. Spikes S9 and S10 resolved against this repo;
-S1 still gates the §7.7 data model.
+**Status:** Draft v0.5 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
+the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
+ships default-on. Spikes S9, S10 and S11 resolved against this repo; S1 still gates
+the §7.7 data model.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
@@ -202,24 +204,34 @@ binary nobody builds is a binary that does not work.
 
 ### 2.5 What folding in changes about this design
 
-Three things, all load-bearing:
+Four things, all load-bearing:
 
 1. **We do not own the informers, so `trimPod` becomes a negotiation.** See §6.1 —
    this is the one place where the fold-in has a real cost, and it invalidates part
    of the original memory model.
-2. **The scale posture needs reconciling.** lookout DESIGN §6.2 states *"typical
-   single clusters are 1–15k pods; 100k is the ceiling, not the design point"* and
-   drops a 50k events/s target as fiction. This document targets 200k pods at 500
-   pods/sec. These are less far apart than they look — §6.6 concludes that node
-   count is nearly free, memory is linear in pods, and 5,000 events/s costs about a
-   quarter of a core, which *agrees* with lookout's "hundreds to low thousands of
-   events/sec" framing. But someone has to edit that paragraph rather than leave
-   two design docs in the same repo contradicting each other.
+2. ~~**The scale posture needs reconciling.**~~ **Resolved (2026-09-15): the higher
+   targets win, and DESIGN §6.2 was edited to match.** That paragraph previously
+   read *"100k is the ceiling, not the design point"* against this document's 200k
+   pods at 500 pods/sec. The two were never really in conflict — they were one
+   sentence covering two different questions. §6.2 now states them separately:
+   pods are a **memory** question (200k target, no cliff before ~500k, dominated by
+   the informer caches), events/sec are a **CPU** question (500 pods/sec ≈ 5,000
+   events/s ≈ a quarter core across the whole watch path). The 50k events/s target
+   stays dropped as fiction — nothing about a bigger cluster gets you there. A
+   200k-pod cluster is ten times the memory of a 20k-pod one and roughly the same
+   CPU.
 3. **Output shape.** Lookout's watch path turns signals into agent sessions with
    warm context. Drift is a slow-moving condition, not an incident. §8 handles this
    by routing most leeway findings to the store and metrics rather than to inject,
    using the existing severity routing (DESIGN §7.7) — the same treatment
    `notifications` info-severity signals already get.
+4. **Two metric APIs in one binary, deliberately.** Spike S11 established that
+   `otelprom` bridges leeway's OTEL-native instruments into the registry the
+   sentinel already serves, so `/metrics` stays one scrape and no migration is
+   needed. The accepted asymmetry is on the push side: an OTLP backend sees
+   leeway's metrics and none of the sentinel's 43 until someone files that refactor
+   on its own merits. §8.4 and §13/S11 carry the numbers and the two regressions
+   that argue against doing it on leeway's schedule.
 
 ---
 
@@ -1564,7 +1576,15 @@ metric API and served by two readers on a single `MeterProvider`, so there is no
 second bookkeeping path to keep in sync:
 
 ```go
-promExporter, _ := otelprom.New() // pull; registers as a prometheus.Collector
+// Pull. WithRegisterer is the load-bearing argument (S11): the reader
+// registers as a Collector into the registry internal/watch already
+// serves on --metrics-addr, so leeway's OTEL-native instruments and the
+// sentinel's 43 Prometheus-native ones come out of one scrape.
+promExporter, _ := otelprom.New(
+    otelprom.WithRegisterer(sentinelRegistry),
+    otelprom.WithoutTargetInfo(), // neither exists on /metrics today;
+    otelprom.WithoutScopeInfo(),  // adding them changes every dashboard's gather
+)
 otlpExporter, _ := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint))
 
 mp := metric.NewMeterProvider(
@@ -1580,20 +1600,47 @@ mp := metric.NewMeterProvider(
 
 Either reader can be disabled; neither requires the other.
 
-> **This is a sentinel-wide change, not a leeway one.** `internal/watch/metrics.go`
-> builds a `prometheus.NewRegistry()` directly and `internal/telemetry/otel.go`
-> bootstraps traces only. Adding OTLP metrics means migrating the existing ~30
-> `lookout_*` instruments onto the OTEL API, or running two registries and accepting
-> that only leeway's metrics reach OTLP. The first is correct and is a prerequisite
-> task, not a side effect; the second is a trap that will be discovered by whoever
-> builds the first cross-subsystem dashboard. Sizing this is spike **S11**.
+> **Spike S11 resolved this, and it killed the premise.** The draft above assumed
+> two bad options: migrate the sentinel's existing instruments first, or run two
+> registries and let only leeway reach OTLP. There is a third, and it is the one
+> the prototype proved: `otelprom` registers the `MeterProvider`'s pull reader
+> **into the sentinel's existing `prometheus.Registry`**. One registry, one
+> `promhttp` handler, one scrape — serving migrated and unmigrated instruments
+> side by side, indistinguishably. Leeway declares its instruments on the OTEL API
+> from day one and reaches both readers; the existing 43 `lookout_*` instruments
+> stay exactly as they are. **Migrating them is not a prerequisite** and, per S11,
+> costs two regressions it would be wrong to pay for on leeway's schedule.
 
 **Names are declared in OTEL form; the Prometheus spelling is derived.** The
 exporter mangles names — `.` → `_`, unit appended, `_total` appended for monotonic
-counters. Hand-maintaining two lists guarantees drift. Watch for double suffixing: an
-instrument named `...pod_seconds` with unit `s` exports as `..._pod_seconds_seconds_total`;
-naming it `...pod_time` with unit `s` lands correctly on `..._pod_time_seconds_total`.
-Every metric name in this document has been written in OTEL form for that reason.
+counters. Hand-maintaining two lists guarantees drift. **Measured against
+`otelprom` v0.66.0 during S11:**
+
+| Declared | Unit | Exported as |
+|---|---|---|
+| `lookout_recoveries_reverted` | — | `lookout_recoveries_reverted_total` |
+| `lookout_events_seen_total` | — | `lookout_events_seen_total` |
+| `lookout_storms_active` (gauge) | — | `lookout_storms_active` |
+| `lookout_enrichment_payload` | `By` | `lookout_enrichment_payload_bytes_total` |
+
+`_total` is idempotent — the translator does not double it — so a name that already
+carries the suffix survives a naive port. **The unit is the live hazard:** it is
+injected into the middle of the name, before `_total`, so any instrument that sets
+`WithUnit` gets a Prometheus name nobody chose. §7.7.3's pod-seconds counter must
+therefore either leave the unit unset (and lose it on the OTLP side) or be named so
+that the injected suffix lands where intended — `...pod_time` + unit `s` →
+`..._pod_time_seconds_total`. Every metric name in this document has been written in
+OTEL form for that reason.
+
+**Counters no longer start at zero.** Also measured in S11 and worth stating
+plainly, because it is the one behaviour the bridge does not preserve: a Prometheus
+counter publishes `{...} 0` from the moment it is registered, whereas an OTEL
+instrument publishes **nothing at all** until its first record. A leeway counter
+that has never fired is absent from `/metrics`, not zero. Alerts must use
+`absent_over_time()` or `or vector(0)` rather than assuming a series exists, and
+`rate()` over a window containing the first-ever record has no zero anchor. This is
+acceptable for new instruments where the convention can be set up front; it is the
+first of the two reasons not to retrofit it onto the existing ones.
 
 **Temporality is configurable, and delta improves the restart story.** Prometheus
 requires cumulative; many OTLP backends prefer delta. Per-instrument selectors handle
@@ -1991,12 +2038,14 @@ Decisions here rest on assumptions only observation can settle. Each spike is a
 question, a method, and the decision it unblocks — no production code, roughly four
 days total. Spikes S9–S11 are new, and exist only because of the fold-in.
 
-**S9 and S10 are done** (2026-09-15) — both were code archaeology against this repo
-and needed no cluster. Between them they changed four things: the terminal-pod field
-selector is narrower, the transform's narrowing is confirmed safe, leeway owns its
-own indexes because the graph runs only under `--storm`, and half the §8.2 state
-machine is now `pkg/engine.RecoveryTracker` rather than new code. Three days remain,
-and **S1 is the one that gates a data model**.
+**S9, S10 and S11 are done** (2026-09-15) — all three were desk work against this
+repo and needed no cluster. Between them they changed five things: the terminal-pod
+field selector is narrower, the transform's narrowing is confirmed safe, leeway owns
+its own indexes because the graph runs only under `--storm`, half the §8.2 state
+machine is now `pkg/engine.RecoveryTracker` rather than new code, and the OTEL
+metrics migration §8.4 called a prerequisite turns out not to be one. Every one of
+the three deleted or narrowed work. Just under three days remain, and **S1 is the one
+that gates a data model**.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
@@ -2010,7 +2059,7 @@ and **S1 is the one that gates a data model**.
 | S8 | Real object sizes, for kwok padding and the trimmed-pod budget | §6.6, §12.1 validity | 0.5 d |
 | ~~S9~~ | ~~Does any source need terminal pods, or fields the transform strips?~~ | **RESOLVED** — §6.1 amended | done |
 | ~~S10~~ | ~~How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide?~~ | **RESOLVED** — §6.2 and §8.2 amended | done |
-| S11 | Cost of migrating the sentinel's ~30 metrics to the OTEL API | §8.4 scope | 0.25 d |
+| ~~S11~~ | ~~Cost of migrating the sentinel's ~30 metrics to the OTEL API~~ | **RESOLVED** — §8.4 amended; migration descoped | done |
 
 **S1 — Observe a fallback.** No node in any cluster inspected has ever left rank 0, so
 the entire fallback half of §7.7 is unvalidated. This is not a test-coverage gap;
@@ -2114,13 +2163,79 @@ answer moved work in both directions:
 - `PodsUnder` and `OwnerChain` stay useful off the hot path — verifier rebuild and
   owner resolution — with a fallback for when storm is off.
 
-**S11 — OTEL metrics migration.** §8.4 requires a `MeterProvider`, but
-`internal/watch/metrics.go` uses a raw Prometheus registry and
-`internal/telemetry/otel.go` bootstraps traces only. *Method:* prototype the migration
-of three existing instruments (a counter, a gauge, a labelled counter with
-`reasonLabelCap`) and measure the diff. *Done when* we know whether this is a
-half-day prerequisite or a week-long refactor — and therefore whether leeway lands
-before or after it.
+**S11 — OTEL metrics migration. RESOLVED (2026-09-15). The answer is "half a day
+*and* a week — and leeway only needs the half day."** The spike asked which of the
+two it was; the prototype's real finding is that they are separable, and the design
+had them fused.
+
+*Method, as specified:* three instruments were actually migrated in a throwaway
+branch — `lookout_recoveries_reverted_total` (plain counter), `lookout_storms_active`
+(gauge), and `lookout_events_seen_total` (labelled counter through `boundReason`) —
+onto `go.opentelemetry.io/otel/metric`, with `otelprom` bridging the `MeterProvider`
+into the sentinel's existing registry. It compiled, served, and was then reverted.
+
+**The scaffolding is genuinely small.** ~45 lines: a `newMeter` helper building the
+bridge and the `MeterProvider`, a generic `must` unwrapper (every OTEL instrument
+constructor returns `(T, error)`, and threading 43 error returns through
+`buildMetrics` is not the trade anyone wants), and passing one `otelmetric.Meter`
+down through `resolveRunners` → `newRunner`. Both readers can then hang off the one
+provider exactly as §8.4 draws it. **This is all leeway needs**, and it can land in
+Phase 2 alongside the source rather than gating it.
+
+**Migrating the existing instruments is a different job.** Measured, not estimated:
+
+| | Count |
+|---|---|
+| Instruments in `internal/watch/metrics.go` | 43 (23 `CounterVec`, 11 `Counter`, 5 `Gauge`, 3 `GaugeVec`, 1 `Histogram`) |
+| Record sites outside `metrics.go` | 85 |
+| …in a function with no `context.Context` in scope | 15 |
+| Test files touching instruments directly | 25 |
+| `testutil.ToFloat64` assertions | 88 |
+| Diff for **three** instruments | 5 files, +118/−42 |
+| Test files that stopped compiling from those three | 7, with 17 errors |
+
+There is no wrapper layer: call sites hold the `*prometheus.CounterVec` and call
+`WithLabelValues(...).Inc()` directly, so every one of the 85 is edited by hand.
+Fifteen need a `ctx` that is not there — `countResolved(sig)` became
+`countResolved(ctx, sig)` in the prototype, and that propagates. `testutil.ToFloat64`
+takes a `prometheus.Collector` and cannot accept an OTEL instrument at all, so all 88
+assertions are rewritten against a gather-and-parse or the SDK's `metricdata` reader.
+Extrapolating the three-instrument diff, this is **4–6 engineer-days of mechanical
+edits with a large blast radius and no user-visible benefit** beyond putting the old
+metrics on OTLP too.
+
+**And it is not neutral — it loses two things.** Both surfaced only because the
+prototype was built rather than reasoned about:
+
+1. **`MetricsInventory()` stops being derived.** `internal/watch/metricsdocs.go`
+   builds the docs-site metrics page by calling `Describe()` on each live collector
+   and regex-parsing `prometheus.Desc.String()`, precisely so names and help strings
+   "cannot drift from metrics.go". An `otelmetric.Int64Counter` is an opaque
+   interface whose only method is `Add` — the concrete type is an unexported
+   `*metric.int64Inst`. There is no `Describe`, no name accessor, no description
+   accessor. The three migrated rows had to be hand-written back into the table,
+   which is exactly the drift `TestMetricsInventoryComplete` and
+   `TestDescRegexpParsesHelp` exist to prevent. Migrating all 43 deletes that
+   guarantee for the whole metrics page.
+2. **Zero-valued series disappear** — see §8.4. Every counter that has not yet fired
+   vanishes from `/metrics` instead of reading `0`.
+
+**Dependency cost** is modest but real, and rubs against the recorded
+dependency-minimisation policy: `go.opentelemetry.io/otel/metric` is already in
+`go.mod` as *indirect* and `sdk/metric` is already in the module graph, so both come
+free. New direct requirements are `go.opentelemetry.io/otel/exporters/prometheus`
+(**v0.66.0 — still pre-1.0**, with its own release line), which pulls
+`github.com/prometheus/otlptranslator`, plus an OTLP metric exporter when the push
+side is switched on. The pre-1.0 bridge is the dependency worth flagging: it is the
+component whose name-mangling behaviour the table in §8.4 pins, and a v0.x module is
+entitled to change it.
+
+*Decision.* §8.4's "migrate the existing instruments first" is **descoped**, and its
+"two registries" trap does not apply — there is one registry either way. Leeway's
+instruments are OTEL-native from Phase 2; the 43 existing ones stay Prometheus-native
+and reach OTLP only if someone later files the refactor on its own merits. Record
+that as a known asymmetry rather than a surprise: until then, an OTLP backend sees
+leeway's metrics and not the sentinel's.
 
 ---
 
@@ -2132,9 +2247,9 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S9 and S10 **done**; S11 next, then S1–S8 in parallel | Package boundaries fixed (done); transform registry written; OTLP scope known |
+| **0 — Spikes** (0.5 wk) | S9, S10 and S11 **done**; S1–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); transform registry written |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9 | Counters provably correct under property tests at 10k pods; existing source tests still green |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
@@ -2145,11 +2260,13 @@ independent of 5.
 Roughly 14 weeks, against ~19 for the standalone version — the difference is almost
 entirely the plumbing lookout already owns.
 
-**Phase 0 is not optional and not a formality.** S9 and S10 have already earned it:
-between them they caught a field selector that would have silently disabled eviction
-detection, and moved half the §8.2 state machine from "write it" to "implement one
-interface". Both were a morning's reading. What is left carries the same shape of
-risk — **S1 gates the Phase 6 data model**, and discovering its answer at week 12
+**Phase 0 is not optional and not a formality.** S9, S10 and S11 have already earned
+it: between them they caught a field selector that would have silently disabled
+eviction detection, moved half the §8.2 state machine from "write it" to "implement
+one interface", and took a week-long metrics refactor off the critical path by
+finding that the pull exporter registers into the registry the sentinel already has.
+All three were desk work — a morning's reading apiece, and S11 a short-lived
+prototype. What is left carries the same shape of risk — **S1 gates the Phase 6 data model**, and discovering its answer at week 12
 means rebuilding the transition model rather than adjusting it. S8 is a softer gate
 on Phase 8: without it, the scale numbers are measured against undersized objects
 and mean nothing.
@@ -2169,15 +2286,23 @@ findings, restart-safe, no baselines and no compute classes.
    annotation, so §7.7.2 reads ground truth and demotes inference to fallback plus
    cross-check. Undocumented and unguaranteed; risk accepted, mitigated by the
    fallback path and the attribution SLIs. Residual: **S1**, **S2**, **S3**.
-3. **Does lookout's DESIGN §6.2 scale paragraph get edited, or does this document
-   lower its target?** The two currently disagree in the same repo (§2.5). They are
-   reconcilable — the numbers agree once you separate memory-in-pods from
-   CPU-in-events — but one of them has to change, and it is a maintainer call, not
-   a design one.
-4. **Should `topology-drift` be enabled by default?** §8.3 routes Tier C to metrics
-   only, so the default deployment adds roughly zero agent sessions, which makes
-   default-on defensible. But it also adds the §6.1 transform change to every
-   deployment. Leaning default-on after Phase 4, default-off before.
+3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
+   DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
+   design point, split across the two axes they were always two answers to. See
+   §2.5 item 2 and DESIGN §6.2. Residual: **S8**, which remeasures the pod-cache
+   line that §6.1's narrowed transform invalidated, and therefore the §6.6 tier
+   table.
+4. ~~Should `topology-drift` be enabled by default?~~ — **resolved 2026-09-15:
+   yes, default-on.** §8.3 routes Tier C to metrics only, so the default
+   deployment adds roughly zero agent sessions, and a drift detector nobody turns
+   on detects nothing. The condition attached to it is the one that was always the
+   real question: default-on means the §6.1 informer transform reaches *every*
+   deployment, and today there is no transform at all (`wiring.go:963` is a bare
+   `NewSharedInformerFactory`). **The transform must not ship before S9's remaining
+   deliverable** — the preserved-field registry and the test that fails when a field
+   is added to the strip list without an entry. Until that lands, the source builds
+   default-on but the transform stays off, which costs only the pod-cache memory
+   S8 is measuring. Both land in Phase 2.
 5. **Is fallback depth per-workload or per-class?** §7.7 aggregates per axis by
    default. If two Deployments share a class but only one is falling back, per-axis
    metrics hide it — but per-subject labels multiply cardinality.
