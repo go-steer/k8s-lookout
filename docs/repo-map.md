@@ -245,7 +245,10 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   [`fleet-audit-detectors-design.md`](./fleet-audit-detectors-design.md)
   (proposal — re-basing the fleet audit onto deterministic `checks`),
   [`audit-ingestion-contract.md`](./audit-ingestion-contract.md)
-  (its consumer seam: `emit.Finding` → an audit ledger).
+  (its consumer seam: `emit.Finding` → an audit ledger),
+  [`leeway-design.md`](./leeway-design.md)
+  (proposal — placement-drift detection as `pkg/leeway` plus two
+  watch sources; the runtime complement to `audit.no_spread`).
 - [`milestones/`](./milestones/) — M0–M5 completion records with
   exit-check evidence and the post-M5 review backlog (M5.md).
 - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
