@@ -1,9 +1,10 @@
 # leeway — Placement Drift Detection
 
-**Status:** Draft v0.5 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
+**Status:** Draft v0.6 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
 the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
-ships default-on. Spikes S9, S10 and S11 resolved against this repo; S1 still gates
-the §7.7 data model.
+ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1 resolved
+against a live GKE cluster**, which rewrote the §7.7.2 annotation model and deleted
+`RankTracker.Move`. No spike now gates a data model.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
@@ -1153,7 +1154,49 @@ class the two coincide because no `priorityScore` is set. On a scored class they
 diverge, and rank must come from `assignRanks`. Reading the annotation as a rank
 would invert the ordering on any scored class.
 
-Two things temper it:
+**The annotation is not always a number, and not always present.** Spike S1 drove a
+real class through fallback, migration-back and rule invalidation on
+`std-simian-test` (2026-09-15) and observed three distinct value shapes:
+
+| Value | Meaning | When |
+|---|---|---|
+| `"0"`, `"1"`, … | 0-based index into `spec.priorities` | a rule matched |
+| `ccc_no_rule_matching` | the class has **no** rule this node satisfies | class edited under a running node |
+| `ccc_scale_up_anyway` | provisioned outside the priority list entirely | `whenUnsatisfiable: ScaleUpAnyway` and nothing matched |
+| *(absent)* | not stamped **yet** | first ~43 s of every node's life |
+
+`strconv.Atoi` on this field fails on three of the four cases, so `parseIndex` must
+be total over strings, not a numeric parse with an error branch. The two sentinels
+are also not errors — they are **findings**. `ccc_no_rule_matching` says the class
+was edited out from under running capacity; `ccc_scale_up_anyway` says the class
+stopped constraining placement at all. Both are exactly the silent degradation this
+subsystem exists to surface, and both would be discarded by a parser that only
+believes in integers.
+
+**The absent case is the dangerous one, because it is transient and universal.**
+Every node observed carried the class *label* and the class *taint* from creation
+but no rank annotation for 33–44 s afterwards, and in two of four cases pods were
+already `Running` on the node before the rank appeared:
+
+| node | created | rank stamped | lag |
+|---|---|---|---|
+| `…nap-n2-highcpu-4--ee04a49d-bq7h` | 18:18:19 | `1` at 18:18:52 | 33 s |
+| `…nap-n4-highcpu-4--d7cef40b-th48` | 18:25:11 | `0` at 18:25:55 | 44 s |
+| `…nap-n4-highcpu-4--d156f7c3-rpvc` | 18:32:03 | `0` at 18:32:47 | 44 s |
+| `…nap-n4-highcpu-4--d7cef40b-x627` | 18:45:04 | `ccc_scale_up_anyway` at 18:45:47 | 43 s |
+
+Defaulting absent-to-zero — the obvious reading, and the one the §13 sweep snippet
+originally used — manufactures a spurious rank-0 → rank-1 fallback 40 seconds into
+the life of every node that lands anywhere but rank 0. Absent must stay absent:
+`RankUnknown`, contributing to no bucket, with the pods on that node parked until
+the annotation arrives.
+
+The same node also mutates through these states in place — `rpvc` went
+`(absent) → 0 → ccc_no_rule_matching → ccc_scale_up_anyway` across 13 minutes without
+being replaced — so the annotation is a live field to be watched, not a birth
+certificate to be read once at node-add.
+
+Two further things temper it:
 
 - **It is undocumented.** `ccc_priority_index` does not appear in GKE's public
   documentation, and the unprefixed key marks it as internal with no stability
@@ -1179,17 +1222,40 @@ absent, **cross-check** when it is present.
 // and catches the two failures that are otherwise invisible — GKE changing the
 // annotation's meaning, and our own parsing of spec.priorities being wrong.
 func (r *RankResolver) Resolve(node *v1.Node, axis *PreferenceAxis) RankPlacement {
-    declared, hasDeclared := parseIndex(node.Annotations[r.cfg.PriorityIndexAnnotation])
+    // Total over strings: the field carries integers, two sentinels, or nothing
+    // at all (S1). Only declaredIndex is an index; the rest are states.
+    declared := parseDeclared(node.Annotations[r.cfg.PriorityIndexAnnotation])
     inferred, quality := r.match(profileOf(node), axis) // first-match-wins
+
+    switch declared.kind {
+    case declaredNoRuleMatching:
+        // The class was edited while this node kept running. Not an error, and
+        // not inferable either — no rule matches by construction.
+        r.metrics.NoRuleMatching.Add(1, attribute.String("axis", axis.Name))
+        return RankPlacement{Rank: RankUnsatisfiable, RuleIndex: -1, Source: SourceNodeAnnotation}
+    case declaredScaleUpAnyway:
+        // The class stopped constraining placement. Every pod here is off-axis.
+        r.metrics.ScaleUpAnyway.Add(1, attribute.String("axis", axis.Name))
+        return RankPlacement{Rank: RankOffAxis, RuleIndex: -1, Source: SourceNodeAnnotation}
+    case declaredAbsent:
+        // Transient for the first ~43s of every node's life, so this is the
+        // common path at node-add, not an anomaly. Inference may still answer;
+        // if it does not, stay unknown rather than defaulting to rank 0.
+        if quality != matchOK {
+            r.metrics.Pending.Add(1, attribute.String("axis", axis.Name))
+            return RankPlacement{Rank: RankUnknown, RuleIndex: -1, Source: SourceNone}
+        }
+    }
 
     var idx int
     var src RankSource
+    hasDeclared := declared.kind == declaredIndex
     switch {
-    case hasDeclared && quality == matchOK && declared != inferred:
+    case hasDeclared && quality == matchOK && declared.index != inferred:
         r.metrics.Disagreement.Add(1, attribute.String("axis", axis.Name))
         fallthrough
     case hasDeclared:
-        idx, src = declared, SourceNodeAnnotation
+        idx, src = declared.index, SourceNodeAnnotation
     case quality == matchOK:
         idx, src = inferred, SourceInferred
     default:
@@ -1277,11 +1343,18 @@ lookout.leeway.preference.rank_weighted_time  {provider,axis,spec_hash}       un
 # Supporting.
 lookout.leeway.preference.pods                {...,rank}            gauge
 lookout.leeway.preference.transitions         {...,from_rank,to_rank,lateral}
+                                       # SUBJECT-level, not pod-level (S1): a pod is
+                                       # born and dies at one rank and never moves.
 lookout.leeway.preference.unmatched           {...}   # no rule matched, no annotation
 lookout.leeway.preference.ambiguous           {...}   # node matched >1 rule
 lookout.leeway.preference.disagreement        {...}   # annotation != inferred
 lookout.leeway.preference.out_of_range        {...}   # stale index after a class edit
 lookout.leeway.preference.axis_invalid        {...}   # partially-scored class
+
+# The two GKE sentinels (S1). Both are findings, not parse errors — see §7.7.2.
+lookout.leeway.preference.no_rule_matching    {...}   # ccc_no_rule_matching
+lookout.leeway.preference.off_axis            {...}   # ccc_scale_up_anyway
+lookout.leeway.preference.rank_pending        {...}   # node has the class, no rank yet
 lookout.leeway.preference.axis_info           {provider,axis,spec_hash,ordering,rules,tiers}
 ```
 
@@ -1311,28 +1384,51 @@ func (b *rankBucket) accumulate(now time.Time) {
     b.lastFlush = now
 }
 
-func (t *RankTracker) Move(axis AxisKey, from, to int, at time.Time) {
-    t.bucket(axis, from).accumulate(at); t.bucket(axis, from).count--
-    t.bucket(axis, to).accumulate(at);   t.bucket(axis, to).count++
+// Enter/Leave, not Move: S1 established that pods are created and destroyed at a
+// rank, never moved between ranks. The two calls are independent and usually
+// minutes apart, on different pods.
+func (t *RankTracker) Enter(axis AxisKey, rank int, at time.Time) {
+    t.bucket(axis, rank).accumulate(at); t.bucket(axis, rank).count++
+}
+
+func (t *RankTracker) Leave(axis AxisKey, rank int, at time.Time) {
+    t.bucket(axis, rank).accumulate(at); t.bucket(axis, rank).count--
 }
 ```
 
-> **`Move` may be modelling an event that does not occur.** No cluster we have
-> inspected has ever fallen back — every node observed sits at rank 0 — so we have not
-> established whether a fallback *mutates* a pod's node assignment or simply
-> provisions a new node in a new NAP pool and schedules a *new* pod there. If it is
-> the latter, which the per-machine-type pool naming makes likely, then no individual
-> pod ever changes rank: rank-0 pods die and rank-1 pods are born.
+> **`Move` was modelling an event that does not occur. Spike S1 confirmed the
+> pessimistic branch** (`std-simian-test`, 2026-09-15). A fallback provisions a new
+> node in a new NAP pool and the ReplicaSet creates a *new pod* there; the old pod is
+> deleted. Observed end to end, twice:
 >
-> Pod-seconds accounting is unaffected — the old pod stops accruing at rank 0 and the
-> new one starts at rank 1, correct either way. But the transitions counter would be
-> permanently empty, and the migration-back finding is built on observing
-> `from_rank > to_rank`, so it would never fire. In that case the signal must be
-> reconstructed at **subject** level — the Deployment's rank *mix* shifted between
-> evaluations — rather than per pod.
+> ```
+> 18:14:03  Deployment created, class rank 0 unsatisfiable
+> 18:14:10  pod vd5cj  Pending/Unschedulable
+> 18:18:52  node bq7h  rank 1     — new node, NEW NAP pool
+> 18:18:30  pod vd5cj  Running on bq7h
+> ---- rank 0 made satisfiable at 18:20:54 ----
+> 18:25:11  node th48  rank 0     — new node, new pool, different zone
+> 18:25:33  pod vhp6p  bound to th48          ← a DIFFERENT pod
+> 18:27:11  node bq7h  drained and deleted    ← 2 min AFTER the rank-0 node came up
+> ```
 >
-> This is a data-model question, not a test-coverage question, and it is why spike
-> **S1** must precede the compute-class source rather than accompany it.
+> **No pod ever changes rank.** `vd5cj` died at rank 1 and `vhp6p` was born at rank 0.
+> `RankTracker.Move` has no per-object event to hang on and is deleted; pod-seconds
+> accounting survives unchanged, because the old pod stops accruing and the new one
+> starts, which is correct either way. The transitions counter and the migration-back
+> finding must both be reconstructed at **subject** level — *this Deployment's rank
+> mix shifted between evaluations* — exactly as the pessimistic branch predicted.
+>
+> Two details that only fall out of watching it happen:
+>
+> - **Ranks overlap during migration.** The rank-0 node was up at 18:25:11 and the
+>   rank-1 node was not drained until 18:27:11. For two minutes the class legitimately
+>   had capacity at both ranks. "The current rank of this workload" is not a scalar
+>   during a migration, and a subject-level differ must compare *mixes*, not modes,
+>   or it will report a spurious lateral flap every time GKE optimises.
+> - **Migration-back works and is slow.** `activeMigration.optimizeRulePriority: true`
+>   acted 4 m 17 s after the class edit. The finding is real; its detection window
+>   must be minutes, not seconds.
 
 The original question — *is the second priority used more than the first?* — is a
 PromQL one-liner:
@@ -1954,9 +2050,14 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
 - **Rank resolution** — table-driven over the §7.7.2 precedence: annotation present,
   absent (matcher fallback), disagreeing (ground truth wins, counter increments),
   overlapping rules, no match, sparse rules, unsupported fields, machine-family
-  derivation. Seed fixtures from the real `ComputeClass` specs and node dumps — the
-  risk here is that our platform assumptions are wrong, and synthetic cases cannot
-  falsify them.
+  derivation, and the two sentinels `ccc_no_rule_matching` / `ccc_scale_up_anyway`.
+  Seed fixtures from the real `ComputeClass` specs and node dumps — the risk here is
+  that our platform assumptions are wrong, and synthetic cases cannot falsify them.
+  S1's capture is the seed: node dumps at every state plus a 1,537-row timeline of one
+  class through fallback, migration-back, rule invalidation and spot preemption.
+  **One case must be a replay of that timeline**, because the ordering — class label
+  before rank annotation, rank-0 node up before rank-1 node drained — is what the
+  naive implementations get wrong, and no static fixture encodes ordering.
 - **Eligibility under compute classes** — assert a class-pinned workload whose class
   exists in one zone reports *zero* drift, not maximal skew (§7.7.6). This belongs in
   the false-positive corpus; it is the failure mode most likely to discredit the tool
@@ -2044,12 +2145,16 @@ field selector is narrower, the transform's narrowing is confirmed safe, leeway 
 its own indexes because the graph runs only under `--storm`, half the §8.2 state
 machine is now `pkg/engine.RecoveryTracker` rather than new code, and the OTEL
 metrics migration §8.4 called a prerequisite turns out not to be one. Every one of
-the three deleted or narrowed work. Just under three days remain, and **S1 is the one
-that gates a data model**.
+the three deleted or narrowed work.
+
+**S1 is also done** (2026-09-15), on `std-simian-test`, and unlike the other three it
+*added* work: it confirmed the pessimistic branch of §7.7.3 and turned up three states
+the data model did not have. No spike now gates a data model. Just over two days
+remain.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
-| S1 | What *is* a compute-class fallback — new node or mutated node? | §7.7.3 transition model | 0.5 d |
+| ~~S1~~ | ~~What *is* a compute-class fallback — new node or mutated node?~~ | **RESOLVED** — §7.7.2 and §7.7.3 amended; `Move` deleted | done |
 | S2 | Does `ccc_priority_index` stay an array index when `priorityScore` is set? | §7.7.1 `assignRanks` | 0.5 d |
 | S3 | Reservation and accelerator node label keys | §7.7.2 extractor config | 0.25 d |
 | S4 | Can we read the scheduler's `defaultConstraints`? | FR-9 correctness | 0.25 d |
@@ -2061,36 +2166,54 @@ that gates a data model**.
 | ~~S10~~ | ~~How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide?~~ | **RESOLVED** — §6.2 and §8.2 amended | done |
 | ~~S11~~ | ~~Cost of migrating the sentinel's ~30 metrics to the OTEL API~~ | **RESOLVED** — §8.4 amended; migration descoped | done |
 
-**S1 — Observe a fallback.** No node in any cluster inspected has ever left rank 0, so
-the entire fallback half of §7.7 is unvalidated. This is not a test-coverage gap;
-§7.7.3 shows it can invalidate the transition data model outright.
+**~~S1 — Observe a fallback.~~ RESOLVED 2026-09-15.** Provoked rather than found: no
+node in any inspected cluster had ever left rank 0, so the fleet sweep was skipped in
+favour of building the condition. On `std-simian-test` (1.36.4-gke.1082000,
+us-central1), namespace `leeway`, a `ComputeClass` named `leeway-fallback-probe` whose
+rank-0 rule asks for a **large N4 spot machine** — `machineFamily: n4, spot: true,
+minCores: 128`, where N4 caps at 80 vCPU in this region — and whose rank-1 rule is a
+plain `machineFamily: n2`, plus one `pause` Deployment. Making rank 0 unsatisfiable by
+*shape* rather than by stockout made the fallback deterministic and free: rank 0 never
+provisions, so the expensive half of the experiment cost nothing.
 
-*Method, free part first:* sweep the fleet for a cluster that has already fallen back,
-before building anything.
+| | Answer |
+|---|---|
+| (i) rank-1 node carries `ccc_priority_index: "1"` | **Yes.** First node observed off rank 0 |
+| (ii) new node or mutated node | **New node, new NAP pool.** Mutation is impossible: existing pools carry another class's `NoSchedule` taint |
+| (iii) direct bind or Pending | **Pending, 4 m 27 s.** Scale-up triggered at 7 s |
+| (iv) `DoNotScaleUp` vs `ScaleUpAnyway` | Both leave running pods alone. `DoNotScaleUp` refuses the scale-up and stamps `ccc_no_rule_matching`; `ScaleUpAnyway` provisions off-list and stamps `ccc_scale_up_anyway` |
+| (v) migration back | **Real, 4 m 17 s, and a different pod.** See §7.7.3 |
 
-```
-for c in $(kubectl config get-contexts -o name); do
-  kubectl --context "$c" get nodes -o json 2>/dev/null \
-  | jq -r --arg c "$c" '.items[]
-      | select(.metadata.annotations.ccc_priority_index // "0" != "0")
-      | [$c, .metadata.name, .metadata.annotations.ccc_priority_index,
-         .metadata.labels["cloud.google.com/compute-class"]] | @tsv'
-done
-```
+Four results beyond the question asked:
 
-*Otherwise provoke one* in a test project: a `ComputeClass` whose rank-0 rule is
-unsatisfiable (a machine family absent from the region) and whose rank-1 rule is
-ordinary, plus one throwaway Deployment. Capture, in order: (i) does the rank-1 node
-carry `ccc_priority_index: "1"`; (ii) is a **new** node and NAP pool created, or is an
-existing node re-labelled — this decides the transition model; (iii) does the pod bind
-directly or go Pending; (iv) the difference between `whenUnsatisfiable: DoNotScaleUp`
-and the default; (v) on making rank 0 satisfiable again, whether
-`activeMigration.optimizeRulePriority` produces an observable move, whether it is the
-same pod, and how long it takes.
+- **The annotation has a non-numeric domain** — `ccc_no_rule_matching`,
+  `ccc_scale_up_anyway`, and absent-for-43 s — and it mutates in place on a live node.
+  §7.7.2 now carries the full state machine. This is the largest single change S1
+  caused, and no amount of reading would have produced it.
+- **`RankTracker.Move` is deleted.** Pods are born and die at a rank; they never move.
+- **Spot churn is a false-positive generator.** `gcloud` recorded
+  `compute.instances.preempted` on a rank-0 spot node after 7 m 30 s, followed by
+  `compute.instances.repair.recreateInstance` **reusing the node name**, with the
+  replacement pod landing in a different zone. Node identity keyed on name is not
+  stable across preemption, and a zone-skew detector watching a spot-backed tier will
+  see clean zone migrations that are not drift. §7.1's normal-deviation split has to
+  absorb this; it is now the second-largest false-positive class after §7.7.6.
+- **`capacityCheckWaitTimeSeconds` is not usable here** — admission rejects it with
+  *"only supported for Flex Start and for multi-host TPUs"* — so fallback latency is
+  GKE's and cannot be tuned down for tests.
 
-Item (ii) is the only thing that can validate `RankTracker.Move`; (v) is the only thing
-that can validate the migration-back finding. *Done when* we know whether per-pod rank
-transitions exist at all. Keep the class as the permanent test fixture.
+Also confirmed in passing, because §7.7.6 rests on it: GKE **auto-injects** the
+`cloud.google.com/compute-class=<name>:NoSchedule` toleration into a pod whose
+manifest declares none.
+
+The class is kept as the permanent test fixture, restored to its rank-0-unsatisfiable
+form so it provisions nothing while idle. Node dumps and the 1,537-row observation
+timeline seed the §16 fixtures.
+
+> **For anyone repeating this:** do not write
+> `.metadata.annotations.ccc_priority_index // "0"`. That default — which an earlier
+> draft of this section used — reads every unstamped and every sentinel-stamped node
+> as rank 0.
 
 **S2 — `priorityScore` semantics.** The inspected cluster runs 1.36.3-gke.1537000, so
 the field is supported, but no class uses it. *Method:* add a scored class, with a tie,
@@ -2247,7 +2370,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S9, S10 and S11 **done**; S1–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); transform registry written |
+| **0 — Spikes** (0.5 wk) | S1, S9, S10 and S11 **done**; S2–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); transform registry written |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -2266,10 +2389,13 @@ eviction detection, moved half the §8.2 state machine from "write it" to "imple
 one interface", and took a week-long metrics refactor off the critical path by
 finding that the pull exporter registers into the registry the sentinel already has.
 All three were desk work — a morning's reading apiece, and S11 a short-lived
-prototype. What is left carries the same shape of risk — **S1 gates the Phase 6 data model**, and discovering its answer at week 12
-means rebuilding the transition model rather than adjusting it. S8 is a softer gate
-on Phase 8: without it, the scale numbers are measured against undersized objects
-and mean nothing.
+prototype. **S1 then justified the whole argument for running spikes first**: it took
+an afternoon on a live cluster, it invalidated the §7.7.3 transition model outright,
+and it turned up an annotation state machine that no amount of desk work would have
+produced. Discovering that at week 12 would have meant rebuilding the data model
+rather than adjusting it. S8 is now the remaining gate, a softer one on Phase 8:
+without it, the scale numbers are measured against undersized objects and mean
+nothing.
 
 Phases 1–4 are a shippable increment at around week 9: declared and inferred intent,
 findings, restart-safe, no baselines and no compute classes.
@@ -2285,7 +2411,9 @@ findings, restart-safe, no baselines and no compute classes.
    2026-09-11. GKE records the achieved priority in the `ccc_priority_index` node
    annotation, so §7.7.2 reads ground truth and demotes inference to fallback plus
    cross-check. Undocumented and unguaranteed; risk accepted, mitigated by the
-   fallback path and the attribution SLIs. Residual: **S1**, **S2**, **S3**.
+   fallback path and the attribution SLIs. **S1 closed 2026-09-15** and materially
+   revised this: the annotation is not purely numeric and is not immediately
+   present — see §7.7.2. Residual: **S2**, **S3**.
 3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
    DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
    design point, split across the two axes they were always two answers to. See
