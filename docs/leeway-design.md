@@ -2,9 +2,10 @@
 
 **Status:** Draft v0.6 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
 the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
-ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1 resolved
-against a live GKE cluster**, which rewrote the §7.7.2 annotation model and deleted
-`RankTracker.Move`. No spike now gates a data model.
+ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1 and S2
+resolved against a live GKE cluster** — S1 rewrote the §7.7.2 annotation model and
+deleted `RankTracker.Move`, S2 confirmed §7.7.1 unchanged and added a second fallback
+shape to §7.7.3. No spike now gates a data model.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
@@ -1069,6 +1070,27 @@ the opposite direction to list position — and **several rules may share a scor
 making them equal-preference alternatives rather than a fallback sequence. GKE
 requires the field on all rules in a class or none.
 
+**Spike S2 confirmed all three claims against a live cluster** (`std-simian-test`,
+2026-09-15) and the confirmation of the last one is not a documentation reading:
+applying a class where one of two rules carried a score was refused at admission
+with *"PriorityScore must be set for all priorities or for none of them"*. The
+all-or-nothing rule is enforced by the API server, not merely documented.
+
+The decisive observation for the first claim: a class whose **least** preferred rule
+sat at list position 0 (`n2`, score 10) ahead of two tied rules (`n4` and `c3`, both
+score 50). GKE skipped index 0 entirely and provisioned `c3`, stamping
+`ccc_priority_index: "2"` — the *index*, on a node the class ranks first. Had the
+field meant a rank, a top-tier node would have read `"0"`. Preference and identity
+are genuinely separate wire values, and only one of them is on the node.
+
+It also produced the peer case by accident, which is the better evidence. The first
+scale-up attempt was `n4` (index 1) and it hit a real stockout — *"GCE out of
+resources"* in `us-central1-f`. GKE fell through to `c3` (index 2). The index rose
+by one; the rank did not move, because both rules score 50. **An implementation that
+read the annotation as a rank would have reported a fallback here, on the first
+workload it ever saw, and it would have been wrong** — the class author declared
+those two families interchangeable.
+
 ```go
 // Rank is always derived, never read off the wire. Without priorityScore, list
 // position is the preference order and Rank == Index. With scores, rules group by
@@ -1094,8 +1116,10 @@ func assignRanks(rules []PreferenceRule) OrderingMode {
         }
         return ByPriorityScore
     default:
-        // GKE documents this as all-or-nothing. Seeing otherwise means our
-        // understanding is wrong, so refuse to invent an ordering.
+        // Unreachable against a current GKE API server, which rejects a mixed
+        // class at admission (S2). Kept because this decodes objects we did not
+        // admit — an older control plane, a CRD restored from backup, or a
+        // non-GKE provider reusing the shape. Refuse to invent an ordering.
         return OrderingInvalid
     }
 }
@@ -1152,7 +1176,13 @@ and removes the largest correctness risk in §7.7.
 Note precisely what it gives us: **rule identity, not preference rank.** On this
 class the two coincide because no `priorityScore` is set. On a scored class they
 diverge, and rank must come from `assignRanks`. Reading the annotation as a rank
-would invert the ordering on any scored class.
+would invert the ordering on any scored class — S2 measured exactly that divergence
+(index `"2"` on a rank-0 node) and §7.7.1 records the run.
+
+The consequence is a hard dependency, not a preference: **a node cannot be ranked
+from the node alone.** The annotation names a rule; only the `ComputeClass` object
+says what that rule is worth. So the class is a watched input, and a rank resolved
+while its class is unsynced is `RankUnknown` — never `0`.
 
 **The annotation is not always a number, and not always present.** Spike S1 drove a
 real class through fallback, migration-back and rule invalidation on
@@ -1297,8 +1327,12 @@ preferenceAxes:
         anyOf:
           - { label: cloud.google.com/gke-provisioning, notEquals: standard } # verified
           - { label: cloud.google.com/gke-spot, equals: "true" }
-      reservation: { label: cloud.google.com/reservation-name }    # UNVERIFIED — S3
-      accelerator: { label: cloud.google.com/gke-accelerator }     # UNVERIFIED — S3
+      reservation: { label: cloud.google.com/reservation-name }    # UNVERIFIED — S3, see §13
+      accelerator: { label: cloud.google.com/gke-accelerator }     # verified — S3
+      # Value is the GPU type verbatim as written in the rule's gpu.type
+      # ("nvidia-tesla-t4"), so the matcher compares the two directly with no
+      # normalisation. A sibling label cloud.google.com/gke-gpu-driver-version
+      # also appears; it is not placement-relevant and is deliberately unmodelled.
 ```
 
 Priority rules are **sparse**: `{machineFamily: n4}` constrains only the family and
@@ -1430,6 +1464,36 @@ func (t *RankTracker) Leave(axis AxisKey, rank int, at time.Time) {
 >   acted 4 m 17 s after the class edit. The finding is real; its detection window
 >   must be minutes, not seconds.
 
+**There is a second fallback shape, and it is the invisible one.** S2 tripped a real
+stockout and produced a fallback that looks nothing like S1's:
+
+```
+19:30:36  Deployment created
+19:30:41  pod jlfzm  TriggeredScaleUp   -> n4  (index 1)   us-central1-f
+19:31:21  pod jlfzm  FailedScaleUp      -> "GCE out of resources"
+19:32:41  node rbjh  appears            -> c3  (index 2)   us-central1-a
+19:32:25  pod jlfzm  Scheduled on rbjh                     ← the SAME pod
+```
+
+S1's fallback was **post-hoc**: a node existed at one rank, the class changed
+underneath it, and migration replaced the pod. S2's is **pre-emptive**: the preferred
+rule never produced a node, so the pod simply waited 1 m 49 s in `Pending` and was
+bound once at the rank it could get. One pod, one `Bind`, no transition — the pod was
+*born* at the achieved rank.
+
+The consequence for detection is uncomfortable. In the pre-emptive shape **nothing
+observable ever exists at the preferred rank** — no node, no pod, no annotation. The
+node and pod caches cannot distinguish "the class asked for `n4` and could not get
+it" from "the class asked for `c3` and got it". The only trace is the `FailedScaleUp`
+Event and the Pending duration, neither of which is in §7.7's inputs. So §7.7 scores
+what a workload *achieved*, and is structurally blind to what it *attempted*:
+
+- Pod-seconds and rank shares stay correct — the pod genuinely ran at that rank for
+  that long, which is what the metric claims.
+- "Unmet preference" is a **different detector** on a different input (the event
+  stream), not a variation of this one. It is out of scope here; noting it as a
+  known gap is the honest outcome rather than quietly widening §7.7 to cover it.
+
 The original question — *is the second priority used more than the first?* — is a
 PromQL one-liner:
 
@@ -1541,6 +1605,28 @@ Four things fall out, each validating an earlier decision:
 2. **The toleration is auto-injected.** Setting the class `nodeSelector` gets you a
    matching toleration for that class's taint, and only that one. So the pod is
    admissible on `n4-preferred` nodes and inadmissible on `n2-preferred` ones.
+
+   S3 found this is not one injection but a pipeline of them, and that it is not
+   confined to compute classes. A GPU node carries **two** `NoSchedule` taints —
+   `cloud.google.com/compute-class=<name>` and `nvidia.com/gpu=present` — and the
+   probe pod, whose manifest declared no tolerations at all, was admitted with both:
+
+   ```yaml
+   tolerations:                      # none of this was in the manifest
+   - { key: nvidia.com/gpu,                    operator: Exists, effect: NoSchedule }
+   - { key: cloud.google.com/compute-class, operator: Equal,
+       value: leeway-gpu-probe,                                 effect: NoSchedule }
+   ```
+
+   **Eligibility must be computed from the admitted Pod, never from a workload
+   template.** A `PodTemplateSpec` on the owning Deployment has neither toleration —
+   injection happens at Pod admission, so the template is a strictly weaker document
+   than the object that got scheduled. Any intent inference reading templates (FR-9's
+   path) will compute an eligible-node set that is too small, and §7.1's eligibility
+   reduction would then *over*-correct: it would conclude a workload is pinned to
+   fewer domains than it really is, and suppress genuine drift. This is the mirror
+   image of the §7.7.6 false positive and is the more dangerous direction, because it
+   fails silent.
 3. **Therefore its eligible zone set is one zone.** On this cluster `n4-preferred`
    has a single node, in `us-central1-f`; `n2-preferred`'s nodes are in `-a` and `-b`.
    Naive zone counting would report this Deployment as maximally skewed — 100% in one
@@ -2058,6 +2144,14 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   **One case must be a replay of that timeline**, because the ordering — class label
   before rank annotation, rank-0 node up before rank-1 node drained — is what the
   naive implementations get wrong, and no static fixture encodes ordering.
+- **Scored classes** — a separate table, because S2 showed index and rank diverge only
+  here and a fixture corpus drawn from real clusters contains no scored class at all.
+  Required cases: the S2 arrangement itself (lowest score at index 0 — assert the
+  rank-0 node resolves from annotation `"2"`); a tied score group (assert index 1 → 2
+  is **not** a rank change and emits no transition); an all-unscored class (assert
+  `Rank == Index`); and a mixed class (assert `OrderingInvalid`, even though GKE
+  rejects it at admission, because this path exists precisely for objects we did not
+  admit).
 - **Eligibility under compute classes** — assert a class-pinned workload whose class
   exists in one zone reports *zero* drift, not maximal skew (§7.7.6). This belongs in
   the false-positive corpus; it is the failure mode most likely to discredit the tool
@@ -2147,16 +2241,18 @@ machine is now `pkg/engine.RecoveryTracker` rather than new code, and the OTEL
 metrics migration §8.4 called a prerequisite turns out not to be one. Every one of
 the three deleted or narrowed work.
 
-**S1 is also done** (2026-09-15), on `std-simian-test`, and unlike the other three it
-*added* work: it confirmed the pessimistic branch of §7.7.3 and turned up three states
-the data model did not have. No spike now gates a data model. Just over two days
-remain.
+**S1 and S2 are also done** (2026-09-15), both on `std-simian-test`, and they cut in
+opposite directions. S1 *added* work: it confirmed the pessimistic branch of §7.7.3 and
+turned up three states the data model did not have. S2 confirmed §7.7.1 exactly as
+written and changed nothing structural — which matters, because between them they were
+the last two spikes that could have invalidated a data model. **No spike now gates a
+data model.** Just over two days remain.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
 | ~~S1~~ | ~~What *is* a compute-class fallback — new node or mutated node?~~ | **RESOLVED** — §7.7.2 and §7.7.3 amended; `Move` deleted | done |
-| S2 | Does `ccc_priority_index` stay an array index when `priorityScore` is set? | §7.7.1 `assignRanks` | 0.5 d |
-| S3 | Reservation and accelerator node label keys | §7.7.2 extractor config | 0.25 d |
+| ~~S2~~ | ~~Does `ccc_priority_index` stay an array index when `priorityScore` is set?~~ | **RESOLVED** — yes; §7.7.1 unchanged, §7.7.3 gained a second fallback shape | done |
+| S3 | ~~Accelerator~~ / reservation node label keys | **PARTIAL** — accelerator verified (`nvidia-tesla-t4`); reservation needs a reservation to exist | 0.1 d left |
 | S4 | Can we read the scheduler's `defaultConstraints`? | FR-9 correctness | 0.25 d |
 | S5 | Prometheus series budget and OTLP backend | §8.4 gating defaults | 0.25 d |
 | S6 | Namespace count and watch-stream headroom | §6.7 sharding viability | 0.25 d |
@@ -2215,15 +2311,80 @@ timeline seed the §16 fixtures.
 > draft of this section used — reads every unstamped and every sentinel-stamped node
 > as rank 0.
 
-**S2 — `priorityScore` semantics.** The inspected cluster runs 1.36.3-gke.1537000, so
-the field is supported, but no class uses it. *Method:* add a scored class, with a tie,
-to the S1 spike. *Done when* we know whether `ccc_priority_index` remains an index into
-`spec.priorities` under scoring or switches to meaning a rank — and whether GKE rejects
-a partially-scored class at admission or leaves us to handle `OrderingInvalid`.
+**~~S2 — `priorityScore` semantics.~~ RESOLVED 2026-09-15.** No class on any inspected
+cluster uses the field, so this too was provoked. On `std-simian-test`, a class
+(`leeway-scored-probe`) arranged so index order and preference order cannot coincide:
 
-**S3 — Reservation and accelerator labels.** The two remaining unverified extractor
-keys. *Method:* one reservation-backed node and one GPU node, dump labels. *Done when*
-the §7.7.2 config has no `UNVERIFIED` markers left.
+```yaml
+priorities:
+  - machineFamily: n2   # index 0, score 10 — LEAST preferred
+    priorityScore: 10
+  - machineFamily: n4   # index 1, score 50 — tied most preferred
+    priorityScore: 50
+  - machineFamily: c3   # index 2, score 50 — tied most preferred
+    priorityScore: 50
+```
+
+| | Answer |
+|---|---|
+| Index or rank under scoring? | **Still an index.** The winning node was `c3` — list position 2, preference tier 0 — and was stamped `ccc_priority_index: "2"`. A rank reading would have said `"0"` |
+| Is scoring honoured over list order? | **Yes.** Index 0 was skipped outright; scale-up went straight to a score-50 rule |
+| Partially-scored class at admission | **Rejected.** `spec: Invalid value: PriorityScore must be set for all priorities or for none of them`. `OrderingInvalid` is unreachable via the GKE API server |
+
+So §7.7.1 needed no change. That is the useful result — it was the last spike that
+could have invalidated a data model, and it did not.
+
+Two results beyond the question asked:
+
+- **The peer case occurred unprompted, and it is a live false-positive source.** The
+  `n4` scale-up hit a genuine stockout (*"GCE out of resources"*, `us-central1-f`) and
+  GKE fell through to `c3`. Index 1 → index 2, **rank unchanged**, because the author
+  scored them equal. Any implementation reading the annotation as a rank reports a
+  fallback on the very first workload it sees. §7.7.1 records the timeline.
+- **A second, structurally invisible fallback shape.** Because the preferred rule never
+  produced a node, the *same* pod waited in `Pending` and was bound once at index 2 —
+  no transition, nothing ever observable at the preferred rank. §7.7.3 now separates
+  this pre-emptive shape from S1's post-hoc one and marks "unmet preference" as a
+  known gap belonging to a different detector on the event stream, not to §7.7.
+
+The absent-annotation window from S1 reproduced here on an unrelated class (`<none>`
+at 19:32:41, `"2"` at 19:32:53), which is the independent confirmation §7.7.2 wanted.
+
+**S3 — Reservation and accelerator labels. PARTIALLY RESOLVED 2026-09-15.** The two
+keys are independent and only one could be closed.
+
+**Accelerator: verified.** A class with `gpu: {type: nvidia-tesla-t4, count: 1}` on
+`machineFamily: n1` provisioned `n1-standard-2` + 1×T4 (the first attempt, L4 on `g2`,
+hit *"GCE out of resources"* in `us-central1-a` — L4 capacity is scarce and `n1`/T4 is
+the reliable probe). The node carries:
+
+```
+cloud.google.com/gke-accelerator        = nvidia-tesla-t4   ← the extractor key
+cloud.google.com/gke-gpu-driver-version = default
+```
+
+The value is the rule's `gpu.type` verbatim, so the matcher compares without
+normalising. §7.7.2's `accelerator` marker is cleared.
+
+**Reservation: still `UNVERIFIED`.** The project holds no reservations
+(`gcloud compute reservations list` → 0), so the key cannot be observed without
+creating one, and creating a billable GCE reservation was outside what this run was
+authorised to do. It stays marked, and Phase 6 must not assume the key. Two mitigations
+in the meantime: the extractor is config, so a wrong default is a one-line fix in the
+field rather than a code change; and `reservations` is already in §7.7.2's *supported*
+rule set, which means a class using it will match-or-miss on a key we have not
+confirmed — so until this closes, treat an axis whose rules mention `reservations` as
+inference-disabled and annotation-only.
+
+*Done when* a reservation-backed node's labels are dumped and the last `UNVERIFIED`
+marker in §7.7.2 is gone. Cost is a few cents for a minimal short-lived reservation;
+it needs the permission, not the budget.
+
+**Beyond the question asked:** the GPU node carries a *second* `NoSchedule` taint
+(`nvidia.com/gpu=present`) and the probe pod was admitted with tolerations for both,
+having declared neither. §7.7.6 now records the consequence — eligibility must be read
+off the admitted Pod, because a `PodTemplateSpec` has none of the injected tolerations
+and yields an eligible-node set that is too small.
 
 **S4 — Scheduler default constraints.** `PodTopologySpread.defaultConstraints` shapes
 scheduling but is not readable through the API, and static config that silently
@@ -2370,7 +2531,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1, S9, S10 and S11 **done**; S2–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); transform registry written |
+| **0 — Spikes** (0.5 wk) | S1, S2, S9, S10 and S11 **done**; S3–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -2393,7 +2554,14 @@ prototype. **S1 then justified the whole argument for running spikes first**: it
 an afternoon on a live cluster, it invalidated the §7.7.3 transition model outright,
 and it turned up an annotation state machine that no amount of desk work would have
 produced. Discovering that at week 12 would have meant rebuilding the data model
-rather than adjusting it. S8 is now the remaining gate, a softer one on Phase 8:
+rather than adjusting it.
+
+**S2 is the counterexample that makes the same point.** It confirmed §7.7.1 exactly
+as written and changed no structure — half a day to learn nothing, on the face of it.
+But it was the last open question that *could* have inverted rank ordering on every
+scored class, and a confirmation is only worthless once you have it. It also caught
+the tied-score fallback live, which is a false-positive class §7.7.1 predicted on
+paper and nobody had seen. S8 is now the remaining gate, a softer one on Phase 8:
 without it, the scale numbers are measured against undersized objects and mean
 nothing.
 
@@ -2413,7 +2581,10 @@ findings, restart-safe, no baselines and no compute classes.
    cross-check. Undocumented and unguaranteed; risk accepted, mitigated by the
    fallback path and the attribution SLIs. **S1 closed 2026-09-15** and materially
    revised this: the annotation is not purely numeric and is not immediately
-   present — see §7.7.2. Residual: **S2**, **S3**.
+   present — see §7.7.2. **S2 closed the same day** and did not revise it: the field
+   stays an index under `priorityScore`, so §7.7.1 stands. Residual: the reservation
+   half of **S3** — the accelerator key is verified, the reservation key is not, and
+   until it is, axes whose rules mention `reservations` run annotation-only.
 3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
    DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
    design point, split across the two axes they were always two answers to. See
