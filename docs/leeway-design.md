@@ -1,7 +1,8 @@
 # leeway — Placement Drift Detection
 
-**Status:** Draft v0.2 (retargeted from the standalone `topology_drift_detector.md`)
-**Date:** 2026-09-11
+**Status:** Draft v0.3 — proposal. Spikes S9 and S10 resolved against this repo;
+S1 still gates the §7.7 data model.
+**Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
 **Language / stack:** Go, `k8s.io/client-go` shared informers
 
@@ -162,11 +163,16 @@ retrofitting any of them is expensive:
 
 1. **`pkg/leeway` never imports client-go.** Pure functions over plain structs.
    This is what makes it embeddable in something that is not lookout at all.
-2. **Sources take their informers as a parameter.** A narrow interface (register
-   handler, get lister), not a `*informers.SharedInformerFactory` they construct.
-   Lookout injects the shared set; `cmd/leeway` builds its own. This is the
-   discipline most likely to be violated by accident, because calling
-   `NewSharedInformerFactory` inline is the natural thing to write.
+2. **Sources take their informers as a parameter.** Lookout injects the shared set;
+   `cmd/leeway` builds its own. This is the discipline most likely to be violated
+   by accident, because calling `NewSharedInformerFactory` inline is the natural
+   thing to write — and the repo already has the right habit: eight sources expose
+   `WithFactory(informers.SharedInformerFactory)` and fall back to constructing
+   their own only when none is injected (`objectstate.go:439`, `rollout.go:247`,
+   and six more). Leeway follows that shape exactly, with one deviation: it should
+   accept a *narrow* interface (register handler, get lister) rather than the
+   concrete client-go factory, since the concrete type is what would drag client-go
+   back into anything embedding this.
 3. **The meter and the store are injected too.** Standalone may run store-less —
    §9.1 establishes that current state is rebuildable, so the cost is losing dwell
    timers across a restart, not losing correctness.
@@ -477,19 +483,35 @@ the sentinel's existing client rather than assumed:
 cfg.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
 cfg.ContentType = "application/vnd.kubernetes.protobuf"
 
-// Drop terminal pods server-side. A Succeeded/Failed pod occupies no domain. When
-// a pod reaches a terminal phase the API server's watch cache sees it stop
-// matching and emits a Deleted event — exactly the decrement we want. On
-// batch-heavy clusters this removes completed-pod accumulation from both memory
-// and the event stream at zero cost to correctness.
+// Drop COMPLETED pods server-side. A Succeeded pod occupies no domain. When a pod
+// reaches a terminal phase the API server's watch cache sees it stop matching and
+// emits a Deleted event — exactly the decrement we want. On batch-heavy clusters
+// this removes completed-pod accumulation from both memory and the event stream at
+// zero cost to correctness.
 //
-// NOTE: this is a change to a SHARED watch. `workload` (Job/CronJob) may need
-// terminal pods; confirm before applying it (spike S9).
-podSelector := fields.AndSelectors(
-    fields.OneTermNotEqualSelector("status.phase", string(v1.PodSucceeded)),
-    fields.OneTermNotEqualSelector("status.phase", string(v1.PodFailed)),
+// Failed pods are NOT excluded, though the standalone design excluded both.
+// objectstate's eviction-burst detector reads exactly that phase:
+//
+//     func podEvicted(p *corev1.Pod) bool {
+//         return p.Status.Phase == corev1.PodFailed && p.Status.Reason == "Evicted"
+//     }
+//                                   — objectstate.go:1220, resolved by spike S9
+//
+// Excluding Failed server-side would silently delete eviction detection from the
+// sentinel: no error, no empty watch, just a detector that never fires again. This
+// is the field-selector instance of the same hazard the transform has.
+podSelector := fields.OneTermNotEqualSelector(
+    "status.phase", string(v1.PodSucceeded),
 ).String()
 ```
+
+> **There is no transform on the shared factory today.** `internal/watch/wiring.go:963`
+> builds a bare `informers.NewSharedInformerFactory(client, 0)` feeding all eight
+> sources and the graph feed, with no `WithTransform` and no tweaked list options.
+> Everything above is therefore a *new* process-wide behaviour introduced by leeway,
+> not an adjustment to an existing one — which is the strongest argument for the
+> preserved-field registry below, and for landing it before the transform rather
+> than after.
 
 **The transform is the sharp edge.** The standalone design attached a `TransformFunc`
 that stripped container `Env`/`EnvFrom`, `ManagedFields`, and all container
@@ -499,13 +521,24 @@ read fields it would have destroyed:
 
 | Consumer | Reads | Verified at |
 |---|---|---|
-| `pkg/graph` | `container.Env[].ValueFrom`, `EnvFrom[].ConfigMapRef/SecretRef` — this is how ConfigMap and Secret edges are built | `derive.go:159`, `derive.go:169`, `changes.go:272` |
+| `pkg/graph` | `Env[].ValueFrom`, `EnvFrom[].ConfigMapRef/SecretRef` — this is how ConfigMap and Secret edges are built | `derive.go:159–173`, `changes.go:272–286` |
+| `pkg/checks/state` | `Env[].ValueFrom` + `Env[].Name` (edge checks); `Env[].Name` alone (Workload Identity) | `edges_checks.go:390–409`, `wi.go:330` |
 | `objectstate` | `pod.Status.ContainerStatuses` | `podclearance.go:349` |
-| `rollout` | `Status.InitContainerStatuses`, `Status.ContainerStatuses` | `rollout.go:495` |
+| `rollout` | `Status.InitContainerStatuses`, `Status.ContainerStatuses` | `rollout.go:501` |
+
+`pkg/checks/state` is in this table because it is *not* only read-path code:
+`internal/watch/enrich.go:80` imports it, and the enricher's `livePod` reads
+straight from the shared pod lister. Anything the transform does reaches the
+enrichment payload too.
 
 Applying the original `trimPod` would have silently emptied the graph's
 config/secret edges and broken two shipped sources — with no error, because a
-nil slice is a valid empty slice. The transform must therefore be **narrowed**:
+nil slice is a valid empty slice.
+
+**Spike S9 resolved the narrowing question in our favour: not one of those four
+readers touches `Env[].Value`.** Every site reads `Name`, `ValueFrom`, or both —
+the *reference*, never the resolved literal. So the transform can be narrowed to
+exactly the field that carries secret material:
 
 ```go
 // The security goal is that secret VALUES never enter process memory or a heap
@@ -584,16 +617,30 @@ roughly 170 events/s even at 50k nodes.
 | `DomainInventory[TopologyKey][Domain]` | Node count, allocatable, taint sets, label sets | Node events |
 | `templateHash → Intent` | Avoid re-deriving intent per pod | Owner events, inventory generation bump |
 
-> **Open design question, worth resolving early: how much of this is already in
-> `pkg/graph`?** The graph holds Pod nodes, Node nodes, `RunsOn` edges and a Zone
-> layer, all interned, under a COW snapshot. `nodeName → set(podUID)` and the pod →
-> zone relation are arguably *queries against the graph* rather than new indexes.
-> Building them separately duplicates memory the process is already spending; deriving
-> them from the graph couples leeway's hot path to the graph's batched swap cadence
-> ("at most every few hundred ms"), which is fine for evaluation and wrong for
-> counting. The likely answer is a split — counts maintained directly on the event
-> path, structural queries (eligibility, node profiles) served from the graph
-> snapshot — but it needs a real look before Phase 1 rather than a guess here.
+**Leeway owns all six. Spike S10 settled this, and the reason is not the one
+expected.** The open question was whether `nodeName → set(podUID)` and the pod →
+zone relation are really *queries against `pkg/graph`* rather than new indexes,
+since the graph already holds Pod nodes, Node nodes, `RunsOn` edges and a Zone
+layer, interned, under a COW snapshot. Three findings close it:
+
+1. **The graph does not always run.** `internal/watch/wiring.go` builds the graph
+   feed inside `if f.stormEnabled()`. Storm correlation is an unrelated feature
+   with its own flag, and with `--storm=off` there is no graph at all. A drift
+   detector whose counters vanish when an operator turns off correlation is not a
+   detector. This alone is decisive.
+2. **The graph has no counting API.** Its surface is traversal — `Radius`,
+   `OwnerChain`, `CommonAncestors`, `PodsUnder`, `Lookup`, `Out`/`In`. Getting
+   per-zone totals means BFS per subject per evaluation, which is the O(pods)
+   recomputation §6 exists to avoid.
+3. **The swap cadence is wrong for counting**, as suspected — batched at "at most
+   every few hundred ms", which is right for evaluation and wrong for a counter
+   that must be correct at the instant a delta lands.
+
+The graph stays genuinely useful in two narrower places, and leeway should use it
+where present rather than ignore it: `PodsUnder(subjectID)` is a ready-made
+*rebuild* path for the §6.5 verifier, and `OwnerChain` is the owner resolution
+behind `podUID → subjectKey`. Both are off the hot path, both tolerate the swap
+cadence, and both must degrade to leeway's own walk when storm is off.
 
 ### 6.3 Delta rules
 
@@ -1434,12 +1481,43 @@ transitioning Firing→OK→Firing more than `flapCount` times (default 3) withi
 `flapWindow` (default 1 h) is marked flapping — findings continue but are annotated,
 and delivery backs off exponentially.
 
-Overlap to resolve during implementation: `pkg/engine` already has dedup and
-fingerprinting, and the finding-state machine in DESIGN §9.5 covers run-to-run
-transitions. Leeway's dwell/hysteresis is a *time-based* state machine over a
-continuous score, which is not quite the same shape. The likely answer is that leeway
-owns the score→state transition and hands `pkg/engine` only the resulting
-fire/resolve edges, so dedup and fingerprinting are not reimplemented (spike S10).
+**Half of this machine already exists, and spike S10 found the seam to plug into.**
+`pkg/engine.RecoveryTracker` runs the resolve side almost exactly as drawn above:
+
+```
+symptomatic --predicate true--> clearing
+clearing --predicate false--> symptomatic        (flap: window resets)
+clearing --window elapsed--> resolved
+resolved --recurs within revert window--> symptomatic   (resolved.reverted, re-arm)
+resolved --revert window elapses--> untracked
+```
+
+That is our `Firing → Resolving → OK`, plus flap-reset and a revert path we had not
+specified, plus the `kind=resolved` emission. It is driven by an injectable
+predicate:
+
+```go
+type ClearanceObserver interface {
+    // Second return is false when the observer cannot judge this incident at
+    // all — wrong object kind, informer not synced — and the tracker keeps
+    // waiting rather than treating "don't know" as "cleared".
+    Clearance(inc Incident) (Clearance, bool)
+}
+```
+
+So the division of labour is sharper than "hand `pkg/engine` the fire/resolve
+edges". **Leeway owns the fire side and implements `ClearanceObserver` for the
+resolve side** — the observer answers "is this subject's drift score back under
+threshold", and flap handling, revert and the resolved signal come free and stay
+consistent with every other source's outcomes.
+
+What `RecoveryTracker` does *not* provide is the `OK → Pending → Firing` half: it
+is only handed an incident once something has already fired, so `forDuration`
+dwell, the score threshold and the Tier A/B/C classification remain ours. One
+constraint to design around: `NewRecoveryTracker(stableFor, emit)` takes a single
+global `stableFor`, while §10.1 lets each policy set its own `resolveAfter`. Either
+per-policy resolve dwell is dropped, or leeway runs its own tracker instance
+alongside the sentinel's — the latter is cheap and keeps the policy promise.
 
 ### 8.3 Severity routing and delivery
 
@@ -1912,6 +1990,13 @@ Decisions here rest on assumptions only observation can settle. Each spike is a
 question, a method, and the decision it unblocks — no production code, roughly four
 days total. Spikes S9–S11 are new, and exist only because of the fold-in.
 
+**S9 and S10 are done** (2026-09-15) — both were code archaeology against this repo
+and needed no cluster. Between them they changed four things: the terminal-pod field
+selector is narrower, the transform's narrowing is confirmed safe, leeway owns its
+own indexes because the graph runs only under `--storm`, and half the §8.2 state
+machine is now `pkg/engine.RecoveryTracker` rather than new code. Three days remain,
+and **S1 is the one that gates a data model**.
+
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
 | S1 | What *is* a compute-class fallback — new node or mutated node? | §7.7.3 transition model | 0.5 d |
@@ -1922,8 +2007,8 @@ days total. Spikes S9–S11 are new, and exist only because of the fold-in.
 | S6 | Namespace count and watch-stream headroom | §6.7 sharding viability | 0.25 d |
 | S7 | Real pod event rate per scheduled pod | §6.6.1 cost model | 0.5 d |
 | S8 | Real object sizes, for kwok padding and the trimmed-pod budget | §6.6, §12.1 validity | 0.5 d |
-| S9 | Does any source need terminal pods, or fields the transform strips? | §6.1 shared-transform safety | 0.5 d |
-| S10 | How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide? | Package boundaries, before Phase 1 | 0.5 d |
+| ~~S9~~ | ~~Does any source need terminal pods, or fields the transform strips?~~ | **RESOLVED** — §6.1 amended | done |
+| ~~S10~~ | ~~How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide?~~ | **RESOLVED** — §6.2 and §8.2 amended | done |
 | S11 | Cost of migrating the sentinel's ~30 metrics to the OTEL API | §8.4 scope | 0.25 d |
 
 **S1 — Observe a fallback.** No node in any cluster inspected has ever left rank 0, so
@@ -1994,23 +2079,39 @@ sample p50/p95/p99 serialised sizes of `Pod` and `Node` on a real cluster, befor
 after the §6.1 transform, plus the `status.images` length distribution. *Done when* the
 kwok templates are padded to match and the §6.6 tiers are confirmed or corrected.
 
-**S9 — Shared-transform safety.** §6.1 found three consumers reading fields the
-original transform destroyed, by inspection. *Method:* enumerate every field read from
-`Pod` and `Node` across `pkg/`, `internal/`, and the graph's derive path; produce the
-preserved-field registry and the test that guards it. *Done when* the registry exists
-and the terminal-phase field selector is confirmed safe for the `workload` source.
-**This blocks any transform change**, and a transform change is a Phase 1 item.
+**S9 — Shared-transform safety. RESOLVED (2026-09-15), with one design change.**
+Four findings, all by inspection of this repo:
 
-**S10 — Boundary with `pkg/graph` and `pkg/engine`.** The graph already holds Pod and
-Node nodes, `RunsOn` edges and a Zone layer under a COW snapshot; `pkg/engine` already
-does dedup and fingerprinting; DESIGN §7.5 storm correlation already handles
-one-cause-many-symptoms. Duplicating any of these wastes memory the process is already
-spending and creates a second source of truth. *Method:* read the three packages
-against §6.2, §7.6 and §8.2 and write down which structures leeway owns, which it
-queries, and where the COW swap cadence is too slow for counting. *Done when* the
-package boundaries in §2.2 are confirmed or redrawn. **Do this before Phase 1**, not
-during — it is the cheapest spike here and the most likely to change the shape of the
-code.
+- **There is no transform today.** `wiring.go:963` is a bare
+  `NewSharedInformerFactory(client, 0)`. Ours would be the first, process-wide.
+- **Nulling `Env[].Value` is safe.** Every informer-reachable reader — `pkg/graph`
+  (`derive.go:159–173`, `changes.go:272–286`), `pkg/checks/state`
+  (`edges_checks.go:390–409`, `wi.go:330`) — reads only `Name` and `ValueFrom`.
+  Not one reads the literal value.
+- **Container statuses must stay** (`podclearance.go:349`, `rollout.go:501`).
+- **The terminal-phase field selector was wrong and is now narrowed.** Excluding
+  `phase=Failed` would have silently killed objectstate's eviction-burst detector
+  (`objectstate.go:1220`). §6.1 now excludes `Succeeded` only.
+
+*Remaining work* is the deliverable, not the question: the preserved-field registry
+and the test that fails when a field is added to the strip list without an entry.
+**This still blocks the transform change**, which is a Phase 2 item.
+
+**S10 — Boundary with `pkg/graph` and `pkg/engine`. RESOLVED (2026-09-15).** The
+answer moved work in both directions:
+
+- **Leeway owns every index in §6.2**, chiefly because the graph feed is built
+  inside `if f.stormEnabled()` — with `--storm=off` there is no graph at all, and
+  a drift detector cannot have its counters disappear with an unrelated
+  correlation flag. The graph also offers only traversal (`Radius`, `PodsUnder`,
+  `OwnerChain`), no aggregation, and swaps too slowly for counting.
+- **But `pkg/engine.RecoveryTracker` takes over half of §8.2.** Its
+  `ClearanceObserver` interface is a clean predicate seam, and it already
+  implements clearing/flap-reset/resolved/reverted. Leeway owns the fire side and
+  implements the observer for the resolve side. Constraint recorded in §8.2: one
+  global `stableFor` per tracker versus per-policy `resolveAfter`.
+- `PodsUnder` and `OwnerChain` stay useful off the hot path — verifier rebuild and
+  owner resolution — with a fallback for when storm is off.
 
 **S11 — OTEL metrics migration.** §8.4 requires a `MeterProvider`, but
 `internal/watch/metrics.go` uses a raw Prometheus registry and
@@ -2030,7 +2131,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S9, S10, S11 first — they change the code's shape. S1–S8 in parallel | Package boundaries fixed; transform registry exists; OTLP scope known |
+| **0 — Spikes** (0.5 wk) | S9 and S10 **done**; S11 next, then S1–S8 in parallel | Package boundaries fixed (done); transform registry written; OTLP scope known |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9 | Counters provably correct under property tests at 10k pods; existing source tests still green |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -2043,11 +2144,14 @@ independent of 5.
 Roughly 14 weeks, against ~19 for the standalone version — the difference is almost
 entirely the plumbing lookout already owns.
 
-**Phase 0 is not optional and not a formality.** S9 gates the Phase 2 transform change,
-S10 gates the Phase 1 and 2 package boundaries, and **S1 gates the Phase 6 data
-model** — discovering its answer at week 12 means rebuilding the transition model.
-S8 is a softer gate on Phase 8: without it, the scale numbers are measured against
-undersized objects and mean nothing.
+**Phase 0 is not optional and not a formality.** S9 and S10 have already earned it:
+between them they caught a field selector that would have silently disabled eviction
+detection, and moved half the §8.2 state machine from "write it" to "implement one
+interface". Both were a morning's reading. What is left carries the same shape of
+risk — **S1 gates the Phase 6 data model**, and discovering its answer at week 12
+means rebuilding the transition model rather than adjusting it. S8 is a softer gate
+on Phase 8: without it, the scale numbers are measured against undersized objects
+and mean nothing.
 
 Phases 1–4 are a shippable increment at around week 9: declared and inferred intent,
 findings, restart-safe, no baselines and no compute classes.
