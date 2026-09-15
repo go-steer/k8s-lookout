@@ -1,7 +1,9 @@
 # leeway — Placement Drift Detection
 
-**Status:** Draft v0.4 — proposal. Spikes S9, S10 and S11 resolved against this
-repo; S1 still gates the §7.7 data model.
+**Status:** Draft v0.5 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
+the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
+ships default-on. Spikes S9, S10 and S11 resolved against this repo; S1 still gates
+the §7.7 data model.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-15
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
@@ -207,14 +209,17 @@ Four things, all load-bearing:
 1. **We do not own the informers, so `trimPod` becomes a negotiation.** See §6.1 —
    this is the one place where the fold-in has a real cost, and it invalidates part
    of the original memory model.
-2. **The scale posture needs reconciling.** lookout DESIGN §6.2 states *"typical
-   single clusters are 1–15k pods; 100k is the ceiling, not the design point"* and
-   drops a 50k events/s target as fiction. This document targets 200k pods at 500
-   pods/sec. These are less far apart than they look — §6.6 concludes that node
-   count is nearly free, memory is linear in pods, and 5,000 events/s costs about a
-   quarter of a core, which *agrees* with lookout's "hundreds to low thousands of
-   events/sec" framing. But someone has to edit that paragraph rather than leave
-   two design docs in the same repo contradicting each other.
+2. ~~**The scale posture needs reconciling.**~~ **Resolved (2026-09-15): the higher
+   targets win, and DESIGN §6.2 was edited to match.** That paragraph previously
+   read *"100k is the ceiling, not the design point"* against this document's 200k
+   pods at 500 pods/sec. The two were never really in conflict — they were one
+   sentence covering two different questions. §6.2 now states them separately:
+   pods are a **memory** question (200k target, no cliff before ~500k, dominated by
+   the informer caches), events/sec are a **CPU** question (500 pods/sec ≈ 5,000
+   events/s ≈ a quarter core across the whole watch path). The 50k events/s target
+   stays dropped as fiction — nothing about a bigger cluster gets you there. A
+   200k-pod cluster is ten times the memory of a 20k-pod one and roughly the same
+   CPU.
 3. **Output shape.** Lookout's watch path turns signals into agent sessions with
    warm context. Drift is a slow-moving condition, not an incident. §8 handles this
    by routing most leeway findings to the store and metrics rather than to inject,
@@ -2244,7 +2249,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S9, S10 and S11 **done**; S1–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); transform registry written |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9 | Counters provably correct under property tests at 10k pods; existing source tests still green |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
@@ -2281,15 +2286,23 @@ findings, restart-safe, no baselines and no compute classes.
    annotation, so §7.7.2 reads ground truth and demotes inference to fallback plus
    cross-check. Undocumented and unguaranteed; risk accepted, mitigated by the
    fallback path and the attribution SLIs. Residual: **S1**, **S2**, **S3**.
-3. **Does lookout's DESIGN §6.2 scale paragraph get edited, or does this document
-   lower its target?** The two currently disagree in the same repo (§2.5). They are
-   reconcilable — the numbers agree once you separate memory-in-pods from
-   CPU-in-events — but one of them has to change, and it is a maintainer call, not
-   a design one.
-4. **Should `topology-drift` be enabled by default?** §8.3 routes Tier C to metrics
-   only, so the default deployment adds roughly zero agent sessions, which makes
-   default-on defensible. But it also adds the §6.1 transform change to every
-   deployment. Leaning default-on after Phase 4, default-off before.
+3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
+   DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
+   design point, split across the two axes they were always two answers to. See
+   §2.5 item 2 and DESIGN §6.2. Residual: **S8**, which remeasures the pod-cache
+   line that §6.1's narrowed transform invalidated, and therefore the §6.6 tier
+   table.
+4. ~~Should `topology-drift` be enabled by default?~~ — **resolved 2026-09-15:
+   yes, default-on.** §8.3 routes Tier C to metrics only, so the default
+   deployment adds roughly zero agent sessions, and a drift detector nobody turns
+   on detects nothing. The condition attached to it is the one that was always the
+   real question: default-on means the §6.1 informer transform reaches *every*
+   deployment, and today there is no transform at all (`wiring.go:963` is a bare
+   `NewSharedInformerFactory`). **The transform must not ship before S9's remaining
+   deliverable** — the preserved-field registry and the test that fails when a field
+   is added to the strip list without an entry. Until that lands, the source builds
+   default-on but the transform stays off, which costs only the pod-cache memory
+   S8 is measuring. Both land in Phase 2.
 5. **Is fallback depth per-workload or per-class?** §7.7 aggregates per axis by
    default. If two Deployments share a class but only one is falling back, per-axis
    metrics hide it — but per-subject labels multiply cardinality.
