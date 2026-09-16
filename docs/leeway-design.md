@@ -6,8 +6,13 @@ ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1, S2 an
 resolved against a live GKE cluster** — S1 rewrote the §7.7.2 annotation model and
 deleted `RankTracker.Move`, S2 confirmed §7.7.1 unchanged and added a second fallback
 shape to §7.7.3, S3 measured every remaining extractor key and turned
-`NodeProfile.Reservation` into a (project, name) pair. No spike gates a data model,
-and §7.7.2 carries no `UNVERIFIED` marker.
+`NodeProfile.Reservation` into a (project, name) pair. **S4 and S5 are now resolved
+too** — the scheduler's `defaultConstraints` are confirmed unreadable on managed GKE,
+so FR-9 is a manual sync whose mitigation caps default-derived intent below Tier A,
+and §8.4's export defaults are measured rather than guessed (GMP bills per sample, the
+GKE managed collector is the OTLP endpoint, temporality is cumulative). **S7 is
+deferred by maintainer decision.** Only S6 and S8 remain open, neither gating Phase 1.
+No spike gates a data model, and §7.7.2 carries no `UNVERIFIED` marker.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-16
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
@@ -307,7 +312,11 @@ Four things, all load-bearing:
   distinct, lower-severity category, because alerting a human about drift they
   cannot fix is a bug.
 - **FR-9** Support the scheduler's `PodTopologySpread` `defaultConstraints` as
-  static configuration, since they are not readable from the API server (spike S4).
+  static configuration, since they are not readable from the API server (spike S4,
+  confirmed on managed GKE). The configuration is three-state — *unset*, *declared
+  empty*, *declared* — and intent derived from a cluster default that was assumed
+  rather than declared is marked as such and can never raise a Tier A finding
+  (§13 S4).
 - **FR-10** Allow explicit declaration of intent via CRD, overriding inference.
 
 **Measurement**
@@ -452,17 +461,23 @@ type Intent struct {
     EligibleDomains sets.Set[Domain]
     DomainCaps      map[Domain]int64
 
-    Confidence Confidence // Declared, Inferred, Learned
+    Confidence Confidence // Declared, Inferred, Assumed, Learned
     Evidence   []EvidenceItem
 }
 ```
 
 **Precedence** (highest first): `SourcePolicyCRD` → `SourceWorkloadAnnotation` →
 `SourceTopologySpreadConstraint` → `SourcePodAntiAffinityRequired` →
-`SourceClusterDefaultConstraints` → `SourcePodAntiAffinityPreferred` →
-`SourceLearnedBaseline`. Multiple intents on *different* topology keys coexist; on
-the same key the highest-precedence source wins and the others are retained as
-evidence.
+`SourceClusterDefaultDeclared` → `SourceClusterDefaultAssumed` →
+`SourcePodAntiAffinityPreferred` → `SourceLearnedBaseline`. Multiple intents on
+*different* topology keys coexist; on the same key the highest-precedence source wins
+and the others are retained as evidence.
+
+The cluster-default source is split in two because S4 confirmed we cannot read the
+scheduler's configuration on managed GKE, so "the cluster default is X" is sometimes
+an operator's assertion and sometimes our assumption — and those must not be the same
+value in the model. `Assumed` is a distinct `Confidence` for the same reason. §8.1
+caps an `Assumed` intent at Tier B and §13 S4 has the rest.
 
 > `Intent` uses `v1.UnsatisfiableConstraintAction` from `k8s.io/api`, which is a
 > types-only dependency, not client-go — NFR-10 is about the client, not the API
@@ -828,7 +843,9 @@ pressure instead of the kernel OOM-killing us.
 
 This, not memory, is what the design target stresses. At 500 pods/sec sustained
 scheduling, steady state implies ~500 pods/sec terminating too, and each pod
-lifecycle produces roughly eight watch events (spike S7 measures the real figure):
+lifecycle produces roughly eight watch events — a **modelled** figure, not a measured
+one, since S7 was deferred (§13). Everything below scales linearly off it, so read the
+totals as an estimate and re-derive them before Phase 8's scale gate is judged:
 
 | | |
 |---|---|
@@ -1711,6 +1728,15 @@ Four things fall out, each validating an earlier decision:
 | **B — Inferred intent deviation** | Strong signal of intent, not a hard contract | `ScheduleAnyway` TSC exceeded; preferred anti-affinity ignored; `ρ` over threshold | `warning` |
 | **C — Behavioural drift** | No declared intent; deviation from the subject's own history | Baseline band breach (§7.5) | `info`, escalating to `warning` on `max domain share` breach |
 
+**An assumed cluster default can never reach Tier A** (S4). Mostly this falls out of
+the table already: the upstream `defaultConstraints` are `ScheduleAnyway`, and Tier A
+needs `DoNotSchedule`. But an operator *may* declare a default that says
+`DoNotSchedule`, so the exclusion is stated as its own rule rather than left to fall
+out — an intent whose source is `cluster-default-assumed` is capped at Tier B
+regardless of its `whenUnsatisfiable`, because we would be raising a `critical` on a
+contract we guessed at. A `cluster-default-declared` intent carries no such cap: an
+operator who writes the constraint down has made the assertion, and it is theirs.
+
 Tier A on a `DoNotSchedule` constraint is the most interesting case: the scheduler
 enforces it at admission, so a violation means the pods were placed and *then* the
 world changed — a node was relabelled, a zone's nodes went away, or the pods predate
@@ -1881,11 +1907,27 @@ that has never fired is absent from `/metrics`, not zero. Alerts must use
 acceptable for new instruments where the convention can be set up front; it is the
 first of the two reasons not to retrofit it onto the existing ones.
 
-**Temporality is configurable, and delta improves the restart story.** Prometheus
-requires cumulative; many OTLP backends prefer delta. Per-instrument selectors handle
-both. The §7.7.3 pod-seconds counter relies on `increase()` tolerating a reset across
-restarts under cumulative — under **delta** that concern disappears, since each export
-carries only the interval's increment.
+**Temporality is cumulative on both readers (S5).** The draft here proposed
+per-instrument selectors on the grounds that Prometheus requires cumulative while many
+OTLP backends prefer delta, and that delta would dissolve the §7.7.3 restart concern.
+S5 measured the actual backend and closed the option. The target estate ships to the
+GKE managed collector, whose `metrics/otlp` pipeline contains **no `deltatocumulative`
+or `cumulativetodelta` processor** — whatever temporality we emit reaches Google Cloud
+Metrics unconverted. Since both readers hang off one `MeterProvider` and the Prometheus
+reader is cumulative by construction, a delta OTLP reader would make a single
+instrument name mean two different things depending on which exit it left by. So:
+cumulative everywhere, and the §7.7.3 pod-seconds counter keeps its reliance on
+`increase()` tolerating a reset — it must stay monotonic for a process lifetime, and a
+restart must present as a reset rather than be smoothed away.
+
+**The collector is one pod, and it recycles connections on purpose (S5).** The endpoint
+is `opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317`, a ClusterIP in
+front of a **single-replica Deployment** — not a node-local DaemonSet. Its receivers
+carry no TLS or auth (the Google credentials sit in the collector's export-side
+`googleclientauth` extension), so lookout connects with `WithInsecure()` and holds no
+credential for the metrics path at all. Its gRPC server sets `max_connection_age: 10m`
+with a 1 m grace to rebalance load, so a `GOAWAY` every ten minutes is routine: the
+exporter must reconnect quietly and the export-failure SLI must not count it.
 
 **Push makes cardinality worse, not better.** Under pull, a series that stops being
 emitted goes stale at the scraper. Under push we actively ship every active series
@@ -1908,6 +1950,17 @@ allow/deny list. Aggregate per-subject scalars (`drift`, `max_domain_share`) are
 always emitted — ~40k series, which is fine. `internal/watch/metrics.go`'s
 `reasonLabelCap` is the existing precedent for this kind of bound and the same
 approach should be reused rather than reinvented.
+
+**S5 turned the ceiling into a bill, which makes the gating more important, not
+less.** The estate runs Google Managed Prometheus, which does not reject a
+high-cardinality target — it charges per sample ingested. There is no scrape that
+fails and no alert that fires; a default-on subsystem simply grows a line item. At a
+30 s scrape each series is 86,400 samples/month, so the 480k worst case above is ~41
+billion samples/month against ~3.5 billion for the aggregate-only path. That 12× is
+the reason `perDomainSeriesMinDrift: 0.05` is a **default**, not a knob large estates
+are expected to find: the cheap posture must be what you get for free, and a
+deployment that wants per-domain series across the board has to ask. Push makes this
+bind harder still, per the paragraph above.
 
 ### 8.5 Finding payload
 
@@ -2096,8 +2149,18 @@ sources:
       - cloud.google.com/gke-nodepool
       - kops.k8s.io/instancegroup
       - agentpool
-    # Mirrors kube-scheduler's PodTopologySpread defaultConstraints, which is not
-    # readable from the API (spike S4). Must be kept in sync manually.
+    # Mirrors kube-scheduler's PodTopologySpread defaultConstraints, which S4
+    # confirmed is not readable on managed GKE. Manual sync, and three-state:
+    #   key absent -> UNSET. Leeway assumes the upstream system defaults and marks
+    #                 every intent derived from them confidence=assumed, source=
+    #                 cluster-default-assumed. Honest, and visibly a guess.
+    #   []         -> DECLARED EMPTY. An operator asserts this cluster has none.
+    #   populated  -> DECLARED. Trusted, source=cluster-default-declared.
+    # The Go field must be a *[]Constraint, not a []Constraint: a nil slice and an
+    # empty one are the same value after decoding, which collapses the first two
+    # states and reintroduces exactly the silent-assumption bug S4 exists to stop.
+    # Either way these only apply to Pods declaring no topologySpreadConstraints of
+    # their own, and being soft they can never raise a Tier A finding (§13 S4).
     clusterDefaultConstraints:
       - { maxSkew: 3, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: ScheduleAnyway }
     scoring:
@@ -2308,17 +2371,23 @@ opposite directions. S1 *added* work: it confirmed the pessimistic branch of §7
 turned up three states the data model did not have. S2 confirmed §7.7.1 exactly as
 written and changed nothing structural — which matters, because between them they were
 the last two spikes that could have invalidated a data model. **No spike now gates a
-data model.** Just over two days remain.
+data model.**
+
+**S4 and S5 closed 2026-09-16, and S7 was deferred by the maintainer**, which leaves
+**S6 and S8** as the only spikes still open — neither of them gating Phase 1. S4 found
+what it expected (the managed control plane is unreadable) and spent its value on the
+mitigation instead; S5 answered all three of its questions, and answered the hardest
+one by reading the managed collector's own pipeline rather than by asking anyone.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
 | ~~S1~~ | ~~What *is* a compute-class fallback — new node or mutated node?~~ | **RESOLVED** — §7.7.2 and §7.7.3 amended; `Move` deleted | done |
 | ~~S2~~ | ~~Does `ccc_priority_index` stay an array index when `priorityScore` is set?~~ | **RESOLVED** — yes; §7.7.1 unchanged, §7.7.3 gained a second fallback shape | done |
 | ~~S3~~ | ~~Reservation and accelerator node label keys~~ | **RESOLVED** — accelerator verified; reservation is three labels, and identity is (project, name) | ~~0.25 d~~ |
-| S4 | Can we read the scheduler's `defaultConstraints`? | FR-9 correctness | 0.25 d |
-| S5 | Prometheus series budget and OTLP backend | §8.4 gating defaults | 0.25 d |
+| ~~S4~~ | ~~Can we read the scheduler's `defaultConstraints`?~~ | **RESOLVED** — no, confirmed live; FR-9 is a manual sync, and §13 S4 is the mitigation | ~~0.25 d~~ |
+| ~~S5~~ | ~~Prometheus series budget and OTLP backend~~ | **RESOLVED** — GMP (cost, not a cap), the GKE managed collector, cumulative | ~~0.25 d~~ |
 | S6 | Namespace count and watch-stream headroom | §6.7 sharding viability | 0.25 d |
-| S7 | Real pod event rate per scheduled pod | §6.6.1 cost model | 0.5 d |
+| ~~S7~~ | ~~Real pod event rate per scheduled pod~~ | **DEFERRED** by the maintainer — see below | ~~0.5 d~~ |
 | S8 | Real object sizes, for kwok padding and the trimmed-pod budget | §6.6, §12.1 validity | 0.5 d |
 | ~~S9~~ | ~~Does any source need terminal pods, or fields the transform strips?~~ | **RESOLVED** — §6.1 amended | done |
 | ~~S10~~ | ~~How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide?~~ | **RESOLVED** — §6.2 and §8.2 amended | done |
@@ -2486,17 +2555,104 @@ having declared neither. §7.7.6 now records the consequence — eligibility mus
 off the admitted Pod, because a `PodTemplateSpec` has none of the injected tolerations
 and yields an eligible-node set that is too small.
 
-**S4 — Scheduler default constraints.** `PodTopologySpread.defaultConstraints` shapes
-scheduling but is not readable through the API, and static config that silently
-desyncs from the real scheduler is a correctness hazard. *Method:* attempt a read-only
-mount or API read of the `KubeSchedulerConfiguration` per environment. *Done when* we
-know whether FR-9 is a live read or a documented manual sync. On managed GKE the answer
-is probably "no", which needs its own mitigation.
+**S4 — Scheduler default constraints. RESOLVED 2026-09-16: no live read, and the
+mitigation is a downgrade rather than a workaround.** The target estate is all
+managed GKE, so the question had a single answer to find. On `std-simian-test`
+(1.36.4-gke.1082000) the control plane is not a workload: `kubectl get pods -n
+kube-system -l component=kube-scheduler` returns nothing, there is no
+scheduler-shaped ConfigMap in `kube-system`, and there is no API surface exposing
+`KubeSchedulerConfiguration`. FR-9 is a documented manual sync. That was the expected
+answer; what the spike was really for is what to do about it, because static config
+that silently desyncs from the real scheduler is a correctness hazard and "write it
+down and hope" is not a mitigation.
 
-**S5 — Metrics budget.** The §8.4 gating thresholds are guesses. *Method:* ask for the
-Prometheus series budget; confirm whether an OTLP collector endpoint exists and which
-temporality its backend wants. *Done when* `perDomainSeriesMinDrift` and the OTLP
-defaults come from a number rather than a guess.
+The mitigation has four parts, and the first two shrink the problem far more than the
+last two solve it.
+
+- **The blast radius is much smaller than it looks.** `defaultConstraints` apply only
+  to a Pod that declares *no* `topologySpreadConstraints` of its own — a Pod with even
+  one constraint ignores the cluster defaults entirely. So a wrong assumption cannot
+  corrupt intent for any workload that has actually expressed intent. It can only
+  affect the population where leeway's intent was weakest anyway, which is precisely
+  where it should already be cautious.
+- **The defaults are soft, so they are never a contract.** The upstream system default
+  set is `topology.kubernetes.io/zone` at `maxSkew: 3` and `kubernetes.io/hostname` at
+  `maxSkew: 5`, both `whenUnsatisfiable: ScheduleAnyway`. Soft constraints are a
+  scheduler preference that placement is free to violate, so a breach of one is not a
+  breach of anything anybody promised. **An assumed cluster default is therefore
+  capped at Tier B** — it can raise a statistical finding or feed a Tier C baseline,
+  and it can never raise `contract_violated`. §8.1 states that as its own rule rather
+  than relying on `ScheduleAnyway` to imply it, because an operator who *declares* a
+  default is free to declare a `DoNotSchedule` one, and then the assertion is theirs
+  and Tier A is fair. This is the part that matters: for the assumed case it converts
+  a correctness hazard into a precision one.
+  (Those two values are version-dependent and are stated here as the upstream default,
+  not as a measurement — confirming them per GKE version is the operator's job, which
+  is exactly what the next bullet is for.)
+- **Three states, and "unset" is not "empty".** The FR-9 config distinguishes *unset*
+  (we have never been told), *declared empty* (an operator has asserted the cluster has
+  no defaults), and *declared* (an operator has supplied them). Defaulting a missing
+  config to "no constraints" is the failure this spike exists to prevent: it produces
+  confident findings built on an assumption nobody made. Under *unset*, leeway assumes
+  the upstream set above, marks every intent derived from it `confidence: assumed`, and
+  logs once at startup naming the assumption and the version it came from.
+- **The assumption is visible on the wire.** §8.4's `intent_info` already carries
+  `source` and `confidence`; cluster defaults split into two sources,
+  `cluster-default-declared` and `cluster-default-assumed`. A dashboard can then answer
+  "how much of this fleet's intent rests on a guess?" without reading the config, and
+  an estate that cares can drive it to zero by declaring. Declaring is cheap; the point
+  of the design is that not declaring is *honest* rather than silently wrong.
+
+**S5 — Metrics budget. RESOLVED 2026-09-16, all three questions, and one of them
+answered itself.** The estate uses Google Managed Prometheus and the GKE managed
+OpenTelemetry collector, with Google Cloud Metrics behind both interfaces.
+
+- **The Prometheus budget is a cost, not a cap.** GMP does not reject a high-cardinality
+  target; it bills per sample ingested. For a default-on subsystem that is the worse
+  failure mode, because nothing breaks — the bill just grows, in a line item nobody is
+  watching. At a 30 s scrape one series is 86,400 samples/month, so §8.4's ungated worst
+  case of 480k series is ~41 billion samples/month against ~3.5 billion for the
+  aggregate-only path. The 12× is the whole decision. **`perDomainSeriesMinDrift: 0.05`
+  stays, and stays on by default**; the gating is not an opt-in tuning knob for large
+  estates, it is the default posture, and a deployment that wants per-domain series for
+  everything has to ask for it. Ingest is via a `PodMonitoring` CR rather than a
+  self-hosted Prometheus, which is a Phase 8 deployment artifact — and it must be
+  optional in the chart, since `monitoring.googleapis.com` CRDs do not exist off GKE.
+  The `manifests` CI stage will require `deploy/` and the Helm chart to agree on it.
+- **The OTLP endpoint exists and needs no credentials from us.** Measured on the same
+  cluster: `opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317` (gRPC) and
+  `:4318` (HTTP). Its receivers are plaintext on the pod IP with no TLS or auth block —
+  the Google credentials live in the collector's `googleclientauth` extension on the
+  *export* side, so lookout ships to a cluster-local ClusterIP with `WithInsecure()` and
+  no service-account key anywhere in the metrics path. Two operational details worth
+  designing against rather than discovering: it is a **single-replica Deployment**, not
+  a per-node DaemonSet, so it is a shared chokepoint and §8.4's bounded-queue,
+  drop-on-full requirement is load-bearing rather than theoretical; and its gRPC server
+  sets `max_connection_age: 10m` with a 1 m grace, deliberately recycling connections to
+  rebalance, so a clean `GOAWAY` every ten minutes is normal and must not be counted as
+  an export failure in the SLIs.
+- **Cumulative — and the collector proved it rather than the docs.** The managed
+  pipeline's `metrics/otlp` stage runs `memory_limiter`, `k8s_attributes`, two
+  `resource`/`transform` passes and `batch`, then exports straight to
+  `telemetry.googleapis.com:443`. There is **no `deltatocumulative` or
+  `cumulativetodelta` processor anywhere in it**, so whatever temporality lookout emits
+  is what lands in Cloud Metrics, unconverted. Since S11 put both readers on one
+  `MeterProvider` and the Prometheus reader is cumulative by construction, choosing
+  delta for the OTLP reader would make one instrument name mean two different things
+  depending on which exit it left by. **Cumulative on both readers.** The consequence is
+  that §8.4's "delta improves the restart story" escape hatch is closed: the §7.7.3
+  pod-seconds counter keeps its reliance on `increase()` tolerating a reset, so the
+  counter must be monotonic for a process lifetime and a restart must show as a reset
+  rather than be papered over.
+
+**S7 — Real event rate. DEFERRED 2026-09-16, by maintainer decision, and recorded
+here so it does not read as merely open.** §6.6.1's ~8 watch events per pod lifecycle
+stays a modelled number. This is a deliberate accepted risk, and a bounded one: the
+multiplier scales a CPU estimate, not a data model, so being wrong costs a resized
+budget rather than a rewrite — which is why it was the right one to drop. The
+measurement remains worth doing before Phase 8's scale gate, where the modelled figure
+is what the soak is being judged against; until then §6.6.1 should be read as an
+estimate and not quoted as a measurement.
 
 **S6 — Namespace count.** *Method:* `kubectl get ns --no-headers | wc -l` across the
 fleet, plus current apiserver watcher counts. *Done when* §6.7 records whether
@@ -2649,7 +2805,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1, S2, S3, S9, S10 and S11 **done**; S4–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written (done) |
+| **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry guard already green, so the only Phase 2 work here is attaching the transform to the factory |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -2731,11 +2887,22 @@ findings, restart-safe, no baselines and no compute classes.
 5. **Is fallback depth per-workload or per-class?** §7.7 aggregates per axis by
    default. If two Deployments share a class but only one is falling back, per-axis
    metrics hide it — but per-subject labels multiply cardinality.
-6. **Cardinality budget** (**S5**). Per §6.6 this is the first ceiling we hit, and
-   §8.4 push export makes it bind harder.
-7. **Cluster default constraints** (**S4**). On managed GKE the answer is probably
-   "unreadable" — is the fallback a documented manual sync, or a widened Tier A
-   threshold?
+6. ~~Cardinality budget~~ — **resolved 2026-09-16 (S5).** The estate is Google
+   Managed Prometheus, so there is no ceiling to hit: GMP bills per sample rather
+   than rejecting, which for a default-on subsystem is worse, because the failure is
+   a growing line item and not a broken scrape. `perDomainSeriesMinDrift: 0.05`
+   therefore stays a default rather than a knob — see §8.4. The OTLP half is the
+   GKE managed collector, measured, and push does make it bind harder as this item
+   said. No residual.
+7. ~~Cluster default constraints~~ — **resolved 2026-09-16 (S4): neither of the two
+   options this question offered.** Confirmed unreadable on managed GKE, so FR-9 is a
+   documented manual sync — but the answer is not a widened Tier A threshold either.
+   Default-derived intent is **capped below Tier A entirely**, because the upstream
+   defaults are `ScheduleAnyway` and a soft preference is not a contract to violate.
+   The residual risk is precision, not correctness, and it is bounded further by the
+   fact that the defaults apply only to Pods that declare no spread of their own. See
+   §13 S4 for the three-state config and the `cluster-default-assumed` provenance
+   label. No residual.
 8. **Karpenter consolidation.** Consolidation deliberately packs pods and produces
    drift by design. Default Karpenter-managed pools to `Ignore` on zone, or alert with
    consolidation as an annotated suspected cause? Leaning the latter — intentional and
