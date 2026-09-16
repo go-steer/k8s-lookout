@@ -542,11 +542,23 @@ read fields it would have destroyed:
 | `pkg/checks/state` | `Env[].ValueFrom` + `Env[].Name` (edge checks); `Env[].Name` alone (Workload Identity) | `edges_checks.go:390–409`, `wi.go:330` |
 | `objectstate` | `pod.Status.ContainerStatuses` | `podclearance.go:349` |
 | `rollout` | `Status.InitContainerStatuses`, `Status.ContainerStatuses` | `rollout.go:501` |
+| `pkg/checks/delta` | `Status.InitContainerStatuses`, `Status.ContainerStatuses` | `pods.go:95–99` |
+| `pkg/checks/logs` | `Spec.EphemeralContainers[].Name` | `fetch.go:183` |
 
 `pkg/checks/state` is in this table because it is *not* only read-path code:
-`internal/watch/enrich.go:80` imports it, and the enricher's `livePod` reads
-straight from the shared pod lister. Anything the transform does reaches the
-enrichment payload too.
+`internal/watch/enrich.go:78–80` imports it, and the enricher's `livePod` reads
+straight from the shared pod lister (`enrich.go:129–131`). Anything the transform
+does reaches the enrichment payload too.
+
+**The last two rows were added when the registry was implemented, and they are
+the argument for the registry in miniature.** The same import block that makes
+`pkg/checks/state` informer-reachable also pulls in `pkg/checks/delta` and
+`pkg/checks/logs`, so all three are reachable and only one was listed. Neither
+new row changes the transform — `ContainerStatuses` was already preserved, and
+`EphemeralContainers[].Name` survives a strip aimed at the container's other
+fields — but both were discovered by enumerating readers a second time, not by
+anything failing. A third enumeration would be a third chance to miss one, which
+is why the mechanism is now a test rather than a table in a document.
 
 Applying the original `trimPod` would have silently emptied the graph's
 config/secret edges and broken two shipped sources — with no error, because a
@@ -569,18 +581,26 @@ func trimPod(obj any) (any, error) {
         return obj, nil // tombstones and other types pass through
     }
     pod.ManagedFields = nil
-    for i := range pod.Spec.Containers {
-        c := &pod.Spec.Containers[i]
-        for j := range c.Env {
-            c.Env[j].Value = "" // drop literal values; keep Name + ValueFrom
-        }
-        c.Command, c.Args, c.Lifecycle = nil, nil, nil
-        c.ReadinessProbe, c.LivenessProbe, c.StartupProbe = nil, nil, nil
+    trimContainers(pod.Spec.Containers)
+    trimContainers(pod.Spec.InitContainers)
+
+    // Ephemeral containers share EphemeralContainerCommon with a regular
+    // container, so `kubectl debug --env` writes literal secret values into
+    // the cache by exactly the route this transform exists to close. Name is
+    // preserved — pkg/checks/logs enumerates it, and that check is
+    // informer-reachable through the enricher.
+    for i := range pod.Spec.EphemeralContainers {
+        trimContainerCommon(&pod.Spec.EphemeralContainers[i].EphemeralContainerCommon)
     }
-    pod.Spec.InitContainers = trimContainers(pod.Spec.InitContainers)
     return pod, nil
 }
 ```
+
+**Ephemeral containers were missing from the original sketch, and that is a
+security hole rather than an omission.** The stated goal is that secret values
+never enter process memory; a `kubectl debug --env` container defeats it while
+every strip above still passes. The two container slices the sketch covered are
+the common case, not the boundary.
 
 **Consequence: the pod memory model in §6.6 needs remeasuring.** Retaining
 `ContainerStatuses` and the `Env` name/ref structure puts a trimmed pod well above
@@ -622,6 +642,22 @@ roughly 170 events/s even at 50k nodes.
 > strip list without an entry. That is a small piece of work with a large blast
 > radius, and it should land with the first transform, not after the second
 > incident.
+>
+> **Done — `internal/watch/transform_registry.go`.** Every field the transform
+> touches has an entry justifying it; every field it deliberately preserves names
+> the informer-reachable reader that requires it, with the `file:line` of the
+> read. The guard is deliberately *not* a declared strip list diffed against the
+> registry, because that only moves the drift up one level — edit `trimPod`
+> directly and the declaration becomes a lie that still passes. Instead the test
+> fills a `Pod` and a `Node` so every field is non-zero, runs the transform, and
+> reflectively collects the JSON path of everything that actually changed. That
+> set must equal the registry's stripped set **exactly**, so a strip with no entry
+> fails and an entry for a strip that no longer happens fails too. Verified by
+> mutation in both directions.
+>
+> The transform itself is written but **not attached to the factory**: that is
+> the "source on, transform off" half of the default-on decision (§15 Q4), and
+> wiring it is a Phase 2 change.
 
 ### 6.2 Indexes
 
@@ -2491,9 +2527,27 @@ Four findings, all by inspection of this repo:
   `phase=Failed` would have silently killed objectstate's eviction-burst detector
   (`objectstate.go:1220`). §6.1 now excludes `Succeeded` only.
 
-*Remaining work* is the deliverable, not the question: the preserved-field registry
-and the test that fails when a field is added to the strip list without an entry.
-**This still blocks the transform change**, which is a Phase 2 item.
+*Remaining work* was the deliverable, not the question — and it is **done**
+(2026-09-16): `internal/watch/transform_registry.go` plus the behavioural guard in
+`transform_test.go`. The transform is written and unwired; attaching it is the
+Phase 2 change this was blocking.
+
+**Implementing it found two things S9's own inspection missed**, which is the
+case for the registry rather than an argument against the spike:
+
+- **Ephemeral containers were not covered.** They share
+  `EphemeralContainerCommon` with a regular container, so `kubectl debug --env`
+  put literal secret values in the shared cache while every strip S9 specified
+  still passed. A hole in the security goal, not a missing optimisation.
+- **Two more informer-reachable readers.** `internal/watch/enrich.go` imports
+  `pkg/checks/delta` and `pkg/checks/logs` from the same block that makes
+  `pkg/checks/state` reachable. `delta` reads container statuses (already
+  preserved, no change) and `logs` reads `EphemeralContainers[].Name` — which is
+  exactly the field the ephemeral strip had to be careful not to take.
+
+Both were found by enumerating readers a second time, by hand, one day after the
+first enumeration. Neither would have been caught by anything failing. That is
+the argument for making the mechanism a test.
 
 **S10 — Boundary with `pkg/graph` and `pkg/engine`. RESOLVED (2026-09-15).** The
 answer moved work in both directions:
@@ -2595,9 +2649,9 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1, S2, S3, S9, S10 and S11 **done**; S4–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written |
+| **0 — Spikes** (0.5 wk) | S1, S2, S3, S9, S10 and S11 **done**; S4–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry guard already green, so the only Phase 2 work here is attaching the transform to the factory |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
