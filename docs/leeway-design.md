@@ -2,12 +2,14 @@
 
 **Status:** Draft v0.6 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
 the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
-ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1 and S2
+ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1, S2 and S3
 resolved against a live GKE cluster** — S1 rewrote the §7.7.2 annotation model and
 deleted `RankTracker.Move`, S2 confirmed §7.7.1 unchanged and added a second fallback
-shape to §7.7.3. No spike now gates a data model.
+shape to §7.7.3, S3 measured every remaining extractor key and turned
+`NodeProfile.Reservation` into a (project, name) pair. No spike gates a data model,
+and §7.7.2 carries no `UNVERIFIED` marker.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
-**Date:** 2026-09-15
+**Date:** 2026-09-16
 **Home:** `k8s-lookout` — `pkg/leeway` plus two watch sources
 **Language / stack:** Go, `k8s.io/client-go` shared informers
 
@@ -1057,9 +1059,18 @@ type NodeProfile struct {
     InstanceType  string // "n2-standard-8"
     MachineFamily string // "n2"
     Spot          bool
-    Reservation   string
+    Reservation   ReservationRef
     Accelerator   string
     Labels        map[string]string // raw, for user-defined matchers
+}
+
+// ReservationRef identifies a consumed GCE reservation. A reservation name is
+// unique only within its project, and GKE can consume one shared from another
+// project, so Name alone is not an identity — S3 measured Project on the node.
+type ReservationRef struct {
+    Name     string // cloud.google.com/reservation-name
+    Project  string // cloud.google.com/reservation-project
+    Affinity string // cloud.google.com/reservation-affinity: "specific" | "any" | ""
 }
 ```
 
@@ -1327,7 +1338,17 @@ preferenceAxes:
         anyOf:
           - { label: cloud.google.com/gke-provisioning, notEquals: standard } # verified
           - { label: cloud.google.com/gke-spot, equals: "true" }
-      reservation: { label: cloud.google.com/reservation-name }    # UNVERIFIED — S3, see §13
+      reservation:
+        name:     { label: cloud.google.com/reservation-name }     # verified — S3
+        project:  { label: cloud.google.com/reservation-project }  # verified — S3
+        affinity: { label: cloud.google.com/reservation-affinity } # verified — S3
+      # Three labels, not one. A reservation name is unique only within a project
+      # and GKE can consume a reservation shared from another project, so the
+      # matcher compares the (project, name) pair — never the name alone. The
+      # rule side carries both: reservations.specific[].{name,project}. Affinity
+      # is the rule's reservations.affinity lowercased ("specific"); it is not
+      # matched on, but it distinguishes a node that had to take this exact
+      # reservation from one that merely happened to land on it.
       accelerator: { label: cloud.google.com/gke-accelerator }     # verified — S3
       # Value is the GPU type verbatim as written in the rule's gpu.type
       # ("nvidia-tesla-t4"), so the matcher compares the two directly with no
@@ -2152,6 +2173,11 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   `Rank == Index`); and a mixed class (assert `OrderingInvalid`, even though GKE
   rejects it at admission, because this path exists precisely for objects we did not
   admit).
+- **Reservation identity** — two nodes carrying the same
+  `cloud.google.com/reservation-name` under different `reservation-project` values,
+  matched against a rule naming one of the projects: assert exactly one matches. A
+  name-only matcher passes every other test in this file and fails this one, which is
+  the whole reason S3's arity finding is written down rather than absorbed silently.
 - **Eligibility under compute classes** — assert a class-pinned workload whose class
   exists in one zone reports *zero* drift, not maximal skew (§7.7.6). This belongs in
   the false-positive corpus; it is the failure mode most likely to discredit the tool
@@ -2252,7 +2278,7 @@ data model.** Just over two days remain.
 |---|---|---|---|
 | ~~S1~~ | ~~What *is* a compute-class fallback — new node or mutated node?~~ | **RESOLVED** — §7.7.2 and §7.7.3 amended; `Move` deleted | done |
 | ~~S2~~ | ~~Does `ccc_priority_index` stay an array index when `priorityScore` is set?~~ | **RESOLVED** — yes; §7.7.1 unchanged, §7.7.3 gained a second fallback shape | done |
-| S3 | ~~Accelerator~~ / reservation node label keys | **PARTIAL** — accelerator verified (`nvidia-tesla-t4`); reservation needs a reservation to exist | 0.1 d left |
+| ~~S3~~ | ~~Reservation and accelerator node label keys~~ | **RESOLVED** — accelerator verified; reservation is three labels, and identity is (project, name) | ~~0.25 d~~ |
 | S4 | Can we read the scheduler's `defaultConstraints`? | FR-9 correctness | 0.25 d |
 | S5 | Prometheus series budget and OTLP backend | §8.4 gating defaults | 0.25 d |
 | S6 | Namespace count and watch-stream headroom | §6.7 sharding viability | 0.25 d |
@@ -2350,8 +2376,9 @@ Two results beyond the question asked:
 The absent-annotation window from S1 reproduced here on an unrelated class (`<none>`
 at 19:32:41, `"2"` at 19:32:53), which is the independent confirmation §7.7.2 wanted.
 
-**S3 — Reservation and accelerator labels. PARTIALLY RESOLVED 2026-09-15.** The two
-keys are independent and only one could be closed.
+**S3 — Reservation and accelerator labels. RESOLVED 2026-09-16.** The two keys are
+independent; the accelerator half closed on 2026-09-15 and the reservation half a day
+later, once a reservation existed to consume.
 
 **Accelerator: verified.** A class with `gpu: {type: nvidia-tesla-t4, count: 1}` on
 `machineFamily: n1` provisioned `n1-standard-2` + 1×T4 (the first attempt, L4 on `g2`,
@@ -2366,19 +2393,56 @@ cloud.google.com/gke-gpu-driver-version = default
 The value is the rule's `gpu.type` verbatim, so the matcher compares without
 normalising. §7.7.2's `accelerator` marker is cleared.
 
-**Reservation: still `UNVERIFIED`.** The project holds no reservations
-(`gcloud compute reservations list` → 0), so the key cannot be observed without
-creating one, and creating a billable GCE reservation was outside what this run was
-authorised to do. It stays marked, and Phase 6 must not assume the key. Two mitigations
-in the meantime: the extractor is config, so a wrong default is a one-line fix in the
-field rather than a code change; and `reservations` is already in §7.7.2's *supported*
-rule set, which means a class using it will match-or-miss on a key we have not
-confirmed — so until this closes, treat an axis whose rules mention `reservations` as
-inference-disabled and annotation-only.
+**Reservation: verified — and it is three labels, not one.** A single-VM
+`n2-standard-2` reservation in `us-central1-a` created with
+`--require-specific-reservation`, consumed by a class whose only rule was
+`reservations: {affinity: Specific, specific: [{name, project, zones}]}`. The node
+carries:
 
-*Done when* a reservation-backed node's labels are dumped and the last `UNVERIFIED`
-marker in §7.7.2 is gone. Cost is a few cents for a minimal short-lived reservation;
-it needs the permission, not the budget.
+```
+cloud.google.com/reservation-name      = leeway-probe-res        ← the extractor key
+cloud.google.com/reservation-project   = gke-demos-345619        ← not modelled before
+cloud.google.com/reservation-affinity  = specific                ← not modelled before
+```
+
+Consumption is proven, not assumed: the reservation reported `inUseCount: 1` while the
+node was up, and `--require-specific-reservation` means the node could not have been
+created on-demand instead.
+
+**The finding that changes the model is `reservation-project`.** A reservation name is
+unique only within a project, and a reservation can be shared *to* other projects, so a
+node consuming a reservation from a neighbouring project would carry a name that
+collides with an unrelated local one. Name alone is therefore not an identity. §7.7.2's
+`NodeProfile.Reservation` becomes a `ReservationRef{Name, Project, Affinity}` and the
+matcher compares the pair against the rule's `reservations.specific[].{name, project}`.
+On a single-project cluster the two agree and nothing changes; the point is that the
+failure is silent on the clusters where they do not.
+
+`reservation-affinity` is recorded but not matched on. It restates the rule's
+`affinity` lowercased, so as a matcher input it is circular — its value is in evidence,
+distinguishing a node that *had* to take this reservation (`specific`) from one that
+merely landed on it (`any`).
+
+**Two obstacles worth writing down, because both mislead.**
+
+*GKE Warden rejects `location` combined with specific reservations* — "compute-class …
+contains priorities using location config with specific reservations enabled". The zone
+must be pinned through `specific[].zones` alone. Nothing in the CRD schema hints at this;
+it is an admission webhook, so it surfaces as a rejected apply rather than a status.
+
+*A reservation's default sharing policy makes it invisible to GKE.* With
+`reservationSharingPolicy.serviceShareType: DISALLOW_ALL` — the default — scale-up fails
+with `ReservationNotFound`: *"does not exist or not accessible"*, on a reservation that
+is `READY` and in the right project and zone. The fix is
+`gcloud compute reservations update <name> --zone=<zone> --reservation-sharing-policy=ALLOW_ALL`
+(the enum is underscored; `allow-all` is rejected). This matters beyond the spike: **a
+user reporting that leeway's reservation axis "sees nothing" may have a policy problem,
+not a detector problem**, and the GKE error text points away from the cause. Note also
+that the `ComputeClass` status condition does not re-evaluate on `kubectl apply` — the
+class must be deleted and recreated to retest.
+
+The in-cluster probe (class, pod, auto-provisioned pool) was torn down immediately; the
+reservation is deleted separately, since it bills whether or not anything consumes it.
 
 **Beyond the question asked:** the GPU node carries a *second* `NoSchedule` taint
 (`nvidia.com/gpu=present`) and the probe pod was admitted with tolerations for both,
@@ -2531,7 +2595,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1, S2, S9, S10 and S11 **done**; S3–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written |
+| **0 — Spikes** (0.5 wk) | S1, S2, S3, S9, S10 and S11 **done**; S4–S8 in parallel | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); transform registry written |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry test fails when a field is added to the strip list without an entry |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -2561,9 +2625,15 @@ as written and changed no structure — half a day to learn nothing, on the face
 But it was the last open question that *could* have inverted rank ordering on every
 scored class, and a confirmation is only worthless once you have it. It also caught
 the tied-score fallback live, which is a false-positive class §7.7.1 predicted on
-paper and nobody had seen. S8 is now the remaining gate, a softer one on Phase 8:
-without it, the scale numbers are measured against undersized objects and mean
-nothing.
+paper and nobody had seen.
+
+**S3 is the third shape: the spike that looked like a lookup.** "Confirm two label
+keys" reads as desk work you could skip, and skipping it would have shipped a
+`Reservation string` that silently conflates same-named reservations in different
+projects — a wrong answer on exactly the multi-project clusters least able to notice.
+The keys were as predicted; the *arity* was not. S8 is now the remaining gate, a softer
+one on Phase 8: without it, the scale numbers are measured against undersized objects
+and mean nothing.
 
 Phases 1–4 are a shippable increment at around week 9: declared and inferred intent,
 findings, restart-safe, no baselines and no compute classes.
@@ -2582,9 +2652,11 @@ findings, restart-safe, no baselines and no compute classes.
    fallback path and the attribution SLIs. **S1 closed 2026-09-15** and materially
    revised this: the annotation is not purely numeric and is not immediately
    present — see §7.7.2. **S2 closed the same day** and did not revise it: the field
-   stays an index under `priorityScore`, so §7.7.1 stands. Residual: the reservation
-   half of **S3** — the accelerator key is verified, the reservation key is not, and
-   until it is, axes whose rules mention `reservations` run annotation-only.
+   stays an index under `priorityScore`, so §7.7.1 stands. **S3 closed 2026-09-16**
+   and finished the extractor config: every key in §7.7.2 is now measured, with no
+   `UNVERIFIED` marker left. It also widened one — a consumed reservation is
+   identified by (project, name), not name — so `NodeProfile.Reservation` became a
+   `ReservationRef`. No residual.
 3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
    DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
    design point, split across the two axes they were always two answers to. See
