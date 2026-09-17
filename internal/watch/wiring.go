@@ -960,7 +960,15 @@ func (r *runner) run(ctx context.Context) error {
 	//
 	// Gateway keeps its own dynamicinformer factory: different client
 	// type, cannot merge into this one.
-	sharedFactory := informers.NewSharedInformerFactory(client, 0)
+	//
+	// The transform trims Pods and Nodes on the way into the cache
+	// (§6.1). It is attached here rather than per-source because the
+	// cache is shared: a transform is a property of the factory, and
+	// every consumer of that factory sees its output. What it strips and
+	// what it deliberately preserves is in transform_registry.go, which
+	// is enforced by a behavioural guard test — read that before
+	// touching trimPod or trimNode.
+	sharedFactory := newSharedFactory(client)
 	if objState != nil {
 		objState.WithFactory(sharedFactory)
 	}
