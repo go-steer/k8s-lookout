@@ -110,6 +110,215 @@ func TestDistribution_AddAndTotal(t *testing.T) {
 	}
 }
 
+// TestDistribution_AddRemoveRoundTrip is the property the delta rules depend
+// on: Remove with the same arguments undoes Add exactly, Pinned included.
+// Pinned overlaps the state counters rather than partitioning them, so an
+// asymmetry between the two would not show up as a wrong answer on the next
+// event — it would show up as a counter that drifts one per move and is
+// meaningfully wrong a week later.
+func TestDistribution_AddRemoveRoundTrip(t *testing.T) {
+	states := []CountState{StateRunning, StatePending, StateUnschedulable, StateTerminating}
+	for _, state := range states {
+		for _, pinned := range []bool{false, true} {
+			d := NewDistribution()
+			d.Add("a", state, pinned)
+			d.Remove("a", state, pinned)
+
+			if d.Total != 0 {
+				t.Errorf("state %v pinned %v: Total = %d, want 0", state, pinned, d.Total)
+			}
+			if len(d.ByDomain) != 0 {
+				t.Errorf("state %v pinned %v: ByDomain = %+v, want empty", state, pinned, d.ByDomain)
+			}
+		}
+	}
+}
+
+// TestDistribution_RemoveDropsEmptyDomains: a subject rescheduled around the
+// cluster over months must not accumulate a zero row per domain it ever
+// touched. Dropping them is safe because the eligible domain list comes from
+// the node inventory and Counts already yields zero for an absent domain.
+func TestDistribution_RemoveDropsEmptyDomains(t *testing.T) {
+	d := NewDistribution()
+	d.Add("a", StateRunning, false)
+	d.Add("a", StatePending, false)
+	d.Add("b", StateRunning, false)
+
+	d.Remove("a", StateRunning, false)
+	if _, present := d.ByDomain["a"]; !present {
+		t.Error("a domain that still holds a pending pod was dropped")
+	}
+	d.Remove("a", StatePending, false)
+	if _, present := d.ByDomain["a"]; present {
+		t.Errorf("an emptied domain survived as a zero row: %+v", d.ByDomain)
+	}
+
+	if d.Total != 1 || d.ByDomain["b"].Running != 1 {
+		t.Errorf("the untouched domain moved: %+v", d)
+	}
+	if got := d.Counts([]Domain{"a", "b"}, StateRunning); got[0] != 0 {
+		t.Errorf("Counts on a dropped domain = %d, want 0", got[0])
+	}
+}
+
+// TestDistribution_RemoveWhatWasNeverAdded: unreachable through the delta rules,
+// which decrement from a stored Placement. Guarded anyway because an informer
+// handler is the wrong place to turn a bookkeeping slip into a negative count
+// every downstream score then inherits.
+func TestDistribution_RemoveWhatWasNeverAdded(t *testing.T) {
+	d := NewDistribution()
+	d.Add("a", StateRunning, false)
+
+	d.Remove("b", StateRunning, false)
+	d.Remove("", StateRunning, false)
+
+	if d.Total != 1 {
+		t.Errorf("Total = %d, want 1", d.Total)
+	}
+	if len(d.ByDomain) != 1 {
+		t.Errorf("ByDomain = %+v, want just a", d.ByDomain)
+	}
+
+	var zero Distribution
+	zero.Remove("a", StateRunning, false)
+	if zero.Total != 0 {
+		t.Errorf("a zero-value Distribution went negative: %+v", zero)
+	}
+}
+
+// TestDistribution_RemoveNormalisesTheEmptyDomain mirrors Add: the two must
+// agree on which bucket "" means, or a pod added to DomainUnknown could never
+// be removed.
+func TestDistribution_RemoveNormalisesTheEmptyDomain(t *testing.T) {
+	d := NewDistribution()
+	d.Add("", StateRunning, false)
+	d.Remove(DomainUnknown, StateRunning, false)
+
+	if d.Total != 0 || len(d.ByDomain) != 0 {
+		t.Errorf("the unknown bucket did not round-trip: %+v", d)
+	}
+}
+
+func TestDomainCount_SubMirrorsAdd(t *testing.T) {
+	var c DomainCount
+	c.Add(StateRunning, true)
+	c.Sub(StateRunning, true)
+	if !c.IsZero() {
+		t.Errorf("Sub did not undo Add: %+v", c)
+	}
+
+	// An out-of-range state is ignored by both, symmetrically.
+	c.Add(CountState(99), false)
+	c.Sub(CountState(99), false)
+	if !c.IsZero() {
+		t.Errorf("an unknown state left a residue: %+v", c)
+	}
+
+	// IsZero counts Pinned, which is the case that matters: a pinned pod's
+	// state counter and its Pinned counter must both come back to zero before
+	// the domain row is dropped.
+	c.Add(StateRunning, true)
+	c.Sub(StateRunning, false)
+	if c.IsZero() {
+		t.Error("IsZero ignored a stranded Pinned count")
+	}
+}
+
+func TestDistribution_Clone(t *testing.T) {
+	// §6.5's verifier compares a snapshot against counts that are still moving
+	// underneath it.
+	d := NewDistribution()
+	d.Add("a", StateRunning, true)
+	d.Add("b", StatePending, false)
+
+	clone := d.Clone()
+	d.Add("a", StateRunning, false)
+	d.Add("c", StateRunning, false)
+
+	if got := clone.ByDomain["a"].Running; got != 1 {
+		t.Errorf("clone followed the original: a.Running = %d, want 1", got)
+	}
+	if clone.Total != 2 {
+		t.Errorf("clone.Total = %d, want 2", clone.Total)
+	}
+	if _, present := clone.ByDomain["c"]; present {
+		t.Error("a domain added after the clone appeared in it")
+	}
+}
+
+func TestDistribution_Equal(t *testing.T) {
+	build := func(f func(*Distribution)) *Distribution {
+		d := NewDistribution()
+		f(d)
+		return d
+	}
+	base := build(func(d *Distribution) {
+		d.Add("a", StateRunning, false)
+		d.Add("b", StatePending, true)
+	})
+
+	tests := []struct {
+		name  string
+		other *Distribution
+		want  bool
+	}{
+		{"same counts", base.Clone(), true},
+		{
+			"different state in the same domain",
+			build(func(d *Distribution) {
+				d.Add("a", StateTerminating, false)
+				d.Add("b", StatePending, true)
+			}),
+			false,
+		},
+		{
+			// The case the verifier exists to catch: the totals agree and the
+			// distribution does not.
+			"same total, different domains",
+			build(func(d *Distribution) {
+				d.Add("a", StateRunning, false)
+				d.Add("a", StatePending, true)
+			}),
+			false,
+		},
+		{
+			"pinned differs only",
+			build(func(d *Distribution) {
+				d.Add("a", StateRunning, false)
+				d.Add("b", StatePending, false)
+			}),
+			false,
+		},
+		{"an extra domain", build(func(d *Distribution) {
+			d.Add("a", StateRunning, false)
+			d.Add("b", StatePending, true)
+			d.Add("c", StateRunning, false)
+		}), false},
+		{"empty", NewDistribution(), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := base.Equal(tc.other); got != tc.want {
+				t.Errorf("Equal = %v, want %v", got, tc.want)
+			}
+			if tc.other != nil {
+				if got := tc.other.Equal(base); got != tc.want {
+					t.Errorf("reversed Equal = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+
+	var nilDist *Distribution
+	if !nilDist.Equal(nil) {
+		t.Error("two absent distributions are not equal")
+	}
+	if nilDist.Equal(base) {
+		t.Error("an absent distribution equals a populated one")
+	}
+}
+
 // TestDistribution_EmptyDomainNormalises: a caller that forgets to normalise
 // must not create a second, invisible bucket keyed by "" that never appears in
 // any domain list and silently drops pods out of the distribution.
