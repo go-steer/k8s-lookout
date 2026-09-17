@@ -983,7 +983,7 @@ Let `a_i` be actual count in domain `i`, `e_i` expected.
 | Metric | Definition | Use |
 |---|---|---|
 | **Observed skew** | `S = max(a) − min(a)` over eligible domains | Direct comparison to TSC `maxSkew` |
-| **Min achievable skew** | `S* = 0 if n mod m == 0 else 1`, raised by caps | The floor imposed by arithmetic |
+| **Min achievable skew** | `S* = max(e) − min(e)`, read off the expectation | The floor imposed by arithmetic |
 | **Excess skew** | `E = max(0, S − max(S*, maxSkew))` | Tier A/B primary signal |
 | **Relocation distance** | `R = Σ_i max(0, a_i − e_i)` | "How many pods must move" — the number humans act on |
 | **Normalised drift** | `ρ = R / n ∈ [0,1]` | Scale-free threshold; equals total variation distance |
@@ -995,10 +995,23 @@ Let `a_i` be actual count in domain `i`, `e_i` expected.
 `max domain share` for severity escalation. `E` supersedes both where a hard
 contract (`maxSkew`) exists.
 
+`S*` is read off the expectation rather than computed as `n mod m`. The two agree
+in the equal-weight uncapped case, but only the former stays correct when weights
+are unequal or a cap has saturated — a domain clamped to 1 of an expected 4 makes a
+wide spread the *best available* placement, and charging the difference as excess
+skew would report drift for a cluster doing the only thing it can.
+
 Rationale for `R`/`ρ` over raw skew: skew is a max-min statistic and therefore blind
-to the shape of the distribution. `[10,0,0,0]` and `[10,3,3,4]` both have skew 10
-across four domains but represent very different risks. `ρ` is 0.75 vs. 0.15, which
-matches intuition.
+to the shape of the distribution. `[10,0,0,0]` and `[10,0,5,5]` both have skew 10
+across four domains but represent very different risks — the first has everything
+in one zone, the second has a zone-failure blast radius of half. `ρ` is 0.70 vs.
+0.25, which matches intuition.
+
+Note that both `ρ` figures are computed against the *integer* expectation
+(`[3,3,2,2]` and `[5,5,5,5]` respectively), not against `n/m`. Using the
+fractional expectation here would give 0.75 for the first case, and that
+0.05 discrepancy is the §7.2 error in miniature: it charges the workload for a
+remainder no placement could have avoided.
 
 ### 7.4 Small-n handling
 
