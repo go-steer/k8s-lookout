@@ -781,6 +781,34 @@ where present rather than ignore it: `PodsUnder(subjectID)` is a ready-made
 behind `podUID → subjectKey`. Both are off the hot path, both tolerate the swap
 cadence, and both must degrade to leeway's own walk when storm is off.
 
+> **`DomainInventory` landed 2026-09-17** as `Inventory` in
+> `pkg/sources/topologydrift`, with `Placement` in `pkg/leeway`. Three things the
+> implementation settled that this section left open:
+>
+> **The relevance comparison is against retained facts, not against objects.**
+> `Upsert` extracts the handful of fields the inventory reads and compares those,
+> so a node status update whose only difference is a condition heartbeat or a
+> kubelet version produces a zero `Change` — no pods re-mapped, no generation
+> bump. Comparing objects, or even comparing `oldObj` to `newObj`, would make
+> every heartbeat look like an event. Taint comparison ignores `TimeAdded` for
+> the same reason: a node controller re-applying an identical taint is not a
+> change.
+>
+> **Eligibility is compared on the full label set, not just the topology
+> labels**, which is a deliberate widening of §6.3's five-field list. A
+> non-topology label is exactly what a subject's `nodeSelector` matches on, so
+> changing one moves the eligible domain set without moving any domain. Node
+> label churn is rare and the map compare is over a few dozen entries, so the
+> cost of being right here is nil. Topology labels alone still drive
+> `DomainsChanged`, which is the narrow, expensive half.
+>
+> **Zone and region read the deprecated beta labels as a fallback.** A node
+> carrying only `failure-domain.beta.kubernetes.io/zone` would otherwise resolve
+> to `DomainUnknown`, and because that is a *visible* domain rather than a drop,
+> the result would not be a missing node — it would be a confident, wrong
+> distribution placing part of the fleet in a nonexistent zone. Three other
+> places in the repo already read both spellings.
+
 ### 6.3 Delta rules
 
 ```go
@@ -2896,7 +2924,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
