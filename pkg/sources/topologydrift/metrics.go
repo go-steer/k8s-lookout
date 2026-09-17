@@ -46,6 +46,7 @@ const (
 	metricDomainObjects    = "lookout.leeway.domain_objects"
 	metricLastEvent        = "lookout.leeway.last_event_timestamp"
 	metricEvalDuration     = "lookout.leeway.evaluation_duration"
+	metricCounterMismatch  = "lookout.leeway.counter_mismatch"
 )
 
 // Instrument descriptions. Hoisted to constants because they are the help
@@ -58,6 +59,10 @@ const (
 	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
 	descLastEvent        = "Unix time of the last informer event leeway processed, per resource."
 	descEvalDuration     = "Time spent evaluating one coalesced subject."
+	descCounterMismatch  = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
+		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
+		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
+		"The repair keeps the next hour's numbers usable; it is not a fix."
 )
 
 // Attribute keys. Kept as typed keys rather than literals so a typo is a
@@ -77,7 +82,7 @@ var (
 // under.
 type MetricDoc struct {
 	Name   string   // fully-qualified Prometheus metric name
-	Type   string   // gauge | histogram
+	Type   string   // gauge | counter | histogram
 	Labels []string // variable label names, nil for unlabeled
 	Help   string   // the exported help string, verbatim
 	// Optional is true for a series that only appears when a flag turns it
@@ -90,7 +95,7 @@ type MetricDoc struct {
 // reference.
 //
 // This list exists because the sentinel's docs generator derives names and
-// help from live prometheus.Collector.Describe, and these five metrics have no
+// help from live prometheus.Collector.Describe, and these metrics have no
 // Collector: they are declared on the OpenTelemetry API and reach the registry
 // through a bridge (§8.4). Writing them out is the price of that, and the risk
 // is the obvious one — a hand-kept list drifting from what the exporter
@@ -130,6 +135,12 @@ func MetricDocs() []MetricDoc {
 			Type:   "histogram",
 			Labels: []string{"subject_kind"},
 			Help:   descEvalDuration,
+		},
+		{
+			Name:   "lookout_leeway_counter_mismatch_total",
+			Type:   "counter",
+			Labels: []string{"subject_kind"},
+			Help:   descCounterMismatch,
 		},
 	}
 }
@@ -183,8 +194,9 @@ type metricsOptions struct {
 // the pull reader bridged into the sentinel's existing registry and the OTLP
 // push reader, with no second bookkeeping path to keep in sync.
 type instruments struct {
-	lastEvent    metric.Int64Gauge
-	evalDuration metric.Float64Histogram
+	lastEvent       metric.Int64Gauge
+	evalDuration    metric.Float64Histogram
+	counterMismatch metric.Int64Counter
 
 	// reg holds the observable-instrument callback so Close can unregister it.
 	reg metric.Registration
@@ -215,6 +227,17 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		metric.WithDescription(descEvalDuration),
 	); err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricEvalDuration, err)
+	}
+
+	// The SLI of §6.5. It has no sensible threshold: any non-zero rate is a bug
+	// in the delta rules, because the incremental counters and a rebuild from
+	// the pod cache are two computations of the same number. Declared here and
+	// not in the PR that built the counters, so that no window existed in which
+	// an instrument shipped that nothing could ever increment.
+	if in.counterMismatch, err = meter.Int64Counter(metricCounterMismatch,
+		metric.WithDescription(descCounterMismatch),
+	); err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricCounterMismatch, err)
 	}
 
 	subjects, err := meter.Int64ObservableGauge(metricSubjectsTracked,
@@ -299,6 +322,14 @@ func (in *instruments) recordEvaluation(ctx context.Context, kind leeway.Subject
 		return
 	}
 	in.evalDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attrSubjectKind.String(string(kind))))
+}
+
+// recordMismatch counts one subject whose counters had drifted.
+func (in *instruments) recordMismatch(ctx context.Context, kind leeway.SubjectKind) {
+	if in == nil {
+		return
+	}
+	in.counterMismatch.Add(ctx, 1, metric.WithAttributes(attrSubjectKind.String(string(kind))))
 }
 
 // Close unregisters the observable callback. Safe on a nil receiver and safe

@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k
   for every other `lookout_leeway_*` metric combined.
 
+  The counters audit themselves. Every five minutes `topology-drift` rebuilds
+  a twelfth of its subjects directly from the pod cache and compares the
+  result against what it has been counting incrementally. A disagreement is
+  logged per subject — naming the subject and the domains that differ — counted
+  on the new `lookout_leeway_counter_mismatch_total`, and repaired in place.
+  **Any non-zero rate on that metric is a bug in k8s-lookout**, not a cluster
+  condition: the two numbers are two computations of the same thing. It is
+  worth an alert at a threshold of zero. The repair is not a substitute for
+  fixing the bug, it is what keeps the next hour's numbers usable while
+  someone does.
+
 - **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
   Instruments declared on the OTel metric API are exported twice from one
   declaration: into the Prometheus registry `/metrics` already serves — same

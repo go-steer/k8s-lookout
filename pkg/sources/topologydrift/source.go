@@ -70,6 +70,17 @@ type Config struct {
 	// EligibilitySweepInterval bounds the broad-node-change sweep.
 	EligibilitySweepInterval time.Duration
 
+	// VerifyInterval and VerifyShards configure §6.5's verifier, taking
+	// DefaultVerifyInterval and DefaultVerifyShards when zero.
+	//
+	// Deliberately not flags. There is no operational decision here to
+	// delegate: the defaults put a full pass at one hour, and an operator who
+	// lengthened that would be choosing to detect a counter bug more slowly in
+	// exchange for nothing measurable. They exist so tests can run a pass
+	// without waiting five minutes.
+	VerifyInterval time.Duration
+	VerifyShards   int
+
 	// PerDomainSeries exports the per-subject, per-domain counts. See
 	// metricsOptions.PerDomainSeries for why this is off by default.
 	PerDomainSeries bool
@@ -110,6 +121,7 @@ type Source struct {
 	state   *State
 	queue   *coalescer
 	metrics *instruments
+	verify  *Verifier
 
 	mu sync.Mutex
 	// armed flips true after every informer cache syncs and the initial
@@ -117,6 +129,8 @@ type Source struct {
 	armed bool
 	// replicaSets resolves the pod → ReplicaSet → Deployment hop. Set in Run.
 	replicaSets appslisters.ReplicaSetLister
+	// pods is the verifier's view of the cache. Set in Run.
+	pods corelisters.PodLister
 	// sweepPending records that some node's eligibility moved since the last
 	// sweep. See DefaultEligibilitySweepInterval.
 	sweepPending bool
@@ -148,6 +162,14 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		Inventory: s.inv,
 		Owners:    s.ownerOf,
 		Enqueue:   s.queue.Enqueue,
+	})
+	s.verify = NewVerifier(VerifyOptions{
+		State:      s.state,
+		Pods:       s.cachedPods,
+		Interval:   cfg.VerifyInterval,
+		Shards:     cfg.VerifyShards,
+		OnMismatch: s.onMismatch,
+		Logf:       func(f string, a ...any) { s.logger()(f, a...) },
 	})
 	return s
 }
@@ -204,6 +226,29 @@ func (s *Source) HasSynced() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.armed
+}
+
+// Verifier exposes §6.5's auditor, for tests.
+func (s *Source) Verifier() *Verifier { return s.verify }
+
+// cachedPods implements PodSnapshot against the pod informer's cache. Before
+// Run has a lister it reports an error rather than an empty cluster: a verifier
+// handed zero pods would conclude that every tracked subject is a leak and
+// "repair" the entire state to nothing.
+func (s *Source) cachedPods() ([]*corev1.Pod, error) {
+	s.mu.Lock()
+	lister := s.pods
+	s.mu.Unlock()
+	if lister == nil {
+		return nil, fmt.Errorf("topologydrift: pod cache not ready")
+	}
+	return lister.List(labels.Everything())
+}
+
+// onMismatch records the §6.5 SLI. Nothing here is attached to a request, so
+// the background context is the honest one.
+func (s *Source) onMismatch(kind leeway.SubjectKind) {
+	s.metrics.recordMismatch(context.Background(), kind)
 }
 
 // State exposes the counters for the §6.5 verifier and for tests.
@@ -267,6 +312,7 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	// started with the rest.
 	s.mu.Lock()
 	s.replicaSets = rsInformer.Lister()
+	s.pods = podInformer.Lister()
 	s.mu.Unlock()
 
 	podH, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -312,13 +358,35 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 
 	ticker := time.NewTicker(s.cfg.EligibilitySweepInterval)
 	defer ticker.Stop()
+
+	// §6.5. One shard per tick, on its own timer rather than folded into the
+	// sweep: the sweep is conditional on a node having changed, and a counter
+	// bug does not wait for one.
+	verifyTick := time.NewTicker(s.verify.Interval())
+	defer verifyTick.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			s.sweep()
+		case <-verifyTick.C:
+			s.runVerifyPass()
 		}
+	}
+}
+
+// runVerifyPass checks one shard and logs only when it found something. A
+// component that logs a line every five minutes forever to say nothing happened
+// is a component whose one important line gets scrolled past.
+func (s *Source) runVerifyPass() {
+	rep := s.verify.Tick()
+	if rep.Err != nil || rep.Drifted > 0 {
+		// Both are already logged in detail by the verifier itself; this is the
+		// line that ties those per-subject reports to a shard.
+		s.logger()("topology-drift: verify shard %d/%d: %d of %d subject(s) drifted",
+			rep.Shard, s.verify.Shards(), rep.Drifted, rep.Subjects)
 	}
 }
 
