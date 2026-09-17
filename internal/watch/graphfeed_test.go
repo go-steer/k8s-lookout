@@ -232,7 +232,7 @@ func TestGraphFeed_InformerIngest(t *testing.T) {
 		testPod("shop", "pay-1", "gke-a", "pay-7b9d", ""),
 	)
 	factory := informers.NewSharedInformerFactory(client, 0)
-	feed := newGraphFeed(factory, nil)
+	feed := newGraphFeed(sameFactory(factory), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -301,7 +301,7 @@ func TestGraphFeed_InitialSyncEmitsNoChangeRecords(t *testing.T) {
 	factory := informers.NewSharedInformerFactory(client, 0)
 	var mu sync.Mutex
 	var recs []graph.ChangeRecord
-	feed := newGraphFeed(factory, func(r graph.ChangeRecord) {
+	feed := newGraphFeed(sameFactory(factory), func(r graph.ChangeRecord) {
 		mu.Lock()
 		defer mu.Unlock()
 		recs = append(recs, r)

@@ -177,8 +177,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 
 	// Event filtering.
 	fs.StringVar(&f.reasons, "reason", "", "Comma-separated allow-list of Event.Reason values. Empty = shipped default set.")
-	fs.StringVar(&f.namespaces, "namespace", "", "Comma-separated allow-list of namespaces. Empty = all namespaces.")
-	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces.")
+	fs.StringVar(&f.namespaces, "namespace", "", "Comma-separated allow-list of namespaces. Empty = all namespaces. A post-watch output filter, NOT a watch scope or a security boundary: every namespace is still listed, watched and cached. Use --exclude-namespace to shrink what is watched.")
+	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces. Scopes the watch: the informers list and watch with a metadata.namespace!= field selector, so these namespaces never enter the cache. Cluster-scoped objects (nodes) are unaffected.")
 
 	// Signal sources (§7.2: sources are individually enabled).
 	// DEFAULT CHANGED to auto (2026-07-27, zero-deployed-users policy;

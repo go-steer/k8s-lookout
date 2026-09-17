@@ -30,6 +30,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
+	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // watchCounter counts LIST+WATCH streams per resource on a fake
@@ -227,6 +229,177 @@ func TestK8sEventsResyncKeepsPrivateFactory(t *testing.T) {
 
 	if got := counter.get("events"); got != 2 {
 		t.Errorf("events: %d watches opened, want 2 — the resyncing source must keep its own factory", got)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// nodeReaders are the four consumers of the shared Nodes informer, each built
+// against a split factory pair. Any new one belongs here: the list is the
+// answer to "who has to know about the node carve-out".
+var nodeReaders = []struct {
+	name  string
+	build func(*fake.Clientset, sharedFactories) (run func(context.Context) error, synced func() bool)
+}{
+	{"capacity", func(client *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
+		cfg := capacity.DefaultConfig()
+		cfg.PollInterval = time.Hour // no poll ticks during the test
+		s := capacity.New(client, nil, cfg)
+		s.WithFactory(f.Namespaced)
+		s.WithNodeFactory(f.Cluster)
+		return runSourceFn(s), syncedFn(s)
+	}},
+	{"object-state", func(client *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
+		s := objectstate.New(client, objectstate.Config{TickInterval: time.Hour})
+		s.WithFactory(f.Namespaced)
+		s.WithNodeFactory(f.Cluster)
+		return runSourceFn(s), syncedFn(s)
+	}},
+	{"topology-drift", func(client *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
+		s := topologydrift.New(client, topologydrift.Config{VerifyInterval: time.Hour})
+		s.WithFactory(f.Namespaced)
+		s.WithNodeFactory(f.Cluster)
+		return runSourceFn(s), syncedFn(s)
+	}},
+	{"graph feed", func(_ *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
+		// The feed takes the pair itself rather than a WithNodeFactory setter,
+		// because it is internal and there is no seam to keep compatible.
+		feed := newGraphFeed(f, nil)
+		return feed.Run, func() bool { _, err := feed.graph.Snapshot(); return err == nil }
+	}},
+}
+
+func runSourceFn(s sources.Source) func(context.Context) error {
+	return func(ctx context.Context) error { return s.Run(ctx, func(engine.Signal) {}) }
+}
+
+func syncedFn(s sources.Source) func() bool {
+	return func() bool { ok, _ := sources.AllSynced([]sources.Source{s}); return ok }
+}
+
+// TestSharedFactories_SplitEveryNodeReaderStartsIt runs each node reader ALONE
+// against a split pair, which is the only arrangement that can catch the bug it
+// is here for.
+//
+// When --exclude-namespace splits the factories, the node informer lives on a
+// SECOND factory object, and a reader that starts only its namespaced one
+// leaves that informer unstarted: WaitForCacheSync then blocks forever rather
+// than erroring, so the production symptom is a sentinel that hangs at startup
+// with no log line. Run the readers together and the bug hides — the pair is
+// shared, so ONE reader remembering to start the cluster factory covers for
+// every reader that forgot.
+func TestSharedFactories_SplitEveryNodeReaderStartsIt(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range nodeReaders {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := fake.NewSimpleClientset()
+			factories := newSharedFactories(client, []string{"kube-system"})
+			if !factories.Split() {
+				t.Fatal("test precondition: a deny list must split the factories")
+			}
+			run, synced := tc.build(client, factories)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = run(ctx)
+			}()
+
+			deadline := time.Now().Add(10 * time.Second)
+			for !synced() {
+				if time.Now().After(deadline) {
+					t.Fatalf("%s did not sync within 10s — it started the namespaced factory but not the cluster-scoped one, so its node informer never listed", tc.name)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			cancel()
+			<-done
+		})
+	}
+}
+
+// TestSharedFactories_SplitKeepsOneNodeWatch is the other half: splitting for
+// the node carve-out must not cost a stream. All four readers together still
+// hold exactly one node watch and one pod watch between them — the §6.3
+// property, unchanged by the deny list.
+func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
+	t.Parallel()
+
+	client := fake.NewSimpleClientset()
+	counter := &watchCounter{}
+	counter.install(client, "pods", "nodes", "events")
+
+	factories := newSharedFactories(client, []string{"kube-system"})
+	if !factories.Split() {
+		t.Fatal("test precondition: a deny list must split the factories")
+	}
+
+	capCfg := capacity.DefaultConfig()
+	capCfg.PollInterval = time.Hour // no poll ticks during the test
+	capSrc := capacity.New(client, nil, capCfg)
+	capSrc.WithFactory(factories.Namespaced)
+	capSrc.WithNodeFactory(factories.Cluster)
+
+	objSrc := objectstate.New(client, objectstate.Config{TickInterval: time.Hour})
+	objSrc.WithFactory(factories.Namespaced)
+	objSrc.WithNodeFactory(factories.Cluster)
+
+	driftSrc := topologydrift.New(client, topologydrift.Config{VerifyInterval: time.Hour})
+	driftSrc.WithFactory(factories.Namespaced)
+	driftSrc.WithNodeFactory(factories.Cluster)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	all := []sources.Source{capSrc, objSrc, driftSrc}
+	var wg sync.WaitGroup
+	for _, s := range all {
+		wg.Add(1)
+		go func(s sources.Source) {
+			defer wg.Done()
+			_ = s.Run(ctx, func(engine.Signal) {})
+		}(s)
+	}
+
+	// The graph feed is the fourth node reader, and the one that takes the
+	// factory pair rather than a WithNodeFactory setter.
+	feed := newGraphFeed(factories, nil)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = feed.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if ok, _ := sources.AllSynced(all); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			_, pending := sources.AllSynced(all)
+			t.Fatalf("sources did not sync within 10s (waiting on %q) — a split node factory that is never Started makes this hang, not fail", pending)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	for _, tc := range []struct {
+		resource string
+		readers  string
+	}{
+		{"nodes", "capacity, object-state, topology-drift, graph feed"},
+		{"pods", "capacity, object-state, topology-drift, graph feed"},
+	} {
+		if got := counter.get(tc.resource); got != 1 {
+			t.Errorf("%s: %d watches opened, want exactly 1 — splitting the factory for the node carve-out must not cost a stream (readers: %s)",
+				tc.resource, got, tc.readers)
+		}
 	}
 
 	cancel()

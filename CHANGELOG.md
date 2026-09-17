@@ -64,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`--exclude-namespace` now scopes the watch, not just the output.** It used
+  to be a post-watch filter: a sentinel with `--exclude-namespace=kube-system`
+  listed, watched, decoded and cached every object in `kube-system` and then
+  declined to report on it. The namespaced informers now carry a
+  `metadata.namespace!=` field selector, so those namespaces never reach the
+  process at all — less memory, fewer decodes, and less watch traffic from the
+  API server. Nodes are unaffected: they are cluster-scoped, so there is nothing
+  for a namespace deny list to remove, and they ride an unfiltered factory
+  because the API server rejects `metadata.namespace` on a cluster-scoped LIST
+  outright. The sentinel logs the selector it is using at startup.
+
+  Two consequences worth knowing before setting it. Storm correlation and the
+  topology graph only see what is watched, so a node failure's blast radius will
+  not include pods in an excluded namespace. And **`--namespace` is still a
+  filter, not a scope, and was never a security boundary** — a sentinel run with
+  `--namespace=foo` holds every other namespace's pods in memory. The two flags
+  now differ in kind, and the flag help says so.
+
 - **The shared informer cache now trims Pods and Nodes on ingest.** Alongside
   the secret-value strip above, this drops container commands, args, lifecycle
   hooks and probes from Pod specs, and `status.images`, `status.nodeInfo`,

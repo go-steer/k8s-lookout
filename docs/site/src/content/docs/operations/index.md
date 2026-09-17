@@ -26,6 +26,10 @@ is [Getting started → Deploy the sentinel](/getting-started/deploy/)):
 - [Troubleshooting](/operations/troubleshooting/) — RBAC probe failures,
   source-by-source requirements, common startup errors verbatim, and
   what the `unavailable` markers mean.
+- [Scoping a sentinel](/operations/scoping/) — narrowing what one
+  sentinel watches: `--exclude-namespace` as a real watch scope, why
+  `--namespace` is not one, and which sources can be split into their
+  own deployment without paying for a second cache.
 
 The generated [`lookout watch` flag table](/reference/watch/) and
 [Prometheus metrics reference](/reference/metrics/) are the authoritative

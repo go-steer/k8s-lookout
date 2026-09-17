@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -67,26 +66,30 @@ import (
 //     than the zone explains it. Pods reach their zone transitively
 //     and are deliberately not grouped on it — see ancestorClass.
 type graphFeed struct {
-	factory informers.SharedInformerFactory
-	graph   *graph.Graph
+	factories sharedFactories
+	graph     *graph.Graph
 
 	mu    sync.Mutex
 	armed bool
 	buf   []graph.Delta
 }
 
-// newGraphFeed constructs the feed over an externally owned shared
-// informer factory (the same one the object-state source registers
-// on when both are enabled). onChange, when non-nil, arms the §6.6
+// newGraphFeed constructs the feed over the runner's externally owned
+// shared informer factories (the same ones the object-state source
+// registers on when both are enabled — pods and replicasets on the
+// namespaced factory, nodes on the cluster-scoped one, which are the
+// same object unless a namespace deny list split them).
+//
+// onChange, when non-nil, arms the §6.6
 // delta log: every informer delta applied AFTER initial sync emits a
 // ChangeRecord the sentinel routes into the store's buffered writer
 // (nil when no --store is configured — the graph then skips change
 // tracking entirely). Initial-sync deltas — the objects listed at
 // startup, including the handler Adds that race the listing — emit
 // nothing: they are baseline, covered by the first stored snapshot.
-func newGraphFeed(factory informers.SharedInformerFactory, onChange func(graph.ChangeRecord)) *graphFeed {
+func newGraphFeed(factories sharedFactories, onChange func(graph.ChangeRecord)) *graphFeed {
 	return &graphFeed{
-		factory: factory,
+		factories: factories,
 		graph: graph.New(graph.Options{
 			OnChange: onChange,
 			// The honesty declaration behind Ref.Observed: exactly the
@@ -139,9 +142,9 @@ func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) erro
 // deltas until ctx is cancelled. Blocking; the sentinel runs it in a
 // goroutine and treats an error as fatal.
 func (g *graphFeed) Run(ctx context.Context) error {
-	podInf := g.factory.Core().V1().Pods().Informer()
-	nodeInf := g.factory.Core().V1().Nodes().Informer()
-	rsInf := g.factory.Apps().V1().ReplicaSets().Informer()
+	podInf := g.factories.Namespaced.Core().V1().Pods().Informer()
+	nodeInf := g.factories.Cluster.Core().V1().Nodes().Informer()
+	rsInf := g.factories.Namespaced.Apps().V1().ReplicaSets().Informer()
 
 	var regs []cache.ResourceEventHandlerRegistration
 	for _, inf := range []cache.SharedIndexInformer{podInf, nodeInf, rsInf} {
@@ -156,7 +159,7 @@ func (g *graphFeed) Run(ctx context.Context) error {
 		regs = append(regs, h)
 	}
 
-	g.factory.Start(ctx.Done())
+	g.factories.Start(ctx.Done())
 	synced := make([]cache.InformerSynced, 0, len(regs))
 	for _, h := range regs {
 		synced = append(synced, h.HasSynced)
