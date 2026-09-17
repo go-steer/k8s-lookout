@@ -144,6 +144,79 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 	}
 }
 
+// TestMetricDocs_MatchTheExporter is what makes MetricDocs safe to publish.
+//
+// The docs generator cannot derive these rows the way it derives every other
+// sentinel metric — there is no prometheus.Collector to Describe — so the
+// names, types and labels are written by hand. This gathers a real bridged
+// registry with every optional series turned on and holds the hand-written
+// rows to what actually came out.
+func TestMetricDocs_MatchTheExporter(t *testing.T) {
+	h := newPromHarness(t, fullOptions())
+	ctx := context.Background()
+	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
+	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
+
+	docs := MetricDocs()
+	names := make([]string, 0, len(docs))
+	for _, d := range docs {
+		names = append(names, d.Name)
+	}
+	slices.Sort(names)
+	if got := h.names(t); !slices.Equal(got, names) {
+		t.Fatalf("MetricDocs names:\n got %q\nwant %q", names, got)
+	}
+
+	promType := map[dto.MetricType]string{
+		dto.MetricType_GAUGE:     "gauge",
+		dto.MetricType_COUNTER:   "counter",
+		dto.MetricType_HISTOGRAM: "histogram",
+	}
+	for _, d := range docs {
+		t.Run(d.Name, func(t *testing.T) {
+			fam := h.family(t, d.Name)
+			if fam == nil {
+				t.Fatalf("not exported")
+			}
+			if got := promType[fam.GetType()]; got != d.Type {
+				t.Errorf("type = %q, doc says %q", got, d.Type)
+			}
+			if got := fam.GetHelp(); got != d.Help {
+				t.Errorf("help =\n %q\ndoc says\n %q", got, d.Help)
+			}
+			var got []string
+			for _, lp := range fam.GetMetric()[0].GetLabel() {
+				got = append(got, lp.GetName())
+			}
+			want := slices.Clone(d.Labels)
+			slices.Sort(got)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("labels = %q, doc says %q", got, want)
+			}
+		})
+	}
+}
+
+// TestMetricDocs_OptionalMatchesTheFlag pins the Optional column: exactly the
+// rows marked optional are the ones missing from a default-configured scrape.
+func TestMetricDocs_OptionalMatchesTheFlag(t *testing.T) {
+	opts := fullOptions()
+	opts.PerDomainSeries = false
+	h := newPromHarness(t, opts)
+	ctx := context.Background()
+	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
+	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
+
+	exported := h.names(t)
+	for _, d := range MetricDocs() {
+		present := slices.Contains(exported, d.Name)
+		if present == d.Optional {
+			t.Errorf("%s: exported=%v with PerDomainSeries off, but Optional=%v", d.Name, present, d.Optional)
+		}
+	}
+}
+
 func TestInstruments_ObservableGaugesCarryTheirAttributes(t *testing.T) {
 	h := newPromHarness(t, fullOptions())
 

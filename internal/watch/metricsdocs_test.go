@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // TestMetricsInventoryComplete is the presence check behind the
@@ -54,8 +56,14 @@ func TestMetricsInventoryComplete(t *testing.T) {
 			}
 		}
 	}
-	if len(inv) != collectors {
-		t.Fatalf("MetricsInventory has %d rows, metrics struct has %d collector fields — add the missing row(s) in metricsdocs.go", len(inv), collectors)
+	// The leeway block has no collector to count: those instruments are
+	// declared on the OpenTelemetry API and bridged into the same
+	// registry, so their rows are owned by topologydrift.MetricDocs and
+	// pinned there against the real exporter. Counted, not exempted — a
+	// row appearing here without one appearing there still fails.
+	bridged := len(topologydrift.MetricDocs())
+	if len(inv) != collectors+bridged {
+		t.Fatalf("MetricsInventory has %d rows, metrics structs have %d collector fields + %d bridged rows — add the missing row(s) in metricsdocs.go", len(inv), collectors, bridged)
 	}
 
 	seen := map[string]bool{}

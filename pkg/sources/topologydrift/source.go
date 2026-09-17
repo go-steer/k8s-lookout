@@ -168,6 +168,19 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	}
 }
 
+// WithMeter directs Run to declare its §8.4 instruments against an externally
+// owned meter. Call before Run; nil is ignored.
+//
+// Separate from Config.Meter for the same reason WithFactory is separate from
+// the client: the meter belongs to the process that serves the scrape endpoint,
+// not to the configuration an operator writes, and the sentinel builds it one
+// layer above the code that decides which sources to construct.
+func (s *Source) WithMeter(m metric.Meter) {
+	if m != nil {
+		s.cfg.Meter = m
+	}
+}
+
 // RequiredAccess implements sources.AccessDeclarer (§11).
 func (s *Source) RequiredAccess() []sources.Requirement {
 	var reqs []sources.Requirement

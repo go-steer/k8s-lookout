@@ -37,6 +37,7 @@ import (
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
@@ -63,6 +64,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
@@ -193,6 +195,17 @@ func realMain(argv []string) error {
 	for _, r := range runners {
 		r.ready = rd
 		names = append(names, r.clusterName)
+		// Each cluster gets its own MeterProvider: the OTLP resource
+		// carries the cluster name and the Prometheus bridge carries the
+		// cluster label, so one shared provider would push N streams that
+		// no consumer could tell apart. Flushed on the way out — deferred
+		// here rather than inside run because the provider outlives a
+		// supervisor restart (see attachMeter), and a shutdown per run
+		// would leave the second run exporting through a stopped reader.
+		if err := r.attachMeter(otelCtx, metricsReg); err != nil {
+			return fmt.Errorf("telemetry metrics setup: %w", err)
+		}
+		defer func(r *runner) { _ = r.meterShutdown(context.Background()) }(r)
 	}
 	// Only now does the process know what it is responsible for, so
 	// only now can /readyz say anything but "starting".
@@ -474,13 +487,43 @@ func shortClusterName(endpoint string) string {
 // per run so a restarted runner reconnects fresh.
 func newRunner(f *flags, cluster string, sink inject.Sink, token string, reg *prometheus.Registry) *runner {
 	return &runner{
-		f:           f,
-		clusterName: cluster,
-		sink:        sink,
-		token:       token,
-		metricsReg:  reg,
-		metrics:     newMetricsFor(reg, cluster),
+		f:             f,
+		clusterName:   cluster,
+		sink:          sink,
+		token:         token,
+		metricsReg:    reg,
+		metrics:       newMetricsFor(reg, cluster),
+		meterShutdown: func(context.Context) error { return nil },
 	}
+}
+
+// attachMeter gives the runner its OpenTelemetry MeterProvider (leeway
+// design §8.4, "instrument once, export twice").
+//
+// Called once per runner from realMain, beside the trace provider it
+// mirrors, and for the same reason the metrics bundle is built once in
+// newRunner: the provider's Prometheus bridge is a collector in the
+// shared registry, so building one per run would re-register the same
+// series on a supervisor restart and panic. Instruments ARE re-declared
+// per run — the OTel API makes an identical redeclaration idempotent,
+// and a source unregisters its callbacks on the way out.
+//
+// The bridge registers through the same cluster-label wrapper the
+// hand-rolled collectors use, so OTel-declared metrics are
+// indistinguishable from their siblings at the scrape: same registry,
+// same port, same cluster label.
+func (r *runner) attachMeter(ctx context.Context, reg prometheus.Registerer) error {
+	mp, shutdown, err := telemetry.SetupMetrics(ctx, telemetry.MetricsOptions{
+		Mode:       r.f.otelExporter,
+		Registerer: prometheus.WrapRegistererWith(prometheus.Labels{"cluster": r.clusterName}, reg),
+		Cluster:    r.clusterName,
+	})
+	if err != nil {
+		return err
+	}
+	r.meterProvider = mp
+	r.meterShutdown = shutdown
+	return nil
 }
 
 // runnerRestartBackoff is the FIRST delay before a crash-looping
@@ -664,6 +707,16 @@ type runner struct {
 	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
 	ready       *readiness           // process-global /readyz tracker; nil in tests that drive run directly
 
+	// meterProvider is this cluster's OpenTelemetry MeterProvider
+	// (leeway §8.4). Built once alongside the metrics bundle and for the
+	// same reason: its Prometheus bridge is a collector in the shared
+	// registry, and re-registering it on a supervisor restart would
+	// panic. Instruments ARE re-declared per run — the OTel API makes an
+	// identical redeclaration idempotent, and a source unregisters its
+	// callbacks on the way out.
+	meterProvider metric.MeterProvider
+	meterShutdown func(context.Context) error
+
 	// restCfg, when set, is the fleet-minted rest.Config for this
 	// cluster (multi-cluster GKE-endpoint mode: ADC over the DNS
 	// endpoint; issue #208). Nil in the single-cluster default, where
@@ -674,6 +727,17 @@ type runner struct {
 	project string
 	region  string
 	zone    string
+}
+
+// meter returns a named meter from this runner's provider, or nil when
+// the runner was built without one (tests that drive run directly).
+// Consumers treat a nil meter as "no telemetry" rather than as an error:
+// a source is not worth failing over an unmeasured counter.
+func (r *runner) meter(name string) metric.Meter {
+	if r.meterProvider == nil {
+		return nil
+	}
+	return r.meterProvider.Meter(name)
 }
 
 // run wires and drives this runner's cluster: it builds the dispatcher,
@@ -993,6 +1057,15 @@ func (r *runner) run(ctx context.Context) error {
 	if bs.capacity != nil {
 		bs.capacity.WithFactory(sharedFactory)
 	}
+	if bs.topoDrift != nil {
+		// Pods, nodes AND replicasets — all three already on this
+		// factory for the graph feed and the workload source, so leeway's
+		// §6.2 indexes cost no new LIST+WATCH stream. That is the whole
+		// argument for a default-on source that watches every pod in the
+		// cluster.
+		bs.topoDrift.WithFactory(sharedFactory)
+		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
+	}
 
 	var feed *graphFeed
 	if f.stormMine && !f.stormEnabled() {
@@ -1262,6 +1335,7 @@ type builtSources struct {
 	expiry      *expiry.Source
 	capacity    *capacity.Source
 	gateway     *gateway.Source
+	topoDrift   *topologydrift.Source
 	quota       *quota.Source
 	notes       *notifications.Source
 	tokenBurn   *tokenburn.Source
@@ -1359,6 +1433,20 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Grace = f.gatewayGrace
 			bs.gateway = gateway.New(client, dyn, cfg)
 			src = bs.gateway
+		case topologydrift.Name:
+			// The leeway subsystem's placement half (docs/leeway-design.md).
+			// Portable — pods, nodes and replicasets, all already granted —
+			// so it auto-enables, and at this phase it EMITS NOTHING: it
+			// maintains the §6.2 indexes and exports the §8.4 counters, and
+			// the scoring that turns those counts into findings lands in
+			// phase 3. Shipping the bookkeeping first is what lets the
+			// counters be wrong in public before anything depends on them.
+			cfg := topologydrift.Config{
+				TopologyKeys:    topologyKeysFrom(f.topologyKeys),
+				PerDomainSeries: f.topologyPerDomain,
+			}
+			bs.topoDrift = topologydrift.New(client, cfg)
+			src = bs.topoDrift
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier
 			// deployment — quota.New fails LOUDLY (naming the source

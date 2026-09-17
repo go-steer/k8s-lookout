@@ -31,6 +31,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
@@ -52,15 +53,16 @@ func TestEverySourceDeclaresItsBarrier(t *testing.T) {
 	// Informer-backed: Run does an initial LIST and arms afterwards, so
 	// there is a window in which the source is up and blind.
 	informerBacked := map[string]any{
-		autoscaling.Name: (*autoscaling.Source)(nil),
-		capacity.Name:    (*capacity.Source)(nil),
-		degradation.Name: (*degradation.Source)(nil),
-		gateway.Name:     (*gateway.Source)(nil),
-		ingress.Name:     (*ingress.Source)(nil),
-		k8sevents.Name:   (*k8sevents.Source)(nil),
-		objectstate.Name: (*objectstate.Source)(nil),
-		rollout.Name:     (*rollout.Source)(nil),
-		workload.Name:    (*workload.Source)(nil),
+		autoscaling.Name:   (*autoscaling.Source)(nil),
+		capacity.Name:      (*capacity.Source)(nil),
+		degradation.Name:   (*degradation.Source)(nil),
+		gateway.Name:       (*gateway.Source)(nil),
+		ingress.Name:       (*ingress.Source)(nil),
+		k8sevents.Name:     (*k8sevents.Source)(nil),
+		objectstate.Name:   (*objectstate.Source)(nil),
+		rollout.Name:       (*rollout.Source)(nil),
+		topologydrift.Name: (*topologydrift.Source)(nil),
+		workload.Name:      (*workload.Source)(nil),
 	}
 	// Poll-driven: no cache to fill, so ready the moment Run is
 	// entered. sources.AllSynced treats an absent barrier as ready.
