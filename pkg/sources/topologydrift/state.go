@@ -282,6 +282,21 @@ func (s *State) Subjects() []leeway.SubjectRef {
 	return out
 }
 
+// SubjectCounts tallies tracked subjects by kind.
+//
+// Separate from Subjects because this one is called on every metrics scrape:
+// returning the whole subject slice to count it would allocate ~1 MiB per
+// scrape at §6.6's baseline row, for a handful of integers.
+func (s *State) SubjectCounts() map[leeway.SubjectKind]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[leeway.SubjectKind]int64, 4)
+	for sub := range s.counts {
+		out[sub.Kind]++
+	}
+	return out
+}
+
 // Len reports how many pods are counted.
 func (s *State) Len() int {
 	s.mu.Lock()

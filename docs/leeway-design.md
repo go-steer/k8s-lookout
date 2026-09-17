@@ -927,6 +927,32 @@ Deployment collapses into a few evaluations. `AddAfter(key, coalesceWindow)`
 (default 2 s) turns a burst into one evaluation at the end; during an active
 rollout the window widens to `rolloutCoalesceWindow` (default 15 s).
 
+> **Landed 2026-09-17** as `coalescer` in `pkg/sources/topologydrift`. Three
+> corrections to the sketch above, all forced by building it.
+>
+> **It is not client-go's workqueue.** `AddAfter` on the delaying queue keeps
+> the *earliest* `readyAt` when a waiting key is re-added, so it can shorten a
+> pending delay but never widen one — and widening is the entire behaviour this
+> section asks for. The queue here is ~150 lines with the same dedup-by-key
+> property and the widening it actually needs.
+>
+> **Nothing has to tell it a rollout is happening.** The sketch implies an
+> external signal for "during an active rollout". There is none to read:
+> re-enqueue *is* the signal, because a Deployment replacing 200 pods produces
+> 200 enqueues. The first enqueue of a burst waits `coalesceWindow`; any
+> subsequent one while the subject is still pending widens to
+> `rolloutCoalesceWindow`.
+>
+> **Widening needs a cap, and the cap is not a detail.** A subject whose pods
+> never settle — a crash-restart loop, a Job queue with constant turnover —
+> would have its evaluation pushed out forever, and that is precisely the
+> subject most worth evaluating. `maxCoalesceDelay` (default 60 s), measured
+> from the first enqueue of the burst, bounds it.
+>
+> Ordering is a lazily-updated heap rather than a scan of the pending set:
+> after a relist, pending is *every* subject, and an O(pending) scan per
+> evaluation turns 20k subjects into 400M map iterations.
+
 ### 6.5 Self-verification
 
 Incremental counters are the kind of code that is correct in tests and subtly wrong
@@ -2103,6 +2129,28 @@ always emitted — ~40k series, which is fine. `internal/watch/metrics.go`'s
 `reasonLabelCap` is the existing precedent for this kind of bound and the same
 approach should be reused rather than reinvented.
 
+> **The naming pass landed 2026-09-17**, with the instruments declared in
+> `pkg/sources/topologydrift/metrics.go` against the OTEL API and nothing
+> Prometheus-native anywhere in the source. Two things to record.
+>
+> **The derivation table above reproduces exactly, on `otelprom` v0.68.0** —
+> two minor versions past the v0.66.0 S11 measured. `lookout.leeway.evaluation_duration`
+> with unit `s` exports as `lookout_leeway_evaluation_duration_seconds`, and
+> `lookout.leeway.last_event_timestamp` + `s` as
+> `..._last_event_timestamp_seconds`. Both names are what we want *because* the
+> instrument is named without the unit; writing `_seconds` into the declaration
+> would have produced `_seconds_seconds`. `TestInstrumentNames_PrometheusSpelling`
+> gathers from a real registry and compares the exported name set, so this stops
+> being a claim in a document and starts being something a dependency bump
+> breaks loudly.
+>
+> **Phase 2 ships the cardinality gate as a boolean, not as the `ρ` floor.**
+> `perDomainSeriesMinDrift` needs a drift figure, and there is none until Phase
+> 3 infers intent. So `domain_objects` is behind an explicit off-by-default
+> opt-in and everything else is the cheap aggregate set. The default posture is
+> the one the paragraph below argues for; only the shape of the knob is
+> temporary.
+
 **S5 turned the ceiling into a bill, which makes the gating more important, not
 less.** The estate runs Google Managed Prometheus, which does not reject a
 high-cardinality target — it charges per sample ingested. There is no scrape that
@@ -2964,7 +3012,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter. Left for the wiring PR: registration in `internal/watch`, flags, RBAC manifests; and the §6.5 verifier |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
