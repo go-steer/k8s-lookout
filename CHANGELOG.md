@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Resolved secret values no longer enter the informer cache.** Every Pod now
+  passes through a transform on its way into the shared cache which clears
+  `env[].value` on regular, init and ephemeral containers, keeping `name` and
+  `valueFrom` — the reference, not the resolved secret, which is what
+  `pkg/graph` needs for its ConfigMap and Secret edges. Ephemeral containers
+  are the case worth naming: they share `EphemeralContainerCommon` with a
+  regular container, so a `kubectl debug --env` against a watched namespace put
+  literal secret values in `watch`'s memory, and in any heap dump taken from
+  it. `managedFields` goes too.
+
+### Changed
+
+- **The shared informer cache now trims Pods and Nodes on ingest.** Alongside
+  the secret-value strip above, this drops container commands, args, lifecycle
+  hooks and probes from Pod specs, and `status.images`, `status.nodeInfo`,
+  volume attachments and every node condition except `Ready` from Nodes.
+  `status.images` is the single largest line item at 10-40 KiB per node. The
+  node annotation allowlist retains `ccc_priority_index`, which GKE uses to
+  record the provisioned compute-class priority. What is stripped and what is
+  deliberately preserved — with the `file:line` of the reader that requires each
+  preserved field — is recorded in `internal/watch/transform_registry.go` and
+  enforced by a test that observes the transform's actual behaviour rather than
+  a declared list.
+
 ## [0.25.0] - 2026-09-11
 
 This release is about the distance between what a sentinel assumed at

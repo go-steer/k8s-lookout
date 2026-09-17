@@ -16,16 +16,18 @@ package watch
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Object trimming for the shared informer factory.
 //
-// These functions are NOT attached to the factory yet. `topology-drift` ships
-// default-on, which puts this transform in every deployment, so the maintainer
-// decision was explicitly "source on, transform off" until the preserved-field
-// registry in transform_registry.go exists and its guard test passes. The
-// registry is that gate; wiring these into NewSharedInformerFactory is a Phase 2
-// change (docs/leeway-design.md §6.1, §14).
+// sharedTransform is attached to the one shared factory in wiring.go, so these
+// functions run on every Pod and Node entering the process (§6.1). The gate the
+// maintainer decision put on that — "source on, transform off" until the
+// preserved-field registry in transform_registry.go exists and its guard test
+// passes — is satisfied; the registry is the standing control, not a one-time
+// review.
 //
 // Read transform_registry.go before editing anything here. A transform on a
 // shared factory mutates objects every other consumer sees, and a nil slice is
@@ -33,6 +35,53 @@ import (
 // does not fail loudly in the source that needed it, it just makes that source
 // quietly stop finding things. The registry names every field this code touches
 // and every field it deliberately does not, with the reader that requires it.
+
+// sharedTransform is the single cache.TransformFunc the shared factory applies
+// to every informer it serves. A factory takes one transform for all of them,
+// so the dispatch has to happen here, and anything that is not a Pod or a Node
+// must pass through untouched — the factory also serves Deployments,
+// ReplicaSets, Events, HPAs, Ingresses and Services, and the registry has no
+// opinion about those.
+//
+// Two contract points from client-go, both load-bearing:
+//
+//   - It must be IDEMPOTENT. Objects already in the cache can be handed back to
+//     Replace(), and a second pass over an object other goroutines are reading
+//     must not change it (delta_fifo.go:501-506). trimPod and trimNode are
+//     idempotent by construction — they assign zero values and filter to a fixed
+//     key set, never append or accumulate — and TestSharedTransform_IsIdempotent
+//     pins that.
+//   - It never sees a DeletedFinalStateUnknown tombstone, and never runs on a
+//     Sync: DeltaFIFO skips the transformer for both, because in each case the
+//     object has already been through it (delta_fifo.go:507-516). The type
+//     switch would pass a tombstone through anyway, which is the right answer if
+//     that ever changes.
+//
+// It is also on the hot path for every watch event in the process, so it stays
+// a type switch and two field-assignment passes. No allocation beyond what the
+// annotation filter needs.
+func sharedTransform(obj any) (any, error) {
+	switch obj.(type) {
+	case *corev1.Pod:
+		return trimPod(obj)
+	case *corev1.Node:
+		return trimNode(obj)
+	default:
+		return obj, nil
+	}
+}
+
+// newSharedFactory builds the one shared informer factory, with the transform
+// attached.
+//
+// This exists so that there is exactly one place the factory is constructed.
+// The alternative — wiring.go builds its own and the test builds a matching one
+// — passes happily on the day someone drops the option from wiring, because the
+// test is still constructing a factory that has it. The test calls this.
+func newSharedFactory(client kubernetes.Interface) informers.SharedInformerFactory {
+	return informers.NewSharedInformerFactoryWithOptions(client, 0,
+		informers.WithTransform(sharedTransform))
+}
 
 // retainedNodeAnnotations is load-bearing, not cosmetic. GKE records the
 // provisioned compute-class priority in the `ccc_priority_index` annotation

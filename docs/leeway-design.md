@@ -721,9 +721,29 @@ roughly 170 events/s even at 50k nodes.
 > fails and an entry for a strip that no longer happens fails too. Verified by
 > mutation in both directions.
 >
-> The transform itself is written but **not attached to the factory**: that is
-> the "source on, transform off" half of the default-on decision (§15 Q4), and
-> wiring it is a Phase 2 change.
+> **Attached in Phase 2.** `newSharedFactory` in `internal/watch/transform.go` is
+> now the single place the shared factory is constructed, with
+> `informers.WithTransform(sharedTransform)` on it, and `wiring.go` calls that
+> rather than building its own — a test that constructs a matching factory of its
+> own would stay green on the day someone drops the option. The dispatch lives in
+> one `TransformFunc` because a factory takes one for all its informers: `Pod` and
+> `Node` are trimmed, everything else passes through by identity.
+>
+> This closes the "source on, transform off" half of the default-on decision
+> (§15 Q4). Two client-go contract points constrain it: the transform must be
+> **idempotent**, because cached objects can be handed back to `Replace()`
+> (`delta_fifo.go:501-506`), and it never sees a `DeletedFinalStateUnknown` or a
+> `Sync`, both of which `DeltaFIFO` skips because the object has already been
+> through it (`delta_fifo.go:507-516`). Both are pinned by tests; the tombstone
+> case is tested as an unreachable-by-contract path rather than assumed.
+>
+> The per-source fallback factories (`pkg/sources/*/…`, built only when
+> `WithFactory` was not called) do **not** carry the transform. In the shipped
+> binary that path is dead — `wiring.go` injects the shared factory into every
+> source — so it is reachable only from tests and from embedding lookout as a
+> library. Left as-is deliberately: those callers get untrimmed objects, which is
+> a memory cost and not a correctness one, and duplicating the option across eight
+> constructors would create eight places for it to drift.
 
 ### 6.2 Indexes
 
@@ -2754,8 +2774,8 @@ Four findings, all by inspection of this repo:
 
 *Remaining work* was the deliverable, not the question — and it is **done**
 (2026-09-16): `internal/watch/transform_registry.go` plus the behavioural guard in
-`transform_test.go`. The transform is written and unwired; attaching it is the
-Phase 2 change this was blocking.
+`transform_test.go`. The Phase 2 change it was blocking — attaching the transform
+to the factory — landed on 2026-09-17; see §6.1.
 
 **Implementing it found two things S9's own inspection missed**, which is the
 case for the registry rather than an argument against the spike:
@@ -2876,7 +2896,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; the registry guard already green, so the only Phase 2 work here is attaching the transform to the factory |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
