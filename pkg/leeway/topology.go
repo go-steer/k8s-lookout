@@ -125,10 +125,38 @@ func (d *DomainCount) Add(state CountState, pinned bool) {
 	}
 }
 
+// Sub decrements the counter for state by one, mirroring Add exactly.
+//
+// Mirroring matters more than it looks: the delta rules decrement from a stored
+// Placement, so an asymmetry between these two — pinned handled on one side and
+// not the other, say — would not show up as a wrong answer on the next event
+// but as a counter that drifts a little on every move and is meaningfully wrong
+// a week later.
+func (d *DomainCount) Sub(state CountState, pinned bool) {
+	switch state {
+	case StateRunning:
+		d.Running--
+	case StatePending:
+		d.Pending--
+	case StateUnschedulable:
+		d.Unschedulable--
+	case StateTerminating:
+		d.Terminating--
+	}
+	if pinned {
+		d.Pinned--
+	}
+}
+
 // Total returns the number of objects counted in this domain across all
 // states. Pinned is excluded because it overlaps the state counters.
 func (d *DomainCount) Total() int64 {
 	return d.Running + d.Pending + d.Unschedulable + d.Terminating
+}
+
+// IsZero reports whether the count holds nothing at all, Pinned included.
+func (d *DomainCount) IsZero() bool {
+	return *d == DomainCount{}
 }
 
 // Distribution is where a subject's objects currently are, on one topology
@@ -160,6 +188,66 @@ func (d *Distribution) Add(domain Domain, state CountState, pinned bool) {
 	}
 	c.Add(state, pinned)
 	d.Total++
+}
+
+// Remove uncounts one object from the given domain, undoing an Add with the
+// same arguments.
+//
+// A domain whose last object leaves is deleted rather than kept as a zero row.
+// That is safe because the eligible domain list comes from the node inventory
+// and not from the distribution — Counts already yields zero for a domain the
+// distribution has never heard of, which is the case that matters. Keeping the
+// rows instead would make a subject that has been rescheduled around the
+// cluster over months accumulate a row per domain it ever touched, so this is a
+// bound on memory rather than a tidiness preference.
+//
+// Removing something that was never added is ignored. The delta rules make that
+// unreachable by construction, since they decrement from the stored Placement,
+// but an informer handler is the wrong place to turn a bookkeeping slip into a
+// negative count that every downstream score then inherits.
+func (d *Distribution) Remove(domain Domain, state CountState, pinned bool) {
+	if domain == "" {
+		domain = DomainUnknown
+	}
+	c, ok := d.ByDomain[domain]
+	if !ok {
+		return
+	}
+	c.Sub(state, pinned)
+	d.Total--
+	if c.IsZero() {
+		delete(d.ByDomain, domain)
+	}
+}
+
+// Clone returns a deep copy, so that a snapshot handed to a reader cannot be
+// mutated by the next delta. §6.5's verifier compares one against live counts
+// that are still moving underneath it.
+func (d *Distribution) Clone() *Distribution {
+	out := &Distribution{ByDomain: make(map[Domain]*DomainCount, len(d.ByDomain)), Total: d.Total}
+	for dom, c := range d.ByDomain {
+		cc := *c
+		out.ByDomain[dom] = &cc
+	}
+	return out
+}
+
+// Equal reports whether two distributions hold identical counts. Used by the
+// verifier to decide whether a rebuild disagrees with the incremental state.
+func (d *Distribution) Equal(other *Distribution) bool {
+	if d == nil || other == nil {
+		return d == other
+	}
+	if d.Total != other.Total || len(d.ByDomain) != len(other.ByDomain) {
+		return false
+	}
+	for dom, c := range d.ByDomain {
+		oc, ok := other.ByDomain[dom]
+		if !ok || *c != *oc {
+			return false
+		}
+	}
+	return true
 }
 
 // Counts projects the distribution onto the given ordered domain list,

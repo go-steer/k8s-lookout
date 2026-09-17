@@ -866,6 +866,33 @@ Two decisions worth calling out:
    at scale — and under a shared informer it matters more, not less, because leeway
    sees every event every other source sees.
 
+> **Landed 2026-09-17** as `State` in `pkg/sources/topologydrift`. Two places the
+> implementation is stricter than the sketch above, both for the same reason the
+> sketch gives for decrementing from the stored `Placement`.
+>
+> **The subject is cached, and a delete uses the cached one rather than
+> re-resolving.** `OnPodDelete` above calls `resolveSubject(pod)`, which asks the
+> owner chain a question it may no longer be able to answer: deleting a
+> Deployment takes its ReplicaSets and pods with it, and whether the ReplicaSet
+> lookup still succeeds depends on which delete arrives first. A miss would
+> decrement nothing and leave that subject's counts permanently high. It is the
+> stored-placement argument applied to the other half of the key.
+>
+> **`OnPodAdd` routes through the update path.** An informer add is not a
+> guarantee of novelty — after a watch break the relist replays the whole cache
+> as adds — so a handler that incremented unconditionally would double every
+> count in the cluster on a dropped connection.
+>
+> Two things the sketch leaves open are settled the strict way. A pod whose owner
+> chain does not end in a Deployment, StatefulSet, DaemonSet or Job is not
+> counted at all: leeway scores a distribution against an *intent*, and a pod
+> nobody declared has none. And `Succeeded` **and `Failed`** pods are both
+> uncounted, which is narrower than §6.1's field selector — the selector keeps
+> Failed pods in the shared cache because objectstate's eviction-burst detector
+> reads exactly that phase, whereas leeway is asking where a workload's replicas
+> are, and a failed pod is not a replica. Counting them would make a zone that
+> has just evicted five hundred pods look like the most populated in the cluster.
+
 **Node events** are lower-volume but higher-fanout, and get the same relevance
 filter — we compare only topology labels, taints, `unschedulable`, `Ready` and
 allocatable against the inventory entry:
@@ -879,6 +906,19 @@ allocatable against the inventory entry:
   rate-limited sweep (default: full sweep over 5 minutes) guarantees eventual
   re-evaluation. This bounds the cost of a zone-wide node event.
 - *Node add/delete* → inventory update as above, plus `byNode` maintenance.
+
+> One correction from the implementation: **a node *add* must re-map too.** A new
+> node is not an empty one as far as `byNode` is concerned — pod events routinely
+> arrive before their node's, and a node deleted and re-created keeps its name —
+> so skipping the re-map on add strands those pods in `DomainUnknown` until they
+> next change, which on a stable workload is never. A node *delete* re-maps its
+> pods to `DomainUnknown` rather than dropping them: their own deletions are
+> coming but are not here yet, and in the meantime they genuinely exist and are
+> genuinely nowhere, which is a true statement about a cluster that just lost a
+> node. The re-map reads no pod objects at all — the stored placement holds
+> everything that is not changing and the inventory supplies the new tuple, so
+> the re-map cannot disagree with what was counted, because it is derived from
+> it.
 
 ### 6.4 Coalescing
 
@@ -2924,7 +2964,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17** |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
