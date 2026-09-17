@@ -11,7 +11,10 @@ too** — the scheduler's `defaultConstraints` are confirmed unreadable on manag
 so FR-9 is a manual sync whose mitigation caps default-derived intent below Tier A,
 and §8.4's export defaults are measured rather than guessed (GMP bills per sample, the
 GKE managed collector is the OTLP endpoint, temporality is cumulative). **S7 is
-deferred by maintainer decision.** Only S6 and S8 remain open, neither gating Phase 1.
+deferred by maintainer decision, and S6 closed without being run** — its question
+turned out to be answerable from the field-selector grammar rather than from a
+namespace count, and its method would have generalised an estate to a population.
+**S8 is the only spike still open**, and it does not gate Phase 1.
 No spike gates a data model, and §7.7.2 carries no `UNVERIFIED` marker.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-16
@@ -1111,7 +1114,7 @@ violation in production.
 4. **API server watch capacity** — shared with every controller in the cluster.
 5. **Steady-state memory** — last, and at 200k pods never reached.
 
-### 6.7 Sharding
+### 6.7 Sharding and watch scope
 
 The standalone design carried a full horizontal-sharding section. Folded in, it is
 **out of scope**: sharding is a property of the sentinel, not of leeway, and
@@ -1123,14 +1126,58 @@ Two things carry over as cheap seams:
 - **Store keys are subject-keyed, not shard-keyed**, so baselines survive any future
   resharding of the sentinel.
 - **Subjects never span namespaces**, so leeway's state partitions cleanly on
-  namespace if the sentinel is ever sharded that way.
+  namespace if the sentinel is ever scoped or sharded that way. A namespace-scoped
+  sentinel gets *complete* distributions for the subjects it can see — fewer
+  subjects, never partial ones — which is why scoping degrades leeway gracefully
+  and losing nodes does not (see below).
 
-For the record, in case the question returns: client-side filtering divides memory
-by N but *multiplies* aggregate decode cost and watch fanout by N, because every
-shard still receives every event. Only server-side (namespace-scoped) watches reduce
-decode, and field selectors are single-valued, so a shard owning *k* namespaces opens
-*k* streams — total streams equals the cluster's namespace count regardless of shard
-count (spike S6).
+#### The selector grammar decides this, not the namespace count
+
+Spike S6 was going to measure namespace counts to find out whether server-side
+scoping was viable. It was the wrong instrument, and §13 records why it was closed
+without being run. The answer is a property of the field-selector grammar, and it
+is the same on a cluster with 12 namespaces and one with 1,200:
+
+- **Exclusion is one stream at any length.** Field-selector requirements are ANDed
+  and `!=` is supported, so `metadata.namespace!=a,metadata.namespace!=b,…` is a
+  single selector on a single informer. This shipped:
+  `--exclude-namespace` scopes the watch rather than filtering the output
+  ([#431](https://github.com/go-steer/k8s-lookout/pull/431)), and it costs leeway
+  nothing — the excluded namespaces simply contribute no subjects.
+- **Inclusion is M factories.** There is no `OR`, so `metadata.namespace=a` names
+  exactly one namespace. Watching *M* of them means *M* informer factories, and the
+  shared factory carries ten namespaced informers, so the stream count is
+  `10M + 1` — 51 at M=5, 201 at M=20 — against a flat 11 for cluster-wide. The
+  memory win exists only when the *M* namespaces are a real subset of the cluster;
+  above roughly a tenth of it, scoping costs more than it saves. Tracked as
+  [#407](https://github.com/go-steer/k8s-lookout/issues/407), deliberately unbuilt.
+
+Neither of those crosses over at a namespace count, which is what makes the
+measurement uninformative: no value S6 could have returned would have changed the
+design. What *does* vary per deployment is how much of the cluster the operator
+wants to watch, and that is an operator's decision to state, not ours to infer.
+
+#### Nodes are the carve-out
+
+`metadata.namespace` is not a selectable field on a cluster-scoped resource, and the
+API server refuses the LIST rather than ignoring the term. A factory-wide selector
+would therefore not filter the node watch, it would break it — as a reflector that
+never syncs, which is worse than an error. Nodes run on a second, unfiltered factory.
+
+That matters more for leeway than for anything else that reads nodes. §7.1 derives
+*eligible* domains from the node inventory, so without a cluster-wide node read
+`topology-drift` cannot tell "the workload avoided this zone" from "no node exists
+there" — it does not degrade, it becomes wrong. The documented shape for a scoped
+deployment is therefore a **hybrid grant**: namespaced `Role`s for the workload
+objects plus a minimal node-only `ClusterRole`. Nodes carry no tenant data and §6.6
+prices them as nearly free, so this is cheap to grant. A strictly namespaced
+deployment stays supported and needs no new code — the §11 probe denies the node
+requirement and disables the source loudly — but it is a deployment without leeway,
+and should be chosen knowing that.
+
+For the record, on client-side sharding, in case the question returns: it divides
+memory by N but *multiplies* aggregate decode cost and watch fanout by N, because
+every shard still receives every event. Only server-side scoping reduces decode.
 
 ---
 
@@ -2611,11 +2658,14 @@ written and changed nothing structural — which matters, because between them t
 the last two spikes that could have invalidated a data model. **No spike now gates a
 data model.**
 
-**S4 and S5 closed 2026-09-16, and S7 was deferred by the maintainer**, which leaves
-**S6 and S8** as the only spikes still open — neither of them gating Phase 1. S4 found
-what it expected (the managed control plane is unreadable) and spent its value on the
-mitigation instead; S5 answered all three of its questions, and answered the hardest
-one by reading the managed collector's own pipeline rather than by asking anyone.
+**S4 and S5 closed 2026-09-16, S7 was deferred by the maintainer, and S6 closed
+2026-09-17 without being run**, which leaves **S8** as the only spike still open —
+and it does not gate Phase 1. S4 found what it expected (the managed control plane is
+unreadable) and spent its value on the mitigation instead; S5 answered all three of
+its questions, and answered the hardest one by reading the managed collector's own
+pipeline rather than by asking anyone. S6 is the odd one out and the most instructive:
+it was closed on its *method*, not on a finding, and the note below is as much about
+which spikes are worth running as about namespaces.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
@@ -2624,7 +2674,7 @@ one by reading the managed collector's own pipeline rather than by asking anyone
 | ~~S3~~ | ~~Reservation and accelerator node label keys~~ | **RESOLVED** — accelerator verified; reservation is three labels, and identity is (project, name) | ~~0.25 d~~ |
 | ~~S4~~ | ~~Can we read the scheduler's `defaultConstraints`?~~ | **RESOLVED** — no, confirmed live; FR-9 is a manual sync, and §13 S4 is the mitigation | ~~0.25 d~~ |
 | ~~S5~~ | ~~Prometheus series budget and OTLP backend~~ | **RESOLVED** — GMP (cost, not a cap), the GKE managed collector, cumulative | ~~0.25 d~~ |
-| S6 | Namespace count and watch-stream headroom | §6.7 sharding viability | 0.25 d |
+| ~~S6~~ | ~~Namespace count and watch-stream headroom~~ | **CLOSED without measuring** — the answer is the selector grammar, not a count; §6.7 rewritten, #431 shipped, #407 held | ~~0.25 d~~ |
 | ~~S7~~ | ~~Real pod event rate per scheduled pod~~ | **DEFERRED** by the maintainer — see below | ~~0.5 d~~ |
 | S8 | Real object sizes, for kwok padding and the trimmed-pod budget | §6.6, §12.1 validity | 0.5 d |
 | ~~S9~~ | ~~Does any source need terminal pods, or fields the transform strips?~~ | **RESOLVED** — §6.1 amended | done |
@@ -2892,9 +2942,42 @@ measurement remains worth doing before Phase 8's scale gate, where the modelled 
 is what the soak is being judged against; until then §6.6.1 should be read as an
 estimate and not quoted as a measurement.
 
-**S6 — Namespace count.** *Method:* `kubectl get ns --no-headers | wc -l` across the
-fleet, plus current apiserver watcher counts. *Done when* §6.7 records whether
-server-side sharding is available should the sentinel ever need it.
+**~~S6 — Namespace count.~~ CLOSED 2026-09-17 without being run** — by maintainer
+decision, on the method rather than on the finding.
+
+The planned method was `kubectl get ns | wc -l` across the fleet plus apiserver
+watcher counts. Two things were wrong with it, and the second is the one worth
+carrying forward.
+
+*The sample was never going to generalise.* The maintainer's estate is not a random
+draw from the population of clusters lookout will run in, so a namespace-count
+distribution measured across it would describe that estate and be quoted as though
+it described the world. The corrective is a classification worth applying to every
+future spike on this design:
+
+- **Mechanical ratios** — measure them anywhere, because estate bias is
+  second-order. Events per pod lifecycle (S7), the §6.1 transform's reduction ratio
+  (S8): these are properties of Kubernetes and of our code, and one cluster's answer
+  is approximately every cluster's answer.
+- **Population parameters** — never sample these, *declare* them as a support
+  envelope. Namespace counts, pod-spec fatness, pod distribution across namespaces:
+  these are properties of who is running the software, and a sample of the clusters
+  we happen to have says nothing about the clusters we do not. State what we intend
+  to support and size for it.
+
+*And the question did not need a measurement.* S6 existed to tell §6.7 whether
+server-side scoping was viable. It is: exclusion is one stream at any length,
+inclusion is `10M + 1`, and **neither crosses over at a namespace count**. No value
+S6 could have returned would have changed a line of the design. The thing that
+actually resolved it was reading the field-selector grammar and then verifying the
+one asymmetry that matters — that `metadata.namespace` is rejected outright on
+cluster-scoped resources — against a live API server.
+
+Both halves are now built or filed rather than pending: `--exclude-namespace` became
+a real watch scope in [#431](https://github.com/go-steer/k8s-lookout/pull/431), and
+the include-list is [#407](https://github.com/go-steer/k8s-lookout/issues/407), held
+until someone is blocked by its absence. §6.7 carries the reasoning; the operator
+guidance is in `operations/scoping.md`.
 
 **S7 — Real event rate.** §6.6.1 assumes ~8 watch events per pod lifecycle, a modelled
 number the whole CPU budget scales off. *Method:* a throwaway watch on the busiest
@@ -3043,7 +3126,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
+| **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**, S6 **closed unrun** (2026-09-17 — the selector grammar answered it); only S8 remains, and it does not gate Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -3092,7 +3175,10 @@ findings, restart-safe, no baselines and no compute classes.
 
 1. ~~Fleet size~~ — **resolved.** 150–200k pods at the high end, 500 pods/sec
    sustained. NFR-1 is set from these; §6.6.1 shows the marginal cost inside the
-   sentinel is ~0.013 core. Residual: namespace count (**S6**).
+   sentinel is ~0.013 core. The residual — namespace count — is **withdrawn, not
+   pending**: §6.7 shows the scoping decision does not turn on it, and how many
+   namespaces a cluster has is a support envelope to declare rather than a number to
+   go and find (S6).
 2. ~~GKE compute class label keys~~ — **resolved** against `simian-test` on
    2026-09-11. GKE records the achieved priority in the `ccc_priority_index` node
    annotation, so §7.7.2 reads ground truth and demotes inference to fallback plus
