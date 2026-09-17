@@ -1032,9 +1032,17 @@ func (r *runner) run(ctx context.Context) error {
 	// what it deliberately preserves is in transform_registry.go, which
 	// is enforced by a behavioural guard test — read that before
 	// touching trimPod or trimNode.
-	sharedFactory := newSharedFactory(client)
+	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces))
+	sharedFactory := factories.Namespaced
+	if factories.Split() {
+		// Worth a line: this is the one flag whose meaning widened from
+		// "do not report" to "do not watch", and the difference is only
+		// visible in API server audit logs.
+		log.Printf("watch: --exclude-namespace is scoping the watch — the namespaced informers list and watch with field selector %q, so excluded namespaces never enter the cache; nodes are cluster-scoped and unaffected", namespaceExclusionSelector(splitCSV(f.excludeNamespaces)))
+	}
 	if objState != nil {
 		objState.WithFactory(sharedFactory)
+		objState.WithNodeFactory(factories.Cluster)
 	}
 	if bs.rollout != nil {
 		bs.rollout.WithFactory(sharedFactory)
@@ -1056,6 +1064,7 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	if bs.capacity != nil {
 		bs.capacity.WithFactory(sharedFactory)
+		bs.capacity.WithNodeFactory(factories.Cluster)
 	}
 	if bs.topoDrift != nil {
 		// Pods, nodes AND replicasets — all three already on this
@@ -1064,6 +1073,7 @@ func (r *runner) run(ctx context.Context) error {
 		// argument for a default-on source that watches every pod in the
 		// cluster.
 		bs.topoDrift.WithFactory(sharedFactory)
+		bs.topoDrift.WithNodeFactory(factories.Cluster)
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
 	}
 
@@ -1089,7 +1099,7 @@ func (r *runner) run(ctx context.Context) error {
 		if occStore != nil {
 			onChange = occStore.RecordGraphChange
 		}
-		feed = newGraphFeed(sharedFactory, onChange)
+		feed = newGraphFeed(factories, onChange)
 	} else if f.storm == stormOn {
 		log.Printf("storm: disabled (--storm-window=0)")
 	}

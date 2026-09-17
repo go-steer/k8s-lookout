@@ -285,6 +285,9 @@ type Source struct {
 	// feed watch, so sharing removes two pod caches and one node cache
 	// from the process.
 	factory informers.SharedInformerFactory
+	// nodeFactory, when set via WithNodeFactory, is where the Node
+	// informer and lister come from. Nil means factory.
+	nodeFactory informers.SharedInformerFactory
 
 	mu   sync.Mutex
 	emit func(engine.Signal)
@@ -361,6 +364,23 @@ func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	if f != nil {
 		s.factory = f
+	}
+}
+
+// WithNodeFactory directs Run to take the Node informer and lister
+// from a different factory than the namespaced ones. Call before Run;
+// nil is ignored, and unset means "the same factory as everything
+// else", which is the caller's normal case.
+//
+// It exists because a namespace deny list is applied as a field
+// selector on the factory, and `metadata.namespace` is not selectable
+// on a cluster-scoped resource — the API server rejects the node LIST
+// outright rather than ignoring the term. A caller that scopes its
+// namespaced watches therefore has to hand the node watch a factory
+// that carries no selector.
+func (s *Source) WithNodeFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.nodeFactory = f
 	}
 }
 
@@ -448,6 +468,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		factory = informers.NewSharedInformerFactory(s.client, 0)
 		owned = true
 	}
+	nodeFactory := s.nodeFactory
+	if nodeFactory == nil {
+		nodeFactory = factory
+	}
 	eventInformer := factory.Core().V1().Events().Informer()
 	eventH, err := eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
@@ -495,13 +519,18 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// Node informer: no event handler — the cluster-forecast
 	// sub-source samples the cache on the poll tick (a per-tick sum,
 	// not an edge detector), so it only needs the synced lister.
-	nodeInformer := factory.Core().V1().Nodes().Informer()
+	nodeInformer := nodeFactory.Core().V1().Nodes().Informer()
 	s.mu.Lock()
 	s.podLister = factory.Core().V1().Pods().Lister()
-	s.nodeLister = factory.Core().V1().Nodes().Lister()
+	s.nodeLister = nodeFactory.Core().V1().Nodes().Lister()
 	s.mu.Unlock()
 
 	factory.Start(ctx.Done())
+	if nodeFactory != factory {
+		// Two objects whenever the caller scoped its namespaced
+		// watches; the node informer lives only on the second one.
+		nodeFactory.Start(ctx.Done())
+	}
 	if owned {
 		// Only the owner shuts a factory down: Shutdown blocks until
 		// every handler goroutine exits, and on a shared factory those

@@ -382,6 +382,9 @@ type Source struct {
 	// and the graph". Nil (the default) preserves the shipped
 	// behavior exactly: Run builds a private factory.
 	factory informers.SharedInformerFactory
+	// nodeFactory, when set via WithNodeFactory, is where the Node
+	// informer comes from. Nil means factory.
+	nodeFactory informers.SharedInformerFactory
 
 	mu sync.Mutex
 	// armed flips true after every informer cache syncs. Handlers
@@ -439,6 +442,23 @@ func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	if f != nil {
 		s.factory = f
+	}
+}
+
+// WithNodeFactory directs Run to take the Node informer from a
+// different factory than the namespaced ones. Call before Run; nil is
+// ignored, and unset means "the same factory as everything else",
+// which is the caller's normal case.
+//
+// It exists because a namespace deny list is applied as a field
+// selector on the factory, and `metadata.namespace` is not selectable
+// on a cluster-scoped resource — the API server rejects the node LIST
+// outright rather than ignoring the term. A caller that scopes its
+// namespaced watches therefore has to hand the node watch a factory
+// that carries no selector.
+func (s *Source) WithNodeFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.nodeFactory = f
 	}
 }
 
@@ -603,6 +623,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		factory = informers.NewSharedInformerFactory(s.client, 0)
 		owned = true
 	}
+	nodeFactory := s.nodeFactory
+	if nodeFactory == nil {
+		nodeFactory = factory
+	}
 
 	podH, err := factory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { s.asPod(obj, s.onPod) },
@@ -614,7 +638,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	}
 	s.pc.SetSynced(podH.HasSynced)
 
-	nodeH, err := factory.Core().V1().Nodes().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	nodeH, err := nodeFactory.Core().V1().Nodes().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { s.asNode(obj, s.onNode) },
 		UpdateFunc: func(_, obj any) { s.asNode(obj, s.onNode) },
 		DeleteFunc: func(obj any) { s.asNode(tombstoneObj(obj), s.onNodeDelete) },
@@ -649,6 +673,13 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	}
 
 	factory.Start(ctx.Done())
+	if nodeFactory != factory {
+		// Start is idempotent per informer, so starting the same object
+		// twice would be harmless — but these are two objects whenever
+		// the caller scoped its namespaced watches, and the node
+		// informer lives only on the second one.
+		nodeFactory.Start(ctx.Done())
+	}
 	// Shutdown blocks until every handler goroutine exits, upholding
 	// the Source contract that emit is never called after Run returns.
 	// Only for a factory this source owns: on the shared factory those

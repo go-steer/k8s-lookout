@@ -51,7 +51,7 @@ breaking change to running deployments, never a refactor.
 | `--enrich-lists-preflight` | bool | — | Before the scoped-list pass, SelfSubjectAccessReview each selected resource and drop the denied ones proactively (fewer 403s in the watcher log); falls back to reactive Forbidden-skip if SSAR is not permitted. |
 | `--enrich-log-lines` | int | `200` | Log tail per container stream distilled into the enrichment bundle's logs section. Must be >= 1. |
 | `--enrich-timeout` | duration | `5s` | Hard wall-clock budget for one enrichment run; on expiry the inject fires with whatever sections completed plus enrichment_error trailers. Must be > 0. |
-| `--exclude-namespace` | string | — | Comma-separated deny-list of namespaces. |
+| `--exclude-namespace` | string | — | Comma-separated deny-list of namespaces. Scopes the watch: the informers list and watch with a metadata.namespace!= field selector, so these namespaces never enter the cache. Cluster-scoped objects (nodes) are unaffected. |
 | `--expiry-interval` | duration | `1h0m0s` | Interval between expiry scans (periodic paged LISTs — deliberately no Secret informer). Must be > 0. |
 | `--expiry-namespaces` | string | — | Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces. Scopes the sensitive secrets-list grant — the startup RBAC probe verifies exactly this scope. |
 | `--expiry-warn` | duration | `336h0m0s` | Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h. |
@@ -64,7 +64,7 @@ breaking change to running deployments, never a refactor.
 | `--log-level` | string | `info` | One of: debug, info, warn, error. |
 | `--metrics-addr` | string | — | Prometheus /metrics + /healthz + /readyz listener address (host:port). Empty = disabled. |
 | `--mode` | string | `per-incident` | Session routing mode: per-incident (create per (uid,reason)) or shared (all to --target-session). |
-| `--namespace` | string | — | Comma-separated allow-list of namespaces. Empty = all namespaces. |
+| `--namespace` | string | — | Comma-separated allow-list of namespaces. Empty = all namespaces. A post-watch output filter, NOT a watch scope or a security boundary: every namespace is still listed, watched and cached. Use --exclude-namespace to shrink what is watched. |
 | `--notifications-subscription` | string | — | Subscription the notifications source reads (GKE: a Pub/Sub subscription on the cluster's notificationConfig topic) — either projects/\<p>/subscriptions/\<name> or a bare name resolved against the provider project. Required when the notifications source is enabled. |
 | `--otel-exporter` | string | `none` | OpenTelemetry span exporter: none \| console \| otlp. The OTEL_TRACES_EXPORTER env var overrides this. |
 | `--owner` | string | — | X-Asserted-Caller value for POST /sessions in per-incident mode. Sidecar must be in daemon's proxy_identities. |

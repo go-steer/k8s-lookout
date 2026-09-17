@@ -953,7 +953,7 @@ quota APIs. Sources:
 
 | Tier | Unit | Mechanism |
 | --- | --- | --- |
-| Namespace | `lookout watch` under a `Role` | `--namespace`/`--exclude-namespace` (existing flags). Cluster-scoped sources (`object-state` nodes, `capacity`, PDB checks) **fail loudly at startup** — "source X requires cluster RBAC" — and are disabled explicitly, never silently empty. The topology index builds a namespace-local subgraph (no Node/Zone layer). |
+| Namespace | `lookout watch` under a `Role` | `--exclude-namespace` is a real watch scope: the namespaced informers carry a `metadata.namespace!=` field selector, so excluded namespaces are never listed, decoded or cached. `--namespace` is **not** — it filters output after the watch, and is not a security boundary. An *inclusion* list is not expressible as one selector (field selectors have no OR) and is tracked as issue #407. Cluster-scoped sources (`object-state` nodes, `capacity`, PDB checks) **fail loudly at startup** — "source X requires cluster RBAC" — and are disabled explicitly, never silently empty. The topology index builds a namespace-local subgraph (no Node/Zone layer). |
 | Cluster | one sentinel per cluster (canonical) | one informer cache, one topology index, one credential boundary, one failure domain. One daemon may serve many sentinels (unchanged from v2.6 design). |
 | Project | quota source only | one instance per GCP project, regardless of cluster count. |
 | Fleet (1000s) | **the fleet layer, not lookout** | sentinel-per-cluster fan-in; the fleet layer joins on `fingerprint` + `cluster`/`zone`/`project` (§8). No federated central graph (§3). lookout's storm correlation (§7.5) is the single-cluster instance of the same idea. |

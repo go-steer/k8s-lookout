@@ -117,6 +117,10 @@ type Source struct {
 	// process that already watches pods and nodes).
 	factory informers.SharedInformerFactory
 
+	// nodeFactory, when set via WithNodeFactory, is where the Node informer
+	// comes from. Unset means factory.
+	nodeFactory informers.SharedInformerFactory
+
 	inv     *Inventory
 	state   *State
 	queue   *coalescer
@@ -187,6 +191,22 @@ func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	if f != nil {
 		s.factory = f
+	}
+}
+
+// WithNodeFactory directs Run to take the Node informer from a different
+// factory than the namespaced ones. Call before Run; nil is ignored, and
+// unset means "the same factory as everything else", which is the caller's
+// normal case.
+//
+// It exists because a namespace deny list is applied as a field selector on the
+// factory, and `metadata.namespace` is not selectable on a cluster-scoped
+// resource — the API server rejects the node LIST outright rather than ignoring
+// the term. A caller that scopes its namespaced watches therefore has to hand
+// the node watch a factory that carries no selector.
+func (s *Source) WithNodeFactory(f informers.SharedInformerFactory) {
+	if f != nil {
+		s.nodeFactory = f
 	}
 }
 
@@ -302,8 +322,13 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 		owned = true
 	}
 
+	nodeFactory := s.nodeFactory
+	if nodeFactory == nil {
+		nodeFactory = factory
+	}
+
 	podInformer := factory.Core().V1().Pods()
-	nodeInformer := factory.Core().V1().Nodes()
+	nodeInformer := nodeFactory.Core().V1().Nodes()
 	rsInformer := factory.Apps().V1().ReplicaSets()
 
 	// The ReplicaSet cache is read, not watched: the resolver asks it for one
@@ -338,6 +363,13 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	defer func() { _ = s.metrics.Close() }()
 
 	factory.Start(ctx.Done())
+	if nodeFactory != factory {
+		// Start is idempotent per informer, so starting the same object twice
+		// would be harmless — but these are two objects whenever the caller
+		// scoped its namespaced watches, and the node informer lives only on
+		// the second one.
+		nodeFactory.Start(ctx.Done())
+	}
 	if owned {
 		defer factory.Shutdown()
 	}

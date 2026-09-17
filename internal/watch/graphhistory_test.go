@@ -137,7 +137,7 @@ func TestGraphHistory_FeedToStore(t *testing.T) {
 
 	client := fake.NewSimpleClientset(testNode("gke-a"), testRS("shop", "pay-7b9d", "pay"))
 	factory := informers.NewSharedInformerFactory(client, 0)
-	feed := newGraphFeed(factory, st.RecordGraphChange)
+	feed := newGraphFeed(sameFactory(factory), st.RecordGraphChange)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = feed.Run(ctx) }()

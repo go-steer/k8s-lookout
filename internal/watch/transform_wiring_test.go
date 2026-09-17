@@ -132,7 +132,7 @@ func TestSharedTransform_Tombstone(t *testing.T) {
 
 // TestSharedFactory_TrimsOnTheWayIntoTheCache is the wiring proof, and the only
 // test here that would fail if informers.WithTransform were dropped from
-// newSharedFactory. It runs a real informer over a fake API server and reads
+// newSharedFactories. It runs a real informer over a fake API server and reads
 // the cache the way a source does — through the lister — rather than calling
 // the transform itself.
 //
@@ -170,14 +170,15 @@ func TestSharedFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(pod, node)
-	factory := newSharedFactory(client)
-	podLister := factory.Core().V1().Pods().Lister()
-	nodeLister := factory.Core().V1().Nodes().Lister()
+	factories := newSharedFactories(client, nil)
+	podLister := factories.Namespaced.Core().V1().Pods().Lister()
+	nodeLister := factories.Cluster.Core().V1().Nodes().Lister()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
+	factories.Start(ctx.Done())
+	factories.Namespaced.WaitForCacheSync(ctx.Done())
+	factories.Cluster.WaitForCacheSync(ctx.Done())
 
 	cached, err := podLister.Pods("prod").Get("api")
 	if err != nil {
