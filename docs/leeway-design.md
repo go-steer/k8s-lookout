@@ -156,15 +156,66 @@ Three different naming systems, and they should not all get the same answer.
 - **Finding kinds are `leeway.*`.** `docs/signal-schema-v1.md` is explicit that
   *"`kind` is the detector's own (`audit.no_pdb`)"*, so the prefix tracks the
   detector, not the source; `audit.*` is already a subsystem prefix spanning
-  several commands. Proposed: `leeway.skew`, `leeway.contract_violated`,
-  `leeway.domain_outage`, `leeway.pinned_skew`, `leeway.rank_depth`,
-  `leeway.rank_wedged`, `leeway.rank_no_migration`.
+  several commands. The settled set is below.
 - **Metrics are `lookout_leeway_*`**, matching the existing `lookout_*` prefix.
 
 > **The kinds are the expensive part.** `TestSchemaV1_KindInventory` pins the
 > inventory and v1 is frozen, so kind names are a durable commitment in a way that
 > source names, package names and metric names are not. They should be settled
 > before the first source lands, not during.
+
+**Settled 2026-09-17.** Eight kinds, taking the v1 inventory from 49 to 57. The Go
+constants land with their sources in phases 3 and 7; this table is the commitment.
+
+| Kind | Source | Tier | Fires when |
+|---|---|---|---|
+| `leeway.contract_violated` | `topology-drift` | A | A declared `DoNotSchedule` TSC or required anti-affinity is being violated |
+| `leeway.placement_drift` | `topology-drift` | B | Inferred intent deviation — `ρ` over threshold (§7.3) |
+| `leeway.baseline_breach` | `topology-drift` | C | Deviation from the subject's own history (§7.5) |
+| `leeway.domain_unavailable` | `topology-drift` | B | A domain that held eligible nodes now has none |
+| `leeway.rank_wedged` | `compute-class` | A | Pods Pending against a `DoNotScaleUp` class (§7.7.4) |
+| `leeway.rank_degraded` | `compute-class` | B/C | Rank-0 share below threshold, sustained time at the last rank, or mean achieved rank rising against its own baseline |
+| `leeway.rank_no_migration` | `compute-class` | B | No `from_rank > to_rank` transitions after capacity returns |
+| `leeway.rank_tier_unused` | `compute-class` | info | An entire preference tier unused in 30 d |
+
+Five of these differ from the names this section first proposed, and the reasons are
+worth keeping, because each one is an argument about what a kind is *for*.
+
+- **`leeway.skew` became `leeway.placement_drift`.** `skew` put the vaguest name on
+  the most-emitted kind; `observed_skew` and `excess_skew` are already metric names,
+  so a finding called `skew` reads as though it were about that one metric rather
+  than about `ρ`; and it is simply wrong for `ModeColocate`, where the complaint is
+  that pods spread out when they should not have.
+- **`leeway.pinned_skew` was dropped**, and pinning became a `suspectedCause` on
+  `leeway.placement_drift` (§8.5). The payload already carries that field, pinning is
+  one cause among several, and promoting exactly one of them to its own kind is
+  inconsistent. It also costs nothing in dedup: the §8 fingerprint hashes
+  `reasonClass` alongside `kind`, so a distinct cause already gets a distinct
+  identity without spending a frozen name on it.
+- **`leeway.rank_depth` split into `leeway.rank_degraded` and
+  `leeway.rank_tier_unused`.** One kind was carrying four triggers across three
+  tiers. The split is not symmetry for its own sake — a dead preference tier is a
+  *cost* finding whose subject is the compute class and whose remedy is deleting the
+  tier or the reservation, while the rest are availability findings about workloads.
+  Different reader, different action. Mean-rank-against-baseline stays inside
+  `rank_degraded` rather than routing to `leeway.baseline_breach`, because the rank
+  payload is shaped around a rank histogram and sharing the Tier C kind would force
+  two payload shapes through one name.
+- **`leeway.domain_outage` became `leeway.domain_unavailable`.** We cannot observe an
+  outage. We observe that a domain's eligible node count reached zero, which a
+  cordon, a taint or a `nodeSelector` edit produces just as readily as a zone
+  failure. The name should not assert a cause we did not measure.
+- **`leeway.baseline_breach` is new: Tier C had no kind at all.** §8.3 routes Tier C
+  to metrics by default *but allows a Signal at `info`, opt-in per policy*. A kind
+  that is reachable by configuration has to exist in the frozen v1 inventory before
+  the source ships, or the opt-in cannot be honoured later without a schema revision.
+
+**`leeway.placement_drift` and `audit.no_spread` are not duplicates and must not be
+merged.** `audit.no_spread` is a static claim about a template — this workload
+declares no spread constraint — answered from the spec at audit time. `leeway.*` is
+the runtime observation that pods are not where the declared or inferred intent puts
+them, which fires precisely on the workloads whose templates look correct. The same
+distinction holds between `audit.rigid_scheduling` and `leeway.domain_unavailable`.
 
 ### 2.4 Standalone binary
 
@@ -1606,10 +1657,10 @@ only the score differs.
 
 | Signal | Meaning | Tier | Kind |
 |---|---|---|---|
-| Rank-0 time share below threshold | First-choice capacity has degraded | B | `leeway.rank_depth` |
-| Mean achieved rank rises vs. its own EWMA baseline | The mix got worse | C | `leeway.rank_depth` |
-| Sustained time at the last rank | Running on last-resort capacity, often spot | B | `leeway.rank_depth` |
-| An entire **tier** unused in 30d | Dead preference level — or a reservation being paid for and never used | info (cost) | `leeway.rank_depth` |
+| Rank-0 time share below threshold | First-choice capacity has degraded | B | `leeway.rank_degraded` |
+| Mean achieved rank rises vs. its own EWMA baseline | The mix got worse | C | `leeway.rank_degraded` |
+| Sustained time at the last rank | Running on last-resort capacity, often spot | B | `leeway.rank_degraded` |
+| An entire **tier** unused in 30d | Dead preference level — or a reservation being paid for and never used | info (cost) | `leeway.rank_tier_unused` |
 | A single rule unused, siblings in its tier busy | Weak signal: an equal-score sibling absorbed demand, which is the design intent of grouping | info, off by default | — |
 | No `from_rank > to_rank` transitions after capacity returns | Active migration back to preferred capacity is not happening | B | `leeway.rank_no_migration` |
 | Pods Pending against a `DoNotScaleUp` class | No priority can be satisfied and GKE will not scale up — the class is wedged, and the pods are the only symptom | A | `leeway.rank_wedged` |
@@ -1979,7 +2030,7 @@ bind harder still, per the paragraph above.
 
 ```json
 {
-  "kind": "leeway.skew",
+  "kind": "leeway.placement_drift",
   "subject":     { "kind": "Deployment", "namespace": "payments", "name": "api" },
   "topologyKey": "topology.kubernetes.io/zone",
   "tier": "B", "severity": "warning",
@@ -2011,7 +2062,12 @@ bind harder still, per the paragraph above.
 }
 ```
 
-Cause attribution is a small rules engine over evidence we already hold:
+Cause attribution is a small rules engine over evidence we already hold. These are
+`suspectedCause` values, a separate namespace from the §2.3 kinds — which is why
+`domain_outage` survives here while the kind it once named became
+`leeway.domain_unavailable`. The distinction is the point: the kind states what we
+measured (a domain has no eligible nodes), the cause states what we think produced it
+(the nodes went `NotReady` together), and only the first is an observation.
 
 | Suspected cause | Signals |
 |---|---|
@@ -2227,7 +2283,7 @@ No write access to any workload or node.
 | Domain with zero eligible nodes | Excluded from expectation unless `minDomains` requires it |
 | Nodes missing the topology label | Bucketed as `__unknown__`, surfaced as a distinct low-severity finding — a mislabelled node is itself a topology defect |
 | DaemonSets | Expectation is one pod per eligible node; drift = nodes missing a pod, not count imbalance |
-| StatefulSet with zonal PVs | Pods marked `Pinned`; excluded from actionable drift, reported as `leeway.pinned_skew` |
+| StatefulSet with zonal PVs | Pods marked `Pinned`; excluded from actionable drift, and `leeway.placement_drift` carries `suspectedCause: volume_pinning` |
 | Multiple ReplicaSets during rollout | Aggregated at Deployment level; per-RS available for debugging |
 | Job/CronJob pods | Short-lived; scored only if `parallelism ≥ minReplicas` and lifetime > `for` duration |
 | Single-replica workloads | Distribution recorded, drift not evaluated |
@@ -2825,7 +2881,7 @@ independent of 5.
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
-| **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, domain-outage detection | Node-pool imbalance detected and attributed |
+| **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |
 | **8 — Hardening** (2 wks) | Cause attribution consuming sibling sources, cardinality controls, OTLP hardening, `cmd/leeway`, docs, dashboards | Scale + soak met on the padded kwok harness; `cmd/leeway` built and smoke-tested in CI; process survives a black-holed OTLP endpoint for 24 h with flat RSS |
 
 Roughly 14 weeks, against ~19 for the standalone version — the difference is almost
