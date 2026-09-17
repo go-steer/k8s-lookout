@@ -977,6 +977,39 @@ func (v *Verifier) verifyShard(shard int) {
 `lookout_leeway_counter_mismatch_total` is an SLI for the tool itself and should be
 alerted on at any non-zero rate.
 
+> **Implemented 2026-09-17** in `pkg/sources/topologydrift/verify.go`, with four
+> departures from the sketch above. Each was forced by writing it.
+>
+> 1. **The rebuild is per shard, not per subject.** `rebuildFromCache(sub)` reads
+>    like a helper and is a full pod-cache walk; calling it once per subject makes
+>    a pass O(pods × subjects-in-shard) — at the §6.6 baseline row, 150,000 pods
+>    times 1,600 subjects. `State.RebuildShard` walks the cache **once** and
+>    groups by subject, discarding pods outside the shard. Sharding was never
+>    about making the walk cheaper; it bounds the *repair*, so that a systematic
+>    bug found at 20,000 subjects rebuilds a twelfth of them per tick instead of
+>    stalling the evaluation queue behind all of them at once.
+> 2. **The compared set is the union of both sides**, not `SubjectsInShard` alone.
+>    A subject the incremental path still holds and the pod cache no longer
+>    supports is the leak this component exists to catch, and it appears in the
+>    rebuild only as an absence — so it has to be looked for from the other
+>    direction.
+> 3. **`Replace(sub, want)` became `Repair(sub, pods)`.** Overwriting the counts
+>    alone passes the very next verification and re-corrupts on the first real
+>    event: `placements` is what a delta decrements *from*, so a pod left at its
+>    stale placement subtracts from a domain it is no longer counted in. The
+>    repair re-seats `placements`, `subjects` and `byNode` from the rebuilt pods.
+> 4. **The rebuild takes the subject from the cache** (`State.subjectOf`) rather
+>    than re-resolving the owner chain. This looks like it weakens the check, and
+>    the alternative is worse: a pod whose ReplicaSet has left the informer cache
+>    is *supposed* to keep counting under its first-assigned subject (§6.3), so a
+>    fresh resolution would report correct behaviour as drift — on a metric whose
+>    entire value is that any non-zero rate means a bug. What the pass verifies is
+>    the arithmetic, which is where drift actually comes from.
+>
+> The log line also reports per-domain `counted→rebuilt` rather than per-axis
+> totals. The commonest drift is a pod that moved and was never re-counted, and
+> its totals match on both sides.
+
 ### 6.6 Scale envelope
 
 Node count is close to free here. Nodes contribute a trimmed cache entry, a
@@ -3012,7 +3045,7 @@ independent of 5.
 |---|---|---|
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**; only S6 and S8 remain, neither gating Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
-| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter. Left for the wiring PR: registration in `internal/watch`, flags, RBAC manifests; and the §6.5 verifier |
+| **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |

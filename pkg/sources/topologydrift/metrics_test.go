@@ -127,6 +127,9 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 	ctx := context.Background()
 	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
+	// A counter with no Add is not exported at all, so the one metric we hope
+	// never moves in production has to move here or it cannot be checked.
+	h.in.recordMismatch(ctx, leeway.SubjectDeployment)
 
 	want := []string{
 		"lookout_leeway_domain_objects",
@@ -136,6 +139,10 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		"lookout_leeway_last_event_timestamp_seconds",
 		"lookout_leeway_evaluation_duration_seconds",
 		"lookout_leeway_subjects_tracked",
+		// The other half of the unit hazard: `_total` is appended to a
+		// monotonic counter, and it is appended AFTER any unit. This one sets
+		// no unit, so the declared name simply gains the suffix.
+		"lookout_leeway_counter_mismatch_total",
 	}
 	slices.Sort(want)
 
@@ -156,6 +163,9 @@ func TestMetricDocs_MatchTheExporter(t *testing.T) {
 	ctx := context.Background()
 	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
+	// A counter with no Add is not exported at all, so the one metric we hope
+	// never moves in production has to move here or it cannot be checked.
+	h.in.recordMismatch(ctx, leeway.SubjectDeployment)
 
 	docs := MetricDocs()
 	names := make([]string, 0, len(docs))
@@ -207,6 +217,9 @@ func TestMetricDocs_OptionalMatchesTheFlag(t *testing.T) {
 	ctx := context.Background()
 	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
+	// A counter with no Add is not exported at all, so the one metric we hope
+	// never moves in production has to move here or it cannot be checked.
+	h.in.recordMismatch(ctx, leeway.SubjectDeployment)
 
 	exported := h.names(t)
 	for _, d := range MetricDocs() {
@@ -352,6 +365,7 @@ func TestInstruments_NilRecordersAreSafe(t *testing.T) {
 	var in *instruments
 	in.recordEvent(context.Background(), resourcePod, time.Now())
 	in.recordEvaluation(context.Background(), leeway.SubjectDeployment, time.Second)
+	in.recordMismatch(context.Background(), leeway.SubjectDeployment)
 }
 
 // brokenMeter fails to declare one named instrument and otherwise behaves like
@@ -379,6 +393,13 @@ func (m brokenMeter) Float64Histogram(name string, opts ...metric.Float64Histogr
 	return m.Meter.Float64Histogram(name, opts...)
 }
 
+func (m brokenMeter) Int64Counter(name string, opts ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	if name == m.fail {
+		return nil, errDeclare
+	}
+	return m.Meter.Int64Counter(name, opts...)
+}
+
 func (m brokenMeter) Int64ObservableGauge(name string, opts ...metric.Int64ObservableGaugeOption) (metric.Int64ObservableGauge, error) {
 	if name == m.fail {
 		return nil, errDeclare
@@ -397,6 +418,7 @@ func TestNewInstruments_ReportsDeclarationFailures(t *testing.T) {
 	for _, fail := range []string{
 		metricLastEvent,
 		metricEvalDuration,
+		metricCounterMismatch,
 		metricSubjectsTracked,
 		metricDomainReadyNodes,
 		metricDomainObjects,

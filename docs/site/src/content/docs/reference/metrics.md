@@ -75,4 +75,5 @@ them on; see the [`lookout watch` flag table](/reference/watch/).
 | `lookout_leeway_domain_objects` | gauge | `namespace`, `subject`, `subject_kind`, `topology_key`, `domain`, `state` | **Opt-in.** Objects counted per subject, topology domain and scheduling state. |
 | `lookout_leeway_last_event_timestamp_seconds` | gauge | `resource` | Unix time of the last informer event leeway processed, per resource. |
 | `lookout_leeway_evaluation_duration_seconds` | histogram | `subject_kind` | Time spent evaluating one coalesced subject. |
+| `lookout_leeway_counter_mismatch_total` | counter | `subject_kind` | Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway). The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. The repair keeps the next hour's numbers usable; it is not a fix. |
 

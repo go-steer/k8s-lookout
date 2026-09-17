@@ -17,7 +17,9 @@ package topologydrift
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -311,6 +313,23 @@ func TestSource_WithFactory(t *testing.T) {
 	})
 }
 
+func TestSource_WithMeter(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{})
+
+	s.WithMeter(nil)
+	if s.cfg.Meter != nil {
+		t.Error("WithMeter(nil) installed a meter")
+	}
+
+	// §8.4: the meter belongs to the process that serves the scrape endpoint,
+	// so the sentinel hands one down after construction.
+	m := noop.NewMeterProvider().Meter(MeterName)
+	s.WithMeter(m)
+	if s.cfg.Meter != m {
+		t.Errorf("cfg.Meter = %v, want the supplied meter", s.cfg.Meter)
+	}
+}
+
 func TestSource_LoggerDefaultsToTheStandardLog(t *testing.T) {
 	if New(fake.NewSimpleClientset(), Config{}).logger() == nil {
 		t.Error("logger() returned nil with no override")
@@ -583,4 +602,66 @@ func TestSource_EvaluateIsWiredToTheQueue(t *testing.T) {
 		_, evaluated := s.queue.stats()
 		return evaluated == 1
 	})
+}
+
+// TestSource_RunVerifiesOnItsTicker is §6.5 end to end: the auditor is wired
+// into Run, it reads the informer's pod cache, and what it finds it repairs.
+func TestSource_RunVerifiesOnItsTicker(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		node("n-a", "us-central1-a"),
+		pod("db-0", "prod", "n-a", ownedBy("StatefulSet", "db")),
+	)
+	s := New(client, Config{
+		TopologyKeys:   []leeway.TopologyKey{zoneKey},
+		VerifyInterval: 10 * time.Millisecond,
+		VerifyShards:   1,
+	})
+	var (
+		mu     sync.Mutex
+		logged []string
+	)
+	s.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	if got := s.Verifier().Shards(); got != 1 {
+		t.Fatalf("Verifier().Shards() = %d, want the configured 1", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx, func(sources.Signal) {}) }()
+	waitFor(t, "the source to sync", s.HasSynced)
+
+	// A pod the cluster does not have, counted as though a delete had been
+	// missed. Nothing short of the verifier can get rid of it.
+	s.State().OnPodAdd(pod("db-1", "prod", "n-a", ownedBy("StatefulSet", "db")))
+	if got := s.State().Len(); got != 2 {
+		t.Fatalf("Len = %d after the injected pod, want 2", got)
+	}
+
+	waitFor(t, "the verifier to drop the phantom pod", func() bool { return s.State().Len() == 1 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(logged, func(l string) bool {
+		return strings.Contains(l, "verify shard 0/1: 1 of 1 subject(s) drifted")
+	}) {
+		t.Errorf("no shard summary line:\n%s", strings.Join(logged, "\n"))
+	}
+}
+
+// TestSource_CachedPodsBeforeRunIsAnError. An empty answer here would tell the
+// verifier the cluster has no pods, and it would "repair" every counter to zero.
+func TestSource_CachedPodsBeforeRunIsAnError(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{})
+	pods, err := s.cachedPods()
+	if err == nil {
+		t.Fatalf("cachedPods before Run returned %d pods and no error", len(pods))
+	}
+	if !strings.Contains(err.Error(), "pod cache not ready") {
+		t.Errorf("error = %v", err)
+	}
 }

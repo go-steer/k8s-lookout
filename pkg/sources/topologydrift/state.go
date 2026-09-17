@@ -15,6 +15,7 @@
 package topologydrift
 
 import (
+	"hash/fnv"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -310,6 +311,133 @@ func (s *State) PlacementOf(uid types.UID) (leeway.Placement, bool) {
 	defer s.mu.Unlock()
 	p, ok := s.placements[uid]
 	return p, ok
+}
+
+// Rebuilt is one subject's distributions computed straight from the pod cache,
+// alongside the pods they were computed from. The pods are kept because a
+// mismatch is repaired by re-seating them, not by overwriting the counts: see
+// Repair.
+type Rebuilt struct {
+	Pods   []*corev1.Pod
+	Counts map[leeway.TopologyKey]*leeway.Distribution
+}
+
+// RebuildShard computes, from scratch, the distributions of every subject that
+// falls in the given shard, for the pods handed to it.
+//
+// The subject of each pod is taken from the cache first (subjectOf), not
+// resolved fresh. That looks like it weakens the check — the rebuild trusts one
+// of the things it is checking — and the alternative is worse. A pod whose
+// ReplicaSet has since left the informer cache is *supposed* to keep counting
+// under the subject it was first assigned; re-resolving would fail to find one
+// and report correct behaviour as drift, on an SLI whose whole value is that any
+// non-zero rate means a bug. What this pass verifies is the arithmetic — the
+// increments, decrements and re-maps of §6.3 — which is where drift actually
+// comes from.
+func (s *State) RebuildShard(pods []*corev1.Pod, shard, shards int) map[leeway.SubjectRef]*Rebuilt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make(map[leeway.SubjectRef]*Rebuilt)
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		p, counted := s.resolvePlacement(pod)
+		if !counted {
+			continue
+		}
+		sub, ok := s.subjectOf(pod, pod.UID)
+		if !ok || shardOf(sub, shards) != shard {
+			continue
+		}
+		r, ok := out[sub]
+		if !ok {
+			r = &Rebuilt{Counts: make(map[leeway.TopologyKey]*leeway.Distribution, len(s.keys))}
+			out[sub] = r
+		}
+		r.Pods = append(r.Pods, pod)
+		for ordinal, key := range s.keys {
+			dist, ok := r.Counts[key]
+			if !ok {
+				dist = leeway.NewDistribution()
+				r.Counts[key] = dist
+			}
+			dist.Add(p.Domain(ordinal), p.State, p.Pinned)
+		}
+	}
+	return out
+}
+
+// SubjectsInShard returns the tracked subjects that fall in the given shard.
+func (s *State) SubjectsInShard(shard, shards int) []leeway.SubjectRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []leeway.SubjectRef
+	for sub := range s.counts {
+		if shardOf(sub, shards) == shard {
+			out = append(out, sub)
+		}
+	}
+	return out
+}
+
+// Repair replaces one subject's state with a rebuild of it.
+//
+// It re-seats the pod indexes and not only the counts. Overwriting counts alone
+// would look like it worked and re-corrupt on the next event: the placements
+// index is what deltas decrement from, so a pod left at a stale placement
+// subtracts from a domain it was never counted in the moment it moves, putting
+// the subject back where it started with a negative in it.
+//
+// Pods belonging to this subject that are absent from the rebuild are dropped
+// from every index. That is the leak case — a pod the cache no longer has and
+// whose delete event never reached us — and it is the one the counts cannot
+// recover from on their own.
+func (s *State) Repair(sub leeway.SubjectRef, pods []*corev1.Pod) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for uid, cached := range s.subjects {
+		if cached != sub {
+			continue
+		}
+		if p, known := s.placements[uid]; known {
+			s.unlinkNode(p.NodeName, uid)
+		}
+		delete(s.placements, uid)
+		delete(s.subjects, uid)
+	}
+	// Dropped whole rather than decremented back to zero: the counts are known
+	// wrong, so unwinding them with the same arithmetic that produced them is
+	// not a repair. Nothing else keys off this map.
+	delete(s.counts, sub)
+
+	for _, pod := range pods {
+		p, counted := s.resolvePlacement(pod)
+		if !counted {
+			continue
+		}
+		s.placements[pod.UID] = p
+		s.subjects[pod.UID] = sub
+		s.linkNode(p.NodeName, pod.UID)
+		s.applyLocked(sub, p, +1)
+	}
+	s.enqueue(sub)
+}
+
+// shardOf assigns a subject to one of shards slices, stably across restarts and
+// across processes. Hashing the subject rather than, say, ranging over a sorted
+// subject list means a shard's membership does not shift every time an unrelated
+// Deployment is created — so a subject cannot repeatedly land just behind the
+// moving boundary and go years without being checked.
+func shardOf(sub leeway.SubjectRef, shards int) int {
+	if shards <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sub.String()))
+	return int(h.Sum32() % uint32(shards)) //nolint:gosec // shards is a small positive count
 }
 
 // resolvePlacement derives where a pod counts, reporting false for one that
