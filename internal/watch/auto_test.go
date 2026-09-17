@@ -140,7 +140,8 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source capacity: enabled",
 		"source ingress: enabled",
 		"source gateway: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
+		"source topology-drift: enabled",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway,topology-drift (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)
@@ -205,7 +206,7 @@ func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress", "gateway"}
+	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress", "gateway", "topology-drift"}
 	if !slices.Equal(res.enabled, want) {
 		t.Errorf("enabled = %v, want %v (saturation off)", res.enabled, want)
 	}
@@ -404,7 +405,7 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 	if err := resolveAutoDefaults(context.Background(), f, client); err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
-	if want := "k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,ingress"; f.sources != want {
+	if want := "k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,ingress,topology-drift"; f.sources != want {
 		t.Errorf("resolved sources = %q, want %q (no metrics API in fake discovery)", f.sources, want)
 	}
 	if f.storm != stormOn {

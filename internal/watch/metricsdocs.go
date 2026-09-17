@@ -18,6 +18,8 @@ import (
 	"regexp"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // MetricDoc documents one sentinel Prometheus metric for generated
@@ -27,6 +29,10 @@ type MetricDoc struct {
 	Type   string   // counter | gauge | histogram
 	Labels []string // variable label names, nil for unlabeled
 	Help   string   // the registered help string, verbatim
+	// Optional marks a series that is absent from a default scrape
+	// because a flag has to turn it on. Rendered on the generated page
+	// so a reader who cannot find it does not conclude it is broken.
+	Optional bool
 }
 
 // MetricsInventory returns every metric the sentinel serves on
@@ -42,7 +48,12 @@ type MetricDoc struct {
 //
 // The per-runner bundle comes first, then the process-level fleet
 // metrics — every per-runner series additionally carries a const
-// cluster label, which the fleet ones cannot (see fleetMetrics).
+// cluster label, which the fleet ones cannot (see fleetMetrics) — and
+// last the leeway block, which is the one part of this page that cannot
+// be derived: those instruments are declared on the OpenTelemetry API
+// and reach the same registry through a bridge, so there is no
+// Collector to Describe. They are owned, and pinned against the real
+// exporter, by pkg/sources/topologydrift.MetricDocs.
 func MetricsInventory() []MetricDoc {
 	m := newMetrics()
 	fm := newFleetMetrics(prometheus.NewRegistry())
@@ -95,10 +106,19 @@ func MetricsInventory() []MetricDoc {
 		{m.sourceDenied, "gauge", []string{"source", "resource", "required"}},
 		{fm.clusterResolveErrors, "counter", []string{"cluster", "cause"}},
 	}
-	out := make([]MetricDoc, 0, len(rows))
+	out := make([]MetricDoc, 0, len(rows)+len(topologydrift.MetricDocs()))
 	for _, r := range rows {
 		name, help := describeCollector(r.c)
 		out = append(out, MetricDoc{Name: name, Type: r.typ, Labels: r.labels, Help: help})
+	}
+	for _, d := range topologydrift.MetricDocs() {
+		out = append(out, MetricDoc{
+			Name:     d.Name,
+			Type:     d.Type,
+			Labels:   d.Labels,
+			Help:     d.Help,
+			Optional: d.Optional,
+		})
 	}
 	return out
 }

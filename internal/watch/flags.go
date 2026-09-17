@@ -25,6 +25,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
@@ -39,6 +40,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
@@ -75,6 +77,8 @@ type flags struct {
 	capacityPoll          time.Duration
 	pendingAge            time.Duration
 	gatewayGrace          time.Duration
+	topologyKeys          string
+	topologyPerDomain     bool
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -184,7 +188,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, topology-drift, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
 
 	// §11 capability re-check (issue #385). The startup probe is a
 	// point-in-time answer; this is the same question asked again for
@@ -225,6 +229,20 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Programmed=False for minutes) before a sustained status-condition
 	// failure fires.
 	fs.DurationVar(&f.gatewayGrace, "gateway-grace", 5*time.Minute, "How long a Gateway/HTTPRoute status condition (Programmed/Accepted/ResolvedRefs=False, reason != Pending) must be sustained — timed from its lastTransitionTime — before gateway.programming_failed / gateway.route_rejected fires. Absorbs normal LB provisioning latency. Must be > 0.")
+
+	// Topology-drift source knobs (leeway design §10.2). ADDITIVE flags;
+	// only meaningful with --sources=…,topology-drift.
+	//
+	// Deliberately two flags and not six. The §6.4 coalescing windows and
+	// the eligibility sweep interval are real knobs with real defaults,
+	// but this phase of the source emits nothing, so there is no latency
+	// to trade them against yet and no way for an operator to tell a good
+	// setting from a bad one. A flag is a frozen surface; these arrive
+	// with the scoring they exist to tune. What IS here is the pair
+	// nobody can infer: which labels this cluster partitions on, and
+	// whether to pay for the per-subject series.
+	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
+	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects — one series per subject × topology key × domain × scheduling state. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. Turn it on to debug one cluster's placement, not as a standing posture.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -536,6 +554,15 @@ func (f *flags) validate() error {
 	if f.gatewayGrace <= 0 {
 		return errors.New("--gateway-grace must be > 0")
 	}
+	// Topology-drift knob: config error in every mode, like the other
+	// source thresholds, even when the source is disabled. Rejected
+	// rather than defaulted — the source's own normalize would quietly
+	// substitute zone/region for an empty list, so an operator who
+	// cleared the flag deliberately would get the opposite of what they
+	// asked for and no line saying so.
+	if len(topologyKeysFrom(f.topologyKeys)) == 0 {
+		return errors.New("--topology-keys must name at least one node label (the topology axes the topology-drift source partitions on)")
+	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.
 	if f.quotaPoll <= 0 {
@@ -695,7 +722,28 @@ func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow
 func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, gateway.Name, quota.Name, notifications.Name, tokenburn.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, gateway.Name, topologydrift.Name, quota.Name, notifications.Name, tokenburn.Name}
+
+// defaultTopologyKeys renders the topology-drift source's own default
+// axes as the --topology-keys default, so the flag's help text and the
+// source's Config cannot disagree about what "the standard labels" are.
+func defaultTopologyKeys() []string {
+	out := make([]string, 0, len(topologydrift.DefaultTopologyKeys))
+	for _, k := range topologydrift.DefaultTopologyKeys {
+		out = append(out, string(k))
+	}
+	return out
+}
+
+// topologyKeysFrom parses --topology-keys into the source's key type.
+func topologyKeysFrom(s string) []leeway.TopologyKey {
+	names := splitCSV(s)
+	out := make([]leeway.TopologyKey, 0, len(names))
+	for _, n := range names {
+		out = append(out, leeway.TopologyKey(n))
+	}
+	return out
+}
 
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {

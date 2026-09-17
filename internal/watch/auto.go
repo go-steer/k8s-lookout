@@ -40,6 +40,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
@@ -78,7 +79,7 @@ const (
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
 	autoscaling.Name, saturation.Name, degradation.Name, expiry.Name,
-	capacity.Name, ingress.Name, gateway.Name,
+	capacity.Name, ingress.Name, gateway.Name, topologydrift.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -95,17 +96,18 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 	expiryCfg := expiry.DefaultConfig()
 	expiryCfg.Namespaces = splitCSV(f.expiryNamespaces)
 	return map[string][]sources.Requirement{
-		k8sevents.Name:   k8sevents.New(client, 0).RequiredAccess(),
-		objectstate.Name: objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
-		rollout.Name:     rollout.New(client, rollout.DefaultConfig()).RequiredAccess(),
-		workload.Name:    workload.New(client, workload.DefaultConfig()).RequiredAccess(),
-		autoscaling.Name: autoscaling.New(client, autoscaling.DefaultConfig()).RequiredAccess(),
-		saturation.Name:  saturation.New(saturation.DefaultConfig(), nil, nil).RequiredAccess(),
-		degradation.Name: degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
-		expiry.Name:      expiry.New(client, nil, expiryCfg).RequiredAccess(),
-		capacity.Name:    capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
-		ingress.Name:     ingress.New(client).RequiredAccess(),
-		gateway.Name:     gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
+		k8sevents.Name:     k8sevents.New(client, 0).RequiredAccess(),
+		objectstate.Name:   objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
+		rollout.Name:       rollout.New(client, rollout.DefaultConfig()).RequiredAccess(),
+		workload.Name:      workload.New(client, workload.DefaultConfig()).RequiredAccess(),
+		autoscaling.Name:   autoscaling.New(client, autoscaling.DefaultConfig()).RequiredAccess(),
+		saturation.Name:    saturation.New(saturation.DefaultConfig(), nil, nil).RequiredAccess(),
+		degradation.Name:   degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
+		expiry.Name:        expiry.New(client, nil, expiryCfg).RequiredAccess(),
+		capacity.Name:      capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
+		ingress.Name:       ingress.New(client).RequiredAccess(),
+		gateway.Name:       gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
+		topologydrift.Name: topologydrift.New(client, topologydrift.Config{}).RequiredAccess(),
 	}
 }
 

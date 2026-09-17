@@ -48,6 +48,18 @@ const (
 	metricEvalDuration     = "lookout.leeway.evaluation_duration"
 )
 
+// Instrument descriptions. Hoisted to constants because they are the help
+// string on BOTH sides of the export — the one the exporter writes into
+// /metrics and the one MetricDocs hands the docs generator — and a help
+// string that says two different things is worse than one that says nothing.
+const (
+	descSubjectsTracked  = "Subjects with a tracked distribution, by kind."
+	descDomainReadyNodes = "Usable nodes per topology domain."
+	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
+	descLastEvent        = "Unix time of the last informer event leeway processed, per resource."
+	descEvalDuration     = "Time spent evaluating one coalesced subject."
+)
+
 // Attribute keys. Kept as typed keys rather than literals so a typo is a
 // compile error in one place instead of a split series in production.
 var (
@@ -59,6 +71,68 @@ var (
 	attrSubject     = attribute.Key("subject")
 	attrResource    = attribute.Key("resource")
 )
+
+// MetricDoc documents one series leeway exports, in its PROMETHEUS spelling —
+// the name an operator greps for, not the OpenTelemetry name it was declared
+// under.
+type MetricDoc struct {
+	Name   string   // fully-qualified Prometheus metric name
+	Type   string   // gauge | histogram
+	Labels []string // variable label names, nil for unlabeled
+	Help   string   // the exported help string, verbatim
+	// Optional is true for a series that only appears when a flag turns it
+	// on. The docs generator renders that rather than letting a reader
+	// conclude the metric is broken when it is absent from a scrape.
+	Optional bool
+}
+
+// MetricDocs returns every series leeway exports, for the generated metrics
+// reference.
+//
+// This list exists because the sentinel's docs generator derives names and
+// help from live prometheus.Collector.Describe, and these five metrics have no
+// Collector: they are declared on the OpenTelemetry API and reach the registry
+// through a bridge (§8.4). Writing them out is the price of that, and the risk
+// is the obvious one — a hand-kept list drifting from what the exporter
+// actually emits. Two things hold it: the help strings are the same constants
+// the instruments are declared with, and TestMetricDocs_MatchTheExporter
+// gathers a real bridged registry and compares names, types and labels
+// against these rows.
+func MetricDocs() []MetricDoc {
+	return []MetricDoc{
+		{
+			Name:   "lookout_leeway_subjects_tracked",
+			Type:   "gauge",
+			Labels: []string{"subject_kind"},
+			Help:   descSubjectsTracked,
+		},
+		{
+			Name:   "lookout_leeway_domain_ready_nodes",
+			Type:   "gauge",
+			Labels: []string{"topology_key", "domain"},
+			Help:   descDomainReadyNodes,
+		},
+		{
+			Name:     "lookout_leeway_domain_objects",
+			Type:     "gauge",
+			Labels:   []string{"namespace", "subject", "subject_kind", "topology_key", "domain", "state"},
+			Help:     descDomainObjects,
+			Optional: true,
+		},
+		{
+			Name:   "lookout_leeway_last_event_timestamp_seconds",
+			Type:   "gauge",
+			Labels: []string{"resource"},
+			Help:   descLastEvent,
+		},
+		{
+			Name:   "lookout_leeway_evaluation_duration_seconds",
+			Type:   "histogram",
+			Labels: []string{"subject_kind"},
+			Help:   descEvalDuration,
+		},
+	}
+}
 
 // Event resources for metricLastEvent.
 const (
@@ -132,29 +206,29 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	// a unix timestamp.
 	if in.lastEvent, err = meter.Int64Gauge(metricLastEvent,
 		metric.WithUnit("s"),
-		metric.WithDescription("Unix time of the last informer event leeway processed, per resource."),
+		metric.WithDescription(descLastEvent),
 	); err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricLastEvent, err)
 	}
 	if in.evalDuration, err = meter.Float64Histogram(metricEvalDuration,
 		metric.WithUnit("s"),
-		metric.WithDescription("Time spent evaluating one coalesced subject."),
+		metric.WithDescription(descEvalDuration),
 	); err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricEvalDuration, err)
 	}
 
 	subjects, err := meter.Int64ObservableGauge(metricSubjectsTracked,
-		metric.WithDescription("Subjects with a tracked distribution, by kind."))
+		metric.WithDescription(descSubjectsTracked))
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricSubjectsTracked, err)
 	}
 	readyNodes, err := meter.Int64ObservableGauge(metricDomainReadyNodes,
-		metric.WithDescription("Usable nodes per topology domain."))
+		metric.WithDescription(descDomainReadyNodes))
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainReadyNodes, err)
 	}
 	objects, err := meter.Int64ObservableGauge(metricDomainObjects,
-		metric.WithDescription("Objects counted per subject, topology domain and scheduling state."))
+		metric.WithDescription(descDomainObjects))
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainObjects, err)
 	}

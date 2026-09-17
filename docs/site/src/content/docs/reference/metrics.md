@@ -16,6 +16,15 @@ the Prometheus client does not expose them before first observation. A
 presence-check test (`TestMetricsInventoryComplete`) fails when a collector
 is added without an inventory row.
 
+The `lookout_leeway_*` block is the exception: those instruments are declared
+on the OpenTelemetry metric API and bridged into the same registry, so they
+have no collector to describe. Their rows are written out in
+`pkg/sources/topologydrift.MetricDocs` and pinned there against the real
+exporter, names, types and labels included.
+
+Rows marked **opt-in** are absent from a default scrape until a flag turns
+them on; see the [`lookout watch` flag table](/reference/watch/).
+
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `lookout_events_seen_total` | counter | `reason`, `namespace` | Total k8s events observed by the informer, before filter. |
@@ -61,4 +70,9 @@ is added without an inventory row.
 | `lookout_runner_terminal` | gauge | `reason` | 1 when the supervisor has GIVEN UP on this cluster: the runner exited for a reason no retry can fix (access_denied — the authorizer refused a required permission), so it is no longer being watched and no longer being restarted (issue #383). ADDITIVE metric rather than a label on lookout_runner_up, which keeps its exact series identity. The alert to write: a series at 1 means a cluster in the fleet is dark until someone changes a grant. Stays absent in the single-cluster default, where such an exit ends the process instead. |
 | `lookout_source_denied` | gauge | `source`, `resource`, `required` | 1 when a permission this source held at STARTUP is denied now, confirmed over consecutive SelfSubjectAccessReview sweeps (--access-recheck, issue #385); back to 0 when the grant returns. required=true means the source cannot run at all and this cluster's runner is stopping for it; required=false is one degraded dimension on a source that keeps going. The alert to write: any series at 1 means the sentinel has lost coverage it used to have — the silence from that source no longer means the cluster is healthy. |
 | `lookout_cluster_resolve_errors_total` | counter | `cluster`, `cause` | Total clusters this process was told to watch and did not, by cluster and cause (issues #388, #410). credentials: the cluster could not be resolved into a client. duplicate_name: two clusters in the fleet share this name, which is the only handle the sentinel has on a cluster, so neither is watched. The cluster is SKIPPED, not fatal, so the rest of the fleet still runs — which means a non-zero value is a coverage gap: nothing is watching that cluster and its silence means nothing. Counted at startup, so it moves on process restart and on nothing else. |
+| `lookout_leeway_subjects_tracked` | gauge | `subject_kind` | Subjects with a tracked distribution, by kind. |
+| `lookout_leeway_domain_ready_nodes` | gauge | `topology_key`, `domain` | Usable nodes per topology domain. |
+| `lookout_leeway_domain_objects` | gauge | `namespace`, `subject`, `subject_kind`, `topology_key`, `domain`, `state` | **Opt-in.** Objects counted per subject, topology domain and scheduling state. |
+| `lookout_leeway_last_event_timestamp_seconds` | gauge | `resource` | Unix time of the last informer event leeway processed, per resource. |
+| `lookout_leeway_evaluation_duration_seconds` | histogram | `subject_kind` | Time spent evaluating one coalesced subject. |
 

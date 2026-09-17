@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `topology-drift` source, on by default, that counts where a workload's
+  replicas actually sit.** It maintains a per-subject distribution over the
+  node labels named by the new `--topology-keys` (default
+  `topology.kubernetes.io/zone,topology.kubernetes.io/region`) and exports it
+  as `lookout_leeway_*` on `--metrics-addr`: how many subjects are tracked, how
+  many usable nodes each domain has, when the last pod or node event landed,
+  and how long an evaluation takes. It reads pods, nodes and replicasets from
+  the informer factory the sentinel already runs, so it adds no LIST/WATCH
+  stream and needs no RBAC the shipped ClusterRole does not already grant.
+
+  **This release emits nothing.** The source produces no signals and no
+  findings — it keeps counters and publishes them, and the scoring that turns
+  a lopsided distribution into something worth paging on lands in a later
+  release. That is deliberate: it is what makes a default-on source that
+  watches every pod in the cluster a safe thing to ship first, because a bug
+  in it is a wrong number on a dashboard rather than a page at 3am.
+
+  The per-subject, per-domain breakdown is available behind
+  `--topology-per-domain-series` and is off by default because it is
+  multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k
+  for every other `lookout_leeway_*` metric combined.
+
+- **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
+  Instruments declared on the OTel metric API are exported twice from one
+  declaration: into the Prometheus registry `/metrics` already serves — same
+  port, same `cluster` label, beside the hand-registered collectors — and, when
+  `--otel-exporter=otlp` (or `OTEL_METRICS_EXPORTER=otlp`) is set, pushed over
+  OTLP every 60s. The pull side is unconditional; no value of the exporter flag
+  can empty the scrape endpoint.
+
 ### Security
 
 - **Resolved secret values no longer enter the informer cache.** Every Pod now

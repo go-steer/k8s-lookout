@@ -321,14 +321,25 @@ func metricsPage() string {
 		"type and label columns are stamped per collector in that inventory because\n" +
 		"the Prometheus client does not expose them before first observation. A\n" +
 		"presence-check test (`TestMetricsInventoryComplete`) fails when a collector\n" +
-		"is added without an inventory row.\n\n")
+		"is added without an inventory row.\n\n" +
+		"The `lookout_leeway_*` block is the exception: those instruments are declared\n" +
+		"on the OpenTelemetry metric API and bridged into the same registry, so they\n" +
+		"have no collector to describe. Their rows are written out in\n" +
+		"`pkg/sources/topologydrift.MetricDocs` and pinned there against the real\n" +
+		"exporter, names, types and labels included.\n\n" +
+		"Rows marked **opt-in** are absent from a default scrape until a flag turns\n" +
+		"them on; see the [`lookout watch` flag table](/reference/watch/).\n\n")
 	b.WriteString("| Metric | Type | Labels | Meaning |\n| --- | --- | --- | --- |\n")
 	for _, m := range watch.MetricsInventory() {
 		labels := "—"
 		if len(m.Labels) > 0 {
 			labels = "`" + strings.Join(m.Labels, "`, `") + "`"
 		}
-		fmt.Fprintf(&b, "| `%s` | %s | %s | %s |\n", m.Name, m.Type, labels, cell(m.Help))
+		meaning := cell(m.Help)
+		if m.Optional {
+			meaning = "**Opt-in.** " + meaning
+		}
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s |\n", m.Name, m.Type, labels, meaning)
 	}
 	b.WriteString("\n")
 	return b.String()
