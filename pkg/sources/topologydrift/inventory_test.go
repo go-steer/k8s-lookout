@@ -430,7 +430,7 @@ func TestInventory_NodeViews(t *testing.T) {
 	inv.Upsert(node("n1", "zone-a", withAllocatable("4", "16Gi")))
 	inv.Upsert(node("n2", "zone-a", cordoned()))
 
-	views := inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU)
+	views := inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU, Constraints{})
 	if len(views) != 3 {
 		t.Fatalf("got %d views, want 3", len(views))
 	}
@@ -448,18 +448,18 @@ func TestInventory_NodeViews(t *testing.T) {
 		t.Error("the cordoned node came back schedulable")
 	}
 	if !views[0].MatchesSelector || !views[0].Tolerated {
-		t.Error("Phase 2 must present every node as matching; the predicate is Phase 3")
+		t.Error("a subject that constrains nothing must match every untainted node")
 	}
 
-	if got := inv.NodeViews(zoneKey, leeway.WeightAllocatableMemory)[0].Capacity; got != 16*1024*1024*1024 {
+	if got := inv.NodeViews(zoneKey, leeway.WeightAllocatableMemory, Constraints{})[0].Capacity; got != 16*1024*1024*1024 {
 		t.Errorf("memory-weighted capacity = %v", got)
 	}
 	// Equal weighting ignores capacity, so carrying a number there would be
 	// noise the engine has to remember to ignore.
-	if got := inv.NodeViews(zoneKey, leeway.WeightEqual)[0].Capacity; got != 0 {
+	if got := inv.NodeViews(zoneKey, leeway.WeightEqual, Constraints{})[0].Capacity; got != 0 {
 		t.Errorf("equal-weighted capacity = %v, want 0", got)
 	}
-	if inv.NodeViews("unconfigured", leeway.WeightEqual) != nil {
+	if inv.NodeViews("unconfigured", leeway.WeightEqual, Constraints{}) != nil {
 		t.Error("NodeViews returned views for an unconfigured key")
 	}
 }
@@ -472,7 +472,7 @@ func TestInventory_NodeViewsFeedEligibility(t *testing.T) {
 	inv.Upsert(node("a1", "zone-a"))
 	inv.Upsert(node("b1", "zone-b", notReady()))
 
-	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, leeway.WeightEqual), leeway.DefaultEligibilityOptions())
+	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, leeway.WeightEqual, Constraints{}), leeway.DefaultEligibilityOptions())
 	if !slices.Equal(el.Domains, []leeway.Domain{"zone-a"}) {
 		t.Errorf("eligible domains = %v, want [zone-a]", el.Domains)
 	}
@@ -507,7 +507,7 @@ func TestInventory_ConcurrentReadsAndWrites(t *testing.T) {
 					_ = inv.Generation()
 				default:
 					_ = inv.Stats(zoneKey)
-					_ = inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU)
+					_ = inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU, Constraints{})
 				}
 			}
 		}()
