@@ -203,6 +203,59 @@ func TestIntent_HardContract(t *testing.T) {
 	}
 }
 
+func TestIntent_EligibilityPolicies(t *testing.T) {
+	// The zero value of NodeInclusionPolicy is the empty string, and
+	// EligibleDomains reads anything that is not Honor as "do not apply this".
+	// So an unset field must not travel as itself: every source but a TSC
+	// leaves these empty, and reading that as Ignore would widen the eligible
+	// set to the whole cluster and make every pinned workload look like it was
+	// drifting. Unset has to come back out as the scheduler's default.
+	def := DefaultNodeInclusionPolicies()
+
+	tests := []struct {
+		name string
+		in   *Intent
+		want NodeInclusionPolicies
+	}{
+		{"nil intent still has to answer", nil, def},
+		{"a source that cannot express policies", &Intent{}, def},
+		{
+			"only the stated half is overridden",
+			&Intent{Policies: NodeInclusionPolicies{NodeAffinityPolicy: v1.NodeInclusionPolicyIgnore}},
+			NodeInclusionPolicies{
+				NodeAffinityPolicy: v1.NodeInclusionPolicyIgnore,
+				NodeTaintsPolicy:   def.NodeTaintsPolicy,
+			},
+		},
+		{
+			"taints only",
+			&Intent{Policies: NodeInclusionPolicies{NodeTaintsPolicy: v1.NodeInclusionPolicyHonor}},
+			NodeInclusionPolicies{
+				NodeAffinityPolicy: def.NodeAffinityPolicy,
+				NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
+			},
+		},
+		{
+			"both stated",
+			&Intent{Policies: NodeInclusionPolicies{
+				NodeAffinityPolicy: v1.NodeInclusionPolicyIgnore,
+				NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
+			}},
+			NodeInclusionPolicies{
+				NodeAffinityPolicy: v1.NodeInclusionPolicyIgnore,
+				NodeTaintsPolicy:   v1.NodeInclusionPolicyHonor,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.EligibilityPolicies(); got != tc.want {
+				t.Errorf("EligibilityPolicies() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 const (
 	zoneKey TopologyKey = "topology.kubernetes.io/zone"
 	hostKey TopologyKey = "kubernetes.io/hostname"
