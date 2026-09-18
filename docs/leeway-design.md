@@ -514,11 +514,23 @@ type Intent struct {
     Weighting       Weighting // Equal, NodeCount, AllocatableCPU, AllocatableMemory
     EligibleDomains sets.Set[Domain]
     DomainCaps      map[Domain]int64
+    Policies        NodeInclusionPolicies // read via EligibilityPolicies(), never directly
 
     Confidence Confidence // Declared, Inferred, Assumed, Learned
     Evidence   []EvidenceItem
 }
 ```
+
+> `Policies` was added during Phase 3 and is a delta from this section as first
+> written. `nodeAffinityPolicy` and `nodeTaintsPolicy` shape the eligible set
+> (§7.1) and only a TopologySpreadConstraint can express them, so every other
+> source leaves them empty — but the zero value of `NodeInclusionPolicy` is the
+> empty string, and §7.1 reads anything that is not `Honor` as "do not apply".
+> An unset field travelling as itself would therefore stop `nodeSelector` being
+> honoured, widen the eligible set to the whole cluster, and make every pinned
+> workload look like it was drifting. `EligibilityPolicies()` substitutes
+> kube-scheduler's defaults at the point of use and answers on a nil receiver,
+> because a subject with no intent at all still has an eligible set to compute.
 
 **Precedence** (highest first): `SourcePolicyCRD` → `SourceWorkloadAnnotation` →
 `SourceTopologySpreadConstraint` → `SourcePodAntiAffinityRequired` →

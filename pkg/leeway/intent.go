@@ -203,8 +203,40 @@ type Intent struct {
 	EligibleDomains sets.Set[Domain]
 	DomainCaps      map[Domain]int64
 
+	// Policies are the node-inclusion policies that shape the eligible set
+	// (§7.1). Only a TopologySpreadConstraint can express them, so every other
+	// source leaves them empty — and empty means "kube-scheduler's default",
+	// not "Ignore". Read them through EligibilityPolicies, never directly.
+	Policies NodeInclusionPolicies
+
 	Confidence Confidence
 	Evidence   []EvidenceItem
+}
+
+// EligibilityPolicies returns the node-inclusion policies to compute
+// eligibility with, substituting kube-scheduler's defaults for anything the
+// intent did not state.
+//
+// The substitution lives here rather than at each parse site because the zero
+// value of NodeInclusionPolicy is the empty string, and EligibleDomains reads
+// "not Honor" as "do not apply this". An intent from a source that cannot
+// express a policy — which is every source but a TSC — would therefore silently
+// stop honouring nodeSelector: the eligible set would widen to the whole
+// cluster and every pinned workload would look like it was drifting. One place
+// to get it right, and a nil receiver answers too, because "no intent at all"
+// still has to compute an eligible set.
+func (i *Intent) EligibilityPolicies() NodeInclusionPolicies {
+	out := DefaultNodeInclusionPolicies()
+	if i == nil {
+		return out
+	}
+	if i.Policies.NodeAffinityPolicy != "" {
+		out.NodeAffinityPolicy = i.Policies.NodeAffinityPolicy
+	}
+	if i.Policies.NodeTaintsPolicy != "" {
+		out.NodeTaintsPolicy = i.Policies.NodeTaintsPolicy
+	}
+	return out
 }
 
 // HardContract reports whether this intent carries an enforceable maxSkew —
