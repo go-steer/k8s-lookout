@@ -30,9 +30,11 @@ var allSources = []IntentSource{
 	SourceWorkloadAnnotation,
 	SourceTopologySpreadConstraint,
 	SourcePodAntiAffinityRequired,
+	SourcePodAffinityRequired,
 	SourceClusterDefaultDeclared,
 	SourceClusterDefaultAssumed,
 	SourcePodAntiAffinityPreferred,
+	SourcePodAffinityPreferred,
 	SourceLearnedBaseline,
 }
 
@@ -66,9 +68,11 @@ func TestIntentSource_StringsAreStableAndDistinct(t *testing.T) {
 		SourceWorkloadAnnotation:       "workload-annotation",
 		SourceTopologySpreadConstraint: "topology-spread-constraint",
 		SourcePodAntiAffinityRequired:  "pod-anti-affinity-required",
+		SourcePodAffinityRequired:      "pod-affinity-required",
 		SourceClusterDefaultDeclared:   "cluster-default-declared",
 		SourceClusterDefaultAssumed:    "cluster-default-assumed",
 		SourcePodAntiAffinityPreferred: "pod-anti-affinity-preferred",
+		SourcePodAffinityPreferred:     "pod-affinity-preferred",
 		SourceLearnedBaseline:          "learned-baseline",
 	}
 	if len(want) != len(allSources) {
@@ -140,6 +144,8 @@ func TestIntentMode_And_Weighting_Strings(t *testing.T) {
 
 func skewPtr(v int32) *int32 { return &v }
 
+func capPtr(v int64) *int64 { return &v }
+
 func TestIntent_HardContract(t *testing.T) {
 	tests := []struct {
 		name string
@@ -191,6 +197,37 @@ func TestIntent_HardContract(t *testing.T) {
 			// value here would be the unsafe direction to guess.
 			"empty action is not a contract",
 			&Intent{Source: SourceTopologySpreadConstraint, MaxSkew: skewPtr(1)},
+			false,
+		},
+		{
+			// §8.1 names a violated required anti-affinity as Tier A. Its
+			// contract is the per-domain ceiling and it carries no maxSkew at
+			// all, so reading only MaxSkew would silently demote the whole
+			// class to a warning.
+			"a required anti-affinity ceiling is a contract",
+			&Intent{
+				Source:            SourcePodAntiAffinityRequired,
+				MaxPerDomain:      capPtr(1),
+				WhenUnsatisfiable: v1.DoNotSchedule,
+			},
+			true,
+		},
+		{
+			// The scheduler enforces a required podAffinity just as hard, but
+			// it was satisfied at every placement — "further apart than the
+			// affinity would have put them" is a deviation to explain, not a
+			// promise Kubernetes broke, so it must not reach Tier A.
+			"a required podAffinity is not a contract",
+			&Intent{Source: SourcePodAffinityRequired, Mode: ModeColocate},
+			false,
+		},
+		{
+			"an assumed source cannot smuggle a ceiling in either",
+			&Intent{
+				Source:            SourceClusterDefaultAssumed,
+				MaxPerDomain:      capPtr(1),
+				WhenUnsatisfiable: v1.DoNotSchedule,
+			},
 			false,
 		},
 	}

@@ -65,6 +65,14 @@ const (
 	SourceWorkloadAnnotation
 	SourceTopologySpreadConstraint
 	SourcePodAntiAffinityRequired
+	// SourcePodAffinityRequired and SourcePodAffinityPreferred are a Phase 3
+	// addition: §5.1 as first written listed only the anti-affinity halves,
+	// but FR-6 requires colocation intent from podAffinity and that intent has
+	// to say where it came from. Each sits immediately below its anti-affinity
+	// counterpart, so a subject declaring both on one key — a contradiction the
+	// scheduler resolves by refusing to place the pod — resolves here to the
+	// spread reading, with the colocation retained as evidence.
+	SourcePodAffinityRequired
 	// SourceClusterDefaultDeclared and SourceClusterDefaultAssumed are one
 	// source in kube-scheduler and two here, because spike S4 confirmed the
 	// scheduler's configuration is not readable on managed GKE. "The cluster
@@ -75,6 +83,7 @@ const (
 	SourceClusterDefaultDeclared
 	SourceClusterDefaultAssumed
 	SourcePodAntiAffinityPreferred
+	SourcePodAffinityPreferred
 	SourceLearnedBaseline
 )
 
@@ -91,12 +100,16 @@ func (s IntentSource) String() string {
 		return "topology-spread-constraint"
 	case SourcePodAntiAffinityRequired:
 		return "pod-anti-affinity-required"
+	case SourcePodAffinityRequired:
+		return "pod-affinity-required"
 	case SourceClusterDefaultDeclared:
 		return "cluster-default-declared"
 	case SourceClusterDefaultAssumed:
 		return "cluster-default-assumed"
 	case SourcePodAntiAffinityPreferred:
 		return "pod-anti-affinity-preferred"
+	case SourcePodAffinityPreferred:
+		return "pod-affinity-preferred"
 	case SourceLearnedBaseline:
 		return "learned-baseline"
 	default:
@@ -198,6 +211,23 @@ type Intent struct {
 	MinDomains        *int32
 	WhenUnsatisfiable v1.UnsatisfiableConstraintAction
 
+	// MaxPerDomain is a uniform ceiling on how many of the subject's objects
+	// one domain may hold, which is the contract a *required* podAntiAffinity
+	// expresses: at most one per domain, on the term's topology key.
+	//
+	// It is not a MaxSkew of one. A skew bound of one is satisfied by two pods
+	// in every domain, which the anti-affinity forbids outright; and going the
+	// other way, a required anti-affinity holds the observed skew at one by
+	// construction, so a MaxSkew check against it could never fire. The
+	// violation this field exists to catch is the IgnoredDuringExecution half
+	// — a pod placed legally, then a node relabelled so two of them share a
+	// domain after the fact.
+	//
+	// Nil means no ceiling. Callers turn it into the per-domain caps
+	// Apportion takes once the eligible domain set is known; §7.1 is what
+	// decides how many domains there are, and inference runs before that.
+	MaxPerDomain *int64
+
 	// Expectation shaping.
 	Weighting       Weighting
 	EligibleDomains sets.Set[Domain]
@@ -239,21 +269,34 @@ func (i *Intent) EligibilityPolicies() NodeInclusionPolicies {
 	return out
 }
 
-// HardContract reports whether this intent carries an enforceable maxSkew —
-// a DoNotSchedule constraint with a skew bound.
+// HardContract reports whether this intent carries a ceiling Kubernetes itself
+// refuses to exceed — a DoNotSchedule TSC with a skew bound, or a required
+// podAntiAffinity's per-domain ceiling. §8.1 names both as Tier A.
 //
 // This is the Tier A gate. An assumed cluster default can never satisfy it,
 // per §8.1: not because such a default cannot say DoNotSchedule, but because
 // raising a critical finding against a constraint nobody told us about would
 // be asserting a contract we invented.
+//
+// A required podAffinity is deliberately not a hard contract even though the
+// scheduler enforces it just as hard. §8.1's Tier A list is about placement
+// Kubernetes promised and did not deliver; "these pods ended up further apart
+// than the affinity would have put them" is a deviation to explain, not a
+// broken promise, because the affinity was satisfied at every placement.
 func (i *Intent) HardContract() bool {
-	if i == nil || i.MaxSkew == nil {
+	if i == nil {
 		return false
 	}
-	if i.WhenUnsatisfiable != v1.DoNotSchedule {
+	if i.Source == SourceClusterDefaultAssumed {
 		return false
 	}
-	return i.Source != SourceClusterDefaultAssumed
+	if i.MaxPerDomain != nil {
+		return true
+	}
+	if i.MaxSkew == nil {
+		return false
+	}
+	return i.WhenUnsatisfiable == v1.DoNotSchedule
 }
 
 // ResolveIntents reduces a set of candidate intents to at most one per
