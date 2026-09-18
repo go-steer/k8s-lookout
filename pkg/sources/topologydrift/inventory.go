@@ -286,18 +286,18 @@ func (inv *Inventory) Stats(key leeway.TopologyKey) map[leeway.Domain]DomainStat
 }
 
 // NodeViews projects the inventory onto the shape pkg/leeway's eligibility
-// computation consumes, for one axis (§7.1).
+// computation consumes, for one axis and one subject's constraints (§7.1).
 //
-// MatchesSelector and Tolerated are set true for every node. That is the
-// correct Phase 2 answer and not a placeholder to be forgotten: this package
-// owns the predicate and pkg/leeway owns the rule, and the predicate needs the
-// subject's nodeSelector, affinity and tolerations, which is Phase 3's intent
-// inference. Until then every node matches, which is exactly the behaviour of a
-// workload that constrains nothing — the common case.
+// The division of labour is the one the package doc states: pkg/leeway owns the
+// eligibility *rule* and this package owns the *predicate*, so MatchesSelector
+// and Tolerated are decided here, against the nodeSelector, required node
+// affinity and tolerations of an admitted pod. A zero-valued Constraints is a
+// subject that constrains nothing, which matches every node — the common case,
+// and the behaviour every caller had before FR-7 existed.
 //
 // The result is sorted by node name so that eligibility, and therefore every
 // score derived from it, does not depend on Go's map iteration order.
-func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighting) []leeway.NodeView {
+func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighting, c Constraints) []leeway.NodeView {
 	ordinal, ok := inv.Ordinal(key)
 	if !ok {
 		return nil
@@ -312,8 +312,8 @@ func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighti
 			Domain:          n.domain(ordinal),
 			Ready:           n.ready,
 			Schedulable:     n.schedulable,
-			MatchesSelector: true,
-			Tolerated:       true,
+			MatchesSelector: c.MatchesNode(n.name, n.labels),
+			Tolerated:       c.ToleratesNode(n.taints),
 			Capacity:        n.capacity(weighting),
 		})
 	}
