@@ -55,6 +55,7 @@ const (
 	metricEvalDuration     = "lookout.leeway.evaluation_duration"
 	metricCounterMismatch  = "lookout.leeway.counter_mismatch"
 	metricIntentInfo       = "lookout.leeway.intent_info"
+	metricAlertState       = "lookout.leeway.alert_state"
 )
 
 // Instrument descriptions. Hoisted to constants because they are the help
@@ -80,6 +81,10 @@ const (
 		"has no row here, which is what makes the series count a property of the estate's declarations rather than of its size. " +
 		"`source` is what the intent was read from and `confidence` how much that source is worth — `assumed` means k8s-lookout " +
 		"guessed a cluster default it could not read, and every finding derived from it rests on that guess."
+	descAlertState = "Where one subject-axis sits in the §8.2 dwell machine: 1 pending, 2 firing. " +
+		"Only subjects with an open episode are present — a subject that is not drifting has no row rather than a zero, " +
+		"which keeps the series bounded by how much trouble a cluster is in rather than by how large it is. " +
+		"A resolving subject (clear, but inside the resolve dwell) still reads 2, because its finding is still outstanding."
 	descCounterMismatch = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
 		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
 		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
@@ -101,6 +106,8 @@ var (
 	attrWeighting   = attribute.Key("weighting")
 	attrMaxSkew     = attribute.Key("max_skew")
 	attrMode        = attribute.Key("mode")
+	attrTier        = attribute.Key("tier")
+	attrPhase       = attribute.Key("phase")
 )
 
 // MetricDoc documents one series leeway exports, in its PROMETHEUS spelling —
@@ -195,6 +202,12 @@ func MetricDocs() []MetricDoc {
 			Help:   descIntentInfo,
 		},
 		{
+			Name:   "lookout_leeway_alert_state",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key", "tier", "phase"},
+			Help:   descAlertState,
+		},
+		{
 			Name:   "lookout_leeway_last_event_timestamp_seconds",
 			Type:   "gauge",
 			Labels: []string{"resource"},
@@ -226,6 +239,9 @@ type countObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, domain le
 
 // intentObserver is handed each resolved intent during a scrape.
 type intentObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent)
+
+// alertObserver is handed each open episode during a scrape.
+type alertObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, st leeway.AlertState, tier leeway.Tier)
 
 // evalObserver is handed each scored axis during a scrape. The Evaluation is
 // borrowed for the duration of the call and must not be retained.
@@ -301,6 +317,15 @@ type metricsOptions struct {
 	// count; on one where every workload declares a zone spread it is at most
 	// the subject count, which is the same order as subjects_tracked.
 	Intents func(intentObserver)
+
+	// Alerts walks every open §8.2 episode.
+	//
+	// Ungated for the same reason as Intents and a stronger one: the series is
+	// bounded by how many subject-axes are in an episode right now, which on a
+	// healthy estate is zero. A gate on a metric that only exists when
+	// something is wrong would withhold precisely the rows somebody is looking
+	// for.
+	Alerts func(alertObserver)
 }
 
 // instruments holds leeway's OTEL-native metric instruments (§8.4).
@@ -408,7 +433,14 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricMaxDomainShare, err)
 	}
 
+	alertState, err := meter.Int64ObservableGauge(metricAlertState,
+		metric.WithDescription(descAlertState))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricAlertState, err)
+	}
+
 	gauges := observables{
+		alertState:     alertState,
 		subjects:       subjects,
 		readyNodes:     readyNodes,
 		objects:        objects,
@@ -453,6 +485,8 @@ type observables struct {
 	relocation     metric.Int64ObservableGauge
 	drift          metric.Float64ObservableGauge
 	maxDomainShare metric.Float64ObservableGauge
+
+	alertState metric.Int64ObservableGauge
 }
 
 // all is every instrument the callback fills, for RegisterCallback. Kept
@@ -463,6 +497,7 @@ func (g observables) all() []metric.Observable {
 	return []metric.Observable{
 		g.subjects, g.readyNodes, g.objects, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
+		g.alertState,
 	}
 }
 
@@ -518,6 +553,37 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 			))
 		})
 	}
+	if opts.Alerts != nil {
+		opts.Alerts(func(sub leeway.SubjectRef, key leeway.TopologyKey, st leeway.AlertState, tier leeway.Tier) {
+			o.ObserveInt64(g.alertState, alertLevel(st.Phase), metric.WithAttributes(
+				attrSubjectKind.String(string(sub.Kind)),
+				attrNamespace.String(sub.Namespace),
+				attrSubject.String(sub.Name),
+				attrTopologyKey.String(string(key)),
+				attrTier.String(tier.String()),
+				attrPhase.String(st.Phase.String()),
+			))
+		})
+	}
+}
+
+// alertLevel is §8.4's 0/1/2 encoding of a phase.
+//
+// Resolving reads 2 rather than a fourth value: the machine is in its resolve
+// dwell, which means the finding is still outstanding and a dashboard counting
+// `alert_state == 2` is counting exactly the episodes somebody has been told
+// about and not yet told are over. The distinction is not lost — `phase` is a
+// label, so `alert_state{phase="resolving"}` picks them out — but the *value*
+// answers the question the value is asked, which is "how many findings are
+// live".
+func alertLevel(p leeway.AlertPhase) int64 {
+	if p.Firing() {
+		return 2
+	}
+	if p == leeway.PhasePending {
+		return 1
+	}
+	return 0
 }
 
 // observeScores fills the §7.3 series for one scored axis.

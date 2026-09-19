@@ -1075,6 +1075,17 @@ func (r *runner) run(ctx context.Context) error {
 		bs.topoDrift.WithFactory(sharedFactory)
 		bs.topoDrift.WithNodeFactory(factories.Cluster)
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
+		if occStore != nil {
+			// §9.1: the dwell timers ride the same --store the occurrence
+			// records do. Guarded rather than passed unconditionally, because
+			// a typed nil in an interface is not a nil interface — the source
+			// would see a store and get an error from every write.
+			//
+			// Without --store the machine still runs; a restart just starts
+			// every episode's clock again (§9.2: a missing history costs one
+			// dwell, never the monitoring).
+			bs.topoDrift.WithStore(occStore, r.clusterName)
+		}
 	}
 
 	var feed *graphFeed

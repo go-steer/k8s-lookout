@@ -14,7 +14,10 @@
 
 package leeway
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // TopologyKey is a node label key defining a domain axis, such as
 // topology.kubernetes.io/zone.
@@ -66,6 +69,41 @@ func (s SubjectRef) String() string {
 		return string(s.Kind) + "/" + s.Name
 	}
 	return string(s.Kind) + "/" + s.Namespace + "/" + s.Name
+}
+
+// ParseSubjectRef reads back what String wrote, and reports false for anything
+// that is not one of its two shapes.
+//
+// It exists for §9.1: the persisted alert state is keyed by the rendered
+// subject, and a restart has to turn that key back into the subject whose
+// distribution it is about. Round-tripping through a string rather than
+// persisting three columns keeps the store's primary key one field, and the
+// encoding is unambiguous because none of the three segments may contain a
+// slash — a Kubernetes name and namespace are DNS labels, and SubjectKind is
+// a fixed vocabulary.
+//
+// A key this build cannot parse is not an error the caller should stop for. It
+// is a row written by a different build, and §9.2's rule is that a history we
+// cannot read costs one dwell rather than the monitoring.
+func ParseSubjectRef(s string) (SubjectRef, bool) {
+	parts := strings.Split(s, "/")
+	switch len(parts) {
+	case 2:
+		if parts[0] == "" || parts[1] == "" {
+			return SubjectRef{}, false
+		}
+		return SubjectRef{Kind: SubjectKind(parts[0]), Name: parts[1]}, true
+	case 3:
+		// The namespace segment is never empty in a three-part key: String
+		// omits it entirely for a cluster-scoped subject, so "Kind//name" is
+		// something neither half of this package produced.
+		if parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return SubjectRef{}, false
+		}
+		return SubjectRef{Kind: SubjectKind(parts[0]), Namespace: parts[1], Name: parts[2]}, true
+	default:
+		return SubjectRef{}, false
+	}
 }
 
 // CountState is the scheduling state an object is counted under. Keeping

@@ -54,6 +54,29 @@ const Name = "topology-drift"
 // actually moving — is applied immediately, because it changes counts.
 const DefaultEligibilitySweepInterval = 5 * time.Minute
 
+// DefaultAlertInterval is how often §8.2's machine is advanced over every
+// scored subject.
+//
+// It is the resolution of every dwell timer in the subsystem — a 10-minute
+// dwell measured on a 30-second tick fires somewhere in [10:00, 10:30) — and
+// against a `for` measured in minutes that is noise. Going faster buys nothing:
+// the verdicts it reads are only recomputed when a pod or node event arrives,
+// so a 5-second tick would advance the machine over the same numbers six times
+// and reach the same answer.
+const DefaultAlertInterval = 30 * time.Second
+
+// DefaultReconcileGrace bounds how long a persisted alert record waits for its
+// subject to be scored again after a restart (§9.3 step 6).
+//
+// A record can only be reconciled against a verdict, and at startup there are
+// none: the informers have synced but nothing has been scored. Most subjects
+// are scored within one coalesce window of the first re-apply; this is the
+// allowance for the tail, after which an unclaimed record is taken to belong to
+// a workload that was deleted while we were down. Generous on purpose — the
+// cost of waiting is one row in a table, and the cost of dropping too early is
+// a dwell timer restarted for a subject that is still drifting.
+const DefaultReconcileGrace = 5 * time.Minute
+
 // DefaultTopologyKeys are the axes tracked when none are configured (§10.2).
 var DefaultTopologyKeys = []leeway.TopologyKey{
 	corev1.LabelTopologyZone,
@@ -114,6 +137,23 @@ type Config struct {
 	// cluster. Take DefaultThresholds and amend it.
 	Thresholds *leeway.Thresholds
 
+	// Dwell is §8.2's timing. The zero value takes leeway.DefaultDwell, and a
+	// partial one is completed by the machine itself — see leeway.Dwell.
+	Dwell leeway.Dwell
+
+	// AlertInterval is how often the §8.2 machine is advanced. Zero takes
+	// DefaultAlertInterval.
+	AlertInterval time.Duration
+
+	// ReconcileGrace bounds how long a persisted alert record waits for its
+	// subject to be scored again after a restart. Zero takes
+	// DefaultReconcileGrace.
+	ReconcileGrace time.Duration
+
+	// Cluster names this cluster in the persisted alert state, so one store
+	// shared by a fleet keeps the episodes apart.
+	Cluster string
+
 	// Meter is where the §8.4 instruments are declared. Nil means no-op, so
 	// the source is usable in tests and in a process with no telemetry.
 	Meter metric.Meter
@@ -133,6 +173,12 @@ func (c Config) normalize() Config {
 		t := leeway.DefaultThresholds()
 		c.Thresholds = &t
 	}
+	if c.AlertInterval <= 0 {
+		c.AlertInterval = DefaultAlertInterval
+	}
+	if c.ReconcileGrace <= 0 {
+		c.ReconcileGrace = DefaultReconcileGrace
+	}
 	return c
 }
 
@@ -150,12 +196,13 @@ func (c Config) perDomainGate() PerDomainGate {
 
 // Source implements sources.Source for the topology-drift row of §3.
 //
-// **Phase 2 emits nothing.** Run takes an emit callback to satisfy the
-// interface and never calls it. That is the whole reason this phase can ship
-// default-on ahead of the detection half: the source maintains its counters
-// against live traffic, exports them as metrics, and cannot produce a finding —
-// so a bug here is a wrong number on a dashboard nobody alerts on, not a page.
-// Intent inference lands in Phase 3 and findings in Phase 4.
+// **It still emits nothing.** Run takes an emit callback to satisfy the
+// interface and never calls it. That is the whole reason this can ship
+// default-on ahead of the delivery half: the source maintains its counters
+// against live traffic, infers intent, scores every subject, runs the §8.2
+// dwell machine over the verdicts and exports the lot as metrics — and cannot
+// produce a finding. So a bug here is a wrong number on a dashboard nobody
+// alerts on, not a page. Emission is the last increment of Phase 4.
 type Source struct {
 	client kubernetes.Interface
 	cfg    Config
@@ -179,6 +226,11 @@ type Source struct {
 	queue   *coalescer
 	metrics *instruments
 	verify  *Verifier
+	alerts  *Alerts
+	// store persists the §8.2 dwell timers. Nil means no persistence, which is
+	// the no-`--store` deployment: the machine still runs, it just starts every
+	// dwell from zero at each restart.
+	store AlertStore
 	// policies holds the LeewayPolicy objects the informers deliver. Always
 	// non-nil so that policyFor needs no second nil check; an empty store is
 	// the normal deployment.
@@ -236,6 +288,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		Enqueue:   s.queue.Enqueue,
 		Pinned:    VolumePins(s.boundVolume, cfg.TopologyKeys),
 	})
+	s.alerts = NewAlerts(cfg.Dwell)
 	s.verify = NewVerifier(VerifyOptions{
 		State:      s.state,
 		Pods:       s.cachedPods,
@@ -292,6 +345,40 @@ func (s *Source) WithDynamic(dyn dynamic.Interface) {
 	if dyn != nil {
 		s.dyn = dyn
 	}
+}
+
+// AlertStore is §9.1's persistence seam, satisfied by *store.Store.
+//
+// An interface rather than the concrete type for the usual reason plus one
+// specific to it: the store is optional (`--store` is opt-in), and a source
+// that imported the package would still have to answer what it does without
+// one. Three methods, named after what they are for, is a cheaper contract to
+// state than "a *store.Store, or nil, and remember that two of its methods
+// return an error on nil while the third does not".
+type AlertStore interface {
+	// LeewayAlertStates returns one cluster's persisted episodes.
+	LeewayAlertStates(ctx context.Context, cluster string) ([]leeway.AlertRecord, error)
+	// PutLeewayAlertState writes one episode.
+	PutLeewayAlertState(ctx context.Context, rec leeway.AlertRecord) error
+	// DeleteLeewayAlertState ends one episode.
+	DeleteLeewayAlertState(ctx context.Context, cluster, subjectKey, topologyKey string) error
+}
+
+// WithStore gives the source somewhere to persist its dwell timers.
+//
+// Optional, and running without one is a supported deployment rather than a
+// degraded mode — it is what `watch` does with no `--store`. §9.2's rule is
+// that a missing history means one lost dwell, never no monitoring, so the
+// machine runs either way and a restart simply starts every episode's clock
+// again.
+func (s *Source) WithStore(st AlertStore, cluster string) {
+	if st == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store = st
+	s.cfg.Cluster = cluster
 }
 
 // warnAmbiguous logs a policy tie once per competing set. Never called under
@@ -552,11 +639,10 @@ func (s *Source) onPolicyDelete(obj any) {
 // evaluate is the coalesced per-subject callback.
 //
 // It resolves intent and eligibility, scores the subject on every axis and
-// stores both results; it emits nothing. The §8.2 state machine and the
-// findings that come out of it are the next increment, and keeping them out of
-// this one means the whole measurement stack — inference, apportionment and the
-// §7.3 scores — reaches a real cluster and a real dashboard before anything can
-// page on it. A wrong number here is a wrong number on a graph.
+// stores both results. It does not touch the §8.2 machine and it emits
+// nothing: the machine runs on its own timer (see Run) so that a dwell
+// measures how long a condition held rather than how often the subject's pods
+// churned, and the findings that come out of it are the next increment.
 func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	start := time.Now()
 	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, time.Since(start)) }()
@@ -783,6 +869,12 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	s.armed = true
 	s.mu.Unlock()
 
+	// §9.3 step 6, read here and applied on the first alert pass: a persisted
+	// episode can only be reconciled against a fresh verdict, and the queue has
+	// not scored anything yet. Read after arming, because until the caches are
+	// synced there is nothing to reconcile against either.
+	s.loadAlertState(ctx, time.Now())
+
 	go s.queue.Run(ctx)
 
 	ticker := time.NewTicker(s.cfg.EligibilitySweepInterval)
@@ -794,6 +886,13 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	verifyTick := time.NewTicker(s.verify.Interval())
 	defer verifyTick.Stop()
 
+	// §8.2, on a timer rather than on the evaluation path. Dwell measures how
+	// long a condition has held, so advancing it per event would make it run
+	// faster for a subject whose pods churn than for a quiet one that is
+	// equally wrong; and a whole pass has to be judged against one instant.
+	alertTick := time.NewTicker(s.cfg.AlertInterval)
+	defer alertTick.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -802,6 +901,8 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 			s.sweep()
 		case <-verifyTick.C:
 			s.runVerifyPass()
+		case <-alertTick.C:
+			s.runAlertPass(ctx)
 		}
 	}
 }
@@ -819,6 +920,107 @@ func (s *Source) runVerifyPass() {
 	}
 }
 
+// loadAlertState reads §9.1's persisted episodes and hands them to the machine
+// for reconciliation on the first pass (§9.3 step 6).
+//
+// A read failure is logged and swallowed. §9.2 is explicit that a sentinel must
+// never refuse to start over its history file — a store that cannot be read
+// costs every open episode one dwell, and refusing to run costs the cluster its
+// monitoring. The nil-store case is not an error at all: it is the deployment
+// without `--store`.
+func (s *Source) loadAlertState(ctx context.Context, now time.Time) {
+	s.mu.Lock()
+	st, cluster := s.store, s.cfg.Cluster
+	s.mu.Unlock()
+	if st == nil {
+		return
+	}
+
+	records, err := st.LeewayAlertStates(ctx, cluster)
+	if err != nil {
+		s.logger()("topology-drift: could not read persisted alert state (%v) — every open episode restarts its dwell; monitoring is unaffected", err)
+		return
+	}
+	if n := s.alerts.Load(records, now); n > 0 {
+		s.logger()("topology-drift: restored %d open episode(s) from the store; each is reconciled against a fresh score as its subject is re-evaluated (within %s)",
+			n, s.cfg.ReconcileGrace)
+	}
+}
+
+// judgements snapshots every scored subject-axis's verdict.
+//
+// Taken as a slice before the machine runs rather than advancing inside
+// State's walk, for two reasons. It keeps the index lock off the machine's
+// lock, so the two can never be taken in opposite orders by some later caller.
+// And it is what makes the pass complete: Alerts.Pass reads the absence of a
+// judgement as "this subject is gone", which is only true of a set that was
+// consistent at one moment.
+func (s *Source) judgements() []Judgement {
+	var js []Judgement
+	s.state.EachEvaluation(func(sub leeway.SubjectRef, ev *Evaluation) {
+		js = append(js, Judgement{
+			Subject:  sub,
+			Key:      ev.Key,
+			Breached: ev.Verdict.Breached,
+			Tier:     ev.Verdict.Tier,
+		})
+	})
+	return js
+}
+
+// runAlertPass advances §8.2's machine over every scored subject and persists
+// what moved.
+//
+// **It still emits nothing.** The transitions are computed, counted in
+// alert_state and written to the store; turning a TransitionFiring into a
+// finding on the wire is the next increment. Running the machine ahead of the
+// emission is deliberate for the same reason the counters shipped ahead of the
+// scoring: a dwell bug that fires everything at once is a graph somebody can
+// look at, right up until it is a page.
+func (s *Source) runAlertPass(ctx context.Context) {
+	now := time.Now()
+	for _, o := range s.alerts.Pass(s.judgements(), now, s.cfg.ReconcileGrace) {
+		s.persistOutcome(ctx, o, now)
+	}
+}
+
+// persistOutcome writes one episode's move through to the store.
+//
+// Only a move is written. An episode that sat in Pending for nine of its ten
+// minutes produced no transition and changed none of the persisted fields, so
+// writing it every tick would be twenty thousand redundant UPSERTs an hour to
+// record that nothing happened. The fields §9.1 persists — the phase, the two
+// timestamps and the flap history — only change when Advance says they did.
+func (s *Source) persistOutcome(ctx context.Context, o Outcome, now time.Time) {
+	s.mu.Lock()
+	st, cluster := s.store, s.cfg.Cluster
+	s.mu.Unlock()
+	if st == nil {
+		return
+	}
+
+	subjectKey, topologyKey := o.Subject.String(), string(o.Key)
+	if o.Gone {
+		if err := st.DeleteLeewayAlertState(ctx, cluster, subjectKey, topologyKey); err != nil {
+			s.logger()("topology-drift: could not clear persisted alert state for %s on %s: %v", subjectKey, topologyKey, err)
+		}
+		return
+	}
+	if o.Transition == leeway.TransitionNone {
+		return
+	}
+	if err := st.PutLeewayAlertState(ctx, leeway.AlertRecord{
+		Cluster:     cluster,
+		SubjectKey:  subjectKey,
+		TopologyKey: topologyKey,
+		AlertState:  o.State,
+		UpdatedAt:   now,
+	}); err != nil {
+		s.logger()("topology-drift: could not persist alert state for %s on %s (%v) — the episode is still tracked in memory and will restart its dwell if this process does",
+			subjectKey, topologyKey, err)
+	}
+}
+
 // startMetrics declares the §8.4 instruments against the configured meter.
 func (s *Source) startMetrics() error {
 	in, err := newInstruments(metricsOptions{
@@ -829,6 +1031,7 @@ func (s *Source) startMetrics() error {
 		DomainObjects: s.domainObjects,
 		Evaluations:   s.state.EachEvaluation,
 		Intents:       s.state.EachIntent,
+		Alerts:        s.alerts.Each,
 	})
 	if err != nil {
 		return err
