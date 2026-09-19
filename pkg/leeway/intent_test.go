@@ -482,3 +482,152 @@ func TestSortedKeys(t *testing.T) {
 		t.Errorf("SortedKeys(empty) = %v, want empty", got)
 	}
 }
+
+// The carry-the-contract tests. Precedence decides whose description of the
+// intent wins; a scheduler-enforced ceiling is not a description, and losing
+// it to an overriding source silently downgrades a Tier A violation.
+
+func TestResolveIntents_CarriesAHardContractPastAnOverridingSource(t *testing.T) {
+	// The FR-10 shape: a policy outranks everything and expresses no maxSkew.
+	// The DoNotSchedule constraint the scheduler actually enforced has to
+	// survive being outranked.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+			MaxSkew: skewPtr(2), WhenUnsatisfiable: v1.DoNotSchedule},
+		{TopologyKey: "zone", Source: SourcePolicyCRD, Mode: ModeSpread},
+	})
+	zone := got["zone"]
+	if zone.Source != SourcePolicyCRD {
+		t.Fatalf("Source = %v, want the policy to win precedence", zone.Source)
+	}
+	if zone.MaxSkew == nil || *zone.MaxSkew != 2 {
+		t.Fatalf("MaxSkew = %v, want the demoted constraint's 2", zone.MaxSkew)
+	}
+	if zone.WhenUnsatisfiable != v1.DoNotSchedule {
+		t.Errorf("WhenUnsatisfiable = %v, want DoNotSchedule to travel with the skew bound", zone.WhenUnsatisfiable)
+	}
+	if !zone.HardContract() {
+		t.Error("HardContract() = false: the policy erased a Tier A contract")
+	}
+}
+
+func TestResolveIntents_APerDomainCeilingDeliberatelyDoesNotCarry(t *testing.T) {
+	// A required podAntiAffinity's ceiling is every bit as real as a
+	// DoNotSchedule maxSkew, and it still must not ride along, because the only
+	// consumer of HardContract() is Breach and it pairs the flag with
+	// ExcessSkew. Carrying the ceiling here would make Breach announce Tier A —
+	// "observed skew exceeds the declared maxSkew" — about a ScheduleAnyway
+	// bound Kubernetes never refused to exceed. The honest report needs Breach
+	// to compare the ceiling against the observed per-domain maximum, which is
+	// Phase 4's job.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourcePodAntiAffinityRequired, Mode: ModeSpread, MaxPerDomain: capPtr(1)},
+		{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+			MaxSkew: skewPtr(3), WhenUnsatisfiable: v1.ScheduleAnyway},
+	})
+	zone := got["zone"]
+	if zone.MaxPerDomain != nil {
+		t.Errorf("MaxPerDomain = %d carried onto a ScheduleAnyway winner", *zone.MaxPerDomain)
+	}
+	if zone.HardContract() {
+		t.Error("HardContract() = true: a ScheduleAnyway bound was escalated to Tier A")
+	}
+	// The ceiling is not lost, only demoted — the evidence still names it, so
+	// Phase 4 has something to read when it learns to score per-domain caps.
+	var found bool
+	for _, e := range zone.Evidence {
+		if e.Source == SourcePodAntiAffinityRequired {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the anti-affinity left no evidence at all")
+	}
+}
+
+func TestResolveIntents_ADoNotScheduleContractStillCarriesPastAScheduleAnywayWinner(t *testing.T) {
+	// The mirror of the case above, and the reason the carry exists: when the
+	// loser's bound *is* one Kubernetes refuses to exceed, ExcessSkew measured
+	// against it means exactly what Breach will say about it.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourceWorkloadAnnotation, Mode: ModeSpread},
+		{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+			MaxSkew: skewPtr(1), WhenUnsatisfiable: v1.DoNotSchedule},
+	})
+	zone := got["zone"]
+	if zone.Source != SourceWorkloadAnnotation {
+		t.Fatalf("winner = %v, want the annotation", zone.Source)
+	}
+	if zone.MaxSkew == nil || *zone.MaxSkew != 1 || !zone.HardContract() {
+		t.Errorf("the DoNotSchedule contract did not carry: %+v", zone)
+	}
+}
+
+func TestResolveIntents_AnAssumedDefaultsSkewDoesNotCarry(t *testing.T) {
+	// §8.1: an assumed default can never be Tier A, so it must not become one
+	// by being carried onto a source that can.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourceClusterDefaultAssumed, Mode: ModeSpread,
+			MaxSkew: skewPtr(1), WhenUnsatisfiable: v1.DoNotSchedule},
+		{TopologyKey: "zone", Source: SourcePolicyCRD, Mode: ModeSpread},
+	})
+	if zone := got["zone"]; zone.HardContract() {
+		t.Errorf("an assumed default was laundered into a hard contract: %+v", zone)
+	}
+}
+
+func TestResolveIntents_CarryIsOrderIndependent(t *testing.T) {
+	contract := Intent{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+		MaxSkew: skewPtr(2), WhenUnsatisfiable: v1.DoNotSchedule}
+	policy := Intent{TopologyKey: "zone", Source: SourcePolicyCRD, Mode: ModeSpread}
+	for _, order := range [][]Intent{{contract, policy}, {policy, contract}} {
+		got := ResolveIntents(order)["zone"]
+		if got.MaxSkew == nil || *got.MaxSkew != 2 {
+			t.Errorf("candidate order changed the carry: MaxSkew = %v", got.MaxSkew)
+		}
+	}
+}
+
+func TestResolveIntents_IgnoreRefusesTheCarry(t *testing.T) {
+	// An operator who declared the key uninteresting said so about the whole
+	// key. Re-admitting the contract would make Ignore mean "ignore, except
+	// when it matters most".
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+			MaxSkew: skewPtr(2), WhenUnsatisfiable: v1.DoNotSchedule},
+		{TopologyKey: "zone", Source: SourcePolicyCRD, Mode: ModeIgnore},
+	})
+	if got["zone"].MaxSkew != nil {
+		t.Errorf("MaxSkew = %v, want nil: Ignore outranks the carry", got["zone"].MaxSkew)
+	}
+	if got["zone"].HardContract() {
+		t.Error("an Ignore key acquired a hard contract")
+	}
+}
+
+func TestResolveIntents_WinnersOwnContractStands(t *testing.T) {
+	// Two contracts on one key: the winner's own bound is the one that
+	// applies, not whichever is tighter. Precedence is not a merge.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourcePodAntiAffinityRequired, Mode: ModeSpread, MaxPerDomain: capPtr(1)},
+		{TopologyKey: "zone", Source: SourceTopologySpreadConstraint, Mode: ModeSpread,
+			MaxSkew: skewPtr(5), WhenUnsatisfiable: v1.DoNotSchedule},
+	})
+	if got["zone"].MaxSkew == nil || *got["zone"].MaxSkew != 5 {
+		t.Errorf("MaxSkew = %v, want the winner's own 5", got["zone"].MaxSkew)
+	}
+}
+
+func TestResolveIntents_AnAssumedDefaultHasNothingToCarry(t *testing.T) {
+	// §8.1 caps an assumed cluster default below Tier A, so HardContract is
+	// false for it however it is spelled — and a contract that does not exist
+	// cannot be carried onto something that outranks it.
+	got := ResolveIntents([]Intent{
+		{TopologyKey: "zone", Source: SourceClusterDefaultAssumed, Mode: ModeSpread,
+			MaxSkew: skewPtr(5), WhenUnsatisfiable: v1.DoNotSchedule},
+		{TopologyKey: "zone", Source: SourcePolicyCRD, Mode: ModeSpread},
+	})
+	if got["zone"].MaxSkew != nil {
+		t.Errorf("MaxSkew = %v, want nil: an assumed default is not a contract", got["zone"].MaxSkew)
+	}
+}

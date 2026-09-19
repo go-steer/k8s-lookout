@@ -276,6 +276,36 @@ func (a *domainAgg) reason() string {
 	return "no usable nodes: " + strings.Join(a.reasons, ", ")
 }
 
+// WeightsFor builds the apportionment weights an intent asks for: its
+// explicitly declared shares where it has them, and its weighting mode
+// otherwise. A nil intent weights every domain equally.
+//
+// This exists for the same reason EligibilityPolicies does — so no caller has
+// to remember which of two fields shapes the expectation. Reading Weighting
+// straight off an intent that carries ExplicitShares would silently apportion
+// a declared 40/40/20 as an even third each, and the resulting drift would be
+// reported against a distribution the operator never asked for.
+func (e *Eligibility) WeightsFor(i *Intent) []float64 {
+	if i == nil {
+		return EqualWeights(len(e.Domains))
+	}
+	if len(i.ExplicitShares) > 0 {
+		out := make([]float64, len(e.Domains))
+		for idx, d := range e.Domains {
+			// A domain the declaration does not name weights zero: the
+			// operator enumerated where the objects belong, and somewhere
+			// unnamed is not one of those places. If that leaves every weight
+			// at zero — the declaration names no eligible domain at all —
+			// Apportion falls back to equal shares rather than placing
+			// nothing, because at that point the declaration tells us nothing
+			// about the domains that actually exist.
+			out[idx] = i.ExplicitShares[d]
+		}
+		return out
+	}
+	return e.Weights(i.Weighting)
+}
+
 // Weights builds the apportionment weights for a weighting mode.
 //
 // NodeCount and capacity weighting both come straight off the eligibility

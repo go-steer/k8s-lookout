@@ -233,6 +233,18 @@ type Intent struct {
 	EligibleDomains sets.Set[Domain]
 	DomainCaps      map[Domain]int64
 
+	// ExplicitShares is §10.1's expectedDistribution: the operator naming the
+	// split they want rather than a rule for deriving one. Only a policy can
+	// express it — nothing in the Kubernetes API says "40/40/20" — so every
+	// other source leaves it nil, and nil is what makes Weighting apply.
+	//
+	// The values are relative weights, not percentages and not counts. They
+	// are normalised over whichever named domains turn out to be eligible, so
+	// a declaration that names a zone the cluster has since drained keeps
+	// working on the zones that remain instead of expecting objects where none
+	// can go. Read it through Eligibility.WeightsFor, never directly.
+	ExplicitShares map[Domain]float64
+
 	// Policies are the node-inclusion policies that shape the eligible set
 	// (§7.1). Only a TopologySpreadConstraint can express them, so every other
 	// source leaves them empty — and empty means "kube-scheduler's default",
@@ -330,12 +342,62 @@ func ResolveIntents(candidates []Intent) map[TopologyKey]*Intent {
 			// replacing it, or the explanation dies with it.
 			cp := c
 			cp.Evidence = append(cp.Evidence, demote(cur)...)
+			carryContract(&cp, cur)
 			winners[c.TopologyKey] = &cp
 			continue
 		}
 		cur.Evidence = append(cur.Evidence, demote(&c)...)
+		carryContract(cur, &c)
 	}
 	return winners
+}
+
+// carryContract preserves a scheduler-enforced ceiling that the winning source
+// does not itself express.
+//
+// Precedence decides whose *description* of the intent wins. A hard contract is
+// not a description: a DoNotSchedule maxSkew, or a required podAntiAffinity's
+// one-per-domain ceiling, is a promise Kubernetes made at admission time, and
+// it stayed true no matter who else had an opinion. Letting a higher-precedence
+// source erase it downgrades a Tier A violation — placement Kubernetes
+// guaranteed and did not deliver — into an ordinary distributional observation,
+// silently, which is the failure direction this subsystem is least able to
+// notice.
+//
+// The case that surfaced this is FR-10's: a policy CRD outranks everything and
+// carries no maxSkew, so a subject with both would have lost its contract the
+// moment an operator declared a policy.
+//
+// Only the DoNotSchedule skew bound carries, and deliberately not a required
+// podAntiAffinity's MaxPerDomain. Both are equally real promises, but
+// HardContract() is consumed in exactly one place — Breach, which pairs it with
+// ExcessSkew, a quantity derived only from MaxSkew. Carrying a per-domain
+// ceiling onto a winner that has its own ScheduleAnyway maxSkew would therefore
+// return "observed skew exceeds the declared maxSkew" as Tier A about a bound
+// Kubernetes never refused to exceed. Reporting the anti-affinity's ceiling
+// honestly needs Breach to compare it against the observed per-domain maximum,
+// which is a scoring rule and belongs with the rest of them in Phase 4; until
+// then the ceiling stays on its own demoted intent, where the evidence trail
+// still carries it and nothing over-claims.
+//
+// Two further limits. ModeIgnore takes precedence over the carry: an operator
+// who declared a key uninteresting has said so about the whole key, and
+// re-admitting a contract through the back door would make Ignore mean "ignore,
+// except when it matters most". And MinDomains does not carry, unlike MaxSkew —
+// it shapes the expectation by adding synthetic domains, and the expectation is
+// precisely what the overriding source is entitled to redefine.
+func carryContract(winner, losing *Intent) {
+	if winner == nil || losing == nil || winner.Mode == ModeIgnore {
+		return
+	}
+	if winner.MaxSkew != nil || losing.MaxSkew == nil {
+		return
+	}
+	if losing.Source == SourceClusterDefaultAssumed || losing.WhenUnsatisfiable != v1.DoNotSchedule {
+		return
+	}
+	winner.MaxSkew = losing.MaxSkew
+	winner.WhenUnsatisfiable = losing.WhenUnsatisfiable
 }
 
 // demote turns a losing candidate into evidence: its own evidence trail plus a

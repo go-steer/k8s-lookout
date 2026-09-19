@@ -343,3 +343,59 @@ func TestDefaultEligibilityOptions(t *testing.T) {
 		t.Errorf("MinDomains should default to unset, got %v", *opts.MinDomains)
 	}
 }
+
+func TestEligibility_WeightsFor(t *testing.T) {
+	e := &Eligibility{
+		Domains:   []Domain{"a", "b", "c"},
+		NodeCount: []int64{10, 5, 1},
+		Capacity:  []float64{40, 20, 4},
+	}
+
+	t.Run("nil intent weights equally", func(t *testing.T) {
+		if got := e.WeightsFor(nil); !reflect.DeepEqual(got, []float64{1, 1, 1}) {
+			t.Errorf("WeightsFor(nil) = %v", got)
+		}
+	})
+
+	t.Run("no explicit shares falls through to the weighting mode", func(t *testing.T) {
+		got := e.WeightsFor(&Intent{Weighting: WeightNodeCount})
+		if !reflect.DeepEqual(got, []float64{10, 5, 1}) {
+			t.Errorf("WeightsFor = %v, want the node counts", got)
+		}
+	})
+
+	t.Run("explicit shares beat the weighting mode", func(t *testing.T) {
+		// The declaration is what the operator asked for; the weighting mode
+		// is a rule for deriving one when they did not. Reading Weighting
+		// here would apportion a declared 40/40/20 as node counts and report
+		// drift against a distribution nobody asked for.
+		got := e.WeightsFor(&Intent{
+			Weighting:      WeightNodeCount,
+			ExplicitShares: map[Domain]float64{"a": 40, "b": 40, "c": 20},
+		})
+		if !reflect.DeepEqual(got, []float64{40, 40, 20}) {
+			t.Errorf("WeightsFor = %v, want the declared shares", got)
+		}
+	})
+
+	t.Run("an unnamed eligible domain weights zero", func(t *testing.T) {
+		got := e.WeightsFor(&Intent{ExplicitShares: map[Domain]float64{"a": 1, "b": 1}})
+		if !reflect.DeepEqual(got, []float64{1, 1, 0}) {
+			t.Errorf("WeightsFor = %v, want c to expect nothing", got)
+		}
+	})
+
+	t.Run("a declaration naming only drained domains degrades to equal", func(t *testing.T) {
+		// Every weight zero. Apportion reads that as "nothing distinguishes
+		// these domains" and falls back to equal shares, which beats placing
+		// the whole workload nowhere and calling all of it drift.
+		w := e.WeightsFor(&Intent{ExplicitShares: map[Domain]float64{"gone": 100}})
+		if !reflect.DeepEqual(w, []float64{0, 0, 0}) {
+			t.Fatalf("WeightsFor = %v, want all zero", w)
+		}
+		ap := Apportion(3, w, nil)
+		if !reflect.DeepEqual(ap.Expected, []int64{1, 1, 1}) {
+			t.Errorf("Apportion(3, allZero) = %v, want an equal fallback", ap.Expected)
+		}
+	})
+}
