@@ -2231,6 +2231,34 @@ transitioning Firing→OK→Firing more than `flapCount` times (default 3) withi
 `flapWindow` (default 1 h) is marked flapping — findings continue but are annotated,
 and delivery backs off exponentially.
 
+> **Shipped 2026-09-19 as `leeway.AlertState.Advance`** — pure, clock-injected, and
+> the diagram's four phases exactly. Three details the diagram does not carry:
+>
+> **There are five transitions, not four, and the fifth is why the machine returns
+> one rather than letting the caller diff the phases.** `Pending → OK` and
+> `Resolving → OK` are the same pair of phases and opposite obligations: the first
+> is an episode that was never announced and must stay silent (`abandoned`), the
+> second owes a resolution to whoever received the finding (`resolved`). Only
+> `firing` and `resolved` emit.
+>
+> **An abandoned episode is not a flap.** A subject that twitches over the
+> threshold for a minute every ten is below the dwell, which is the case the dwell
+> exists for — counting it would mark the quietest subjects flapping.
+>
+> **Flapping is counted from a pruned list of firing instants, not a counter,
+> and read at query time.** A counter needs something to tick it down, and a
+> subject that has settled generates no events to tick it with, so it would stay
+> marked flapping until the next time it misbehaved. Counting *firings* rather
+> than the Firing→OK→Firing transitions between them is also what makes one rule
+> cover both ways a subject comes back: through a completed resolve, and through a
+> recurrence inside the resolve window. The latter does **not** serve a second
+> `forDuration` — the finding never stopped being outstanding — and does not move
+> `since`, or a subject oscillating just inside the resolve dwell would report
+> itself as perpetually new.
+>
+> `DeliveryBackoff` is `forDuration` doubled once per recurrence past the
+> allowance, capped at `flapWindow`.
+
 **Half of this machine already exists, and spike S10 found the seam to plug into.**
 `pkg/engine.RecoveryTracker` runs the resolve side almost exactly as drawn above:
 
