@@ -633,6 +633,103 @@ func stsComplete(sts *appsv1.StatefulSet) bool {
 	return sts.Status.ReadyReplicas == int32OrOne(sts.Spec.Replicas)
 }
 
+// WorkloadRef names a workload by kind and namespaced name. It is what
+// RollingOut returns: a caller that wants the answer for its own subjects
+// has those three strings and not the UID this source keys on.
+type WorkloadRef struct {
+	Kind      string
+	Namespace string
+	Name      string
+}
+
+// RollingOut reports which workloads are partway through a revision change,
+// as of the last event this source saw.
+//
+// This exists for docs/leeway-design.md §7.6, whose rollout row says to
+// consume this source's answer rather than recompute it. Pods move during a
+// rollout and the placement they move through is not the placement anybody
+// declared, so leeway relaxes its thresholds while one is running; asking
+// here means the two subsystems cannot disagree about whether a rollout is
+// happening.
+//
+// The predicate is §7.6's three clauses and NOT deploymentComplete, which is
+// a stricter thing serving a different purpose. deploymentComplete also
+// requires every replica to be *available*, so a Deployment with one pod
+// stuck in CrashLoopBackOff is permanently incomplete — correct for a stall
+// verdict that is bounded by an observation window, and wrong here, where it
+// would relax that subject's placement thresholds forever. The clauses below
+// all close on their own once the controller finishes moving pods around,
+// whether or not the new pods ever become healthy.
+//
+// DaemonSets are absent because this source does not watch them. That is
+// visible to the caller as "no rollout in progress" rather than as an error,
+// which is the honest shape: the answer is unavailable, and the cost of
+// treating unavailable as false is a threshold that was not relaxed.
+//
+// The whole cluster is returned in one call rather than answering per
+// subject, because the caller asks once per evaluation pass for tens of
+// thousands of subjects and the set of workloads mid-rollout is small.
+func (s *Source) RollingOut() []WorkloadRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Count the owned ReplicaSets still holding replicas, per Deployment, in
+	// one pass. Per-Deployment scanning would be quadratic on a cluster with
+	// thousands of each, which is exactly the size where this is asked.
+	active := make(map[types.UID]int)
+	for _, e := range s.replicasets {
+		if int32OrOne(e.obj.Spec.Replicas) == 0 {
+			continue
+		}
+		for _, ref := range e.obj.OwnerReferences {
+			if ref.Controller != nil && *ref.Controller {
+				active[ref.UID]++
+			}
+		}
+	}
+
+	var out []WorkloadRef
+	for uid, e := range s.deployments {
+		if deploymentRollingOut(e.obj, active[uid]) {
+			out = append(out, WorkloadRef{Kind: "Deployment", Namespace: e.obj.Namespace, Name: e.obj.Name})
+		}
+	}
+	for _, e := range s.statefulsets {
+		if stsRollingOut(e.obj) {
+			out = append(out, WorkloadRef{Kind: "StatefulSet", Namespace: e.obj.Namespace, Name: e.obj.Name})
+		}
+	}
+	return out
+}
+
+// deploymentRollingOut is §7.6's rollout row for a Deployment: the controller
+// has not caught up with the spec, or more than one ReplicaSet still holds
+// replicas, or some replicas are still on the old template. activeRS is how
+// many of its ReplicaSets have a non-zero spec.replicas.
+func deploymentRollingOut(d *appsv1.Deployment, activeRS int) bool {
+	if d.Spec.Paused {
+		// A paused Deployment can sit half-rolled indefinitely, which is a
+		// steady state somebody chose and not a transient to wait out.
+		return false
+	}
+	return d.Status.ObservedGeneration < d.Generation ||
+		activeRS > 1 ||
+		d.Status.UpdatedReplicas < int32OrOne(d.Spec.Replicas)
+}
+
+// stsRollingOut is the StatefulSet form: the controller has not caught up, or
+// the update revision has not become the current one, or some ordinals are
+// still on the old revision. A partitioned rollout reports in progress for as
+// long as the partition holds, which is the same steady-state-somebody-chose
+// case as a paused Deployment — but unlike Paused there is no flag saying so,
+// and a partition that is being stepped down is a real rollout. Reporting in
+// progress is the side that errs towards not judging placement.
+func stsRollingOut(sts *appsv1.StatefulSet) bool {
+	return sts.Status.ObservedGeneration < sts.Generation ||
+		(sts.Status.UpdateRevision != "" && sts.Status.UpdateRevision != sts.Status.CurrentRevision) ||
+		sts.Status.UpdatedReplicas < int32OrOne(sts.Spec.Replicas)
+}
+
 // rsRevision parses the deployment controller's revision annotation
 // (-1 when absent, sorting unannotated RSes oldest).
 func rsRevision(rs *appsv1.ReplicaSet) int64 {

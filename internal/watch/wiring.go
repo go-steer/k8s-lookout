@@ -49,6 +49,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/memory/distill"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
@@ -1075,6 +1076,18 @@ func (r *runner) run(ctx context.Context) error {
 		bs.topoDrift.WithFactory(sharedFactory)
 		bs.topoDrift.WithNodeFactory(factories.Cluster)
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
+		if bs.rollout != nil {
+			// §7.6's rollout row. leeway relaxes its placement thresholds
+			// while a workload is mid-rollout, and the design is explicit
+			// that it consumes the rollout source's answer rather than
+			// recomputing one — two subsystems disagreeing about whether a
+			// rollout is running is a bug nobody would find.
+			//
+			// The adapter lives here rather than in either package because
+			// this is the only place that already knows about both, and
+			// neither should have to import the other to be testable.
+			bs.topoDrift.WithRolloutOracle(rolloutOracle(bs.rollout))
+		}
 		if occStore != nil {
 			// §9.1: the dwell timers ride the same --store the occurrence
 			// records do. Guarded rather than passed unconditionally, because
@@ -1377,6 +1390,36 @@ type builtSources struct {
 // daemonToken is the resolved --token-env bearer token, reused by the
 // token-burn source's cost-stack client (§3: same daemon, same auth
 // as the inject path); empty means authless.
+// rollingOutReporter is the half of *rollout.Source that rolloutOracle needs.
+// Narrow because it is the whole contract between the two subsystems, and
+// because a test of the adapter should not have to build a rollout source.
+type rollingOutReporter interface {
+	RollingOut() []rollout.WorkloadRef
+}
+
+// rolloutOracle adapts the rollout source's cluster-wide answer into the
+// SubjectRefs leeway keys on (docs/leeway-design.md §7.6).
+//
+// A kind the rollout source reports and leeway does not track is dropped
+// rather than passed through as a Custom subject: the set is only ever used to
+// look subjects up, so an entry nothing can match is a row in a map and
+// nothing else. Today the two kinds line up exactly; the guard is for the day
+// one of them grows a third.
+func rolloutOracle(src rollingOutReporter) topologydrift.RolloutOracle {
+	return func() []leeway.SubjectRef {
+		refs := src.RollingOut()
+		out := make([]leeway.SubjectRef, 0, len(refs))
+		for _, w := range refs {
+			kind := leeway.SubjectKind(w.Kind)
+			if kind != leeway.SubjectDeployment && kind != leeway.SubjectStatefulSet {
+				continue
+			}
+			out = append(out, leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name})
+		}
+		return out
+	}
+}
+
 func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface, provider cloud.Provider) (*builtSources, error) {
 	bs := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
