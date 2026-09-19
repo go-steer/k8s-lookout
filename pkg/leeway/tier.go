@@ -183,6 +183,62 @@ func (s *Scores) Judge(intent *Intent, t Thresholds) Verdict {
 	return v
 }
 
+// Delivery is §8.3's decision: does this verdict become a Signal at all, and
+// at what severity.
+//
+// It is a small type because §8.3's table is mostly not ours to implement.
+// "Tier A injects, Tier B reaches the watchboard, Tier C is stored only" is
+// DESIGN §7.7's existing per-severity routing, which already does exactly
+// that for every other source; leeway does not get a second delivery
+// mechanism, it gets a severity. Tier B's "inject only if it correlates with
+// an active storm" is likewise the storm correlator's job downstream, not a
+// branch here.
+//
+// What is genuinely leeway's is the one row §7.7 cannot express: **Tier C is
+// metrics only unless a policy opts in.** Nothing in the severity table says
+// "do not emit at all", so that decision has to be taken before emitting, and
+// it is the whole of this type.
+//
+// §8.3's fourth row — tool SLIs, metrics only and never a Signal — needs no
+// code either. Those are self-observability counters (§8.4) and never become
+// a Verdict, so the rule is enforced by there being no path from one to here.
+type Delivery struct {
+	// Signal reports whether to emit at all. False means metrics only.
+	Signal bool
+
+	// Severity is the DESIGN §7.7 level that decides inject, watchboard or
+	// store. Empty when Signal is false.
+	Severity string
+
+	// Reason explains a metrics-only outcome. Populated only when Signal is
+	// false, because "why did this not page anyone" is the question actually
+	// asked of a quiet finding.
+	Reason string
+}
+
+// Route applies §8.3.
+//
+// tierCSignals is the policy opt-in. It defaults off, and that default is what
+// makes enabling leeway by default defensible: the overwhelming majority of
+// subjects that breach anything breach the distributional rule with no
+// declared intent behind it, and every one of those stays a metric.
+//
+// A suppressed verdict (§7.6) is metrics-only regardless of tier, including
+// Tier A. That is the zone-outage case in §14's exit criteria: four hundred
+// workloads all "violating" their spread contract because a zone went away is
+// one fact about the cluster, not four hundred findings about the workloads.
+func (v Verdict) Route(tierCSignals bool) Delivery {
+	switch {
+	case v.Suppressed:
+		return Delivery{Reason: v.Reason}
+	case !v.Breached:
+		return Delivery{Reason: "no breach"}
+	case v.Tier == TierC && !tierCSignals:
+		return Delivery{Reason: "tier C is metrics-only unless enabled by policy"}
+	}
+	return Delivery{Signal: true, Severity: v.Severity}
+}
+
 // classify implements the §8.1 table.
 //
 // §8.1's rule that an assumed cluster default can never reach Tier A is not

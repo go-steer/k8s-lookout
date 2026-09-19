@@ -429,3 +429,96 @@ func TestHardContract_IsTheDisjunctionOfItsHalves(t *testing.T) {
 		}
 	}
 }
+
+func TestRoute_TheTierSetsTheSeverityAndTierCDecidesWhetherToSpeak(t *testing.T) {
+	cases := []struct {
+		name         string
+		verdict      Verdict
+		tierCSignals bool
+		wantSignal   bool
+		wantSeverity string
+		wantReason   string
+	}{
+		{
+			name:       "a subject that did not breach",
+			verdict:    Verdict{},
+			wantReason: "no breach",
+		},
+		{
+			name:         "tier A takes the critical route and injects",
+			verdict:      Verdict{Breached: true, Tier: TierA, Severity: severityCritical},
+			wantSignal:   true,
+			wantSeverity: severityCritical,
+		},
+		{
+			name:         "tier B reaches the watchboard at warning",
+			verdict:      Verdict{Breached: true, Tier: TierB, Severity: severityWarning},
+			wantSignal:   true,
+			wantSeverity: severityWarning,
+		},
+		{
+			name:       "tier C is silent by default",
+			verdict:    Verdict{Breached: true, Tier: TierC, Severity: severityInfo},
+			wantReason: "tier C is metrics-only unless enabled by policy",
+		},
+		{
+			name:         "tier C speaks when a policy opts in",
+			verdict:      Verdict{Breached: true, Tier: TierC, Severity: severityInfo},
+			tierCSignals: true,
+			wantSignal:   true,
+			wantSeverity: severityInfo,
+		},
+		{
+			name: "an escalated tier C carries the severity Judge gave it",
+			verdict: Verdict{
+				Breached: true, Tier: TierC, Severity: severityWarning, Escalated: true,
+			},
+			tierCSignals: true,
+			wantSignal:   true,
+			wantSeverity: severityWarning,
+		},
+	}
+	for _, tc := range cases {
+		got := tc.verdict.Route(tc.tierCSignals)
+		if got.Signal != tc.wantSignal || got.Severity != tc.wantSeverity || got.Reason != tc.wantReason {
+			t.Errorf("%s: Route(%v) = %+v, want signal=%v severity=%q reason=%q",
+				tc.name, tc.tierCSignals, got, tc.wantSignal, tc.wantSeverity, tc.wantReason)
+		}
+	}
+}
+
+// TestRoute_SuppressionSilencesEveryTier is §14's exit criterion in miniature.
+// A zone going away puts four hundred workloads in breach of a contract they
+// all genuinely declared, and Tier A is precisely the tier that would
+// otherwise open four hundred agent sessions about one fact.
+func TestRoute_SuppressionSilencesEveryTier(t *testing.T) {
+	for _, tier := range []Tier{TierA, TierB, TierC} {
+		v := Verdict{
+			Breached: true, Tier: tier, Severity: tier.Severity(),
+			Suppressed: true, Transient: TransientDomainOutage,
+			Reason: "domain-outage: the counts describe a different cluster",
+		}
+		got := v.Route(true)
+		if got.Signal {
+			t.Errorf("tier %s: Route emitted a signal through a suppression", tier)
+		}
+		if got.Reason != v.Reason {
+			t.Errorf("tier %s: Reason = %q, want the suppression's own %q", tier, got.Reason, v.Reason)
+		}
+		if got.Severity != "" {
+			t.Errorf("tier %s: Severity = %q, want none where nothing is emitted", tier, got.Severity)
+		}
+	}
+}
+
+// TestRoute_ARelaxedBreachRoutesNormally: §7.6 relaxing the thresholds changes
+// whether a subject breached, never what happens to it once it has.
+func TestRoute_ARelaxedBreachRoutesNormally(t *testing.T) {
+	v := Verdict{
+		Breached: true, Tier: TierB, Severity: severityWarning,
+		Relaxed: true, Transient: TransientRollout,
+	}
+	if got := v.Route(false); !got.Signal || got.Severity != severityWarning {
+		t.Errorf("Route = %+v, want a plain warning signal", got)
+	}
+}
