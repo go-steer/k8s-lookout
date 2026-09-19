@@ -207,6 +207,16 @@ rules:
     # annotation, nothing else is read.
     resources: ["ingresses", "ingressclasses"]
     verbs: ["list"]
+  - apiGroups: [""]
+    # The topology-drift source's FR-8 pin predicate: a pod bound to a
+    # volume that cannot follow it to another zone is drift nobody can
+    # act on, and telling that apart from real imbalance needs the
+    # claim's binding (spec.volumeName) and the volume's
+    # spec.nodeAffinity. Nothing reads a volume's contents — these are
+    # object metadata and a node selector, and a PV holds neither data
+    # nor credentials.
+    resources: ["persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     # storageclasses, likewise name-only: a StatefulSet's
     # volumeClaimTemplates naming a class that no longer exists leaves

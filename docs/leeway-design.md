@@ -365,6 +365,37 @@ Four things, all load-bearing:
   `nodeAffinity` are pinned and cannot rebalance. Report as *pinned skew* — a
   distinct, lower-severity category, because alerting a human about drift they
   cannot fix is a bug.
+  > **Shipped 2026-09-19, and the rule is narrower than "carries
+  > `nodeAffinity`".** A volume constrained to `kubernetes.io/os=linux` carries
+  > node affinity and pins nothing, because every domain on every scored axis
+  > still holds a linux node. What the predicate asks instead is whether the
+  > volume's required affinity constrains an axis *we are about to report drift
+  > on* — the configured `--topology-keys`, plus `kubernetes.io/hostname`
+  > always, since one node is one domain on every axis there is and local
+  > volumes pin the zone transitively. Node-selector terms are ORed, so a
+  > volume pins only when **every** term does: one unconstrained term is an
+  > escape route. `Exists` on a scored key is not a constraint (every node in
+  > every domain carries the label — that is what makes it an axis).
+  >
+  > Two imprecisions are deliberate and recorded on `pvPins`. A volume
+  > constrained on an unscored key (a rack label) reads unpinned, which
+  > under-reports into the *visible* direction — a finding a human dismisses,
+  > not one they never see. A volume enumerating every domain on a scored axis
+  > reads pinned, which is the silent direction, tolerated only because no
+  > provisioner emits one: a zonal disk names its zone, a regional disk names
+  > its two.
+  >
+  > There is no PVC or PV event handler. A pod whose claim has not bound is a
+  > pod that has not been scheduled, so it holds no domain and contributes to
+  > no distribution; the event that schedules it is a pod event the source
+  > already acts on. Watching the volumes would make `Pinned` depend on a
+  > second informer's arrival order — the trap that ruled out a subject-keyed
+  > pod index in §6.2.
+  >
+  > "Report as *pinned skew*" above is superseded: `leeway.pinned_skew` was
+  > dropped as a kind, and pinning is a `suspectedCause: volume_pinning` on
+  > `leeway.placement_drift` (§8.2).
+
 - **FR-9** Support the scheduler's `PodTopologySpread` `defaultConstraints` as
   static configuration, since they are not readable from the API server (spike S4,
   confirmed on managed GKE). The configuration is three-state — *unset*, *declared
@@ -2581,8 +2612,12 @@ startup instead of producing an empty watch. Most of this the sentinel already h
   - { apiGroups: ["batch"], resources: [jobs, cronjobs], verbs: [get, list, watch] }
 
 # New for leeway:
+#   The volume rule SHIPPED 2026-09-19 as list+watch (no `get`: both are read
+#   through informer listers, never fetched one at a time). It is in
+#   deploy/12-clusterrole-watcher.yaml and the chart copy that CI diffs
+#   against it.
   - { apiGroups: [""], resources: [persistentvolumeclaims, persistentvolumes],
-      verbs: [get, list, watch] }        # volume pinning, FR-8
+      verbs: [list, watch] }             # volume pinning, FR-8
   - { apiGroups: ["cloud.google.com"], resources: [computeclasses],
       verbs: [get, list, watch] }        # optional; source self-disables if absent
   - { apiGroups: ["leeway.lookout.go-steer.io"],

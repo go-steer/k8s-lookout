@@ -42,6 +42,13 @@ var otherSourceBulkReads = []ListRequirement{
 	{"cert-manager.io", "certificates"},                                 // expiry source (discovery-gated)
 	{"gateway.networking.k8s.io", "gateways"},                           // gateway source (discovery-gated)
 	{"gateway.networking.k8s.io", "httproutes"},                         // gateway source
+	// topology-drift source, FR-8 volume pinning: the claim says which volume
+	// (spec.volumeName), the volume's spec.nodeAffinity says whether the pod
+	// can be rebalanced at all. Object metadata and a node selector only —
+	// neither object holds data or credentials, which is what makes this a
+	// cheap grant rather than a secrets-shaped one.
+	{"", "persistentvolumeclaims"},
+	{"", "persistentvolumes"},
 }
 
 // TestShippedClusterRoleGrantsSubsetOfLoadCluster is the least-privilege

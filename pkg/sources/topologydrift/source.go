@@ -135,6 +135,9 @@ type Source struct {
 	replicaSets appslisters.ReplicaSetLister
 	// pods is the verifier's view of the cache. Set in Run.
 	pods corelisters.PodLister
+	// claims and volumes resolve FR-8's pod → PVC → PV hop. Set in Run.
+	claims  corelisters.PersistentVolumeClaimLister
+	volumes corelisters.PersistentVolumeLister
 	// sweepPending records that some node's eligibility moved since the last
 	// sweep. See DefaultEligibilitySweepInterval.
 	sweepPending bool
@@ -166,6 +169,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		Inventory: s.inv,
 		Owners:    s.ownerOf,
 		Enqueue:   s.queue.Enqueue,
+		Pinned:    VolumePins(s.boundVolume, cfg.TopologyKeys),
 	})
 	s.verify = NewVerifier(VerifyOptions{
 		State:      s.state,
@@ -230,6 +234,11 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 		{"", "pods"},
 		{"", "nodes"},
 		{"apps", "replicasets"},
+		// FR-8: a pod bound to a volume that cannot follow it is drift nobody
+		// can act on, and saying so needs the claim's binding and the volume's
+		// node affinity.
+		{"", "persistentvolumeclaims"},
+		{"", "persistentvolumes"},
 	} {
 		for _, verb := range []string{"list", "watch"} {
 			reqs = append(reqs, sources.Requirement{Group: r.group, Resource: r.resource, Verb: verb})
@@ -296,6 +305,36 @@ func (s *Source) ownerOf(namespace, kind, name string) (*metav1.OwnerReference, 
 		return nil, false
 	}
 	return controllerOf(rs.OwnerReferences), true
+}
+
+// boundVolume implements VolumeLookup against the PVC and PV caches.
+//
+// Before Run populates the listers it reports nothing bound, which reads as
+// unpinned — the same "retried on the next event" shape as ownerOf, and for
+// FR-8 a benign one: the first thing Run does after the caches sync is reapply,
+// which re-counts every pod with the listers in place.
+func (s *Source) boundVolume(namespace, claim string) (*corev1.PersistentVolume, bool) {
+	s.mu.Lock()
+	claims, volumes := s.claims, s.volumes
+	s.mu.Unlock()
+	if claims == nil || volumes == nil {
+		return nil, false
+	}
+	pvc, err := claims.PersistentVolumeClaims(namespace).Get(claim)
+	if err != nil {
+		return nil, false
+	}
+	// An unbound claim has no VolumeName, and a claim that is Pending because
+	// its class provisions on first consumer will get one the moment the pod is
+	// scheduled — which is also the moment the pod starts occupying a domain.
+	if pvc.Spec.VolumeName == "" {
+		return nil, false
+	}
+	pv, err := volumes.Get(pvc.Spec.VolumeName)
+	if err != nil {
+		return nil, false
+	}
+	return pv, true
 }
 
 // evaluate is the coalesced per-subject callback.
@@ -412,14 +451,28 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	podInformer := factory.Core().V1().Pods()
 	nodeInformer := nodeFactory.Core().V1().Nodes()
 	rsInformer := factory.Apps().V1().ReplicaSets()
+	pvcInformer := factory.Core().V1().PersistentVolumeClaims()
+	// PersistentVolumes are cluster-scoped, so they go where the nodes go —
+	// see WithNodeFactory for why a scoped caller's factory cannot list them.
+	pvInformer := nodeFactory.Core().V1().PersistentVolumes()
 
-	// The ReplicaSet cache is read, not watched: the resolver asks it for one
-	// object at a time and nothing here reacts to a ReplicaSet changing.
-	// Touching the Lister before Start is what gets the informer built and
-	// started with the rest.
+	// The ReplicaSet, PVC and PV caches are read, not watched: the resolver and
+	// the FR-8 pin predicate ask them for one object at a time and nothing here
+	// reacts to any of the three changing. Touching the Lister before Start is
+	// what gets the informer built and started with the rest.
+	//
+	// No handler on the volumes is a decision, not an omission. A pod whose
+	// claim binds later is not a pod whose placement we have already got wrong:
+	// until the claim binds the pod is unscheduled, so it holds no domain and
+	// contributes to no distribution, and the event that schedules it is a pod
+	// event we already act on. Watching the volumes instead would make a pod's
+	// Pinned answer depend on a second informer's arrival order — the same trap
+	// that ruled out a subject-keyed pod index in subjectPod.
 	s.mu.Lock()
 	s.replicaSets = rsInformer.Lister()
 	s.pods = podInformer.Lister()
+	s.claims = pvcInformer.Lister()
+	s.volumes = pvInformer.Lister()
 	s.mu.Unlock()
 
 	podH, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -457,7 +510,8 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	}
 
 	if !cache.WaitForCacheSync(ctx.Done(),
-		podH.HasSynced, nodeH.HasSynced, rsInformer.Informer().HasSynced) {
+		podH.HasSynced, nodeH.HasSynced, rsInformer.Informer().HasSynced,
+		pvcInformer.Informer().HasSynced, pvInformer.Informer().HasSynced) {
 		return fmt.Errorf("topologydrift: cache sync failed (informer stopped before initial list completed)")
 	}
 

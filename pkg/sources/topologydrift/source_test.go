@@ -112,6 +112,10 @@ func TestSource_Contract(t *testing.T) {
 		{Resource: "nodes", Verb: "list"}, {Resource: "nodes", Verb: "watch"},
 		{Group: "apps", Resource: "replicasets", Verb: "list"},
 		{Group: "apps", Resource: "replicasets", Verb: "watch"},
+		{Resource: "persistentvolumeclaims", Verb: "list"},
+		{Resource: "persistentvolumeclaims", Verb: "watch"},
+		{Resource: "persistentvolumes", Verb: "list"},
+		{Resource: "persistentvolumes", Verb: "watch"},
 	}
 	if got := s.RequiredAccess(); !slices.Equal(got, want) {
 		t.Errorf("RequiredAccess() = %+v, want %+v", got, want)
