@@ -93,6 +93,12 @@ func DefaultTransientConfig() TransientConfig {
 	}
 }
 
+// Normalized is the config with its defaults filled in, for a caller that
+// needs to read a window rather than only pass one back in. The source sizes
+// its ready-count history off OutageWindow, and sizing it off a zero would
+// keep no history at all for the config that means "the shipped default".
+func (c TransientConfig) Normalized() TransientConfig { return c.normalize() }
+
 // normalize fills in what a partial config leaves out.
 //
 // A multiplier below 1 would be a *tightening* under a transient, which is the

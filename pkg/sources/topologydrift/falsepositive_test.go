@@ -191,7 +191,7 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	// the tier is part of what the corpus asserts is absent. A fixture that
 	// stopped breaching but started producing a Tier A verdict would pass a
 	// boolean check.
-	ev := ScoreAxis(key, intent, eligible, dist, leeway.DefaultThresholds())
+	ev := ScoreAxis(key, intent, eligible, dist, leeway.DefaultThresholds(), leeway.Suppression{})
 	return fpResult{
 		intent:   ev.Intent,
 		eligible: ev.Eligible,

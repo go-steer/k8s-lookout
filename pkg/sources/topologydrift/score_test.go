@@ -45,7 +45,7 @@ func running(e leeway.Eligibility, counts ...int64) *leeway.Distribution {
 
 func TestScoreAxis_ScoresTheDistributionAgainstTheApportionment(t *testing.T) {
 	e := threeEligibleZones()
-	got := ScoreAxis(zoneKey, nil, e, running(e, 8, 3, 1), leeway.DefaultThresholds())
+	got := ScoreAxis(zoneKey, nil, e, running(e, 8, 3, 1), leeway.DefaultThresholds(), leeway.Suppression{})
 
 	if !slices.Equal(got.Scores.Actual, []int64{8, 3, 1}) {
 		t.Errorf("actual = %v, want [8 3 1]", got.Scores.Actual)
@@ -78,7 +78,7 @@ func TestScoreAxis_OnlyRunningObjectsAreScored(t *testing.T) {
 		d.Add("zone-a", leeway.StatePending, false)
 	}
 
-	got := ScoreAxis(zoneKey, nil, e, d, leeway.DefaultThresholds())
+	got := ScoreAxis(zoneKey, nil, e, d, leeway.DefaultThresholds(), leeway.Suppression{})
 	if got.Scores.Total != 12 {
 		t.Fatalf("n = %d, want 12: twelve Running objects and twelve that are not", got.Scores.Total)
 	}
@@ -89,7 +89,7 @@ func TestScoreAxis_OnlyRunningObjectsAreScored(t *testing.T) {
 
 func TestScoreAxis_ASubjectWithNoObjectsIsGatedNotBreached(t *testing.T) {
 	e := threeEligibleZones()
-	got := ScoreAxis(zoneKey, nil, e, nil, leeway.DefaultThresholds())
+	got := ScoreAxis(zoneKey, nil, e, nil, leeway.DefaultThresholds(), leeway.Suppression{})
 
 	if got.Scores.Evaluable {
 		t.Error("a subject with no counted objects was evaluable")
@@ -119,7 +119,7 @@ func TestScoreAxis_ADeclaredBoundMakesItATierAFinding(t *testing.T) {
 		WhenUnsatisfiable: "DoNotSchedule",
 	}
 
-	got := ScoreAxis(zoneKey, intent, e, running(e, 8, 3, 1), leeway.DefaultThresholds())
+	got := ScoreAxis(zoneKey, intent, e, running(e, 8, 3, 1), leeway.DefaultThresholds(), leeway.Suppression{})
 	if got.Verdict.Tier != leeway.TierA {
 		t.Errorf("tier = %s, want A: maxSkew 1 and DoNotSchedule is a contract", got.Verdict.Tier)
 	}
@@ -142,7 +142,7 @@ func TestScoreSubject_ScoresEveryEligibleAxisAndNotOnlyTheDeclaredOnes(t *testin
 		poolKey: running(e, 4, 4, 4),
 	}
 
-	got := ScoreSubject(res, dists, leeway.DefaultThresholds())
+	got := ScoreSubject(res, dists, leeway.DefaultThresholds(), nil)
 	if len(got) != 2 {
 		t.Fatalf("scored %d axes, want 2 — the undeclared one is still measured", len(got))
 	}
@@ -173,7 +173,7 @@ func TestScoreSubject_IsInCanonicalKeyOrder(t *testing.T) {
 
 	for range 8 {
 		var keys []leeway.TopologyKey
-		for _, ev := range ScoreSubject(res, nil, leeway.DefaultThresholds()) {
+		for _, ev := range ScoreSubject(res, nil, leeway.DefaultThresholds(), nil) {
 			keys = append(keys, ev.Key)
 		}
 		if want := []leeway.TopologyKey{"a", "b", "m", "z"}; !slices.Equal(keys, want) {
@@ -186,7 +186,7 @@ func TestScoreSubject_AnAxisWithNoDistributionIsStillScored(t *testing.T) {
 	e := threeEligibleZones()
 	res := Resolution{Eligible: map[leeway.TopologyKey]leeway.Eligibility{zoneKey: e}}
 
-	got := ScoreSubject(res, map[leeway.TopologyKey]*leeway.Distribution{}, leeway.DefaultThresholds())
+	got := ScoreSubject(res, map[leeway.TopologyKey]*leeway.Distribution{}, leeway.DefaultThresholds(), nil)
 	if len(got) != 1 {
 		t.Fatalf("scored %d axes, want 1: a missing distribution is an empty one, not a skipped axis", len(got))
 	}

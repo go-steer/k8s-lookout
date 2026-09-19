@@ -1560,6 +1560,55 @@ the domain-level finding and let storm correlation handle cross-source fan-in
 > matters most — but one more than a whole window ahead is bad data and is
 > ignored rather than suppressing the subject forever.
 
+> **Three of the five rows went live in the source 2026-09-19** — cluster
+> warmup, node drain and domain outage, the ones leeway can answer by itself.
+> Rollout and recent-scale are the two that read another source's state and
+> land next. `ScoreAxis` now judges through `JudgeTransient`, and the
+> suppression is kept on the `Evaluation` beside the scores.
+>
+> **The outage row needs a sampled series, not an event log.** `DomainOutage`
+> compares against the peak *inside* the window, so something has to have
+> recorded the peak while the domain was still healthy. Appending a
+> `ReadyCount` on every change cannot: the log holds the value in force *after*
+> each change, and a zone that sat at thirty ready nodes for a week and then
+> lost all of them changes exactly once. The peak would read zero and the
+> outage would be invisible precisely because it was total. The inventory
+> therefore samples every domain's ready count on a timer
+> (`DefaultReadySampleInterval`, 30 s) and retains twice the outage window.
+>
+> **Ready is a third count, not a reuse of `Usable`.** §6.2 already tracks
+> `Nodes` and `Usable` (ready *and* schedulable), and a domain that shrinks
+> looks identical through `Usable` whether its nodes died or were cordoned —
+> which are the two rows of the table above with *opposite* answers. The outage
+> test reads readiness alone; the drain test reads cordon times alone.
+>
+> **A cordon is dated from the unschedulable taint where there is one.**
+> `TimeAdded` is the API server's own record and the only source that survives
+> a restart of this process; failing that, the moment we watched
+> `spec.unschedulable` flip. A node first seen *already* cordoned is dated
+> **zero**, not now — guessing "now" would relax every subject in its domain
+> for a whole settle window after every restart, and a suppression that
+> switches itself on at startup is worse than one that under-reports. The
+> timestamp also survives an *un*cordon, because the row asks whether a node
+> *became* unschedulable recently and the pods a completed drain evicted are
+> still landing.
+>
+> **`DrainedAt` is scoped by eligible domain, not by node**, because
+> `leeway.Eligibility` carries domains and not node names (§7.1). That is the
+> right scope anyway: a drain narrow enough to miss every domain a subject can
+> reach cannot have moved its pods, and one that empties a whole domain removes
+> it from the eligible set, at which point §7.1 re-apportions rather than §7.6
+> relaxing.
+>
+> **Suppression is decided at scoring time and kept**, rather than recomputed
+> when §8.2 reads the verdict. It therefore goes stale with the evaluation
+> carrying it: a subject scored during an outage stays suppressed until
+> something re-evaluates it. That bound is accepted because the alternative
+> lets the verdict in a finding disagree with the verdict behind the exported
+> scores, and because the cost is only latency — the end of an outage is itself
+> a burst of node events, and a subject coming out of suppression still owes
+> §8.2 a full dwell, which is longer than the staleness.
+
 ### 7.7 Preference-rank tracking (GKE custom compute classes)
 
 A GKE custom compute class is an **ordered** list of provisioning priorities. A
@@ -2428,6 +2477,7 @@ lookout.leeway.relocation_distance {...}
 lookout.leeway.intent_info      {...,source,confidence,weighting,max_skew}
 lookout.leeway.domain_ready_nodes {topology_key,domain}
 lookout.leeway.alert_state      {...,tier}   # 0=ok 1=pending 2=firing
+lookout.leeway.transient_subjects {topology_key,transient}   # §7.6, added 2026-09-19
 
 # Self-observability.
 lookout.leeway.counter_mismatch     {subject_kind}
@@ -3714,7 +3764,7 @@ independent of 5.
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
-| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. Still emits nothing: `Transients` assembly is next, then emission | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
+| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. **§7.6 suppression is now live for the three rows leeway can answer alone, 2026-09-19** — cluster warmup, node drain and domain outage; the inventory samples each domain's ready-node count on a 30 s timer so the outage test has a peak to compare against, cordons are dated from the unschedulable taint, and `lookout_leeway_transient_subjects` reports what is being held back. The zone-outage exit criterion is a standing test at the mechanism level: twenty workloads all skewed by one dead zone open **zero** episodes, and the same skew without an outage still fires. Still emits nothing: the two cross-source rows (rollout, recent scale) come next, then emission | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |

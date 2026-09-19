@@ -40,11 +40,29 @@ type Evaluation struct {
 	Apportionment leeway.Apportionment
 	Scores        leeway.Scores
 
-	// Verdict is §7.4 and §8.1 applied to the scores. It is computed even for
-	// a gated subject, where it reads as "not breached" with the gate's
+	// Suppression is §7.6's answer for this axis at the moment it was scored.
+	// Carried rather than folded away into the verdict because "no breach" and
+	// "a breach we declined to report because a zone was down" are different
+	// statements, and only one of them should reassure anybody.
+	Suppression leeway.Suppression
+
+	// Verdict is §7.4, §7.6 and §8.1 applied to the scores. It is computed even
+	// for a gated subject, where it reads as "not breached" with the gate's
 	// reason, so that a caller never has to remember to check Evaluable first.
 	Verdict leeway.Verdict
 }
+
+// Suppressor answers §7.6 for one subject-axis, given the domains the subject
+// is eligible for on that axis.
+//
+// A callback rather than a precomputed map because the domain-outage row is
+// per-axis *and* per-subject: it asks whether any domain this particular
+// subject could have used is out, and two subjects on the same axis have
+// different eligible sets.
+//
+// Nil is "no transient", which is what every caller that does not watch a
+// cluster — the score tests, the false-positive corpus — should pass.
+type Suppressor func(key leeway.TopologyKey, eligible leeway.Eligibility) leeway.Suppression
 
 // ScoreSubject runs §7.1–§7.4 for one subject, on every axis its resolution
 // covers.
@@ -63,16 +81,20 @@ type Evaluation struct {
 //
 // The result is in the resolution's canonical key order, so two evaluations of
 // the same subject produce the same slice order and a caller may index it.
-func ScoreSubject(res Resolution, dists map[leeway.TopologyKey]*leeway.Distribution, t leeway.Thresholds) []Evaluation {
+func ScoreSubject(res Resolution, dists map[leeway.TopologyKey]*leeway.Distribution, t leeway.Thresholds, sup Suppressor) []Evaluation {
 	keys := leeway.SortedKeys(res.Eligible)
 	out := make([]Evaluation, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, ScoreAxis(key, res.Intents[key], res.Eligible[key], dists[key], t))
+		var s leeway.Suppression
+		if sup != nil {
+			s = sup(key, res.Eligible[key])
+		}
+		out = append(out, ScoreAxis(key, res.Intents[key], res.Eligible[key], dists[key], t, s))
 	}
 	return out
 }
 
-// ScoreAxis runs §7.2–§7.4 for one (subject, topology key).
+// ScoreAxis runs §7.2–§7.4 for one (subject, topology key), and applies §7.6.
 //
 // Only Running objects are counted. §7.6 is the reason: a distribution that
 // includes Terminating pods describes where the subject *was*, and one that
@@ -80,8 +102,12 @@ func ScoreSubject(res Resolution, dists map[leeway.TopologyKey]*leeway.Distribut
 // put it. Both are real facts about a cluster mid-move and neither is where the
 // workload is, which is the question drift asks. The other states are counted
 // and exported; they feed suppression, not the score.
-func ScoreAxis(key leeway.TopologyKey, intent *leeway.Intent, eligible leeway.Eligibility, dist *leeway.Distribution, t leeway.Thresholds) Evaluation {
-	ev := Evaluation{Key: key, Intent: intent, Eligible: eligible}
+//
+// sup is §7.6's verdict on the cluster's state, and it reaches only the
+// judgement: the scores themselves are recorded as measured whatever is going
+// on, because §7.4's metrics are the evidence a suppression was right.
+func ScoreAxis(key leeway.TopologyKey, intent *leeway.Intent, eligible leeway.Eligibility, dist *leeway.Distribution, t leeway.Thresholds, sup leeway.Suppression) Evaluation {
+	ev := Evaluation{Key: key, Intent: intent, Eligible: eligible, Suppression: sup}
 
 	var actual []int64
 	if dist != nil {
@@ -107,7 +133,7 @@ func ScoreAxis(key leeway.TopologyKey, intent *leeway.Intent, eligible leeway.El
 	// difference as drift.
 	ev.Apportionment = leeway.Apportion(n, eligible.WeightsFor(intent), capsFor(intent, eligible))
 	ev.Scores = leeway.Score(eligible.Domains, actual, ev.Apportionment, maxSkew, t)
-	ev.Verdict = ev.Scores.Judge(intent, t)
+	ev.Verdict = ev.Scores.JudgeTransient(intent, t, sup)
 	return ev
 }
 
