@@ -35,6 +35,42 @@ func TestSubjectRef_String(t *testing.T) {
 	}
 }
 
+func TestParseSubjectRef_RoundTripsEverythingStringCanWrite(t *testing.T) {
+	// §9.1 keys the persisted alert state by the rendered subject, so this is
+	// the only way a restored row gets back to a SubjectRef. Anything String
+	// can produce has to survive the trip.
+	for _, want := range []SubjectRef{
+		{Kind: SubjectDeployment, Namespace: "prod", Name: "api"},
+		{Kind: SubjectNodeGroup, Name: "pool-1"},
+		{Kind: SubjectStatefulSet, Namespace: "db", Name: "pg"},
+	} {
+		got, ok := ParseSubjectRef(want.String())
+		if !ok || got != want {
+			t.Errorf("ParseSubjectRef(%q) = %+v, %v; want %+v, true", want.String(), got, ok, want)
+		}
+	}
+}
+
+func TestParseSubjectRef_RefusesWhatItCannotRead(t *testing.T) {
+	// A row written by a different build, or a truncated one. Refusing is the
+	// §9.3 policy — a record that cannot be read back to a subject would
+	// otherwise dwell forever against a subject nothing can match it to.
+	for _, in := range []string{
+		"",
+		"Deployment",
+		"Deployment/prod/api/extra",
+		"/prod/api",
+		"Deployment//api",
+		"Deployment/prod/",
+		"/api",
+		"Deployment/",
+	} {
+		if got, ok := ParseSubjectRef(in); ok {
+			t.Errorf("ParseSubjectRef(%q) = %+v, true; want a refusal", in, got)
+		}
+	}
+}
+
 func TestCountState_String(t *testing.T) {
 	want := map[CountState]string{
 		StateRunning:       "running",

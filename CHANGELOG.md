@@ -66,10 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that `lookout_leeway_domain_objects` should be compared against.
 
   **It still emits nothing.** These are numbers on a dashboard, not findings:
-  the dwell timers, tiers and alert routing that turn a sustained one into
-  something worth paging on land in a later release. The point of shipping the
-  measurement first is that you can look at your own fleet's drift distribution
-  before anything is allowed to page on it.
+  the alert routing that turns a sustained one into something worth paging on
+  lands in a later release. The point of shipping the measurement first is that
+  you can look at your own fleet's drift distribution before anything is
+  allowed to page on it.
 
   Scores are only published for axes that were actually evaluated. A subject
   below the scoring floor, one whose axis has no eligible domains, and one a
@@ -78,6 +78,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-replica Deployment would be both the wrong statement and the bulk of
   the cardinality. A subject tracked in `lookout_leeway_subjects_tracked` and
   absent from `lookout_leeway_drift` was gated, deliberately.
+
+- **`topology-drift` now holds a drifting subject in a dwell before it counts
+  as a problem, and remembers where it got to across a restart.** Every 30
+  seconds the source judges every scored subject-axis against one instant: a
+  subject that starts drifting goes *pending*, becomes *firing* once it has
+  stayed that way for the dwell, and after it comes back to plan sits
+  *resolving* through a longer one before the episode closes. The new
+  `lookout_leeway_alert_state` reports where each open episode sits — `1`
+  pending, `2` firing — labelled by subject, topology key and tier. Only open
+  episodes have a series; a subject that is not drifting has no row rather than
+  a zero, so the metric is bounded by how much trouble a cluster is in rather
+  than by how large it is.
+
+  **With `--store`, the dwell survives a restart.** Open episodes are written
+  to the store as they move and read back at startup, so a Deployment that had
+  been drifting for nine minutes when the sentinel was restarted fires a minute
+  later rather than starting a fresh ten-minute clock. A store that cannot be
+  read costs every open episode one dwell and is logged; it never stops the
+  sentinel from starting. Resolved episodes are deleted rather than stored as
+  "fine". Without `--store` everything above still works, in memory.
+
+  **It still emits nothing** — no signals, no findings, no pages. What this
+  adds is the timing, and the metric that lets you see what your fleet's
+  episodes would look like before anything is allowed to act on them.
 
 - **The per-subject, per-domain breakdown is now exported for drifting
   subjects by default**, via the new `--topology-per-domain-min-drift`

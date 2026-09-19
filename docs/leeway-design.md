@@ -2338,6 +2338,44 @@ global `stableFor`, while §10.1 lets each policy set its own `resolveAfter`. Ei
 per-policy resolve dwell is dropped, or leeway runs its own tracker instance
 alongside the sentinel's — the latter is cheap and keeps the policy promise.
 
+> **The machine went live in the source 2026-09-19**, driving real verdicts and
+> persisting through §9.1. It still emits nothing — `ClearanceObserver` and the
+> `RecoveryTracker` seam above arrive with emission — so what shipped is the
+> fire side, the store and `lookout_leeway_alert_state`.
+>
+> **It runs on its own ticker (30 s), not on the evaluation path.** Two reasons,
+> and both are about what a dwell is for. A dwell measures how long a condition
+> has *held*; advancing it per event would make it run faster for a subject
+> whose pods churn than for a quiet one that is equally wrong, so a busy
+> Deployment would fire before a settled one with identical drift. And §8.2
+> wants a whole pass judged against one instant — a slow sweep over twenty
+> thousand subjects would hand the ones at the end a slightly longer dwell than
+> the ones at the start.
+>
+> **A pass must be complete, because absence is information.** An episode with
+> no verdict in a pass belongs to a subject the source is no longer tracking,
+> and it is dropped. That is the map's only eviction rule; nothing else would
+> stop a deleted Deployment dwelling forever against a cluster that has
+> forgotten it.
+>
+> **A non-breaching subject with no history gets no entry at all.** Not a zero
+> value, not a `PhaseOK` row — nothing. Same bound as the store's (§9.3's write
+> policy): the machine is sized by how much trouble a cluster is in, not by how
+> large it is.
+>
+> **Persisted records reconcile lazily, on the first pass that carries a verdict
+> for their subject-axis.** A record can only be reconciled *against* something,
+> and at startup there is nothing: the caches have synced but the queue has
+> scored nothing yet. Records nobody claims within `ReconcileGrace` (5 min) are
+> discarded — their subjects did not come back, and holding a dwell open for a
+> Deployment deleted while we were down is the phantom episode §9.3's repair
+> rules exist to avoid.
+>
+> **Only a move is written.** An episode that sat in Pending for nine of its ten
+> minutes produced no transition and changed none of §9.1's fields, so writing
+> it every tick would be twenty thousand UPSERTs an hour recording that nothing
+> happened.
+
 ### 8.3 Severity routing and delivery
 
 Leeway findings are mostly **not incidents**. Drift is a slow-moving condition, and
@@ -3676,7 +3714,7 @@ independent of 5.
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
-| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. Still emits nothing: the state machine, persistence and `Transients` assembly are wired next, then emission | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
+| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. Still emits nothing: `Transients` assembly is next, then emission | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |

@@ -17,6 +17,7 @@ package topologydrift
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -138,6 +139,9 @@ func fullOptions() metricsOptions {
 				},
 			})
 		},
+		Alerts: func(yield alertObserver) {
+			yield(subA, zoneKey, leeway.AlertState{Phase: leeway.PhaseFiring}, leeway.TierB)
+		},
 		Intents: func(yield intentObserver) {
 			skew := int32(1)
 			yield(subA, zoneKey, &leeway.Intent{
@@ -192,6 +196,9 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		"lookout_leeway_last_event_timestamp_seconds",
 		"lookout_leeway_evaluation_duration_seconds",
 		"lookout_leeway_subjects_tracked",
+		// §8.2's episodes. A gauge rather than a counter, because the question
+		// it answers is "what is firing now", not "how many ever did".
+		"lookout_leeway_alert_state",
 		// The other half of the unit hazard: `_total` is appended to a
 		// monotonic counter, and it is appended AFTER any unit. This one sets
 		// no unit, so the declared name simply gains the suffix.
@@ -347,6 +354,85 @@ func TestInstruments_ObservableGaugesCarryTheirAttributes(t *testing.T) {
 			t.Errorf("value = %v, want 4", running.GetGauge().GetValue())
 		}
 	})
+}
+
+func TestInstruments_AlertStateEncodesThePhaseAndKeepsIt(t *testing.T) {
+	// §8.4's 0/1/2. Resolving deliberately reads 2 rather than a fourth value:
+	// the finding is still outstanding, so `alert_state == 2` counts exactly
+	// the episodes somebody has been told about and not yet told are over. The
+	// phase itself stays reachable as a label.
+	episodes := []struct {
+		phase leeway.AlertPhase
+		want  float64
+	}{
+		{leeway.PhasePending, 1},
+		{leeway.PhaseFiring, 2},
+		{leeway.PhaseResolving, 2},
+	}
+
+	opts := fullOptions()
+	opts.Alerts = func(yield alertObserver) {
+		for i, e := range episodes {
+			sub := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: fmt.Sprintf("web-%d", i)}
+			yield(sub, zoneKey, leeway.AlertState{Phase: e.phase}, leeway.TierA)
+		}
+	}
+	h := newPromHarness(t, opts)
+
+	f := h.family(t, "lookout_leeway_alert_state")
+	if f == nil {
+		t.Fatal("family absent")
+	}
+	if len(f.GetMetric()) != len(episodes) {
+		t.Fatalf("got %d series, want one per episode (%d)", len(f.GetMetric()), len(episodes))
+	}
+
+	byPhase := map[string]*dto.Metric{}
+	for _, m := range f.GetMetric() {
+		byPhase[labelValue(m, "phase")] = m
+	}
+	for _, e := range episodes {
+		m := byPhase[e.phase.String()]
+		if m == nil {
+			t.Errorf("no series for phase %q", e.phase)
+			continue
+		}
+		if got := m.GetGauge().GetValue(); got != e.want {
+			t.Errorf("%s = %v, want %v", e.phase, got, e.want)
+		}
+	}
+
+	firing := byPhase[leeway.PhaseFiring.String()]
+	for key, want := range map[string]string{
+		"subject_kind": "Deployment",
+		"namespace":    "prod",
+		"subject":      "web-1",
+		"topology_key": string(zoneKey),
+		"tier":         leeway.TierA.String(),
+	} {
+		if got := labelValue(firing, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestAlertLevel_AQuietEpisodeReadsZero(t *testing.T) {
+	// Not reachable through the observer — a subject in PhaseOK has no entry to
+	// walk — but the encoding is a published contract, and "0 means nothing is
+	// wrong" is the half of it a dashboard's `== 0` depends on.
+	if got := alertLevel(leeway.PhaseOK); got != 0 {
+		t.Errorf("alertLevel(ok) = %d, want 0", got)
+	}
+}
+
+func TestInstruments_NoAlertObserverMeansNoAlertSeries(t *testing.T) {
+	// The embedder that never wires the machine — and the shape of every other
+	// optional observer in this file.
+	opts := fullOptions()
+	opts.Alerts = nil
+	if f := newPromHarness(t, opts).family(t, "lookout_leeway_alert_state"); f != nil {
+		t.Errorf("exported %d series with no observer", len(f.GetMetric()))
+	}
 }
 
 // labelValue reads one label off a gathered metric.
