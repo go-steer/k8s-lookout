@@ -143,6 +143,7 @@ type fpResult struct {
 	eligible leeway.Eligibility
 	ap       leeway.Apportionment
 	scores   leeway.Scores
+	verdict  leeway.Verdict
 	breach   bool
 	reason   string
 }
@@ -196,7 +197,11 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	// the weighting off the intent would silently ignore an explicit split.
 	out.ap = leeway.Apportion(n, out.eligible.WeightsFor(out.intent), caps)
 	out.scores = leeway.Score(out.eligible.Domains, actual, out.ap, maxSkew, thresholds)
-	out.breach, out.reason = out.scores.Breach(out.intent, thresholds)
+	// Judge rather than Breach: from Phase 4 on, the tier is part of what the
+	// corpus is asserting is absent. A fixture that stopped breaching but
+	// started producing a Tier A verdict would pass a boolean check.
+	out.verdict = out.scores.Judge(out.intent, thresholds)
+	out.breach, out.reason = out.verdict.Breached, out.verdict.Reason
 	return out
 }
 
@@ -208,6 +213,9 @@ func TestFalsePositiveCorpus_NoneOfTheseClustersIsDrifting(t *testing.T) {
 			got := scoreSubject(t, f, zoneKey)
 			if got.breach {
 				t.Errorf("reported drift on a cluster that is fine: %s", got)
+			}
+			if got.verdict.Tier != leeway.TierNone {
+				t.Errorf("verdict carries tier %v on a cluster that is fine: %s", got.verdict.Tier, got)
 			}
 			if f.also != nil {
 				f.also(t, got)
@@ -225,6 +233,54 @@ func falsePositiveCorpus(t *testing.T) []fpFixture {
 		midRollout(t),
 		smallN(t),
 		cappedDomains(t),
+		deliberateColocation(t),
+	}
+}
+
+// deliberateColocation: a workload that asked to be in one zone, and is.
+//
+// This is the most embarrassing false positive available, because the subject
+// is not merely fine — it is doing exactly and only what it was told to do,
+// and it maximises every spread metric by doing so. Judged against a spread
+// expectation a perfectly colocated subject scores ρ = 1 − 1/m, which is over
+// any threshold anyone would set, for as long as the workload exists. It would
+// have been the first finding a user with a cache-affinity deployment ever saw.
+//
+// §8.1's inversion is what saves it: a ModeColocate intent is judged on
+// dispersion, the share of objects *outside* the fullest domain, so the right
+// answer here is zero.
+func deliberateColocation(t *testing.T) fpFixture {
+	inv := zonedInventory(t,
+		zoneSpec{zone: "zone-a", nodes: 2},
+		zoneSpec{zone: "zone-b", nodes: 2},
+		zoneSpec{zone: "zone-c", nodes: 2},
+	)
+	rep := affPod(affRequired(selfTerm(corev1.LabelTopologyZone)))
+
+	return fpFixture{
+		name: "deliberate colocation: a podAffinity workload in one zone",
+		inv:  inv,
+		rep:  rep,
+		pods: replicas(rep, "zone-a-0", "zone-a-0", "zone-a-1", "zone-a-1", "zone-a-1", "zone-a-1"),
+		also: func(t *testing.T, got fpResult) {
+			if got.intent == nil || got.intent.Mode != leeway.ModeColocate {
+				t.Fatalf("intent = %+v, want a colocation intent — the fixture is not testing what it claims", got.intent)
+			}
+
+			// The counterfactual: the same numbers under the spread rule. It
+			// must breach, and loudly. If this goes quiet the fixture above has
+			// stopped proving anything.
+			spread := *got.intent
+			spread.Mode = leeway.ModeSpread
+			if v := got.scores.Judge(&spread, leeway.DefaultThresholds()); !v.Breached {
+				t.Errorf("the same placement under the spread rule did not breach (%q); "+
+					"the mode inversion is no longer what is saving this fixture", v.Reason)
+			}
+			if got.scores.Dispersion() != 0 {
+				t.Errorf("dispersion = %v, want 0 — every pod is in the fullest domain: %s",
+					got.scores.Dispersion(), got)
+			}
+		},
 	}
 }
 

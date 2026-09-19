@@ -296,19 +296,31 @@ func (i *Intent) EligibilityPolicies() NodeInclusionPolicies {
 // than the affinity would have put them" is a deviation to explain, not a
 // broken promise, because the affinity was satisfied at every placement.
 func (i *Intent) HardContract() bool {
-	if i == nil {
-		return false
-	}
-	if i.Source == SourceClusterDefaultAssumed {
-		return false
-	}
-	if i.MaxPerDomain != nil {
-		return true
-	}
-	if i.MaxSkew == nil {
-		return false
-	}
-	return i.WhenUnsatisfiable == v1.DoNotSchedule
+	return i.HardPerDomainContract() || i.HardSkewContract()
+}
+
+// HardPerDomainContract reports the required-podAntiAffinity half of
+// HardContract: a ceiling on how many objects one domain may hold. When it
+// answers true, MaxPerDomain is non-nil.
+func (i *Intent) HardPerDomainContract() bool {
+	return i.declaredContract() && i.MaxPerDomain != nil
+}
+
+// HardSkewContract reports the DoNotSchedule-maxSkew half of HardContract.
+// When it answers true, MaxSkew is non-nil.
+//
+// The two halves are separate predicates because they bound different
+// quantities — a count in one domain, and the spread between the fullest and
+// emptiest — and the rule that checks one must not be reached by an intent
+// carrying only the other.
+func (i *Intent) HardSkewContract() bool {
+	return i.declaredContract() && i.MaxSkew != nil && i.WhenUnsatisfiable == v1.DoNotSchedule
+}
+
+// declaredContract is the precondition both halves share: there is an intent,
+// and somebody other than us asserted it.
+func (i *Intent) declaredContract() bool {
+	return i != nil && i.Source != SourceClusterDefaultAssumed
 }
 
 // ResolveIntents reduces a set of candidate intents to at most one per
@@ -369,16 +381,17 @@ func ResolveIntents(candidates []Intent) map[TopologyKey]*Intent {
 // moment an operator declared a policy.
 //
 // Only the DoNotSchedule skew bound carries, and deliberately not a required
-// podAntiAffinity's MaxPerDomain. Both are equally real promises, but
-// HardContract() is consumed in exactly one place — Breach, which pairs it with
-// ExcessSkew, a quantity derived only from MaxSkew. Carrying a per-domain
-// ceiling onto a winner that has its own ScheduleAnyway maxSkew would therefore
-// return "observed skew exceeds the declared maxSkew" as Tier A about a bound
-// Kubernetes never refused to exceed. Reporting the anti-affinity's ceiling
-// honestly needs Breach to compare it against the observed per-domain maximum,
-// which is a scoring rule and belongs with the rest of them in Phase 4; until
-// then the ceiling stays on its own demoted intent, where the evidence trail
-// still carries it and nothing over-claims.
+// podAntiAffinity's MaxPerDomain. Both are equally real promises, and since
+// Phase 4 the scoring rules do compare the ceiling against the observed
+// per-domain maximum rather than laundering it through ExcessSkew — so the
+// reason for the asymmetry is no longer that the ceiling cannot be reported
+// honestly. It is that the ceiling is not only a reporting input: MaxPerDomain
+// becomes a per-domain cap on the apportionment once the eligible set is known,
+// and the expectation is precisely what an overriding source is entitled to
+// redefine. Carrying the bound would let a superseded anti-affinity reshape the
+// winner's expected distribution, which is the same objection MinDomains loses
+// on below. The ceiling stays on its own demoted intent, where the evidence
+// trail still carries it and nothing over-claims.
 //
 // Two further limits. ModeIgnore takes precedence over the carry: an operator
 // who declared a key uninteresting has said so about the whole key, and

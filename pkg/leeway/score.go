@@ -89,6 +89,13 @@ type Scores struct {
 	Expected []int64
 	Total    int64 // n, the number of objects counted
 
+	// MaxDomainObjects is max(a), the count in the fullest domain. It is the
+	// numerator of MaxDomainShare, kept as a count because the per-domain
+	// ceiling a required podAntiAffinity expresses is a count and comparing it
+	// against a share would reintroduce the rounding the ceiling exists to
+	// forbid.
+	MaxDomainObjects int64
+
 	ObservedSkew      int64 // S = max(a) − min(a)
 	MinAchievableSkew int64 // S*, the floor imposed by arithmetic and caps
 	ExcessSkew        int64 // E = max(0, S − max(S*, maxSkew))
@@ -145,6 +152,7 @@ func Score(domains []Domain, actual []int64, ap Apportionment, maxSkew *int32, t
 		}
 	}
 	s.ObservedSkew = maxA - minA
+	s.MaxDomainObjects = maxA
 	s.MaxDomainShare = float64(maxA) / float64(s.Total)
 
 	// S* is read off the expectation rather than computed as `0 if n mod m ==
@@ -241,23 +249,57 @@ func chiSquare(actual, expected []int64) (float64, bool) {
 // a user can change. Keeping them apart means a threshold change cannot alter
 // a recorded metric, only the verdict drawn from it.
 //
-// Where a hard contract exists, excess skew supersedes ρ (§7.3): a
-// DoNotSchedule maxSkew was violated or it was not, and no amount of
-// distributional nuance changes that.
+// Callers that need the tier as well as the verdict should use Judge, which
+// calls this and classifies the result; this signature stays because "did it
+// breach, and in one line why" is the whole question at most call sites.
 func (s *Scores) Breach(intent *Intent, t Thresholds) (bool, string) {
+	k, reason := s.breach(intent, t)
+	return k != BreachNone, reason
+}
+
+// breach applies the §7.3/§7.4 rules in precedence order and names which one
+// fired, because the rule decides the tier: a contract breach is Tier A and a
+// distributional one is not, and reconstructing that from a prose reason
+// string downstream would be guesswork.
+//
+// Where a hard contract exists it supersedes ρ (§7.3): the bound was violated
+// or it was not, and no amount of distributional nuance changes that.
+func (s *Scores) breach(intent *Intent, t Thresholds) (BreachKind, string) {
 	if intent != nil && intent.Mode == ModeIgnore {
-		return false, GateModeIgnore.String()
+		return BreachNone, GateModeIgnore.String()
 	}
 	if !s.Evaluable {
-		return false, s.Gate.String()
+		return BreachNone, s.Gate.String()
 	}
 
-	if intent.HardContract() && s.ExcessSkew > 0 {
-		return true, "observed skew exceeds the declared maxSkew"
+	// The two hard contracts are checked separately, against the quantity each
+	// one actually bounds. Treating them as interchangeable — asking
+	// HardContract() and then testing ExcessSkew — reports a required
+	// podAntiAffinity's ceiling as "observed skew exceeds the declared
+	// maxSkew" on a subject that declared no maxSkew at all, and reports it
+	// against a floor derived from the expectation rather than from the
+	// ceiling. The per-domain rule goes first because it is the more specific
+	// statement where a subject somehow carries both.
+	if intent.HardPerDomainContract() && s.MaxDomainObjects > *intent.MaxPerDomain {
+		return BreachPerDomainCeiling, "a domain holds more objects than the declared per-domain ceiling"
+	}
+	if intent.HardSkewContract() && s.ExcessSkew > 0 {
+		return BreachMaxSkew, "observed skew exceeds the declared maxSkew"
+	}
+
+	// Colocation inverts the frame: the objects are meant to be together, so
+	// what counts as deviation is how many of them are not in the fullest
+	// domain. Running the spread rule here would report ρ against an
+	// expectation that spreads them, which is drift from the opposite of what
+	// the subject asked for — a guaranteed finding on every workload that
+	// declares a podAffinity, and the reason this branch exists rather than
+	// colocation simply falling through.
+	if intent != nil && intent.Mode == ModeColocate {
+		return s.breachColocate(t)
 	}
 
 	if s.Drift <= t.Drift {
-		return false, ""
+		return BreachNone, ""
 	}
 
 	// §7.4: between minReplicasForScoring and smallNThreshold, ρ alone is too
@@ -265,13 +307,47 @@ func (s *Scores) Breach(intent *Intent, t Thresholds) (bool, string) {
 	// threshold. Requiring R ≥ 2 as well means the finding always names at
 	// least two objects that have to move.
 	if s.Total < t.SmallNThreshold && s.Relocation < t.MinRelocationSmallN {
-		return false, "small-n: relocation below floor"
+		return BreachNone, "small-n: relocation below floor"
 	}
-	return true, "normalised drift over threshold"
+	return BreachDrift, "normalised drift over threshold"
 }
+
+// breachColocate applies the drift rule to a colocation intent, against
+// Dispersion rather than ρ. The threshold and the small-n floor are the same
+// ones, deliberately: both are statements about how many objects a human would
+// have to move before the finding is worth reading, and that does not change
+// with the direction they move in.
+func (s *Scores) breachColocate(t Thresholds) (BreachKind, string) {
+	if s.Dispersion() <= t.Drift {
+		return BreachNone, ""
+	}
+	if s.Total < t.SmallNThreshold && s.Scattered() < t.MinRelocationSmallN {
+		return BreachNone, "small-n: scattered objects below floor"
+	}
+	return BreachDrift, "objects scattered across domains against a colocation intent"
+}
+
+// Dispersion is the colocation counterpart of Drift: the fraction of objects
+// outside the fullest domain, which is 1 − MaxDomainShare and is also
+// Scattered/n, so it reads the same way ρ does — "what share of this subject
+// is in the wrong place".
+func (s *Scores) Dispersion() float64 {
+	if s.Total == 0 {
+		return 0
+	}
+	return 1 - s.MaxDomainShare
+}
+
+// Scattered is the colocation counterpart of Relocation: how many objects
+// would have to move to bring the subject into one domain.
+func (s *Scores) Scattered() int64 { return s.Total - s.MaxDomainObjects }
 
 // Escalate reports whether concentration warrants raising severity, per §8.3's
 // use of max domain share as the zone-failure-risk signal.
+//
+// It is meaningless for a colocation intent, where concentration is the goal,
+// and Judge is what knows the intent; this stays a plain question about the
+// numbers.
 func (s *Scores) Escalate(t Thresholds) bool {
 	return s.Evaluable && s.MaxDomainShare > t.MaxDomainShare
 }

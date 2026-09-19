@@ -1415,6 +1415,23 @@ Let `a_i` be actual count in domain `i`, `e_i` expected.
 `max domain share` for severity escalation. `E` supersedes both where a hard
 contract (`maxSkew`) exists.
 
+> **Amended in Phase 4 — every metric above assumes the subject wanted to be
+> spread.** FR-6 infers `Colocate` intent from `podAffinity`, and under this table
+> a workload doing exactly what it asked for scores the worst ρ available
+> (`1 − 1/m`), permanently. Colocation is therefore judged on two counterparts,
+> against the same thresholds and the same §7.4 small-n floor:
+>
+> | Metric | Definition | Spread counterpart |
+> |---|---|---|
+> | **Scattered** | `Sc = n − max(a)` | `R` |
+> | **Dispersion** | `Sc / n = 1 − max domain share` | `ρ` |
+>
+> Max domain share does not escalate a colocation finding: concentration is the
+> goal, so escalating on it would raise severity on the subjects behaving best.
+> `deliberate colocation: a podAffinity workload in one zone` is the §12 fixture,
+> and it carries the counterfactual — the same placement under the spread rule,
+> asserted to breach — so the inversion cannot quietly stop being what saves it.
+
 `S*` is read off the expectation rather than computed as `n mod m`. The two agree
 in the equal-weight uncapped case, but only the former stays correct when weights
 are unequal or a cap has saturated — a domain clamped to 1 of an expected 4 makes a
@@ -2169,6 +2186,28 @@ out — an intent whose source is `cluster-default-assumed` is capped at Tier B
 regardless of its `whenUnsatisfiable`, because we would be raising a `critical` on a
 contract we guessed at. A `cluster-default-declared` intent carries no such cap: an
 operator who writes the constraint down has made the assertion, and it is theirs.
+
+> **Shipped 2026-09-19 as `leeway.Judge`, with the tier read off the rule that
+> fired rather than off the numbers.** Four named breach rules — `per-domain-ceiling`,
+> `max-skew`, `drift`, and none — and the first two are the Tier A gate. The
+> alternative, re-deriving "a contract was violated" downstream from `E > 0`, is
+> only correct if a contract existed, and by rendering time that context is gone.
+>
+> This forced the two hard contracts apart. `HardContract()` was one predicate
+> answering for both a `DoNotSchedule` `maxSkew` and a required `podAntiAffinity`'s
+> per-domain ceiling, and its only consumer paired it with `E` — a quantity derived
+> from `maxSkew` alone. A subject whose only declared bound was the ceiling
+> therefore fired Tier A with the reason "observed skew exceeds the declared
+> maxSkew", against a floor the ceiling had nothing to do with. There are now two
+> predicates, `HardSkewContract` and `HardPerDomainContract`, each checked against
+> the quantity it actually bounds; the ceiling is compared to `max(a)`, which is
+> what catches the `IgnoredDuringExecution` case it exists for — two pods sharing a
+> domain after a relabel, at a skew of one that no skew rule would call a violation.
+>
+> §8.1's "an assumed cluster default can never reach Tier A" is enforced one layer
+> down, in the precondition both hard-contract predicates share, rather than
+> restated as a cap in the classifier: an assumed intent cannot fire a contract
+> rule, so it cannot arrive at classification with a contract to be capped.
 
 Tier A on a `DoNotSchedule` constraint is the most interesting case: the scheduler
 enforces it at admission, so a violation means the pods were placed and *then* the
