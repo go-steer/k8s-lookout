@@ -93,9 +93,26 @@ type Config struct {
 	// exists to stop. See ClusterDefaultIntents.
 	ClusterDefaultConstraints *[]corev1.TopologySpreadConstraint
 
-	// PerDomainSeries exports the per-subject, per-domain counts. See
-	// metricsOptions.PerDomainSeries for why this is off by default.
+	// PerDomainSeries exports the per-subject, per-domain counts for *every*
+	// tracked subject, not only the drifting ones. See PerDomainGate for why
+	// that is a deliberate opt-in and PerDomainSeriesMinDrift for what a
+	// deployment gets without it.
 	PerDomainSeries bool
+
+	// PerDomainSeriesMinDrift is §8.4's cardinality floor on the per-domain
+	// series. Zero takes DefaultPerDomainSeriesMinDrift; negative admits every
+	// scored subject.
+	PerDomainSeriesMinDrift float64
+
+	// Thresholds are §7.4's scoring thresholds. Nil takes
+	// leeway.DefaultThresholds.
+	//
+	// A pointer rather than a value, because these are five fields that must
+	// be set together: a caller that wanted a stricter drift threshold and set
+	// the struct's one field would otherwise get a MinReplicasForScoring of
+	// zero along with it, and score every single-replica workload in the
+	// cluster. Take DefaultThresholds and amend it.
+	Thresholds *leeway.Thresholds
 
 	// Meter is where the §8.4 instruments are declared. Nil means no-op, so
 	// the source is usable in tests and in a process with no telemetry.
@@ -109,7 +126,26 @@ func (c Config) normalize() Config {
 	if c.EligibilitySweepInterval <= 0 {
 		c.EligibilitySweepInterval = DefaultEligibilitySweepInterval
 	}
+	if c.PerDomainSeriesMinDrift == 0 {
+		c.PerDomainSeriesMinDrift = DefaultPerDomainSeriesMinDrift
+	}
+	if c.Thresholds == nil {
+		t := leeway.DefaultThresholds()
+		c.Thresholds = &t
+	}
 	return c
+}
+
+// perDomainGate is §8.4's gate as the metrics layer takes it. A negative floor
+// is the configured way to say "every scored subject", which the gate spells
+// as a zero floor — drift is never negative, so passing it through unchanged
+// would work by accident rather than by contract.
+func (c Config) perDomainGate() PerDomainGate {
+	g := PerDomainGate{All: c.PerDomainSeries, MinDrift: c.PerDomainSeriesMinDrift}
+	if g.MinDrift < 0 {
+		g.MinDrift = 0
+	}
+	return g
 }
 
 // Source implements sources.Source for the topology-drift row of §3.
@@ -515,10 +551,12 @@ func (s *Source) onPolicyDelete(obj any) {
 
 // evaluate is the coalesced per-subject callback.
 //
-// It resolves intent and eligibility and stores the result; it emits nothing.
-// Scoring (§7.3) and findings (§8) are the next increment, and keeping them
-// out of this one means the inference stack reaches a real cluster — and its
-// `intent_info` series reaches a dashboard — before anything can page on it.
+// It resolves intent and eligibility, scores the subject on every axis and
+// stores both results; it emits nothing. The §8.2 state machine and the
+// findings that come out of it are the next increment, and keeping them out of
+// this one means the whole measurement stack — inference, apportionment and the
+// §7.3 scores — reaches a real cluster and a real dashboard before anything can
+// page on it. A wrong number here is a wrong number on a graph.
 func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	start := time.Now()
 	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, time.Since(start)) }()
@@ -532,10 +570,16 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 		// subject is forgotten outright once its last pod stops counting.
 		return
 	}
-	s.state.SetIntents(sub, Resolve(pod, s.inv, ResolveConfig{
+	res := Resolve(pod, s.inv, ResolveConfig{
 		ClusterDefaults: s.cfg.ClusterDefaultConstraints,
 		Policy:          s.policyFor(sub, pod),
-	}).Intents)
+	})
+	s.state.SetIntents(sub, res.Intents)
+
+	// Snapshot and then score outside the index lock. Scoring is O(domains)
+	// arithmetic and holding the lock across it would put every pod event in
+	// the cluster behind whichever subject the queue happened to reach.
+	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds))
 }
 
 // policyFor picks the LeewayPolicy governing sub, or nil when none does — the
@@ -778,12 +822,13 @@ func (s *Source) runVerifyPass() {
 // startMetrics declares the §8.4 instruments against the configured meter.
 func (s *Source) startMetrics() error {
 	in, err := newInstruments(metricsOptions{
-		Meter:           s.cfg.Meter,
-		PerDomainSeries: s.cfg.PerDomainSeries,
-		SubjectCounts:   s.state.SubjectCounts,
-		DomainNodes:     s.domainNodes,
-		DomainObjects:   s.domainObjects,
-		Intents:         s.state.EachIntent,
+		Meter:         s.cfg.Meter,
+		PerDomain:     s.cfg.perDomainGate(),
+		SubjectCounts: s.state.SubjectCounts,
+		DomainNodes:   s.domainNodes,
+		DomainObjects: s.domainObjects,
+		Evaluations:   s.state.EachEvaluation,
+		Intents:       s.state.EachIntent,
 	})
 	if err != nil {
 		return err
@@ -900,8 +945,11 @@ func (s *Source) domainNodes() map[leeway.TopologyKey]map[leeway.Domain]int64 {
 // whole walk: a scrape must not be able to stall the delta path. The cost is
 // that two subjects in one scrape can be a few microseconds apart, which for a
 // gauge of a moving count is not a cost at all.
-func (s *Source) domainObjects(yield countObserver) {
+func (s *Source) domainObjects(gate PerDomainGate, yield countObserver) {
 	for _, sub := range s.state.Subjects() {
+		if !gate.Admits(s.state.DriftOf(sub)) {
+			continue
+		}
 		for key, dist := range s.state.Snapshot(sub) {
 			for _, domain := range dist.Domains() {
 				c := dist.ByDomain[domain]

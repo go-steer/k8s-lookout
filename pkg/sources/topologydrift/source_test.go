@@ -567,7 +567,7 @@ func TestSource_MetricProjections(t *testing.T) {
 			n      int64
 		}
 		var rows []row
-		s.domainObjects(func(sub leeway.SubjectRef, key leeway.TopologyKey, d leeway.Domain, st leeway.CountState, n int64) {
+		s.domainObjects(PerDomainGate{All: true}, func(sub leeway.SubjectRef, key leeway.TopologyKey, d leeway.Domain, st leeway.CountState, n int64) {
 			if sub.Name != "db" || key != zoneKey {
 				t.Errorf("unexpected row for %s on %s", sub, key)
 			}

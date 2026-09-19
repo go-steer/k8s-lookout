@@ -159,8 +159,15 @@ func (r fpResult) String() string {
 		r.scores.Gate, r.reason)
 }
 
-// scoreSubject runs a fixture through everything Phase 3 has: inference,
+// scoreSubject runs a fixture through the production scoring pass: inference,
 // eligibility, apportionment, scoring and the threshold verdict.
+//
+// It builds the distribution and then calls ScoreAxis, rather than reproducing
+// the chain. The corpus's whole claim is that the shipped code does not report
+// on these clusters, and a corpus that assembled its own version of the pass
+// could keep passing while the source scored something else entirely — which
+// is exactly what happened to the caps conversion, inline here until capsFor
+// existed to do it.
 func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	t.Helper()
 
@@ -168,40 +175,51 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	// because of what its pods say, not because an assumed cluster default
 	// happened to supply a lenient maxSkew.
 	res := Resolve(f.rep, f.inv, ResolveConfig{ClusterDefaults: noClusterDefaults})
-	out := fpResult{intent: res.Intents[key], eligible: res.Eligible[key]}
 
 	dist := leeway.NewDistribution()
 	for _, p := range f.pods {
 		dist.Add(domainOf(f.inv, key, p.Spec.NodeName), leeway.StateRunning, false)
 	}
-	actual := dist.Counts(out.eligible.Domains, leeway.StateRunning)
 
-	var caps []int64
+	intent := res.Intents[key]
+	eligible := res.Eligible[key]
 	if f.caps != nil {
-		caps = f.caps(out.eligible)
+		intent = withDomainCaps(intent, eligible, f.caps(eligible))
 	}
 
-	var maxSkew *int32
-	if out.intent != nil {
-		maxSkew = out.intent.MaxSkew
+	// Judge rather than Breach, which is what ScoreAxis runs: from Phase 4 on,
+	// the tier is part of what the corpus asserts is absent. A fixture that
+	// stopped breaching but started producing a Tier A verdict would pass a
+	// boolean check.
+	ev := ScoreAxis(key, intent, eligible, dist, leeway.DefaultThresholds())
+	return fpResult{
+		intent:   ev.Intent,
+		eligible: ev.Eligible,
+		ap:       ev.Apportionment,
+		scores:   ev.Scores,
+		verdict:  ev.Verdict,
+		breach:   ev.Verdict.Breached,
+		reason:   ev.Verdict.Reason,
 	}
+}
 
-	var n int64
-	for _, a := range actual {
-		n += a
+// withDomainCaps copies an intent with a per-domain ceiling attached, so a
+// fixture can express a ceiling no inference source produces yet.
+//
+// Setting DomainCaps rather than handing ScoreAxis a caps slice is the point:
+// the conversion from a declared ceiling to §7.2's index-aligned slice is
+// capsFor's job, and a fixture that bypassed it would stop testing it.
+func withDomainCaps(in *leeway.Intent, e leeway.Eligibility, caps []int64) *leeway.Intent {
+	out := &leeway.Intent{}
+	if in != nil {
+		*out = *in
 	}
-
-	thresholds := leeway.DefaultThresholds()
-	// WeightsFor, not Weights(weighting): a policy's expectedDistribution
-	// replaces the weighting rule rather than parameterising it, and reading
-	// the weighting off the intent would silently ignore an explicit split.
-	out.ap = leeway.Apportion(n, out.eligible.WeightsFor(out.intent), caps)
-	out.scores = leeway.Score(out.eligible.Domains, actual, out.ap, maxSkew, thresholds)
-	// Judge rather than Breach: from Phase 4 on, the tier is part of what the
-	// corpus is asserting is absent. A fixture that stopped breaching but
-	// started producing a Tier A verdict would pass a boolean check.
-	out.verdict = out.scores.Judge(out.intent, thresholds)
-	out.breach, out.reason = out.verdict.Breached, out.verdict.Reason
+	out.DomainCaps = make(map[leeway.Domain]int64, len(caps))
+	for i, d := range e.Domains {
+		if i < len(caps) {
+			out.DomainCaps[d] = caps[i]
+		}
+	}
 	return out
 }
 

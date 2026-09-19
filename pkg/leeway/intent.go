@@ -429,11 +429,16 @@ func demote(losing *Intent) []EvidenceItem {
 	return out
 }
 
-// SortedKeys returns the topology keys of a resolved intent set in
-// lexicographic order, so callers iterating the result are deterministic.
-func SortedKeys(intents map[TopologyKey]*Intent) []TopologyKey {
-	out := make([]TopologyKey, 0, len(intents))
-	for k := range intents {
+// SortedKeys returns a keyed-by-axis map's topology keys in lexicographic
+// order, so callers iterating the result are deterministic.
+//
+// Generic over the value because the two things iterated per axis — resolved
+// intents and eligible sets — are different types and must be walked in the
+// same order: an evaluation that scored its axes in map order would produce a
+// differently ordered result on every pass.
+func SortedKeys[V any](byKey map[TopologyKey]V) []TopologyKey {
+	out := make([]TopologyKey, 0, len(byKey))
+	for k := range byKey {
 		out = append(out, k)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })

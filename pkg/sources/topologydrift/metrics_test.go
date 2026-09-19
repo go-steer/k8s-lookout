@@ -94,9 +94,15 @@ func (h *promHarness) family(t *testing.T, name string) *dto.MetricFamily {
 	return nil
 }
 
+// fullOptionsDrift is the drift the harness's one subject reports. Above
+// DefaultPerDomainSeriesMinDrift, so the default posture — no All, the shipped
+// floor — still exports its per-domain series; the gate tests move the floor
+// rather than the subject.
+const fullOptionsDrift = 0.2
+
 func fullOptions() metricsOptions {
 	return metricsOptions{
-		PerDomainSeries: true,
+		PerDomain: PerDomainGate{All: true},
 		SubjectCounts: func() map[leeway.SubjectKind]int64 {
 			return map[leeway.SubjectKind]int64{leeway.SubjectDeployment: 3, leeway.SubjectDaemonSet: 1}
 		},
@@ -105,9 +111,32 @@ func fullOptions() metricsOptions {
 				zoneKey: {"us-central1-a": 7, "us-central1-b": 5},
 			}
 		},
-		DomainObjects: func(yield countObserver) {
+		// The stub applies the gate, as Source.domainObjects does: a harness
+		// whose walker yielded unconditionally would make every gate assertion
+		// below pass for the wrong reason.
+		DomainObjects: func(g PerDomainGate, yield countObserver) {
+			if !g.Admits(fullOptionsDrift, true) {
+				return
+			}
 			yield(subA, zoneKey, "us-central1-a", leeway.StateRunning, 4)
 			yield(subA, zoneKey, "us-central1-b", leeway.StatePending, 1)
+		},
+		Evaluations: func(yield evalObserver) {
+			yield(subA, &Evaluation{
+				Key: zoneKey,
+				Scores: leeway.Scores{
+					Domains:        []leeway.Domain{"us-central1-a", "us-central1-b"},
+					Actual:         []int64{4, 1},
+					Expected:       []int64{3, 2},
+					Total:          5,
+					ObservedSkew:   3,
+					ExcessSkew:     2,
+					Relocation:     1,
+					Drift:          fullOptionsDrift,
+					MaxDomainShare: 0.8,
+					Evaluable:      true,
+				},
+			})
 		},
 		Intents: func(yield intentObserver) {
 			skew := int32(1)
@@ -146,8 +175,18 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 
 	want := []string{
 		"lookout_leeway_domain_objects",
+		"lookout_leeway_domain_expected",
 		"lookout_leeway_domain_ready_nodes",
 		"lookout_leeway_intent_info",
+		// The §7.3 scores. None of them sets a unit — ρ and a share are
+		// dimensionless, and a skew and a relocation distance are counts of
+		// objects, which has no UCUM spelling worth injecting into the middle
+		// of the name.
+		"lookout_leeway_observed_skew",
+		"lookout_leeway_excess_skew",
+		"lookout_leeway_relocation_distance",
+		"lookout_leeway_drift",
+		"lookout_leeway_max_domain_share",
 		// Unit "s" lands before nothing at all on a gauge, so the name reads
 		// as the Prometheus convention for a unix timestamp.
 		"lookout_leeway_last_event_timestamp_seconds",
@@ -222,11 +261,12 @@ func TestMetricDocs_MatchTheExporter(t *testing.T) {
 	}
 }
 
-// TestMetricDocs_OptionalMatchesTheFlag pins the Optional column: exactly the
-// rows marked optional are the ones missing from a default-configured scrape.
-func TestMetricDocs_OptionalMatchesTheFlag(t *testing.T) {
+// TestMetricDocs_OptionalMatchesTheGate pins the Optional column: exactly the
+// rows marked optional are the ones §8.4's per-domain gate can withhold.
+func TestMetricDocs_OptionalMatchesTheGate(t *testing.T) {
 	opts := fullOptions()
-	opts.PerDomainSeries = false
+	// A floor no subject can reach — drift is R/n, so it never exceeds 1.
+	opts.PerDomain = PerDomainGate{MinDrift: 2}
 	h := newPromHarness(t, opts)
 	ctx := context.Background()
 	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
@@ -239,7 +279,7 @@ func TestMetricDocs_OptionalMatchesTheFlag(t *testing.T) {
 	for _, d := range MetricDocs() {
 		present := slices.Contains(exported, d.Name)
 		if present == d.Optional {
-			t.Errorf("%s: exported=%v with PerDomainSeries off, but Optional=%v", d.Name, present, d.Optional)
+			t.Errorf("%s: exported=%v below the per-domain floor, but Optional=%v", d.Name, present, d.Optional)
 		}
 	}
 }
@@ -319,20 +359,112 @@ func labelValue(m *dto.Metric, name string) string {
 	return ""
 }
 
-func TestInstruments_PerDomainSeriesIsOffByDefault(t *testing.T) {
-	// The expensive series must not appear unless asked for. §8.4: at the
-	// baseline row this is ~480k series against ~3.5k for everything else,
-	// and under managed Prometheus that is a bill rather than a failure, so
-	// nothing about the default posture announces itself.
+func TestInstruments_ThePerDomainGateDecidesWhoGetsABreakdown(t *testing.T) {
+	// §8.4: at §6.6's baseline row the per-domain breakdown is ~480k series
+	// against ~3.5k for everything else, and under managed Prometheus that is
+	// a bill rather than a failure. So it is exported for the subjects
+	// somebody is about to go and look at, and withheld for the rest — and
+	// the aggregates never move either way.
+	for _, tc := range []struct {
+		name string
+		gate PerDomainGate
+		want bool
+	}{
+		{"the shipped floor admits a drifting subject", PerDomainGate{MinDrift: DefaultPerDomainSeriesMinDrift}, true},
+		{"a floor above it does not", PerDomainGate{MinDrift: 2}, false},
+		{"All overrides the floor", PerDomainGate{All: true, MinDrift: 2}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := fullOptions()
+			opts.PerDomain = tc.gate
+			names := newPromHarness(t, opts).names(t)
+
+			for _, m := range []string{"lookout_leeway_domain_objects", "lookout_leeway_domain_expected"} {
+				if got := slices.Contains(names, m); got != tc.want {
+					t.Errorf("%s exported = %v, want %v", m, got, tc.want)
+				}
+			}
+			for _, m := range []string{"lookout_leeway_subjects_tracked", "lookout_leeway_drift"} {
+				if !slices.Contains(names, m) {
+					t.Errorf("%s went missing: the gate does not reach the aggregates", m)
+				}
+			}
+		})
+	}
+}
+
+func TestPerDomainGate_ASubjectWithNoScoreIsNeverAdmittedByTheFloor(t *testing.T) {
+	// A zero floor admits every *scored* subject, and an unscored one has no
+	// drift figure for a floor to compare against — admitting it on a zero
+	// would put the whole estate's breakdown on the wire the moment somebody
+	// set the floor to zero meaning "everything that is measured".
+	if (PerDomainGate{}).Admits(0, false) {
+		t.Error("a zero floor admitted an unscored subject")
+	}
+	if !(PerDomainGate{All: true}).Admits(0, false) {
+		t.Error("All must admit an unscored subject: it is the every-subject switch")
+	}
+	if !(PerDomainGate{}).Admits(0, true) {
+		t.Error("a zero floor must admit a scored subject that is not drifting")
+	}
+}
+
+func TestInstruments_AGatedSubjectHasNoScoreSeries(t *testing.T) {
+	// §7.5 gates a subject below MinReplicasForScoring, one with no eligible
+	// domains, and one told to ignore the axis. None of them has a drift figure,
+	// and the zero is not one: five series per axis asserting a perfectly
+	// balanced workload for every single-replica Deployment is both the wrong
+	// statement and, at §6.6's baseline, the bulk of the cardinality.
 	opts := fullOptions()
-	opts.PerDomainSeries = false
+	opts.Evaluations = func(yield evalObserver) {
+		yield(subA, &Evaluation{
+			Key:    zoneKey,
+			Scores: leeway.Scores{Domains: []leeway.Domain{"us-central1-a"}, Gate: leeway.GateBelowMinReplicas},
+		})
+		// And a nil evaluation is a walker bug, not a scrape failure.
+		yield(subA, nil)
+	}
+	names := newPromHarness(t, opts).names(t)
+
+	for _, m := range []string{
+		"lookout_leeway_drift",
+		"lookout_leeway_observed_skew",
+		"lookout_leeway_excess_skew",
+		"lookout_leeway_max_domain_share",
+		"lookout_leeway_relocation_distance",
+		"lookout_leeway_domain_expected",
+	} {
+		if slices.Contains(names, m) {
+			t.Errorf("%s was exported for a gated subject", m)
+		}
+	}
+}
+
+func TestInstruments_ThePerDomainBreakdownStopsAtTheShorterSlice(t *testing.T) {
+	// Domains and Expected are built together and are the same length, so this
+	// is a guard rather than a case. It is worth holding anyway: the loop reads
+	// one slice by the other's index, and the failure mode of getting that
+	// wrong is a panic inside a scrape callback, which takes down /metrics for
+	// every other source in the process.
+	opts := fullOptions()
+	opts.Evaluations = func(yield evalObserver) {
+		yield(subA, &Evaluation{
+			Key: zoneKey,
+			Scores: leeway.Scores{
+				Domains:   []leeway.Domain{"us-central1-a", "us-central1-b"},
+				Expected:  []int64{3},
+				Evaluable: true,
+			},
+		})
+	}
 	h := newPromHarness(t, opts)
 
-	if slices.Contains(h.names(t), "lookout_leeway_domain_objects") {
-		t.Error("domain_objects was exported with PerDomainSeries off")
+	f := h.family(t, "lookout_leeway_domain_expected")
+	if f == nil {
+		t.Fatal("family absent")
 	}
-	if !slices.Contains(h.names(t), "lookout_leeway_subjects_tracked") {
-		t.Error("the cheap aggregate series went missing with PerDomainSeries off")
+	if len(f.GetMetric()) != 1 {
+		t.Errorf("got %d series, want the one domain the expectation covers", len(f.GetMetric()))
 	}
 }
 
@@ -340,7 +472,7 @@ func TestInstruments_MissingCallbacksAreNotAPanic(t *testing.T) {
 	// A source constructed without state wired in — which is what a partially
 	// built process looks like — must scrape clean rather than crash the
 	// handler serving /metrics for every other source.
-	h := newPromHarness(t, metricsOptions{PerDomainSeries: true})
+	h := newPromHarness(t, metricsOptions{PerDomain: PerDomainGate{All: true}})
 	if got := h.names(t); len(got) != 0 {
 		t.Errorf("names = %q, want nothing observed", got)
 	}

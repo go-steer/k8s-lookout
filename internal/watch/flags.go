@@ -80,6 +80,7 @@ type flags struct {
 	topologyKeys          string
 	topologyDefaults      string
 	topologyPerDomain     bool
+	topologyMinDrift      float64
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -244,7 +245,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// whether to pay for the per-subject series.
 	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
 	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
-	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects — one series per subject × topology key × domain × scheduling state. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. Turn it on to debug one cluster's placement, not as a standing posture.")
+	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
+	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
