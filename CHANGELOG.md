@@ -53,6 +53,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixing the bug, it is what keeps the next hour's numbers usable while
   someone does.
 
+- **`--topology-cluster-defaults`, and it has three states rather than two.**
+  kube-scheduler's `PodTopologySpread` `defaultConstraints` shape where every
+  pod that declares no `topologySpreadConstraints` of its own is expected to
+  land — and on a managed control plane they are not readable: there is no
+  scheduler pod, no scheduler ConfigMap and no API exposing
+  `KubeSchedulerConfiguration`. So leeway has to be told, and the interesting
+  part is what it does when it has not been.
+
+  Leaving the flag unset does **not** mean "this cluster has no defaults". It
+  means *nobody has said*, so leeway assumes the upstream system set
+  (`kubernetes.io/hostname` maxSkew 3, `topology.kubernetes.io/zone` maxSkew 5,
+  both `ScheduleAnyway`), labels every intent derived from it
+  `source=cluster-default-assumed confidence=assumed`, and logs the assumption
+  once at startup. An assumed default is capped below the tier a contract
+  violation needs, so a wrong guess can cost precision but can never raise a
+  critical finding. Pass `none` to assert your cluster configures none, or
+  `topology.kubernetes.io/zone=4:ScheduleAnyway,...` to be scored against your
+  real numbers — an operator who declares a `DoNotSchedule` default is making
+  an assertion of their own, and that one *can* reach the top tier.
+
+  Defaults only ever reach pods that declared nothing themselves: one
+  constraint on the pod and the scheduler ignores them entirely, so a wrong
+  assumption cannot touch a workload that expressed intent. A dashboard can
+  ask what fraction of a fleet's intent rests on a guess by grouping
+  `lookout_leeway_intent_info` on `source`, and drive it to zero by declaring.
+
 - **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
   Instruments declared on the OTel metric API are exported twice from one
   declaration: into the Prometheus registry `/metrics` already serves — same

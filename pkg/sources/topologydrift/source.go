@@ -81,6 +81,13 @@ type Config struct {
 	VerifyInterval time.Duration
 	VerifyShards   int
 
+	// ClusterDefaultConstraints is the cluster's PodTopologySpread
+	// defaultConstraints (FR-9), and it is a pointer on purpose: nil is "we
+	// have never been told", an empty slice is "an operator asserts there are
+	// none", and collapsing those two is the silent-assumption bug spike S4
+	// exists to stop. See ClusterDefaultIntents.
+	ClusterDefaultConstraints *[]corev1.TopologySpreadConstraint
+
 	// PerDomainSeries exports the per-subject, per-domain counts. See
 	// metricsOptions.PerDomainSeries for why this is off by default.
 	PerDomainSeries bool
@@ -356,7 +363,7 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 		// subject is forgotten outright once its last pod stops counting.
 		return
 	}
-	s.state.SetIntents(sub, Resolve(pod, s.inv).Intents)
+	s.state.SetIntents(sub, Resolve(pod, s.inv, s.cfg.ClusterDefaultConstraints).Intents)
 }
 
 // subjectPod returns an admitted pod belonging to sub, for inference to read.
@@ -491,6 +498,12 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("topologydrift: register node handler: %w", err)
 	}
+
+	// §13 S4's fourth mitigation, and the cheapest one: say once, out loud,
+	// whose numbers the fleet is about to be scored against. An operator who
+	// never configured anything should not have to read the source to find out
+	// that a maxSkew is ours rather than theirs.
+	s.logger()("topologydrift: %s", DescribeClusterDefaults(s.cfg.ClusterDefaultConstraints))
 
 	if err := s.startMetrics(); err != nil {
 		return err
