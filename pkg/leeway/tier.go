@@ -140,6 +140,18 @@ type Verdict struct {
 	// it to raise Tier C from info to warning; at A and B the severity is
 	// already at or above warning, so it is reported and changes nothing.
 	Escalated bool
+
+	// Transient is the §7.6 state in force, if any. It is recorded on both
+	// outcomes: a subject that breached *through* a rollout is a more
+	// interesting finding than one that breached on a quiet cluster, and a
+	// reader cannot tell the two apart from the scores.
+	Transient TransientState
+	// Suppressed reports that §7.6 declined to evaluate this subject at all,
+	// which is not the same as not breaching — Reason says which state.
+	Suppressed bool
+	// Relaxed reports that the thresholds were multiplied by §7.6's transient
+	// multiplier before judging.
+	Relaxed bool
 }
 
 // Judge applies the §7.3/§7.4 breach rules and the §8.1 tier table.

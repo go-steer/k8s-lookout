@@ -1519,6 +1519,47 @@ one-cause-many-symptoms problem generically; the right split is for leeway to em
 the domain-level finding and let storm correlation handle cross-source fan-in
 (spike S10).
 
+> **Shipped 2026-09-19 as `leeway.Transients.Classify` / `JudgeTransient`.** Four
+> things the table above leaves open, decided:
+>
+> **Which rows suppress and which relax is not arbitrary.** A state suppresses
+> when it makes the counts *unreliable* — during warmup they are a partial view
+> of the cluster, and during a domain outage they describe a cluster that is not
+> the one the expectation was apportioned over. A state relaxes when the counts
+> are correct and merely unflattering: a rollout, a drain and a scale event all
+> produce an accurately measured distribution that has not finished moving yet.
+>
+> **The relaxation reaches the drift path and nothing else.** The contract rules
+> (§8.1 Tier A) compare against numbers the *user* declared — a `DoNotSchedule`
+> `maxSkew`, a required anti-affinity's per-domain ceiling — and multiplying
+> somebody else's stated bound by 2.5 because a rollout is running substitutes
+> our judgement for theirs. Suppression is the opposite and covers Tier A too,
+> which is the whole point of the outage row: a zone dies, every `DoNotSchedule`
+> constraint in the cluster is violated in the same second, and §14 asks for one
+> finding rather than four hundred.
+>
+> **The multiplier scales the tolerances, not the eligibility gate.**
+> `minReplicasForScoring` answers "does this subject have enough objects for a
+> distribution to mean anything", which is a property of the subject and not of
+> what the cluster happens to be doing to it. Scaling it would let a transient
+> silently change which subjects are *measured*, and §7.4 records the metrics
+> even for subjects it declines to judge. `maxDomainShare` is capped at 1 — 1.25
+> and 1.0 are equally unreachable, but only one prints in a finding without
+> looking like a bug.
+>
+> **The outage row compares against the peak in the window, not the oldest
+> sample in it.** A zone that goes 9 → 4 → 4 over ten minutes is out; under an
+> oldest-sample rule it stops being out the moment the 9 ages out of a sliding
+> window, un-detecting an outage that is still in progress. The >50% test is
+> strict, so a clean 4 → 2 is a rolling node-pool upgrade rather than a zone.
+>
+> Detection itself stays in the source, which is the only layer that can see a
+> cluster (NFR-10); `Transients` is five answered questions. A timestamp a few
+> seconds in the future counts as recent — the kubelet, the API server and this
+> process do not share a clock, and that skew lands exactly when suppression
+> matters most — but one more than a whole window ahead is bad data and is
+> ignored rather than suppressing the subject forever.
+
 ### 7.7 Preference-rank tracking (GKE custom compute classes)
 
 A GKE custom compute class is an **ordered** list of provisioning priorities. A
