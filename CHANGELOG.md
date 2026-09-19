@@ -17,7 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many usable nodes each domain has, when the last pod or node event landed,
   and how long an evaluation takes. It reads pods, nodes and replicasets from
   the informer factory the sentinel already runs, so it adds no LIST/WATCH
-  stream and needs no RBAC the shipped ClusterRole does not already grant.
+  stream for them.
+
+  **It does need one new grant.** A pod bound to a zonal disk cannot be
+  rebalanced, and reporting its zone as lopsided would be a finding whose only
+  remedy is to delete data — so the source reads PersistentVolumeClaims and
+  PersistentVolumes to tell "unevenly placed" apart from "not free to move",
+  and the shipped ClusterRole now carries `list`/`watch` on both.
+  **Operators who copied the ClusterRole into their own manifests must add the
+  rule**, or the sentinel will fail its §11 access check at startup. Nothing
+  reads a volume's contents: the source uses the claim's `spec.volumeName` and
+  the volume's `spec.nodeAffinity`, and a PV object holds neither data nor
+  credentials.
 
   **This release emits nothing.** The source produces no signals and no
   findings — it keeps counters and publishes them, and the scoring that turns
