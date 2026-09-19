@@ -247,6 +247,47 @@ var migrations = []string{
 		ack_by         TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX finding_state_last_seen ON finding_state (last_seen);`,
+
+	// v7: §9.1's leeway alert state — the one thing in the
+	// topology-drift subsystem we are the sole source of truth for.
+	// Placement, inventory and resolved intent are all rebuilt from the
+	// API server on every sync; dwell timers are not, and §9.1's
+	// requirement reduces to one sentence: a 30-minute dwell must not
+	// restart its clock because a pod was rescheduled at minute 29.
+	//
+	// Keyed (cluster, subject_key, topology_key) — the grain §8.2's
+	// machine runs at. A workload with both a zone constraint and a
+	// hostname constraint is two independent episodes; it can be evenly
+	// spread across zones while stacked three-deep on one node.
+	//
+	// phase is the TEXT AlertPhase.String() rather than the enum's
+	// ordinal, so the table is readable from the sqlite3 CLI and a
+	// reordered enum cannot silently reinterpret old rows; an
+	// unrecognised phase decodes to "forget this episode" (see
+	// leeway.Reconcile). fires is the JSON array of flap instants in
+	// unix nanoseconds, already pruned to flapWindow by the machine.
+	//
+	// Written SYNCHRONOUSLY, bypassing the buffered writer that
+	// occurrences use: §9.2 puts alert transitions and baselines on
+	// different write policies precisely because losing 30 s of EWMA is
+	// irrelevant and losing a dwell timer is the one thing we promised
+	// not to do. Like memory_facts, triage_status and finding_state,
+	// exempt from the §9.1 TTL/size prune — volume is "how many
+	// subjects are drifting right now" and a resolved episode's row is
+	// deleted, which is what makes a recurrence read as new.
+	`CREATE TABLE leeway_alert_state (
+		cluster      TEXT NOT NULL DEFAULT '',
+		subject_key  TEXT NOT NULL,
+		topology_key TEXT NOT NULL,
+		phase        TEXT NOT NULL,
+		first_seen   INTEGER,
+		since        INTEGER,
+		clear_since  INTEGER,
+		fires        TEXT NOT NULL DEFAULT '[]',
+		updated_at   INTEGER NOT NULL,
+		PRIMARY KEY (cluster, subject_key, topology_key)
+	);
+	CREATE INDEX leeway_alert_state_updated ON leeway_alert_state (updated_at);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

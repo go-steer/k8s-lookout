@@ -2637,6 +2637,53 @@ inventing a warmup window:
 8. Normal operation.
 ```
 
+> **Shipped 2026-09-19 as store migration v7 + `leeway.Reconcile`.** Steps 1 and
+> 6 for alert state; steps 3, 5 and 7 belong to the source and the baselines,
+> which arrive with the pipeline and Phase 5 respectively.
+>
+> **Three of step 6's four rows are already what `Advance` does.** A persisted
+> Firing that is still drifting stays Firing with its `since`; a persisted
+> Pending whose dwell elapsed during the downtime fires on the spot; an absent
+> record becomes a new Pending. None of them depends on having watched the
+> interval, so the machine needs no telling that a restart happened.
+>
+> **The fourth does, and the list is missing its twin.** §9.3 states the
+> full-`resolveDuration` rule for a persisted *Firing* that now looks OK, but the
+> same hazard is sharper for a persisted *Resolving*: a process down two hours,
+> holding a `clearSince` from before the outage, finds the window long elapsed
+> and closes the finding on a single sample taken seconds after start-up. So the
+> rule is generalised — **any subject arriving in Resolving restarts its window
+> from now**, and `since` is preserved through it.
+>
+> The asymmetry with the fire side is deliberate, and is the one
+> `resolveDuration = 3× forDuration` already encodes. Firing on a dwell that
+> elapsed while we were blind at worst reports drift we *did* watch for the full
+> dwell and which is still true; resolving on a stale clear silently drops a
+> finding nobody was told was going away.
+>
+> **A decoded record gets repaired before it is run.** Everything repaired is a
+> state `Advance` cannot have written, so reaching it means the row is damaged,
+> newer than this build, or was read across a clock that moved. A phase with no
+> transitions is forgotten outright rather than guessed at; `time.Time{}` is the
+> year 1 rather than a neutral default, so a truncated Pending would fire on the
+> spot; and a *future* timestamp — a VM restore, an NTP step — is clamped to now,
+> because left alone it makes `now.Sub` negative and wedges the subject in
+> Pending, silently, for as long as the skew lasts. Throughout: prefer the
+> reading that loses information over the one that acts on a lie. A forgotten
+> episode costs one dwell; a phantom one pages somebody.
+>
+> **Table grain and write policy.** One row per (cluster, subject, topology
+> key) — a workload can be evenly spread across zones while stacked three-deep
+> on one node, and those are two independent episodes. Writes are synchronous
+> and bypass the buffered writer that occurrences use, per §9.2: an occurrence
+> lost to a buffer is a missing history line, a dwell transition lost to a buffer
+> is the one durability promise §9.1 makes. Resolved episodes are **deleted**,
+> which keeps the table bounded by "how many subjects are drifting right now"
+> rather than by how many subjects exist. A store predating v7 reads as "no
+> state" and starts degraded with fresh dwells — §9.2's "never refuse to start" —
+> while a *write* to one is refused, because a write that vanishes is exactly
+> what persistence exists to prevent.
+
 Step 6's asymmetry is the important part: honour elapsed dwell in the *firing*
 direction (a problem that persisted through a restart is more real, not less) but not
 in the *resolving* direction (we have no evidence about what happened while we were
