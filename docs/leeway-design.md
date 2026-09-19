@@ -2573,6 +2573,36 @@ are expected to find: the cheap posture must be what you get for free, and a
 deployment that wants per-domain series across the board has to ask. Push makes this
 bind harder still, per the paragraph above.
 
+> **The score metrics and the real gate landed 2026-09-19**, replacing the Phase
+> 2 boolean. Three things to record.
+>
+> **The gate is `PerDomainGate{All bool; MinDrift float64}`,** not one number.
+> Overloading a sentinel — a negative floor meaning "everything" — would have
+> made `--topology-per-domain-series` and the floor the same knob, and they are
+> different statements: one is "export the breakdown for whoever is drifting",
+> the other is "export it for everyone, I have budgeted for it". `Admits(drift,
+> scored)` is `All || (scored && drift >= MinDrift)`, and **an unscored subject
+> is never admitted by the floor**: a zero floor means "every *measured*
+> subject", and reading it as "everything" would put the whole estate's
+> breakdown on the wire the moment somebody set it to zero meaning the former.
+> `domain_expected` rides the same gate as `domain_objects`, because the two are
+> a numerator and a denominator.
+>
+> **Gating is per subject, not per axis.** `State.DriftOf` returns the maximum
+> drift across a subject's axes. A subject drifting on zone is one somebody will
+> investigate, and serving them the region breakdown while withholding the zone
+> one would be exactly the wrong half.
+>
+> **The subject-level score series are narrower than the table above**, and
+> deliberately so: they are exported only for axes where `Scores.Evaluable`. A
+> gated subject — below `MinReplicasForScoring`, no eligible domains, or
+> `ModeIgnore` — has no drift figure, and the zero is not one. Publishing it
+> would be five series per axis asserting a perfectly balanced workload for
+> every single-replica Deployment, which at §6.6's baseline row is the majority
+> of the cardinality and is also simply a false statement. A reader asking why a
+> tracked subject has no `drift` series finds it in `subjects_tracked` and
+> absent here, which is the same answer.
+
 ### 8.5 Finding payload
 
 ```json
@@ -3646,7 +3676,7 @@ independent of 5.
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
-| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
+| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. Still emits nothing: the state machine, persistence and `Transients` assembly are wired next, then emission | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |

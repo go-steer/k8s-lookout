@@ -45,6 +45,12 @@ const (
 	metricSubjectsTracked  = "lookout.leeway.subjects_tracked"
 	metricDomainReadyNodes = "lookout.leeway.domain_ready_nodes"
 	metricDomainObjects    = "lookout.leeway.domain_objects"
+	metricDomainExpected   = "lookout.leeway.domain_expected"
+	metricObservedSkew     = "lookout.leeway.observed_skew"
+	metricExcessSkew       = "lookout.leeway.excess_skew"
+	metricDrift            = "lookout.leeway.drift"
+	metricMaxDomainShare   = "lookout.leeway.max_domain_share"
+	metricRelocation       = "lookout.leeway.relocation_distance"
 	metricLastEvent        = "lookout.leeway.last_event_timestamp"
 	metricEvalDuration     = "lookout.leeway.evaluation_duration"
 	metricCounterMismatch  = "lookout.leeway.counter_mismatch"
@@ -59,9 +65,17 @@ const (
 	descSubjectsTracked  = "Subjects with a tracked distribution, by kind."
 	descDomainReadyNodes = "Usable nodes per topology domain."
 	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
-	descLastEvent        = "Unix time of the last informer event leeway processed, per resource."
-	descEvalDuration     = "Time spent evaluating one coalesced subject."
-	descIntentInfo       = "Placement intent inferred for a subject on one topology axis, as labels on a constant 1 (leeway §5.1). " +
+	descDomainExpected   = "Objects §7.2 apportioned to each topology domain, the expectation domain_objects is scored against."
+	descObservedSkew     = "S, the difference between the fullest and emptiest eligible domain (leeway §7.3)."
+	descExcessSkew       = "E, observed skew beyond what the arithmetic and the declared bound allow (leeway §7.3). " +
+		"Zero is the normal reading: a subject that cannot be spread any more evenly than it already is scores zero here " +
+		"however lopsided S looks, which is the whole reason drift is not alerted on S."
+	descDrift          = "ρ, the fraction of a subject's objects that would have to move to meet its expectation (leeway §7.3)."
+	descMaxDomainShare = "The share of a subject's objects held by its fullest domain (leeway §7.3)."
+	descRelocation     = "R, the number of objects that would have to move to meet the expectation (leeway §7.3)."
+	descLastEvent      = "Unix time of the last informer event leeway processed, per resource."
+	descEvalDuration   = "Time spent evaluating one coalesced subject."
+	descIntentInfo     = "Placement intent inferred for a subject on one topology axis, as labels on a constant 1 (leeway §5.1). " +
 		"Only subjects that expressed an intent are present: a workload with no spread constraint, anti-affinity or affinity " +
 		"has no row here, which is what makes the series count a property of the estate's declarations rather than of its size. " +
 		"`source` is what the intent was read from and `confidence` how much that source is worth — `assumed` means k8s-lookout " +
@@ -97,9 +111,10 @@ type MetricDoc struct {
 	Type   string   // gauge | counter | histogram
 	Labels []string // variable label names, nil for unlabeled
 	Help   string   // the exported help string, verbatim
-	// Optional is true for a series that only appears when a flag turns it
-	// on. The docs generator renders that rather than letting a reader
-	// conclude the metric is broken when it is absent from a scrape.
+	// Optional is true for a series §8.4's per-domain gate can withhold: it is
+	// present for the subjects the gate admits and absent for the rest, so a
+	// scrape of a healthy estate may not carry it at all. The docs generator
+	// renders that rather than letting a reader conclude the metric is broken.
 	Optional bool
 }
 
@@ -135,6 +150,43 @@ func MetricDocs() []MetricDoc {
 			Labels:   []string{"namespace", "subject", "subject_kind", "topology_key", "domain", "state"},
 			Help:     descDomainObjects,
 			Optional: true,
+		},
+		{
+			Name:     "lookout_leeway_domain_expected",
+			Type:     "gauge",
+			Labels:   []string{"namespace", "subject", "subject_kind", "topology_key", "domain"},
+			Help:     descDomainExpected,
+			Optional: true,
+		},
+		{
+			Name:   "lookout_leeway_observed_skew",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key"},
+			Help:   descObservedSkew,
+		},
+		{
+			Name:   "lookout_leeway_excess_skew",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key"},
+			Help:   descExcessSkew,
+		},
+		{
+			Name:   "lookout_leeway_drift",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key"},
+			Help:   descDrift,
+		},
+		{
+			Name:   "lookout_leeway_max_domain_share",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key"},
+			Help:   descMaxDomainShare,
+		},
+		{
+			Name:   "lookout_leeway_relocation_distance",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key"},
+			Help:   descRelocation,
 		},
 		{
 			Name:   "lookout_leeway_intent_info",
@@ -175,6 +227,44 @@ type countObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, domain le
 // intentObserver is handed each resolved intent during a scrape.
 type intentObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent)
 
+// evalObserver is handed each scored axis during a scrape. The Evaluation is
+// borrowed for the duration of the call and must not be retained.
+type evalObserver func(sub leeway.SubjectRef, ev *Evaluation)
+
+// DefaultPerDomainSeriesMinDrift is §8.4's per-domain cardinality floor: a
+// subject drifting by at least 5% gets its per-domain breakdown exported, and
+// one that is not does not.
+const DefaultPerDomainSeriesMinDrift = 0.05
+
+// PerDomainGate is §8.4's cardinality gate on the per-domain series.
+//
+// The series count of a per-domain breakdown is subjects × keys × domains
+// × states, which at §6.6's 20k-subject baseline is ~480k series against ~3.5k
+// for the aggregates — and under Google Managed Prometheus that is not a scrape
+// that fails but a bill that grows (§13 S5). So the breakdown is exported for
+// the subjects somebody is actually going to look at, and the gate is what
+// decides which those are.
+//
+// Phase 2 shipped this as a plain boolean because the floor needs a drift
+// figure and there was none until intent inference landed. The boolean survives
+// as All, for a small estate that would rather have everything.
+type PerDomainGate struct {
+	// All exports the breakdown for every counted subject, scored or not.
+	All bool
+
+	// MinDrift is the floor a scored subject must reach. Zero admits every
+	// scored subject; a subject that was never scored is never admitted by the
+	// floor, because a subject with no drift figure is not one the floor can
+	// say anything about.
+	MinDrift float64
+}
+
+// Admits reports whether a subject's per-domain series should be exported,
+// given its highest drift across axes and whether it was scored at all.
+func (g PerDomainGate) Admits(drift float64, scored bool) bool {
+	return g.All || (scored && drift >= g.MinDrift)
+}
+
 // metricsOptions wires the observable instruments to the state they read.
 //
 // The callbacks are pulled at scrape time rather than pushed on every event:
@@ -185,17 +275,8 @@ type metricsOptions struct {
 	// provider, so a source constructed without telemetry still runs.
 	Meter metric.Meter
 
-	// PerDomainSeries turns on metricDomainObjects.
-	//
-	// Off by default, and that default is the whole point (§8.4): the series
-	// count is subjects × keys × domains × states, which at the 20k subjects
-	// of §6.6's baseline row is ~480k series against ~3.5k for everything
-	// else here. Under Google Managed Prometheus that is not a scrape that
-	// fails, it is a bill that grows, so the cheap posture has to be what a
-	// deployment gets for free. Phase 3 replaces this boolean with §8.4's
-	// `perDomainSeriesMinDrift` floor, which needs a drift figure that does
-	// not exist until intent inference lands.
-	PerDomainSeries bool
+	// PerDomain gates metricDomainObjects and metricDomainExpected.
+	PerDomain PerDomainGate
 
 	// SubjectCounts returns the tracked subject count per kind.
 	SubjectCounts func() map[leeway.SubjectKind]int64
@@ -203,9 +284,12 @@ type metricsOptions struct {
 	// DomainNodes returns the usable node count per domain, per axis.
 	DomainNodes func() map[leeway.TopologyKey]map[leeway.Domain]int64
 
-	// DomainObjects walks every non-zero per-domain count. Only called when
-	// PerDomainSeries is set.
-	DomainObjects func(countObserver)
+	// DomainObjects walks every non-zero per-domain count of every subject the
+	// gate admits.
+	DomainObjects func(PerDomainGate, countObserver)
+
+	// Evaluations walks each scored subject's §7.3 result, one call per axis.
+	Evaluations func(evalObserver)
 
 	// Intents walks each tracked subject's resolved intent, one call per axis.
 	//
@@ -292,17 +376,60 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricIntentInfo, err)
 	}
+	expected, err := meter.Int64ObservableGauge(metricDomainExpected,
+		metric.WithDescription(descDomainExpected))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainExpected, err)
+	}
 
-	// One callback for all three observables: the SDK invokes it once per
-	// collection, so the three reads see the same moment rather than three
+	observedSkew, err := meter.Int64ObservableGauge(metricObservedSkew,
+		metric.WithDescription(descObservedSkew))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricObservedSkew, err)
+	}
+	excessSkew, err := meter.Int64ObservableGauge(metricExcessSkew,
+		metric.WithDescription(descExcessSkew))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricExcessSkew, err)
+	}
+	relocation, err := meter.Int64ObservableGauge(metricRelocation,
+		metric.WithDescription(descRelocation))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricRelocation, err)
+	}
+	drift, err := meter.Float64ObservableGauge(metricDrift,
+		metric.WithDescription(descDrift))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDrift, err)
+	}
+	maxDomainShare, err := meter.Float64ObservableGauge(metricMaxDomainShare,
+		metric.WithDescription(descMaxDomainShare))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricMaxDomainShare, err)
+	}
+
+	gauges := observables{
+		subjects:       subjects,
+		readyNodes:     readyNodes,
+		objects:        objects,
+		intents:        intents,
+		expected:       expected,
+		observedSkew:   observedSkew,
+		excessSkew:     excessSkew,
+		relocation:     relocation,
+		drift:          drift,
+		maxDomainShare: maxDomainShare,
+	}
+
+	// One callback for every observable: the SDK invokes it once per
+	// collection, so the reads see the same moment rather than a series of
 	// moments a scrape apart.
-	gauges := observables{subjects: subjects, readyNodes: readyNodes, objects: objects, intents: intents}
 	in.reg, err = meter.RegisterCallback(
 		func(_ context.Context, o metric.Observer) error {
 			opts.observe(o, gauges)
 			return nil
 		},
-		subjects, readyNodes, objects, intents,
+		gauges.all()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: register metric callback: %w", err)
@@ -319,6 +446,24 @@ type observables struct {
 	readyNodes metric.Int64ObservableGauge
 	objects    metric.Int64ObservableGauge
 	intents    metric.Int64ObservableGauge
+	expected   metric.Int64ObservableGauge
+
+	observedSkew   metric.Int64ObservableGauge
+	excessSkew     metric.Int64ObservableGauge
+	relocation     metric.Int64ObservableGauge
+	drift          metric.Float64ObservableGauge
+	maxDomainShare metric.Float64ObservableGauge
+}
+
+// all is every instrument the callback fills, for RegisterCallback. Kept
+// beside the struct so that adding a field and forgetting to register it is
+// one edit away from being noticed rather than a series that is silently never
+// collected.
+func (g observables) all() []metric.Observable {
+	return []metric.Observable{
+		g.subjects, g.readyNodes, g.objects, g.intents, g.expected,
+		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
+	}
 }
 
 // observe fills the observable gauges from the wired callbacks.
@@ -338,8 +483,8 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 			}
 		}
 	}
-	if opts.PerDomainSeries && opts.DomainObjects != nil {
-		opts.DomainObjects(func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64) {
+	if opts.DomainObjects != nil {
+		opts.DomainObjects(opts.PerDomain, func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64) {
 			o.ObserveInt64(g.objects, n, metric.WithAttributes(
 				attrSubjectKind.String(string(sub.Kind)),
 				attrNamespace.String(sub.Namespace),
@@ -348,6 +493,11 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 				attrDomain.String(string(domain)),
 				attrState.String(state.String()),
 			))
+		})
+	}
+	if opts.Evaluations != nil {
+		opts.Evaluations(func(sub leeway.SubjectRef, ev *Evaluation) {
+			opts.observeScores(o, g, sub, ev)
 		})
 	}
 	if opts.Intents != nil {
@@ -367,6 +517,54 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 				attrMaxSkew.String(skewLabel(in)),
 			))
 		})
+	}
+}
+
+// observeScores fills the §7.3 series for one scored axis.
+//
+// **Only an evaluable axis is exported.** A subject below
+// minReplicasForScoring, or with no eligible domains, or one whose intent says
+// Ignore has no drift figure — Score gates it and leaves the fields at zero —
+// and publishing that zero would be five series per axis asserting a perfectly
+// balanced workload for every single-replica Deployment in the estate. It is
+// both the wrong statement and, at §6.6's baseline, the majority of the
+// cardinality. The gate itself is not lost: a reader asking why a subject has
+// no drift series finds it tracked in subjects_tracked and absent here, which
+// is the same answer.
+//
+// The per-domain expectation rides the same gate as domain_objects, because the
+// two are a numerator and a denominator: exporting one without the other gives
+// a dashboard a number it cannot draw a comparison from.
+func (opts metricsOptions) observeScores(o metric.Observer, g observables, sub leeway.SubjectRef, ev *Evaluation) {
+	if ev == nil || !ev.Scores.Evaluable {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attrSubjectKind.String(string(sub.Kind)),
+		attrNamespace.String(sub.Namespace),
+		attrSubject.String(sub.Name),
+		attrTopologyKey.String(string(ev.Key)),
+	)
+	o.ObserveInt64(g.observedSkew, ev.Scores.ObservedSkew, attrs)
+	o.ObserveInt64(g.excessSkew, ev.Scores.ExcessSkew, attrs)
+	o.ObserveInt64(g.relocation, ev.Scores.Relocation, attrs)
+	o.ObserveFloat64(g.drift, ev.Scores.Drift, attrs)
+	o.ObserveFloat64(g.maxDomainShare, ev.Scores.MaxDomainShare, attrs)
+
+	if !opts.PerDomain.Admits(ev.Scores.Drift, true) {
+		return
+	}
+	for i, domain := range ev.Scores.Domains {
+		if i >= len(ev.Scores.Expected) {
+			break
+		}
+		o.ObserveInt64(g.expected, ev.Scores.Expected[i], metric.WithAttributes(
+			attrSubjectKind.String(string(sub.Kind)),
+			attrNamespace.String(sub.Namespace),
+			attrSubject.String(sub.Name),
+			attrTopologyKey.String(string(ev.Key)),
+			attrDomain.String(string(domain)),
+		))
 	}
 }
 

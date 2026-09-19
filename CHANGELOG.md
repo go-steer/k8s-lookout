@@ -37,10 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watches every pod in the cluster a safe thing to ship first, because a bug
   in it is a wrong number on a dashboard rather than a page at 3am.
 
-  The per-subject, per-domain breakdown is available behind
-  `--topology-per-domain-series` and is off by default because it is
+  The per-subject, per-domain breakdown is cardinality-gated, because it is
   multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k
-  for every other `lookout_leeway_*` metric combined.
+  for every other `lookout_leeway_*` metric combined. See
+  `--topology-per-domain-min-drift` below.
 
   The counters audit themselves. Every five minutes `topology-drift` rebuilds
   a twelfth of its subjects directly from the pod cache and compares the
@@ -52,6 +52,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worth an alert at a threshold of zero. The repair is not a substitute for
   fixing the bug, it is what keeps the next hour's numbers usable while
   someone does.
+
+- **`topology-drift` now scores what it counts, and exports the scores.** Every
+  evaluation compares a subject's actual placement against the distribution its
+  intent implies and publishes five new gauges per subject and axis:
+  `lookout_leeway_drift` (the share of replicas sitting in the wrong domain),
+  `lookout_leeway_observed_skew` and `lookout_leeway_excess_skew` (the spread
+  between the fullest and emptiest eligible domain, and how much of it exceeds
+  a declared `maxSkew`), `lookout_leeway_max_domain_share` (the fraction in the
+  single largest domain — the blast radius of losing it), and
+  `lookout_leeway_relocation_distance` (how many replicas would have to move).
+  A sixth, `lookout_leeway_domain_expected`, gives the per-domain expectation
+  that `lookout_leeway_domain_objects` should be compared against.
+
+  **It still emits nothing.** These are numbers on a dashboard, not findings:
+  the dwell timers, tiers and alert routing that turn a sustained one into
+  something worth paging on land in a later release. The point of shipping the
+  measurement first is that you can look at your own fleet's drift distribution
+  before anything is allowed to page on it.
+
+  Scores are only published for axes that were actually evaluated. A subject
+  below the scoring floor, one whose axis has no eligible domains, and one a
+  policy told to ignore have no drift figure, and a zero is not one — five
+  series per axis asserting a perfectly balanced workload for every
+  single-replica Deployment would be both the wrong statement and the bulk of
+  the cardinality. A subject tracked in `lookout_leeway_subjects_tracked` and
+  absent from `lookout_leeway_drift` was gated, deliberately.
+
+- **The per-subject, per-domain breakdown is now exported for drifting
+  subjects by default**, via the new `--topology-per-domain-min-drift`
+  (default `0.05`). This is what `--topology-per-domain-series` was waiting
+  for: the breakdown is the series you want when you are looking into a
+  specific workload, and the reason it was off was cost, not usefulness —
+  roughly 480k series on a 20k-subject cluster. Gating it on drift keeps that
+  bounded while making it present for the subjects somebody is actually about
+  to open a dashboard for. `--topology-per-domain-series` still exports it for
+  everything and overrides the floor; pass a negative floor for every *scored*
+  subject; raise the floor to shrink it further. The aggregates are never
+  gated. Operators who were relying on `domain_objects` being absent unless
+  explicitly enabled should set `--topology-per-domain-min-drift` high enough
+  to exclude everything (any value above `1.0`).
 
 - **`--topology-cluster-defaults`, and it has three states rather than two.**
   kube-scheduler's `PodTopologySpread` `defaultConstraints` shape where every

@@ -1461,6 +1461,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				TopologyKeys:              topologyKeysFrom(f.topologyKeys),
 				ClusterDefaultConstraints: clusterDefaults,
 				PerDomainSeries:           f.topologyPerDomain,
+				PerDomainSeriesMinDrift:   f.topologyMinDrift,
 			}
 			bs.topoDrift = topologydrift.New(client, cfg)
 			// Optional, unlike the gateway source's dynamic client, which is

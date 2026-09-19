@@ -17,6 +17,7 @@ package topologydrift
 import (
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -1010,5 +1011,88 @@ func TestState_Intents(t *testing.T) {
 	h.SetIntents(other, resolved)
 	if got := h.IntentsOf(other); got != nil {
 		t.Errorf("IntentsOf(untracked) = %v, want nil", got)
+	}
+}
+
+// evalOn is a scored axis holding one drift figure, which is all the
+// evaluation-store tests are about.
+func evalOn(key leeway.TopologyKey, drift float64) Evaluation {
+	return Evaluation{Key: key, Scores: leeway.Scores{Drift: drift, Evaluable: true}}
+}
+
+func TestState_EvaluationsAreStoredAndReadBack(t *testing.T) {
+	h := newHarness(t, zoneKey, poolKey)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+
+	evals := []Evaluation{evalOn(poolKey, 0.1), evalOn(zoneKey, 0.4)}
+	h.SetEvaluations(webSubject, evals)
+
+	if got := h.EvaluationsOf(webSubject); !reflect.DeepEqual(got, evals) {
+		t.Errorf("EvaluationsOf = %+v, want %+v", got, evals)
+	}
+
+	var walked []leeway.TopologyKey
+	h.EachEvaluation(func(sub leeway.SubjectRef, ev *Evaluation) {
+		if sub != webSubject {
+			t.Errorf("EachEvaluation yielded %v, want %v", sub, webSubject)
+		}
+		walked = append(walked, ev.Key)
+	})
+	if want := []leeway.TopologyKey{poolKey, zoneKey}; !slices.Equal(walked, want) {
+		t.Errorf("EachEvaluation walked %v, want %v", walked, want)
+	}
+}
+
+// TestState_DriftOfIsTheWorstAxis holds the gating rule: the per-domain
+// cardinality gate asks one question of a whole subject, and a subject drifting
+// on zone is one somebody will investigate even if its pool axis is flat.
+func TestState_DriftOfIsTheWorstAxis(t *testing.T) {
+	h := newHarness(t, zoneKey, poolKey)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+
+	if _, ok := h.DriftOf(webSubject); ok {
+		t.Error("an unscored subject reported a drift figure")
+	}
+
+	h.SetEvaluations(webSubject, []Evaluation{evalOn(poolKey, 0.02), evalOn(zoneKey, 0.4)})
+	got, ok := h.DriftOf(webSubject)
+	if !ok {
+		t.Fatal("DriftOf reported a scored subject as unscored")
+	}
+	if got != 0.4 {
+		t.Errorf("DriftOf = %v, want the worst axis 0.4", got)
+	}
+}
+
+// TestState_EvaluationsFollowTheSubject is the memory bound, same as the
+// representative hint: nothing else evicts this map, so a subject that goes
+// away has to take its scores with it — including through a repair, which
+// routes its eviction through the same place.
+func TestState_EvaluationsFollowTheSubject(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+	h.SetEvaluations(webSubject, []Evaluation{evalOn(zoneKey, 0.4)})
+
+	// A subject that drops back to nothing measurable stops exporting its
+	// scores now, not at the next restart.
+	h.SetEvaluations(webSubject, nil)
+	if got := h.EvaluationsOf(webSubject); got != nil {
+		t.Errorf("EvaluationsOf = %+v after an empty set, want nil", got)
+	}
+
+	h.SetEvaluations(webSubject, []Evaluation{evalOn(zoneKey, 0.4)})
+	h.OnPodDelete(webPod("web-1", "n1"))
+	if got := h.EvaluationsOf(webSubject); got != nil {
+		t.Errorf("EvaluationsOf = %+v once the subject is forgotten, want nil", got)
+	}
+
+	// And an untracked subject never gets an entry at all, since there would be
+	// no eviction rule behind it.
+	h.SetEvaluations(webSubject, []Evaluation{evalOn(zoneKey, 0.4)})
+	if got := h.EvaluationsOf(webSubject); got != nil {
+		t.Errorf("EvaluationsOf(untracked) = %+v, want nil", got)
 	}
 }

@@ -125,6 +125,16 @@ type State struct {
 	// its subject is a metric series for a Deployment that was deleted months
 	// ago. One owner, one lock, one lifetime.
 	intents map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Intent
+
+	// evaluations is subject → what its last evaluation scored (§7.3), one
+	// entry per axis, in canonical key order.
+	//
+	// Here for the same reason as intents, and with the same lifetime: a
+	// drift figure for a Deployment that was deleted an hour ago is a series
+	// that never goes away on its own. It is read by the scrape callback and
+	// written once per evaluation; it is not the path a finding is built on,
+	// which uses the live Evaluation rather than reading it back out.
+	evaluations map[leeway.SubjectRef][]Evaluation
 }
 
 // representative identifies the pod a subject's intent is read from.
@@ -154,6 +164,7 @@ func NewState(opts StateOptions) *State {
 
 		representatives: make(map[leeway.SubjectRef]representative),
 		intents:         make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Intent),
+		evaluations:     make(map[leeway.SubjectRef][]Evaluation),
 	}
 }
 
@@ -445,6 +456,71 @@ func (s *State) EachIntent(yield intentObserver) {
 	}
 }
 
+// SetEvaluations records what a subject's evaluation scored (§7.3). An empty
+// set clears the entry, mirroring SetIntents.
+//
+// Ignored for an untracked subject, for the same reason as SetRepresentative.
+func (s *State) SetEvaluations(sub leeway.SubjectRef, evals []Evaluation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tracked(sub) {
+		return
+	}
+	if len(evals) == 0 {
+		delete(s.evaluations, sub)
+		return
+	}
+	s.evaluations[sub] = evals
+}
+
+// EvaluationsOf returns what a subject's last evaluation scored, or nil if it
+// has not been scored since it was last tracked.
+//
+// The slice is shared, not copied, and callers must treat it as read-only. It
+// is replaced rather than mutated, so a reader holding the previous slice sees
+// a consistent older answer rather than a torn newer one.
+func (s *State) EvaluationsOf(sub leeway.SubjectRef) []Evaluation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evaluations[sub]
+}
+
+// EachEvaluation calls yield for every scored subject, one call per axis, under
+// the lock. Used by the §7.3 scrape callbacks, and it walks rather than copying
+// for the reason SubjectCounts gives.
+func (s *State) EachEvaluation(yield evalObserver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sub, evals := range s.evaluations {
+		for i := range evals {
+			yield(sub, &evals[i])
+		}
+	}
+}
+
+// DriftOf returns a subject's highest drift across its axes, and false when it
+// has not been scored.
+//
+// Highest rather than per-axis, because §8.4's per-domain series are gated per
+// *subject*: one that is drifting on its zone axis is one somebody is about to
+// go and look at, and serving them the region breakdown while withholding the
+// zone one would be the wrong half.
+func (s *State) DriftOf(sub leeway.SubjectRef) (float64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	evals, ok := s.evaluations[sub]
+	if !ok || len(evals) == 0 {
+		return 0, false
+	}
+	worst := evals[0].Scores.Drift
+	for _, e := range evals[1:] {
+		if e.Scores.Drift > worst {
+			worst = e.Scores.Drift
+		}
+	}
+	return worst, true
+}
+
 // Rebuilt is one subject's distributions computed straight from the pod cache,
 // alongside the pods they were computed from. The pods are kept because a
 // mismatch is repaired by re-seating them, not by overwriting the counts: see
@@ -704,6 +780,7 @@ func (s *State) applyLocked(sub leeway.SubjectRef, p leeway.Placement, sign int)
 func (s *State) forgetLocked(sub leeway.SubjectRef) {
 	delete(s.representatives, sub)
 	delete(s.intents, sub)
+	delete(s.evaluations, sub)
 }
 
 // tracked reports whether the subject has counts. Caller holds the lock.
