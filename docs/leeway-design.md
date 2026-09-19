@@ -509,6 +509,7 @@ type Intent struct {
     MaxSkew           *int32
     MinDomains        *int32
     WhenUnsatisfiable v1.UnsatisfiableConstraintAction
+    MaxPerDomain      *int64 // required podAntiAffinity's ceiling; see below
 
     // Expectation shaping.
     Weighting       Weighting // Equal, NodeCount, AllocatableCPU, AllocatableMemory
@@ -520,6 +521,23 @@ type Intent struct {
     Evidence   []EvidenceItem
 }
 ```
+
+> `MaxPerDomain` was added during Phase 3, also a delta. It is the contract a
+> *required* `podAntiAffinity` expresses — at most one of the subject's pods per
+> domain on the term's topology key — and it is deliberately not modelled as a
+> `MaxSkew` of one. A skew bound of one is satisfied by two pods in every domain,
+> which the anti-affinity forbids outright; and in the other direction a required
+> anti-affinity holds the observed skew at one by construction, so a skew check
+> against it could never fire. What it does catch is the `IgnoredDuringExecution`
+> half: a pod placed legally, then a node relabelled so two of them share a domain
+> after the fact. Callers turn it into the per-domain caps `Apportion` already takes
+> once §7.1 has decided how many domains there are; inference runs before that.
+>
+> A required `podAffinity` gets no ceiling and is not a hard contract, even though
+> the scheduler enforces it just as hard. §8.1's Tier A is about placement Kubernetes
+> promised and did not deliver, and an affinity that was satisfied at every placement
+> broke no promise — "further apart than the affinity would have put them" is a
+> deviation to explain, which is Tier B's job.
 
 > `Policies` was added during Phase 3 and is a delta from this section as first
 > written. `nodeAffinityPolicy` and `nodeTaintsPolicy` shape the eligible set
@@ -534,10 +552,21 @@ type Intent struct {
 
 **Precedence** (highest first): `SourcePolicyCRD` → `SourceWorkloadAnnotation` →
 `SourceTopologySpreadConstraint` → `SourcePodAntiAffinityRequired` →
-`SourceClusterDefaultDeclared` → `SourceClusterDefaultAssumed` →
-`SourcePodAntiAffinityPreferred` → `SourceLearnedBaseline`. Multiple intents on
+`SourcePodAffinityRequired` → `SourceClusterDefaultDeclared` →
+`SourceClusterDefaultAssumed` → `SourcePodAntiAffinityPreferred` →
+`SourcePodAffinityPreferred` → `SourceLearnedBaseline`. Multiple intents on
 *different* topology keys coexist; on the same key the highest-precedence source wins
 and the others are retained as evidence.
+
+> The two `PodAffinity` sources were added in Phase 3 and are a delta from this list
+> as first written, which had only the anti-affinity halves. FR-6 requires colocation
+> intent from `podAffinity` and that intent has to be able to say where it came from
+> — reusing an anti-affinity source would put `source="pod-anti-affinity-required"`
+> on the `intent_info` label of something that is not one. Each sits immediately
+> below its anti-affinity counterpart, so a subject declaring both on one key — a
+> contradiction the scheduler resolves by refusing to place the pod at all —
+> resolves here to the spread reading with the colocation kept as evidence. The
+> CRD's `inference.sources` list (§8.6) takes the same two additions.
 
 The cluster-default source is split in two because S4 confirmed we cannot read the
 scheduler's configuration on managed GKE, so "the cluster default is X" is sometimes
@@ -2419,7 +2448,8 @@ spec:
         severity: warning
   inference:
     enabled: true
-    sources: [TopologySpreadConstraint, PodAntiAffinityRequired, PodAntiAffinityPreferred]
+    sources: [TopologySpreadConstraint, PodAntiAffinityRequired, PodAntiAffinityPreferred,
+              PodAffinityRequired, PodAffinityPreferred]
   baseline: { enabled: true, halfLife: 12h, deviationSigmas: 4.0 }
   exclusions:
     minReplicas: 3
