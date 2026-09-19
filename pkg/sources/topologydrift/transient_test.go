@@ -336,6 +336,11 @@ func TestScoreSubject_ASuppressorIsAskedPerAxisAndNilMeansNoTransient(t *testing
 	}
 }
 
+// anySubject is for the tests below that exercise a cluster-wide row — warmup,
+// outage, drain — where the subject is a parameter the answer does not depend
+// on. The per-subject rows (rollout, recent scale) name their own.
+var anySubject = leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: "web"}
+
 // armedSource is a source whose caches are declared synced without running
 // informers, so a test can drive the inventory by hand and ask §7.6 directly.
 // Without this every answer is cluster-warmup, which is correct and useless.
@@ -354,7 +359,7 @@ func TestSource_WarmupSuppressesUntilTheSentinelIsArmed(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
 	s.inv.Upsert(node("n-a", "us-central1-a"))
 
-	got := s.suppression(t0)(zoneKey, evenlyEligible("us-central1-a"))
+	got := s.suppression(anySubject, t0)(zoneKey, evenlyEligible("us-central1-a"))
 	if got.State != leeway.TransientWarmup || !got.Suppress {
 		t.Fatalf("suppression before arming = %+v, want a suppressing cluster-warmup", got)
 	}
@@ -362,7 +367,7 @@ func TestSource_WarmupSuppressesUntilTheSentinelIsArmed(t *testing.T) {
 	s.mu.Lock()
 	s.armed = true
 	s.mu.Unlock()
-	if got := s.suppression(t0)(zoneKey, evenlyEligible("us-central1-a")); got.State != leeway.TransientNone {
+	if got := s.suppression(anySubject, t0)(zoneKey, evenlyEligible("us-central1-a")); got.State != leeway.TransientNone {
 		t.Errorf("suppression after arming = %+v, want no transient", got)
 	}
 }
@@ -381,7 +386,7 @@ func TestSource_ADomainOutageSuppressesOnlyTheSubjectsThatCouldReachIt(t *testin
 	now := t0.Add(time.Minute)
 	s.inv.SampleReady(now, cfg.readyRetention())
 
-	sup := s.suppression(now)
+	sup := s.suppression(anySubject, now)
 	if got := sup(zoneKey, evenlyEligible("us-central1-a", "us-central1-b", "us-central1-c")); !got.Suppress || got.State != leeway.TransientDomainOutage {
 		t.Errorf("a subject eligible for the dying zone = %+v, want a suppressing domain-outage", got)
 	}
@@ -399,7 +404,7 @@ func TestSource_ARecentDrainRelaxesRatherThanSuppresses(t *testing.T) {
 		node("n-b", "us-central1-b"))
 	s.inv.SampleReady(t0, cfg.readyRetention())
 
-	got := s.suppression(t0)(zoneKey, evenlyEligible("us-central1-a", "us-central1-b"))
+	got := s.suppression(anySubject, t0)(zoneKey, evenlyEligible("us-central1-a", "us-central1-b"))
 	if got.Suppress || !got.Relax || got.State != leeway.TransientDrain {
 		t.Fatalf("suppression = %+v, want a relaxing node-drain", got)
 	}
@@ -410,7 +415,7 @@ func TestSource_ARecentDrainRelaxesRatherThanSuppresses(t *testing.T) {
 	// Past the settle window it stops mattering. The cordon is still there;
 	// what has expired is the claim that the pods are still moving.
 	late := t0.Add(leeway.DefaultTransientConfig().DrainSettleWindow + time.Minute)
-	if got := s.suppression(late)(zoneKey, evenlyEligible("us-central1-a", "us-central1-b")); got.State != leeway.TransientNone {
+	if got := s.suppression(anySubject, late)(zoneKey, evenlyEligible("us-central1-a", "us-central1-b")); got.State != leeway.TransientNone {
 		t.Errorf("suppression after the settle window = %+v, want no transient", got)
 	}
 }

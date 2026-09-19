@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -253,9 +254,16 @@ type Source struct {
 	// which is the same observable state as a cluster without the CRDs.
 	dyn dynamic.Interface
 
-	inv     *Inventory
-	state   *State
-	queue   *coalescer
+	// rollouts, when set via WithRolloutOracle, answers §7.6's rollout row.
+	// Nil means the row is unanswered — see RolloutOracle.
+	rollouts RolloutOracle
+
+	inv   *Inventory
+	state *State
+	queue *coalescer
+	// scales is §7.6's recent-scale row. Always non-nil; it is simply empty
+	// when the apps informers are not running.
+	scales  *scaleLog
 	metrics *instruments
 	verify  *Verifier
 	alerts  *Alerts
@@ -272,6 +280,9 @@ type Source struct {
 	// armed flips true after every informer cache syncs and the initial
 	// re-apply has run.
 	armed bool
+	// rollingOut is the last snapshot the rollout oracle gave us. Nil until
+	// the first cluster sample, which reads as "nothing is rolling out".
+	rollingOut map[leeway.SubjectRef]bool
 	// replicaSets resolves the pod → ReplicaSet → Deployment hop. Set in Run.
 	replicaSets appslisters.ReplicaSetLister
 	// pods is the verifier's view of the cache. Set in Run.
@@ -307,6 +318,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 	s := &Source{client: client, cfg: cfg}
 	s.policies = NewPolicyStore()
 	s.warnedTies = map[string]bool{}
+	s.scales = newScaleLog()
 	s.inv = NewInventory(cfg.TopologyKeys)
 	s.queue = newCoalescer(CoalesceOptions{
 		Window:        cfg.CoalesceWindow,
@@ -379,6 +391,26 @@ func (s *Source) WithDynamic(dyn dynamic.Interface) {
 	}
 }
 
+// RolloutOracle answers §7.6's rollout row: which subjects are partway
+// through a revision change right now. It is asked once per evaluation pass
+// for the whole cluster rather than once per subject, because a pass covers
+// tens of thousands of subjects and the mid-rollout set is a handful.
+//
+// A function rather than an interface, and it deals in leeway's own
+// SubjectRef, so that neither this package nor the rollout source has to
+// import the other: the adapter belongs at the composition root that already
+// knows about both. Unset means the row goes unanswered, which is the state
+// of any deployment that turned the rollout source off.
+type RolloutOracle func() []leeway.SubjectRef
+
+// WithRolloutOracle sets the callback that answers §7.6's rollout row. Call
+// before Run; nil is ignored.
+func (s *Source) WithRolloutOracle(fn RolloutOracle) {
+	if fn != nil {
+		s.rollouts = fn
+	}
+}
+
 // AlertStore is §9.1's persistence seam, satisfied by *store.Store.
 //
 // An interface rather than the concrete type for the usual reason plus one
@@ -448,6 +480,13 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 		{"", "pods"},
 		{"", "nodes"},
 		{"apps", "replicasets"},
+		// §7.6's recent-scale row reads spec.replicas. Declared rather than
+		// treated as optional because §11's check is a coverage contract and a
+		// missing grant here is a transient row that silently never fires —
+		// exactly the kind of quiet degradation the contract exists to catch.
+		// Both are already granted to the sentinel for the rollout source.
+		{"apps", "deployments"},
+		{"apps", "statefulsets"},
 		// FR-8: a pod bound to a volume that cannot follow it is drift nobody
 		// can act on, and saying so needs the claim's binding and the volume's
 		// node affinity.
@@ -697,7 +736,7 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	// Snapshot and then score outside the index lock. Scoring is O(domains)
 	// arithmetic and holding the lock across it would put every pod event in
 	// the cluster behind whichever subject the queue happened to reach.
-	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds, s.suppression(start)))
+	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds, s.suppression(sub, start)))
 }
 
 // suppression returns §7.6's Suppressor for one evaluation, closing over the
@@ -714,16 +753,90 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 // is itself a burst of node events, which bumps the generation and re-scores
 // every subject that cared; and a subject that comes out of suppression still
 // owes §8.2 a full dwell before it fires, which is longer than the staleness.
-func (s *Source) suppression(now time.Time) Suppressor {
+func (s *Source) suppression(sub leeway.SubjectRef, now time.Time) Suppressor {
 	warming := !s.HasSynced()
+	rolling := s.isRollingOut(sub)
+	scaledAt := s.scales.ScaledAt(sub)
 	return func(key leeway.TopologyKey, eligible leeway.Eligibility) leeway.Suppression {
 		t := leeway.Transients{
-			Warming:      warming,
-			DomainOutage: s.domainOutage(key, eligible.Domains, now),
-			DrainedAt:    s.inv.LastDrainIn(key, eligible.Domains),
+			Warming:           warming,
+			RolloutInProgress: rolling,
+			ScaledAt:          scaledAt,
+			DomainOutage:      s.domainOutage(key, eligible.Domains, now),
+			DrainedAt:         s.inv.LastDrainIn(key, eligible.Domains),
 		}
 		return t.Classify(now, s.cfg.Transient)
 	}
+}
+
+// sampleCluster refreshes the two §7.6 inputs that describe the cluster rather
+// than a subject: the per-domain ready-count series and the set of workloads
+// mid-rollout. Both are read by evaluate, which runs per subject, so both have
+// to be gathered on a timer instead.
+func (s *Source) sampleCluster(now time.Time) {
+	s.inv.SampleReady(now, s.cfg.readyRetention())
+
+	if s.rollouts == nil {
+		return
+	}
+	refs := s.rollouts()
+	set := make(map[leeway.SubjectRef]bool, len(refs))
+	for _, ref := range refs {
+		set[ref] = true
+	}
+	s.mu.Lock()
+	s.rollingOut = set
+	s.mu.Unlock()
+}
+
+// isRollingOut reports whether the last cluster sample found this subject
+// mid-rollout. An unwired oracle, or a sample that has not run yet, reads
+// false: §7.6's rows relax rather than suppress, so the absent answer costs a
+// threshold that was not widened, not a finding that should not exist.
+func (s *Source) isRollingOut(sub leeway.SubjectRef) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rollingOut[sub]
+}
+
+// onScalable records a Deployment's or StatefulSet's declared size for §7.6's
+// recent-scale row. Anything else the informers might hand us is ignored
+// rather than guessed at — a workload whose size we cannot read is one whose
+// scale row stays unanswered, which is the same state as a DaemonSet.
+func (s *Source) onScalable(obj any) {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		s.scales.Observe(leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name},
+			int32OrOne(o.Spec.Replicas), time.Now())
+	case *appsv1.StatefulSet:
+		s.scales.Observe(leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name},
+			int32OrOne(o.Spec.Replicas), time.Now())
+	}
+}
+
+// onScalableDelete drops a deleted workload's scale entry, resolving the
+// tombstone the informer delivers when it missed the delete itself.
+func (s *Source) onScalableDelete(obj any) {
+	if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tomb.Obj
+	}
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		s.scales.Forget(leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name})
+	case *appsv1.StatefulSet:
+		s.scales.Forget(leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name})
+	}
+}
+
+// int32OrOne dereferences a replicas pointer with the API's own default. An
+// unset spec.replicas means one, not zero, and reading it as zero would make
+// every default-sized workload's first explicit scale look like a change from
+// nothing.
+func int32OrOne(p *int32) int32 {
+	if p != nil {
+		return *p
+	}
+	return 1
 }
 
 // domainOutage reports whether any domain this subject could have used has
@@ -856,6 +969,14 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	podInformer := factory.Core().V1().Pods()
 	nodeInformer := nodeFactory.Core().V1().Nodes()
 	rsInformer := factory.Apps().V1().ReplicaSets()
+	// §7.6's recent-scale row. Both kinds are already on this factory in the
+	// sentinel — the rollout source watches all three of Deployment,
+	// StatefulSet and ReplicaSet, and objectstate watches Deployments — so
+	// this costs no new stream in the deployment that matters. A standalone
+	// embedder that runs leeway alone pays two LISTs of objects an order of
+	// magnitude smaller than the pod list it is already paying for.
+	depInformer := factory.Apps().V1().Deployments()
+	stsInformer := factory.Apps().V1().StatefulSets()
 	pvcInformer := factory.Core().V1().PersistentVolumeClaims()
 	// PersistentVolumes are cluster-scoped, so they go where the nodes go —
 	// see WithNodeFactory for why a scoped caller's factory cannot list them.
@@ -896,6 +1017,29 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	if err != nil {
 		return fmt.Errorf("topologydrift: register node handler: %w", err)
 	}
+	depH, err := depInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { s.onScalable(obj) },
+		UpdateFunc: func(_, obj any) { s.onScalable(obj) },
+		DeleteFunc: func(obj any) { s.onScalableDelete(obj) },
+	})
+	if err != nil {
+		return fmt.Errorf("topologydrift: register deployment handler: %w", err)
+	}
+	stsH, err := stsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { s.onScalable(obj) },
+		UpdateFunc: func(_, obj any) { s.onScalable(obj) },
+		DeleteFunc: func(obj any) { s.onScalableDelete(obj) },
+	})
+	if err != nil {
+		return fmt.Errorf("topologydrift: register statefulset handler: %w", err)
+	}
+	if s.rollouts == nil {
+		// §13 S4's "say it out loud" rule, applied to a row that is simply
+		// absent: an operator looking at lookout_leeway_transient_subjects and
+		// seeing no rollout bucket should be able to find out here whether that
+		// means no rollouts or no answer.
+		s.logger()("topologydrift: no rollout source wired — §7.6 will not relax thresholds during a rollout")
+	}
 
 	// §13 S4's fourth mitigation, and the cheapest one: say once, out loud,
 	// whose numbers the fleet is about to be scored against. An operator who
@@ -931,6 +1075,7 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	// would publish one wrong intent_info sample at every restart.
 	synced := append([]cache.InformerSynced{
 		podH.HasSynced, nodeH.HasSynced, rsInformer.Informer().HasSynced,
+		depH.HasSynced, stsH.HasSynced,
 		pvcInformer.Informer().HasSynced, pvInformer.Informer().HasSynced,
 	}, policySynced...)
 	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
@@ -972,9 +1117,18 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	// something has to record the peak while the domain is still healthy. Node
 	// events cannot: they carry the value *after* each change, and a zone that
 	// dies all at once changes exactly once.
+	//
+	// The rollout set rides the same tick. It is the other §7.6 input that is a
+	// property of the cluster rather than of the subject being scored, and the
+	// oracle answers for the whole cluster in one call — asking it from
+	// evaluate, which runs per subject, would make one pass over tens of
+	// thousands of subjects into tens of thousands of scans of every Deployment
+	// in the cluster. Snapshotting it on a timer bounds that at one scan per
+	// interval, at the cost of a rollout being noticed up to one interval late,
+	// which is nothing against a ten-minute dwell.
 	readyTick := time.NewTicker(s.cfg.ReadySampleInterval)
 	defer readyTick.Stop()
-	s.inv.SampleReady(time.Now(), s.cfg.readyRetention())
+	s.sampleCluster(time.Now())
 
 	for {
 		select {
@@ -987,7 +1141,7 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 		case <-alertTick.C:
 			s.runAlertPass(ctx)
 		case <-readyTick.C:
-			s.inv.SampleReady(time.Now(), s.cfg.readyRetention())
+			s.sampleCluster(time.Now())
 		}
 	}
 }

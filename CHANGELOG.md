@@ -132,6 +132,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero and stays there has nothing to compare against otherwise — the outage
   would be invisible precisely because it was total.
 
+  **Two more situations hold a subject back: a rollout, and a recent resize.**
+  Both relax the thresholds by 2.5× rather than suppressing — the counts are
+  accurate, they have just not finished moving. A rollout is whatever the
+  `rollout` source says it is, so the two cannot disagree about whether one is
+  running; a deployment that turned that source off says so at startup instead
+  of quietly reporting that nothing ever rolls. Note that a *paused* Deployment
+  does not count: it can sit half-rolled for weeks, and that is a placement
+  worth judging rather than a transient to wait out. Neither does a Deployment
+  whose pods crash-loop forever, which is broken rather than moving.
+
+  Resizes are watched rather than read, because Kubernetes records no timestamp
+  for a `spec.replicas` change. `topology-drift` therefore watches Deployments
+  and StatefulSets — two streams the sentinel already carries for the `rollout`
+  and `object-state` sources, and two grants it already has — and stamps a
+  change only when the declared size differs from the one it last saw. A
+  workload seen for the first time is not a resize, so neither a restart nor
+  the informer's own periodic resync relaxes anything. DaemonSets and Jobs have
+  no resize row; a DaemonSet's size is the node count, which the drain and
+  outage situations already cover.
+
 - **The per-subject, per-domain breakdown is now exported for drifting
   subjects by default**, via the new `--topology-per-domain-min-drift`
   (default `0.05`). This is what `--topology-per-domain-series` was waiting
