@@ -58,7 +58,7 @@ func TestResolve_IntentAndEligibilityTogether(t *testing.T) {
 	pod := tscPod(zoneSpread(1, corev1.DoNotSchedule))
 	pod.Spec.Affinity = antiRequired(selfTerm(string(poolKey)))
 
-	res := Resolve(pod, threeZones(t))
+	res := Resolve(pod, threeZones(t), noClusterDefaults)
 
 	if len(res.Intents) != 2 {
 		t.Fatalf("Intents = %+v, want one per axis", res.Intents)
@@ -92,7 +92,7 @@ func TestResolve_NodeSelectorNarrowsEligibility(t *testing.T) {
 	pod := tscPod(zoneSpread(1, corev1.DoNotSchedule))
 	pod.Spec.NodeSelector = map[string]string{string(poolKey): "gpu"}
 
-	res := Resolve(pod, threeZones(t))
+	res := Resolve(pod, threeZones(t), noClusterDefaults)
 
 	if got, want := domains(res.Eligible[zoneKey]), []string{"zone-a", "zone-b"}; !slices.Equal(got, want) {
 		t.Errorf("eligible zones = %v, want %v — zone-c has no gpu node", got, want)
@@ -115,7 +115,7 @@ func TestResolve_TaintsAreIgnoredUnlessTheIntentSaysOtherwise(t *testing.T) {
 	pod := tscPod(zoneSpread(1, corev1.DoNotSchedule))
 	pod.Spec.NodeSelector = map[string]string{string(poolKey): "general"}
 
-	res := Resolve(pod, inv)
+	res := Resolve(pod, inv, noClusterDefaults)
 
 	// Taints ignored by default, mirroring kube-scheduler: a workload with no
 	// toleration is usually unaware of the taint, so zone-c stays eligible.
@@ -126,7 +126,7 @@ func TestResolve_TaintsAreIgnoredUnlessTheIntentSaysOtherwise(t *testing.T) {
 	// accessor exists to preserve. n2 and n4 are gpu, so both zones survive on
 	// their general node alone — flip the selector to gpu and zone-c goes.
 	pod.Spec.NodeSelector = map[string]string{string(poolKey): "gpu"}
-	if got, want := domains(Resolve(pod, inv).Eligible[zoneKey]), []string{"zone-a", "zone-b"}; !slices.Equal(got, want) {
+	if got, want := domains(Resolve(pod, inv, noClusterDefaults).Eligible[zoneKey]), []string{"zone-a", "zone-b"}; !slices.Equal(got, want) {
 		t.Errorf("eligible zones under a gpu selector = %v, want %v", got, want)
 	}
 }
@@ -137,7 +137,7 @@ func TestResolve_NoIntentStillHasAnEligibleSet(t *testing.T) {
 	pod := tscPod()
 	pod.Spec.NodeSelector = map[string]string{string(poolKey): "gpu"}
 
-	res := Resolve(pod, threeZones(t))
+	res := Resolve(pod, threeZones(t), noClusterDefaults)
 
 	if len(res.Intents) != 0 {
 		t.Errorf("Intents = %+v, want none — a pod that declared nothing has no intent", res.Intents)
@@ -151,8 +151,8 @@ func TestResolve_NoIntentStillHasAnEligibleSet(t *testing.T) {
 // whatever the representative lookup found, which can be nothing.
 func TestResolve_NothingToReadFrom(t *testing.T) {
 	for name, res := range map[string]Resolution{
-		"nil pod":       Resolve(nil, threeZones(t)),
-		"nil inventory": Resolve(tscPod(zoneSpread(1, corev1.DoNotSchedule)), nil),
+		"nil pod":       Resolve(nil, threeZones(t), noClusterDefaults),
+		"nil inventory": Resolve(tscPod(zoneSpread(1, corev1.DoNotSchedule)), nil, noClusterDefaults),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if res.Intents == nil || len(res.Intents) != 0 {
@@ -172,7 +172,7 @@ func TestResolve_MinDomainsPadsTheEligibleSet(t *testing.T) {
 	tsc := zoneSpread(1, corev1.DoNotSchedule)
 	tsc.MinDomains = ptr(int32(5))
 
-	res := Resolve(tscPod(tsc), threeZones(t))
+	res := Resolve(tscPod(tsc), threeZones(t), noClusterDefaults)
 
 	el := res.Eligible[zoneKey]
 	if el.SyntheticDomains != 2 {

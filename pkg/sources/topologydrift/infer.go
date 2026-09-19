@@ -132,25 +132,6 @@ func intentFromConstraint(c *corev1.TopologySpreadConstraint, pos int, podLabels
 		return leeway.Intent{}, false
 	}
 
-	in := leeway.Intent{
-		TopologyKey:       leeway.TopologyKey(c.TopologyKey),
-		Mode:              leeway.ModeSpread,
-		Source:            leeway.SourceTopologySpreadConstraint,
-		Confidence:        leeway.ConfidenceDeclared,
-		WhenUnsatisfiable: corev1.DoNotSchedule,
-	}
-	if !enforced(c) {
-		in.WhenUnsatisfiable = corev1.ScheduleAnyway
-	}
-	maxSkew := c.MaxSkew
-	in.MaxSkew = &maxSkew
-	if c.NodeAffinityPolicy != nil {
-		in.Policies.NodeAffinityPolicy = *c.NodeAffinityPolicy
-	}
-	if c.NodeTaintsPolicy != nil {
-		in.Policies.NodeTaintsPolicy = *c.NodeTaintsPolicy
-	}
-
 	notes := []string{}
 	if sel.Empty() {
 		// A present-but-empty selector matches every pod in the namespace, so
@@ -160,19 +141,12 @@ func intentFromConstraint(c *corev1.TopologySpreadConstraint, pos int, podLabels
 		// was never a bound on this subject alone.
 		notes = append(notes, "labelSelector is empty: the constraint spreads every pod in the namespace, of which this subject is only a part")
 	}
-	// minDomains is only honoured alongside DoNotSchedule — the API validates
-	// that today, but this code also sees objects from a fixture corpus and
-	// from clusters older than the validation, and carrying a minDomains the
-	// scheduler ignored would pad the eligible set with synthetic
-	// present-with-zero domains (§7.1) and manufacture skew out of nothing.
-	if c.MinDomains != nil {
-		if enforced(c) {
-			minDomains := *c.MinDomains
-			in.MinDomains = &minDomains
-		} else {
-			notes = append(notes, "minDomains ignored: only honoured with DoNotSchedule")
-		}
-	}
+
+	in, spreadNotes := spreadIntent(c)
+	in.Source = leeway.SourceTopologySpreadConstraint
+	in.Confidence = leeway.ConfidenceDeclared
+	notes = append(notes, spreadNotes...)
+
 	if len(c.MatchLabelKeys) > 0 {
 		// matchLabelKeys narrows the counted population to pods sharing this
 		// pod's value for each key. The usual key is pod-template-hash, which
@@ -189,6 +163,44 @@ func intentFromConstraint(c *corev1.TopologySpreadConstraint, pos int, podLabels
 		Detail: describeConstraint(c, pos, sel, notes),
 	}}
 	return in, true
+}
+
+// spreadIntent fills the fields a TopologySpreadConstraint contributes
+// regardless of who supplied it, and returns any notes the translation
+// produced. The caller sets Source, Confidence and Evidence, because those are
+// exactly what differs between a constraint the pod declared (FR-4) and one the
+// cluster default supplied (FR-9) — the object is the same shape either way and
+// translating it twice is how the two readings drift apart.
+func spreadIntent(c *corev1.TopologySpreadConstraint) (leeway.Intent, []string) {
+	in := leeway.Intent{
+		TopologyKey:       leeway.TopologyKey(c.TopologyKey),
+		Mode:              leeway.ModeSpread,
+		WhenUnsatisfiable: whenUnsatisfiable(c),
+	}
+	maxSkew := c.MaxSkew
+	in.MaxSkew = &maxSkew
+	if c.NodeAffinityPolicy != nil {
+		in.Policies.NodeAffinityPolicy = *c.NodeAffinityPolicy
+	}
+	if c.NodeTaintsPolicy != nil {
+		in.Policies.NodeTaintsPolicy = *c.NodeTaintsPolicy
+	}
+
+	var notes []string
+	// minDomains is only honoured alongside DoNotSchedule — the API validates
+	// that today, but this code also sees objects from a fixture corpus and
+	// from clusters older than the validation, and carrying a minDomains the
+	// scheduler ignored would pad the eligible set with synthetic
+	// present-with-zero domains (§7.1) and manufacture skew out of nothing.
+	if c.MinDomains != nil {
+		if enforced(c) {
+			minDomains := *c.MinDomains
+			in.MinDomains = &minDomains
+		} else {
+			notes = append(notes, "minDomains ignored: only honoured with DoNotSchedule")
+		}
+	}
+	return in, notes
 }
 
 // describeConstraint renders the constraint for a finding body. It reads off

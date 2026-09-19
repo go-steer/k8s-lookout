@@ -55,7 +55,7 @@ type Resolution struct {
 // §5.1 precedence decides every cross-source case on its own. They are
 // concatenated TSC-first anyway so that a reader of the candidate list sees the
 // same order §5.1 lists.
-func Resolve(pod *corev1.Pod, inv *Inventory) Resolution {
+func Resolve(pod *corev1.Pod, inv *Inventory, clusterDefaults *[]corev1.TopologySpreadConstraint) Resolution {
 	res := Resolution{
 		Intents:  map[leeway.TopologyKey]*leeway.Intent{},
 		Eligible: map[leeway.TopologyKey]leeway.Eligibility{},
@@ -66,6 +66,12 @@ func Resolve(pod *corev1.Pod, inv *Inventory) Resolution {
 
 	candidates := SpreadConstraintIntents(pod)
 	candidates = append(candidates, AffinityIntents(pod)...)
+	// Last, and it costs nothing to order it so: ClusterDefaultIntents returns
+	// nothing at all for a pod that declared any constraint of its own, which
+	// is the scheduler's own rule and the reason a wrong assumption about the
+	// defaults cannot reach a workload that expressed intent. Filtered to the
+	// counted axes, unlike every other source here — see onlyTrackedAxes.
+	candidates = append(candidates, onlyTrackedAxes(ClusterDefaultIntents(pod, clusterDefaults), inv)...)
 	res.Intents = leeway.ResolveIntents(candidates)
 
 	constraints := ConstraintsOf(pod)

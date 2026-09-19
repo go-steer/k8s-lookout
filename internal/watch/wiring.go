@@ -1451,9 +1451,16 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// the scoring that turns those counts into findings lands in
 			// phase 3. Shipping the bookkeeping first is what lets the
 			// counters be wrong in public before anything depends on them.
+			// The error is dropped, not ignored: validate() already
+			// parsed this string and refused to start on a bad one, so
+			// a failure here is unreachable — and the fallback if it
+			// were reachable is nil, the assumed state, which is the
+			// honest one rather than a silent "no defaults".
+			clusterDefaults, _ := topologydrift.ParseClusterDefaults(f.topologyDefaults)
 			cfg := topologydrift.Config{
-				TopologyKeys:    topologyKeysFrom(f.topologyKeys),
-				PerDomainSeries: f.topologyPerDomain,
+				TopologyKeys:              topologyKeysFrom(f.topologyKeys),
+				ClusterDefaultConstraints: clusterDefaults,
+				PerDomainSeries:           f.topologyPerDomain,
 			}
 			bs.topoDrift = topologydrift.New(client, cfg)
 			src = bs.topoDrift

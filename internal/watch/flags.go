@@ -78,6 +78,7 @@ type flags struct {
 	pendingAge            time.Duration
 	gatewayGrace          time.Duration
 	topologyKeys          string
+	topologyDefaults      string
 	topologyPerDomain     bool
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
@@ -242,6 +243,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// nobody can infer: which labels this cluster partitions on, and
 	// whether to pay for the per-subject series.
 	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
+	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
 	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects — one series per subject × topology key × domain × scheduling state. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. Turn it on to debug one cluster's placement, not as a standing posture.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
@@ -562,6 +564,12 @@ func (f *flags) validate() error {
 	// asked for and no line saying so.
 	if len(topologyKeysFrom(f.topologyKeys)) == 0 {
 		return errors.New("--topology-keys must name at least one node label (the topology axes the topology-drift source partitions on)")
+	}
+	// Parsed here as well as at construction so a typo is a startup error
+	// rather than a silent fall-through to the assumed defaults — which is
+	// the failure §13 S4 is entirely about.
+	if _, err := topologydrift.ParseClusterDefaults(f.topologyDefaults); err != nil {
+		return fmt.Errorf("--topology-cluster-defaults: %w", err)
 	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.

@@ -402,6 +402,30 @@ Four things, all load-bearing:
   empty*, *declared* — and intent derived from a cluster default that was assumed
   rather than declared is marked as such and can never raise a Tier A finding
   (§13 S4).
+
+  > **Shipped 2026-09-19 as `--topology-cluster-defaults`.** Three states on a CLI
+  > flag need one of them to have a spelling, and "absent" is the one that cannot:
+  > unset is the flag's empty default (assume the upstream set), the literal `none`
+  > is declared-empty, and `key=maxSkew[:action]` comma-separated is declared. An
+  > omitted action parses as `ScheduleAnyway`, which is deliberately *not* the API's
+  > default for a pod's own constraint — the API reads an unset
+  > `whenUnsatisfiable` as `DoNotSchedule`, and here that would let a typo promote
+  > a cluster-wide assumption into something that can raise Tier A. The flag is
+  > parsed twice, once in `validate()` and once at construction, so a malformed
+  > value stops startup instead of falling through to the assumed set, which would
+  > be the S4 failure wearing a different hat.
+  >
+  > **One thing the design did not anticipate: cluster defaults change who has an
+  > intent at all.** Every other source only fires where a human wrote something,
+  > so `intent_info` was sparse. An assumed default fires on *every* subject, which
+  > at §8.4's 20k-subject baseline takes the metric from ~3.5k series to ~40k for
+  > the two-axis upstream set. Cluster-default intents are therefore the one source
+  > filtered to the *counted* axes (`onlyTrackedAxes`): nobody declared them, an
+  > untracked axis will never be scored, and being the lowest-precedence candidate
+  > they cannot even survive as demoted evidence. The tracked-axis rows stay,
+  > because those are exactly what S4's "how much of this fleet's intent rests on a
+  > guess?" needs to be answerable.
+
 - **FR-10** Allow explicit declaration of intent via CRD, overriding inference.
 
 **Measurement**
@@ -3002,8 +3026,20 @@ last two solve it.
   affect the population where leeway's intent was weakest anyway, which is precisely
   where it should already be cautious.
 - **The defaults are soft, so they are never a contract.** The upstream system default
-  set is `topology.kubernetes.io/zone` at `maxSkew: 3` and `kubernetes.io/hostname` at
-  `maxSkew: 5`, both `whenUnsatisfiable: ScheduleAnyway`. Soft constraints are a
+  set is `kubernetes.io/hostname` at `maxSkew: 3` and `topology.kubernetes.io/zone` at
+  `maxSkew: 5`, both `whenUnsatisfiable: ScheduleAnyway`.
+  > **Corrected 2026-09-19 while implementing FR-9: the two keys were written the
+  > wrong way round here.** kube-scheduler's `systemDefaultConstraints` pairs the
+  > *tighter* bound with the *finer* axis — hostname 3, zone 5 — which reads
+  > backwards if you expect the coarser axis to be the stricter one, and is
+  > presumably how the swap got in. It matters: under *unset* these are the numbers
+  > every undeclared workload in the fleet is scored against, and swapping them is
+  > wrong on both axes at once with nothing else in the system to notice.
+  > `SystemDefaultConstraints` in `pkg/sources/topologydrift` is now the single
+  > place they are written down, and `TestSystemDefaultConstraints_MatchUpstream`
+  > pins the pairing.
+
+  Soft constraints are a
   scheduler preference that placement is free to violate, so a breach of one is not a
   breach of anything anybody promised. **An assumed cluster default is therefore
   capped at Tier B** — it can raise a statistical finding or feed a Tier C baseline,
