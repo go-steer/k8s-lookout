@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	v1 "k8s.io/api/core/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 )
@@ -108,6 +109,18 @@ func fullOptions() metricsOptions {
 			yield(subA, zoneKey, "us-central1-a", leeway.StateRunning, 4)
 			yield(subA, zoneKey, "us-central1-b", leeway.StatePending, 1)
 		},
+		Intents: func(yield intentObserver) {
+			skew := int32(1)
+			yield(subA, zoneKey, &leeway.Intent{
+				TopologyKey:       zoneKey,
+				Mode:              leeway.ModeSpread,
+				Source:            leeway.SourceTopologySpreadConstraint,
+				MaxSkew:           &skew,
+				WhenUnsatisfiable: v1.DoNotSchedule,
+				Confidence:        leeway.ConfidenceDeclared,
+				Weighting:         leeway.WeightEqual,
+			})
+		},
 	}
 }
 
@@ -134,6 +147,7 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 	want := []string{
 		"lookout_leeway_domain_objects",
 		"lookout_leeway_domain_ready_nodes",
+		"lookout_leeway_intent_info",
 		// Unit "s" lands before nothing at all on a gauge, so the name reads
 		// as the Prometheus convention for a unix timestamp.
 		"lookout_leeway_last_event_timestamp_seconds",
@@ -438,6 +452,29 @@ func TestNewInstruments_ReportsDeclarationFailures(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "topologydrift") {
 				t.Errorf("error %q does not name the source", err)
+			}
+		})
+	}
+}
+
+// TestSkewLabel: a required podAntiAffinity is a ceiling of one per domain and
+// not a skew of one, so the label has to be able to say which bound it is
+// reporting — and "none" rather than a number it invented when there is neither.
+func TestSkewLabel(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in   *leeway.Intent
+		want string
+	}{
+		"max skew":       {&leeway.Intent{MaxSkew: ptr(int32(3))}, "3"},
+		"max per domain": {&leeway.Intent{MaxPerDomain: ptr(int64(1))}, "max-per-domain=1"},
+		"neither":        {&leeway.Intent{}, "none"},
+		// An intent carrying both is a spread constraint on an axis that also
+		// bounds a domain; the skew is the tighter statement and wins.
+		"both": {&leeway.Intent{MaxSkew: ptr(int32(2)), MaxPerDomain: ptr(int64(1))}, "2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := skewLabel(tc.in); got != tc.want {
+				t.Errorf("skewLabel = %q, want %q", got, tc.want)
 			}
 		})
 	}

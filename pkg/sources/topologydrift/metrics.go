@@ -17,6 +17,7 @@ package topologydrift
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -47,6 +48,7 @@ const (
 	metricLastEvent        = "lookout.leeway.last_event_timestamp"
 	metricEvalDuration     = "lookout.leeway.evaluation_duration"
 	metricCounterMismatch  = "lookout.leeway.counter_mismatch"
+	metricIntentInfo       = "lookout.leeway.intent_info"
 )
 
 // Instrument descriptions. Hoisted to constants because they are the help
@@ -59,7 +61,12 @@ const (
 	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
 	descLastEvent        = "Unix time of the last informer event leeway processed, per resource."
 	descEvalDuration     = "Time spent evaluating one coalesced subject."
-	descCounterMismatch  = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
+	descIntentInfo       = "Placement intent inferred for a subject on one topology axis, as labels on a constant 1 (leeway §5.1). " +
+		"Only subjects that expressed an intent are present: a workload with no spread constraint, anti-affinity or affinity " +
+		"has no row here, which is what makes the series count a property of the estate's declarations rather than of its size. " +
+		"`source` is what the intent was read from and `confidence` how much that source is worth — `assumed` means k8s-lookout " +
+		"guessed a cluster default it could not read, and every finding derived from it rests on that guess."
+	descCounterMismatch = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
 		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
 		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
 		"The repair keeps the next hour's numbers usable; it is not a fix."
@@ -75,6 +82,11 @@ var (
 	attrNamespace   = attribute.Key("namespace")
 	attrSubject     = attribute.Key("subject")
 	attrResource    = attribute.Key("resource")
+	attrSource      = attribute.Key("source")
+	attrConfidence  = attribute.Key("confidence")
+	attrWeighting   = attribute.Key("weighting")
+	attrMaxSkew     = attribute.Key("max_skew")
+	attrMode        = attribute.Key("mode")
 )
 
 // MetricDoc documents one series leeway exports, in its PROMETHEUS spelling —
@@ -125,6 +137,12 @@ func MetricDocs() []MetricDoc {
 			Optional: true,
 		},
 		{
+			Name:   "lookout_leeway_intent_info",
+			Type:   "gauge",
+			Labels: []string{"namespace", "subject", "subject_kind", "topology_key", "mode", "source", "confidence", "weighting", "max_skew"},
+			Help:   descIntentInfo,
+		},
+		{
 			Name:   "lookout_leeway_last_event_timestamp_seconds",
 			Type:   "gauge",
 			Labels: []string{"resource"},
@@ -153,6 +171,9 @@ const (
 
 // countObserver is handed each per-domain count during a scrape.
 type countObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64)
+
+// intentObserver is handed each resolved intent during a scrape.
+type intentObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent)
 
 // metricsOptions wires the observable instruments to the state they read.
 //
@@ -185,6 +206,17 @@ type metricsOptions struct {
 	// DomainObjects walks every non-zero per-domain count. Only called when
 	// PerDomainSeries is set.
 	DomainObjects func(countObserver)
+
+	// Intents walks each tracked subject's resolved intent, one call per axis.
+	//
+	// Ungated, unlike DomainObjects, because the cardinality argument that
+	// gates that one does not apply: this is subjects × *axes they declared an
+	// intent on*, not subjects × keys × domains × states, and a subject that
+	// declared nothing contributes nothing. On an estate where placement intent
+	// is the exception the series count is a small fraction of the subject
+	// count; on one where every workload declares a zone spread it is at most
+	// the subject count, which is the same order as subjects_tracked.
+	Intents func(intentObserver)
 }
 
 // instruments holds leeway's OTEL-native metric instruments (§8.4).
@@ -255,16 +287,22 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainObjects, err)
 	}
+	intents, err := meter.Int64ObservableGauge(metricIntentInfo,
+		metric.WithDescription(descIntentInfo))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricIntentInfo, err)
+	}
 
 	// One callback for all three observables: the SDK invokes it once per
 	// collection, so the three reads see the same moment rather than three
 	// moments a scrape apart.
+	gauges := observables{subjects: subjects, readyNodes: readyNodes, objects: objects, intents: intents}
 	in.reg, err = meter.RegisterCallback(
 		func(_ context.Context, o metric.Observer) error {
-			opts.observe(o, subjects, readyNodes, objects)
+			opts.observe(o, gauges)
 			return nil
 		},
-		subjects, readyNodes, objects,
+		subjects, readyNodes, objects, intents,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: register metric callback: %w", err)
@@ -272,17 +310,28 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	return in, nil
 }
 
-// observe fills the three observable gauges from the wired callbacks.
-func (opts metricsOptions) observe(o metric.Observer, subjects, readyNodes, objects metric.Int64ObservableGauge) {
+// observables is the set of observable gauges one scrape fills, carried as a
+// struct so that adding one does not lengthen a positional argument list that
+// is already four instruments of the same type — the shape where a
+// transposition compiles and silently swaps two series.
+type observables struct {
+	subjects   metric.Int64ObservableGauge
+	readyNodes metric.Int64ObservableGauge
+	objects    metric.Int64ObservableGauge
+	intents    metric.Int64ObservableGauge
+}
+
+// observe fills the observable gauges from the wired callbacks.
+func (opts metricsOptions) observe(o metric.Observer, g observables) {
 	if opts.SubjectCounts != nil {
 		for kind, n := range opts.SubjectCounts() {
-			o.ObserveInt64(subjects, n, metric.WithAttributes(attrSubjectKind.String(string(kind))))
+			o.ObserveInt64(g.subjects, n, metric.WithAttributes(attrSubjectKind.String(string(kind))))
 		}
 	}
 	if opts.DomainNodes != nil {
 		for key, byDomain := range opts.DomainNodes() {
 			for domain, n := range byDomain {
-				o.ObserveInt64(readyNodes, n, metric.WithAttributes(
+				o.ObserveInt64(g.readyNodes, n, metric.WithAttributes(
 					attrTopologyKey.String(string(key)),
 					attrDomain.String(string(domain)),
 				))
@@ -291,7 +340,7 @@ func (opts metricsOptions) observe(o metric.Observer, subjects, readyNodes, obje
 	}
 	if opts.PerDomainSeries && opts.DomainObjects != nil {
 		opts.DomainObjects(func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64) {
-			o.ObserveInt64(objects, n, metric.WithAttributes(
+			o.ObserveInt64(g.objects, n, metric.WithAttributes(
 				attrSubjectKind.String(string(sub.Kind)),
 				attrNamespace.String(sub.Namespace),
 				attrSubject.String(sub.Name),
@@ -301,6 +350,41 @@ func (opts metricsOptions) observe(o metric.Observer, subjects, readyNodes, obje
 			))
 		})
 	}
+	if opts.Intents != nil {
+		opts.Intents(func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent) {
+			if in == nil {
+				return
+			}
+			o.ObserveInt64(g.intents, 1, metric.WithAttributes(
+				attrSubjectKind.String(string(sub.Kind)),
+				attrNamespace.String(sub.Namespace),
+				attrSubject.String(sub.Name),
+				attrTopologyKey.String(string(key)),
+				attrMode.String(in.Mode.String()),
+				attrSource.String(in.Source.String()),
+				attrConfidence.String(in.Confidence.String()),
+				attrWeighting.String(in.Weighting.String()),
+				attrMaxSkew.String(skewLabel(in)),
+			))
+		})
+	}
+}
+
+// skewLabel renders an intent's bound for the max_skew label.
+//
+// Three cases, and they must stay distinguishable: a skew bound, a per-domain
+// ceiling from a required podAntiAffinity — which is not a skew of one and must
+// not be reported as one (§5.1) — and no bound at all. "none" rather than an
+// empty string, because an empty label value is indistinguishable from an
+// absent label in a PromQL matcher.
+func skewLabel(in *leeway.Intent) string {
+	if in.MaxSkew != nil {
+		return strconv.FormatInt(int64(*in.MaxSkew), 10)
+	}
+	if in.MaxPerDomain != nil {
+		return "max-per-domain=" + strconv.FormatInt(*in.MaxPerDomain, 10)
+	}
+	return "none"
 }
 
 // recordEvent stamps the arrival of an informer event for resource.

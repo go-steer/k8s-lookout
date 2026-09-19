@@ -17,6 +17,7 @@ package topologydrift
 import (
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"testing"
 
@@ -796,4 +797,218 @@ func TestState_ConcurrentPodAndNodeEvents(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestState_RepresentativeTracksTheNewestPod pins the hint's whole contract:
+// it appears with the first counted pod, it moves to whichever pod was counted
+// most recently, and status churn — which returns early before any of this —
+// leaves it alone.
+func TestState_RepresentativeTracksTheNewestPod(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+
+	if _, ok := h.Representative(webSubject); ok {
+		t.Fatal("an untracked subject has a representative")
+	}
+
+	h.OnPodAdd(webPod("web-1", "n1"))
+	if got, ok := h.Representative(webSubject); !ok || got != "web-1" {
+		t.Errorf("Representative = %q,%v, want web-1,true", got, ok)
+	}
+
+	h.OnPodAdd(webPod("web-2", "n1"))
+	if got, _ := h.Representative(webSubject); got != "web-2" {
+		t.Errorf("Representative = %q, want the pod counted most recently", got)
+	}
+
+	churned := webPod("web-1", "n1")
+	churned.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", RestartCount: 7}}
+	h.OnPodUpdate(nil, churned)
+	if got, _ := h.Representative(webSubject); got != "web-2" {
+		t.Errorf("Representative = %q after churn on web-1, want web-2 — the early return "+
+			"in OnPodUpdate is what makes that path free, so nothing may happen ahead of it", got)
+	}
+}
+
+// TestState_RepresentativeDropsWithItsOwnPod is the case that would otherwise
+// leave every rolled Deployment pointing at a pod the lister cannot resolve.
+func TestState_RepresentativeDropsWithItsOwnPod(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+	h.OnPodAdd(webPod("web-2", "n1"))
+
+	// Deleting a pod that is not the representative must not disturb it.
+	h.OnPodDelete(webPod("web-1", "n1"))
+	if got, ok := h.Representative(webSubject); !ok || got != "web-2" {
+		t.Errorf("Representative = %q,%v after deleting a different pod, want web-2,true", got, ok)
+	}
+
+	h.OnPodDelete(webPod("web-2", "n1"))
+	if got, ok := h.Representative(webSubject); ok {
+		t.Errorf("Representative = %q,true after its own pod went away, want no hint", got)
+	}
+}
+
+// TestState_RepresentativeIsForgottenWithTheSubject holds the memory bound: the
+// hint is keyed by subject and nothing rebuilds it, so a subject that goes away
+// and never comes back must take its entry with it.
+func TestState_RepresentativeIsForgottenWithTheSubject(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+	h.SetIntents(webSubject, map[leeway.TopologyKey]*leeway.Intent{zoneKey: {TopologyKey: zoneKey}})
+
+	h.OnPodDelete(webPod("web-1", "n1"))
+
+	if len(h.Subjects()) != 0 {
+		t.Fatalf("subject still tracked: %v", h.Subjects())
+	}
+	if _, ok := h.Representative(webSubject); ok {
+		t.Error("representative outlived its subject")
+	}
+	if got := h.IntentsOf(webSubject); got != nil {
+		t.Errorf("IntentsOf = %v, want nil once the subject is forgotten", got)
+	}
+}
+
+// TestState_SetRepresentativeNeedsATrackedSubject is the other half of that
+// bound: a reader that elects a representative for a subject holding no counts
+// would add an entry with no eviction rule behind it.
+func TestState_SetRepresentativeNeedsATrackedSubject(t *testing.T) {
+	h := newHarness(t)
+	h.SetRepresentative(webSubject, types.UID("prod/web-9"), "web-9")
+	if _, ok := h.Representative(webSubject); ok {
+		t.Error("accepted a representative for an untracked subject")
+	}
+
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+	h.SetRepresentative(webSubject, types.UID("prod/web-9"), "web-9")
+	if got, _ := h.Representative(webSubject); got != "web-9" {
+		t.Errorf("Representative = %q, want the elected web-9", got)
+	}
+}
+
+// TestState_RepairReseatsTheRepresentative covers the leak case the verifier
+// exists for: the hint names a pod whose delete never arrived, so the repair
+// has to replace it from the pods the rebuild actually saw.
+func TestState_RepairReseatsTheRepresentative(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-leaked", "n1"))
+	h.SetIntents(webSubject, map[leeway.TopologyKey]*leeway.Intent{zoneKey: {TopologyKey: zoneKey}})
+
+	h.Repair(webSubject, []*corev1.Pod{webPod("web-real", "n1")})
+
+	if got, ok := h.Representative(webSubject); !ok || got != "web-real" {
+		t.Errorf("Representative = %q,%v after repair, want web-real,true", got, ok)
+	}
+	if got := h.IntentsOf(webSubject); got != nil {
+		t.Errorf("IntentsOf = %v after repair, want nil — a repair invalidates what was "+
+			"resolved from the pods it just replaced, and re-enqueues the subject to redo it", got)
+	}
+
+	// A repair to nothing is the other direction: no pods, no hint.
+	h.Repair(webSubject, nil)
+	if _, ok := h.Representative(webSubject); ok {
+		t.Error("representative survived a repair that found no pods")
+	}
+}
+
+// TestState_Intents covers the intent store's three states — recorded, cleared
+// by an empty set, and refused for an untracked subject — and the walk the
+// intent_info scrape callback drives.
+// TestState_ATransientZeroIsNotAForgottenSubject pins the eviction rule to the
+// events that actually mean a subject has gone away.
+//
+// A one-pod subject's counts pass through zero whenever its pod is re-counted
+// in place: both the move path here and remapNode take the old placement out
+// before they put the new one in, and applyLocked drops the counts row the
+// instant it empties. Evicting the representative and the resolved intents on
+// that would clear a perfectly healthy workload's state every time its node was
+// relabelled — and, because the hint is what the next evaluation reads, send it
+// down the un-indexed list path for no reason.
+func TestState_ATransientZeroIsNotAForgottenSubject(t *testing.T) {
+	h := newHarness(t)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnNodeUpsert(node("n2", "zone-b"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+
+	resolved := map[leeway.TopologyKey]*leeway.Intent{
+		zoneKey: {TopologyKey: zoneKey, Source: leeway.SourceTopologySpreadConstraint},
+	}
+	h.SetIntents(webSubject, resolved)
+
+	// The node moves zone under the pod: one decrement, one increment, one lock.
+	h.OnNodeUpsert(node("n1", "zone-c"))
+	if got, ok := h.Representative(webSubject); !ok || got != "web-1" {
+		t.Errorf("Representative = %q,%v after a node relabel, want web-1,true", got, ok)
+	}
+	if got := h.IntentsOf(webSubject); len(got) != 1 {
+		t.Errorf("IntentsOf = %v after a node relabel, want the resolved intent to survive", got)
+	}
+
+	// The pod moves node, which is the same shape through OnPodUpdate.
+	h.OnPodUpdate(nil, webPod("web-1", "n2"))
+	if got, ok := h.Representative(webSubject); !ok || got != "web-1" {
+		t.Errorf("Representative = %q,%v after a reschedule, want web-1,true", got, ok)
+	}
+	if got := h.IntentsOf(webSubject); len(got) != 1 {
+		t.Errorf("IntentsOf = %v after a reschedule, want the resolved intent to survive", got)
+	}
+
+	// And the decrement that is final still forgets both.
+	h.OnPodDelete(webPod("web-1", "n2"))
+	if got, ok := h.Representative(webSubject); ok {
+		t.Errorf("Representative = %q,true after the last pod went away, want no hint", got)
+	}
+	if got := h.IntentsOf(webSubject); got != nil {
+		t.Errorf("IntentsOf = %v after the last pod went away, want nil", got)
+	}
+}
+
+func TestState_Intents(t *testing.T) {
+	h := newHarness(t, zoneKey, poolKey)
+	h.OnNodeUpsert(node("n1", "zone-a"))
+	h.OnPodAdd(webPod("web-1", "n1"))
+
+	if got := h.IntentsOf(webSubject); got != nil {
+		t.Errorf("IntentsOf = %v before any evaluation, want nil", got)
+	}
+
+	resolved := map[leeway.TopologyKey]*leeway.Intent{
+		poolKey: {TopologyKey: poolKey, Source: leeway.SourcePodAntiAffinityPreferred},
+		zoneKey: {TopologyKey: zoneKey, Source: leeway.SourceTopologySpreadConstraint},
+	}
+	h.SetIntents(webSubject, resolved)
+	if got := h.IntentsOf(webSubject); len(got) != 2 {
+		t.Fatalf("IntentsOf = %v, want both axes", got)
+	}
+
+	var walked []leeway.TopologyKey
+	h.EachIntent(func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent) {
+		if sub != webSubject || in == nil || in.TopologyKey != key {
+			t.Errorf("EachIntent yielded %v / %v / %+v", sub, key, in)
+		}
+		walked = append(walked, key)
+	})
+	// Sorted, because a scrape that reorders its own series for no reason is a
+	// diff nobody can read.
+	if want := []leeway.TopologyKey{poolKey, zoneKey}; !slices.Equal(walked, want) {
+		t.Errorf("EachIntent walked %v, want %v in sorted order", walked, want)
+	}
+
+	// A workload that drops its constraints stops exporting them now, not at
+	// the next restart.
+	h.SetIntents(webSubject, nil)
+	if got := h.IntentsOf(webSubject); got != nil {
+		t.Errorf("IntentsOf = %v after an empty set, want nil", got)
+	}
+
+	other := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: "gone"}
+	h.SetIntents(other, resolved)
+	if got := h.IntentsOf(other); got != nil {
+		t.Errorf("IntentsOf(untracked) = %v, want nil", got)
+	}
 }

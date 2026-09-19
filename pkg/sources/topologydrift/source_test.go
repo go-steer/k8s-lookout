@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -580,9 +581,10 @@ func TestSource_MetricProjections(t *testing.T) {
 }
 
 func TestSource_EvaluateIsWiredToTheQueue(t *testing.T) {
-	// Phase 2's evaluate does nothing but time itself. What has to hold is
-	// that the delta path reaches it at all, because Phase 3 hangs scoring
-	// off exactly this callback.
+	// What has to hold is that the delta path reaches evaluate at all. This
+	// source has no pod lister — it is driven straight through State — so the
+	// evaluation finds no representative and resolves nothing, which is the
+	// point: the wiring is separable from what hangs off it.
 	s := New(fake.NewSimpleClientset(), Config{
 		TopologyKeys: []leeway.TopologyKey{zoneKey}, CoalesceWindow: tickWindow,
 	})
@@ -663,5 +665,158 @@ func TestSource_CachedPodsBeforeRunIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pod cache not ready") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+// evalConfig is a config whose evaluation queue actually drains inside a test's
+// patience.
+//
+// Setting CoalesceWindow alone is not enough, and the way it fails is worth
+// recording: §6.4 widens a subject's wait to RolloutCoalesceWindow the moment it
+// is enqueued a second time while still pending, and start-up produces exactly
+// that whenever the pod's event is delivered before its node's — the pod is
+// counted as unknown on every axis, then re-counted by remapNode when the node
+// lands. Two enqueues, one subject, and the default 15s widening. Which way
+// that race falls is not deterministic, so a test that leaves the rollout
+// window at its default passes or hangs depending on informer scheduling.
+func evalConfig(keys ...leeway.TopologyKey) Config {
+	return Config{
+		TopologyKeys:          keys,
+		CoalesceWindow:        tickWindow,
+		RolloutCoalesceWindow: tickWindow,
+		MaxCoalesceDelay:      tickWindow,
+	}
+}
+
+// spreadPod is a Deployment-owned pod carrying a zone spread constraint, which
+// is the shape every test below infers from.
+func spreadPod(name string, created time.Time) *corev1.Pod {
+	p := pod(name, "prod", "n-a", ownedBy("ReplicaSet", "web-7c9f"))
+	p.Labels = map[string]string{"app": "api"}
+	p.CreationTimestamp = metav1.NewTime(created)
+	p.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		zoneSpread(1, corev1.DoNotSchedule),
+	}
+	return p
+}
+
+// TestSource_EvaluateResolvesIntentFromTheRepresentative is Phase 3's assembly
+// end to end: a pod event reaches evaluate, evaluate finds a pod for the
+// subject through State's hint, and the intent inferred from it lands where the
+// intent_info scrape reads.
+func TestSource_EvaluateResolvesIntentFromTheRepresentative(t *testing.T) {
+	s, _ := runSource(t,
+		evalConfig(zoneKey),
+		node("n-a", "us-central1-a"),
+		replicaSet("web-7c9f", "prod", "web"),
+		spreadPod("web-1", time.Now()),
+	)
+
+	waitFor(t, "the subject's intent to be resolved", func() bool {
+		return s.state.IntentsOf(webSubject) != nil
+	})
+
+	in := s.state.IntentsOf(webSubject)[zoneKey]
+	if in == nil {
+		t.Fatalf("no zone intent: %+v", s.state.IntentsOf(webSubject))
+	}
+	if in.Source != leeway.SourceTopologySpreadConstraint {
+		t.Errorf("Source = %v, want the spread constraint", in.Source)
+	}
+	if in.MaxSkew == nil || *in.MaxSkew != 1 {
+		t.Errorf("MaxSkew = %v, want 1", in.MaxSkew)
+	}
+
+	var seen int
+	s.state.EachIntent(func(leeway.SubjectRef, leeway.TopologyKey, *leeway.Intent) { seen++ })
+	if seen != 1 {
+		t.Errorf("EachIntent yielded %d rows, want the one intent_info series", seen)
+	}
+}
+
+// TestSource_SubjectPodRecoversFromAStaleHint covers the miss path. The hint is
+// allowed to be wrong — that is what makes it cheap — so what has to hold is
+// that a wrong one costs one list and then repairs itself.
+func TestSource_SubjectPodRecoversFromAStaleHint(t *testing.T) {
+	s, _ := runSource(t,
+		evalConfig(zoneKey),
+		node("n-a", "us-central1-a"),
+		replicaSet("web-7c9f", "prod", "web"),
+		spreadPod("web-1", time.Now()),
+	)
+	waitFor(t, "the subject to be tracked", func() bool {
+		_, ok := s.state.Representative(webSubject)
+		return ok
+	})
+
+	s.state.SetRepresentative(webSubject, types.UID("prod/web-gone"), "web-gone")
+	if got := s.subjectPod(webSubject); got == nil || got.Name != "web-1" {
+		t.Fatalf("subjectPod = %v, want the pod the fallback list found", got)
+	}
+	if got, _ := s.state.Representative(webSubject); got != "web-1" {
+		t.Errorf("Representative = %q after the miss, want the re-elected web-1", got)
+	}
+
+	// A subject with no pods at all in the cache is a miss the fallback cannot
+	// fix, and it must say so rather than guess.
+	other := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: "absent"}
+	if got := s.subjectPod(other); got != nil {
+		t.Errorf("subjectPod(absent) = %v, want nil", got)
+	}
+}
+
+// TestSource_ElectRepresentativePicksTheNewest: during a rollout the pod being
+// replaced still carries the template the workload has already abandoned, so
+// reading it would describe intent that is on its way out.
+func TestSource_ElectRepresentativePicksTheNewest(t *testing.T) {
+	old := spreadPod("web-old", time.Now().Add(-time.Hour))
+	fresh := spreadPod("web-new", time.Now())
+	// Same name prefix, different template: only the newer pod spreads on the
+	// pool axis, so which one was read is visible in the result.
+	fresh.Spec.TopologySpreadConstraints[0].TopologyKey = string(poolKey)
+
+	s, _ := runSource(t,
+		evalConfig(zoneKey, poolKey),
+		node("n-a", "us-central1-a"),
+		replicaSet("web-7c9f", "prod", "web"),
+		old, fresh,
+	)
+	waitFor(t, "the subject to be tracked", func() bool {
+		return len(s.state.Subjects()) == 1
+	})
+
+	// Clear the hint so election has to run, rather than testing whichever pod
+	// the informer happened to deliver last.
+	s.state.SetRepresentative(webSubject, types.UID("prod/web-gone"), "web-gone")
+	got := s.subjectPod(webSubject)
+	if got == nil || got.Name != "web-new" {
+		t.Fatalf("elected %v, want web-new", got)
+	}
+}
+
+// TestNewerPod covers the tiebreak directly, because the case it exists for is
+// the one a fixture cannot reliably produce: creation timestamps have
+// one-second resolution, so a scale-out puts a whole ReplicaSet on the same
+// value and the election has to stay reproducible anyway.
+func TestNewerPod(t *testing.T) {
+	now := time.Now()
+	a := spreadPod("web-a", now)
+	b := spreadPod("web-b", now)
+	if !newerPod(a, b) || newerPod(b, a) {
+		t.Errorf("same timestamp: want the name to break the tie, got %v/%v", newerPod(a, b), newerPod(b, a))
+	}
+
+	older := spreadPod("web-z", now.Add(-time.Minute))
+	if newerPod(older, a) || !newerPod(a, older) {
+		t.Error("an older pod won on a name comparison the timestamp should have settled")
+	}
+}
+
+// TestSource_SubjectPodBeforeRun. The informer handlers are registered before
+// the listers are, so an evaluation can be dispatched with no cache to read.
+func TestSource_SubjectPodBeforeRun(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{})
+	if got := s.subjectPod(webSubject); got != nil {
+		t.Errorf("subjectPod before Run = %v, want nil", got)
 	}
 }

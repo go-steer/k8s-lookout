@@ -853,6 +853,40 @@ cadence, and both must degrade to leeway's own walk when storm is off.
 > distribution placing part of the fleet in a nonexistent zone. Three other
 > places in the repo already read both spellings.
 
+> **The `templateHash → Intent` row is not what shipped (2026-09-18).** It cannot
+> be: S3 established that intent is read from an *admitted pod* and never from a
+> controller's `PodTemplateSpec`, so there is no template to hash. Two
+> subject-keyed maps took its place, both in `State` because both need exactly the
+> eviction rule `State` already runs — a subject is forgotten the moment its last
+> pod stops counting:
+>
+> | Index | Purpose | Maintained on |
+> |---|---|---|
+> | `subjectKey → representative{uid,name}` | Get from a subject back to a pod to infer from | Pod events |
+> | `subjectKey → map[TopologyKey]*Intent` | Last evaluation's resolved intent; what `intent_info` scrapes | Evaluation |
+>
+> The representative is **a hint, not an index**: one entry per subject, holding a
+> name rather than a pod (§6.6.2 budgets this process to absorb a ~66k-pod
+> reschedule, and retaining pod objects would put the whole cache in a second
+> place), overwritten by every counted pod event so it converges on the most
+> recently admitted spec. A reader that misses re-elects by listing the namespace.
+> That the fallback is un-indexed is the decision and not an omission: a
+> subject-keyed *pod* index has to run owner resolution to place a pod, which
+> reads the ReplicaSet cache — so an entry would depend on a different informer's
+> state, and an informer re-indexes an object only when *that object* changes.
+> With the resync period at zero, an entry computed before the ReplicaSet landed
+> is never repaired. A miss is cheap and self-correcting; a wrong index is
+> neither. Misses that cluster mean pods are turning over faster than the cache,
+> which is the §7.6 domain-outage row — the case where workload findings are
+> suppressed anyway.
+>
+> **Eviction belongs to the caller that knows its decrement is final.** A one-pod
+> subject's counts pass through zero on every in-place re-count — the move path in
+> `OnPodUpdate` and `remapNode` both take the old placement out before putting the
+> new one in — so hanging eviction off "the counts row emptied" clears the
+> representative and the resolved intents of a healthy workload whose node was
+> merely relabelled.
+
 ### 6.3 Delta rules
 
 ```go
@@ -2271,6 +2305,33 @@ approach should be reused rather than reinvented.
 > opt-in and everything else is the cheap aggregate set. The default posture is
 > the one the paragraph below argues for; only the shape of the knob is
 > temporary.
+
+> **`intent_info` landed 2026-09-18**, as the first metric Phase 3 fills in, and
+> its label set is one wider than the line above:
+>
+> ```
+> lookout_leeway_intent_info {namespace,subject,subject_kind,topology_key,
+>                             mode,source,confidence,weighting,max_skew}
+> ```
+>
+> **`mode` is the added label** and it is not decoration: §5.1 precedence can
+> resolve one axis to an *enforced* intent and another on the same workload to a
+> *preference*, and a dashboard that cannot tell them apart will read a preferred
+> anti-affinity's soft nudge as a hard guarantee the scheduler broke. The other
+> eight are as drafted.
+>
+> **It is ungated, unlike `domain_objects`.** The cardinality argument does not
+> transfer: the series is emitted only for subjects that actually expressed an
+> intent, and only on the axes they expressed it on — no domain, no state, and no
+> row at all for the large majority of workloads that declare nothing. That is
+> bounded by *declared* constraints rather than by cluster shape, which is the
+> distinction the gate exists to draw.
+>
+> **`max_skew` carries a ceiling that is not a skew.** A required
+> `podAntiAffinity` is one-per-domain, which §5 models as `MaxPerDomain` and not
+> as `MaxSkew: 1` — the two are different bounds and conflating them would
+> understate what the workload asked for. The label reads `max-per-domain=1` in
+> that case and `none` where neither is set, rather than inventing a number.
 
 **S5 turned the ceiling into a bill, which makes the gating more important, not
 less.** The estate runs Google Managed Prometheus, which does not reject a

@@ -95,6 +95,48 @@ type State struct {
 
 	// counts is the distributions themselves, per subject per axis.
 	counts map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution
+
+	// representatives is subject → one of its pods, by UID and name.
+	//
+	// Intent is inferred from an *admitted pod* and never from a controller's
+	// PodTemplateSpec (§13 S3: GKE injects tolerations at admission that the
+	// template does not carry, and inferring from the weaker document computes
+	// too small an eligible set, concludes the workload is pinned and
+	// suppresses real drift). Evaluation is per subject, so something has to
+	// get from a subject back to a pod, and this is it.
+	//
+	// It holds a name, not a pod: §6.6.2 budgets this process to absorb a
+	// ~66k-pod reschedule, and retaining pod objects here would put the whole
+	// cache in a second place. The cost is one string per *subject* — thousands,
+	// not hundreds of thousands — and a lister Get on the read side.
+	//
+	// It is a hint and not an index. The entry is overwritten by every counted
+	// pod event, so it converges on the most recently admitted pod, which is
+	// the freshest spec; it is dropped when that pod is uncounted; and a reader
+	// that misses re-elects. Nothing downstream may assume it is populated.
+	representatives map[leeway.SubjectRef]representative
+
+	// intents is subject → the intent set its last evaluation resolved (§5.1),
+	// one entry per axis that expressed one.
+	//
+	// It lives here rather than on the Source because the eviction rule it
+	// needs is the one this file already runs: a subject is forgotten the
+	// moment its last pod stops counting, and a resolved intent that outlived
+	// its subject is a metric series for a Deployment that was deleted months
+	// ago. One owner, one lock, one lifetime.
+	intents map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Intent
+}
+
+// representative identifies the pod a subject's intent is read from.
+//
+// The UID is carried alongside the name so that uncount can tell "the pod this
+// hint names has gone" from "a pod with the same name was recreated", which is
+// not a hypothetical: a StatefulSet replaces web-0 with a new object under the
+// old name, and dropping the hint on that event would send the next evaluation
+// down the un-indexed list path for no reason.
+type representative struct {
+	uid  types.UID
+	name string
 }
 
 // NewState returns a State ready to receive deltas.
@@ -109,6 +151,9 @@ func NewState(opts StateOptions) *State {
 		subjects:   make(map[types.UID]leeway.SubjectRef),
 		byNode:     make(map[string]map[types.UID]struct{}),
 		counts:     make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution),
+
+		representatives: make(map[leeway.SubjectRef]representative),
+		intents:         make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Intent),
 	}
 }
 
@@ -176,6 +221,12 @@ func (s *State) OnPodUpdate(_, cur *corev1.Pod) {
 	s.subjects[uid] = sub
 	s.linkNode(next.NodeName, uid)
 	s.applyLocked(sub, next, +1)
+	// After applyLocked, never before: that call is what creates the subject's
+	// row, and the hint is evicted with that row, so setting it for a subject
+	// applyLocked declined to track would leak an entry nothing ever removes.
+	if s.tracked(sub) {
+		s.representatives[sub] = representative{uid: uid, name: cur.Name}
+	}
 	s.enqueue(sub)
 }
 
@@ -313,6 +364,87 @@ func (s *State) PlacementOf(uid types.UID) (leeway.Placement, bool) {
 	return p, ok
 }
 
+// Representative returns the name of a pod belonging to sub, in sub's
+// namespace, for intent inference to read.
+//
+// False means "no hint", not "no such pod": the subject may be untracked, or
+// the pod the hint named may have been the one that just went away. A true
+// answer is not a guarantee either — the name is from an index this package
+// maintains, and the pod informer's cache is a different index that may have
+// moved on. Callers must handle a lister miss, and re-elect through
+// SetRepresentative when they do.
+func (s *State) Representative(sub leeway.SubjectRef) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep, ok := s.representatives[sub]
+	return rep.name, ok
+}
+
+// SetRepresentative records a pod as sub's representative, which is how a
+// reader that found one the hard way stops the next evaluation paying for it
+// again.
+//
+// Ignored for a subject that holds no counts. The hint is evicted with the
+// counts, so accepting one without them is how the map would grow without
+// bound on a cluster with heavy Job churn.
+func (s *State) SetRepresentative(sub leeway.SubjectRef, uid types.UID, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tracked(sub) {
+		return
+	}
+	s.representatives[sub] = representative{uid: uid, name: name}
+}
+
+// SetIntents records what a subject's evaluation resolved (§5.1). A nil or
+// empty set clears the entry, so a workload that drops its spread constraints
+// stops exporting intent for them on the next evaluation rather than at the
+// next restart.
+//
+// Ignored for an untracked subject, for the same reason as SetRepresentative.
+func (s *State) SetIntents(sub leeway.SubjectRef, intents map[leeway.TopologyKey]*leeway.Intent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tracked(sub) {
+		return
+	}
+	if len(intents) == 0 {
+		delete(s.intents, sub)
+		return
+	}
+	s.intents[sub] = intents
+}
+
+// IntentsOf returns the intent set a subject's last evaluation resolved, or nil
+// if it has not been evaluated since it was last tracked.
+//
+// The map and the intents in it are shared, not copied, and callers must treat
+// both as read-only. They are written once per evaluation and replaced rather
+// than mutated, so a reader holding the previous map sees a consistent older
+// answer rather than a torn newer one.
+func (s *State) IntentsOf(sub leeway.SubjectRef) map[leeway.TopologyKey]*leeway.Intent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.intents[sub]
+}
+
+// EachIntent calls yield for every tracked subject's resolved intent, one call
+// per axis, under the lock.
+//
+// Used by the intent_info scrape callback. It walks rather than copying because
+// the alternative — handing back a map of maps — allocates the whole intent
+// table on every scrape to read a handful of labels off it, which is the same
+// mistake SubjectCounts exists to avoid.
+func (s *State) EachIntent(yield intentObserver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sub, byKey := range s.intents {
+		for _, key := range leeway.SortedKeys(byKey) {
+			yield(sub, key, byKey[key])
+		}
+	}
+}
+
 // Rebuilt is one subject's distributions computed straight from the pod cache,
 // alongside the pods they were computed from. The pods are kept because a
 // mismatch is repaired by re-seating them, not by overwriting the counts: see
@@ -412,6 +544,11 @@ func (s *State) Repair(sub leeway.SubjectRef, pods []*corev1.Pod) {
 	// wrong, so unwinding them with the same arithmetic that produced them is
 	// not a repair. Nothing else keys off this map.
 	delete(s.counts, sub)
+	// The representative goes with them. A repair is driven by a rebuild from
+	// the pod cache, and the leak case it exists to fix — a pod whose delete
+	// event never arrived — is exactly the case where the hint names a pod that
+	// is not there. Re-elected below from the pods the rebuild actually saw.
+	s.forgetLocked(sub)
 
 	for _, pod := range pods {
 		p, counted := s.resolvePlacement(pod)
@@ -422,6 +559,9 @@ func (s *State) Repair(sub leeway.SubjectRef, pods []*corev1.Pod) {
 		s.subjects[pod.UID] = sub
 		s.linkNode(p.NodeName, pod.UID)
 		s.applyLocked(sub, p, +1)
+		if s.tracked(sub) {
+			s.representatives[sub] = representative{uid: pod.UID, name: pod.Name}
+		}
 	}
 	s.enqueue(sub)
 }
@@ -489,6 +629,19 @@ func (s *State) uncount(uid types.UID) {
 	delete(s.placements, uid)
 	delete(s.subjects, uid)
 	s.unlinkNode(p.NodeName, uid)
+	switch rep, hasRep := s.representatives[sub]; {
+	case !s.tracked(sub):
+		// That was the subject's last counted pod. This is the one decrement
+		// that is final, so it is where everything else keyed by the subject
+		// goes too — see forgetLocked.
+		s.forgetLocked(sub)
+	case hasRep && rep.uid == uid:
+		// Other pods remain, but the hint named this one, so it is now a name
+		// the lister will not resolve. Dropping it here rather than leaving it
+		// to fail on read costs nothing and keeps the miss path for genuine
+		// surprises.
+		delete(s.representatives, sub)
+	}
 	if hadSubject {
 		s.enqueue(sub)
 	}
@@ -530,6 +683,33 @@ func (s *State) applyLocked(sub leeway.SubjectRef, p leeway.Placement, sign int)
 	if len(byKey) == 0 {
 		delete(s.counts, sub)
 	}
+}
+
+// forgetLocked drops the per-subject state that is not a count but shares the
+// counts' lifetime. Caller holds the lock.
+//
+// Both maps are keyed by subject and neither is rebuilt from anything, so a
+// subject that stops being tracked and is never seen again would keep its
+// entries for the life of the process — and, for intents, keep exporting an
+// intent_info series for a workload that no longer exists.
+//
+// It is deliberately not called from applyLocked, even though applyLocked is
+// where the counts row is dropped. A decrement to zero there is not the same
+// event as a subject going away: the move path in OnPodUpdate and the re-map in
+// remapNode both take a subject's last pod out and put it straight back under
+// the same lock, and a single-pod subject passes through zero every time either
+// one runs. Forgetting on that transient would clear the representative and the
+// resolved intents of a healthy workload whose node was merely relabelled.
+// Only the callers that know their decrement is final call this.
+func (s *State) forgetLocked(sub leeway.SubjectRef) {
+	delete(s.representatives, sub)
+	delete(s.intents, sub)
+}
+
+// tracked reports whether the subject has counts. Caller holds the lock.
+func (s *State) tracked(sub leeway.SubjectRef) bool {
+	_, ok := s.counts[sub]
+	return ok
 }
 
 func (s *State) linkNode(nodeName string, uid types.UID) {

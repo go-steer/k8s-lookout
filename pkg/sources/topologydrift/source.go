@@ -300,18 +300,100 @@ func (s *Source) ownerOf(namespace, kind, name string) (*metav1.OwnerReference, 
 
 // evaluate is the coalesced per-subject callback.
 //
-// Phase 2 has nothing to evaluate — intent inference is Phase 3 — so this only
-// times the dispatch. The queue still runs, and deliberately: it is the piece
-// whose behaviour under a 200-pod rollout has to be right before anything
-// expensive hangs off it, and running it now means the same property tests that
-// exercise the counters exercise it too.
+// It resolves intent and eligibility and stores the result; it emits nothing.
+// Scoring (§7.3) and findings (§8) are the next increment, and keeping them
+// out of this one means the inference stack reaches a real cluster — and its
+// `intent_info` series reaches a dashboard — before anything can page on it.
 func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	start := time.Now()
 	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, time.Since(start)) }()
 
-	// Phase 3 hangs intent inference and scoring here. Until then the recorded
-	// duration is real but tiny, which is the truthful reading: dispatch costs
-	// what it costs and evaluation costs nothing yet.
+	pod := s.subjectPod(sub)
+	if pod == nil {
+		// No pod to read means no evidence, and no evidence is not the same as
+		// no intent: clearing what the last evaluation resolved would drop a
+		// subject's intent_info every time its pods turned over faster than the
+		// cache. The stale answer is the better one, and it is bounded — the
+		// subject is forgotten outright once its last pod stops counting.
+		return
+	}
+	s.state.SetIntents(sub, Resolve(pod, s.inv).Intents)
+}
+
+// subjectPod returns an admitted pod belonging to sub, for inference to read.
+//
+// The fast path is State's representative hint: one map get and one lister get,
+// which is what keeps evaluation independent of cluster size. The hint is a
+// hint, so a miss falls through to listing the subject's namespace and electing
+// a new one — plain O(pods in namespace), taken rarely and never cached into a
+// per-pod index.
+//
+// That the fallback is un-indexed is the decision, not an omission. A
+// subject-keyed pod index has to run resolveSubject to place a pod, which reads
+// the ReplicaSet cache — so a pod's index entry would depend on a *different*
+// informer's state, and an informer re-indexes an object only when that object
+// changes. With the resync period at zero, an entry computed before the
+// ReplicaSet landed is never repaired. A hint that can be wrong and is checked
+// on every read has no such failure mode.
+//
+// Misses also cluster in exactly the case where paying for them is wrong: a
+// domain outage turns over every pod at once, and §7.6 suppresses workload
+// findings for the duration and raises one domain finding instead. Skipping an
+// evaluation whose output would be suppressed anyway is the right answer, so
+// the fallback is allowed to be slow because it is allowed to be rare.
+func (s *Source) subjectPod(sub leeway.SubjectRef) *corev1.Pod {
+	s.mu.Lock()
+	lister := s.pods
+	s.mu.Unlock()
+	if lister == nil {
+		return nil
+	}
+	if name, ok := s.state.Representative(sub); ok {
+		if pod, err := lister.Pods(sub.Namespace).Get(name); err == nil {
+			return pod
+		}
+	}
+	return s.electRepresentative(lister, sub)
+}
+
+// electRepresentative finds a pod for sub the hard way and records it.
+//
+// It picks the most recently created pod, breaking ties on name. Newest because
+// during a rollout it is the one carrying the current template — inference that
+// reads the pod being replaced describes intent the workload has already
+// abandoned; deterministic because two evaluations of an unchanged subject that
+// disagree would flap `intent_info` on nothing but map iteration order.
+func (s *Source) electRepresentative(lister corelisters.PodLister, sub leeway.SubjectRef) *corev1.Pod {
+	pods, err := lister.Pods(sub.Namespace).List(labels.Everything())
+	if err != nil {
+		return nil
+	}
+	var best *corev1.Pod
+	for _, pod := range pods {
+		got, ok := resolveSubject(pod, s.ownerOf)
+		if !ok || got != sub {
+			continue
+		}
+		if best == nil || newerPod(pod, best) {
+			best = pod
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	s.state.SetRepresentative(sub, best.UID, best.Name)
+	return best
+}
+
+// newerPod reports whether a should be preferred over b as a representative.
+func newerPod(a, b *corev1.Pod) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.After(b.CreationTimestamp.Time)
+	}
+	// Creation timestamps have one-second resolution, so a scale-out puts a
+	// whole ReplicaSet on the same value. The name is the tiebreak that makes
+	// the choice reproducible.
+	return a.Name < b.Name
 }
 
 // Run implements sources.Source. emit is never called; see the Source doc.
@@ -430,6 +512,7 @@ func (s *Source) startMetrics() error {
 		SubjectCounts:   s.state.SubjectCounts,
 		DomainNodes:     s.domainNodes,
 		DomainObjects:   s.domainObjects,
+		Intents:         s.state.EachIntent,
 	})
 	if err != nil {
 		return err
