@@ -49,6 +49,14 @@ var otherSourceBulkReads = []ListRequirement{
 	// cheap grant rather than a secrets-shaped one.
 	{"", "persistentvolumeclaims"},
 	{"", "persistentvolumes"},
+	// topology-drift source, FR-10 policy overrides: discovery-gated, and
+	// deliberately absent from the source's RequiredAccess() so that a cluster
+	// without the CRDs is not forced to carry the grant to start. A policy
+	// object is an operator's own placement declaration — a selector and a set
+	// of topology keys — so this reads configuration the operator wrote, not
+	// workload state.
+	{"leeway.lookout.go-steer.io", "leewaypolicies"},
+	{"leeway.lookout.go-steer.io", "clusterleewaypolicies"},
 }
 
 // TestShippedClusterRoleGrantsSubsetOfLoadCluster is the least-privilege

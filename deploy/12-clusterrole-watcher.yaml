@@ -250,6 +250,20 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
+  # ---- LeewayPolicy: optional placement-intent overrides (FR-10) ----
+  # The topology-drift source infers placement intent from the pod, and
+  # these CRDs let an operator declare it instead. Granted here so that
+  # installing deploy/crds/leewaypolicies.yaml is the only step needed;
+  # the grant is harmless on the clusters that never do, since a watch
+  # is only started for a kind discovery reports as served.
+  # Deliberately NOT in the source's RequiredAccess(): §11's check fails
+  # startup on a missing grant, and the source does its whole job with
+  # no policy at all, so declaring it would make an optional override a
+  # cluster-wide prerequisite. Dropping these two rules from your own
+  # copy costs you the CRDs and nothing else.
+  - apiGroups: ["leeway.lookout.go-steer.io"]
+    resources: ["leewaypolicies", "clusterleewaypolicies"]
+    verbs: ["list", "watch"]
   # ---- secrets: expiry source + enrichment edges (#87) ----
   # §11 TRADEOFF — the broadest grant in this file: `list` on Secrets
   # cluster-wide returns VALUES, so a compromise of this pod reads

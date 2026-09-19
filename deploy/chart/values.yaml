@@ -58,6 +58,26 @@ rbac:
   # cluster admin may reasonably refuse.
   capacity: true
 
+# -- The optional LeewayPolicy / ClusterLeewayPolicy CRDs, which let an
+# operator declare a workload's placement intent instead of letting the
+# topology-drift source infer it (docs/leeway-design.md FR-10).
+#
+# Off by default. The source works fully without them and most clusters will
+# never want them; installing cluster-scoped API types is a bigger commitment
+# than deploying a watcher, and it should be a decision rather than a side
+# effect. Turning this on is equivalent to
+# `kubectl apply -f deploy/crds/leewaypolicies.yaml`.
+#
+# The sentinel evaluates the CRDs' presence once, at startup, so enabling this
+# against a running release needs a restart of the watcher pod before policies
+# take effect.
+#
+# The ClusterRole grants list/watch on both kinds either way — the grant is
+# inert on a cluster where the CRDs are absent, and carrying it means enabling
+# them later is one step rather than two.
+leewayPolicyCRD:
+  install: false
+
 # -- Sentinel flags. These are the container args, verbatim: the image
 # entrypoint is ["/lookout", "watch"], so each entry splices in behind
 # `watch`. Setting `args` replaces the list wholesale, which is the

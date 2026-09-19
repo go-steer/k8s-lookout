@@ -18,13 +18,18 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
@@ -128,11 +133,20 @@ type Source struct {
 	// comes from. Unset means factory.
 	nodeFactory informers.SharedInformerFactory
 
+	// dyn, when set via WithDynamic, is the dynamic client the optional
+	// LeewayPolicy informers are built on. Unset means no policy watch at all,
+	// which is the same observable state as a cluster without the CRDs.
+	dyn dynamic.Interface
+
 	inv     *Inventory
 	state   *State
 	queue   *coalescer
 	metrics *instruments
 	verify  *Verifier
+	// policies holds the LeewayPolicy objects the informers deliver. Always
+	// non-nil so that policyFor needs no second nil check; an empty store is
+	// the normal deployment.
+	policies *PolicyStore
 
 	mu sync.Mutex
 	// armed flips true after every informer cache syncs and the initial
@@ -148,6 +162,12 @@ type Source struct {
 	// sweepPending records that some node's eligibility moved since the last
 	// sweep. See DefaultEligibilitySweepInterval.
 	sweepPending bool
+	// warnedTies deduplicates the ambiguous-policy warning. Keyed by the set of
+	// competing policies rather than by subject: the operator fixes a pair of
+	// policies, not each of the subjects they both match, and keying it this
+	// way bounds the map by the number of policies (tens) instead of by the
+	// number of subjects (tens of thousands).
+	warnedTies map[string]bool
 
 	// logf overrides log.Printf for testing. nil = log.Printf.
 	logf func(format string, args ...any)
@@ -165,6 +185,8 @@ func (s *Source) logger() func(string, ...any) {
 func New(client kubernetes.Interface, cfg Config) *Source {
 	cfg = cfg.normalize()
 	s := &Source{client: client, cfg: cfg}
+	s.policies = NewPolicyStore()
+	s.warnedTies = map[string]bool{}
 	s.inv = NewInventory(cfg.TopologyKeys)
 	s.queue = newCoalescer(CoalesceOptions{
 		Window:        cfg.CoalesceWindow,
@@ -221,6 +243,36 @@ func (s *Source) WithNodeFactory(f informers.SharedInformerFactory) {
 	}
 }
 
+// WithDynamic gives Run a dynamic client to build the optional LeewayPolicy
+// informers on. Call before Run; nil is ignored.
+//
+// Separate from New's signature, unlike the gateway source which takes its
+// dynamic client as a constructor parameter, because there the CRD is the
+// entire subject and a source without it has nothing to watch. Here the policy
+// watch is an optional override on a source that works fully without it, so a
+// caller that does not care — every unit test, and any embedder that has no
+// dynamic client — should not have to name it.
+func (s *Source) WithDynamic(dyn dynamic.Interface) {
+	if dyn != nil {
+		s.dyn = dyn
+	}
+}
+
+// warnAmbiguous logs a policy tie once per competing set. Never called under
+// s.mu by its caller; it takes the lock itself.
+func (s *Source) warnAmbiguous(sub leeway.SubjectRef, m PolicyMatch) {
+	tie := strings.Join(m.Competing, ",")
+	s.mu.Lock()
+	seen := s.warnedTies[tie]
+	s.warnedTies[tie] = true
+	s.mu.Unlock()
+	if seen {
+		return
+	}
+	s.logger()("topologydrift: %d policies match the same subject (e.g. %s) and there is no defensible ordering between their selectors — applying %q; narrow one of %s to make this deterministic",
+		len(m.Competing), sub, m.Policy.ref(), tie)
+}
+
 // WithMeter directs Run to declare its §8.4 instruments against an externally
 // owned meter. Call before Run; nil is ignored.
 //
@@ -251,6 +303,14 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 			reqs = append(reqs, sources.Requirement{Group: r.group, Resource: r.resource, Verb: verb})
 		}
 	}
+	// FR-10's policies are deliberately absent. §11's access check is a
+	// coverage contract — it fails startup when a grant the source needs to do
+	// its job is missing — and the source does its whole job without ever
+	// reading a policy. Declaring them would turn an optional override into a
+	// startup prerequisite on every cluster, including the ones that never
+	// install the CRD, which is exactly the coupling keeping the CRD out of
+	// deploy/kustomization.yaml avoids. A missing grant is instead handled
+	// where it happens: the discovery gate in Run logs and continues.
 	return reqs
 }
 
@@ -344,6 +404,115 @@ func (s *Source) boundVolume(namespace, claim string) (*corev1.PersistentVolume,
 	return pv, true
 }
 
+// policyCRDsServed asks discovery which of the two policy kinds the cluster
+// serves. A discovery error — which is what an uninstalled CRD looks like,
+// since the whole group is absent — reads as "neither", because that is the
+// same observable state and the same correct behaviour.
+func (s *Source) policyCRDsServed() (namespaced, clusterScoped bool) {
+	resources, err := s.client.Discovery().ServerResourcesForGroupVersion(policyGV.String())
+	if err != nil || resources == nil {
+		return false, false
+	}
+	for _, r := range resources.APIResources {
+		switch r.Name {
+		case policyGVR.Resource:
+			namespaced = true
+		case clusterPolicyGVR.Resource:
+			clusterScoped = true
+		}
+	}
+	return namespaced, clusterScoped
+}
+
+// startPolicyWatch registers informers for whichever policy CRDs the cluster
+// serves and returns their sync barriers, or nothing at all.
+//
+// **Absent CRDs log and continue.** This is the opposite of the gateway
+// source, which returns an error when its CRD is missing, and the difference is
+// which way the silence points. There, the source was named explicitly or by a
+// discovery gate that would have skipped it, so an empty watch would be a
+// coverage lie. Here the source is default-on and complete without any policy:
+// refusing to start would make an optional override a prerequisite for a
+// cluster-wide watcher, and the operator who installs the CRD later gets it at
+// the next restart, which the manifest says out loud.
+//
+// The gate is evaluated once. Watching for the CRD itself to appear would mean
+// a second watch on apiextensions — a grant we would then need everywhere — to
+// save a restart on a one-off installation step.
+func (s *Source) startPolicyWatch(ctx context.Context) ([]cache.InformerSynced, error) {
+	if s.dyn == nil {
+		return nil, nil
+	}
+	namespaced, clusterScoped := s.policyCRDsServed()
+	if !namespaced && !clusterScoped {
+		s.logger()("topologydrift: %s not installed — placement intent is inferred only (apply deploy/crds/leewaypolicies.yaml and restart to declare it)", policyGV)
+		return nil, nil
+	}
+
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(s.dyn, 0)
+	var synced []cache.InformerSynced
+	for _, w := range []struct {
+		gvr           schema.GroupVersionResource
+		serve         bool
+		clusterScoped bool
+	}{
+		{policyGVR, namespaced, false},
+		{clusterPolicyGVR, clusterScoped, true},
+	} {
+		if !w.serve {
+			s.logger()("topologydrift: %s not served — %s policies ignored", w.gvr, w.gvr.Resource)
+			continue
+		}
+		scoped := w.clusterScoped
+		inf := factory.ForResource(w.gvr).Informer()
+		h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(obj any) { s.onPolicy(obj, scoped) },
+			UpdateFunc: func(_, obj any) { s.onPolicy(obj, scoped) },
+			DeleteFunc: func(obj any) { s.onPolicyDelete(obj) },
+		})
+		if err != nil {
+			return nil, fmt.Errorf("topologydrift: register %s handler: %w", w.gvr.Resource, err)
+		}
+		synced = append(synced, h.HasSynced)
+	}
+	factory.Start(ctx.Done())
+	return synced, nil
+}
+
+// onPolicy decodes and stores one policy object.
+//
+// A policy that does not decode is dropped with a log line and the previous
+// version of it, if any, is left in place. Replacing it with nothing would mean
+// a typo in one field silently reverts a subject to inferred intent — the
+// operator sees their policy stop applying and nothing tells them why. The
+// structural schema rejects most of this at admission; what reaches here is
+// what a schema cannot express, such as an all-zero expectedDistribution.
+func (s *Source) onPolicy(obj any, clusterScoped bool) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	p, err := DecodePolicy(u, clusterScoped)
+	if err != nil {
+		s.logger()("topologydrift: ignoring %s %s/%s: %v", u.GetKind(), u.GetNamespace(), u.GetName(), err)
+		return
+	}
+	s.policies.Upsert(p)
+}
+
+// onPolicyDelete removes a policy, resolving the tombstone the informer
+// delivers when it missed the delete itself.
+func (s *Source) onPolicyDelete(obj any) {
+	if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tomb.Obj
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	s.policies.Delete(u.GetNamespace(), u.GetName())
+}
+
 // evaluate is the coalesced per-subject callback.
 //
 // It resolves intent and eligibility and stores the result; it emits nothing.
@@ -363,7 +532,31 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 		// subject is forgotten outright once its last pod stops counting.
 		return
 	}
-	s.state.SetIntents(sub, Resolve(pod, s.inv, s.cfg.ClusterDefaultConstraints).Intents)
+	s.state.SetIntents(sub, Resolve(pod, s.inv, ResolveConfig{
+		ClusterDefaults: s.cfg.ClusterDefaultConstraints,
+		Policy:          s.policyFor(sub, pod),
+	}).Intents)
+}
+
+// policyFor picks the LeewayPolicy governing sub, or nil when none does — the
+// normal case, since the CRD is optional and most clusters never install it.
+//
+// The selector is matched against the *pod's* labels, not the workload's. The
+// source resolves subjects from pods and never reads the owning object, so a
+// label that exists only on the Deployment is not available to match; the pod
+// carries the template's labels plus the controller's own, which is a superset
+// of what a workload selector would offer anyway.
+func (s *Source) policyFor(sub leeway.SubjectRef, pod *corev1.Pod) *Policy {
+	m := s.policies.For(sub, pod.Labels)
+	if m.Ambiguous {
+		// Reported, not resolved: there is no honest ordering between two
+		// selectors, so the operator has to be told which one won rather than
+		// left to discover it from the intent it produced. Rate-limited,
+		// because this runs on every coalesced evaluation of a matched subject
+		// and the condition persists until someone edits a policy.
+		s.warnAmbiguous(sub, m)
+	}
+	return m.Policy
 }
 
 // subjectPod returns an admitted pod belonging to sub, for inference to read.
@@ -505,6 +698,11 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	// that a maxSkew is ours rather than theirs.
 	s.logger()("topologydrift: %s", DescribeClusterDefaults(s.cfg.ClusterDefaultConstraints))
 
+	policySynced, err := s.startPolicyWatch(ctx)
+	if err != nil {
+		return err
+	}
+
 	if err := s.startMetrics(); err != nil {
 		return err
 	}
@@ -522,9 +720,15 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 		defer factory.Shutdown()
 	}
 
-	if !cache.WaitForCacheSync(ctx.Done(),
+	// The policy barriers join the rest rather than being awaited separately:
+	// arming before they sync would run the first re-apply against inferred
+	// intent and then quietly correct it, so every subject a policy governs
+	// would publish one wrong intent_info sample at every restart.
+	synced := append([]cache.InformerSynced{
 		podH.HasSynced, nodeH.HasSynced, rsInformer.Informer().HasSynced,
-		pvcInformer.Informer().HasSynced, pvInformer.Informer().HasSynced) {
+		pvcInformer.Informer().HasSynced, pvInformer.Informer().HasSynced,
+	}, policySynced...)
+	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
 		return fmt.Errorf("topologydrift: cache sync failed (informer stopped before initial list completed)")
 	}
 

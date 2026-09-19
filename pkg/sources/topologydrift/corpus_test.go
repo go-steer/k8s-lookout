@@ -507,7 +507,7 @@ func TestCorpus_ResolvedIntentPerAxis(t *testing.T) {
 			// noClusterDefaults is the DECLARED EMPTY state, so nothing in this
 			// table can have its intent quietly supplied by FR-9. The cluster
 			// defaults have their own table below.
-			res := Resolve(tc.pod, inv, noClusterDefaults)
+			res := Resolve(tc.pod, inv, ResolveConfig{ClusterDefaults: noClusterDefaults})
 
 			checkIntents(t, res, tc.want)
 			if tc.eligible != nil {
@@ -608,7 +608,7 @@ func TestCorpus_ClusterDefaults(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			checkIntents(t, Resolve(tc.pod, threeZones(t), tc.defaults), tc.want)
+			checkIntents(t, Resolve(tc.pod, threeZones(t), ResolveConfig{ClusterDefaults: tc.defaults}), tc.want)
 		})
 	}
 }
@@ -632,7 +632,7 @@ func TestCorpus_ZonalVolumePinsAPodWithoutNarrowingItsIntent(t *testing.T) {
 		t.Error("a pod bound to a zonal disk did not read as pinned")
 	}
 
-	res := Resolve(pod, inv, noClusterDefaults)
+	res := Resolve(pod, inv, ResolveConfig{ClusterDefaults: noClusterDefaults})
 	if got, want := domains(res.Eligible[zoneKey]), []string{"zone-a", "zone-b", "zone-c"}; !slices.Equal(got, want) {
 		t.Errorf("eligible zones = %v, want %v — a pinned pod must not narrow the subject's eligible set", got, want)
 	}

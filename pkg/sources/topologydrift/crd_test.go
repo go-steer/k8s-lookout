@@ -254,6 +254,27 @@ func TestCRD_OmitsTheFieldsNoReleaseHonoursYet(t *testing.T) {
 	}
 }
 
+func TestCRD_ChartShipsTheSameFile(t *testing.T) {
+	// The chart serves the CRD from files/ rather than restating it, so there
+	// are two copies on disk and exactly one of them is written by hand. Byte
+	// equality is the cheap guarantee that `helm install --set
+	// leewayPolicyCRD.install=true` and `kubectl apply -f deploy/crds/` install
+	// the same schema — a divergence would mean the decoder's drift guard above
+	// is validating a document half the users never receive.
+	root := filepath.Join("..", "..", "..")
+	canonical, err := os.ReadFile(filepath.Join(root, "deploy", "crds", "leewaypolicies.yaml"))
+	if err != nil {
+		t.Fatalf("reading the canonical CRD: %v", err)
+	}
+	chart, err := os.ReadFile(filepath.Join(root, "deploy", "chart", "files", "leewaypolicies.yaml"))
+	if err != nil {
+		t.Fatalf("reading the chart's copy: %v", err)
+	}
+	if !bytes.Equal(canonical, chart) {
+		t.Error("deploy/chart/files/leewaypolicies.yaml has drifted from deploy/crds/leewaypolicies.yaml — copy the canonical file over it")
+	}
+}
+
 func TestCRD_ExampleFromTheDesignDocDecodes(t *testing.T) {
 	// The §10.1 worked example, which is also what the docs page shows. If it
 	// stops decoding, the documentation is wrong.
