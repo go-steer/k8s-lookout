@@ -1463,6 +1463,11 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				PerDomainSeries:           f.topologyPerDomain,
 			}
 			bs.topoDrift = topologydrift.New(client, cfg)
+			// Optional, unlike the gateway source's dynamic client, which is
+			// a hard requirement checked above. A nil client here just means
+			// no LeewayPolicy watch, which is the same state as a cluster
+			// that never installed the CRD — the common case.
+			bs.topoDrift.WithDynamic(dyn)
 			src = bs.topoDrift
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier

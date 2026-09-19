@@ -183,6 +183,9 @@ render_ok "rbac disabled"           --set rbac.create=false --set rbac.capacity=
 render_ok "serviceAccount external" --set serviceAccount.create=false --set serviceAccount.name=other
 render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
 render_ok "gke flavor"              --set image.flavor=gke
+# Off by default, so it never appears in the diffed render above — this is the
+# only check that the CRDs the chart serves from files/ are valid manifests.
+render_ok "leewayPolicyCRD.install" --set leewayPolicyCRD.install=true
 
 # serviceMonitor without a Service is a scrape target that silently
 # selects nothing; the chart refuses it, and this asserts the refusal.

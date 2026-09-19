@@ -166,7 +166,7 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	// Declared-empty defaults throughout. A fixture that is fine must be fine
 	// because of what its pods say, not because an assumed cluster default
 	// happened to supply a lenient maxSkew.
-	res := Resolve(f.rep, f.inv, noClusterDefaults)
+	res := Resolve(f.rep, f.inv, ResolveConfig{ClusterDefaults: noClusterDefaults})
 	out := fpResult{intent: res.Intents[key], eligible: res.Eligible[key]}
 
 	dist := leeway.NewDistribution()
@@ -180,9 +180,9 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 		caps = f.caps(out.eligible)
 	}
 
-	weighting, maxSkew := leeway.WeightEqual, (*int32)(nil)
+	var maxSkew *int32
 	if out.intent != nil {
-		weighting, maxSkew = out.intent.Weighting, out.intent.MaxSkew
+		maxSkew = out.intent.MaxSkew
 	}
 
 	var n int64
@@ -191,7 +191,10 @@ func scoreSubject(t *testing.T, f fpFixture, key leeway.TopologyKey) fpResult {
 	}
 
 	thresholds := leeway.DefaultThresholds()
-	out.ap = leeway.Apportion(n, out.eligible.Weights(weighting), caps)
+	// WeightsFor, not Weights(weighting): a policy's expectedDistribution
+	// replaces the weighting rule rather than parameterising it, and reading
+	// the weighting off the intent would silently ignore an explicit split.
+	out.ap = leeway.Apportion(n, out.eligible.WeightsFor(out.intent), caps)
 	out.scores = leeway.Score(out.eligible.Domains, actual, out.ap, maxSkew, thresholds)
 	out.breach, out.reason = out.scores.Breach(out.intent, thresholds)
 	return out

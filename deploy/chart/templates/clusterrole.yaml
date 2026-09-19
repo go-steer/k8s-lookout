@@ -83,6 +83,10 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
+  # Optional LeewayPolicy overrides (FR-10) — see deploy/12-clusterrole-watcher.yaml.
+  - apiGroups: ["leeway.lookout.go-steer.io"]
+    resources: ["leewaypolicies", "clusterleewaypolicies"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]

@@ -428,6 +428,51 @@ Four things, all load-bearing:
 
 - **FR-10** Allow explicit declaration of intent via CRD, overriding inference.
 
+  > **Shipped 2026-09-19 as `LeewayPolicy` / `ClusterLeewayPolicy`** (§10.1),
+  > `deploy/crds/leewaypolicies.yaml`, `helm --set leewayPolicyCRD.install=true`.
+  > Four decisions worth keeping:
+  >
+  > **Optional, which inverts the gateway source's precedent.** That source fails to
+  > start when its CRD is absent, because there the CRD is the whole subject. Here
+  > the CRD is an override on a default-on source that works completely without it,
+  > so an absent CRD logs one line and continues. The discovery gate is evaluated
+  > once at startup: watching for the CRD itself to appear would cost a watch on
+  > `apiextensions` — a grant every deployment would then carry — to save a restart
+  > on a one-off installation step.
+  >
+  > **Only the honoured subset is in the schema.** §10.1 also sketches `thresholds`,
+  > `baseline` and `exclusions`. A structural schema prunes what it does not declare,
+  > so shipping them ahead of the code that reads them would let an operator write a
+  > threshold, see it accepted, and believe it was in force. They are absent instead,
+  > which fails visibly; adding them later is additive.
+  >
+  > **Ambiguity is reported, not resolved.** A namespaced policy beats a
+  > cluster-scoped one — it names a smaller set of subjects outright — but between
+  > two policies at the same scope there is no honest ordering: "more specific
+  > selector" has no definition spanning a `matchLabels` set and an `Exists`
+  > expression. The store picks lexicographically, applies the winner *whole* with no
+  > per-key merging, and logs the tie once per competing set naming both policies.
+  >
+  > **The allowlist is applied before precedence.** A source excluded by
+  > `inference.sources` must not survive as demoted evidence either, because evidence
+  > is what a finding quotes to justify itself and quoting a term the policy said to
+  > disregard makes the finding unanswerable. The policy's own intent is never
+  > filtered by its own allowlist.
+  >
+  > **A defect found on the way in.** Precedence decides whose *description* of
+  > intent wins, but a `DoNotSchedule` maxSkew is not a description — it is a promise
+  > Kubernetes made at admission and kept regardless of who outranked it. A
+  > higher-precedence source expressing no bound was erasing it, silently downgrading
+  > a Tier A violation to an ordinary distributional observation; a policy outranks
+  > everything and carries no maxSkew, so FR-10 would have hit this on every subject
+  > that had both. The carry is narrow: a required podAntiAffinity's `MaxPerDomain`
+  > is an equally real promise and deliberately does *not* carry, because
+  > `HardContract()`'s only consumer pairs it with `ExcessSkew`, which is derived
+  > from `MaxSkew` alone — carrying the ceiling would report Tier A about a
+  > `ScheduleAnyway` bound Kubernetes never refused to exceed. Reporting it honestly
+  > needs `Breach` to compare it against the observed per-domain maximum, which is a
+  > scoring rule and belongs in Phase 4.
+
 **Measurement**
 
 - **FR-11** Compute per (subject × topology key): per-domain counts, observed
@@ -621,7 +666,7 @@ and the others are retained as evidence.
 > below its anti-affinity counterpart, so a subject declaring both on one key — a
 > contradiction the scheduler resolves by refusing to place the pod at all —
 > resolves here to the spread reading with the colocation kept as evidence. The
-> CRD's `inference.sources` list (§8.6) takes the same two additions.
+> CRD's `inference.sources` list (§10.1) takes the same two additions.
 
 The cluster-default source is split in two because S4 confirmed we cannot read the
 scheduler's configuration on managed GKE, so "the cluster default is X" is sometimes
@@ -2576,6 +2621,29 @@ spec:
 Per-workload annotation overrides remain the lightest-weight path:
 `leeway.lookout.go-steer.io/max-drift: "0.2"`.
 
+> **Shipped 2026-09-19 — and the shipped schema is a strict subset of the document
+> above.** `selector`, `subjectKinds`, `topologyKeys` (`key`, `mode`, `weighting`,
+> `expectedDistribution`) and `inference` (`enabled`, `sources`) are honoured.
+> `thresholds`, `baseline` and `exclusions` are **not in the CRD at all**, and that
+> is the point: a structural schema prunes undeclared fields, so writing one today
+> makes it visibly disappear rather than leaving an operator believing a threshold
+> is in force that nothing reads. They arrive with the code that honours them, which
+> is Phase 4's; adding a field to a structural schema is additive and safe.
+>
+> Two clarifications the worked example leaves open. `expectedDistribution` values
+> are **relative weights, not percentages** — they are normalised over whichever
+> named domains are currently eligible, so the `40/40/20` above keeps working after
+> `us-east-1c` is drained, and a domain that is eligible but unnamed is expected to
+> hold nothing. And an omitted `selector` matches **everything** in scope, which is
+> the opposite of how a workload's own selector reads an empty value; the selector
+> is matched against the **pod's** labels, since the source resolves subjects from
+> pods and never reads the owning workload object.
+
+See the FR-10 note in §4 for the precedence, ambiguity and discovery decisions, and
+`deploy/crds/leewaypolicies.yaml` for the shipped schema — the two duplicated
+`openAPIV3Schema` blocks, the enums and the defaults are all held to this package's
+decoder by `pkg/sources/topologydrift/crd_test.go`.
+
 ### 10.2 Source configuration
 
 Under the sentinel's existing source config:
@@ -2644,9 +2712,17 @@ startup instead of producing an empty watch. Most of this the sentinel already h
       verbs: [list, watch] }             # volume pinning, FR-8
   - { apiGroups: ["cloud.google.com"], resources: [computeclasses],
       verbs: [get, list, watch] }        # optional; source self-disables if absent
+#   The policy rule SHIPPED 2026-09-19 as list+watch (again no `get`: read
+#   through a dynamic informer). It is in the shipped ClusterRole and the chart,
+#   but deliberately NOT in the source's RequiredAccess() — the sentence at the
+#   top of this section is the reason to be careful here. §11's check fails
+#   startup on a missing declared grant, and the source does its whole job with
+#   no policy at all, so declaring it would turn an optional override into a
+#   cluster-wide prerequisite. A missing grant is handled where it happens
+#   instead: the discovery gate logs one line and continues.
   - { apiGroups: ["leeway.lookout.go-steer.io"],
       resources: [leewaypolicies, clusterleewaypolicies],
-      verbs: [get, list, watch] }        # optional
+      verbs: [list, watch] }             # optional; FR-10
 ```
 
 No write access to any workload or node.
@@ -2733,8 +2809,18 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   readers reporting consistent values; a black-holed OTLP endpoint yielding rising
   drop counts with flat heap and an unaffected `/metrics`.
 - **False-positive corpus** — a fixture set of clusters that are *fine* (unavoidable
-  skew, restricted eligibility, pinned volumes, mid-rollout). Reporting on any of them
-  is a test failure. Grows with every false positive found in production.
+  skew, restricted eligibility, pinned volumes below threshold, mid-rollout, small-n,
+  capped domains). Reporting on any of them is a test failure. Grows with every false
+  positive found in production.
+
+  *"Pinned volumes below threshold"* rather than "pinned volumes": the amendment to
+  FR-8 dropped `leeway.pinned_skew` as a kind and made pinning a `suspectedCause` on
+  `leeway.placement_drift`, so a pinned subject with real skew *does* report, at lower
+  severity. The corpus fixture is a pinned subject whose distribution is genuinely
+  sub-threshold; the case this bullet originally described — pinned and skewed, and
+  suppressed for it — is recorded separately as a test asserting that it breaches
+  today, so that whoever turns pinning-based suppression on moves the cluster into the
+  corpus rather than deleting the assertion.
 
 ### 12.1 The kwok harness
 
@@ -3303,7 +3389,7 @@ independent of 5.
 | **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**, S6 **closed unrun** (2026-09-17 — the selector grammar answered it); only S8 remains, and it does not gate Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
-| **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew | Correct intent on the scenario corpus; false-positive corpus clean |
+| **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |

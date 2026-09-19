@@ -38,6 +38,27 @@ type Resolution struct {
 	Eligible map[leeway.TopologyKey]leeway.Eligibility
 }
 
+// ResolveConfig is the cluster-level context an evaluation resolves against —
+// everything that is true of the deployment rather than of the pod.
+//
+// A struct rather than more positional parameters because this is the third
+// thing to arrive and it will not be the last: Phase 4 adds thresholds and a
+// baseline. Growing a parameter list makes every call site read as a row of
+// unlabelled arguments, and the two fields here are both nilable pointers, so
+// transposing them would compile.
+type ResolveConfig struct {
+	// ClusterDefaults is §5.2's three-state cluster default: nil for unknown,
+	// a pointer to an empty slice for "declared, and there are none", and a
+	// populated slice for declared constraints. The three are not
+	// interchangeable — see DescribeClusterDefaults.
+	ClusterDefaults *[]corev1.TopologySpreadConstraint
+
+	// Policy is the LeewayPolicy governing this subject, or nil. Nil is the
+	// normal case and not a degraded one: the CRD is optional and most
+	// clusters never install it.
+	Policy *Policy
+}
+
 // Resolve infers a subject's placement intent from one admitted pod and
 // computes the eligible domains that intent is scored against.
 //
@@ -55,7 +76,7 @@ type Resolution struct {
 // §5.1 precedence decides every cross-source case on its own. They are
 // concatenated TSC-first anyway so that a reader of the candidate list sees the
 // same order §5.1 lists.
-func Resolve(pod *corev1.Pod, inv *Inventory, clusterDefaults *[]corev1.TopologySpreadConstraint) Resolution {
+func Resolve(pod *corev1.Pod, inv *Inventory, cfg ResolveConfig) Resolution {
 	res := Resolution{
 		Intents:  map[leeway.TopologyKey]*leeway.Intent{},
 		Eligible: map[leeway.TopologyKey]leeway.Eligibility{},
@@ -71,7 +92,21 @@ func Resolve(pod *corev1.Pod, inv *Inventory, clusterDefaults *[]corev1.Topology
 	// is the scheduler's own rule and the reason a wrong assumption about the
 	// defaults cannot reach a workload that expressed intent. Filtered to the
 	// counted axes, unlike every other source here — see onlyTrackedAxes.
-	candidates = append(candidates, onlyTrackedAxes(ClusterDefaultIntents(pod, clusterDefaults), inv)...)
+	candidates = append(candidates, onlyTrackedAxes(ClusterDefaultIntents(pod, cfg.ClusterDefaults), inv)...)
+
+	// The allowlist is applied before precedence, not after. A source the
+	// operator excluded must not survive as demoted evidence either: evidence
+	// is what a finding quotes back to justify itself, and quoting a term the
+	// policy said to disregard would make the finding unanswerable. Never
+	// filters the policy's own intent — see filterBySources.
+	if cfg.Policy != nil {
+		candidates = filterBySources(candidates, cfg.Policy.Inference)
+		// Appended last so that on a tie ResolveIntents' input order does not
+		// decide it; SourcePolicyCRD outranks every other source outright, so
+		// position cannot matter, and putting it here keeps the inferred
+		// candidates in the order §5.1 lists them.
+		candidates = append(candidates, cfg.Policy.Intents()...)
+	}
 	res.Intents = leeway.ResolveIntents(candidates)
 
 	constraints := ConstraintsOf(pod)

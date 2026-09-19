@@ -79,6 +79,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ask what fraction of a fleet's intent rests on a guess by grouping
   `lookout_leeway_intent_info` on `source`, and drive it to zero by declaring.
 
+- **`LeewayPolicy` and `ClusterLeewayPolicy`: declare a workload's intended
+  placement instead of letting it be inferred.** Two optional CRDs, sharing one
+  schema and differing only in scope. A policy selects workloads by pod label
+  and states, per topology axis, whether they should spread or colocate, how
+  the expectation is apportioned across domains, and — when a rule will not do
+  — the explicit split it wants:
+
+  ```yaml
+  spec:
+    selector: { matchLabels: { app: api } }
+    topologyKeys:
+      - key: topology.kubernetes.io/zone
+        mode: Spread
+        expectedDistribution: { us-east-1a: 40, us-east-1b: 40, us-east-1c: 20 }
+  ```
+
+  Those numbers are **relative weights, not percentages**: they are normalised
+  over whichever named domains are currently eligible, so the split above keeps
+  working after `us-east-1c` is drained rather than expecting 20% of the
+  replicas in a zone that can hold none. A domain that is eligible but unnamed
+  is expected to hold nothing. `inference.enabled: false` makes the policy a
+  subject's *only* intent, and `inference.sources` narrows which of the nine
+  inference sources may contribute — applied before precedence, so an excluded
+  source does not linger as evidence either.
+
+  **Installing them is a separate, optional step**, and not installing them is
+  the normal deployment: `kubectl apply -f deploy/crds/leewaypolicies.yaml`, or
+  `--set leewayPolicyCRD.install=true` for the chart. The source infers intent
+  perfectly well without them; it discovers the CRDs once at startup and logs
+  one line when they are absent. The ClusterRole grants `list`/`watch` on both
+  kinds either way — inert where the CRDs do not exist, and it means enabling
+  them later is one step rather than two. **Operators who copied the ClusterRole
+  into their own manifests do not need to change anything** unless they want
+  policies; the grant is deliberately not part of the source's startup access
+  check, precisely so an optional override cannot become a prerequisite.
+
+  Enabling the CRDs against an already-running watcher takes effect at its next
+  restart, because the discovery gate is evaluated once. Watching for the CRD
+  itself to appear would mean a permanent watch on `apiextensions` — a grant
+  every deployment would then carry — to save a restart on a one-off step.
+
+  The schema contains only what this release honours. The design also sketches
+  `thresholds`, `baseline` and `exclusions`; those are **absent rather than
+  accepted-and-ignored**, so writing one today is visibly pruned by the API
+  server instead of leaving you believing a threshold is in force that nothing
+  reads.
+
+  If two policies at the same scope match one workload there is no honest
+  ordering between their selectors, so lookout does not invent one: a
+  namespaced policy beats a cluster-scoped one, and beyond that the
+  lexicographically first wins, applies *whole*, and the tie is logged once
+  naming both policies so you can narrow one.
+
+  **This still emits nothing.** Like the rest of the source, policies feed the
+  `lookout_leeway_intent_info` series and no findings.
+
 - **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
   Instruments declared on the OTel metric API are exported twice from one
   declaration: into the Prometheus registry `/metrics` already serves — same
@@ -301,6 +357,16 @@ reader to look at pods that by definition were never created.
   a detection miss rather than a misconfiguration.
 
 ### Fixed
+
+- A scheduler-enforced `DoNotSchedule` skew bound is no longer erased by a
+  higher-precedence description of the same axis. Precedence decides whose
+  account of a workload's intent wins, but a `DoNotSchedule` `maxSkew` is not
+  an account of anything — it is a promise Kubernetes made when it admitted the
+  pod, and it held regardless of who outranked it. A winning source that
+  expressed no bound of its own was dropping it, which quietly turns a broken
+  guarantee into an ordinary distributional observation. Nothing emits findings
+  yet, so no release ever misreported one; the fix lands with the policy CRD,
+  which is the change that would have made it reachable on every workload.
 
 - A cluster whose authorizer refuses a required permission is no longer
   restarted forever (#383). The supervisor classified every runner exit

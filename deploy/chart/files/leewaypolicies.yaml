@@ -1,0 +1,323 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LeewayPolicy / ClusterLeewayPolicy — explicit placement intent for the
+# topology-drift source (leeway design doc FR-10, §10.1).
+#
+# **Optional, and deliberately not part of `deploy/kustomization.yaml`.**
+# Inference works with no CRD installed and that is the normal deployment;
+# lookout is not otherwise a CRD-installing product, so nothing here is a
+# prerequisite. Install it only if you want to override what the source infers:
+#
+#   kubectl apply -f deploy/crds/leewaypolicies.yaml
+#
+# The watcher discovers the CRDs at startup. Installing them after the watcher
+# is already running takes effect at its next restart, because the discovery
+# gate is evaluated once — see the source's package documentation.
+#
+# The two kinds share a schema and differ only in scope. A LeewayPolicy applies
+# to subjects in its own namespace and takes precedence over a
+# ClusterLeewayPolicy that also matches.
+#
+# The schema below is only what the current release honours. The design also
+# sketches `thresholds`, `baseline` and `exclusions`, which belong to later
+# phases; they are absent rather than accepted-and-ignored, so that writing one
+# today fails visibly (a structural schema prunes what it does not declare)
+# instead of leaving you believing a threshold is in force that nothing reads.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: leewaypolicies.leeway.lookout.go-steer.io
+spec:
+  group: leeway.lookout.go-steer.io
+  scope: Namespaced
+  names:
+    kind: LeewayPolicy
+    listKind: LeewayPolicyList
+    plural: leewaypolicies
+    singular: leewaypolicy
+    shortNames: [lwp]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Keys
+          type: string
+          jsonPath: .spec.topologyKeys[*].key
+        - name: Inference
+          type: boolean
+          jsonPath: .spec.inference.enabled
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                selector:
+                  description: >-
+                    Which workloads this policy governs. Matched against the
+                    pod's labels, which are the template's labels plus
+                    controller-added ones such as pod-template-hash — the
+                    source resolves subjects from pods and never reads the
+                    owning workload object, so a label that exists only on the
+                    Deployment will not match. Omitting the selector matches
+                    every workload in scope, which is the opposite of how a
+                    workload's own selector reads an empty value.
+                  type: object
+                  x-kubernetes-map-type: atomic
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      items:
+                        type: object
+                        required: [key, operator]
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                subjectKinds:
+                  description: >-
+                    Restrict the policy to these subject kinds. Omit for all.
+                  type: array
+                  items:
+                    type: string
+                    minLength: 1
+                topologyKeys:
+                  description: >-
+                    Declared intent per topology axis. A key listed here
+                    overrides anything inferred on that axis; axes not listed
+                    are still inferred unless inference is disabled.
+                  type: array
+                  items:
+                    type: object
+                    required: [key]
+                    properties:
+                      key:
+                        type: string
+                        minLength: 1
+                      mode:
+                        type: string
+                        enum: [Spread, Colocate, Ignore]
+                        default: Spread
+                      weighting:
+                        description: >-
+                          How expected share is apportioned across eligible
+                          domains when expectedDistribution is not given.
+                        type: string
+                        enum: [Equal, NodeCount, AllocatableCPU, AllocatableMemory]
+                        default: Equal
+                      expectedDistribution:
+                        description: >-
+                          Relative weights per domain — not percentages and not
+                          counts, so they need not sum to anything in
+                          particular. Normalised over whichever named domains
+                          are eligible, so naming a zone that has since been
+                          drained keeps working on the zones that remain. A
+                          domain that is eligible but unnamed is expected to
+                          hold nothing. At least one weight must be non-zero,
+                          and the field cannot be combined with mode Ignore.
+                        type: object
+                        additionalProperties:
+                          type: integer
+                          minimum: 0
+                  x-kubernetes-list-map-keys: [key]
+                  x-kubernetes-list-type: map
+                inference:
+                  type: object
+                  properties:
+                    enabled:
+                      description: >-
+                        False means this policy is the subject's only intent:
+                        axes it does not declare have no intent at all, rather
+                        than an inferred one.
+                      type: boolean
+                      default: true
+                    sources:
+                      description: >-
+                        An allowlist over the inference sources. Omit for all
+                        of them; an empty list admits none. It applies to every
+                        source, so enumerating the pod-level ones also excludes
+                        the cluster defaults.
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - WorkloadAnnotation
+                          - TopologySpreadConstraint
+                          - PodAntiAffinityRequired
+                          - PodAffinityRequired
+                          - ClusterDefaultDeclared
+                          - ClusterDefaultAssumed
+                          - PodAntiAffinityPreferred
+                          - PodAffinityPreferred
+                          - LearnedBaseline
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterleewaypolicies.leeway.lookout.go-steer.io
+spec:
+  group: leeway.lookout.go-steer.io
+  scope: Cluster
+  names:
+    kind: ClusterLeewayPolicy
+    listKind: ClusterLeewayPolicyList
+    plural: clusterleewaypolicies
+    singular: clusterleewaypolicy
+    shortNames: [clwp]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Keys
+          type: string
+          jsonPath: .spec.topologyKeys[*].key
+        - name: Inference
+          type: boolean
+          jsonPath: .spec.inference.enabled
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                selector:
+                  description: >-
+                    Which workloads this policy governs. Matched against the
+                    pod's labels, which are the template's labels plus
+                    controller-added ones such as pod-template-hash — the
+                    source resolves subjects from pods and never reads the
+                    owning workload object, so a label that exists only on the
+                    Deployment will not match. Omitting the selector matches
+                    every workload in scope, which is the opposite of how a
+                    workload's own selector reads an empty value.
+                  type: object
+                  x-kubernetes-map-type: atomic
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      items:
+                        type: object
+                        required: [key, operator]
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                subjectKinds:
+                  description: >-
+                    Restrict the policy to these subject kinds. Omit for all.
+                  type: array
+                  items:
+                    type: string
+                    minLength: 1
+                topologyKeys:
+                  description: >-
+                    Declared intent per topology axis. A key listed here
+                    overrides anything inferred on that axis; axes not listed
+                    are still inferred unless inference is disabled.
+                  type: array
+                  items:
+                    type: object
+                    required: [key]
+                    properties:
+                      key:
+                        type: string
+                        minLength: 1
+                      mode:
+                        type: string
+                        enum: [Spread, Colocate, Ignore]
+                        default: Spread
+                      weighting:
+                        description: >-
+                          How expected share is apportioned across eligible
+                          domains when expectedDistribution is not given.
+                        type: string
+                        enum: [Equal, NodeCount, AllocatableCPU, AllocatableMemory]
+                        default: Equal
+                      expectedDistribution:
+                        description: >-
+                          Relative weights per domain — not percentages and not
+                          counts, so they need not sum to anything in
+                          particular. Normalised over whichever named domains
+                          are eligible, so naming a zone that has since been
+                          drained keeps working on the zones that remain. A
+                          domain that is eligible but unnamed is expected to
+                          hold nothing. At least one weight must be non-zero,
+                          and the field cannot be combined with mode Ignore.
+                        type: object
+                        additionalProperties:
+                          type: integer
+                          minimum: 0
+                  x-kubernetes-list-map-keys: [key]
+                  x-kubernetes-list-type: map
+                inference:
+                  type: object
+                  properties:
+                    enabled:
+                      description: >-
+                        False means this policy is the subject's only intent:
+                        axes it does not declare have no intent at all, rather
+                        than an inferred one.
+                      type: boolean
+                      default: true
+                    sources:
+                      description: >-
+                        An allowlist over the inference sources. Omit for all
+                        of them; an empty list admits none. It applies to every
+                        source, so enumerating the pod-level ones also excludes
+                        the cluster defaults.
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - WorkloadAnnotation
+                          - TopologySpreadConstraint
+                          - PodAntiAffinityRequired
+                          - PodAffinityRequired
+                          - ClusterDefaultDeclared
+                          - ClusterDefaultAssumed
+                          - PodAntiAffinityPreferred
+                          - PodAffinityPreferred
+                          - LearnedBaseline

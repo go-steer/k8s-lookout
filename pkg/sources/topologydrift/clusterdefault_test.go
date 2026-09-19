@@ -158,9 +158,9 @@ func TestResolve_ClusterDefaultLosesToThePodsOwnIntent(t *testing.T) {
 	// ClusterDefaultIntents returns nothing here in the first place. Either
 	// mechanism alone would pass this; both are meant to hold.
 	res := Resolve(tscPod(zoneSpread(1, corev1.DoNotSchedule)), threeZones(t),
-		declaredDefaults(corev1.TopologySpreadConstraint{
+		ResolveConfig{ClusterDefaults: declaredDefaults(corev1.TopologySpreadConstraint{
 			TopologyKey: string(zoneKey), MaxSkew: 9, WhenUnsatisfiable: corev1.ScheduleAnyway,
-		}))
+		})})
 
 	in := res.Intents[zoneKey]
 	if in == nil {
@@ -178,7 +178,7 @@ func TestResolve_AssumedDefaultReachesABarePod(t *testing.T) {
 	// The population cluster defaults exist for: a workload that declared
 	// nothing at all still gets an expectation, and the expectation says
 	// openly that nobody asked for it.
-	res := Resolve(barePod(), threeZones(t), nil)
+	res := Resolve(barePod(), threeZones(t), ResolveConfig{ClusterDefaults: nil})
 
 	in := res.Intents[zoneKey]
 	if in == nil {
@@ -202,7 +202,7 @@ func TestResolve_AnAssumedDefaultOnAnUntrackedAxisStaysOffTheWire(t *testing.T) 
 	// axis this source counts by default. An intent nobody declared, on an
 	// axis nobody scores, would be a series on every subject in the cluster
 	// and nothing else — see onlyTrackedAxes.
-	res := Resolve(barePod(), threeZones(t), nil)
+	res := Resolve(barePod(), threeZones(t), ResolveConfig{ClusterDefaults: nil})
 
 	if _, ok := res.Intents[leeway.TopologyKey(corev1.LabelHostname)]; ok {
 		t.Error("an assumed cluster default reached intent_info on an untracked axis")

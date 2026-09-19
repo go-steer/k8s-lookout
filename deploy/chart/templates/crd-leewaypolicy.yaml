@@ -1,0 +1,16 @@
+{{- if .Values.leewayPolicyCRD.install }}
+# SOURCE OF TRUTH: deploy/crds/leewaypolicies.yaml, served here verbatim from
+# files/ rather than restated — held byte-identical by
+# TestCRD_ChartShipsTheSameFile in pkg/sources/topologydrift/crd_test.go.
+#
+# Off by default, and the only template in this chart that is. Everything else
+# here is part of running the sentinel; these CRDs are an optional override on
+# one source, and a chart that installs cluster-scoped API types by default
+# would make `helm install` a bigger ask than the thing it deploys.
+#
+# Helm's own crds/ directory would install these unconditionally and then never
+# upgrade them, which is the wrong pair of behaviours for a schema in v1alpha1.
+# As a template they are conditional and they do upgrade — at the cost of being
+# deleted on `helm uninstall`, along with any policy objects stored in them.
+{{ .Files.Get "files/leewaypolicies.yaml" }}
+{{- end }}
