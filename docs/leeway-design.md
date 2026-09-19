@@ -2609,6 +2609,43 @@ bind harder still, per the paragraph above.
 }
 ```
 
+> **Shipped 2026-09-19 as `leeway.NewFinding`.** The example above is a test,
+> asserted byte for byte, with three deliberate departures.
+>
+> **`kind` is not a constant.** The example shows `leeway.placement_drift`
+> because the example is Tier B; §2.3 gives Tier A `leeway.contract_violated` and
+> Tier C `leeway.baseline_breach`. `FindingKind` lets the **tier lead**, so kind and
+> tier can never disagree — one combination is otherwise structurally reachable,
+> because a learned-baseline intent is not an assumed cluster default, so it
+> satisfies `declaredContract` and could in principle carry a `MaxSkew` and fire a
+> contract rule. §8.1 has already decided that case is Tier C, and the kind has to
+> follow rather than claim a contract nobody declared. Within Tier C the intent
+> source decides, because the two Tier C cases measured different things: a learned
+> baseline is a deviation from the subject's own history, while a subject with *no*
+> intent was scored against an apportioned expectation, which is placement drift —
+> less confident than Tier B's, the same observation. `leeway.domain_unavailable`
+> is reachable from no verdict at all and the source raises it directly.
+>
+> **`source` and `confidence` ship kebab-case** — `pod-anti-affinity-preferred`,
+> `inferred` — not as the Go identifiers written above. Those spellings are already
+> the §8.4 `intent_info` labels, and one fact should not have two names.
+> (`weighting` is `AllocatableCPU` in both, which is inconsistent with its two
+> neighbours and is left alone: it is a shipped label.)
+>
+> **`score` is a projection, not `Scores`.** χ², concentration and the gate reason
+> stay in metrics and the debugger. Freezing the payload against the internal
+> struct would make every future scoring field a wire change.
+>
+> Two fields the draft did not have: `transient` and `relaxed`, both omitted when
+> empty. A subject that breached *through* a rollout is a stronger finding than one
+> that breached on a quiet cluster, and nothing else in the payload says which
+> happened. `firstSeenAt` is read from the §8.2 dwell state and normalised to UTC,
+> so a re-emitted finding still reports when the *episode* started and two
+> sentinels cannot disagree about when that was.
+>
+> The payload is built whether or not it will be emitted; `Route` decides that
+> separately, so a suppressed subject can still be rendered for a dry run.
+
 Cause attribution is a small rules engine over evidence we already hold. These are
 `suspectedCause` values, a separate namespace from the §2.3 kinds — which is why
 `domain_outage` survives here while the kind it once named became
