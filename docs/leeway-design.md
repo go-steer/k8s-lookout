@@ -2356,6 +2356,27 @@ info-severity `notifications` signals already get. It also means the default
 deployment adds approximately zero agent sessions, which is the property that makes
 enabling leeway by default defensible.
 
+> **Shipped 2026-09-19 as `leeway.Verdict.Route`.** The table above is mostly not
+> leeway's to implement, and saying so out loud shrank the type to four lines.
+> "A injects, B reaches the watchboard, C is stored only" *is* DESIGN §7.7's
+> per-severity policy, which already does that for every other source; leeway does
+> not get a second delivery mechanism, it gets a severity. Tier B's storm-correlated
+> inject is likewise the correlator's decision downstream.
+>
+> What is genuinely ours is the one row §7.7 cannot express: **Tier C is metrics
+> only unless a policy opts in.** Nothing in a severity table can say "do not emit
+> at all", so that has to be decided before emitting, and it is the whole of
+> `Delivery`. The fourth row needs no code either — tool SLIs are §8.4 counters and
+> never become a `Verdict`, so "never a Signal" is enforced by there being no path
+> from one to the other rather than by a branch that could be got wrong.
+>
+> **A §7.6 suppression is metrics-only at every tier, Tier A included.** That is
+> §14's exit criterion stated as a routing rule: a zone going away puts four hundred
+> workloads in breach of spread contracts they each genuinely declared, and Tier A is
+> precisely the tier that would otherwise open four hundred agent sessions about one
+> fact. A *relaxation* is the opposite and changes nothing here — it decides whether
+> a subject breached, never what happens once it has.
+
 ### 8.4 Metrics and the export pipeline
 
 ```
@@ -2610,6 +2631,49 @@ Several of these are already available from sibling sources — `capacity` owns 
 stockout and pending-pod aging, `objectstate` owns node Ready transitions. Attribution
 should consume those signals rather than re-derive them; that is what one shared
 pipeline is for.
+
+> **Shipped 2026-09-19 as `leeway.Scores.Attribute`.** The sibling-source rule is
+> enforced by the input type: `Evidence` is a plain struct of other people's
+> observations, so the rules engine has no way to re-derive anything and the whole
+> of it runs without a cluster, a clock or an informer.
+>
+> **The table's rows are not mutually exclusive, so the order matters, and the
+> worked example above is what fixes it.** A domain falling 12 → 3 with nothing
+> `NotReady` is attributed there to `domain_capacity_shortfall`, not
+> `domain_outage` — so the line between those two is **presence, not magnitude**:
+> the nine nodes did not break, they left. Read that way the outage row's two
+> signals are one condition seen twice, because when nine of twelve nodes go
+> `NotReady` the ready count falls sharply *and* the `NotReady` census passes half.
+> Testing the census is the form that also answers when there is no history to have
+> watched the fall, the process having started after the zone was already down.
+>
+> "At least half" is §7.6's own line, reused rather than re-tuned. A finding that
+> suppressed at one threshold and attributed at another would be incoherent, and
+> the two are not in conflict: §7.6's suppression is windowed, and when it lapses
+> with the domain still down, the finding fires and this is why.
+>
+> The ladder is therefore the under-filled side first, **most specific mechanism
+> downwards, with `domain_capacity_shortfall` as their catch-all**; then the
+> over-filled side (`volume_pinning`); then history (`rollout_bias`); then policy.
+> Consolidation has to outrank the shortfall it is indistinguishable from —
+> both show up as a domain that lost ready nodes, and "the autoscaler removed it"
+> is a different remedy from "there aren't enough" even though the number that
+> moved is the same. `constraint_ignored` comes last for the mirror reason: it says
+> nothing malfunctioned and you permitted this, which is only the answer once no
+> mechanism is available to be the answer instead.
+>
+> Every rule here but pinning asks about an *under-filled* domain. Drift has two
+> ends and the causes are not interchangeable between them — nodes failing in the
+> domain holding the surplus would push objects away, not draw them in.
+>
+> **The cause is singular; the evidence is not.** `contributingFactors` is built in
+> a fixed order independent of which rule won, so two findings on one subject an
+> hour apart diff cleanly, and the losing hypotheses still get a line. That is also
+> why the worked example carries "0 pods pinned by zonal volumes" in a finding that
+> is not about pinning: a ruled-out hypothesis is what turns "we think it was
+> capacity" into "we think it was capacity, and here is what it wasn't". Per-domain
+> fall lines are capped at three — a forty-zone cluster losing nodes everywhere is
+> one story, not forty — while every domain still gets its own `note`.
 
 ---
 
