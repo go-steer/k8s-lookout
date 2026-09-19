@@ -19,11 +19,18 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 )
+
+// DefaultReadyRetention is how far back SampleReady keeps ready-node samples
+// when the caller asks for nothing in particular. Twice §7.6's default outage
+// window, so that the peak a domain outage is measured against is still in the
+// series when the window is at its widest.
+const DefaultReadyRetention = 30 * time.Minute
 
 // betaFallback maps a topology key to the deprecated beta label carrying the
 // same value.
@@ -52,6 +59,19 @@ type DomainStats struct {
 	// place anything, which is a finding rather than an absence.
 	Usable int64
 
+	// Ready is the nodes reporting Ready, cordoned or not.
+	//
+	// A third count rather than a reuse of Usable, because §7.6 asks two
+	// different questions of a shrinking domain and answers them oppositely. A
+	// domain whose nodes went NotReady is an *outage*: the counts describe a
+	// cluster that is not the one the expectation was apportioned over, so
+	// workload findings are suppressed and one domain finding is raised
+	// instead. A domain whose nodes were cordoned is a *drain*: the counts are
+	// correct and merely mid-move, so the thresholds relax. Usable cannot tell
+	// them apart — it falls either way — so the outage test reads Ready and
+	// the drain test reads cordon times.
+	Ready int64
+
 	// Allocatable sums over usable nodes only, for capacity weighting (§7.2).
 	// Summing over all nodes would expect pods into capacity that cannot
 	// receive them.
@@ -72,6 +92,13 @@ type nodeFacts struct {
 	labels      map[string]string
 	cpuMilli    int64
 	memBytes    int64
+
+	// cordonedAt is when this node last became unschedulable, or the zero time
+	// if it never has within this process's memory. It survives an uncordon on
+	// purpose: §7.6's drain row asks whether a node *became* unschedulable
+	// recently, and the pods a completed drain evicted are still landing for
+	// some minutes after the node is handed back.
+	cordonedAt time.Time
 }
 
 // Change describes what a node event actually altered, so the caller can do the
@@ -118,7 +145,14 @@ type Inventory struct {
 	intern   *interner
 	nodes    map[string]*nodeFacts
 	stats    []map[leeway.Domain]*DomainStats // indexed by ordinal
+	ready    []map[leeway.Domain][]leeway.ReadyCount
 	gen      uint64
+
+	// now is the clock, overridden in tests. Held because Upsert dates a cordon
+	// it watched happen, and threading a timestamp through every node event for
+	// the one case that needs it would put a clock in the signature of the
+	// hottest call in the package.
+	now func() time.Time
 }
 
 // NewInventory returns an inventory tracking the given topology keys.
@@ -133,6 +167,7 @@ func NewInventory(keys []leeway.TopologyKey) *Inventory {
 		intern:   newInterner(),
 		nodes:    make(map[string]*nodeFacts),
 		gen:      1,
+		now:      time.Now,
 	}
 	for _, k := range keys {
 		if k == "" {
@@ -144,6 +179,7 @@ func NewInventory(keys []leeway.TopologyKey) *Inventory {
 		inv.ordinals[k] = len(inv.keys)
 		inv.keys = append(inv.keys, k)
 		inv.stats = append(inv.stats, make(map[leeway.Domain]*DomainStats))
+		inv.ready = append(inv.ready, make(map[leeway.Domain][]leeway.ReadyCount))
 	}
 	return inv
 }
@@ -192,11 +228,14 @@ func (inv *Inventory) Upsert(node *corev1.Node) Change {
 	next := inv.factsOf(node)
 	prev, known := inv.nodes[next.name]
 	if !known {
+		next.cordonedAt = cordonTime(nil, next, inv.now())
 		inv.nodes[next.name] = next
 		inv.addStats(next, +1)
 		inv.gen++
 		return Change{Added: true, DomainsChanged: true, EligibilityChanged: true}
 	}
+
+	next.cordonedAt = cordonTime(prev, next, inv.now())
 
 	var ch Change
 	if !slices.Equal(prev.domains, next.domains) {
@@ -321,6 +360,160 @@ func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighti
 	return views
 }
 
+// SampleReady records every domain's current ready-node count on every axis,
+// and forgets samples older than retain (DefaultReadyRetention when zero).
+//
+// A periodic sample rather than an append-on-change log, which is a
+// correctness decision and not a storage one. §7.6 compares a domain's ready
+// count against its *peak over the window*, and an edge log holds only the
+// value in force after each change. A zone that sat at thirty ready nodes for
+// a week and then lost all of them would have exactly two entries: one a week
+// old, outside the window and therefore unread, and one fresh entry reading
+// zero. The peak would come out zero and the outage would be invisible
+// precisely because it was total. A uniform series always carries the
+// pre-outage value until it ages out honestly.
+//
+// Nothing here is a metric. The series exists only to answer one boolean per
+// domain, and the counts it samples are already exported by §7.4's
+// domain_ready_nodes.
+func (inv *Inventory) SampleReady(now time.Time, retain time.Duration) {
+	if retain <= 0 {
+		retain = DefaultReadyRetention
+	}
+	cutoff := now.Add(-retain)
+
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	for ordinal := range inv.keys {
+		hist := inv.ready[ordinal]
+		for d, s := range inv.stats[ordinal] {
+			hist[d] = append(pruneReady(hist[d], cutoff), leeway.ReadyCount{At: now, Ready: s.Ready})
+		}
+		// A domain with no nodes left is no longer sampled, so its series would
+		// otherwise sit there forever. Drop it once the last sample has aged
+		// out — not before, because a domain that lost its final node one
+		// minute ago is the most interesting series in the inventory.
+		for d, h := range hist {
+			if _, live := inv.stats[ordinal][d]; live {
+				continue
+			}
+			if h = pruneReady(h, cutoff); len(h) == 0 {
+				delete(hist, d)
+			} else {
+				hist[d] = h
+			}
+		}
+	}
+}
+
+// ReadyHistory returns the retained ready-node samples for one domain, oldest
+// first, in the shape leeway.TransientConfig.DomainOutage consumes.
+func (inv *Inventory) ReadyHistory(key leeway.TopologyKey, d leeway.Domain) []leeway.ReadyCount {
+	ordinal, ok := inv.Ordinal(key)
+	if !ok {
+		return nil
+	}
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	return slices.Clone(inv.ready[ordinal][d])
+}
+
+// LastDrainIn is the most recent time a node in any of the given domains became
+// unschedulable, or the zero time if none did.
+//
+// Scoped by domain rather than by node because that is the only scoping
+// available: leeway.Eligibility carries the domains a subject may use and not
+// the nodes in them (§7.1). That is the right scope anyway — a drain narrow
+// enough to miss every domain a subject can reach cannot have moved its pods,
+// and a drain that empties a whole domain removes it from the eligible set, at
+// which point §7.1 re-apportions rather than §7.6 relaxing.
+func (inv *Inventory) LastDrainIn(key leeway.TopologyKey, domains []leeway.Domain) time.Time {
+	ordinal, ok := inv.Ordinal(key)
+	if !ok || len(domains) == 0 {
+		return time.Time{}
+	}
+	want := make(map[leeway.Domain]bool, len(domains))
+	for _, d := range domains {
+		want[d] = true
+	}
+
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	var last time.Time
+	for _, n := range inv.nodes {
+		if n.cordonedAt.IsZero() || !want[n.domain(ordinal)] {
+			continue
+		}
+		if n.cordonedAt.After(last) {
+			last = n.cordonedAt
+		}
+	}
+	return last
+}
+
+// pruneReady drops the leading samples at or before cutoff, in place.
+//
+// At or before, matching DomainOutage's strict After: a sample the peak scan
+// will never read is not history, it is memory. In place rather than by
+// reslicing, so the backing array stays bounded by the retention window
+// instead of growing for the life of the process.
+func pruneReady(h []leeway.ReadyCount, cutoff time.Time) []leeway.ReadyCount {
+	i := 0
+	for i < len(h) && !h[i].At.After(cutoff) {
+		i++
+	}
+	if i == 0 {
+		return h
+	}
+	return h[:copy(h, h[i:])]
+}
+
+// cordonTime dates a node's cordon, preferring the kubelet's answer to ours.
+//
+// The taint's TimeAdded is the API server's own record of when the node became
+// unschedulable and is the only source that survives a restart of this process.
+// Where it is missing — an operator that sets spec.unschedulable without the
+// taint, or a very old cluster — the next best answer is the moment we watched
+// the flip.
+//
+// A node first seen *already* cordoned gets the zero time rather than now.
+// Guessing "now" would mean every restart relaxed the thresholds of every
+// subject eligible for a domain containing one long-forgotten cordoned node,
+// for a whole drain window, and a suppression that switches itself on at
+// startup is worse than one that under-reports.
+func cordonTime(prev, next *nodeFacts, now time.Time) time.Time {
+	var prior time.Time
+	if prev != nil {
+		prior = prev.cordonedAt
+	}
+	if next.schedulable {
+		return prior
+	}
+	if t := taintTime(next.taints); t != nil {
+		return *t
+	}
+	switch {
+	case prev == nil:
+		return time.Time{}
+	case !prev.schedulable:
+		// Still cordoned: the clock started when it went, not now.
+		return prior
+	default:
+		return now
+	}
+}
+
+// taintTime reads the unschedulable taint's TimeAdded, or nil if the taint is
+// absent or undated.
+func taintTime(taints []corev1.Taint) *time.Time {
+	for _, t := range taints {
+		if t.Key == corev1.TaintNodeUnschedulable && t.TimeAdded != nil {
+			return &t.TimeAdded.Time
+		}
+	}
+	return nil
+}
+
 // factsOf extracts the retained facts from a Node. Caller holds the lock,
 // because interning writes.
 func (inv *Inventory) factsOf(node *corev1.Node) *nodeFacts {
@@ -365,6 +558,9 @@ func (inv *Inventory) addStats(n *nodeFacts, sign int64) {
 			inv.stats[ordinal][d] = s
 		}
 		s.Nodes += sign
+		if n.ready {
+			s.Ready += sign
+		}
 		if n.ready && n.schedulable {
 			s.Usable += sign
 			s.AllocatableCPUMilli += sign * n.cpuMilli

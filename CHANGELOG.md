@@ -103,6 +103,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds is the timing, and the metric that lets you see what your fleet's
   episodes would look like before anything is allowed to act on them.
 
+- **`topology-drift` now declines to judge a workload while the cluster is
+  doing something to it.** Drift that the cluster is in the middle of causing
+  is not a workload's fault, and the moment it is most likely to be measured is
+  the moment it is least worth reporting. Three situations now hold a subject
+  back: the sentinel is still filling its caches, a node in a domain the
+  subject can reach was cordoned recently, or a domain lost more than half its
+  ready nodes inside the last fifteen minutes. The first and last suppress
+  outright; a drain instead relaxes the thresholds by 2.5×, because a drain is
+  a deliberate act whose skew is expected to be temporary but whose scale is
+  still worth knowing about if it is extreme. The new
+  `lookout_leeway_transient_subjects` reports how many axes are being held back
+  and why, labelled by topology key and reason, so a quiet dashboard can be
+  told apart from a suppressed one.
+
+  This is what keeps a zone outage from reading as a fleet-wide incident. A
+  zone that loses two of its three nodes relocates every pod that was on them,
+  and on a 20-workload cluster that is 20 subjects going out of plan within a
+  few seconds of each other for one reason. All twenty are now suppressed for
+  the outage window and none of them opens an episode. The same movement
+  without an outage behind it still fires, exactly as before.
+
+  Cordons are dated from the API server's own `node.kubernetes.io/unschedulable`
+  taint where it has one, so a restart does not make every drain look like it
+  happened just now; a node first seen already cordoned is treated as having
+  been cordoned long ago rather than recently. Ready-node counts are sampled
+  every 30 seconds rather than logged on change, because a domain that goes to
+  zero and stays there has nothing to compare against otherwise — the outage
+  would be invisible precisely because it was total.
+
 - **The per-subject, per-domain breakdown is now exported for drifting
   subjects by default**, via the new `--topology-per-domain-min-drift`
   (default `0.05`). This is what `--topology-per-domain-series` was waiting

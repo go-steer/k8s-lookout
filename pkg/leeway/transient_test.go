@@ -84,6 +84,18 @@ func TestTransientConfig_NormalizeRefusesATighteningMultiplier(t *testing.T) {
 	}
 }
 
+// Normalized is normalize with a caller outside the package. The source reads
+// OutageWindow off it to size the history it keeps, and a zero there would
+// mean keeping none.
+func TestTransientConfig_NormalizedIsTheFilledInConfig(t *testing.T) {
+	if got := (TransientConfig{}).Normalized(); got != DefaultTransientConfig() {
+		t.Fatalf("Normalized() = %+v, want the defaults", got)
+	}
+	if got := (TransientConfig{OutageWindow: time.Hour}).Normalized(); got.OutageWindow != time.Hour {
+		t.Errorf("OutageWindow = %v, want the hour that was set", got.OutageWindow)
+	}
+}
+
 func TestClassify_AQuietSubjectIsNotInAnyTransientState(t *testing.T) {
 	got := Transients{}.Classify(tnow, TransientConfig{})
 	if got != (Suppression{}) {

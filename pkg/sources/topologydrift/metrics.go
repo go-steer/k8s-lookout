@@ -56,6 +56,7 @@ const (
 	metricCounterMismatch  = "lookout.leeway.counter_mismatch"
 	metricIntentInfo       = "lookout.leeway.intent_info"
 	metricAlertState       = "lookout.leeway.alert_state"
+	metricTransient        = "lookout.leeway.transient_subjects"
 )
 
 // Instrument descriptions. Hoisted to constants because they are the help
@@ -85,6 +86,10 @@ const (
 		"Only subjects with an open episode are present — a subject that is not drifting has no row rather than a zero, " +
 		"which keeps the series bounded by how much trouble a cluster is in rather than by how large it is. " +
 		"A resolving subject (clear, but inside the resolve dwell) still reads 2, because its finding is still outstanding."
+	descTransient = "Subject-axes whose judgement §7.6 suppressed or relaxed, by the transient state responsible. " +
+		"This is the series to look at before believing a quiet estate: a fleet-wide `domain-outage` row is leeway declining to page " +
+		"four hundred workloads about one dead zone, and a `cluster-warmup` row that never clears is a sentinel that never synced. " +
+		"Only the axes under a transient are present, so zero rows is the healthy reading."
 	descCounterMismatch = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
 		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
 		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
@@ -108,6 +113,7 @@ var (
 	attrMode        = attribute.Key("mode")
 	attrTier        = attribute.Key("tier")
 	attrPhase       = attribute.Key("phase")
+	attrTransient   = attribute.Key("transient")
 )
 
 // MetricDoc documents one series leeway exports, in its PROMETHEUS spelling —
@@ -206,6 +212,12 @@ func MetricDocs() []MetricDoc {
 			Type:   "gauge",
 			Labels: []string{"namespace", "subject", "subject_kind", "topology_key", "tier", "phase"},
 			Help:   descAlertState,
+		},
+		{
+			Name:   "lookout_leeway_transient_subjects",
+			Type:   "gauge",
+			Labels: []string{"topology_key", "transient"},
+			Help:   descTransient,
 		},
 		{
 			Name:   "lookout_leeway_last_event_timestamp_seconds",
@@ -439,8 +451,15 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricAlertState, err)
 	}
 
+	transient, err := meter.Int64ObservableGauge(metricTransient,
+		metric.WithDescription(descTransient))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricTransient, err)
+	}
+
 	gauges := observables{
 		alertState:     alertState,
+		transient:      transient,
 		subjects:       subjects,
 		readyNodes:     readyNodes,
 		objects:        objects,
@@ -487,6 +506,7 @@ type observables struct {
 	maxDomainShare metric.Float64ObservableGauge
 
 	alertState metric.Int64ObservableGauge
+	transient  metric.Int64ObservableGauge
 }
 
 // all is every instrument the callback fills, for RegisterCallback. Kept
@@ -497,7 +517,7 @@ func (g observables) all() []metric.Observable {
 	return []metric.Observable{
 		g.subjects, g.readyNodes, g.objects, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
-		g.alertState,
+		g.alertState, g.transient,
 	}
 }
 
@@ -531,9 +551,24 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		})
 	}
 	if opts.Evaluations != nil {
+		// §7.6 is counted here rather than through an observer of its own
+		// because it is an aggregate of the same walk: a per-subject
+		// suppression series would be subjects × axes rows saying the same
+		// thing about the cluster, and the question the row answers — "is
+		// leeway holding its tongue, and about what" — is a fleet question.
+		byTransient := map[transientBucket]int64{}
 		opts.Evaluations(func(sub leeway.SubjectRef, ev *Evaluation) {
 			opts.observeScores(o, g, sub, ev)
+			if ev != nil && ev.Suppression.State != leeway.TransientNone {
+				byTransient[transientBucket{key: ev.Key, state: ev.Suppression.State}]++
+			}
 		})
+		for b, n := range byTransient {
+			o.ObserveInt64(g.transient, n, metric.WithAttributes(
+				attrTopologyKey.String(string(b.key)),
+				attrTransient.String(b.state.String()),
+			))
+		}
 	}
 	if opts.Intents != nil {
 		opts.Intents(func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent) {
@@ -565,6 +600,13 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 			))
 		})
 	}
+}
+
+// transientBucket is one row of the §7.6 gauge: an axis and the state
+// suppressing or relaxing it.
+type transientBucket struct {
+	key   leeway.TopologyKey
+	state leeway.TransientState
 }
 
 // alertLevel is §8.4's 0/1/2 encoding of a phase.

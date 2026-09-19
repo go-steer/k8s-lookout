@@ -125,6 +125,16 @@ func fullOptions() metricsOptions {
 		Evaluations: func(yield evalObserver) {
 			yield(subA, &Evaluation{
 				Key: zoneKey,
+				// Under a transient, so that the §7.6 gauge has a row: the
+				// series only exists when something is being suppressed or
+				// relaxed, and fullOptions has to exercise every series
+				// MetricDocs claims.
+				Suppression: leeway.Suppression{
+					State:      leeway.TransientRollout,
+					Relax:      true,
+					Multiplier: 2.5,
+					Reason:     "a rollout is in progress",
+				},
 				Scores: leeway.Scores{
 					Domains:        []leeway.Domain{"us-central1-a", "us-central1-b"},
 					Actual:         []int64{4, 1},
@@ -199,6 +209,7 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		// §8.2's episodes. A gauge rather than a counter, because the question
 		// it answers is "what is firing now", not "how many ever did".
 		"lookout_leeway_alert_state",
+		"lookout_leeway_transient_subjects",
 		// The other half of the unit hazard: `_total` is appended to a
 		// monotonic counter, and it is appended AFTER any unit. This one sets
 		// no unit, so the declared name simply gains the suffix.
@@ -413,6 +424,64 @@ func TestInstruments_AlertStateEncodesThePhaseAndKeepsIt(t *testing.T) {
 		if got := labelValue(firing, key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// The §7.6 gauge counts subject-axes, not subjects: the whole point of the
+// series is to be readable during an outage, when the per-subject series are
+// exactly what nobody can page through.
+func TestInstruments_TheTransientGaugeCountsAxesNotSubjects(t *testing.T) {
+	suppressed := func(state leeway.TransientState) leeway.Suppression {
+		return leeway.Suppression{State: state, Suppress: true, Reason: "because"}
+	}
+	opts := fullOptions()
+	opts.Evaluations = func(yield evalObserver) {
+		for i := range 7 {
+			sub := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: fmt.Sprintf("web-%d", i)}
+			ev := &Evaluation{Key: zoneKey, Suppression: suppressed(leeway.TransientDomainOutage)}
+			switch i {
+			case 6:
+				// One subject on a different axis, and a different state.
+				ev = &Evaluation{Key: regionKey, Suppression: suppressed(leeway.TransientWarmup)}
+			case 5:
+				// And one that is fine, which contributes no row at all.
+				ev = &Evaluation{Key: zoneKey}
+			}
+			yield(sub, ev)
+		}
+	}
+
+	f := newPromHarness(t, opts).family(t, "lookout_leeway_transient_subjects")
+	if f == nil {
+		t.Fatal("family absent")
+	}
+	got := map[string]float64{}
+	for _, m := range f.GetMetric() {
+		got[labelValue(m, "topology_key")+"/"+labelValue(m, "transient")] = m.GetGauge().GetValue()
+	}
+	want := map[string]float64{
+		string(zoneKey) + "/domain-outage":    5,
+		string(regionKey) + "/cluster-warmup": 1,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d series %v, want %d", len(got), got, len(want))
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %v, want %v", k, got[k], w)
+		}
+	}
+}
+
+func TestInstruments_AnUntroubledEstateHasNoTransientSeries(t *testing.T) {
+	// Zero rows rather than a row reading zero, so that `transient_subjects`
+	// present at all is the alert condition.
+	opts := fullOptions()
+	opts.Evaluations = func(yield evalObserver) {
+		yield(subA, &Evaluation{Key: zoneKey})
+	}
+	if f := newPromHarness(t, opts).family(t, "lookout_leeway_transient_subjects"); f != nil {
+		t.Errorf("exported %d series with nothing suppressed", len(f.GetMetric()))
 	}
 }
 

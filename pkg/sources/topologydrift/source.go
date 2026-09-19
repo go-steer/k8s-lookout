@@ -77,6 +77,17 @@ const DefaultAlertInterval = 30 * time.Second
 // a dwell timer restarted for a subject that is still drifting.
 const DefaultReconcileGrace = 5 * time.Minute
 
+// DefaultReadySampleInterval is how often §7.6's ready-node series is
+// sampled.
+//
+// Thirty seconds gives a fifteen-minute outage window thirty samples, which is
+// more resolution than a test with a 50% threshold needs — the point of the
+// cadence is not precision but that a sample exists *at all* between the last
+// change and the outage, because the peak the outage is measured against has
+// to be somewhere in the window. Anything up to a couple of minutes would work;
+// this matches the alert tick so that the two passes stay roughly in step.
+const DefaultReadySampleInterval = 30 * time.Second
+
 // DefaultTopologyKeys are the axes tracked when none are configured (§10.2).
 var DefaultTopologyKeys = []leeway.TopologyKey{
 	corev1.LabelTopologyZone,
@@ -141,6 +152,15 @@ type Config struct {
 	// partial one is completed by the machine itself — see leeway.Dwell.
 	Dwell leeway.Dwell
 
+	// Transient is §7.6's windows and multiplier. The zero value takes
+	// leeway.DefaultTransientConfig, field by field.
+	Transient leeway.TransientConfig
+
+	// ReadySampleInterval is how often each domain's ready-node count is
+	// sampled for §7.6's outage test. Zero takes
+	// DefaultReadySampleInterval.
+	ReadySampleInterval time.Duration
+
 	// AlertInterval is how often the §8.2 machine is advanced. Zero takes
 	// DefaultAlertInterval.
 	AlertInterval time.Duration
@@ -179,7 +199,19 @@ func (c Config) normalize() Config {
 	if c.ReconcileGrace <= 0 {
 		c.ReconcileGrace = DefaultReconcileGrace
 	}
+	if c.ReadySampleInterval <= 0 {
+		c.ReadySampleInterval = DefaultReadySampleInterval
+	}
+	c.Transient = c.Transient.Normalized()
 	return c
+}
+
+// readyRetention is how much ready-count history the outage test needs: twice
+// the window it scans. Twice rather than exactly, so that a sample taken just
+// before the window opened is still there when it does, and a peak is never
+// lost to the boundary between two ticks.
+func (c Config) readyRetention() time.Duration {
+	return 2 * c.Transient.Normalized().OutageWindow
 }
 
 // perDomainGate is §8.4's gate as the metrics layer takes it. A negative floor
@@ -665,7 +697,50 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	// Snapshot and then score outside the index lock. Scoring is O(domains)
 	// arithmetic and holding the lock across it would put every pod event in
 	// the cluster behind whichever subject the queue happened to reach.
-	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds))
+	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds, s.suppression(start)))
+}
+
+// suppression returns §7.6's Suppressor for one evaluation, closing over the
+// instant the evaluation started so that every axis of one subject is judged
+// against the same clock.
+//
+// Suppression is decided here, at scoring time, and then kept on the
+// Evaluation rather than recomputed when the §8.2 machine reads it. That makes
+// a suppression as stale as the evaluation carrying it: a subject scored during
+// a zone outage stays suppressed until something re-evaluates it. The bound is
+// acceptable and the alternative is worse. Re-judging on every alert tick would
+// mean the verdict in a finding and the verdict behind the exported scores
+// could disagree, and the staleness costs only latency — the end of an outage
+// is itself a burst of node events, which bumps the generation and re-scores
+// every subject that cared; and a subject that comes out of suppression still
+// owes §8.2 a full dwell before it fires, which is longer than the staleness.
+func (s *Source) suppression(now time.Time) Suppressor {
+	warming := !s.HasSynced()
+	return func(key leeway.TopologyKey, eligible leeway.Eligibility) leeway.Suppression {
+		t := leeway.Transients{
+			Warming:      warming,
+			DomainOutage: s.domainOutage(key, eligible.Domains, now),
+			DrainedAt:    s.inv.LastDrainIn(key, eligible.Domains),
+		}
+		return t.Classify(now, s.cfg.Transient)
+	}
+}
+
+// domainOutage reports whether any domain this subject could have used has
+// lost more than half its ready nodes within §7.6's window.
+//
+// Any, not all: the question the row asks is whether the counts still describe
+// the cluster the expectation was apportioned over, and one dead zone out of
+// three is enough to make them describe something else. A subject eligible for
+// no domains cannot be affected by one going down, and scores as a gate anyway.
+func (s *Source) domainOutage(key leeway.TopologyKey, domains []leeway.Domain, now time.Time) bool {
+	stats := s.inv.Stats(key)
+	for _, d := range domains {
+		if s.cfg.Transient.DomainOutage(s.inv.ReadyHistory(key, d), stats[d].Ready, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // policyFor picks the LeewayPolicy governing sub, or nil when none does — the
@@ -893,6 +968,14 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 	alertTick := time.NewTicker(s.cfg.AlertInterval)
 	defer alertTick.Stop()
 
+	// §7.6's outage test compares a domain against its peak over a window, so
+	// something has to record the peak while the domain is still healthy. Node
+	// events cannot: they carry the value *after* each change, and a zone that
+	// dies all at once changes exactly once.
+	readyTick := time.NewTicker(s.cfg.ReadySampleInterval)
+	defer readyTick.Stop()
+	s.inv.SampleReady(time.Now(), s.cfg.readyRetention())
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -903,6 +986,8 @@ func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
 			s.runVerifyPass()
 		case <-alertTick.C:
 			s.runAlertPass(ctx)
+		case <-readyTick.C:
+			s.inv.SampleReady(time.Now(), s.cfg.readyRetention())
 		}
 	}
 }

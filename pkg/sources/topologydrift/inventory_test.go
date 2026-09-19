@@ -580,6 +580,9 @@ func recount(nodes map[string]*corev1.Node, key leeway.TopologyKey) map[leeway.D
 				ready = c.Status == corev1.ConditionTrue
 			}
 		}
+		if ready {
+			s.Ready++
+		}
 		if ready && !n.Spec.Unschedulable {
 			s.Usable++
 			s.AllocatableCPUMilli += n.Status.Allocatable.Cpu().MilliValue()
