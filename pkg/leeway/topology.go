@@ -49,10 +49,14 @@ const (
 )
 
 // SubjectRef identifies the thing whose distribution we track.
+//
+// The JSON tags are §8.5's payload shape. A cluster-scoped subject omits the
+// namespace rather than carrying an empty one, so a reader never has to decide
+// whether "" means the default namespace.
 type SubjectRef struct {
-	Kind      SubjectKind
-	Namespace string // empty for cluster-scoped subjects
-	Name      string
+	Kind      SubjectKind `json:"kind"`
+	Namespace string      `json:"namespace,omitempty"` // empty for cluster-scoped subjects
+	Name      string      `json:"name"`
 }
 
 // String renders a subject as kind/namespace/name, with the namespace segment
