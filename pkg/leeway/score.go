@@ -298,6 +298,12 @@ func (s *Scores) breach(intent *Intent, t Thresholds) (BreachKind, string) {
 		return s.breachColocate(t)
 	}
 
+	// A learned baseline brings its own expectation *and* its own tolerance,
+	// so it gets its own rule rather than falling through to ρ.
+	if intent != nil && len(intent.Bands) > 0 {
+		return s.breachBaseline(intent, t)
+	}
+
 	if s.Drift <= t.Drift {
 		return BreachNone, ""
 	}
@@ -310,6 +316,69 @@ func (s *Scores) breach(intent *Intent, t Thresholds) (BreachKind, string) {
 		return BreachNone, "small-n: relocation below floor"
 	}
 	return BreachDrift, "normalised drift over threshold"
+}
+
+// breachBaseline applies §7.5's rule: a domain deviates when its observed
+// share sits further from the learned share than k · max(deviation,
+// floorDeviation), the band the intent carries.
+//
+// Why not ρ against the learned expectation. The two answer different
+// questions. ρ asks "how much of this subject is in the wrong place", against
+// a fixed threshold that has to be loose enough for every workload in the
+// estate; the band asks "is this subject doing something it does not normally
+// do", against a tolerance measured from that subject's own history. For a
+// workload that has always sat 80/10/10, a shift to 50/40/10 is ρ = 0.3 —
+// over the threshold, but only just, and for a workload at 60/20/20 the same
+// magnitude of change would not be. The whole reason §7.5 learns a dispersion
+// is to stop using one number for both, so running ρ here would discard the
+// estimate we spent six hours building.
+//
+// The small-n floor is kept. It is the same statement as everywhere else —
+// a finding has to name at least two objects somebody could move — and it is
+// if anything more necessary here, because a tight band on a four-pod
+// Deployment is crossed by one pod moving anywhere at all.
+//
+// The worst domain is named rather than the first: the deviation reported is
+// the largest one, because that is the domain a human will look at, and
+// reporting whichever domain happened to sort first would make the finding's
+// prose depend on zone naming.
+func (s *Scores) breachBaseline(intent *Intent, t Thresholds) (BreachKind, string) {
+	expected := s.ExpectedShares()
+	var (
+		worst    Domain
+		worstDev float64
+		breached bool
+	)
+	for i, d := range s.Domains {
+		band, ok := intent.Bands[d]
+		if !ok {
+			// A domain the baseline has never seen is not evidence of
+			// deviation, it is evidence the baseline is out of date — and
+			// the set invalidates itself on exactly that, so this can only
+			// be a sample racing an invalidation. Skip it; the next pass
+			// has a baseline that knows about the domain.
+			continue
+		}
+		var share float64
+		if s.Total > 0 && i < len(s.Actual) {
+			share = float64(s.Actual[i]) / float64(s.Total)
+		}
+		var want float64
+		if i < len(expected) {
+			want = expected[i]
+		}
+		dev := math.Abs(share - want)
+		if dev > band && dev > worstDev {
+			worst, worstDev, breached = d, dev, true
+		}
+	}
+	if !breached {
+		return BreachNone, ""
+	}
+	if s.Total < t.SmallNThreshold && s.Relocation < t.MinRelocationSmallN {
+		return BreachNone, "small-n: relocation below floor"
+	}
+	return BreachBaseline, "domain " + string(worst) + " is outside its learned band"
 }
 
 // breachColocate applies the drift rule to a colocation intent, against

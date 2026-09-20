@@ -94,6 +94,7 @@ const (
 	BreachPerDomainCeiling
 	BreachMaxSkew
 	BreachDrift
+	BreachBaseline
 )
 
 // String implements fmt.Stringer. Reaches the `rule` metric label.
@@ -105,6 +106,8 @@ func (b BreachKind) String() string {
 		return "max-skew"
 	case BreachDrift:
 		return "drift"
+	case BreachBaseline:
+		return "baseline"
 	default:
 		return ""
 	}
