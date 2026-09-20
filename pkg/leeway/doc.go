@@ -45,6 +45,7 @@
 //	rank.go        preference axes and tier assignment (§7.7)
 //	rankprofile.go node attributes, extracted from labels by a config table
 //	rankmatch.go   fail-closed matching of a node against priority rules
+//	rankdecode.go  a provider ComputeClass spec decoded into an axis
 //	rankresolve.go annotation-primary rank resolution, with a cross-check
 //	ranktrack.go   time-weighted pod-seconds per rank (§7.7.3)
 //
