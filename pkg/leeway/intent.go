@@ -234,9 +234,11 @@ type Intent struct {
 	DomainCaps      map[Domain]int64
 
 	// ExplicitShares is §10.1's expectedDistribution: the operator naming the
-	// split they want rather than a rule for deriving one. Only a policy can
-	// express it — nothing in the Kubernetes API says "40/40/20" — so every
-	// other source leaves it nil, and nil is what makes Weighting apply.
+	// split they want rather than a rule for deriving one. Nothing in the
+	// Kubernetes API says "40/40/20", so only two sources can express it — a
+	// policy, and a learned baseline (§7.5), which is the same statement
+	// arrived at by measurement rather than by declaration. Every other
+	// source leaves it nil, and nil is what makes Weighting apply.
 	//
 	// The values are relative weights, not percentages and not counts. They
 	// are normalised over whichever named domains turn out to be eligible, so
@@ -244,6 +246,19 @@ type Intent struct {
 	// working on the zones that remain instead of expecting objects where none
 	// can go. Read it through Eligibility.WeightsFor, never directly.
 	ExplicitShares map[Domain]float64
+
+	// Bands is §7.5's learned tolerance: per domain, how far that domain's
+	// observed share may sit from its ExplicitShares entry before it counts
+	// as deviation. Only a learned baseline populates it, and its presence
+	// is what switches the breach rule from ρ to the per-domain band test —
+	// see breachBaseline for why a learned expectation needs its own rule
+	// rather than a shared threshold.
+	//
+	// A declared 40/40/20 deliberately has no bands. The operator stated
+	// where the objects belong, not how much wobble they tolerate, and
+	// inventing a tolerance for them would be scoring a declaration against
+	// a number nobody wrote.
+	Bands map[Domain]float64
 
 	// Policies are the node-inclusion policies that shape the eligible set
 	// (§7.1). Only a TopologySpreadConstraint can express them, so every other

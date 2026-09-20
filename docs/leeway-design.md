@@ -1510,6 +1510,64 @@ Three details that matter more than the formula:
 
 Default half-life 12 h, configurable per policy.
 
+> **The estimator shipped 2026-09-20** as `pkg/leeway.BaselineSet`, pure and
+> clock-injected. Six things about it are not in the sketch above, and five of
+> them are the difference between a learned baseline that works and the usual
+> one that does not.
+>
+> **`Samples`, `UpdatedAt` and `Frozen` live on the set, not on each domain.**
+> Every domain of one (subject, topology key) is observed in the same pass from
+> the same distribution, so per-domain copies would cost m× the memory to hold
+> m copies of one number — and would admit states where two domains of one
+> subject disagree about how much history they have, which nothing can produce
+> and everything downstream would have to handle.
+>
+> **dt comes from the clock, not from a fixed sample interval.** A missed tick,
+> a slow pass or a restart then weights its sample by the time it actually
+> represents, so a subject whose pods churn does not learn faster than a quiet
+> one that is equally wrong. Twelve samples an hour and one sample an hour
+> converge to the same estimate.
+>
+> **Freezing stops the clock, not just the arithmetic.** A frozen set still
+> advances `UpdatedAt`. If it did not, a subject frozen for three hours would
+> thaw with dt = 3 h — α ≈ 0.16 at a 12 h half-life — and absorb a sixth of the
+> drift the freeze existed to keep out in a single sample, compounding from
+> there. The freeze also covers §7.6 suppression, not only a firing finding, on
+> the same reasoning: a baseline that learns through a zone outage decides the
+> outage is normal and then decides the recovery is drift.
+>
+> **The first sample seeds rather than converges**, and **the deviation is
+> corrected for its warm-up.** Share can be seeded; deviation cannot, because
+> one sample has nothing to deviate from, so it starts at zero and climbs. With
+> the stated defaults a baseline matures at 6 h having accumulated only ~29% of
+> a 12 h half-life's weight, so the raw EWMAD understates real dispersion by
+> about 3.5× and every band built from it is 3.5× too tight — which fires on
+> exactly the workloads whose placement legitimately moves, the population Tier
+> C exists to avoid paging about. `DevWeight` accumulates `α(1−w)` and
+> `DeviationOf` divides by it; this is the standard bias correction and removes
+> the artefact exactly. §12's corpus has the case both ways.
+>
+> **A mature baseline is rendered as an `Intent`, not as a parallel comparison
+> path.** `BaselineSet.Intent` returns `Source: SourceLearnedBaseline`,
+> `ExplicitShares` = the learned shares and `Bands` = k·max(dev, floor), so a
+> learned expectation apportions, scores, exports and routes through exactly
+> the code a declared TopologySpreadConstraint does — which is what §5.1 means
+> by normalising every source into one shape. What makes it Tier C is the
+> source field, and what makes it judged against a band rather than ρ is the
+> presence of `Bands`, which no declared source sets. An *immature* baseline
+> returns nil, which is the pre-Phase-5 behaviour: scored against an even
+> apportionment. Tier C without a baseline is not unmonitored, it is measured
+> against the only expectation available.
+>
+> **Why the band and not ρ against the learned shares.** They answer different
+> questions. ρ asks how much of the subject is in the wrong place, against a
+> threshold loose enough for the whole estate; the band asks whether the
+> subject is doing something *it* does not normally do. For a workload that has
+> always sat 80/10/10, a shift to 50/40/10 is ρ = 0.3 — over the threshold, but
+> only just — while for one at 60/20/20 the same magnitude of change would not
+> be. Learning a dispersion and then judging with a global constant would throw
+> away the estimate.
+
 ### 7.6 Transient-state suppression
 
 Skew during these states is expected, and is suppressed or evaluated against a
