@@ -236,6 +236,18 @@ func TestAlerts_ARecordThisBuildCannotReadIsDropped(t *testing.T) {
 		t.Errorf("Load accepted %d records, want 0", n)
 	}
 
+	// And a row belonging to the compute-class source, which shares this table.
+	// It parses perfectly — PreferenceAxis is in the same subject vocabulary —
+	// so only the kind tells them apart, and claiming it would reconcile it
+	// against verdicts that never come and then DELETE it as unclaimed.
+	other := persisted(leeway.PhaseFiring, t0)
+	other.SubjectKey = leeway.SubjectRef{Kind: leeway.SubjectPreferenceAxis, Name: "n4-preferred"}.String()
+	other.TopologyKey = "gke-computeclass/last-rank"
+	a = NewAlerts(leeway.DefaultDwell())
+	if n := a.Load([]leeway.AlertRecord{other}, t0); n != 0 {
+		t.Errorf("Load claimed %d of another source's rows, want 0", n)
+	}
+
 	// A phase from a newer build does reach the machine — the key parsed — and
 	// leeway.Reconcile's repair turns it into a clean start rather than a
 	// guess at semantics this binary does not have.

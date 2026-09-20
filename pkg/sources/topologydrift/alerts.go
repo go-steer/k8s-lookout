@@ -93,6 +93,13 @@ func NewAlerts(d leeway.Dwell) *Alerts {
 // A record whose subject key this build cannot parse is dropped here. It was
 // written by a different build, and §9.2's rule is that an unreadable history
 // costs one dwell rather than the monitoring.
+//
+// So is a record for a subject kind this source does not score. The
+// leeway_alert_state table is shared — the `compute-class` source keeps its
+// §7.7.4 episodes there under a PreferenceAxis subject — and claiming another
+// source's rows would not merely ignore them: they would be reconciled against
+// verdicts that never come, and then DELETED as unclaimed once the grace period
+// elapsed.
 func (a *Alerts) Load(records []leeway.AlertRecord, at time.Time) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -101,7 +108,7 @@ func (a *Alerts) Load(records []leeway.AlertRecord, at time.Time) int {
 	a.pendingAt = at
 	for _, rec := range records {
 		sub, ok := leeway.ParseSubjectRef(rec.SubjectKey)
-		if !ok {
+		if !ok || !scoredHere(sub.Kind) {
 			continue
 		}
 		a.pending[alertKey{Subject: sub, Key: leeway.TopologyKey(rec.TopologyKey)}] = rec

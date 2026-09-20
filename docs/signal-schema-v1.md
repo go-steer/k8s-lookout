@@ -218,11 +218,11 @@ deliberately absent from the wire-kind inventory below. The table here
 exists only to pin the fingerprint INPUTS, which are a cross-cluster
 contract in a way a glossary entry is not.
 
-## Kind inventory (v1: 51 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +2 `leeway.*` #416, additive-only)
+## Kind inventory (v1: 56 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +3 `leeway.*` topology-drift verdicts #416, +4 `leeway.rank_*` #416 phase 6, additive-only)
 
-The `sentinel.access_revoked` row below landed without bumping this heading;
-the count above is the corrected one and now matches the ledger pin in
-`pkg/inject/schema_freeze_test.go`.
+The `sentinel.access_revoked` row and the third topology-drift verdict both
+landed without bumping this heading; the count above is the corrected one and
+now matches the ledger pin in `pkg/inject/schema_freeze_test.go`.
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -263,7 +263,11 @@ contract_violated|placement_drift|baseline_breach` (added post-M5, #416
 — the topology-drift verdicts of docs/leeway-design.md §2.3; a Tier C
 finding, scored against an apportionment or a learned baseline nobody
 declared, stays metrics-only unless `--topology-tier-c-signals` is set,
-§8.3).
+§8.3), `leeway.
+rank_wedged|rank_degraded|rank_no_migration|rank_tier_unused` (added
+post-M5, #416 phase 6 — the §7.7.4 preference-rank verdicts of a
+provider compute class; `rank_tier_unused` is the Tier C row and stays
+metrics-only unless `--compute-class-tier-c-signals` is set).
 
 The leeway kinds ride `Payload` like every other source-namespaced
 kind: the §8.5 finding document is the store's and `cmd/leeway`'s
@@ -274,10 +278,22 @@ is frozen against fleet consumers. Their `uid` is synthetic —
 axis: one Deployment can drift on `topology.kubernetes.io/zone` and be
 within tolerance on `region`, and those are two findings with two dwell
 timers. `reason` is the suspected cause (§8.5), so a differently-caused
-episode gets its own identity. The remaining settled leeway names are
-deliberately absent until a code path can emit them:
-`leeway.domain_unavailable` is raised by the source rather than by a
-verdict (Phase 7), and the compute-class rank kinds have no producer.
+episode gets its own identity.
+
+The `leeway.rank_*` kinds follow the same shape with two deliberate
+differences. Their `uid` prefix is `leeway-rank:` rather than
+`leeway:`, because the two sources share one subject vocabulary and one
+persisted alert table: a common prefix would let topology-drift's
+clearance observer report a rank incident recovered on its first sweep,
+and a hyphen instead of a colon makes that parse fail outright rather
+than half-succeed. And their `reason` is the judging rule
+(`wedged`, `rank0-share`, `last-rank`, `no-migration`, `tier-unused`)
+rather than a suspected cause, because a rank verdict names the
+measurement it failed, not a hypothesis about why.
+
+One settled leeway name is still deliberately absent until a code path
+can emit it: `leeway.domain_unavailable` is raised by the source rather
+than by a verdict (Phase 7).
 
 ## Frozen field sets
 

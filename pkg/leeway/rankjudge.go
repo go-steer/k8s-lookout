@@ -403,6 +403,14 @@ func JudgeRank(in RankInput, t RankThresholds) []RankVerdict {
 		// An axis with fewer than two tiers has no fallback to detect and an
 		// unorderable one has no tiers at all. Both are reported through
 		// axis_info and the SLI gauges; neither can produce a degradation.
+		//
+		// This gate takes the wedged rule with it, which is a deliberate cost
+		// rather than an oversight: a one-priority DoNotScaleUp class CAN wedge,
+		// but the four GKE-managed Autopilot classes each declare exactly one
+		// priority, and a Pending pod on one of those is the ordinary
+		// out-of-capacity story that every other part of k8s-lookout already
+		// reports. The gauge stays honest — wedged_pods counts them — and only
+		// the finding is withheld.
 		return nil
 	}
 	axis := in.Class.Axis

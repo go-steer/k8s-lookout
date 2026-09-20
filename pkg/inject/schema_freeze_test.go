@@ -235,13 +235,14 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 	// in #130, ingress.* +3 in #135, family.member +1 in #132,
 	// objectstate.* +2 in #134, capacity.cluster_forecast +1 in #131,
 	// autoscaling.* +2 in #131, gateway.* +2 in #168,
-	// sentinel.access_revoked +1 in #385, leeway.* +2 in #416
-	// (topology-drift's two emittable verdict kinds; the other five
-	// names docs/leeway-design.md §2.3 settled have no producer yet
-	// and are deliberately absent) — additive-only, ledger + docs
-	// updated in the same changes).
-	if len(shippedKinds) != 52 {
-		t.Errorf("shipped kind inventory has %d kinds, want 52 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	// sentinel.access_revoked +1 in #385, leeway.* +3 in #416
+	// (topology-drift's emittable verdict kinds) and +4 more in #416
+	// phase 6 (the §7.7.4 preference-rank kinds). One name
+	// docs/leeway-design.md §2.3 settled is still absent:
+	// leeway.domain_unavailable has no producer yet — additive-only,
+	// ledger + docs updated in the same changes).
+	if len(shippedKinds) != 56 {
+		t.Errorf("shipped kind inventory has %d kinds, want 56 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 
