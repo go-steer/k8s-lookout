@@ -839,7 +839,7 @@ func (s *Source) onPolicyDelete(obj any) {
 // stores both results. It does not touch the §8.2 machine and it emits
 // nothing: the machine runs on its own timer (see Run) so that a dwell
 // measures how long a condition held rather than how often the subject's pods
-// churned, and the findings that come out of it are the next increment.
+// churned, and it is the alert pass — not this one — that emits.
 func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	start := time.Now()
 	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, time.Since(start)) }()
@@ -856,6 +856,7 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	res := Resolve(pod, s.inv, ResolveConfig{
 		ClusterDefaults: s.cfg.ClusterDefaultConstraints,
 		Policy:          s.policyFor(sub, pod),
+		Baselines:       s.baselineIntents(sub, start),
 	})
 	s.state.SetIntents(sub, res.Intents)
 
@@ -1001,6 +1002,22 @@ func (s *Source) policyFor(sub leeway.SubjectRef, pod *corev1.Pod) *Policy {
 		s.warnAmbiguous(sub, m)
 	}
 	return m.Policy
+}
+
+// baselineIntents renders whatever §7.5 has learned about sub, for §5.1 to
+// rank against everything the subject actually declared.
+//
+// The learnBaselines gate is redundant with the sampler's — with learning off
+// nothing is ever observed, so the log stays empty and this walk finds
+// nothing. It is here anyway because the two would stop being redundant the
+// moment anything else populates the log, and of the two ways to get that
+// wrong, "the off switch did not turn something off" is the one an operator
+// finds out about from a page.
+func (s *Source) baselineIntents(sub leeway.SubjectRef, now time.Time) map[leeway.TopologyKey]*leeway.Intent {
+	if !s.cfg.learnBaselines() {
+		return nil
+	}
+	return s.baselines.IntentsFor(sub, now, s.cfg.Baselines)
 }
 
 // subjectPod returns an admitted pod belonging to sub, for inference to read.

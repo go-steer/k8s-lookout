@@ -68,10 +68,10 @@ func IntentSources() []IntentSource {
 		SourcePodAntiAffinityRequired,
 		SourcePodAffinityRequired,
 		SourceClusterDefaultDeclared,
-		SourceClusterDefaultAssumed,
 		SourcePodAntiAffinityPreferred,
 		SourcePodAffinityPreferred,
 		SourceLearnedBaseline,
+		SourceClusterDefaultAssumed,
 	}
 }
 

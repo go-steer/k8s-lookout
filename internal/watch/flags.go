@@ -83,6 +83,9 @@ type flags struct {
 	topologyMinDrift      float64
 	topologyDwell         time.Duration
 	topologyTierC         bool
+	topologyLearn         bool
+	topologyHalfLife      time.Duration
+	topologyBand          float64
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -237,20 +240,31 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Topology-drift source knobs (leeway design §10.2). ADDITIVE flags;
 	// only meaningful with --sources=…,topology-drift.
 	//
-	// Deliberately two flags and not six. The §6.4 coalescing windows and
-	// the eligibility sweep interval are real knobs with real defaults,
-	// but this phase of the source emits nothing, so there is no latency
-	// to trade them against yet and no way for an operator to tell a good
-	// setting from a bad one. A flag is a frozen surface; these arrive
-	// with the scoring they exist to tune. What IS here is the pair
-	// nobody can infer: which labels this cluster partitions on, and
-	// whether to pay for the per-subject series.
+	// Deliberately a handful and not two dozen. The §6.4 coalescing
+	// windows and the eligibility sweep interval are real knobs with real
+	// defaults, but they trade latency against work in a way no operator
+	// can observe the effect of, and a flag is a frozen surface. What IS
+	// here is what nobody can infer from outside: which labels this
+	// cluster partitions on, whether to pay for the per-subject series,
+	// how patient to be before calling motion drift, and — since §7.5 —
+	// what the learned baselines are allowed to do.
 	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
 	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
 	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
 	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
 	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
-	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach, and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
+	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach — or, once one is learned, against its own §7.5 baseline — and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
+
+	// Baseline knobs (§7.5). The three here are the ones with a visible
+	// effect: whether to learn at all, how long "normal" remembers, and
+	// how far from it counts as a breach. The maturity gates, the
+	// deviation floor and §9.3's downtime thresholds are deliberately not
+	// flags — they all fail closed towards fewer and later findings, and
+	// an operator who wants fewer of those has --topology-tier-c-signals
+	// and the band width, both of which they can reason about.
+	fs.BoolVar(&f.topologyLearn, "topology-learn-baselines", true, "Learn each workload's normal placement, so that a workload which declared no spread constraint is scored against what it actually does instead of against an even split (§7.5). Learning is passive and cheap: it samples every subject once a minute, matures after 6h, and only ever applies where nothing else expressed an intent — it cannot override a declared constraint. Turn it off to score every undeclared workload against an even apportionment, which is what happened before this existed.")
+	fs.DurationVar(&f.topologyHalfLife, "topology-baseline-half-life", leeway.DefaultBaselineConfig().HalfLife, "How long a learned baseline takes to half-absorb a step change in placement. Shorter follows a cluster that is legitimately rebalancing and stops calling it drift; longer keeps a longer memory of normal and so keeps noticing a slow slide that a short half-life would quietly adopt as the new normal. Must be > 0.")
+	fs.Float64Var(&f.topologyBand, "topology-baseline-band", leeway.DefaultBaselineConfig().K, "How many learned deviations wide a baseline's tolerance band is — the false-positive knob for Tier C. A subject breaches when a domain's share leaves the band around what it learned. Raise it if learned baselines are noisy on your cluster; the default is deliberately wide, because Tier C is the tier where nobody asked to be watched. Must be > 0.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -582,6 +596,16 @@ func (f *flags) validate() error {
 	// every rollout paging them — has to be told the flag cannot express it.
 	if f.topologyDwell <= 0 {
 		return errors.New("--topology-dwell must be > 0 (a breach has to outlive something, or every rollout is a finding)")
+	}
+	// Same reason as the dwell: BaselineConfig.Normalized() fails closed, so
+	// a zero or negative value here would be silently replaced by the
+	// default. That is the right behaviour for a config struct a caller may
+	// leave half-filled, and the wrong one for a number an operator typed.
+	if f.topologyHalfLife <= 0 {
+		return errors.New("--topology-baseline-half-life must be > 0 (pass --topology-learn-baselines=false to not learn at all)")
+	}
+	if f.topologyBand <= 0 {
+		return errors.New("--topology-baseline-band must be > 0 (a zero-width band breaches on every sample)")
 	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.

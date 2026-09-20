@@ -1501,9 +1501,9 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// The leeway subsystem's placement half (docs/leeway-design.md).
 			// Portable — pods, nodes and replicasets, all already granted —
 			// so it auto-enables. It maintains the §6.2 indexes, exports the
-			// §8.4 counters, and raises the three §2.3 verdict kinds once a
+			// §8.4 counters, and raises the four §2.3 verdict kinds once a
 			// breach outlives the dwell; Tier C stays metrics-only unless
-			// --topology-baseline-signals says otherwise.
+			// --topology-tier-c-signals says otherwise.
 			// The error is dropped, not ignored: validate() already
 			// parsed this string and refused to start on a bad one, so
 			// a failure here is unreachable — and the fallback if it
@@ -1517,6 +1517,15 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				PerDomainSeriesMinDrift:   f.topologyMinDrift,
 				Dwell:                     leeway.Dwell{For: f.topologyDwell},
 				TierCSignals:              f.topologyTierC,
+				LearnBaselines:            &f.topologyLearn,
+				// Only the two knobs the flags expose are set; every other
+				// field stays zero and Normalized() fills it from the §7.5
+				// defaults. Naming the defaults here as well would give the
+				// package two places to change them and one of them wrong.
+				Baselines: leeway.BaselineConfig{
+					HalfLife: f.topologyHalfLife,
+					K:        f.topologyBand,
+				},
 			}
 			bs.topoDrift = topologydrift.New(client, cfg)
 			// Optional, unlike the gateway source's dynamic client, which is

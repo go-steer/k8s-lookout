@@ -32,10 +32,15 @@ var allSources = []IntentSource{
 	SourcePodAntiAffinityRequired,
 	SourcePodAffinityRequired,
 	SourceClusterDefaultDeclared,
-	SourceClusterDefaultAssumed,
 	SourcePodAntiAffinityPreferred,
 	SourcePodAffinityPreferred,
 	SourceLearnedBaseline,
+	// Last since Phase 5. §5.1 as first written had the assumed cluster
+	// default above both preferred sources and above the baseline, which made
+	// §7.5 unreachable in the default configuration — the guess applies to
+	// exactly the pods a baseline is learned for. A guess ranks below every
+	// answer; see the IntentSource declaration.
+	SourceClusterDefaultAssumed,
 }
 
 func TestIntentSource_PrecedenceOrder(t *testing.T) {

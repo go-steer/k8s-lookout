@@ -240,8 +240,8 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 	// names docs/leeway-design.md §2.3 settled have no producer yet
 	// and are deliberately absent) — additive-only, ledger + docs
 	// updated in the same changes).
-	if len(shippedKinds) != 51 {
-		t.Errorf("shipped kind inventory has %d kinds, want 51 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	if len(shippedKinds) != 52 {
+		t.Errorf("shipped kind inventory has %d kinds, want 52 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 
