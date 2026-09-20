@@ -3024,6 +3024,50 @@ If the store is unavailable at startup, start degraded: Tier A and B proceed wit
 fresh dwell timers, Tier C is disabled until baselines reload or relearn. Never
 refuse to start — a missing history file should not mean no monitoring.
 
+> **The baseline half shipped 2026-09-20 as store migration v8**, one table
+> (`leeway_baseline`) at v7's grain — one row per (cluster, subject, topology
+> key) — and the opposite write policy: `PutLeewayBaselines` takes a batch and
+> writes it in **one** transaction. At fleet scale that is the difference
+> between twenty thousand transactions per flush and one, and it buys nothing
+> the alert path needs, because thirty seconds lost from a twelve-hour
+> half-life is not a lost promise.
+>
+> **The batch is all-or-nothing, and the reason is `updated_at`.** Since a
+> subject's whole domain set lives in one row, a partial flush cannot corrupt a
+> distribution — it can only leave some subjects on this interval's estimate
+> and some on the last one. But `updated_at` is precisely what step 7 below
+> reads as downtime, so a torn flush is a row lying about how old it is, which
+> is the one thing that decides whether its bands are widened or discarded.
+>
+> **Three fields do not cross.** `Frozen` is re-derived, because a persisted
+> freeze can outlive the finding that justified it and quietly stop a subject
+> learning for good. `WidenBy` and `WidenUntil` are *produced* by loading
+> rather than carried through it — step 7 decides them from the gap it
+> measures, and a widening persisted from a previous outage would be applied
+> against the wrong clock. `DevWeight`, by contrast, **must** persist: §7.5's
+> warm-up correction divides by it, and a restart that dropped it would divide
+> a converged deviation by a freshly-zeroed weight.
+>
+> **A damaged row is refused whole, not half-believed.** A share outside
+> [0, 1], a negative deviation, a duplicate domain, a missing `updated_at`:
+> each reads back as "nothing learned", which is a state §7.5 already handles,
+> because an absent baseline is an immature one. Two things are repaired
+> instead, both losing information in the safe direction — a scrambled domain
+> order is re-canonicalised, since the order *is* the invalidation fingerprint
+> and loading it as written would reset a perfectly good baseline on the next
+> sample; and a missing `FirstSeen` is treated as now, which costs six hours of
+> relearning rather than making the set mature the instant it loaded. A
+> negative sample count gets the same treatment at the SQL boundary: it would
+> wrap to an enormous `uint64` and satisfy the maturity gate it exists to hold
+> shut.
+>
+> **This table needs a prune where `leeway_alert_state` does not.** An alert
+> row is deleted when its episode resolves, so that table is bounded by how
+> many subjects are drifting right now. A baseline row exists for every subject
+> ever sampled, and a namespace torn down between restarts leaves no event to
+> act on. Discarding a row older than step 7's stale window costs nothing:
+> loading it restarts the maturity clock anyway.
+
 The standalone design also specced a PostgreSQL backend and CRD-status writes. Both
 are dropped: backend choice is `pkg/store`'s decision, not leeway's, and lookout is
 deliberately not a controller with a status-writing CRD surface.

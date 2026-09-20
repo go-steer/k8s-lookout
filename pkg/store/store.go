@@ -288,6 +288,47 @@ var migrations = []string{
 		PRIMARY KEY (cluster, subject_key, topology_key)
 	);
 	CREATE INDEX leeway_alert_state_updated ON leeway_alert_state (updated_at);`,
+
+	// v8: §9.1's other "yes, persist this" row — the §7.5 learned
+	// baselines. Same grain as v7, and for the same reason: a subject's
+	// zone mix and its hostname mix are two independent estimates.
+	//
+	// The opposite write policy to v7, which is the whole point of §9.2
+	// listing them separately. Losing a dwell transition breaks the one
+	// durability promise §9.1 makes; losing thirty seconds of EWMA is
+	// irrelevant, so these are written in batches on a ticker and a
+	// crash costs one interval of learning out of a twelve-hour
+	// half-life.
+	//
+	// domains is a JSON array of {domain, share, deviation} in the
+	// set's canonical order. It is one column rather than a child table
+	// because it is only ever read and written whole — there is no
+	// query that wants one domain's share — and a child table would
+	// turn every flush of twenty thousand subjects into a delete and a
+	// re-insert of sixty thousand rows.
+	//
+	// dev_weight is not an optimisation. §7.5's deviation EWMA starts at
+	// zero and is corrected by the weight it has accumulated; a restart
+	// that dropped the weight would divide a converged deviation by a
+	// freshly-zeroed one.
+	//
+	// Unlike v7 this table is NOT bounded by "how many subjects are
+	// drifting right now" — a baseline exists for every subject that has
+	// ever been sampled — so it carries a prune by updated_at. A row
+	// untouched for longer than §9.3 step 7's stale window is worthless
+	// anyway: loading it restarts the maturity clock.
+	`CREATE TABLE leeway_baseline (
+		cluster      TEXT NOT NULL DEFAULT '',
+		subject_key  TEXT NOT NULL,
+		topology_key TEXT NOT NULL,
+		domains      TEXT NOT NULL DEFAULT '[]',
+		dev_weight   REAL NOT NULL DEFAULT 0,
+		samples      INTEGER NOT NULL DEFAULT 0,
+		first_seen   INTEGER,
+		updated_at   INTEGER NOT NULL,
+		PRIMARY KEY (cluster, subject_key, topology_key)
+	);
+	CREATE INDEX leeway_baseline_updated ON leeway_baseline (updated_at);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no
