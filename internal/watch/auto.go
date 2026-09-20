@@ -32,6 +32,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -70,16 +71,21 @@ const (
 //     polling loop against the daemon — enabling it is a cost/topology
 //     decision the operator makes explicitly.
 //
-// gateway IS a candidate, but unlike the others its RBAC grant is inert
-// on clusters without the Gateway API CRDs (RBAC for an absent group is
-// legal and always "allowed"), so the probe alone would enable it
-// everywhere. It is gated on a discovery check (gatewayCheck →
-// gateway.GatewayAPIServed) instead — the CRD-presence analog of
-// saturation's metrics.k8s.io check.
+// gateway and compute-class ARE candidates, but unlike the others their
+// RBAC grants are inert on clusters without the corresponding CRDs (RBAC
+// for an absent group is legal and always "allowed"), so the probe alone
+// would enable them everywhere. Both are gated on a discovery check
+// (availabilityChecks.Gateway, .ComputeClass) instead — the CRD-presence
+// analog of saturation's metrics.k8s.io check. compute-class is GKE-only
+// in practice, which is precisely why it is gated rather than excluded:
+// the gate answers "is this a cluster where the question means anything",
+// and nobody should have to name a provider on the command line to get an
+// answer that discovery already has.
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
 	autoscaling.Name, saturation.Name, degradation.Name, expiry.Name,
 	capacity.Name, ingress.Name, gateway.Name, topologydrift.Name,
+	computeclass.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -108,6 +114,10 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 		ingress.Name:       ingress.New(client).RequiredAccess(),
 		gateway.Name:       gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
 		topologydrift.Name: topologydrift.New(client, topologydrift.Config{}).RequiredAccess(),
+		// Package-level, not a throwaway source: computeclass.New can
+		// fail, and a probe built from a construction whose error was
+		// dropped would probe an empty requirement set — i.e. pass.
+		computeclass.Name: computeclass.RequiredAccess(),
 	}
 }
 
@@ -129,20 +139,35 @@ type autoResolution struct {
 	lines   []string
 }
 
+// availabilityChecks are the non-RBAC gates auto-resolution consults:
+// a grant proves the sentinel MAY read something, and these prove there
+// is something to read. Discovery-backed in production; named fields
+// rather than positional funcs because they are all the same type and
+// a silent swap between two of them would turn one source off and
+// another on with nothing to notice it.
+type availabilityChecks struct {
+	// Metrics reports nil when metrics.k8s.io is served (saturation).
+	Metrics func() error
+	// Gateway reports whether the Gateway API CRDs are served.
+	Gateway func() bool
+	// ComputeClass reports whether cloud.google.com/v1 ComputeClasses
+	// are served — GKE with custom compute classes enabled.
+	ComputeClass func() bool
+}
+
 // resolveSourcesAuto resolves --sources=auto: per candidate, run its
 // §11 RBAC probe (SelfSubjectAccessReview — the same machinery the
-// explicit path uses) and, for saturation, additionally check that
-// the metrics.k8s.io API is served (metricsCheck; discovery-backed in
-// production, nil error = present). Pass → enabled; miss → skipped
-// with one explicit line naming the source, the missing grant/API,
-// and how to enable it.
+// explicit path uses) and, for the sources with one, additionally run
+// its availability check. Pass → enabled; miss → skipped with one
+// explicit line naming the source, the missing grant/API, and how to
+// enable it.
 //
 // Two misses stay FATAL even under auto:
 //   - k8s-events: a sentinel that cannot watch events is misdeployed —
 //     there is no "auto" answer to that, only a fix.
 //   - a probe that cannot be evaluated (reviewer error): "could not
 //     verify" must not degrade into "assumed fine" (§11).
-func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interface, reviewer sources.AccessReviewer, metricsCheck func() error, gatewayCheck func() bool) (*autoResolution, error) {
+func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interface, reviewer sources.AccessReviewer, checks availabilityChecks) (*autoResolution, error) {
 	access := autoCandidateAccess(f, client)
 	res := &autoResolution{
 		lines: []string{
@@ -192,10 +217,12 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 			return nil, fmt.Errorf("source %q requires permission to %q and %s — a sentinel that cannot watch events is misdeployed; %s", name, *missing, sources.DenialRemedy(missingWhy), grantHint(name))
 		case missing != nil:
 			res.lines = append(res.lines, fmt.Sprintf("source %s: disabled (%s — %s)", name, missClause, missTail))
-		case name == saturation.Name && metricsCheck != nil && metricsCheck() != nil:
+		case name == saturation.Name && checks.Metrics != nil && checks.Metrics() != nil:
 			res.lines = append(res.lines, "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)")
-		case name == gateway.Name && gatewayCheck != nil && !gatewayCheck():
+		case name == gateway.Name && checks.Gateway != nil && !checks.Gateway():
 			res.lines = append(res.lines, "source gateway: disabled (Gateway API CRDs not served — install a GKE Gateway class or the upstream gateway.networking.k8s.io CRDs, or name gateway in --sources to make this fatal)")
+		case name == computeclass.Name && checks.ComputeClass != nil && !checks.ComputeClass():
+			res.lines = append(res.lines, "source compute-class: disabled (cloud.google.com/v1 ComputeClasses not served — this is a GKE feature; enable custom compute classes, or name compute-class in --sources to make this fatal)")
 		case name == k8sevents.Name && len(degraded) == 0:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled (always on — a sentinel that cannot watch events is misdeployed)", name))
@@ -255,11 +282,13 @@ func resolveAutoDefaults(ctx context.Context, f *flags, client kubernetes.Interf
 	}
 	reviewer := sources.NewAccessReviewer(client)
 	if f.sourcesAuto() {
-		res, err := resolveSourcesAuto(ctx, f, client, reviewer, func() error {
-			_, derr := client.Discovery().ServerResourcesForGroupVersion(metricsAPIGroupVersion)
-			return derr
-		}, func() bool {
-			return gateway.GatewayAPIServed(client)
+		res, err := resolveSourcesAuto(ctx, f, client, reviewer, availabilityChecks{
+			Metrics: func() error {
+				_, derr := client.Discovery().ServerResourcesForGroupVersion(metricsAPIGroupVersion)
+				return derr
+			},
+			Gateway:      func() bool { return gateway.GatewayAPIServed(client) },
+			ComputeClass: func() bool { return computeclass.ComputeClassesServed(client) },
 		})
 		if err != nil {
 			return err

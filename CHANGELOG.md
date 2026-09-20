@@ -370,6 +370,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OTLP every 60s. The pull side is unconditional; no value of the exporter flag
   can empty the scrape endpoint.
 
+- **A `compute-class` source that measures which rung of a GKE compute class's
+  priority ladder your workloads are actually running on.** A custom compute
+  class is an ordered list of machine shapes; when the first choice has no
+  capacity GKE provisions the next one down. The pod runs, the Deployment stays
+  at its full replica count, and nothing anywhere says you are on the fallback
+  — until the bill, or the day the fallback is a spot instance and the
+  preemptions start. The source joins nodes to their class and exports
+  time-weighted pod-seconds per preference rank as
+  `lookout_leeway_preference_pod_time_seconds_total`, plus a mean-achieved-rank
+  pair and one gauge per anomaly it can see.
+
+  **The rank is not GKE's `ccc_priority_index`.** A class that sets
+  `priorityScore` orders its rules by that field — higher is more preferred,
+  which is the *opposite* direction to list position — and several rules may
+  share a score, so a fallback between two of them costs no rank at all. The
+  index is an identity; the rank is the preference. Both are exported, on
+  different series, on purpose.
+
+  Time-weighted, not sampled: a ninety-second burst of fallback nodes during a
+  scale-up and three weeks parked on spot look identical to a gauge scraped
+  every thirty seconds, and only one of them is a finding.
+
+  It checks itself. Where the annotation is present k8s-lookout independently
+  matches the node against the class's priority rules and counts every
+  disagreement on `lookout_leeway_preference_disagreement` — the annotation
+  always wins, so a non-zero reading is evidence that *our* model of the rules
+  is wrong, not that your nodes are. `--compute-class-infer=false` turns the
+  cross-check off. Both that counter and
+  `lookout_leeway_preference_unmatched` are worth an alert at a threshold of
+  zero.
+
+  Auto-enabled wherever the `cloud.google.com/v1` ComputeClass CRD is served
+  and skipped with one loud line where it is not, the same discovery gate the
+  `gateway` source uses. The shipped ClusterRole gains `list`/`watch` on
+  `computeclasses`; **operators who copied it into their own manifests must add
+  the rule** before naming `compute-class` in an explicit `--sources`. Nodes
+  and pods come from informers the sentinel already runs.
+
+  No signals yet, deliberately — the same staging the `topology-drift`
+  counters went through. A number nobody has audited against a real cluster is
+  not something to page on.
+
 ### Security
 
 - **Resolved secret values no longer enter the informer cache.** Every Pod now

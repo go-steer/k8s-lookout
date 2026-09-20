@@ -321,3 +321,16 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "httproutes"]
     verbs: ["list", "watch"]
+
+  # GKE custom compute classes (compute-class source, leeway §7.7).
+  # Discovery-gated exactly like the Gateway API rules above and inert
+  # for the same reason, which is why they ship unconditionally rather
+  # than in a GKE-only overlay: a rule naming an absent API group costs
+  # nothing and cannot be forgotten later.
+  #
+  # The source reads the class SPEC — the ordered priority list — to work
+  # out what rank each node is at; the nodes and pods it joins that
+  # against are already granted above. There is nothing to write.
+  - apiGroups: ["cloud.google.com"]
+    resources: ["computeclasses"]
+    verbs: ["list", "watch"]

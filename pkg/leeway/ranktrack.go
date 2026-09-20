@@ -130,6 +130,30 @@ func (t *RankTracker) Flush(now time.Time) {
 	}
 }
 
+// Forget drops every bucket for one axis, discarding its accumulated
+// pod-seconds.
+//
+// This is what a re-tiering is. When a class's spec hash changes — a
+// priorityScore edited, a rule inserted — rank 1 stops meaning what it meant
+// an hour ago, and carrying the old pod-seconds forward under the new tiers
+// would average two different questions into one number nobody could unpick.
+// spec_hash is a label on the exported counter, so downstream this reads as a
+// new series starting at zero rather than as a counter that went backwards.
+//
+// The buckets are discarded, not zeroed and kept: a bucket left at count zero
+// would go on reporting a rank the new spec may not have. The caller is
+// responsible for re-entering whatever still occupies the axis — it holds the
+// occupancy, and this type deliberately does not.
+func (t *RankTracker) Forget(axis AxisKey) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.buckets {
+		if key.Axis == axis {
+			delete(t.buckets, key)
+		}
+	}
+}
+
 // RankOccupancy is one axis/rank bucket at one instant.
 type RankOccupancy struct {
 	Axis       AxisKey

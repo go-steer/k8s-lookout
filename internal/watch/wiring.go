@@ -54,6 +54,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -958,12 +959,13 @@ func (r *runner) run(ctx context.Context) error {
 	// (auto resolves to the supported portable set above; an explicit
 	// list is honored verbatim). The dynamic
 	// client serves the expiry source's discovery-gated cert-manager
-	// reads and the gateway source's Gateway/HTTPRoute informers; the
+	// reads, the gateway source's Gateway/HTTPRoute informers and the
+	// compute-class source's ComputeClass informer; the
 	// saturation source's metrics.k8s.io dimension needs its own
 	// clientset — each built from the same kube options, only when its
 	// source is enabled.
 	var dyn dynamic.Interface
-	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) {
+	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) || f.sourceEnabled(computeclass.Name) {
 		dyn, err = kube.BuildDynamicClientFromConfig(restCfg)
 		if err != nil {
 			return err
@@ -1099,6 +1101,15 @@ func (r *runner) run(ctx context.Context) error {
 			// dwell, never the monitoring).
 			bs.topoDrift.WithStore(occStore, r.clusterName)
 		}
+	}
+	if bs.compClass != nil {
+		// Pods and nodes, both already on these factories — the §7.7
+		// pod-seconds are a join over two streams this process watches
+		// anyway, and the only watch the source adds for itself is the
+		// handful of ComputeClass objects, on its own dynamic factory.
+		bs.compClass.WithFactory(sharedFactory)
+		bs.compClass.WithNodeFactory(factories.Cluster)
+		bs.compClass.WithMeter(r.meter(computeclass.MeterName))
 	}
 
 	var feed *graphFeed
@@ -1370,6 +1381,7 @@ type builtSources struct {
 	capacity    *capacity.Source
 	gateway     *gateway.Source
 	topoDrift   *topologydrift.Source
+	compClass   *computeclass.Source
 	quota       *quota.Source
 	notes       *notifications.Source
 	tokenBurn   *tokenburn.Source
@@ -1534,6 +1546,28 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// that never installed the CRD — the common case.
 			bs.topoDrift.WithDynamic(dyn)
 			src = bs.topoDrift
+		case computeclass.Name:
+			// The leeway subsystem's preference half (§7.7): which rung of
+			// a GKE custom compute class's priority ladder the estate is
+			// actually running on, weighted by time. Silent by design for
+			// now — it exports the §7.7.3 counters and emits no signals —
+			// because the condition it describes has no failing pod and no
+			// failing Deployment, and the metric has to be trustworthy
+			// before anything is allowed to page on it.
+			//
+			// The dynamic client is a hard requirement, like gateway's:
+			// ComputeClass is a CRD and there is no typed client for it.
+			if dyn == nil {
+				return nil, fmt.Errorf("--sources: %s requires a dynamic client (programming error: buildSources called without one)", computeclass.Name)
+			}
+			cfg := computeclass.DefaultConfig()
+			cfg.Infer = &f.computeClassInfer
+			ccSrc, cerr := computeclass.New(client, dyn, cfg)
+			if cerr != nil {
+				return nil, cerr
+			}
+			bs.compClass = ccSrc
+			src = bs.compClass
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier
 			// deployment — quota.New fails LOUDLY (naming the source

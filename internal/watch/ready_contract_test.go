@@ -20,6 +20,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -55,6 +56,7 @@ func TestEverySourceDeclaresItsBarrier(t *testing.T) {
 	informerBacked := map[string]any{
 		autoscaling.Name:   (*autoscaling.Source)(nil),
 		capacity.Name:      (*capacity.Source)(nil),
+		computeclass.Name:  (*computeclass.Source)(nil),
 		degradation.Name:   (*degradation.Source)(nil),
 		gateway.Name:       (*gateway.Source)(nil),
 		ingress.Name:       (*ingress.Source)(nil),

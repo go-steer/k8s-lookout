@@ -8,10 +8,11 @@ sidebar:
 The sentinel is one process per cluster, and what it watches is the
 set of signal sources that are enabled. Out of the box that is
 `--sources=auto`: at startup the sentinel probes each portable
-source's needs — RBAC grants, plus a metrics API for `saturation` and
-the Gateway API CRDs for `gateway` — and enables everything your
+source's needs — RBAC grants, plus a metrics API for `saturation`,
+the Gateway API CRDs for `gateway`, and the ComputeClass CRD for
+`compute-class` — and enables everything your
 deployment supports, announcing each decision with one startup line.
-Three of the fifteen sources are never auto-enabled and stay
+Three of the sixteen sources are never auto-enabled and stay
 explicit opt-ins: `quota` (a per-GCP-project deployment decision),
 `notifications` (needs an operator-created Pub/Sub subscription), and
 `token-burn` (a polling loop against the core-agent daemon's cost
@@ -40,6 +41,7 @@ shipped threshold.
 | Load balancers that never get programmed (Ingress) | An `ingress-gce` Warning `Sync` ("Error syncing to GCP: …") or `Translate` event on an Ingress; a NEG-controller `AttachFailed`/`SyncNetworkEndpointGroupFailed` on a Service — endpoints never reach the load balancer while the Ingress object looks fine | `ingress` | **Auto** | none (nothing fires on clusters without `ingress-gce`/NEG controllers) |
 | Load balancers that never get programmed (Gateway API) | A Gateway or listener holds `Programmed=False` past the 5-minute grace, with `observedGeneration` caught up and the reason not `Pending`; an HTTPRoute parent holds `Accepted=False`/`ResolvedRefs=False` — the route config never became routable | `gateway` | **Auto** | the Gateway API CRDs served — absent, auto skips the source with one loud line (RBAC alone can't tell, so this is a discovery check) |
 | Workload placement across topology domains — **counters only, no signals yet** | Nothing fires yet. The source maintains the per-domain placement counts (which replicas of which workload sit in which zone, and how many nodes there could have gone to) and exports them as `lookout_leeway_*`; the findings that read those counts land in a later release | `topology-drift` | **Auto** | none (pods, nodes and replicasets — grants the sentinel already holds) |
+| Workloads quietly running on a compute class's fallback hardware — **counters only, no signals yet** | Nothing fires yet. A GKE custom compute class is an ordered list of machine shapes; when the first choice has no capacity GKE provisions the next one down and the pod runs, the Deployment stays at full replica count, and nothing anywhere says so. The source resolves each node's preference RANK (which is not the raw `ccc_priority_index` — a class that sets `priorityScore` can rank its list in the opposite order) and accumulates pod-seconds per rank as `lookout_leeway_preference_*` | `compute-class` | **Auto** | the `cloud.google.com/v1` ComputeClass CRD served — a GKE feature; absent, auto skips the source with one loud line (RBAC alone can't tell, so this is a discovery check) |
 | Cloud quota exhaustion, days out | `CPUS/us-east1` at 98% of limit, exhausted in ~16 h at the current slope — drafted increase request attached | `quota` | No — explicit | GCP provider (`-gke` image); project tier — exactly one sentinel per GCP project enables it |
 | Agent token spend burning out of control | One session's token rate at 4× the cross-session median, sustained two polls; a session budget projected to exhaust inside 30 minutes | `token-burn` | No — explicit | `core-agent` daemon — its cost stack is the data source |
 | The provider's own announcements: upgrades and security bulletins | A control-plane or node-pool upgrade starts (recorded for incident-window correlation); a security bulletin affecting the cluster lands on the watchboard | `notifications` | No — explicit | GKE notificationConfig topic + a Pub/Sub subscription (`--notifications-subscription`) |
