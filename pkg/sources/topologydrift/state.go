@@ -345,6 +345,18 @@ func (s *State) Subjects() []leeway.SubjectRef {
 	return out
 }
 
+// Tracked reports whether this subject currently holds a count.
+//
+// It is the clearance observer's "does this workload still exist" test (§7.4),
+// and it answers from the same index every other question here answers from
+// rather than from a lister: an incident whose subject left the pod cache is
+// one whose objects are gone, which is what object_deleted means.
+func (s *State) Tracked(sub leeway.SubjectRef) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tracked(sub)
+}
+
 // SubjectCounts tallies tracked subjects by kind.
 //
 // Separate from Subjects because this one is called on every metrics scrape:

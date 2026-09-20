@@ -218,7 +218,11 @@ deliberately absent from the wire-kind inventory below. The table here
 exists only to pin the fingerprint INPUTS, which are a cross-cluster
 contract in a way a glossary entry is not.
 
-## Kind inventory (v1: 48 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, additive-only)
+## Kind inventory (v1: 51 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +2 `leeway.*` #416, additive-only)
+
+The `sentinel.access_revoked` row below landed without bumping this heading;
+the count above is the corrected one and now matches the ledger pin in
+`pkg/inject/schema_freeze_test.go`.
 
 Cross-cutting kinds, each with its own schema-stable struct
 (`pkg/inject/payload.go`):
@@ -254,7 +258,26 @@ Gateway-API sibling of `ingress.*`: sustained `Programmed`/`Accepted`/
 `ResolvedRefs`=False status conditions on `Gateway`/`HTTPRoute`),
 `quota.forecast`,
 `notification.upgrade|upgrade_available|security_bulletin` (added
-post-M5, #130), `token.burn`.
+post-M5, #130), `token.burn`, `leeway.
+contract_violated|placement_drift` (added post-M5, #416 — the
+topology-drift verdicts of docs/leeway-design.md §2.3; a Tier C
+`placement_drift`, scored against an apportionment nobody declared,
+stays metrics-only unless `--topology-tier-c-signals` is set, §8.3).
+
+The leeway kinds ride `Payload` like every other source-namespaced
+kind: the §8.5 finding document is the store's and `cmd/leeway`'s
+representation and `message` is its rendering, so no fifth wire struct
+is frozen against fleet consumers. Their `uid` is synthetic —
+`leeway:<subject>|<topology-key>`, following `capacity`'s
+`nodegroup:<name>` precedent — because the dedup key must carry the
+axis: one Deployment can drift on `topology.kubernetes.io/zone` and be
+within tolerance on `region`, and those are two findings with two dwell
+timers. `reason` is the suspected cause (§8.5), so a differently-caused
+episode gets its own identity. The remaining settled leeway names are
+deliberately absent until a code path can emit them:
+`leeway.baseline_breach` needs a learned baseline to breach (Phase 5),
+`leeway.domain_unavailable` is raised by the source rather than by a
+verdict (Phase 7), and the compute-class rank kinds have no producer.
 
 ## Frozen field sets
 

@@ -451,6 +451,37 @@ func (inv *Inventory) LastDrainIn(key leeway.TopologyKey, domains []leeway.Domai
 	return last
 }
 
+// DrainTimes is LastDrainIn per domain: the most recent time a node in each of
+// the given domains became unschedulable, omitting the domains where none did.
+//
+// One pass over the nodes for the whole set rather than one call per domain,
+// because §8.5's attribution asks the question of every domain a subject is
+// eligible for and repeating LastDrainIn would walk the node map once per zone.
+func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain) map[leeway.Domain]time.Time {
+	ordinal, ok := inv.Ordinal(key)
+	if !ok || len(domains) == 0 {
+		return nil
+	}
+	want := make(map[leeway.Domain]bool, len(domains))
+	for _, d := range domains {
+		want[d] = true
+	}
+
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	out := make(map[leeway.Domain]time.Time)
+	for _, n := range inv.nodes {
+		d := n.domain(ordinal)
+		if n.cordonedAt.IsZero() || !want[d] {
+			continue
+		}
+		if n.cordonedAt.After(out[d]) {
+			out[d] = n.cordonedAt
+		}
+	}
+	return out
+}
+
 // pruneReady drops the leading samples at or before cutoff, in place.
 //
 // At or before, matching DomainOutage's strict After: a sample the peak scan

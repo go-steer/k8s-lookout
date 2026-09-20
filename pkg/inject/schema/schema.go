@@ -32,6 +32,7 @@ package schema
 
 import (
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
@@ -192,4 +193,19 @@ var kinds = []KindSpec{
 		"A provider security bulletin affects this cluster — batched to the watchboard."},
 	{tokenburn.KindBurn, inject.Payload{}, "token-burn",
 		"An agent session's token rate ran at --burn-multiple times the cross-session baseline, or projects budget exhaustion within --burn-eta."},
+
+	// Leeway findings (docs/leeway-design.md §2.3). These ride
+	// inject.Payload like the rest: the §8.5 finding document is the
+	// store's and `cmd/leeway`'s representation, and `message` is its
+	// rendering, so the kinds are additive without freezing a fifth
+	// wire struct against fleet consumers. The other five settled
+	// leeway kinds are NOT listed: leeway.baseline_breach needs a
+	// learned baseline to breach (phase 5), leeway.domain_unavailable
+	// is raised by the source and not by a verdict (phase 7), and the
+	// three compute-class rank kinds have no producer at all. This
+	// ledger is what CAN be emitted, not what has been named.
+	{leeway.KindContractViolated, inject.Payload{}, "topology-drift",
+		"A declared topology contract (a DoNotSchedule spread constraint or a required anti-affinity) is being violated, sustained past the dwell window."},
+	{leeway.KindPlacementDrift, inject.Payload{}, "topology-drift",
+		"A workload's objects deviated from the placement its intent implies — declared, inferred, or, where nobody expressed one, an even apportionment over the domains it can reach (drift ρ over threshold), sustained past the dwell window."},
 }

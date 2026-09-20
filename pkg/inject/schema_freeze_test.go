@@ -230,15 +230,18 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 			t.Errorf("kind %q maps to %s, which has no frozen field ledger", kind, typ.Name())
 		}
 	}
-	// The inventory is complete: 13 cross-cutting + 36 source kinds
+	// The inventory is complete: 13 cross-cutting + 38 source kinds
 	// (21 at the M5 freeze; workload.* +2 in #129, notification.* +3
 	// in #130, ingress.* +3 in #135, family.member +1 in #132,
 	// objectstate.* +2 in #134, capacity.cluster_forecast +1 in #131,
 	// autoscaling.* +2 in #131, gateway.* +2 in #168,
-	// sentinel.access_revoked +1 in #385 — additive-only, ledger +
-	// docs updated in the same changes).
-	if len(shippedKinds) != 49 {
-		t.Errorf("shipped kind inventory has %d kinds, want 49 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	// sentinel.access_revoked +1 in #385, leeway.* +2 in #416
+	// (topology-drift's two emittable verdict kinds; the other five
+	// names docs/leeway-design.md §2.3 settled have no producer yet
+	// and are deliberately absent) — additive-only, ledger + docs
+	// updated in the same changes).
+	if len(shippedKinds) != 51 {
+		t.Errorf("shipped kind inventory has %d kinds, want 51 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 

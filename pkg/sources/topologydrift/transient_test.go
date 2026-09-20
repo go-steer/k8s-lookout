@@ -271,12 +271,25 @@ func TestInventory_LastDrainInTakesTheMostRecentCordon(t *testing.T) {
 	}
 }
 
-func TestConfig_ReadyRetentionIsTwiceTheOutageWindow(t *testing.T) {
-	if got := (Config{}).readyRetention(); got != 30*time.Minute {
-		t.Errorf("readyRetention() = %v, want twice the default 15m window", got)
+func TestConfig_ReadyRetentionCoversBothItsReaders(t *testing.T) {
+	// One ready-count series, two readers: §7.6's outage test scans twice its
+	// own window, and §8.5's peak/LostAt scan the attribution window. The
+	// retention is the longer of the two, so the two can never disagree about
+	// when a domain lost nodes. Retaining more than the outage test scans costs
+	// it nothing — it bounds its own scan.
+	if got := (Config{}).readyRetention(); got != 2*time.Hour {
+		t.Errorf("readyRetention() = %v, want the default 2h attribution window, which outlasts 2×15m", got)
 	}
-	if got := (Config{Transient: leeway.TransientConfig{OutageWindow: time.Minute}}).readyRetention(); got != 2*time.Minute {
-		t.Errorf("readyRetention() = %v, want 2m", got)
+	cfg := Config{
+		Transient: leeway.TransientConfig{OutageWindow: time.Minute},
+		Cause:     leeway.CauseConfig{Window: 30 * time.Second},
+	}
+	if got := cfg.readyRetention(); got != 2*time.Minute {
+		t.Errorf("readyRetention() = %v, want 2m — twice the outage window, which is the longer of the two here", got)
+	}
+	cfg.Cause.Window = time.Hour
+	if got := cfg.readyRetention(); got != time.Hour {
+		t.Errorf("readyRetention() = %v, want the 1h attribution window", got)
 	}
 }
 

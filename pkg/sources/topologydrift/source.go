@@ -171,6 +171,17 @@ type Config struct {
 	// DefaultReconcileGrace.
 	ReconcileGrace time.Duration
 
+	// Cause tunes §8.5's attribution rules. The zero value takes
+	// leeway.DefaultCauseConfig, field by field.
+	Cause leeway.CauseConfig
+
+	// TierCSignals is §8.3's policy opt-in: Tier C findings are metrics-only
+	// unless it is set. It defaults off, and that default is what makes the
+	// source defensible as a default-on one — the overwhelming majority of
+	// subjects that breach anything breach the distributional rule with no
+	// declared intent behind it.
+	TierCSignals bool
+
 	// Cluster names this cluster in the persisted alert state, so one store
 	// shared by a fleet keeps the episodes apart.
 	Cluster string
@@ -204,15 +215,24 @@ func (c Config) normalize() Config {
 		c.ReadySampleInterval = DefaultReadySampleInterval
 	}
 	c.Transient = c.Transient.Normalized()
+	c.Cause = c.Cause.Normalized()
 	return c
 }
 
-// readyRetention is how much ready-count history the outage test needs: twice
-// the window it scans. Twice rather than exactly, so that a sample taken just
-// before the window opened is still there when it does, and a peak is never
-// lost to the boundary between two ticks.
+// readyRetention is how much ready-count history the two readers of the series
+// need between them, which is the longer of their windows.
+//
+// §7.6's outage test wants twice the window it scans — twice rather than
+// exactly, so that a sample taken just before the window opened is still there
+// when it does, and a peak is never lost to the boundary between two ticks.
+// §8.5's attribution wants its whole two-hour cause window, because the peak a
+// finding reports a domain as having fallen from is read from the same samples.
+//
+// Keeping one series rather than two is what stops the two from disagreeing
+// about when a zone lost its nodes. Retaining more than the outage test scans
+// costs it nothing: it bounds its own scan and never reads the older samples.
 func (c Config) readyRetention() time.Duration {
-	return 2 * c.Transient.Normalized().OutageWindow
+	return max(2*c.Transient.Normalized().OutageWindow, c.Cause.Normalized().Window)
 }
 
 // perDomainGate is §8.4's gate as the metrics layer takes it. A negative floor
@@ -229,13 +249,18 @@ func (c Config) perDomainGate() PerDomainGate {
 
 // Source implements sources.Source for the topology-drift row of §3.
 //
-// **It still emits nothing.** Run takes an emit callback to satisfy the
-// interface and never calls it. That is the whole reason this can ship
-// default-on ahead of the delivery half: the source maintains its counters
-// against live traffic, infers intent, scores every subject, runs the §8.2
-// dwell machine over the verdicts and exports the lot as metrics — and cannot
-// produce a finding. So a bug here is a wrong number on a dashboard nobody
-// alerts on, not a page. Emission is the last increment of Phase 4.
+// It maintains the §6.2 counters against live traffic, infers intent (§5.1),
+// scores every subject on every eligible axis (§7.1–§7.4), withholds judgement
+// while the cluster is mid-move (§7.6), runs the §8.2 dwell machine over the
+// verdicts, exports the lot as §8.4 metrics — and, from Phase 4's last
+// increment, emits a §8.5 finding for each episode that crosses its dwell.
+//
+// **What it emits is narrow by default, on purpose.** §8.3 routes Tier C to
+// metrics unless a policy opts in, and Tier C is the overwhelming majority of
+// subjects that breach anything: a workload with no declared or inferred intent
+// is measured against an apportionment nobody promised. So the default-on
+// deployment adds approximately zero agent sessions, which is the property that
+// makes shipping this default-on defensible in the first place.
 type Source struct {
 	client kubernetes.Interface
 	cfg    Config
@@ -277,6 +302,10 @@ type Source struct {
 	policies *PolicyStore
 
 	mu sync.Mutex
+	// emit is the pipeline callback, set at the top of Run. Nil outside Run,
+	// which is the state every unit test that never calls Run is in — and the
+	// reason emitFinding checks rather than assumes.
+	emit func(sources.Signal)
 	// armed flips true after every informer cache syncs and the initial
 	// re-apply has run.
 	armed bool
@@ -953,8 +982,15 @@ func newerPod(a, b *corev1.Pod) bool {
 	return a.Name < b.Name
 }
 
-// Run implements sources.Source. emit is never called; see the Source doc.
-func (s *Source) Run(ctx context.Context, _ func(sources.Signal)) error {
+// Run implements sources.Source.
+//
+// emit is stored rather than threaded through, because the only caller is the
+// §8.2 alert pass and it runs on a timer several call frames down.
+func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	s.mu.Lock()
+	s.emit = emit
+	s.mu.Unlock()
+
 	factory, owned := s.factory, false
 	if factory == nil {
 		factory = informers.NewSharedInformerFactory(s.client, 0)
@@ -1207,20 +1243,75 @@ func (s *Source) judgements() []Judgement {
 	return js
 }
 
-// runAlertPass advances §8.2's machine over every scored subject and persists
-// what moved.
+// runAlertPass advances §8.2's machine over every scored subject, emits what
+// crossed its dwell and persists what moved.
 //
-// **It still emits nothing.** The transitions are computed, counted in
-// alert_state and written to the store; turning a TransitionFiring into a
-// finding on the wire is the next increment. Running the machine ahead of the
-// emission is deliberate for the same reason the counters shipped ahead of the
-// scoring: a dwell bug that fires everything at once is a graph somebody can
-// look at, right up until it is a page.
+// Persistence happens for every outcome and emission only for TransitionFiring.
+// The other four moves are bookkeeping §8.2 owns: Pending and Clearing change
+// nothing anybody outside has been told, Abandoned ends an episode that was
+// never announced, and Resolved is answered by the clearance observer rather
+// than by a second signal — DESIGN §7.4 owns outcome records, and a source that
+// emitted its own would produce two.
+//
+// Persist first, emit second. A finding on the wire that the store does not
+// know about turns into a duplicate the moment the process restarts, while a
+// persisted episode nobody was told about is one tick late at worst.
 func (s *Source) runAlertPass(ctx context.Context) {
 	now := time.Now()
 	for _, o := range s.alerts.Pass(s.judgements(), now, s.cfg.ReconcileGrace) {
 		s.persistOutcome(ctx, o, now)
+		if o.Transition == leeway.TransitionFiring {
+			s.emitFinding(o, now)
+		}
 	}
+}
+
+// emitFinding builds and routes the §8.5 payload for one episode that has just
+// crossed its dwell.
+//
+// The evaluation is re-read from the index rather than carried through the
+// machine, because the machine's input is deliberately four fields wide
+// (Judgement) and widening it would put the whole scoring result inside a lock
+// the pass holds over every subject in the cluster. The re-read is bounded by
+// the number of episodes that fired on this tick, which is normally none.
+//
+// A subject whose evaluation has gone — scored, then untracked between the
+// judgement snapshot and here — is dropped silently. There is nothing to say
+// about a workload that no longer exists, and the machine has already emitted
+// the outcome that removes it.
+func (s *Source) emitFinding(o Outcome, now time.Time) {
+	s.mu.Lock()
+	emit := s.emit
+	s.mu.Unlock()
+	if emit == nil {
+		return
+	}
+
+	ev := axisOf(s.state.EvaluationsOf(o.Subject), o.Key)
+	if ev == nil {
+		return
+	}
+	f, delivery := s.findingFor(o.Subject, ev, o.State, s.state.Snapshot(o.Subject)[o.Key], now)
+	if !delivery.Signal {
+		// Metrics only (§8.3). Not logged: on a large estate most firing
+		// subjects are Tier C, and a line per subject per episode would be a
+		// log nobody reads about the decision that keeps the source quiet.
+		// lookout_leeway_alert_state already shows the episode.
+		return
+	}
+	emit(signalFor(f, now))
+}
+
+// axisOf picks one axis out of a subject's evaluations, or nil when the axis is
+// no longer scored — a subject can lose an axis between two passes when the
+// last node carrying that topology label goes away.
+func axisOf(evals []Evaluation, key leeway.TopologyKey) *Evaluation {
+	for i := range evals {
+		if evals[i].Key == key {
+			return &evals[i]
+		}
+	}
+	return nil
 }
 
 // persistOutcome writes one episode's move through to the store.

@@ -220,6 +220,16 @@ the runtime observation that pods are not where the declared or inferred intent 
 them, which fires precisely on the workloads whose templates look correct. The same
 distinction holds between `audit.rigid_scheduling` and `leeway.domain_unavailable`.
 
+> **Two of the eight are in the v1 ledger as of 2026-09-20, not all eight.**
+> `pkg/inject/schema` lists what CAN be emitted, not what has been named, and the
+> freeze test counts it — so a kind enters the ledger in the change that gives it a
+> producer. `leeway.contract_violated` and `leeway.placement_drift` are there;
+> `leeway.baseline_breach` needs a learned baseline to breach (Phase 5),
+> `leeway.domain_unavailable` is raised by the source rather than by a verdict
+> (Phase 7), and the four `compute-class` kinds have no source yet (Phase 6). That
+> the names are settled here is what makes each of those additions mechanical: the
+> commitment was made once, in this table, and the ledger catches up to it.
+
 ### 2.4 Standalone binary
 
 `cmd/leeway` builds the same two sources against their own informer set, its own
@@ -2439,9 +2449,13 @@ per-policy resolve dwell is dropped, or leeway runs its own tracker instance
 alongside the sentinel's — the latter is cheap and keeps the policy promise.
 
 > **The machine went live in the source 2026-09-19**, driving real verdicts and
-> persisting through §9.1. It still emits nothing — `ClearanceObserver` and the
-> `RecoveryTracker` seam above arrive with emission — so what shipped is the
-> fire side, the store and `lookout_leeway_alert_state`.
+> persisting through §9.1, and **emission followed 2026-09-20** — a firing
+> episode now raises a signal and the source registers the
+> `ClearanceObserver` described above, so the sentinel's own
+> `RecoveryTracker` carries the resolve. Note the two dwells compose rather
+> than compete: `AlertPhase.Firing()` is true in both `Firing` and
+> `Resolving`, so the episode stays cleared-pending until §8.2's resolve
+> dwell *and* the tracker's `--recovery-stable-for` have both elapsed.
 >
 > **It runs on its own ticker (30 s), not on the evaluation path.** Two reasons,
 > and both are about what a dwell is for. A dwell measures how long a condition
@@ -2514,6 +2528,14 @@ enabling leeway by default defensible.
 > precisely the tier that would otherwise open four hundred agent sessions about one
 > fact. A *relaxation* is the opposite and changes nothing here — it decides whether
 > a subject breached, never what happens once it has.
+
+> **Wired 2026-09-20.** The source calls `Route` for every episode that crosses
+> its dwell and drops the ones that come back metrics-only, silently — a Tier C
+> log line per subject per episode would be the loudest thing in the process on a
+> large estate, and the `lookout_leeway_*` gauges already say the finding exists.
+> The opt-in is `--topology-tier-c-signals`, off by default. The severity on the
+> wire is the verdict's, so the routing the table describes happens downstream in
+> §7.7 exactly as this section argues it should.
 
 ### 8.4 Metrics and the export pipeline
 
@@ -2880,6 +2902,34 @@ pipeline is for.
 > capacity" into "we think it was capacity, and here is what it wasn't". Per-domain
 > fall lines are capped at three — a forty-zone cluster losing nodes everywhere is
 > one story, not forty — while every domain still gets its own `note`.
+
+> **Wired 2026-09-20.** The source assembles `Evidence` from what it already
+> holds — the inventory's per-domain census, its ready-count series and the
+> subject's own distribution — and answers `zonalVolumes` locally, since
+> "bound to a zonal volume" is exactly the pin predicate. Four fields stay at
+> their zero values because each is a whole sibling source and Phase 8 owns
+> consuming them: `insufficientResource` and `schedulingMessage` are
+> `capacity`'s judgement about Pending pods, `consolidatedAt` is the
+> autoscaler's, and `rolloutEndedAt` needs a rollout's *completion* time where
+> §7.6's seam reports only what is rolling out now. The cost is bounded and
+> known: the shortfall row loses its corroborating pod evidence, and
+> `consolidation` and `rollout_bias` cannot win at all — so attribution falls
+> through to a cause below them on the ladder, never to a wrong one, because
+> every rule needs positive evidence.
+>
+> Reading the peak and the fall out of the ready series made the retention the
+> longer of §7.6's window and this one: **one series, two readers.** Both scan
+> their own window over identical samples, so they cannot disagree about when a
+> domain lost nodes. The fall is the *last* decrease, not the first — a zone that
+> fell 12 → 3 an hour ago and 3 → 1 a minute ago lost nodes a minute ago, and the
+> older step is still in the peak, which is the number the finding compares
+> against.
+>
+> The finding rides `inject.Payload` like every other source-namespaced kind, and
+> `message` is a rendering of the document above rather than the document itself.
+> Adding a fifth wire struct to signal-schema v1 would freeze the whole finding
+> shape against fleet consumers on a payload days old; `cmd/leeway` and the store
+> keep the struct, and that the two agree is what §8.5 is for.
 
 ---
 
@@ -3815,7 +3865,7 @@ independent of 5.
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
-| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. **§7.6 suppression is now live for the three rows leeway can answer alone, 2026-09-19** — cluster warmup, node drain and domain outage; the inventory samples each domain's ready-node count on a 30 s timer so the outage test has a peak to compare against, cordons are dated from the unschedulable taint, and `lookout_leeway_transient_subjects` reports what is being held back. The zone-outage exit criterion is a standing test at the mechanism level: twenty workloads all skewed by one dead zone open **zero** episodes, and the same skew without an outage still fires. **All five §7.6 rows are now answered, 2026-09-19** — the rollout row consumes `rollout.Source.RollingOut()` through a `RolloutOracle` seam adapted at the composition root (and a deployment without the rollout source says so at startup rather than reporting no rollouts), and the recent-scale row watches `spec.replicas` on Deployments and StatefulSets, stamping only a size that differs from the one already on file so that neither the informer's resync nor a restart reads as a cluster-wide scale event. Still emits nothing: emission is the last increment | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
+| **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. **§7.6 suppression is now live for the three rows leeway can answer alone, 2026-09-19** — cluster warmup, node drain and domain outage; the inventory samples each domain's ready-node count on a 30 s timer so the outage test has a peak to compare against, cordons are dated from the unschedulable taint, and `lookout_leeway_transient_subjects` reports what is being held back. The zone-outage exit criterion is a standing test at the mechanism level: twenty workloads all skewed by one dead zone open **zero** episodes, and the same skew without an outage still fires. **All five §7.6 rows are now answered, 2026-09-19** — the rollout row consumes `rollout.Source.RollingOut()` through a `RolloutOracle` seam adapted at the composition root (and a deployment without the rollout source says so at startup rather than reporting no rollouts), and the recent-scale row watches `spec.replicas` on Deployments and StatefulSets, stamping only a size that differs from the one already on file so that neither the informer's resync nor a restart reads as a cluster-wide scale event. **Emission shipped, 2026-09-20 — PHASE 4 COMPLETE.** A firing episode builds the §8.5 payload from evidence the source already holds, routes it through §8.3, and reaches the wire as `leeway.contract_violated` or `leeway.placement_drift` (two kinds, not five: `baseline_breach` needs a learned baseline, which is Phase 5, and `domain_unavailable` is Phase 7's source-raised kind). The incident UID is synthetic and carries the axis — `leeway:<subject>|<topology-key>` — because one subject drifting on zone and fine on region is two findings with two dwell timers. Resolution is the clearance observer's job rather than a second signal: §7.4 owns outcome records, `PhaseResolving` reports firing, so §8.2's resolve dwell and `--recovery-stable-for` compose. Tier C is metrics-only unless `--topology-tier-c-signals` says otherwise, and the dwell is `--topology-dwell` | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |
