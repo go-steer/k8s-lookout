@@ -43,6 +43,10 @@
 //	score.go       skew, R, ρ, Herfindahl, χ², small-n gating (§7.3, §7.4)
 //	baseline.go    EWMA/EWMAD, freeze, maturity, invalidation (§7.5)
 //	rank.go        preference axes and tier assignment (§7.7)
+//	rankprofile.go node attributes, extracted from labels by a config table
+//	rankmatch.go   fail-closed matching of a node against priority rules
+//	rankresolve.go annotation-primary rank resolution, with a cross-check
+//	ranktrack.go   time-weighted pod-seconds per rank (§7.7.3)
 //
 // # Two axes, not one
 //
