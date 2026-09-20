@@ -41,10 +41,18 @@
 //	eligible.go    eligible-domain computation (§7.1)
 //	apportion.go   Hamilton apportionment with water-filling caps (§7.2)
 //	score.go       skew, R, ρ, Herfindahl, χ², small-n gating (§7.3, §7.4)
+//	baseline.go    EWMA/EWMAD, freeze, maturity, invalidation (§7.5)
+//	rank.go        preference axes and tier assignment (§7.7)
 //
-// baseline.go (§7.5, Tier C) and rank.go (§7.7, preference axes) are listed in
-// the design's §2.2 layout but belong to phases 5 and 6; they are deliberately
-// absent rather than stubbed.
+// # Two axes, not one
+//
+// Everything up to score.go is about *topology*: domains are peers, the
+// desired distribution is even, and drift is measured as departure from it.
+// rank.go is about *preference*: tiers are ordered, the desired distribution
+// is all mass at rank 0, and departure is measured as depth. None of §7.2–7.4
+// applies there — no apportionment, no maxSkew, no relocation distance — so
+// the two share this package for the domain model and the alerting machinery
+// and deliberately share none of the arithmetic.
 //
 // # Determinism
 //
