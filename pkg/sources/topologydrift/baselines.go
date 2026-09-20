@@ -149,6 +149,35 @@ func (l *baselineLog) Intent(k baselineKey, now time.Time, cfg leeway.BaselineCo
 	return l.sets[k].Intent(k.Key, now, cfg)
 }
 
+// IntentsFor renders every axis one subject has a mature baseline on, or nil
+// where it has none.
+//
+// Nil rather than an empty map, and one walk rather than a lookup per tracked
+// axis, because this is on the evaluation path: a subject with nothing learned
+// yet is the common case for the first six hours of any process's life and for
+// every subject that never holds still, and it should cost one map walk and no
+// allocation.
+func (l *baselineLog) IntentsFor(sub leeway.SubjectRef, now time.Time, cfg leeway.BaselineConfig) map[leeway.TopologyKey]*leeway.Intent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var out map[leeway.TopologyKey]*leeway.Intent
+	for k, b := range l.sets {
+		if k.Subject != sub {
+			continue
+		}
+		in := b.Intent(k.Key, now, cfg)
+		if in == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[leeway.TopologyKey]*leeway.Intent, 2)
+		}
+		out[k.Key] = in
+	}
+	return out
+}
+
 // Forget drops one subject-axis and queues its row for deletion.
 //
 // Called when a subject stops being tracked and when it loses an axis — the

@@ -82,6 +82,8 @@ const (
 	descIntentInfo     = "Placement intent inferred for a subject on one topology axis, as labels on a constant 1 (leeway §5.1). " +
 		"Only subjects that expressed an intent are present: a workload with no spread constraint, anti-affinity or affinity " +
 		"has no row here, which is what makes the series count a property of the estate's declarations rather than of its size. " +
+		"A §7.5 learned baseline is deliberately absent for the same reason, even though it scores and routes like any other intent: " +
+		"it is not something anybody declared, and it is eventually present for every subject. See lookout_leeway_baselines for those. " +
 		"`source` is what the intent was read from and `confidence` how much that source is worth — `assumed` means k8s-lookout " +
 		"guessed a cluster default it could not read, and every finding derived from it rests on that guess."
 	descAlertState = "Where one subject-axis sits in the §8.2 dwell machine: 1 pending, 2 firing. " +
@@ -628,6 +630,25 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 	if opts.Intents != nil {
 		opts.Intents(func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent) {
 			if in == nil {
+				return
+			}
+			// A learned baseline is an intent for every purpose except this
+			// one. It scores, it routes, it is quoted in the finding — but it
+			// is not a *declaration*, and this series counts declarations.
+			// Two reasons, and the second is the one that would be found out
+			// the hard way. It changes what the series means: `source` is
+			// meant to answer "where did the operator say this", and a row
+			// present for every workload answers nothing. And it changes what
+			// the series costs: declarations are a property of the estate's
+			// configuration and typically cover a minority of subjects, while
+			// baselines are a property of its size and eventually cover all
+			// of them — turning learning on would silently multiply the
+			// second-largest leeway series by five on a cluster that declared
+			// nothing. The learned expectation is visible three other ways:
+			// domain_expected carries the apportionment it produced,
+			// lookout_leeway_baselines counts how many exist, and the finding
+			// payload quotes the shares and bands that fired it.
+			if in.Source == leeway.SourceLearnedBaseline {
 				return
 			}
 			o.ObserveInt64(g.intents, 1, metric.WithAttributes(

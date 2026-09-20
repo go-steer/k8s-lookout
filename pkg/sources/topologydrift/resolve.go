@@ -57,6 +57,23 @@ type ResolveConfig struct {
 	// normal case and not a degraded one: the CRD is optional and most
 	// clusters never install it.
 	Policy *Policy
+
+	// Baselines is §7.5's learned normal, at most one per axis, and nil for a
+	// subject with nothing mature yet.
+	//
+	// It is a candidate like any other rather than a fallback applied after
+	// precedence, because §5.1 ranks it: it sits below everything anybody
+	// declared — including a preferred affinity — and above the one entry
+	// nobody asserted, the assumed cluster default. So it fills a gap and
+	// never overrules an answer.
+	//
+	// That last comparison is the one worth stating out loud, because it is a
+	// Phase 5 correction rather than the original order. The assumed defaults
+	// apply to precisely the population §7.5 exists for — pods declaring no
+	// topologySpreadConstraints — so while the guess outranked the baseline,
+	// no cluster that had left --topology-cluster-defaults unset ever scored a
+	// subject against a learned intent. See the IntentSource list for the rest.
+	Baselines map[leeway.TopologyKey]*leeway.Intent
 }
 
 // Resolve infers a subject's placement intent from one admitted pod and
@@ -93,6 +110,15 @@ func Resolve(pod *corev1.Pod, inv *Inventory, cfg ResolveConfig) Resolution {
 	// defaults cannot reach a workload that expressed intent. Filtered to the
 	// counted axes, unlike every other source here — see onlyTrackedAxes.
 	candidates = append(candidates, onlyTrackedAxes(ClusterDefaultIntents(pod, cfg.ClusterDefaults), inv)...)
+	// Below the cluster defaults, which is where §5.1 puts it. Sorted, because
+	// map order is random and the candidate list is what evidence is rendered
+	// from: an unordered one would make a finding's evidence block reshuffle
+	// between passes that saw the same cluster.
+	for _, key := range leeway.SortedKeys(cfg.Baselines) {
+		if in := cfg.Baselines[key]; in != nil {
+			candidates = append(candidates, *in)
+		}
+	}
 
 	// The allowlist is applied before precedence, not after. A source the
 	// operator excluded must not survive as demoted evidence either: evidence

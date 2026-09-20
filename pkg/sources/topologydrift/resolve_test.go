@@ -183,3 +183,152 @@ func TestResolve_MinDomainsPadsTheEligibleSet(t *testing.T) {
 		t.Errorf("Domains = %v, want five", el.Domains)
 	}
 }
+
+// antiPod is a pod whose only placement statement is a required zone
+// anti-affinity.
+func antiPod() *corev1.Pod {
+	p := tscPod()
+	p.Spec.Affinity = antiRequired(selfTerm(string(zoneKey)))
+	return p
+}
+
+// learnedZones is a mature baseline rendered as §7.5's intent, built by hand so
+// that the precedence tests below do not also depend on the estimator's
+// maturity arithmetic — that is BaselineSet's own test's job.
+func learnedZones() map[leeway.TopologyKey]*leeway.Intent {
+	return map[leeway.TopologyKey]*leeway.Intent{
+		zoneKey: {
+			TopologyKey:    zoneKey,
+			Mode:           leeway.ModeSpread,
+			Source:         leeway.SourceLearnedBaseline,
+			ExplicitShares: map[leeway.Domain]float64{"zone-a": 0.5, "zone-b": 0.5},
+			Bands:          map[leeway.Domain]float64{"zone-a": 0.2, "zone-b": 0.2},
+			Confidence:     leeway.ConfidenceLearned,
+		},
+	}
+}
+
+// TestResolve_ALearnedBaselineAppliesWhereNothingSpoke is the whole point of
+// §7.5: the majority of an estate declares nothing, and without a baseline the
+// only expectation available for it is an even split over its eligible domains.
+func TestResolve_ALearnedBaselineAppliesWhereNothingSpoke(t *testing.T) {
+	res := Resolve(tscPod(), threeZones(t), ResolveConfig{
+		ClusterDefaults: noClusterDefaults,
+		Baselines:       learnedZones(),
+	})
+
+	got := res.Intents[zoneKey]
+	if got == nil || got.Source != leeway.SourceLearnedBaseline {
+		t.Fatalf("zone intent = %+v, want the learned baseline", got)
+	}
+	if len(got.Bands) != 2 {
+		t.Errorf("Bands = %v, want the learned band per domain — Bands is what switches breach from the drift rule to the per-domain one", got.Bands)
+	}
+	// The eligible set is still the pod's, not the baseline's domain list: a
+	// baseline learned while a third zone existed must not keep scoring against
+	// a zone the subject can no longer reach.
+	if got, want := domains(res.Eligible[zoneKey]), []string{"zone-a", "zone-b", "zone-c"}; !slices.Equal(got, want) {
+		t.Errorf("eligible zones = %v, want %v", got, want)
+	}
+	// And the axis nobody learned anything about is untouched, rather than
+	// picking up the zone baseline by accident.
+	if got := res.Intents[poolKey]; got != nil {
+		t.Errorf("pool intent = %+v, want none — nothing was learned on that axis", got)
+	}
+}
+
+// TestResolve_ALearnedBaselineLosesToEveryDeclaredSource pins §5.1's ordering
+// at the bottom of the list, which is the property that makes learning safe to
+// leave on: it can only ever fill a gap, never overrule an answer.
+func TestResolve_ALearnedBaselineLosesToEveryDeclaredSource(t *testing.T) {
+	cases := map[string]struct {
+		pod  *corev1.Pod
+		cfg  ResolveConfig
+		want leeway.IntentSource
+	}{
+		"a spread constraint": {
+			pod:  tscPod(zoneSpread(1, corev1.DoNotSchedule)),
+			cfg:  ResolveConfig{ClusterDefaults: noClusterDefaults},
+			want: leeway.SourceTopologySpreadConstraint,
+		},
+		"an anti-affinity term": {
+			pod:  antiPod(),
+			cfg:  ResolveConfig{ClusterDefaults: noClusterDefaults},
+			want: leeway.SourcePodAntiAffinityRequired,
+		},
+		"a declared cluster default": {
+			pod:  tscPod(),
+			cfg:  ResolveConfig{ClusterDefaults: &[]corev1.TopologySpreadConstraint{zoneSpread(2, corev1.ScheduleAnyway)}},
+			want: leeway.SourceClusterDefaultDeclared,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tc.cfg.Baselines = learnedZones()
+			res := Resolve(tc.pod, threeZones(t), tc.cfg)
+			got := res.Intents[zoneKey]
+			if got == nil || got.Source != tc.want {
+				t.Fatalf("zone intent source = %+v, want %v — the baseline outranked %s", got, tc.want, name)
+			}
+			if len(got.Bands) != 0 {
+				t.Errorf("Bands = %v on a declared intent; only a learned baseline sets them, and their presence changes the breach rule", got.Bands)
+			}
+		})
+	}
+}
+
+// TestResolve_ALearnedBaselineBeatsAnAssumedClusterDefault is the one pair in
+// §5.1 the baseline wins, and the reason Phase 5 moved the assumed default to
+// the bottom of the list. The assumed defaults apply to exactly the pods a
+// baseline is learned for — those declaring no topologySpreadConstraints — so
+// while the guess ranked higher, no cluster that had left
+// --topology-cluster-defaults unset ever scored anything against §7.5 at all.
+func TestResolve_ALearnedBaselineBeatsAnAssumedClusterDefault(t *testing.T) {
+	// ClusterDefaults nil is the assumed state, and the shipped default.
+	res := Resolve(tscPod(), threeZones(t), ResolveConfig{Baselines: learnedZones()})
+
+	got := res.Intents[zoneKey]
+	if got == nil || got.Source != leeway.SourceLearnedBaseline {
+		t.Fatalf("zone intent = %+v, want the learned baseline to beat our own guess", got)
+	}
+	// The guess is kept as evidence rather than discarded, so a reader of the
+	// finding can still see what it would have been scored against.
+	var sawDefault bool
+	for _, e := range got.Evidence {
+		sawDefault = sawDefault || (e.Source == leeway.SourceClusterDefaultAssumed && e.Ignored)
+	}
+	if !sawDefault {
+		t.Errorf("evidence = %+v, want the superseded assumed default retained and flagged ignored", got.Evidence)
+	}
+}
+
+// TestResolve_EveryLearnedAxisLandsAndAHoleIsSkipped covers the two remaining
+// shapes of the map: more than one axis at once, and a nil entry. IntentsFor
+// omits an immature axis rather than storing nil for it, but the field is
+// exported and a caller assembling the map by hand can leave a hole, which must
+// not be dereferenced as an intent claiming the workload asked for nothing.
+func TestResolve_EveryLearnedAxisLandsAndAHoleIsSkipped(t *testing.T) {
+	baselines := learnedZones()
+	baselines[poolKey] = &leeway.Intent{
+		TopologyKey:    poolKey,
+		Mode:           leeway.ModeSpread,
+		Source:         leeway.SourceLearnedBaseline,
+		ExplicitShares: map[leeway.Domain]float64{"general": 1},
+		Bands:          map[leeway.Domain]float64{"general": 0.1},
+	}
+	baselines[leeway.TopologyKey("unwatched")] = nil
+
+	res := Resolve(tscPod(), threeZones(t), ResolveConfig{
+		ClusterDefaults: noClusterDefaults,
+		Baselines:       baselines,
+	})
+
+	if len(res.Intents) != 2 {
+		t.Fatalf("Intents = %+v, want one per learned axis and nothing for the hole", res.Intents)
+	}
+	for _, key := range []leeway.TopologyKey{zoneKey, poolKey} {
+		if got := res.Intents[key]; got == nil || got.Source != leeway.SourceLearnedBaseline {
+			t.Errorf("%s intent = %+v, want the learned baseline", key, got)
+		}
+	}
+}

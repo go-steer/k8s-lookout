@@ -198,14 +198,15 @@ var kinds = []KindSpec{
 	// inject.Payload like the rest: the §8.5 finding document is the
 	// store's and `cmd/leeway`'s representation, and `message` is its
 	// rendering, so the kinds are additive without freezing a fifth
-	// wire struct against fleet consumers. The other five settled
-	// leeway kinds are NOT listed: leeway.baseline_breach needs a
-	// learned baseline to breach (phase 5), leeway.domain_unavailable
-	// is raised by the source and not by a verdict (phase 7), and the
-	// three compute-class rank kinds have no producer at all. This
-	// ledger is what CAN be emitted, not what has been named.
+	// wire struct against fleet consumers. The other four settled
+	// leeway kinds are NOT listed: leeway.domain_unavailable is raised
+	// by the source and not by a verdict (phase 7), and the three
+	// compute-class rank kinds have no producer at all. This ledger is
+	// what CAN be emitted, not what has been named.
 	{leeway.KindContractViolated, inject.Payload{}, "topology-drift",
 		"A declared topology contract (a DoNotSchedule spread constraint or a required anti-affinity) is being violated, sustained past the dwell window."},
 	{leeway.KindPlacementDrift, inject.Payload{}, "topology-drift",
 		"A workload's objects deviated from the placement its intent implies — declared, inferred, or, where nobody expressed one, an even apportionment over the domains it can reach (drift ρ over threshold), sustained past the dwell window."},
+	{leeway.KindBaselineBreach, inject.Payload{}, "topology-drift",
+		"A workload that declared nothing left the placement it has held all along — a domain's share fell outside the band around its own learned normal (§7.5), sustained past the dwell window."},
 }

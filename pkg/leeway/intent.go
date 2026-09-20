@@ -81,10 +81,29 @@ const (
 	// lose exactly the distinction that keeps a guess from raising a
 	// critical finding. See §13 S4.
 	SourceClusterDefaultDeclared
-	SourceClusterDefaultAssumed
 	SourcePodAntiAffinityPreferred
 	SourcePodAffinityPreferred
 	SourceLearnedBaseline
+	// SourceClusterDefaultAssumed is last, which is a Phase 5 correction to
+	// §5.1 as first written — it used to sit above both preferred affinity
+	// sources and above the learned baseline. It is the only entry in this
+	// list that nobody asserted and nothing measured: it is our guess at a
+	// scheduler configuration we cannot read, and the right place for a guess
+	// is below every actual answer.
+	//
+	// What forced the change is that the old order made §7.5 inert in the
+	// default configuration. The assumed defaults cover the zone axis, and
+	// they apply to exactly the population baselines exist for — pods that
+	// declare no topologySpreadConstraints — so on any cluster that had not
+	// passed --topology-cluster-defaults, the guess won every axis a baseline
+	// would have spoken on and Tier C never saw a learned intent at all.
+	//
+	// It is also the more coherent reading of §8.1. An assumed intent is
+	// capped at Tier B, which signals; a learned baseline is Tier C, which is
+	// metrics-only. Ranking the guess above the measurement meant a workload
+	// nobody had declared anything about got *louder* treatment for being
+	// unmeasured than for being measured, which is backwards.
+	SourceClusterDefaultAssumed
 )
 
 // String implements fmt.Stringer. These spellings reach the `source` label on

@@ -135,7 +135,8 @@ func TestSource_TierCSignalsOptsTierCIn(t *testing.T) {
 		t.Fatalf("emitted %d signals with --topology-tier-c-signals on, want 1", len(*got))
 	}
 	// Still placement_drift, not baseline_breach: that kind needs an intent
-	// from a LEARNED baseline, and learned baselines are phase 5. The opt-in
+	// from a learned baseline, and this evaluation carries none — it is Tier C
+	// the original way, scored against an even apportionment. The opt-in
 	// changes who is told, not what the finding is.
 	if kind := (*got)[0].Kind; kind != leeway.KindPlacementDrift {
 		t.Errorf("Kind = %q, want %q", kind, leeway.KindPlacementDrift)

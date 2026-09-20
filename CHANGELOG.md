@@ -152,16 +152,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no resize row; a DaemonSet's size is the node count, which the drain and
   outage situations already cover.
 
-- **`topology-drift` now raises findings.** Two new signal kinds,
-  `leeway.contract_violated` and `leeway.placement_drift`, taking the frozen
-  v1 inventory to 51 kinds. A workload whose placement has been out of plan
+- **`topology-drift` now raises findings.** Three new signal kinds,
+  `leeway.contract_violated`, `leeway.placement_drift` and
+  `leeway.baseline_breach`, taking the frozen
+  v1 inventory to 52 kinds. A workload whose placement has been out of plan
   for longer than the new `--topology-dwell` (default 10 minutes) produces one
   signal naming the axis it drifted on, the three domains furthest from their
   expectation, what we think caused it, and where the expectation came from —
   a declared spread constraint, an anti-affinity we inferred an intent from,
-  or, where the workload said nothing, an even apportionment over the domains
-  it can reach. The finding says which of those it was, because it is the
-  first thing anybody disputing one will ask.
+  the workload's own learned baseline, or — where it said nothing and has not
+  been watched long enough to have a baseline — an even apportionment over the
+  domains it can reach. The finding says which of those it was, because it is
+  the first thing anybody disputing one will ask.
 
   **A contract violation is `critical`; everything else is at most `warning`;
   and the tier where nobody declared anything is metrics-only.** That last one
@@ -318,12 +320,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   more than a day restarts the maturity clock and keeps the old shares only as
   a seed.
 
-  **Nothing is scored against a baseline yet.** This increment learns,
-  persists and reports on the estimators; scoring Tier C against them — which
-  is the point of the exercise, and the thing that needs a soak against a
-  false-positive corpus before it can be trusted — arrives next. The cost of
-  learning first is one gauge read: by the time it is turned on, an operator
-  can already see how many of their subjects have a mature baseline.
+  **And now Tier C is scored against them.** A workload that declared no
+  spread constraint used to be measured against an even split across its
+  eligible domains — a number nobody asked for, and wrong for most real
+  workloads. Once its baseline matures it is measured against its own normal
+  instead, with a tolerance band of `--topology-baseline-band` learned
+  deviations (default 3) around each domain's learned share. So a service that
+  has always run 80/10/10 across zones is no longer permanently 0.7 drifted,
+  and the same service going to 100/0/0 is a finding — which is the inversion
+  that makes Tier C worth reading. Findings from a learned baseline arrive as
+  the new **`leeway.baseline_breach`** kind rather than
+  `leeway.placement_drift`, because they say a different thing: not "this is
+  not evenly spread" but "this changed".
+
+  Three new flags. `--topology-learn-baselines` (default `true`) turns the
+  whole thing off; `--topology-baseline-half-life` (default 12h) sets how long
+  normal remembers; `--topology-baseline-band` (default 3) is the
+  false-positive knob. The maturity gates, the deviation floor and the
+  downtime thresholds are deliberately not flags — they all fail closed
+  towards fewer and later findings.
+
+  **This stays metrics-only by default**, exactly as Tier C already was: a
+  baseline makes Tier C sharper, not louder, and the workload's owner still
+  never asked to be watched. `--topology-tier-c-signals` is still what puts
+  any of it on the wire. A baseline that has not matured yet is not a gap
+  either — the subject is scored against the even apportionment as before, so
+  turning learning on never takes a workload out of view.
+
+  **One behaviour change, and it lands on everyone who left
+  `--topology-cluster-defaults` unset — which is the default.**
+  The intent-precedence order changed: an *assumed* cluster default — leeway's
+  guess at a scheduler configuration it cannot read — now ranks below every
+  other source, including a learned baseline and a preferred pod affinity,
+  where it used to rank above both. It is the only entry in that list nobody
+  asserted and nothing measured, and a guess belongs below every actual
+  answer. Concretely: a subject that was being scored against an assumed
+  default is now scored against its own learned baseline once that matures,
+  and its `lookout_leeway_intent_info{source=...}` label changes accordingly.
+  A *declared* cluster default — one you named on
+  `--topology-cluster-defaults` — is unaffected and still outranks both. Without this change learning would have been inert
+  in the default configuration, since the assumed defaults cover precisely the
+  population baselines exist for.
 
 - **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
   Instruments declared on the OTel metric API are exported twice from one

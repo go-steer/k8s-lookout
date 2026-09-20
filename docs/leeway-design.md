@@ -220,11 +220,11 @@ the runtime observation that pods are not where the declared or inferred intent 
 them, which fires precisely on the workloads whose templates look correct. The same
 distinction holds between `audit.rigid_scheduling` and `leeway.domain_unavailable`.
 
-> **Two of the eight are in the v1 ledger as of 2026-09-20, not all eight.**
+> **Three of the eight are in the v1 ledger as of 2026-09-20, not all eight.**
 > `pkg/inject/schema` lists what CAN be emitted, not what has been named, and the
 > freeze test counts it — so a kind enters the ledger in the change that gives it a
-> producer. `leeway.contract_violated` and `leeway.placement_drift` are there;
-> `leeway.baseline_breach` needs a learned baseline to breach (Phase 5),
+> producer. `leeway.contract_violated`, `leeway.placement_drift` and — since Phase 5
+> turned Tier C's learned baselines on — `leeway.baseline_breach` are there;
 > `leeway.domain_unavailable` is raised by the source rather than by a verdict
 > (Phase 7), and the four `compute-class` kinds have no source yet (Phase 6). That
 > the names are settled here is what makes each of those additions mechanical: the
@@ -663,10 +663,36 @@ type Intent struct {
 **Precedence** (highest first): `SourcePolicyCRD` → `SourceWorkloadAnnotation` →
 `SourceTopologySpreadConstraint` → `SourcePodAntiAffinityRequired` →
 `SourcePodAffinityRequired` → `SourceClusterDefaultDeclared` →
-`SourceClusterDefaultAssumed` → `SourcePodAntiAffinityPreferred` →
-`SourcePodAffinityPreferred` → `SourceLearnedBaseline`. Multiple intents on
+`SourcePodAntiAffinityPreferred` → `SourcePodAffinityPreferred` →
+`SourceLearnedBaseline` → `SourceClusterDefaultAssumed`. Multiple intents on
 *different* topology keys coexist; on the same key the highest-precedence source wins
 and the others are retained as evidence.
+
+> **`SourceClusterDefaultAssumed` moved to the bottom of this list in Phase 5,
+> 2026-09-20.** It used to sit sixth, above both preferred affinity sources and
+> above the learned baseline. That ordering made §7.5 unreachable: the assumed
+> defaults cover the zone axis and apply to exactly the population baselines are
+> learned for — pods that declare no `topologySpreadConstraints` — so on any
+> cluster that had left `--topology-cluster-defaults` unset, which is the default
+> and the majority, the guess won every axis a baseline would have spoken on.
+> Tier C would have shipped and never once scored a subject against a learned
+> intent.
+>
+> It is the better order on its own terms too, independently of §7.5. Every other
+> entry here is something *somebody said*: an operator, a workload author, or the
+> workload's own observed behaviour. `Assumed` alone is our reconstruction of a
+> `kube-scheduler` configuration S4 confirmed we cannot read, and a guess belongs
+> below every answer — including a soft `preferredDuringScheduling` term, which is
+> at least the workload author expressing a wish. §8.1 sharpens the point: an
+> assumed intent is capped at Tier B, which signals, while a learned baseline is
+> Tier C, which is metrics-only. Under the old order a workload nobody had declared
+> anything about got *louder* treatment for being unmeasured than for being
+> measured.
+>
+> The enum is ordinal, so this renumbers the constants — but nothing persists the
+> number. The kebab-case `String()` spellings are what reach the `intent_info`
+> label and the CRD's `inference.sources` enum, and those are unchanged; only the
+> order the CRD lists them in moved, which is documentation rather than schema.
 
 > The two `PodAffinity` sources were added in Phase 3 and are a delta from this list
 > as first written, which had only the anti-affinity halves. FR-6 requires colocation
@@ -3138,7 +3164,10 @@ inventing a warmup window:
 
 > **Shipped 2026-09-19 as store migration v7 + `leeway.Reconcile`.** Steps 1 and
 > 6 for alert state; steps 3, 5 and 7 belong to the source and the baselines,
-> which arrive with the pipeline and Phase 5 respectively.
+> which arrive with the pipeline and Phase 5 respectively. **Steps 3, 5 and 7
+> shipped 2026-09-20** with migration v8 and `leeway_baseline` — the baselines
+> load at startup, the sweep runs on its own timer, and the three downtime
+> bands above are the restore path's own test.
 >
 > **Three of step 6's four rows are already what `Advance` does.** A persisted
 > Firing that is still drifting stays Firing with its `since`; a persisted
@@ -4004,7 +4033,7 @@ independent of 5.
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
 | **4 — Findings** (2 wks) | State machine, dwell, hysteresis, tiers A/B, transient suppression, severity routing, `pkg/store` persistence. **Verdict layer, §8.2 state machine, §7.6 transient suppression, the v7 `leeway_alert_state` table with §9.3 startup reconcile, §8.5 cause attribution and the finding payload all done as library code, 2026-09-19.** **The scoring pass is now wired into the source, 2026-09-19** — `Source.evaluate` runs §7.1–§7.4 for every *eligible* axis of every subject (not only the declared ones, which would stop measuring the majority of an estate) and publishes the §8.4 score gauges; the per-domain cardinality gate is the real `ρ` floor rather than Phase 2's boolean; and the false-positive corpus now scores through the shipped `ScoreAxis` instead of reassembling the pass itself. **The §8.2 machine is now live in the source, 2026-09-19** — a 30 s alert tick advances every subject-axis against one instant (see §8.2 for why not the evaluation path), episodes persist through the v7 table under the watch process's `--store`, `loadAlertState` restores them for lazy reconcile against the first fresh verdict, and `lookout_leeway_alert_state` exports where each one sits. **§7.6 suppression is now live for the three rows leeway can answer alone, 2026-09-19** — cluster warmup, node drain and domain outage; the inventory samples each domain's ready-node count on a 30 s timer so the outage test has a peak to compare against, cordons are dated from the unschedulable taint, and `lookout_leeway_transient_subjects` reports what is being held back. The zone-outage exit criterion is a standing test at the mechanism level: twenty workloads all skewed by one dead zone open **zero** episodes, and the same skew without an outage still fires. **All five §7.6 rows are now answered, 2026-09-19** — the rollout row consumes `rollout.Source.RollingOut()` through a `RolloutOracle` seam adapted at the composition root (and a deployment without the rollout source says so at startup rather than reporting no rollouts), and the recent-scale row watches `spec.replicas` on Deployments and StatefulSets, stamping only a size that differs from the one already on file so that neither the informer's resync nor a restart reads as a cluster-wide scale event. **Emission shipped, 2026-09-20 — PHASE 4 COMPLETE.** A firing episode builds the §8.5 payload from evidence the source already holds, routes it through §8.3, and reaches the wire as `leeway.contract_violated` or `leeway.placement_drift` (two kinds, not five: `baseline_breach` needs a learned baseline, which is Phase 5, and `domain_unavailable` is Phase 7's source-raised kind). The incident UID is synthetic and carries the axis — `leeway:<subject>|<topology-key>` — because one subject drifting on zone and fine on region is two findings with two dwell timers. Resolution is the clearance observer's job rather than a second signal: §7.4 owns outcome records, `PhaseResolving` reports firing, so §8.2's resolve dwell and `--recovery-stable-for` compose. Tier C is metrics-only unless `--topology-tier-c-signals` says otherwise, and the dwell is `--topology-dwell` | Restart tests pass; zone-outage scenario yields one finding, not four hundred |
-| **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C | Tier C detects injected drift in soak without firing on the FP corpus |
+| **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C. **The estimator shipped as library code, 2026-09-20** — `leeway.BaselineSet` holds one EWMA share and one EWMAD deviation per domain, matures behind both §7.5 gates, freezes while an episode fires (the clock stops, not just the arithmetic, so a week-long incident does not teach the baseline that the incident is normal), and invalidates on the events §7.5 lists. The warm-up bias is real and corrected: at a 12 h half-life a baseline matures having accumulated ~29 % of its weight, so raw EWMAD understates dispersion ~3.5× — `DevWeight` accumulates `α(1−w)` and `DeviationOf` divides by it. **Persistence shipped, 2026-09-20** — store migration v8 and `leeway_baseline`, written in one batched transaction every 30 s (§9.2's second write policy; alert state stays synchronous), with §9.3 step 7's downtime rules on restore: ≤ 2 h resume, ≤ 24 h widen ×1.5 for one half-life, beyond that mark stale. `DevWeight` persists, because a baseline restored without it would re-acquire the bias it was corrected for. **Wired into the source, 2026-09-20** — a sample timer on its own clock, independent of the evaluation coalescer, so what is learned is a placement's duration and not its edit rate. **Tier C turn-on, 2026-09-20 — PHASE 5 COMPLETE.** A mature baseline renders as an `*Intent` with `Source: LearnedBaseline`, so it reuses apportionment, scoring, the per-domain gauges and routing unchanged; the presence of `Bands` (k·max(deviation, floor)) is what switches the breach rule from ρ to the per-domain band test, and no declared source sets them. An immature baseline is nil, which means "scored against an even apportionment" and not "unmonitored". The finding reaches the wire as `leeway.baseline_breach`, the 52nd kind in the frozen schema, still metrics-only unless `--topology-tier-c-signals` says otherwise. Three flags: `--topology-learn-baselines` (default on), `--topology-baseline-half-life`, `--topology-baseline-band`. **This phase amended §5.1** — see the delta there: `SourceClusterDefaultAssumed` moved to the bottom of the precedence list, without which the whole phase would have shipped inert | Tier C detects injected drift in soak without firing on the FP corpus. **Both halves now hold as standing tests, 2026-09-20**: a Deployment that declared nothing and has always sat evenly across three zones, with all six replicas in one, produces exactly one `leeway.baseline_breach` quoting the *learned* expectation; and all seven §12 fixtures run a second time with their declarations stripped — so the baseline is what scores them — and add no findings at the narrowest (floor-width) band |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0 |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable` | Node-pool imbalance detected and attributed |
 | **8 — Hardening** (2 wks) | Cause attribution consuming sibling sources, cardinality controls, OTLP hardening, `cmd/leeway`, docs, dashboards | Scale + soak met on the padded kwok harness; `cmd/leeway` built and smoke-tested in CI; process survives a black-holed OTLP endpoint for 24 h with flat RSS |

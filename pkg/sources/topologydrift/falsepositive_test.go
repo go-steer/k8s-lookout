@@ -608,6 +608,139 @@ func cappedDomains(t *testing.T) fpFixture {
 	}
 }
 
+// learnedFrom renders a mature §7.5 baseline for a fixture's own current
+// placement: the shares it is sitting at, and a dispersion of nothing.
+//
+// A zero dispersion is the adversarial choice, not a convenient one. It gives
+// the narrowest band the estimator can produce — k · floorDeviation, 0.2 —
+// which is the most likely to fire, so a fixture that stays quiet under it
+// stays quiet under any baseline a real cluster could have grown.
+func learnedFrom(t *testing.T, key leeway.TopologyKey, e leeway.Eligibility, dist *leeway.Distribution) *leeway.Intent {
+	t.Helper()
+	// StateRunning, the same filter ScoreAxis measures through. Counts with no
+	// state at all sums nothing and returns zeros, which would make every
+	// share zero — and a baseline whose weights are all zero apportions as an
+	// even split, quietly turning this whole test back into the even-split one
+	// it exists to be different from.
+	counts := dist.Counts(e.Domains, leeway.StateRunning)
+	var total int64
+	for _, c := range counts {
+		total += c
+	}
+	if total == 0 {
+		t.Fatalf("no running pods to learn from on %s; the baseline would be vacuous", key)
+	}
+	cfg := leeway.DefaultBaselineConfig()
+	in := &leeway.Intent{
+		TopologyKey:    key,
+		Mode:           leeway.ModeSpread,
+		Source:         leeway.SourceLearnedBaseline,
+		Confidence:     leeway.ConfidenceLearned,
+		ExplicitShares: make(map[leeway.Domain]float64, len(e.Domains)),
+		Bands:          make(map[leeway.Domain]float64, len(e.Domains)),
+	}
+	for i, d := range e.Domains {
+		var share float64
+		if total > 0 {
+			share = float64(counts[i]) / float64(total)
+		}
+		in.ExplicitShares[d] = share
+		in.Bands[d] = cfg.K * cfg.FloorDeviation
+	}
+	return in
+}
+
+// undeclared strips every placement statement from a representative pod,
+// leaving the constraints that shape eligibility — nodeSelector, tolerations,
+// volumes — untouched.
+//
+// This is what makes the corpus reusable for Tier C. All seven §12 fixtures
+// declare something, so run as written they only ever exercise precedence;
+// stripping the declaration turns each of them into the cluster shape Tier C
+// actually sees, which is the same nodes and the same placement with nobody
+// having said anything about it.
+func undeclared(rep *corev1.Pod) *corev1.Pod {
+	out := rep.DeepCopy()
+	out.Spec.TopologySpreadConstraints = nil
+	out.Spec.Affinity = nil
+	return out
+}
+
+// TestFalsePositiveCorpus_LearnedBaselinesAddNoFalsePositives is the other half
+// of §14's Phase 5 exit criterion. The first half — that Tier C detects
+// injected drift — is TestSource_ALearnedBaselineBreachReachesTheWire; this is
+// the "without firing on the FP corpus" half, run against every cluster §12
+// says is fine with learning turned on.
+//
+// Each fixture is given a baseline of its own placement, which is what a real
+// deployment would have learned from a cluster that has been sitting in that
+// shape: none of these clusters is drifting, so none of them moved, so the
+// baseline is the observation.
+//
+// Two subtests per fixture, because there are two ways learning could go wrong
+// and the declared fixtures cannot exercise both. "declared" is the precedence
+// half: a workload that said something must not have its expectation quietly
+// replaced by what it happens to be doing, which §5.1 prevents but only as long
+// as the candidate really is appended below the declaration. "undeclared" is
+// the band half, and the one §14 is about: the same cluster with nobody having
+// declared anything, scored by §7.5's per-domain rule instead of ρ — a
+// different rule, on shapes chosen because they look like drift and are not.
+func TestFalsePositiveCorpus_LearnedBaselinesAddNoFalsePositives(t *testing.T) {
+	for _, f := range falsePositiveCorpus(t) {
+		for _, mode := range []string{"declared", "undeclared"} {
+			t.Run(f.name+"/"+mode, func(t *testing.T) {
+				rep := f.rep
+				if mode == "undeclared" {
+					rep = undeclared(f.rep)
+				}
+				// Resolved twice: once to learn what the fixture's eligible
+				// set is — the baseline is per-domain, so it cannot be built
+				// before the domains are known — and once with it in hand.
+				base := Resolve(rep, f.inv, ResolveConfig{ClusterDefaults: noClusterDefaults})
+				dist := leeway.NewDistribution()
+				for _, p := range f.pods {
+					dist.Add(domainOf(f.inv, zoneKey, p.Spec.NodeName), leeway.StateRunning, false)
+				}
+				learned := learnedFrom(t, zoneKey, base.Eligible[zoneKey], dist)
+
+				res := Resolve(rep, f.inv, ResolveConfig{
+					ClusterDefaults: noClusterDefaults,
+					Baselines:       map[leeway.TopologyKey]*leeway.Intent{zoneKey: learned},
+				})
+				intent := res.Intents[zoneKey]
+				eligible := res.Eligible[zoneKey]
+				if f.caps != nil {
+					intent = withDomainCaps(intent, eligible, f.caps(eligible))
+				}
+
+				ev := ScoreAxis(zoneKey, intent, eligible, dist, leeway.DefaultThresholds(), leeway.Suppression{})
+				got := fpResult{intent: ev.Intent, eligible: ev.Eligible, ap: ev.Apportionment,
+					scores: ev.Scores, verdict: ev.Verdict, reason: ev.Verdict.Reason}
+				if ev.Verdict.Breached {
+					t.Errorf("learning turned a cluster that is fine into a finding: %s", got)
+				}
+
+				// Each mode also has to prove it ran the path it names, or the
+				// subtest passes for the wrong reason.
+				switch mode {
+				case "declared":
+					if was := base.Intents[zoneKey]; was == nil || ev.Intent.Source != was.Source {
+						t.Errorf("intent source is %v, want the declaration %v — §5.1 ranks the baseline below everything declared",
+							ev.Intent.Source, was)
+					}
+				case "undeclared":
+					if ev.Intent == nil || ev.Intent.Source != leeway.SourceLearnedBaseline {
+						t.Fatalf("intent = %+v, want the learned baseline — with nothing declared there is nothing above it", ev.Intent)
+					}
+					if ev.Verdict.Kind != leeway.BreachNone {
+						t.Errorf("breach kind = %v on a quiet cluster: %s", ev.Verdict.Kind, got)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestFalsePositiveCorpus_PinnedSkewIsNotYetSuppressed records a gap rather
 // than a passing cluster, and it is here so the gap cannot close silently.
 //

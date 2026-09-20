@@ -259,10 +259,11 @@ Gateway-API sibling of `ingress.*`: sustained `Programmed`/`Accepted`/
 `quota.forecast`,
 `notification.upgrade|upgrade_available|security_bulletin` (added
 post-M5, #130), `token.burn`, `leeway.
-contract_violated|placement_drift` (added post-M5, #416 — the
-topology-drift verdicts of docs/leeway-design.md §2.3; a Tier C
-`placement_drift`, scored against an apportionment nobody declared,
-stays metrics-only unless `--topology-tier-c-signals` is set, §8.3).
+contract_violated|placement_drift|baseline_breach` (added post-M5, #416
+— the topology-drift verdicts of docs/leeway-design.md §2.3; a Tier C
+finding, scored against an apportionment or a learned baseline nobody
+declared, stays metrics-only unless `--topology-tier-c-signals` is set,
+§8.3).
 
 The leeway kinds ride `Payload` like every other source-namespaced
 kind: the §8.5 finding document is the store's and `cmd/leeway`'s
@@ -275,7 +276,6 @@ within tolerance on `region`, and those are two findings with two dwell
 timers. `reason` is the suspected cause (§8.5), so a differently-caused
 episode gets its own identity. The remaining settled leeway names are
 deliberately absent until a code path can emit them:
-`leeway.baseline_breach` needs a learned baseline to breach (Phase 5),
 `leeway.domain_unavailable` is raised by the source rather than by a
 verdict (Phase 7), and the compute-class rank kinds have no producer.
 
