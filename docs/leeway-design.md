@@ -1568,6 +1568,42 @@ Default half-life 12 h, configurable per policy.
 > be. Learning a dispersion and then judging with a global constant would throw
 > away the estimate.
 
+> **The source wiring shipped 2026-09-20**, learning on by default. The
+> estimators live in a `baselineLog` keyed by (subject, topology key) — the
+> same grain as an episode and as a persisted row — fed on its own ticker
+> (default 60 s) rather than from the evaluation queue, and flushed on another
+> (§9.2's 30 s). Four decisions in it are worth keeping.
+>
+> **The sampler is a ticker, not a hook on the queue.** dt from the clock only
+> buys an estimate independent of event volume if the *sampling* is too, and a
+> queue-driven sampler would feed a churning subject twelve times an hour and a
+> quiet one twice a day. It also makes the cost of learning a property of the
+> estate's size rather than of how much is going wrong in it.
+>
+> **The freeze decision is made in the source, because it is two facts from two
+> different places.** §7.6 suppression is already on the evaluation, carried
+> from scoring time; the alert phase belongs to the machine, and
+> `AlertPhase.Firing()` deliberately covers `Resolving` as well as `Firing` — a
+> subject whose episode is still clearing has not been shown to be back to
+> normal, and learning through the tail of an episode is learning from the
+> drift. Freezing and thawing both mark the set dirty, because `Frozen` does
+> not persist but `UpdatedAt` does: writing on the edge is what keeps a long
+> freeze from reading as downtime to §9.3 step 7 after a restart.
+>
+> **Sampling collects first and applies second.** `State.EachEvaluation` holds
+> the index lock for the whole walk, and both things a sample needs next — the
+> episode's phase and the estimator — live behind other locks. The same rule
+> `judgements()` already follows: two locks never held together cannot be taken
+> in two orders.
+>
+> **The reap is a sweep, and it waits out `ReconcileGrace`.** A subject-axis
+> with no evaluation is one nothing is scoring, whether the workload went away
+> or the last node carrying its topology label did — the index already knows,
+> so there is no need for a hook on every removal path. But at startup nothing
+> has been scored yet, and a reap on the first tick would delete every row
+> §9.3 step 1 had just read; the grace the alert machine already keeps for its
+> own reconcile covers this one too.
+
 ### 7.6 Transient-state suppression
 
 Skew during these states is expected, and is suppressed or evaluated against a

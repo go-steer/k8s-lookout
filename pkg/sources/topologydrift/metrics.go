@@ -57,6 +57,8 @@ const (
 	metricIntentInfo       = "lookout.leeway.intent_info"
 	metricAlertState       = "lookout.leeway.alert_state"
 	metricTransient        = "lookout.leeway.transient_subjects"
+	metricBaselines        = "lookout.leeway.baselines"
+	metricBaselineSamples  = "lookout.leeway.baseline_samples"
 )
 
 // Instrument descriptions. Hoisted to constants because they are the help
@@ -90,6 +92,17 @@ const (
 		"This is the series to look at before believing a quiet estate: a fleet-wide `domain-outage` row is leeway declining to page " +
 		"four hundred workloads about one dead zone, and a `cluster-warmup` row that never clears is a sentinel that never synced. " +
 		"Only the axes under a transient are present, so zero rows is the healthy reading."
+	descBaselines = "Subject-axes with a §7.5 learned baseline, by state: `learning` is still inside a maturity gate, " +
+		"`mature` is old enough and sampled enough to be scored against, and `frozen` is being held still because its subject is " +
+		"firing or under a §7.6 transient. The three overlap — a frozen baseline is also learning or mature — so they do not sum to the total. " +
+		"This is the series to read before turning Tier C baseline signals on: `mature` is how many subjects would start being judged " +
+		"against what they normally do rather than against an even split, and a `mature` that never climbs means something is resetting " +
+		"the baselines — check the reset outcome on baseline_samples_total."
+	descBaselineSamples = "§7.5 baseline samples, by what the estimator did with each (leeway §6.5). " +
+		"A healthy estate is almost all `applied`. A sustained `reset` rate is the failure mode worth alerting on: the domain set is the " +
+		"invalidation fingerprint, so something churning it — a zone label appearing and disappearing on nodes — restarts every affected " +
+		"baseline's history and keeps it permanently immature, silently. `empty` is subjects with nothing to learn from (scaled to zero, " +
+		"or every pod Pending) and `held` is a frozen set, and neither is a problem."
 	descCounterMismatch = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
 		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
 		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
@@ -114,6 +127,7 @@ var (
 	attrTier        = attribute.Key("tier")
 	attrPhase       = attribute.Key("phase")
 	attrTransient   = attribute.Key("transient")
+	attrOutcome     = attribute.Key("outcome")
 )
 
 // MetricDoc documents one series leeway exports, in its PROMETHEUS spelling —
@@ -237,6 +251,18 @@ func MetricDocs() []MetricDoc {
 			Labels: []string{"subject_kind"},
 			Help:   descCounterMismatch,
 		},
+		{
+			Name:   "lookout_leeway_baselines",
+			Type:   "gauge",
+			Labels: []string{"state"},
+			Help:   descBaselines,
+		},
+		{
+			Name:   "lookout_leeway_baseline_samples_total",
+			Type:   "counter",
+			Labels: []string{"outcome"},
+			Help:   descBaselineSamples,
+		},
 	}
 }
 
@@ -338,6 +364,16 @@ type metricsOptions struct {
 	// something is wrong would withhold precisely the rows somebody is looking
 	// for.
 	Alerts func(alertObserver)
+
+	// Baselines counts §7.5's estimators at scrape time.
+	//
+	// A snapshot function rather than a walk, unlike every other reader here,
+	// because the series is four aggregate numbers and not one per subject.
+	// A per-subject baseline series would be the largest thing this source
+	// exports — subjects × axes, present for every workload rather than only
+	// the ones in trouble — and nothing an operator does with it needs more
+	// than "how many are mature yet".
+	Baselines func() baselineStats
 }
 
 // instruments holds leeway's OTEL-native metric instruments (§8.4).
@@ -457,19 +493,35 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricTransient, err)
 	}
 
+	baselines, err := meter.Int64ObservableGauge(metricBaselines,
+		metric.WithDescription(descBaselines))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricBaselines, err)
+	}
+	// Observable rather than incremented at the sample site: the log already
+	// keeps the running totals, so pushing them would be one write per subject
+	// per minute to reproduce a number two reads a scrape apart can just read.
+	baselineSamples, err := meter.Int64ObservableCounter(metricBaselineSamples,
+		metric.WithDescription(descBaselineSamples))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricBaselineSamples, err)
+	}
+
 	gauges := observables{
-		alertState:     alertState,
-		transient:      transient,
-		subjects:       subjects,
-		readyNodes:     readyNodes,
-		objects:        objects,
-		intents:        intents,
-		expected:       expected,
-		observedSkew:   observedSkew,
-		excessSkew:     excessSkew,
-		relocation:     relocation,
-		drift:          drift,
-		maxDomainShare: maxDomainShare,
+		alertState:      alertState,
+		transient:       transient,
+		baselines:       baselines,
+		baselineSamples: baselineSamples,
+		subjects:        subjects,
+		readyNodes:      readyNodes,
+		objects:         objects,
+		intents:         intents,
+		expected:        expected,
+		observedSkew:    observedSkew,
+		excessSkew:      excessSkew,
+		relocation:      relocation,
+		drift:           drift,
+		maxDomainShare:  maxDomainShare,
 	}
 
 	// One callback for every observable: the SDK invokes it once per
@@ -507,6 +559,9 @@ type observables struct {
 
 	alertState metric.Int64ObservableGauge
 	transient  metric.Int64ObservableGauge
+
+	baselines       metric.Int64ObservableGauge
+	baselineSamples metric.Int64ObservableCounter
 }
 
 // all is every instrument the callback fills, for RegisterCallback. Kept
@@ -517,7 +572,7 @@ func (g observables) all() []metric.Observable {
 	return []metric.Observable{
 		g.subjects, g.readyNodes, g.objects, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
-		g.alertState, g.transient,
+		g.alertState, g.transient, g.baselines, g.baselineSamples,
 	}
 }
 
@@ -599,6 +654,21 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 				attrPhase.String(st.Phase.String()),
 			))
 		})
+	}
+	if opts.Baselines != nil {
+		st := opts.Baselines()
+		// Reported as zeros rather than withheld, unlike the alert and
+		// transient series. Those are bounded by how much trouble a cluster is
+		// in, so an absent row means "nothing wrong"; this one is bounded by
+		// how large it is, so an absent row would be indistinguishable from a
+		// deployment that turned learning off — and the whole point of
+		// `mature` is to be watched climbing from zero.
+		o.ObserveInt64(g.baselines, int64(st.Tracked-st.Mature), metric.WithAttributes(attrState.String("learning")))
+		o.ObserveInt64(g.baselines, int64(st.Mature), metric.WithAttributes(attrState.String("mature")))
+		o.ObserveInt64(g.baselines, int64(st.Frozen), metric.WithAttributes(attrState.String("frozen")))
+		for out, n := range st.Outcomes {
+			o.ObserveInt64(g.baselineSamples, n, metric.WithAttributes(attrOutcome.String(out.String())))
+		}
 	}
 }
 

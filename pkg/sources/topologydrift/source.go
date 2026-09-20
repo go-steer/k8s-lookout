@@ -89,6 +89,28 @@ const DefaultReconcileGrace = 5 * time.Minute
 // this matches the alert tick so that the two passes stay roughly in step.
 const DefaultReadySampleInterval = 30 * time.Second
 
+// DefaultBaselineSampleInterval is how often §7.5's estimators are fed.
+//
+// A minute against a twelve-hour half-life is 720 samples per half-life,
+// which is far more than the estimate needs — the EWMA converges on elapsed
+// time, not on sample count, and `dt` comes from the clock precisely so that
+// the cadence is free to be wrong. What the cadence actually buys is the
+// 200-sample maturity gate: at one a minute a subject clears it in 3h20m,
+// comfortably inside the 6h age gate, so age is the binding constraint and
+// maturity means "we watched this for six hours" rather than "we sampled it
+// often enough".
+//
+// Going faster would make the sample count the binding gate on a cluster
+// that restarts often, which is the wrong gate: 200 samples in ten minutes
+// is a very good estimate of ten minutes.
+const DefaultBaselineSampleInterval = time.Minute
+
+// DefaultBaselineFlushInterval is §9.2's batched baseline write.
+//
+// Thirty seconds, straight from the design: losing it costs thirty seconds of
+// a twelve-hour half-life, which is not a durability promise anybody made.
+const DefaultBaselineFlushInterval = 30 * time.Second
+
 // DefaultTopologyKeys are the axes tracked when none are configured (§10.2).
 var DefaultTopologyKeys = []leeway.TopologyKey{
 	corev1.LabelTopologyZone,
@@ -175,6 +197,33 @@ type Config struct {
 	// leeway.DefaultCauseConfig, field by field.
 	Cause leeway.CauseConfig
 
+	// Baselines tunes §7.5's estimator. The zero value takes
+	// leeway.DefaultBaselineConfig, field by field, and every gate in it
+	// fails closed — a zero MinSamples does not mean "mature immediately".
+	Baselines leeway.BaselineConfig
+
+	// BaselineSampleInterval is how often each scored subject's placement is
+	// fed to its estimator. Zero takes DefaultBaselineSampleInterval.
+	//
+	// On a timer for the same reason the dwell is, only more so: a half-life
+	// is a statement about elapsed time, and sampling on the evaluation path
+	// would make a subject whose pods churn reach maturity in minutes while a
+	// quiet one that is equally wrong took the full six hours.
+	BaselineSampleInterval time.Duration
+
+	// BaselineFlushInterval is §9.2's batched write. Zero takes
+	// DefaultBaselineFlushInterval.
+	BaselineFlushInterval time.Duration
+
+	// LearnBaselines is §7.5's off switch, and it defaults ON — the zero
+	// value learns, which is why this is not spelled DisableBaselines.
+	//
+	// Learning is separate from *using* what was learned (TierCSignals).
+	// A deployment that never wants a Tier C signal still wants the
+	// baselines, because lookout_leeway_baseline_mature is how an operator
+	// finds out whether turning them on would be quiet.
+	LearnBaselines *bool
+
 	// TierCSignals is §8.3's policy opt-in: Tier C findings are metrics-only
 	// unless it is set. It defaults off, and that default is what makes the
 	// source defensible as a default-on one — the overwhelming majority of
@@ -214,10 +263,20 @@ func (c Config) normalize() Config {
 	if c.ReadySampleInterval <= 0 {
 		c.ReadySampleInterval = DefaultReadySampleInterval
 	}
+	if c.BaselineSampleInterval <= 0 {
+		c.BaselineSampleInterval = DefaultBaselineSampleInterval
+	}
+	if c.BaselineFlushInterval <= 0 {
+		c.BaselineFlushInterval = DefaultBaselineFlushInterval
+	}
 	c.Transient = c.Transient.Normalized()
 	c.Cause = c.Cause.Normalized()
+	c.Baselines = c.Baselines.Normalized()
 	return c
 }
+
+// learnBaselines is LearnBaselines with its default applied: nil is on.
+func (c Config) learnBaselines() bool { return c.LearnBaselines == nil || *c.LearnBaselines }
 
 // readyRetention is how much ready-count history the two readers of the series
 // need between them, which is the longer of their windows.
@@ -292,10 +351,18 @@ type Source struct {
 	metrics *instruments
 	verify  *Verifier
 	alerts  *Alerts
+	// baselines is §7.5's live estimators. Always non-nil; a deployment with
+	// LearnBaselines off simply never feeds it.
+	baselines *baselineLog
 	// store persists the §8.2 dwell timers. Nil means no persistence, which is
 	// the no-`--store` deployment: the machine still runs, it just starts every
 	// dwell from zero at each restart.
 	store AlertStore
+	// baselineStore is the same store when it can also carry §7.5's learned
+	// normals, and nil when it cannot. Separate from store rather than a type
+	// assertion at each use, so the capability is decided once, where the
+	// store arrives.
+	baselineStore BaselineStore
 	// policies holds the LeewayPolicy objects the informers deliver. Always
 	// non-nil so that policyFor needs no second nil check; an empty store is
 	// the normal deployment.
@@ -312,6 +379,11 @@ type Source struct {
 	// rollingOut is the last snapshot the rollout oracle gave us. Nil until
 	// the first cluster sample, which reads as "nothing is rolling out".
 	rollingOut map[leeway.SubjectRef]bool
+	// baselineGraceUntil holds the baseline reap off until the first re-apply
+	// has had time to score the subjects whose rows we just loaded. Zero
+	// outside Run, which is every test that never starts one — and reaping
+	// from the first tick is right there, because nothing was loaded either.
+	baselineGraceUntil time.Time
 	// replicaSets resolves the pod → ReplicaSet → Deployment hop. Set in Run.
 	replicaSets appslisters.ReplicaSetLister
 	// pods is the verifier's view of the cache. Set in Run.
@@ -362,6 +434,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 		Pinned:    VolumePins(s.boundVolume, cfg.TopologyKeys),
 	})
 	s.alerts = NewAlerts(cfg.Dwell)
+	s.baselines = newBaselineLog()
 	s.verify = NewVerifier(VerifyOptions{
 		State:      s.state,
 		Pods:       s.cachedPods,
@@ -457,7 +530,30 @@ type AlertStore interface {
 	DeleteLeewayAlertState(ctx context.Context, cluster, subjectKey, topologyKey string) error
 }
 
-// WithStore gives the source somewhere to persist its dwell timers.
+// BaselineStore is §9.1's second persistence seam, also satisfied by
+// *store.Store.
+//
+// Separate from AlertStore because the two are written on deliberately
+// opposite policies (§9.2) and it is worth being able to read one contract
+// without the other: this one is a batch write and a bulk read, which is what
+// a twelve-hour half-life is allowed to be, while an alert transition is
+// written one at a time and synchronously because losing it loses a promise.
+//
+// Optional in the same way: a store that does not implement it — an older
+// embedder's, or a fake in a test that only cares about dwells — simply
+// learns baselines in memory and forgets them on restart, which costs six
+// hours of relearning and no monitoring at all.
+type BaselineStore interface {
+	// LeewayBaselines returns one cluster's persisted baselines.
+	LeewayBaselines(ctx context.Context, cluster string) ([]leeway.BaselineRecord, error)
+	// PutLeewayBaselines writes a batch in one transaction.
+	PutLeewayBaselines(ctx context.Context, recs []leeway.BaselineRecord) error
+	// DeleteLeewayBaseline forgets one subject-axis's learned normal.
+	DeleteLeewayBaseline(ctx context.Context, cluster, subjectKey, topologyKey string) error
+}
+
+// WithStore gives the source somewhere to persist its dwell timers, and — if
+// the store also satisfies BaselineStore — its learned baselines.
 //
 // Optional, and running without one is a supported deployment rather than a
 // degraded mode — it is what `watch` does with no `--store`. §9.2's rule is
@@ -471,6 +567,7 @@ func (s *Source) WithStore(st AlertStore, cluster string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.store = st
+	s.baselineStore, _ = st.(BaselineStore)
 	s.cfg.Cluster = cluster
 }
 
@@ -1130,6 +1227,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// not scored anything yet. Read after arming, because until the caches are
 	// synced there is nothing to reconcile against either.
 	s.loadAlertState(ctx, time.Now())
+	// §9.3 step 1's other half, read at the same instant and for the same
+	// reason: step 7 measures one gap for the whole set, and a loader that
+	// read the clock per row would give two subjects loaded a second apart
+	// two different answers about the same outage.
+	s.loadBaselines(ctx, time.Now())
 
 	go s.queue.Run(ctx)
 
@@ -1166,6 +1268,25 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	defer readyTick.Stop()
 	s.sampleCluster(time.Now())
 
+	// §7.5, on its own timer and not on the evaluation path. A half-life is a
+	// statement about elapsed time, so a subject whose pods churn must not
+	// learn faster than a quiet one that is equally wrong — the same argument
+	// as the alert tick, only sharper, because the dwell is minutes and this
+	// is hours.
+	baselineTick := time.NewTicker(s.cfg.BaselineSampleInterval)
+	defer baselineTick.Stop()
+
+	// §9.2's batched write, separate from the sample tick because the two
+	// answer to different things: the sample rate is what the estimator needs,
+	// and the flush rate is how much learning a crash is allowed to cost.
+	baselineFlush := time.NewTicker(s.cfg.BaselineFlushInterval)
+	defer baselineFlush.Stop()
+	// A last flush on the way out. Not a promise — a killed process makes no
+	// write at all — but a graceful stop is the common shutdown, and a clean
+	// one turns "24 hours of downtime, mark everything stale" into "no
+	// downtime at all" for a rolling restart that takes seconds.
+	defer func() { s.flushBaselines(context.WithoutCancel(ctx)) }()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1178,6 +1299,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			s.runAlertPass(ctx)
 		case <-readyTick.C:
 			s.sampleCluster(time.Now())
+		case <-baselineTick.C:
+			s.sampleBaselines(time.Now())
+		case <-baselineFlush.C:
+			s.flushBaselines(ctx)
 		}
 	}
 }
@@ -1219,6 +1344,141 @@ func (s *Source) loadAlertState(ctx context.Context, now time.Time) {
 	if n := s.alerts.Load(records, now); n > 0 {
 		s.logger()("topology-drift: restored %d open episode(s) from the store; each is reconciled against a fresh score as its subject is re-evaluated (within %s)",
 			n, s.cfg.ReconcileGrace)
+	}
+}
+
+// loadBaselines reads §7.5's persisted estimators and applies §9.3 step 7's
+// downtime rules (§9.3 step 1, deferred to here for the same reason the alert
+// state is: a baseline is only interpretable against a clock, and step 7 wants
+// one instant for the whole set).
+//
+// Swallowed on failure, like the alert half and for the stronger version of
+// the same reason: a baseline that cannot be read costs six hours of
+// relearning during which Tier C is scored exactly as it was before Phase 5.
+func (s *Source) loadBaselines(ctx context.Context, now time.Time) {
+	s.mu.Lock()
+	st, cluster := s.baselineStore, s.cfg.Cluster
+	s.baselineGraceUntil = now.Add(s.cfg.ReconcileGrace)
+	s.mu.Unlock()
+	if st == nil || !s.cfg.learnBaselines() {
+		return
+	}
+
+	records, err := st.LeewayBaselines(ctx, cluster)
+	if err != nil {
+		s.logger()("topology-drift: could not read persisted baselines (%v) — §7.5 relearns from scratch and Tier C is scored against an even apportionment until it does; monitoring is unaffected", err)
+		return
+	}
+	n, verdicts := s.baselines.Load(records, now, s.cfg.Baselines)
+	if n == 0 {
+		return
+	}
+	// One line, and only when something came back. The verdict breakdown is
+	// the part worth reading: "restored 12000" says the file was there, and
+	// "11800 resumed, 200 widened" says what it is worth.
+	s.logger()("topology-drift: restored %d learned baseline(s) — %d resumed, %d widened for one half-life after a gap, %d stale and relearning (§9.3 step 7)",
+		n,
+		verdicts[leeway.DowntimeResumed],
+		verdicts[leeway.DowntimeWidened],
+		verdicts[leeway.DowntimeStale])
+}
+
+// baselineSample is one subject-axis's placement as of one pass, lifted out
+// of the index before anything is done with it.
+//
+// Collected first and applied second because State.EachEvaluation holds the
+// index lock for the whole walk, and both of the things a sample needs next —
+// the episode's phase and the estimator itself — live behind other locks. The
+// same rule judgements() follows, for the same reason: two locks that are
+// never held together cannot be taken in two orders.
+type baselineSample struct {
+	key        baselineKey
+	domains    []leeway.Domain
+	actual     []int64
+	suppressed bool
+}
+
+// sampleBaselines feeds every scored subject-axis to its §7.5 estimator, and
+// reaps the ones that are no longer scored.
+//
+// Freezing is decided here rather than inside the estimator because it is two
+// facts from two different places. §7.6 suppression is already on the
+// evaluation, carried from scoring time; the alert phase is the machine's, and
+// AlertPhase.Firing() covers Resolving as well as Firing — a subject whose
+// episode is still clearing has not yet been shown to be back to normal, and
+// learning through the tail of an episode is learning from the drift.
+//
+// The reap is a sweep rather than a hook on every removal path, because the
+// index already knows the answer: a subject-axis with no evaluation is one
+// nothing is scoring, whether that is because the workload went away or
+// because the last node carrying its topology label did. It is held off for
+// ReconcileGrace after a load for the same reason the alert machine holds off
+// its own: at startup nothing has been scored yet, and reaping on the first
+// tick would delete every row we had just read.
+func (s *Source) sampleBaselines(now time.Time) {
+	if !s.cfg.learnBaselines() {
+		return
+	}
+
+	samples := make([]baselineSample, 0, 64)
+	s.state.EachEvaluation(func(sub leeway.SubjectRef, ev *Evaluation) {
+		samples = append(samples, baselineSample{
+			key:        baselineKey{Subject: sub, Key: ev.Key},
+			domains:    ev.Scores.Domains,
+			actual:     ev.Scores.Actual,
+			suppressed: ev.Verdict.Suppressed,
+		})
+	})
+
+	live := make(map[baselineKey]bool, len(samples))
+	for _, sm := range samples {
+		live[sm.key] = true
+		frozen := sm.suppressed
+		if st, open := s.alerts.StateOf(sm.key.Subject, sm.key.Key); open && st.Phase.Firing() {
+			frozen = true
+		}
+		s.baselines.SetFrozen(sm.key, frozen)
+		s.baselines.Observe(sm.key, sm.domains, sm.actual, now, s.cfg.Baselines)
+	}
+
+	s.mu.Lock()
+	grace := s.baselineGraceUntil
+	s.mu.Unlock()
+	if now.Before(grace) {
+		return
+	}
+	for _, k := range s.baselines.Keys() {
+		if !live[k] {
+			s.baselines.Forget(k)
+		}
+	}
+}
+
+// flushBaselines writes §9.2's batch: everything that moved since the last
+// flush, in one transaction, plus the deletions that cannot ride in it.
+//
+// Errors are logged and dropped rather than retried. The batch has already
+// been drained, so a failed flush loses at most one interval of a twelve-hour
+// half-life and the next sample marks the same sets dirty again — which is the
+// trade §9.2 makes for this table and explicitly refuses for the other one.
+func (s *Source) flushBaselines(ctx context.Context) {
+	s.mu.Lock()
+	st, cluster := s.baselineStore, s.cfg.Cluster
+	s.mu.Unlock()
+	if st == nil || !s.cfg.learnBaselines() {
+		return
+	}
+
+	recs, gone := s.baselines.Flush(cluster)
+	if len(recs) > 0 {
+		if err := st.PutLeewayBaselines(ctx, recs); err != nil {
+			s.logger()("topology-drift: could not flush %d learned baseline(s) (%v) — they are still being learned in memory and will be written on the next tick", len(recs), err)
+		}
+	}
+	for _, k := range gone {
+		if err := st.DeleteLeewayBaseline(ctx, cluster, k.Subject.String(), string(k.Key)); err != nil {
+			s.logger()("topology-drift: could not delete the learned baseline for %s on %s: %v", k.Subject, k.Key, err)
+		}
 	}
 }
 
@@ -1362,6 +1622,7 @@ func (s *Source) startMetrics() error {
 		Evaluations:   s.state.EachEvaluation,
 		Intents:       s.state.EachIntent,
 		Alerts:        s.alerts.Each,
+		Baselines:     func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
 	})
 	if err != nil {
 		return err

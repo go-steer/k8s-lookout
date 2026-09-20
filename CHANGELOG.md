@@ -287,6 +287,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **This still emits nothing.** Like the rest of the source, policies feed the
   `lookout_leeway_intent_info` series and no findings.
 
+- **`topology-drift` now learns what normal looks like for workloads that
+  declared nothing.** Every minute it samples each scored subject's placement
+  into a per-axis EWMA of domain share plus an EWMA of absolute deviation.
+  After 200 samples over at least 6 hours a subject's baseline is *mature*: it
+  has an expectation of its own — a workload that has always sat 80/10/10
+  across zones, plus how much that mix normally moves — instead of only the
+  even apportionment it never asked for. Two new
+  aggregate gauges say how far along that is: `lookout_leeway_baselines`
+  (labelled `state`: `learning`, `mature`, `frozen`) and
+  `lookout_leeway_baseline_samples_total` (labelled `outcome`). **`mature`
+  climbing from zero over the first day is the expected shape**, and a
+  non-trivial `reset` rate on the samples counter means something is churning
+  a subject's eligible domain set, which is the one failure mode that keeps
+  every baseline immature forever without anything else looking wrong. These
+  are four series in total, not four per subject.
+
+  **Learning stops while a subject is in trouble.** A baseline that keeps
+  learning through the episode it is being used to judge converges on the
+  drift and quietly stops calling it drift — the classic failure of learned
+  baselines. So a subject freezes while its finding is firing *or resolving*,
+  and also while §7.6 suppression is in force, because a baseline that learns
+  through a zone outage decides the outage is normal and then decides the
+  recovery is the anomaly.
+
+  With `--store`, what was learned survives a restart, so a rollout does not
+  cost six hours of relearning; see the schema note below. A gap in
+  observation is handled rather than ignored: under two hours simply resumes,
+  up to a day resumes with the bands widened by half for one half-life, and
+  more than a day restarts the maturity clock and keeps the old shares only as
+  a seed.
+
+  **Nothing is scored against a baseline yet.** This increment learns,
+  persists and reports on the estimators; scoring Tier C against them — which
+  is the point of the exercise, and the thing that needs a soak against a
+  false-positive corpus before it can be trusted — arrives next. The cost of
+  learning first is one gauge read: by the time it is turned on, an operator
+  can already see how many of their subjects have a mature baseline.
+
 - **The sentinel now has an OpenTelemetry MeterProvider per cluster runner.**
   Instruments declared on the OTel metric API are exported twice from one
   declaration: into the Prometheus registry `/metrics` already serves — same
@@ -317,9 +355,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The two are written on deliberately opposite policies: alert state
   synchronously, because losing a dwell timer is the one durability promise the
   design makes, and baselines in one batched transaction, because losing thirty
-  seconds of a twelve-hour half-life is not worth an fsync per subject. Nothing
-  writes to `leeway_baseline` yet — the sampler arrives with the next
-  increment — but the migration runs on first open, so a store file touched by
+  seconds of a twelve-hour half-life is not worth an fsync per subject. The
+  migration runs on first open, so a store file touched by
   this release cannot afterwards be opened by an older binary, which refuses a
   backward migration rather than guessing. Nothing else changes: a pre-v7 file
   upgrades in place, and a sentinel run without `--store` is unaffected.
