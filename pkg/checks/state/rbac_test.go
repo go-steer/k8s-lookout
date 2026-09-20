@@ -57,6 +57,12 @@ var otherSourceBulkReads = []ListRequirement{
 	// workload state.
 	{"leeway.lookout.go-steer.io", "leewaypolicies"},
 	{"leeway.lookout.go-steer.io", "clusterleewaypolicies"},
+	// compute-class source, §7.7: discovery-gated, and inert everywhere but
+	// GKE. What it reads is the class's ordered priority list — machine
+	// families, core and memory floors, spot/reservation flags — which is an
+	// operator's own hardware preference, not workload state. There are only
+	// ever a handful of these objects in a cluster.
+	{"cloud.google.com", "computeclasses"},
 }
 
 // TestShippedClusterRoleGrantsSubsetOfLoadCluster is the least-privilege

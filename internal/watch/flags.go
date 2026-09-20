@@ -29,6 +29,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -86,6 +87,7 @@ type flags struct {
 	topologyLearn         bool
 	topologyHalfLife      time.Duration
 	topologyBand          float64
+	computeClassInfer     bool
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -195,7 +197,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, topology-drift, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, topology-drift, compute-class, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
 
 	// §11 capability re-check (issue #385). The startup probe is a
 	// point-in-time answer; this is the same question asked again for
@@ -265,6 +267,17 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.BoolVar(&f.topologyLearn, "topology-learn-baselines", true, "Learn each workload's normal placement, so that a workload which declared no spread constraint is scored against what it actually does instead of against an even split (§7.5). Learning is passive and cheap: it samples every subject once a minute, matures after 6h, and only ever applies where nothing else expressed an intent — it cannot override a declared constraint. Turn it off to score every undeclared workload against an even apportionment, which is what happened before this existed.")
 	fs.DurationVar(&f.topologyHalfLife, "topology-baseline-half-life", leeway.DefaultBaselineConfig().HalfLife, "How long a learned baseline takes to half-absorb a step change in placement. Shorter follows a cluster that is legitimately rebalancing and stops calling it drift; longer keeps a longer memory of normal and so keeps noticing a slow slide that a short half-life would quietly adopt as the new normal. Must be > 0.")
 	fs.Float64Var(&f.topologyBand, "topology-baseline-band", leeway.DefaultBaselineConfig().K, "How many learned deviations wide a baseline's tolerance band is — the false-positive knob for Tier C. A subject breaches when a domain's share leaves the band around what it learned. Raise it if learned baselines are noisy on your cluster; the default is deliberately wide, because Tier C is the tier where nobody asked to be watched. Must be > 0.")
+
+	// Compute-class source knob (leeway design §7.7). ADDITIVE flag; only
+	// meaningful with --sources=…,compute-class.
+	//
+	// One knob, because there is only one decision an operator can make
+	// here that the source cannot make for them. Everything else about
+	// this source — the class label, the priority-index annotation, the
+	// flush cadence — is GKE's spelling of its own feature, and an
+	// operator who needs to change those needs a code fix, not a flag
+	// they have to get right.
+	fs.BoolVar(&f.computeClassInfer, "compute-class-infer", true, "Cross-check GKE's ccc_priority_index node annotation by independently matching each node against its compute class's priority rules, and count every disagreement (lookout_leeway_preference_disagreement). The annotation ALWAYS wins either way — this is a check on k8s-lookout's model of the rules, not an override of GKE's answer — so the only thing turning it off buys is silence on a cluster where the matcher is known to be behind the rules people write. Turning it off also blinds the unmatched and ambiguous counters, which are how that gap is meant to become visible.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -766,7 +779,7 @@ func (f *flags) stormEnabled() bool { return f.storm == stormOn && f.stormWindow
 func (f *flags) sourcesAuto() bool { return f.sources == autoValue }
 
 // knownSources are the --sources names, in the §7.2 table order.
-var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, gateway.Name, topologydrift.Name, quota.Name, notifications.Name, tokenburn.Name}
+var knownSources = []string{k8sevents.Name, objectstate.Name, rollout.Name, workload.Name, autoscaling.Name, saturation.Name, degradation.Name, expiry.Name, capacity.Name, ingress.Name, gateway.Name, topologydrift.Name, computeclass.Name, quota.Name, notifications.Name, tokenburn.Name}
 
 // defaultTopologyKeys renders the topology-drift source's own default
 // axes as the --topology-keys default, so the flag's help text and the

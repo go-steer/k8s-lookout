@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
@@ -53,7 +54,8 @@ type MetricDoc struct {
 // be derived: those instruments are declared on the OpenTelemetry API
 // and reach the same registry through a bridge, so there is no
 // Collector to Describe. They are owned, and pinned against the real
-// exporter, by pkg/sources/topologydrift.MetricDocs.
+// exporter, by pkg/sources/topologydrift.MetricDocs and
+// pkg/sources/computeclass.MetricDocs.
 func MetricsInventory() []MetricDoc {
 	m := newMetrics()
 	fm := newFleetMetrics(prometheus.NewRegistry())
@@ -106,7 +108,7 @@ func MetricsInventory() []MetricDoc {
 		{m.sourceDenied, "gauge", []string{"source", "resource", "required"}},
 		{fm.clusterResolveErrors, "counter", []string{"cluster", "cause"}},
 	}
-	out := make([]MetricDoc, 0, len(rows)+len(topologydrift.MetricDocs()))
+	out := make([]MetricDoc, 0, len(rows)+len(topologydrift.MetricDocs())+len(computeclass.MetricDocs()))
 	for _, r := range rows {
 		name, help := describeCollector(r.c)
 		out = append(out, MetricDoc{Name: name, Type: r.typ, Labels: r.labels, Help: help})
@@ -119,6 +121,13 @@ func MetricsInventory() []MetricDoc {
 			Help:     d.Help,
 			Optional: d.Optional,
 		})
+	}
+	// §7.7's preference block, bridged the same way. It carries no
+	// Optional rows: none of these is behind a flag — the whole source is
+	// behind a CRD instead, and a page that said "opt-in" would send the
+	// reader looking for a flag that does not exist.
+	for _, d := range computeclass.MetricDocs() {
+		out = append(out, MetricDoc{Name: d.Name, Type: d.Type, Labels: d.Labels, Help: d.Help})
 	}
 	return out
 }
