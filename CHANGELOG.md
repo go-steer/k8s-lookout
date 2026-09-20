@@ -309,13 +309,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The `--store` schema is now v7**, adding a `leeway_alert_state` table for
-  the topology-drift dwell timers. Nothing writes to it yet — the source does
-  not emit findings — but the migration runs on first open, so a store file
-  touched by this release cannot afterwards be opened by an older binary, which
-  refuses a backward migration rather than guessing. Nothing else changes: a
-  pre-v7 file upgrades in place, and a sentinel run without `--store` is
-  unaffected.
+- **The `--store` schema is now v8**, adding two tables for topology drift:
+  `leeway_alert_state` (v7) holds the dwell timers, so an episode that has been
+  pending for eight minutes of its ten-minute dwell is still eight minutes in
+  after a restart, and `leeway_baseline` (v8) holds §7.5's learned normal, so a
+  baseline that took six hours to mature does not spend another six relearning.
+  The two are written on deliberately opposite policies: alert state
+  synchronously, because losing a dwell timer is the one durability promise the
+  design makes, and baselines in one batched transaction, because losing thirty
+  seconds of a twelve-hour half-life is not worth an fsync per subject. Nothing
+  writes to `leeway_baseline` yet — the sampler arrives with the next
+  increment — but the migration runs on first open, so a store file touched by
+  this release cannot afterwards be opened by an older binary, which refuses a
+  backward migration rather than guessing. Nothing else changes: a pre-v7 file
+  upgrades in place, and a sentinel run without `--store` is unaffected.
 
 - **`--exclude-namespace` now scopes the watch, not just the output.** It used
   to be a post-watch filter: a sentinel with `--exclude-namespace=kube-system`
