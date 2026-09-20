@@ -30,12 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the volume's `spec.nodeAffinity`, and a PV object holds neither data nor
   credentials.
 
-  **This release emits nothing.** The source produces no signals and no
-  findings — it keeps counters and publishes them, and the scoring that turns
-  a lopsided distribution into something worth paging on lands in a later
-  release. That is deliberate: it is what makes a default-on source that
-  watches every pod in the cluster a safe thing to ship first, because a bug
-  in it is a wrong number on a dashboard rather than a page at 3am.
+  The counters shipped before anything read them, deliberately: it is what
+  makes a default-on source that watches every pod in the cluster a safe thing
+  to build up in public, because a bug in it was a wrong number on a dashboard
+  rather than a page at 3am. Scoring, dwell, suppression and — last — findings
+  were each added on top of counters that had already been checked against the
+  cluster; see the entries below.
 
   The per-subject, per-domain breakdown is cardinality-gated, because it is
   multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k
@@ -151,6 +151,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the informer's own periodic resync relaxes anything. DaemonSets and Jobs have
   no resize row; a DaemonSet's size is the node count, which the drain and
   outage situations already cover.
+
+- **`topology-drift` now raises findings.** Two new signal kinds,
+  `leeway.contract_violated` and `leeway.placement_drift`, taking the frozen
+  v1 inventory to 51 kinds. A workload whose placement has been out of plan
+  for longer than the new `--topology-dwell` (default 10 minutes) produces one
+  signal naming the axis it drifted on, the three domains furthest from their
+  expectation, what we think caused it, and where the expectation came from —
+  a declared spread constraint, an anti-affinity we inferred an intent from,
+  or, where the workload said nothing, an even apportionment over the domains
+  it can reach. The finding says which of those it was, because it is the
+  first thing anybody disputing one will ask.
+
+  **A contract violation is `critical`; everything else is at most `warning`;
+  and the tier where nobody declared anything is metrics-only.** That last one
+  is the default that keeps this affordable to turn on: a workload scored
+  against an apportionment it never asked for is a finding about a change, not
+  about a fault, so it moves the gauges and tells nobody. `--topology-tier-c-signals`
+  puts those on the wire too, once you trust what the source is saying about a
+  given cluster. A subject held back by a rollout, a drain or a zone outage is
+  likewise metrics-only at *every* tier, including contract violations — that
+  is what keeps one dead zone from opening four hundred incidents about four
+  hundred workloads that each genuinely declared a spread they can no longer
+  honour.
+
+  **One incident per workload per axis, not per workload.** The incident's
+  identity carries the topology key, because a Deployment can be drifting on
+  zone while its region mix is exactly as intended, and those are two findings
+  with two dwell timers — folding them would silently swallow the second. The
+  dedup reason is the suspected cause, so an episode that starts being caused
+  by something else gets its own identity rather than deduping into the old
+  one.
+
+  Findings resolve through the ordinary recovery path (`resolved` injects,
+  `--recovery-stable-for`): the source now answers "is this workload still
+  drifting?" for its own incidents, and reports `object_deleted` for a
+  workload that has gone away entirely rather than calling that a recovery.
+  A finding stays outstanding for 30 minutes after the drift stops before the
+  source calls it clear, so a workload that wobbles back and forth across the
+  threshold produces one incident rather than a pair every hour.
 
 - **The per-subject, per-domain breakdown is now exported for drifting
   subjects by default**, via the new `--topology-per-domain-min-drift`

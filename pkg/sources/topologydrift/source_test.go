@@ -144,9 +144,11 @@ func TestConfig_Normalize(t *testing.T) {
 	}
 }
 
-func TestSource_RunBuildsCountersAndEmitsNothing(t *testing.T) {
-	// The Phase 2 shape end to end: counters built from a live informer set,
-	// and not one signal produced.
+func TestSource_RunBuildsCountersAndAQuietClusterStaysQuiet(t *testing.T) {
+	// The whole pipeline end to end on a cluster with nothing wrong with it:
+	// counters built from a live informer set, and not one signal produced.
+	// Emission is wired now, so this asserts the absence of findings rather
+	// than the absence of a feature.
 	objs := []runtime.Object{
 		node("n-a", "us-central1-a"),
 		node("n-b", "us-central1-b"),

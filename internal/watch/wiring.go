@@ -1500,11 +1500,10 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 		case topologydrift.Name:
 			// The leeway subsystem's placement half (docs/leeway-design.md).
 			// Portable — pods, nodes and replicasets, all already granted —
-			// so it auto-enables, and at this phase it EMITS NOTHING: it
-			// maintains the §6.2 indexes and exports the §8.4 counters, and
-			// the scoring that turns those counts into findings lands in
-			// phase 3. Shipping the bookkeeping first is what lets the
-			// counters be wrong in public before anything depends on them.
+			// so it auto-enables. It maintains the §6.2 indexes, exports the
+			// §8.4 counters, and raises the three §2.3 verdict kinds once a
+			// breach outlives the dwell; Tier C stays metrics-only unless
+			// --topology-baseline-signals says otherwise.
 			// The error is dropped, not ignored: validate() already
 			// parsed this string and refused to start on a bad one, so
 			// a failure here is unreachable — and the fallback if it
@@ -1516,6 +1515,8 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				ClusterDefaultConstraints: clusterDefaults,
 				PerDomainSeries:           f.topologyPerDomain,
 				PerDomainSeriesMinDrift:   f.topologyMinDrift,
+				Dwell:                     leeway.Dwell{For: f.topologyDwell},
+				TierCSignals:              f.topologyTierC,
 			}
 			bs.topoDrift = topologydrift.New(client, cfg)
 			// Optional, unlike the gateway source's dynamic client, which is
@@ -1670,6 +1671,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 	if bs.autoscaling != nil {
 		observers = append(observers, bs.autoscaling.ClearanceObserver())
 		log.Printf("recovery: autoscaling clearance observer registered (HPA below max / cap lifted / metrics pipeline alive → cleared)")
+	}
+	if bs.topoDrift != nil {
+		observers = append(observers, bs.topoDrift.ClearanceObserver())
+		log.Printf("recovery: topology-drift clearance observer registered (§8.2 episode resolved / subject gone → cleared)")
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())

@@ -81,6 +81,8 @@ type flags struct {
 	topologyDefaults      string
 	topologyPerDomain     bool
 	topologyMinDrift      float64
+	topologyDwell         time.Duration
+	topologyTierC         bool
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -247,6 +249,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
 	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
 	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
+	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
+	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach, and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -572,6 +576,12 @@ func (f *flags) validate() error {
 	// the failure §13 S4 is entirely about.
 	if _, err := topologydrift.ParseClusterDefaults(f.topologyDefaults); err != nil {
 		return fmt.Errorf("--topology-cluster-defaults: %w", err)
+	}
+	// Zero would be read as "unset" by the source's normalize and silently
+	// become the 10m default, so an operator asking for no dwell at all —
+	// every rollout paging them — has to be told the flag cannot express it.
+	if f.topologyDwell <= 0 {
+		return errors.New("--topology-dwell must be > 0 (a breach has to outlive something, or every rollout is a finding)")
 	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.

@@ -151,6 +151,12 @@ func DefaultCauseConfig() CauseConfig {
 	}
 }
 
+// Normalized is the config with its defaults filled in, for a caller that
+// needs to read a window rather than only pass one back in. The source sizes
+// the ready-count history it keeps off Window, and sizing it off a zero would
+// leave attribution comparing a domain against nothing at all.
+func (c CauseConfig) Normalized() CauseConfig { return c.normalize() }
+
 func (c CauseConfig) normalize() CauseConfig {
 	d := DefaultCauseConfig()
 	if c.Window <= 0 {
