@@ -64,10 +64,35 @@ func TestParseFindingUID_DeclinesForeignIncidents(t *testing.T) {
 		"leeway:",                              // prefix only
 		"leeway:Deployment/prod/web",           // no axis
 		"leeway:nonsense|topology.kubernetes.io/zone",
+		// A compute-class rank incident. It carries a different prefix, but the
+		// kind guard is what makes the refusal right rather than lucky: the
+		// subject vocabulary is shared, so a PreferenceAxis subject under THIS
+		// prefix must be declined too — the alternative is reporting another
+		// source's finding recovered because no Deployment by that name is in
+		// the pod index.
+		"leeway-rank:PreferenceAxis/n4-preferred|gke-computeclass/last-rank",
+		"leeway:PreferenceAxis/n4-preferred|gke-computeclass/last-rank",
 	} {
 		if _, _, ok := parseFindingUID(uid); ok {
 			t.Errorf("parseFindingUID(%q) claimed an incident it did not mint", uid)
 		}
+	}
+}
+
+// TestScoredHere_NamesEveryKindThisSourcePlaces, so that adding a subject kind
+// to the vocabulary without deciding who scores it is a test failure rather
+// than a silently unclaimed incident.
+func TestScoredHere_NamesEveryKindThisSourcePlaces(t *testing.T) {
+	for _, kind := range []leeway.SubjectKind{
+		leeway.SubjectDeployment, leeway.SubjectStatefulSet, leeway.SubjectDaemonSet,
+		leeway.SubjectJob, leeway.SubjectNodeGroup, leeway.SubjectCustom,
+	} {
+		if !scoredHere(kind) {
+			t.Errorf("scoredHere(%s) = false, want this source to own it", kind)
+		}
+	}
+	if scoredHere(leeway.SubjectPreferenceAxis) {
+		t.Error("scoredHere(PreferenceAxis) = true: that is the compute-class source's subject")
 	}
 }
 

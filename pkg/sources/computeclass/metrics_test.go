@@ -119,7 +119,22 @@ func newPromHarness(t *testing.T) *promHarness {
 	// here or it cannot be checked at all.
 	s.tracker.Leave(s.nodes["at-rank-0"].axis, 2, now)
 
+	// A class nothing can be provisioned for, with a pod stuck against it: the
+	// one shape that makes wedged_pods non-zero, and — once judged — the one
+	// §7.7.4 rule that needs no window to reach a verdict, so alert_state has a
+	// row too. Both series are bounded by trouble rather than by cluster size,
+	// which means neither exports anything at all on a healthy fixture.
+	s.UpsertClass("locked-down", map[string]any{
+		"priorities": []any{
+			map[string]any{"machineFamily": "n4"},
+			map[string]any{"machineFamily": "c3"},
+		},
+		"whenUnsatisfiable": "DoNotScaleUp",
+	}, t0)
+	s.UpsertPod(wedgedPod("stuck", "locked-down"), t0)
+
 	now = at(60 * time.Second)
+	s.alerts.pass(s.judgeAll(now), now, s.cfg.ReconcileGrace)
 	return &promHarness{registry: reg, source: s}
 }
 
@@ -161,6 +176,7 @@ func (h *promHarness) family(t *testing.T, name string) *dto.MetricFamily {
 func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 	h := newPromHarness(t)
 	want := []string{
+		"lookout_leeway_preference_alert_state",
 		"lookout_leeway_preference_ambiguous",
 		"lookout_leeway_preference_axis_info",
 		"lookout_leeway_preference_axis_invalid",
@@ -181,6 +197,7 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		"lookout_leeway_preference_unmatched",
 		"lookout_leeway_preference_unreadable_class_nodes",
 		"lookout_leeway_preference_unsupported_rules",
+		"lookout_leeway_preference_wedged_pods",
 	}
 	slices.Sort(want)
 	if got := h.names(t); !slices.Equal(got, want) {

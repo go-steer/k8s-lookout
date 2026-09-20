@@ -63,12 +63,22 @@
 //
 // # Signals
 //
-// None yet, deliberately. This phase ships the axes, the accounting and the
-// §7.7.3 metric set; the four `leeway.rank_*` kinds of §7.7.4 are the next
-// one, and they are gated on policy fields (`whenUnsatisfiable`,
-// `activeMigration.optimizeRulePriority`) this source already decodes. The
-// same staging the topology half took: a source that exports its numbers and
-// self-verifies before it is allowed to page anybody.
+// The four `leeway.rank_*` kinds of §7.7.4, judged by pkg/leeway and held by
+// §8.2's dwell machine at one episode per rule per axis. Two of the rules are
+// gated on policy fields this source decodes from the class rather than on
+// anything a node says: `whenUnsatisfiable` must DECLARE DoNotScaleUp before a
+// Pending pod counts as wedged, and `activeMigration.optimizeRulePriority` must
+// be set before a failure to migrate back is a failure at all.
+//
+// The shares they are judged over are windowed, not cumulative. The tracker's
+// counters run for the life of the axis, and a share taken off those totals
+// would report a bad week in March forever and a bad two hours right now not at
+// all — so the judge diffs two readings and scores the difference (judge.go).
+//
+// The §7.7.4 row that is not here is the Tier C one: mean achieved rank rising
+// against its own EWMA baseline. It wants §7.5's estimator, which is
+// domain-share shaped and persisted against topology subjects, and pointing it
+// at a rank mix is its own change.
 //
 // # Availability
 //
@@ -139,6 +149,49 @@ type Config struct {
 	// time. Scrapes flush too; this bounds the loss if nothing ever scrapes.
 	FlushInterval time.Duration
 
+	// Window is how much history a rank share is a share of (§7.7.4).
+	//
+	// Bounded rather than cumulative because the counters are monotonic: a
+	// share taken off the totals answers "what fraction of this class's whole
+	// recorded life ran at rank 2", which means a bad week in March goes on
+	// reporting in June and a bad two hours right now reports nothing.
+	Window time.Duration
+
+	// AlertInterval is how often §8.2's machine runs. It is also the sampling
+	// rate of the window ring, so it bounds how finely the share can move.
+	AlertInterval time.Duration
+
+	// Dwell is §8.2's hysteresis. The zero value takes leeway's defaults.
+	Dwell leeway.Dwell
+
+	// ReconcileGrace bounds how long a persisted episode waits for a verdict
+	// before it is discarded (§9.3 step 6).
+	ReconcileGrace time.Duration
+
+	// Rank0ShareFloor and LastRankShareCeiling are §7.7.4's two share rules.
+	// Nil takes the shipped default, which is OFF for the floor and 0.9 for
+	// the ceiling; zero is a setting and turns the rule off, which is why they
+	// are pointers. See §7.7.5's "not all fallback is bad".
+	Rank0ShareFloor      *float64
+	LastRankShareCeiling *float64
+
+	// UnusedTierFor is how long a preference tier must have been idle. Zero
+	// takes the §7.7.4 default of thirty days.
+	UnusedTierFor time.Duration
+
+	// MigrationGrace is how long after capacity returns a stuck migration is
+	// still just a slow one. Zero takes the default, which is spike S1's
+	// measured 4 m 17 s with room.
+	MigrationGrace time.Duration
+
+	// TierCSignals routes the Tier C kinds to sinks as well as to metrics.
+	// Off by default (§8.3): an unused preference tier is a cost observation,
+	// and it is the operator's call whether it is worth waking up for.
+	TierCSignals bool
+
+	// Cluster names this cluster in the persisted episode rows.
+	Cluster string
+
 	// Meter is where the §8.4 instruments are declared. Nil means no-op, so a
 	// source constructed without telemetry still runs.
 	Meter metric.Meter
@@ -150,12 +203,38 @@ func DefaultConfig() Config {
 		ClassLabel:              "cloud.google.com/compute-class",
 		PriorityIndexAnnotation: "ccc_priority_index",
 		Profile:                 leeway.DefaultNodeProfileConfig(),
-		FlushInterval:           30 * time.Second,
+		FlushInterval:           DefaultFlushInterval,
+		Window:                  DefaultWindow,
+		AlertInterval:           DefaultAlertInterval,
+		Dwell:                   leeway.DefaultDwell(),
+		ReconcileGrace:          DefaultReconcileGrace,
 	}
 }
 
 // DefaultFlushInterval is how often a quiescent rank advances.
 const DefaultFlushInterval = 30 * time.Second
+
+// DefaultWindow is how much history a rank share is a share of.
+//
+// An hour, which is long enough that a rolling replacement of an estate does
+// not read as a fallback and short enough that yesterday's recovery does not
+// hold today's finding open. It composes with the dwell rather than duplicating
+// it: the window decides whether the condition is true now, the dwell decides
+// whether it has been true long enough to say.
+const DefaultWindow = time.Hour
+
+// DefaultAlertInterval is how often §8.2's machine runs, and how finely the
+// window is sampled.
+const DefaultAlertInterval = time.Minute
+
+// DefaultReconcileGrace is how long a persisted episode waits for a verdict.
+//
+// Longer than topologydrift's equivalent would need to be, because the window
+// this source judges over is itself empty at startup: an episode restored from
+// the store meets nothing but abstentions until MinWindow has elapsed, and
+// discarding it before then would turn every restart into a lost dwell that the
+// persistence exists to prevent.
+const DefaultReconcileGrace = 15 * time.Minute
 
 // normalize fills the zero fields from the defaults.
 func (c Config) normalize() Config {
@@ -172,6 +251,19 @@ func (c Config) normalize() Config {
 	if c.FlushInterval <= 0 {
 		c.FlushInterval = d.FlushInterval
 	}
+	if c.Window <= 0 {
+		c.Window = d.Window
+	}
+	if c.AlertInterval <= 0 {
+		c.AlertInterval = d.AlertInterval
+	}
+	if c.ReconcileGrace <= 0 {
+		c.ReconcileGrace = d.ReconcileGrace
+	}
+	// Dwell is deliberately not filled here: leeway.AlertState.Advance
+	// normalizes it itself, and a partial Dwell means §8.2's 3× resolve rule
+	// rather than the shipped resolve time. Copying the defaults in would
+	// silently overrule that.
 	return c
 }
 
@@ -190,19 +282,53 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, cfg Config) (*Sourc
 	resolver := leeway.NewRankResolver()
 	resolver.Infer = cfg.infer()
 	return &Source{
-		client:      client,
-		dyn:         dyn,
-		cfg:         cfg,
-		extractor:   extractor,
-		resolver:    resolver,
-		tracker:     leeway.NewRankTracker(),
-		classes:     map[string]*leeway.ComputeClass{},
-		decodeFails: map[string]int64{},
-		nodes:       map[string]*nodeState{},
-		pods:        map[podRef]*podState{},
-		podsByNode:  map[string]map[podRef]struct{}{},
-		transitions: map[transitionKey]int64{},
+		client:         client,
+		dyn:            dyn,
+		cfg:            cfg,
+		extractor:      extractor,
+		resolver:       resolver,
+		tracker:        leeway.NewRankTracker(),
+		classes:        map[string]*leeway.ComputeClass{},
+		decodeFails:    map[string]int64{},
+		nodes:          map[string]*nodeState{},
+		pods:           map[podRef]*podState{},
+		podsByNode:     map[string]map[podRef]struct{}{},
+		pendingByClass: map[string]map[podRef]struct{}{},
+		transitions:    map[transitionKey]int64{},
+		history:        map[leeway.AxisKey]*axisHistory{},
+		alerts:         newRankAlerts(cfg.Dwell),
 	}, nil
+}
+
+// AlertStore is §9.1's persistence seam, satisfied by *store.Store.
+//
+// The same three methods topologydrift declares, and deliberately the same
+// table: the grain is identical — one subject, one independent episode per axis
+// of judgement — and the two key columns are free text. What keeps the two
+// sources out of each other's rows is the subject KIND, which each filters on
+// at load; see rankAlerts.Load.
+type AlertStore interface {
+	// LeewayAlertStates returns one cluster's persisted episodes.
+	LeewayAlertStates(ctx context.Context, cluster string) ([]leeway.AlertRecord, error)
+	// PutLeewayAlertState writes one episode.
+	PutLeewayAlertState(ctx context.Context, rec leeway.AlertRecord) error
+	// DeleteLeewayAlertState ends one episode.
+	DeleteLeewayAlertState(ctx context.Context, cluster, subjectKey, topologyKey string) error
+}
+
+// WithStore gives the source somewhere to persist its dwell timers.
+//
+// Optional, and running without one is a supported deployment rather than a
+// degraded mode — it is what `watch` does with no `--store`. §9.2's rule is
+// that a missing history costs one dwell, never the monitoring.
+func (s *Source) WithStore(st AlertStore, cluster string) {
+	if st == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store = st
+	s.cfg.Cluster = cluster
 }
 
 // Name implements sources.Source.
@@ -303,12 +429,10 @@ func (s *Source) logPrintf(format string, args ...any) {
 }
 
 // Run implements sources.Source.
-//
-// emit is accepted and unused: this phase exports metrics only, and the §7.7.4
-// kinds are the next one. Taking the parameter now keeps the signature honest
-// against the interface rather than inventing a second one later.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
-	_ = emit
+	s.mu.Lock()
+	s.emit = emit
+	s.mu.Unlock()
 
 	if !ComputeClassesServed(s.client) {
 		return fmt.Errorf("%s: %s is not served — this source reads GKE custom compute classes, so drop %q from --sources on a cluster without them",
@@ -397,16 +521,121 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// did not exist yet; without this it would stay unplaced until GKE next
 	// touched it, which for a stable node is never.
 	s.reconcile(s.clock())
+	s.loadAlerts(ctx)
 
 	ticker := time.NewTicker(s.cfg.FlushInterval)
 	defer ticker.Stop()
+	alertTick := time.NewTicker(s.cfg.AlertInterval)
+	defer alertTick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			s.tracker.Flush(s.clock())
+		case <-alertTick.C:
+			s.runAlertPass(ctx)
 		}
+	}
+}
+
+// loadAlerts seats §9.1's persisted episodes, after the barrier.
+//
+// After, not before: Load holds the records aside until a verdict turns up for
+// them, and a verdict cannot exist until the caches have something in them. A
+// store that errors is logged and ignored — §9.2's rule is that an unreadable
+// history costs one dwell rather than the monitoring.
+func (s *Source) loadAlerts(ctx context.Context) {
+	s.mu.Lock()
+	st, cluster := s.store, s.cfg.Cluster
+	s.mu.Unlock()
+	if st == nil {
+		return
+	}
+	recs, err := st.LeewayAlertStates(ctx, cluster)
+	if err != nil {
+		s.logPrintf("%s: read persisted alert state: %v", Name, err)
+		return
+	}
+	if n := s.alerts.Load(recs, s.clock()); n > 0 {
+		s.logPrintf("%s: restored %d open rank episode(s)", Name, n)
+	}
+}
+
+// runAlertPass judges every axis, advances §8.2's machine and emits what
+// crossed its dwell.
+//
+// Persist first, emit second, and only TransitionFiring emits. Both rules are
+// topologydrift's and hold here for the same reasons: a finding on the wire the
+// store does not know about becomes a duplicate at the next restart, and
+// Resolved is answered by the clearance observer rather than by a second signal
+// — a source that emitted its own would produce two.
+func (s *Source) runAlertPass(ctx context.Context) {
+	now := s.clock()
+	js := s.judgeAll(now)
+	byAxis := make(map[leeway.AxisKey]*rankJudgement, len(js))
+	for i := range js {
+		byAxis[js[i].axis] = &js[i]
+	}
+
+	for _, o := range s.alerts.pass(js, now, s.cfg.ReconcileGrace) {
+		s.persistOutcome(ctx, o, now)
+		if o.Transition == leeway.TransitionFiring {
+			s.emitFinding(byAxis[o.Key.Axis], o, now)
+		}
+	}
+}
+
+// emitFinding builds, routes and sends the §8.5 payload for one episode.
+func (s *Source) emitFinding(j *rankJudgement, o rankOutcome, now time.Time) {
+	s.mu.Lock()
+	emit := s.emit
+	s.mu.Unlock()
+	if emit == nil || j == nil || o.Verdict == nil {
+		return
+	}
+	f, delivery := s.findingFor(j, *o.Verdict, o.State)
+	if !delivery.Signal {
+		// Metrics only (§8.3). Not logged: the suppressed kind is the one that
+		// fires on every class with a reserved tier, and a line per episode
+		// would be a log nobody reads about the decision that keeps the source
+		// quiet. The alert_state series already shows the episode.
+		return
+	}
+	emit(signalFor(f, o.Key, now))
+}
+
+// persistOutcome writes one episode's move through to the store.
+//
+// Only a move is written, and a Gone episode is deleted rather than stored in
+// PhaseOK — which is what makes a recurrence read as new rather than as the
+// resumption of something the table never let go of.
+func (s *Source) persistOutcome(ctx context.Context, o rankOutcome, now time.Time) {
+	s.mu.Lock()
+	st, cluster := s.store, s.cfg.Cluster
+	s.mu.Unlock()
+	if st == nil {
+		return
+	}
+
+	subject, state := o.Key.subjectKey(), o.Key.stateKey()
+	if o.Gone {
+		if err := st.DeleteLeewayAlertState(ctx, cluster, subject, state); err != nil {
+			s.logPrintf("%s: delete alert state for %s/%s: %v", Name, subject, state, err)
+		}
+		return
+	}
+	if o.Transition == leeway.TransitionNone {
+		return
+	}
+	if err := st.PutLeewayAlertState(ctx, leeway.AlertRecord{
+		Cluster:     cluster,
+		SubjectKey:  subject,
+		TopologyKey: state,
+		AlertState:  o.State,
+		UpdatedAt:   now,
+	}); err != nil {
+		s.logPrintf("%s: persist alert state for %s/%s: %v", Name, subject, state, err)
 	}
 }
 

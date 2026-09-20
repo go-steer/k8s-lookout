@@ -52,6 +52,8 @@ const (
 	metricDecodeErrors     = "lookout.leeway.preference.decode_errors"
 	metricUnderflows       = "lookout.leeway.preference.tracker_underflows"
 	metricAxisInfo         = "lookout.leeway.preference.axis_info"
+	metricAlertState       = "lookout.leeway.preference.alert_state"
+	metricWedgedPods       = "lookout.leeway.preference.wedged_pods"
 )
 
 // Instrument descriptions, hoisted for the same reason topologydrift hoists
@@ -139,6 +141,16 @@ const (
 		"collapse to; `tiers` of 1 means every node on the class is rank 0 by construction and nothing here can " +
 		"degrade. `scale_up` is whenUnsatisfiable as DECLARED — `unset` is not the same evidence as GKE's documented " +
 		"default, and §7.7.4 gates a finding on the difference."
+	descAlertState = "Where one rule on one axis sits in the §8.2 dwell machine: 1 pending, 2 firing. " +
+		"Episodes are per RULE, not per axis: a class can be running almost entirely on its last rank and also have a " +
+		"tier nobody has touched in a month, and resolving the first must not close the second. " +
+		"Only rules with an open episode are present — a healthy class has no rows rather than zeroes. " +
+		"A resolving episode still reads 2, because its finding is still outstanding."
+	descWedgedPods = "Unscheduled pods that named a compute class by nodeSelector and did not get one. " +
+		"The only symptom a wedged class has: on a DoNotScaleUp class no priority can be satisfied and the autoscaler " +
+		"will not provision outside the list, so the pods stay Pending and nothing in the rank distribution moves at all. " +
+		"Non-zero on a scale-up-anyway class is a different story — those pods are waiting on something else, which is " +
+		"why the §7.7.4 finding is gated on whenUnsatisfiable being DECLARED and this gauge is not."
 )
 
 // Attribute keys, typed so a typo is a compile error in one place rather than
@@ -161,6 +173,14 @@ var (
 	attrTiers     = attribute.Key("tiers")
 	attrScaleUp   = attribute.Key("scale_up")
 	attrMigration = attribute.Key("active_migration")
+	// attrRankRule is the §7.7.4 judging rule an episode belongs to, and is
+	// deliberately not `rule`: that label already means a priority rule's
+	// rendering on the nodes gauge, and two different things under one label
+	// name is how a dashboard ends up joining series that have nothing to say
+	// to each other.
+	attrRankRule = attribute.Key("rank_rule")
+	attrTier     = attribute.Key("tier")
+	attrPhase    = attribute.Key("phase")
 )
 
 // MetricDoc documents one series in its PROMETHEUS spelling — the name an
@@ -246,6 +266,18 @@ func MetricDocs() []MetricDoc {
 			Labels: []string{"provider", "axis", "spec_hash", "ordering", "rules", "tiers", "scale_up", "active_migration"},
 			Help:   descAxisInfo,
 		},
+		{
+			Name:   "lookout_leeway_preference_alert_state",
+			Type:   "gauge",
+			Labels: []string{"provider", "axis", "rank_rule", "tier", "phase"},
+			Help:   descAlertState,
+		},
+		{
+			Name:   "lookout_leeway_preference_wedged_pods",
+			Type:   "gauge",
+			Labels: []string{"provider", "class"},
+			Help:   descWedgedPods,
+		},
 	}
 }
 
@@ -275,6 +307,8 @@ type instruments struct {
 	decodeErrors     metric.Int64ObservableCounter
 	underflows       metric.Int64ObservableCounter
 	axisInfo         metric.Int64ObservableGauge
+	alertState       metric.Int64ObservableGauge
+	wedgedPods       metric.Int64ObservableGauge
 
 	reg metric.Registration
 }
@@ -288,6 +322,7 @@ func (in *instruments) all() []metric.Observable {
 		in.unmatched, in.ambiguous, in.disagreement, in.outOfRange, in.axisInvalid,
 		in.noRuleMatching, in.offAxis, in.rankPending, in.unsupported,
 		in.unreadableClass, in.decodeErrors, in.underflows, in.axisInfo,
+		in.alertState, in.wedgedPods,
 	}
 }
 
@@ -378,6 +413,14 @@ func (s *Source) startMetrics() error {
 		in.axisInfo, e = meter.Int64ObservableGauge(metricAxisInfo, metric.WithDescription(descAxisInfo))
 		return
 	})
+	declare(metricAlertState, func() (e error) {
+		in.alertState, e = meter.Int64ObservableGauge(metricAlertState, metric.WithDescription(descAlertState))
+		return
+	})
+	declare(metricWedgedPods, func() (e error) {
+		in.wedgedPods, e = meter.Int64ObservableGauge(metricWedgedPods, metric.WithDescription(descWedgedPods))
+		return
+	})
 	if err != nil {
 		return err
 	}
@@ -465,8 +508,48 @@ func (s *Source) observe(o metric.Observer, in *instruments) {
 		o.ObserveInt64(in.decodeErrors, n, metric.WithAttributes(provider, attrClass.String(class)))
 	}
 
+	for class, pods := range s.pendingByClass {
+		o.ObserveInt64(in.wedgedPods, int64(len(pods)), metric.WithAttributes(provider, attrClass.String(class)))
+	}
+
 	s.observeNodes(o, in, provider)
 	s.observeAxes(o, in, provider)
+	s.observeAlerts(o, in)
+}
+
+// observeAlerts reports one row per open episode.
+//
+// The provider comes off the episode's own axis key rather than the constant
+// every other series here uses, because the alert map is the one place a
+// second provider's axes would arrive without any of the node bookkeeping
+// changing shape — the §8.2 machine does not care which cloud minted the rank.
+//
+// Caller holds s.mu; rankAlerts takes its own lock and never calls back into
+// the Source, so the nesting only ever runs in this direction.
+func (s *Source) observeAlerts(o metric.Observer, in *instruments) {
+	s.alerts.each(func(k alertKey, st leeway.AlertState, tier leeway.Tier) {
+		o.ObserveInt64(in.alertState, alertLevel(st.Phase), metric.WithAttributes(
+			attrProvider.String(string(k.Axis.Provider)),
+			attrAxis.String(k.Axis.Name),
+			attrRankRule.String(k.Rule),
+			attrTier.String(tier.String()),
+			attrPhase.String(st.Phase.String()),
+		))
+	})
+}
+
+// alertLevel is §8.4's 0/1/2 encoding of a phase, and is the same encoding
+// topologydrift exports for the same reason: a resolving episode reads 2
+// because its finding is still outstanding, and `phase` is a label for anyone
+// who needs the distinction back.
+func alertLevel(p leeway.AlertPhase) int64 {
+	if p.Firing() {
+		return 2
+	}
+	if p == leeway.PhasePending {
+		return 1
+	}
+	return 0
 }
 
 // nodeCounts is one axis's tally of the conditions §7.7.3 reports.

@@ -57,10 +57,29 @@ func parseFindingUID(uid string) (leeway.SubjectRef, leeway.TopologyKey, bool) {
 		return leeway.SubjectRef{}, "", false
 	}
 	sub, ok := leeway.ParseSubjectRef(subject)
-	if !ok {
+	if !ok || !scoredHere(sub.Kind) {
 		return leeway.SubjectRef{}, "", false
 	}
 	return sub, leeway.TopologyKey(key), true
+}
+
+// scoredHere reports whether a subject kind is one this source places.
+//
+// The guard exists because "is this mine" is answered by parsing a string, and
+// a string another source minted can parse cleanly here — `compute-class`
+// writes a PreferenceAxis subject and a rule name where this one expects a
+// workload and a topology key. Declining on the kind rather than on the shape
+// is what makes the answer right instead of lucky: an unrecognised kind is not
+// in the pod index, so Clearance would otherwise report the other source's
+// finding recovered-object_deleted on its first sweep.
+func scoredHere(kind leeway.SubjectKind) bool {
+	switch kind {
+	case leeway.SubjectDeployment, leeway.SubjectStatefulSet, leeway.SubjectDaemonSet,
+		leeway.SubjectJob, leeway.SubjectNodeGroup, leeway.SubjectCustom:
+		return true
+	default:
+		return false
+	}
 }
 
 // findingFor builds §8.5's payload and §8.3's routing decision for one

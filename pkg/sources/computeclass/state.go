@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
+	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
 
 // Source implements sources.Source for the compute-class row of §7.2.
@@ -64,8 +65,24 @@ type Source struct {
 	// every node event would be O(pods in the cluster).
 	podsByNode  map[string]map[podRef]struct{}
 	transitions map[transitionKey]int64
+	// pendingByClass holds the unscheduled pods that named a class and did not
+	// get one. They are the only symptom of §7.7.4's wedged class, and they are
+	// indexed separately from `pods` because they occupy nothing: charging them
+	// to a rank would put a pod that got no hardware at all into the same
+	// bucket as one that got its first choice.
+	pendingByClass map[string]map[podRef]struct{}
+	// history is the per-axis sample ring the §7.7.4 windows are diffed from.
+	history map[leeway.AxisKey]*axisHistory
 
 	in *instruments
+
+	// alerts is §8.2's machine, one episode per rule per axis.
+	alerts *rankAlerts
+	// store is §9.1's optional persistence. Nil is a supported deployment, not
+	// a degraded one — it is what `watch` does with no `--store`.
+	store AlertStore
+	// emit is the pipeline's sink, seated by Run.
+	emit func(sources.Signal)
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
@@ -184,6 +201,14 @@ func (s *Source) DeleteClass(name string, at time.Time) {
 // SLI whose whole value is that it reads zero.
 func (s *Source) resetAxis(key leeway.AxisKey) {
 	s.tracker.Forget(key)
+	// The sample ring goes with the buckets, and so does the axis's epoch. An
+	// AxisKey is provider and name only — the spec hash is not in it — so a
+	// re-tiered class keeps the same key, and a ring that survived would diff a
+	// reading of the new tiers against a reading of the old ones. The epoch
+	// restarting is the same statement §7.7.4's unused-tier rule already makes:
+	// a rank 1 that was renumbered an hour ago has not been idle for thirty
+	// days, whatever the old counter said.
+	delete(s.history, key)
 	for _, ps := range s.pods {
 		if ps.counted && ps.axis == key {
 			ps.counted = false
@@ -294,9 +319,12 @@ func (s *Source) resolveNode(name string, ns *nodeState, at time.Time) {
 func (s *Source) UpsertPod(pod *corev1.Pod, at time.Time) {
 	ref := podRef{pod.Namespace, pod.Name}
 	node := pod.Spec.NodeName
+	wedged := wedgedOn(pod, s.cfg.ClassLabel)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.setWedged(ref, wedged)
 
 	if !occupies(pod) {
 		s.forgetPod(ref, at)
@@ -325,9 +353,59 @@ func (s *Source) UpsertPod(pod *corev1.Pod, at time.Time) {
 
 // DeletePod uncharges a pod.
 func (s *Source) DeletePod(pod *corev1.Pod, at time.Time) {
+	ref := podRef{pod.Namespace, pod.Name}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.forgetPod(podRef{pod.Namespace, pod.Name}, at)
+	s.setWedged(ref, "")
+	s.forgetPod(ref, at)
+}
+
+// wedgedOn reports which class a pod is stuck waiting for, empty for a pod
+// that is not stuck or not asking for one.
+//
+// Unscheduled and Pending, asking for a class by nodeSelector. Three
+// deliberate narrowings.
+//
+// A pod with a node is not waiting for capacity whatever its phase says — a
+// Pending pod that is bound is pulling an image. A pod that is Pending because
+// it is unschedulable for some reason of its own (a taint, a quota, a volume in
+// the wrong zone) also lands here, which is why the §7.7.4 rule is additionally
+// gated on the class DECLARING DoNotScaleUp: on a scale-up-anyway class a
+// Pending pod means something else, and the verdict says so rather than
+// counting it.
+//
+// nodeSelector and not nodeAffinity, because that is the form GKE documents for
+// requesting a compute class and the form every class-pinned workload on the
+// inspected cluster uses. An affinity term expressing the same thing would be
+// missed; it would read as a class with no wedged pods, which is the safe
+// direction for a Tier A finding to be wrong in.
+func wedgedOn(pod *corev1.Pod, classLabel string) string {
+	if pod.Spec.NodeName != "" || pod.Status.Phase != corev1.PodPending {
+		return ""
+	}
+	return pod.Spec.NodeSelector[classLabel]
+}
+
+// setWedged moves one pod into or out of the pending index. Caller holds s.mu.
+func (s *Source) setWedged(ref podRef, class string) {
+	for name, byClass := range s.pendingByClass {
+		if name == class {
+			continue
+		}
+		delete(byClass, ref)
+		if len(byClass) == 0 {
+			delete(s.pendingByClass, name)
+		}
+	}
+	if class == "" {
+		return
+	}
+	byClass, ok := s.pendingByClass[class]
+	if !ok {
+		byClass = map[podRef]struct{}{}
+		s.pendingByClass[class] = byClass
+	}
+	byClass[ref] = struct{}{}
 }
 
 // forgetPod uncharges and de-indexes one pod. Caller holds s.mu.

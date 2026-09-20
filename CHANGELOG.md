@@ -408,9 +408,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rule** before naming `compute-class` in an explicit `--sources`. Nodes
   and pods come from informers the sentinel already runs.
 
-  No signals yet, deliberately — the same staging the `topology-drift`
-  counters went through. A number nobody has audited against a real cluster is
-  not something to page on.
+  The counters shipped before anything read them, deliberately — the same
+  staging the `topology-drift` counters went through. A number nobody has
+  audited against a real cluster is not something to page on. The findings that
+  read them are the next entry.
+
+- **`compute-class` now raises findings, not only counters.** Four new signal
+  kinds, judged against the pod-seconds above rather than against a snapshot:
+
+  - `leeway.rank_wedged` — pods are Pending against a class that told the
+    autoscaler not to provision outside its priority list (`whenUnsatisfiable:
+    DoNotScaleUp`), so no capacity of any rank will arrive without a change to
+    the class. Critical; the one rule that needs no window to reach a verdict.
+  - `leeway.rank_degraded` — the class is running below the priority it
+    prefers. Two measurements of the same complaint: more than
+    `--compute-class-last-rank-ceiling` (default 0.9) of its windowed pod-time
+    on its *least*-preferred rank, or less than
+    `--compute-class-rank0-floor` (default 0 — off) on its most-preferred one.
+  - `leeway.rank_no_migration` — a class that declared it would migrate
+    workloads back to preferred capacity has not done so in the 15 minutes
+    since that capacity became available again.
+  - `leeway.rank_tier_unused` — a whole priority nothing has occupied for
+    thirty days: a dead rung on the ladder, or a reservation being paid for and
+    never drawn on. Tier C, so it is **metrics-only unless
+    `--compute-class-tier-c-signals`** is set — an unused priority is
+    frequently the intended configuration, and this is a bill to look at rather
+    than a page.
+
+  Shares are taken over a bounded window (`--compute-class-window`, default 1h)
+  because the counters are cumulative: a share of a class's whole recorded life
+  would still be reporting a bad week in March in June. A verdict must outlive
+  `--compute-class-dwell` (default 10m) before it is a finding, and the dwell
+  timers ride `--store` alongside the occurrence records, so a restart costs
+  one dwell rather than the episode. `lookout_leeway_preference_alert_state`
+  and `lookout_leeway_preference_wedged_pods` are new.
+
+  **A class with only one priority is not judged at all**, including the wedged
+  rule. That is a deliberate cost rather than an oversight: a one-priority
+  `DoNotScaleUp` class *can* wedge, but the four GKE-managed Autopilot classes
+  each declare exactly one priority, and a Pending pod on one of those is the
+  ordinary out-of-capacity story every other part of k8s-lookout already
+  reports. The gauge stays honest — `wedged_pods` counts them — and only the
+  finding is withheld.
+
+  The signal-kind inventory goes 52 → 56. Additive, as v1 requires.
 
 ### Security
 

@@ -88,6 +88,11 @@ type flags struct {
 	topologyHalfLife      time.Duration
 	topologyBand          float64
 	computeClassInfer     bool
+	computeClassWindow    time.Duration
+	computeClassDwell     time.Duration
+	computeClassRank0     float64
+	computeClassLastRank  float64
+	computeClassTierC     bool
 	quotaPoll             time.Duration
 	quotaWindow           time.Duration
 	quotaWarn             float64
@@ -268,16 +273,23 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.DurationVar(&f.topologyHalfLife, "topology-baseline-half-life", leeway.DefaultBaselineConfig().HalfLife, "How long a learned baseline takes to half-absorb a step change in placement. Shorter follows a cluster that is legitimately rebalancing and stops calling it drift; longer keeps a longer memory of normal and so keeps noticing a slow slide that a short half-life would quietly adopt as the new normal. Must be > 0.")
 	fs.Float64Var(&f.topologyBand, "topology-baseline-band", leeway.DefaultBaselineConfig().K, "How many learned deviations wide a baseline's tolerance band is — the false-positive knob for Tier C. A subject breaches when a domain's share leaves the band around what it learned. Raise it if learned baselines are noisy on your cluster; the default is deliberately wide, because Tier C is the tier where nobody asked to be watched. Must be > 0.")
 
-	// Compute-class source knob (leeway design §7.7). ADDITIVE flag; only
-	// meaningful with --sources=…,compute-class.
+	// Compute-class source knobs (leeway design §7.7). ADDITIVE flags;
+	// only meaningful with --sources=…,compute-class.
 	//
-	// One knob, because there is only one decision an operator can make
-	// here that the source cannot make for them. Everything else about
-	// this source — the class label, the priority-index annotation, the
-	// flush cadence — is GKE's spelling of its own feature, and an
-	// operator who needs to change those needs a code fix, not a flag
-	// they have to get right.
+	// The class label, the priority-index annotation and the flush
+	// cadence stay unexposed: they are GKE's spelling of its own
+	// feature, and an operator who needs to change those needs a code
+	// fix, not a flag they have to get right. So do the §7.7.4 bounds
+	// that fail towards fewer findings — the 5m minimum window, the 15m
+	// migration grace and the 30d unused-tier dwell — because raising
+	// any of them only ever withholds a finding, which is what the two
+	// share knobs and the dwell already do more legibly.
 	fs.BoolVar(&f.computeClassInfer, "compute-class-infer", true, "Cross-check GKE's ccc_priority_index node annotation by independently matching each node against its compute class's priority rules, and count every disagreement (lookout_leeway_preference_disagreement). The annotation ALWAYS wins either way — this is a check on k8s-lookout's model of the rules, not an override of GKE's answer — so the only thing turning it off buys is silence on a cluster where the matcher is known to be behind the rules people write. Turning it off also blinds the unmatched and ambiguous counters, which are how that gap is meant to become visible.")
+	fs.DurationVar(&f.computeClassWindow, "compute-class-window", computeclass.DefaultWindow, "How much recent history a compute class's rank shares are a share of (§7.7.4). The counters are cumulative, so a share has to be taken over a bounded window or a bad week in March goes on reporting in June. Longer smooths a class whose capacity comes and goes; shorter notices a fallback sooner and reads a rolling estate replacement as one. Composes with --compute-class-dwell rather than duplicating it: the window decides whether the condition is true now, the dwell decides whether it has been true long enough to say. Must be > 0.")
+	fs.DurationVar(&f.computeClassDwell, "compute-class-dwell", leeway.DefaultDwell().For, "How long a compute class's rank verdict must persist before the source raises a finding (§8.2). The resolve dwell (30m) and the flap guard are not separately tunable. Must be > 0.")
+	fs.Float64Var(&f.computeClassRank0, "compute-class-rank0-floor", leeway.DefaultRankThresholds().Rank0ShareFloor, "Raise leeway.rank_degraded when less than this fraction of a class's windowed pod-time ran at its most-preferred priority. OFF by default (0), because on a class with three or more priorities the same reading also describes an estate that is merely mixed, and only somebody who knows what their class was for can say which. Set it when the first priority is the one that matters — a reservation, or the only family your licence covers.")
+	fs.Float64Var(&f.computeClassLastRank, "compute-class-last-rank-ceiling", leeway.DefaultRankThresholds().LastRankShareCeiling, "Raise leeway.rank_degraded when more than this fraction of a class's windowed pod-time ran at its LEAST-preferred priority. The default of 0.9 admits only two readings — capacity at every better priority is chronically unavailable, or the priority list is in the wrong order — and both are findings. Pass 0 to turn the rule off, which is the right answer for a class whose last rung is the cheap capacity it was always meant to run on (§7.7.5).")
+	fs.BoolVar(&f.computeClassTierC, "compute-class-tier-c-signals", false, "Put Tier C compute-class findings on the wire (§8.3). There is one: leeway.rank_tier_unused, a whole priority nothing has occupied for thirty days — a dead rung on the ladder, or reserved capacity being paid for and never drawn on. It is exported as a metric by default and not as a signal, because an unused priority is frequently the intended configuration and the finding is a bill to look at rather than a page. The rank_wedged, rank_degraded and rank_no_migration kinds always signal.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -619,6 +631,23 @@ func (f *flags) validate() error {
 	}
 	if f.topologyBand <= 0 {
 		return errors.New("--topology-baseline-band must be > 0 (a zero-width band breaches on every sample)")
+	}
+	// Compute-class knobs (§7.7). The two durations are checked for the
+	// same reason as the topology ones — Config.normalize() reads zero as
+	// "unset" and would silently hand back the default. The two shares are
+	// NOT checked against zero, because zero is how each rule is turned
+	// off; only a value outside a share's range is nonsense.
+	if f.computeClassWindow <= 0 {
+		return errors.New("--compute-class-window must be > 0 (a share needs a window to be a share of)")
+	}
+	if f.computeClassDwell <= 0 {
+		return errors.New("--compute-class-dwell must be > 0 (a rank verdict has to outlive something, or a single scale-up is a finding)")
+	}
+	if f.computeClassRank0 < 0 || f.computeClassRank0 > 1 {
+		return errors.New("--compute-class-rank0-floor must be a fraction in [0,1] (0 turns the rule off)")
+	}
+	if f.computeClassLastRank < 0 || f.computeClassLastRank > 1 {
+		return errors.New("--compute-class-last-rank-ceiling must be a fraction in [0,1] (0 turns the rule off)")
 	}
 	// Quota knobs (§7.2 row 8): config errors in every mode, like the
 	// other source thresholds, even when the source is disabled.

@@ -198,15 +198,28 @@ var kinds = []KindSpec{
 	// inject.Payload like the rest: the §8.5 finding document is the
 	// store's and `cmd/leeway`'s representation, and `message` is its
 	// rendering, so the kinds are additive without freezing a fifth
-	// wire struct against fleet consumers. The other four settled
-	// leeway kinds are NOT listed: leeway.domain_unavailable is raised
-	// by the source and not by a verdict (phase 7), and the three
-	// compute-class rank kinds have no producer at all. This ledger is
-	// what CAN be emitted, not what has been named.
+	// wire struct against fleet consumers. One settled leeway kind is
+	// NOT listed: leeway.domain_unavailable is raised by the source and
+	// not by a verdict (phase 7). This ledger is what CAN be emitted,
+	// not what has been named.
 	{leeway.KindContractViolated, inject.Payload{}, "topology-drift",
 		"A declared topology contract (a DoNotSchedule spread constraint or a required anti-affinity) is being violated, sustained past the dwell window."},
 	{leeway.KindPlacementDrift, inject.Payload{}, "topology-drift",
 		"A workload's objects deviated from the placement its intent implies — declared, inferred, or, where nobody expressed one, an even apportionment over the domains it can reach (drift ρ over threshold), sustained past the dwell window."},
 	{leeway.KindBaselineBreach, inject.Payload{}, "topology-drift",
 		"A workload that declared nothing left the placement it has held all along — a domain's share fell outside the band around its own learned normal (§7.5), sustained past the dwell window."},
+
+	// The §7.7.4 preference-rank kinds. Their subject is a provider's
+	// compute class rather than a workload, and they are judged on
+	// pod-seconds at each priority rather than on a distribution over
+	// domains, but the §8.5 finding document and the dwell machine are
+	// the same, so they ride the same payload.
+	{leeway.KindRankWedged, inject.Payload{}, "compute-class",
+		"Pods are Pending against a compute class that told the autoscaler not to provision outside its priority list, so no capacity of any rank will arrive without a change to the class."},
+	{leeway.KindRankDegraded, inject.Payload{}, "compute-class",
+		"A compute class is running below the priority it prefers — too little pod-time at rank 0, or too much at the least-preferred tier, sustained past the dwell window. The pods stay Running, which is why nothing else reports it."},
+	{leeway.KindRankNoMigration, inject.Payload{}, "compute-class",
+		"A compute class that declared it would migrate workloads back to preferred capacity has not done so since that capacity became available again."},
+	{leeway.KindRankTierUnused, inject.Payload{}, "compute-class",
+		"A whole preference tier has never been occupied over the observation window — a dead rung on the priority ladder, or reserved capacity being paid for and never drawn on. Info, not a page: an unused tier is frequently the intended configuration."},
 }

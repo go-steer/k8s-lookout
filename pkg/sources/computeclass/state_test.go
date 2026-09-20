@@ -110,6 +110,17 @@ func pod(name, nodeName string, phase corev1.PodPhase) *corev1.Pod {
 	}
 }
 
+// wedgedPod is an unscheduled pod that asked for a compute class by name: no
+// node, Pending, and the class label in its nodeSelector. That is the exact
+// shape wedgedOn looks for, and the only symptom a wedged class has.
+func wedgedPod(name, class string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
+		Spec:       corev1.PodSpec{NodeSelector: map[string]string{DefaultConfig().ClassLabel: class}},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+}
+
 // podSeconds reads one bucket out of a snapshot, flushing to `when` first so
 // the reading is exact as of that instant — which is what a scrape does.
 func podSeconds(t *testing.T, s *Source, axis string, rank leeway.Rank, when time.Time) float64 {

@@ -1110,6 +1110,14 @@ func (r *runner) run(ctx context.Context) error {
 		bs.compClass.WithFactory(sharedFactory)
 		bs.compClass.WithNodeFactory(factories.Cluster)
 		bs.compClass.WithMeter(r.meter(computeclass.MeterName))
+		if occStore != nil {
+			// The same §9.1 arrangement topologydrift has, and the same
+			// typed-nil guard. The two sources share the one
+			// leeway_alert_state table and tell their rows apart by the
+			// subject kind, so this is not a second store and does not need
+			// to be a second flag.
+			bs.compClass.WithStore(occStore, r.clusterName)
+		}
 	}
 
 	var feed *graphFeed
@@ -1549,11 +1557,13 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 		case computeclass.Name:
 			// The leeway subsystem's preference half (§7.7): which rung of
 			// a GKE custom compute class's priority ladder the estate is
-			// actually running on, weighted by time. Silent by design for
-			// now — it exports the §7.7.3 counters and emits no signals —
-			// because the condition it describes has no failing pod and no
-			// failing Deployment, and the metric has to be trustworthy
-			// before anything is allowed to page on it.
+			// actually running on, weighted by time. It exports the §7.7.3
+			// counters and, since phase 6, raises the four §7.7.4 verdict
+			// kinds once one outlives the dwell — the condition has no
+			// failing pod and no failing Deployment, which is exactly why
+			// nothing else in k8s-lookout reports it. Tier C
+			// (leeway.rank_tier_unused) stays metrics-only unless
+			// --compute-class-tier-c-signals says otherwise.
 			//
 			// The dynamic client is a hard requirement, like gateway's:
 			// ComputeClass is a CRD and there is no typed client for it.
@@ -1562,6 +1572,19 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			}
 			cfg := computeclass.DefaultConfig()
 			cfg.Infer = &f.computeClassInfer
+			cfg.Window = f.computeClassWindow
+			cfg.Dwell = leeway.Dwell{For: f.computeClassDwell}
+			// Taken by address unconditionally: the flag defaults ARE the
+			// shipped thresholds, so an unset flag reproduces the default
+			// and a set one is honoured — including the zero that turns a
+			// rule off, which is the distinction the pointers exist for.
+			cfg.Rank0ShareFloor = &f.computeClassRank0
+			cfg.LastRankShareCeiling = &f.computeClassLastRank
+			cfg.TierCSignals = f.computeClassTierC
+			// Cluster is not set here: WithStore carries it, below, for the
+			// same reason topologydrift's does — the name only matters to
+			// the persisted episode rows, and a source with no store has no
+			// rows to name.
 			ccSrc, cerr := computeclass.New(client, dyn, cfg)
 			if cerr != nil {
 				return nil, cerr
@@ -1718,6 +1741,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 	if bs.topoDrift != nil {
 		observers = append(observers, bs.topoDrift.ClearanceObserver())
 		log.Printf("recovery: topology-drift clearance observer registered (§8.2 episode resolved / subject gone → cleared)")
+	}
+	if bs.compClass != nil {
+		observers = append(observers, bs.compClass.ClearanceObserver())
+		log.Printf("recovery: compute-class clearance observer registered (§7.7.4 rank episode resolved / class gone → cleared)")
 	}
 	if bs.objState != nil {
 		observers = append(observers, bs.objState.ClearanceObserver())
