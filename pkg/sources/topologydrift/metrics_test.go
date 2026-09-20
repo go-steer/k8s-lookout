@@ -152,6 +152,15 @@ func fullOptions() metricsOptions {
 		Alerts: func(yield alertObserver) {
 			yield(subA, zoneKey, leeway.AlertState{Phase: leeway.PhaseFiring}, leeway.TierB)
 		},
+		Baselines: func() baselineStats {
+			return baselineStats{
+				Tracked: 9, Mature: 4, Frozen: 2,
+				Outcomes: map[leeway.ObserveOutcome]int64{
+					leeway.ObserveApplied: 120,
+					leeway.ObserveReset:   1,
+				},
+			}
+		},
 		Intents: func(yield intentObserver) {
 			skew := int32(1)
 			yield(subA, zoneKey, &leeway.Intent{
@@ -214,6 +223,12 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		// monotonic counter, and it is appended AFTER any unit. This one sets
 		// no unit, so the declared name simply gains the suffix.
 		"lookout_leeway_counter_mismatch_total",
+		// §7.5's two. The gauge is unconditional — it is how an operator
+		// watches maturity climb, so a zero has to be a zero and not an
+		// absence — and the counter is the one series whose sustained
+		// non-zero reading (outcome="reset") is a silent failure.
+		"lookout_leeway_baselines",
+		"lookout_leeway_baseline_samples_total",
 	}
 	slices.Sort(want)
 
