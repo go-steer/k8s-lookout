@@ -33,6 +33,19 @@ const (
 	KindDomainUnavailable = "leeway.domain_unavailable"
 )
 
+// The §7.7.4 preference-rank kinds.
+//
+// They are in the same frozen inventory and settled in the same §2.3 table, but
+// nothing in this file produces them: they come from a RankVerdict, which is
+// judged against pod-seconds rather than against a distribution, and share none
+// of FindingKind's inputs. RankRule.Kind is their FindingKind.
+const (
+	KindRankWedged      = "leeway.rank_wedged"
+	KindRankDegraded    = "leeway.rank_degraded"
+	KindRankNoMigration = "leeway.rank_no_migration"
+	KindRankTierUnused  = "leeway.rank_tier_unused"
+)
+
 // FindingKind picks the §2.3 kind for a judged subject.
 //
 // The tier leads, so kind and tier cannot disagree: §2.3's table assigns each

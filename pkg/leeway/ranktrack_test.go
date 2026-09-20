@@ -276,6 +276,40 @@ func TestRankTracker_AxesAreIndependent(t *testing.T) {
 	}
 }
 
+// TestRankTracker_ForgetDropsOneAxisAndOnlyThatOne is the re-tiering path: a
+// class whose spec hash changed has to start a new series, because rank 1 no
+// longer means what the accrued seconds were accrued at. The buckets go rather
+// than zero, since a zeroed bucket would go on reporting a rank the new spec
+// may not have.
+func TestRankTracker_ForgetDropsOneAxisAndOnlyThatOne(t *testing.T) {
+	other := AxisKey{Provider: ProviderGKEComputeClass, Name: "batch"}
+	tr := NewRankTracker()
+	tr.Enter(trackAxis, 0, rankAt(0))
+	tr.Enter(trackAxis, 2, rankAt(0))
+	tr.Enter(other, 1, rankAt(0))
+	tr.Flush(rankAt(time.Minute))
+
+	tr.Forget(trackAxis)
+
+	snap := tr.Snapshot()
+	if len(snap.Ranks) != 1 || snap.Ranks[0].Axis != other {
+		t.Fatalf("Snapshot after Forget = %+v, want only the untouched axis", snap.Ranks)
+	}
+	if snap.Ranks[0].PodSeconds != 60 || snap.Ranks[0].Pods != 1 {
+		t.Errorf("the surviving axis lost state: %+v", snap.Ranks[0])
+	}
+
+	// Re-entering is the caller's job — this type does not hold occupancy —
+	// and the new series starts from zero rather than from the old total.
+	tr.Enter(trackAxis, 0, rankAt(time.Minute))
+	tr.Flush(rankAt(2 * time.Minute))
+	for _, r := range tr.Snapshot().Ranks {
+		if r.Axis == trackAxis && r.PodSeconds != 60 {
+			t.Errorf("re-entered axis = %v pod-seconds, want a series starting at zero", r.PodSeconds)
+		}
+	}
+}
+
 func TestRankTracker_EmptyTrackerSnapshots(t *testing.T) {
 	snap := NewRankTracker().Snapshot()
 	if len(snap.Ranks) != 0 || len(snap.Axes) != 0 || snap.Underflows != 0 {

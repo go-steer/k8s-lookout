@@ -49,6 +49,16 @@ const (
 	SubjectJob         SubjectKind = "Job"
 	SubjectNodeGroup   SubjectKind = "NodeGroup"
 	SubjectCustom      SubjectKind = "Custom"
+	// SubjectPreferenceAxis is one ordered fallback list (§7.7) — the subject
+	// of every rank finding.
+	//
+	// Not "ComputeClass", though on GKE that is the object it comes from. A
+	// preference axis is a shape, not a product: Karpenter NodePool weights and
+	// weighted preferred node affinity express the same thing, and the day one
+	// of those arrives the alternative would be a second subject kind meaning
+	// the same thing, in a frozen vocabulary. The provider's own object kind is
+	// carried by the finding instead, where it costs nothing to add another.
+	SubjectPreferenceAxis SubjectKind = "PreferenceAxis"
 )
 
 // SubjectRef identifies the thing whose distribution we track.
