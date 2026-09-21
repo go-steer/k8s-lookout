@@ -1539,6 +1539,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				CapacityRatioTrigger:      f.topologyCapacityRatio,
 				NodeGroupLabelKeys:        splitCSV(f.topologyNodeGroupKeys),
 				MaxNodeGroups:             f.topologyMaxNodeGroups,
+				DomainUnavailableKeys:     topologyKeysFrom(f.topologyDomainKeys),
 				TierCSignals:              f.topologyTierC,
 				LearnBaselines:            &f.topologyLearn,
 				// Only the two knobs the flags expose are set; every other

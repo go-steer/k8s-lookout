@@ -190,6 +190,19 @@ type Config struct {
 	// off entirely.
 	MaxNodeGroups int
 
+	// DomainUnavailableKeys are the axes §2.3's leeway.domain_unavailable is
+	// judged on. Nil takes DefaultDomainUnavailableKeys; a non-nil empty
+	// slice turns the detector off.
+	//
+	// Nil and empty differ here, which they do nowhere else in this struct,
+	// because the off switch has to be reachable. Every other list defaults
+	// to something an operator can narrow by naming fewer entries; this one
+	// cannot be narrowed to nothing that way, and the axis set is exactly
+	// where the detector's blast radius lives — see
+	// DefaultDomainUnavailableKeys on why a per-node axis here would be a
+	// finding per node.
+	DomainUnavailableKeys []leeway.TopologyKey
+
 	// Dwell is §8.2's timing. The zero value takes leeway.DefaultDwell, and a
 	// partial one is completed by the machine itself — see leeway.Dwell.
 	Dwell leeway.Dwell
@@ -283,6 +296,10 @@ func (c Config) normalize() Config {
 	// to survive normalization to mean anything.
 	if c.MaxNodeGroups == 0 {
 		c.MaxNodeGroups = DefaultMaxNodeGroups
+	}
+	// Nil defaults, empty stays empty. See the field.
+	if c.DomainUnavailableKeys == nil {
+		c.DomainUnavailableKeys = DefaultDomainUnavailableKeys
 	}
 	if c.AlertInterval <= 0 {
 		c.AlertInterval = DefaultAlertInterval
@@ -409,6 +426,10 @@ type Source struct {
 	// rollingOut is the last snapshot the rollout oracle gave us. Nil until
 	// the first cluster sample, which reads as "nothing is rolling out".
 	rollingOut map[leeway.SubjectRef]bool
+	// domainSeen is §2.3's latch: when each domain was last observed to exist
+	// on each axis. It is the memory that keeps a dead zone reported after its
+	// ready history has aged out — see sampleDomains.
+	domainSeen map[leeway.TopologyKey]map[leeway.Domain]time.Time
 	// baselineGraceUntil holds the baseline reap off until the first re-apply
 	// has had time to score the subjects whose rows we just loaded. Zero
 	// outside Run, which is every test that never starts one — and reaping
@@ -1063,6 +1084,9 @@ func (s *Source) suppression(sub leeway.SubjectRef, now time.Time) Suppressor {
 // to be gathered on a timer instead.
 func (s *Source) sampleCluster(now time.Time) {
 	s.inv.SampleReady(now, s.cfg.readyRetention())
+	// After the sample, and reading the series it just extended: a domain
+	// whose nodes are gone is only still knowable through its history.
+	s.sampleDomains(now)
 
 	if s.rollouts == nil {
 		return
@@ -1677,7 +1701,11 @@ func (s *Source) flushBaselines(ctx context.Context) {
 // And it is what makes the pass complete: Alerts.Pass reads the absence of a
 // judgement as "this subject is gone", which is only true of a set that was
 // consistent at one moment.
-func (s *Source) judgements() []Judgement {
+// The domain judgements are appended here rather than passed separately for
+// the same completeness reason: §2.3's subjects share the machine with the
+// placed ones, so a pass that carried only one of the two sets would read the
+// other as gone and abandon every episode in it.
+func (s *Source) judgements(now time.Time) []Judgement {
 	var js []Judgement
 	s.state.EachEvaluation(func(sub leeway.SubjectRef, ev *Evaluation) {
 		js = append(js, Judgement{
@@ -1687,7 +1715,7 @@ func (s *Source) judgements() []Judgement {
 			Tier:     ev.Verdict.Tier,
 		})
 	})
-	return js
+	return append(js, s.domainJudgements(now)...)
 }
 
 // runAlertPass advances §8.2's machine over every scored subject, emits what
@@ -1705,7 +1733,7 @@ func (s *Source) judgements() []Judgement {
 // persisted episode nobody was told about is one tick late at worst.
 func (s *Source) runAlertPass(ctx context.Context) {
 	now := time.Now()
-	for _, o := range s.alerts.Pass(s.judgements(), now, s.cfg.ReconcileGrace) {
+	for _, o := range s.alerts.Pass(s.judgements(now), now, s.cfg.ReconcileGrace) {
 		s.persistOutcome(ctx, o, now)
 		if o.Transition == leeway.TransitionFiring {
 			s.emitFinding(o, now)
@@ -1716,16 +1744,11 @@ func (s *Source) runAlertPass(ctx context.Context) {
 // emitFinding builds and routes the §8.5 payload for one episode that has just
 // crossed its dwell.
 //
-// The evaluation is re-read from the index rather than carried through the
+// The payload is re-read from the index rather than carried through the
 // machine, because the machine's input is deliberately four fields wide
 // (Judgement) and widening it would put the whole scoring result inside a lock
 // the pass holds over every subject in the cluster. The re-read is bounded by
 // the number of episodes that fired on this tick, which is normally none.
-//
-// A subject whose evaluation has gone — scored, then untracked between the
-// judgement snapshot and here — is dropped silently. There is nothing to say
-// about a workload that no longer exists, and the machine has already emitted
-// the outcome that removes it.
 func (s *Source) emitFinding(o Outcome, now time.Time) {
 	s.mu.Lock()
 	emit := s.emit
@@ -1734,11 +1757,10 @@ func (s *Source) emitFinding(o Outcome, now time.Time) {
 		return
 	}
 
-	ev := axisOf(s.state.EvaluationsOf(o.Subject), o.Key)
-	if ev == nil {
+	f, delivery, ok := s.payloadFor(o, now)
+	if !ok {
 		return
 	}
-	f, delivery := s.findingFor(o.Subject, ev, o.State, s.state.Snapshot(o.Subject)[o.Key], now)
 	if !delivery.Signal {
 		// Metrics only (§8.3). Not logged: on a large estate most firing
 		// subjects are Tier C, and a line per subject per episode would be a
@@ -1747,6 +1769,34 @@ func (s *Source) emitFinding(o Outcome, now time.Time) {
 		return
 	}
 	emit(signalFor(f, now))
+}
+
+// payloadFor resolves one fired episode into its §8.5 payload and §8.3 routing,
+// or reports false when there is nothing left to say.
+//
+// The two branches are the two kinds of subject this machine holds. A placed
+// subject's payload comes from its evaluation, re-read from the index; a domain
+// has no evaluation — nothing was placed and nothing scored — so its payload is
+// rebuilt from the census, which is the whole of the claim.
+//
+// A placed subject whose evaluation has gone — scored, then untracked between
+// the judgement snapshot and here — is dropped silently. There is nothing to
+// say about a workload that no longer exists, and the machine has already
+// emitted the outcome that removes it. A domain never takes that branch: the
+// case where its nodes have all gone is precisely the finding.
+func (s *Source) payloadFor(o Outcome, now time.Time) (leeway.Finding, leeway.Delivery, bool) {
+	if o.Subject.Kind == leeway.SubjectDomain {
+		a := s.domainReading(o.Key, leeway.Domain(o.Subject.Name), now)
+		return leeway.NewDomainFinding(a, o.Key, o.State),
+			leeway.DomainVerdict().Route(s.cfg.TierCSignals), true
+	}
+
+	ev := axisOf(s.state.EvaluationsOf(o.Subject), o.Key)
+	if ev == nil {
+		return leeway.Finding{}, leeway.Delivery{}, false
+	}
+	f, delivery := s.findingFor(o.Subject, ev, o.State, s.state.Snapshot(o.Subject)[o.Key], now)
+	return f, delivery, true
 }
 
 // axisOf picks one axis out of a subject's evaluations, or nil when the axis is
@@ -1805,12 +1855,14 @@ func (s *Source) startMetrics() error {
 		PerDomain:     s.cfg.perDomainGate(),
 		SubjectCounts: s.state.SubjectCounts,
 		NodeGroups:    s.nodeGroupsDiscovered,
-		DomainNodes:   s.domainNodes,
-		DomainObjects: s.domainObjects,
-		Evaluations:   s.state.EachEvaluation,
-		Intents:       s.state.EachIntent,
-		Alerts:        s.alerts.Each,
-		Baselines:     func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
+
+		UnavailableDomains: s.unavailableDomains,
+		DomainNodes:        s.domainNodes,
+		DomainObjects:      s.domainObjects,
+		Evaluations:        s.state.EachEvaluation,
+		Intents:            s.state.EachIntent,
+		Alerts:             s.alerts.Each,
+		Baselines:          func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
 	})
 	if err != nil {
 		return err

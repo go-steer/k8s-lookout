@@ -63,7 +63,9 @@ func parseFindingUID(uid string) (leeway.SubjectRef, leeway.TopologyKey, bool) {
 	return sub, leeway.TopologyKey(key), true
 }
 
-// scoredHere reports whether a subject kind is one this source places.
+// scoredHere reports whether a subject kind is one this source owns an episode
+// for — every kind it places, plus SubjectDomain, which it judges without
+// placing anything.
 //
 // The guard exists because "is this mine" is answered by parsing a string, and
 // a string another source minted can parse cleanly here — `compute-class`
@@ -75,7 +77,8 @@ func parseFindingUID(uid string) (leeway.SubjectRef, leeway.TopologyKey, bool) {
 func scoredHere(kind leeway.SubjectKind) bool {
 	switch kind {
 	case leeway.SubjectDeployment, leeway.SubjectStatefulSet, leeway.SubjectDaemonSet,
-		leeway.SubjectJob, leeway.SubjectNodeGroup, leeway.SubjectCustom:
+		leeway.SubjectJob, leeway.SubjectNodeGroup, leeway.SubjectCustom,
+		leeway.SubjectDomain:
 		return true
 	default:
 		return false

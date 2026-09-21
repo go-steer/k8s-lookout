@@ -108,6 +108,9 @@ func fullOptions() metricsOptions {
 			return map[leeway.SubjectKind]int64{leeway.SubjectDeployment: 3, leeway.SubjectDaemonSet: 1}
 		},
 		NodeGroups: func() int64 { return 2 },
+		UnavailableDomains: func() map[leeway.TopologyKey]int64 {
+			return map[leeway.TopologyKey]int64{zoneKey: 1, "topology.kubernetes.io/region": 0}
+		},
 		DomainNodes: func() map[leeway.TopologyKey]map[leeway.Domain]int64 {
 			return map[leeway.TopologyKey]map[leeway.Domain]int64{
 				zoneKey: {"us-central1-a": 7, "us-central1-b": 5},
@@ -220,6 +223,10 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		// for the same reason: zero groups discovered and no pass running have
 		// to look different.
 		"lookout_leeway_node_groups_discovered",
+		// §2.3's live reading, ahead of the dwell. Unconditional for a third
+		// time, and here it is the whole point: a series that only appears
+		// during an outage cannot be alerted on before the first one.
+		"lookout_leeway_domains_unavailable",
 		// §8.2's episodes. A gauge rather than a counter, because the question
 		// it answers is "what is firing now", not "how many ever did".
 		"lookout_leeway_alert_state",
@@ -353,6 +360,29 @@ func TestInstruments_ObservableGaugesCarryTheirAttributes(t *testing.T) {
 			}
 			if d := labelValue(m, "domain"); d != "us-central1-a" && d != "us-central1-b" {
 				t.Errorf("unexpected domain %q", d)
+			}
+		}
+	})
+
+	t.Run("domains_unavailable carries a zero for a healthy axis", func(t *testing.T) {
+		f := h.family(t, "lookout_leeway_domains_unavailable")
+		if f == nil {
+			t.Fatal("family absent")
+		}
+		got := map[string]float64{}
+		for _, m := range f.GetMetric() {
+			got[labelValue(m, "topology_key")] = m.GetGauge().GetValue()
+		}
+		// Both axes are present, and the healthy one reads zero rather than
+		// being absent — the property that makes the series alertable before
+		// the first outage.
+		want := map[string]float64{string(zoneKey): 1, "topology.kubernetes.io/region": 0}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for key, n := range want {
+			if got[key] != n {
+				t.Errorf("%s = %v, want %v", key, got[key], n)
 			}
 		}
 	})

@@ -198,10 +198,9 @@ var kinds = []KindSpec{
 	// inject.Payload like the rest: the §8.5 finding document is the
 	// store's and `cmd/leeway`'s representation, and `message` is its
 	// rendering, so the kinds are additive without freezing a fifth
-	// wire struct against fleet consumers. One settled leeway kind is
-	// NOT listed: leeway.domain_unavailable is raised by the source and
-	// not by a verdict (phase 7). This ledger is what CAN be emitted,
-	// not what has been named.
+	// wire struct against fleet consumers.
+	{leeway.KindDomainUnavailable, inject.Payload{}, "topology-drift",
+		"A topology domain has no node anything can be scheduled onto — the subject is the domain and not a workload, so a dead zone is one signal rather than one per workload that drifted because of it."},
 	{leeway.KindContractViolated, inject.Payload{}, "topology-drift",
 		"A declared topology contract (a DoNotSchedule spread constraint or a required anti-affinity) is being violated, sustained past the dwell window."},
 	{leeway.KindPlacementDrift, inject.Payload{}, "topology-drift",

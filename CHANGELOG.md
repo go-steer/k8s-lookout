@@ -30,6 +30,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A topology domain with nothing schedulable left in it is now one signal for
+  the cluster**, `leeway.domain_unavailable`. When a zone goes, every workload
+  spread across it drifts at the same instant; lookout already held those
+  findings back, so the event that mattered produced silence. It now names the
+  domain — the subject is the zone, not a workload — and the workloads stay
+  suppressed. The three ways a domain empties are separated as the suspected
+  cause: the nodes are gone (`consolidation`), the nodes are there and none is
+  Ready (`domain_outage`), or every node is Ready and cordoned or tainted
+  (`taint_exclusion`) — the last of which no ready-node count can see, and which
+  a `kubectl cordon` over a zone produces in seconds. The finding survives its
+  own evidence: lookout remembers which domains the cluster has, so a zone that
+  has been gone for hours keeps being reported rather than quietly being
+  reclassified as a zone that never existed.
+- **`--topology-domain-unavailable-keys`** chooses the axes that is judged on
+  (default `topology.kubernetes.io/zone,topology.kubernetes.io/region`); an
+  empty value turns the detector off. Only name axes whose domains hold many
+  nodes — `kubernetes.io/hostname` is a topology axis on which every node is its
+  own domain, and judged there this would raise a finding per NotReady node,
+  which `object-state` already reports with the node as the subject.
+- **`lookout_leeway_domains_unavailable`** is the live reading behind it, per
+  axis, exported as a zero when nothing is out so the series can be alerted on
+  before the first outage.
 - **`topology-drift` now tracks node pools and compute classes as subjects in
   their own right**, so a pool spread across one of the three zones it is
   configured for is reported once, naming the pool — instead of showing up as

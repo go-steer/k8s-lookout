@@ -14,7 +14,10 @@
 
 package topologydrift
 
-import "github.com/go-steer/k8s-lookout/pkg/engine"
+import (
+	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/leeway"
+)
 
 // ClearanceObserver exposes the source to the §7.4 recovery tracker.
 func (s *Source) ClearanceObserver() engine.ClearanceObserver { return s }
@@ -46,7 +49,13 @@ func (s *Source) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 		return engine.Clearance{}, false
 	}
 
-	if !s.state.Tracked(sub) {
+	// The pod index is the wrong question for a domain. §2.3's subject holds
+	// no objects by construction, so Tracked is false for every one of them
+	// and this branch would report a zone that is still down as
+	// recovered-object_deleted on the first observation. The machine's own
+	// phase is the only reading that means anything here, which is where the
+	// fall-through goes.
+	if sub.Kind != leeway.SubjectDomain && !s.state.Tracked(sub) {
 		// No objects left under this subject. StableSince stays zero: the
 		// deletion is the fact, and dating it from a sweep that merely noticed
 		// would be inventing a timestamp.
