@@ -467,9 +467,38 @@ func TestEligibility_WeightsFor(t *testing.T) {
 		CapacityCPU: []float64{40, 20, 4},
 	}
 
-	t.Run("nil intent weights equally", func(t *testing.T) {
-		if got := e.WeightsFor(nil); !reflect.DeepEqual(got, []float64{1, 1, 1}) {
+	t.Run("nil intent on an even cluster weights equally", func(t *testing.T) {
+		even := &Eligibility{Domains: []Domain{"a", "b"}, CapacityCPU: []float64{40, 40}}
+		if got := even.WeightsFor(nil); !reflect.DeepEqual(got, []float64{1, 1}) {
 			t.Errorf("WeightsFor(nil) = %v", got)
+		}
+	})
+
+	t.Run("nil intent still takes the capacity trigger", func(t *testing.T) {
+		// A subject with no intent at all is the Tier C case and the majority of
+		// any estate. Short-circuiting nil to EqualWeights here made §7.2's
+		// trigger unreachable for exactly the population it exists for.
+		if got := e.WeightsFor(nil); !reflect.DeepEqual(got, []float64{40, 20, 4}) {
+			t.Errorf("WeightsFor(nil) = %v, want the CPU capacities", got)
+		}
+	})
+
+	t.Run("an undeclared weighting bypasses the trigger", func(t *testing.T) {
+		// The node-group case. These are the same unequal capacities the
+		// subtest above fires the trigger on, so the assertion is specifically
+		// that the field wins over it rather than merely filling a gap.
+		ng := &Eligibility{
+			Domains:             []Domain{"a", "b", "c"},
+			NodeCount:           []int64{10, 5, 1},
+			CapacityCPU:         []float64{40, 20, 4},
+			UndeclaredWeighting: WeightEqual,
+		}
+		if got := ng.WeightsFor(nil); !reflect.DeepEqual(got, []float64{1, 1, 1}) {
+			t.Errorf("WeightsFor(nil) = %v, want even weights", got)
+		}
+		// And a declaration still beats it, the same way it beats the trigger.
+		if got := ng.WeightsFor(&Intent{Weighting: WeightNodeCount}); !reflect.DeepEqual(got, []float64{10, 5, 1}) {
+			t.Errorf("WeightsFor(NodeCount) = %v, want the node counts", got)
 		}
 	})
 

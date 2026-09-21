@@ -180,6 +180,16 @@ type Config struct {
 	// score has to be to count.
 	CapacityRatioTrigger float64
 
+	// NodeGroupLabelKeys is FR-3's ordered precedence list: the node label
+	// keys a node group's name is read from, first match wins. Empty takes
+	// DefaultNodeGroupLabelKeys.
+	NodeGroupLabelKeys []string
+
+	// MaxNodeGroups bounds how many node-group subjects are tracked. Zero
+	// takes DefaultMaxNodeGroups; a negative value turns node-group subjects
+	// off entirely.
+	MaxNodeGroups int
+
 	// Dwell is §8.2's timing. The zero value takes leeway.DefaultDwell, and a
 	// partial one is completed by the machine itself — see leeway.Dwell.
 	Dwell leeway.Dwell
@@ -265,6 +275,14 @@ func (c Config) normalize() Config {
 	}
 	if c.CapacityRatioTrigger <= 0 {
 		c.CapacityRatioTrigger = leeway.CapacityWeightingRatioTrigger
+	}
+	if len(c.NodeGroupLabelKeys) == 0 {
+		c.NodeGroupLabelKeys = DefaultNodeGroupLabelKeys
+	}
+	// Only the zero value defaults. A negative bound is the off switch and has
+	// to survive normalization to mean anything.
+	if c.MaxNodeGroups == 0 {
+		c.MaxNodeGroups = DefaultMaxNodeGroups
 	}
 	if c.AlertInterval <= 0 {
 		c.AlertInterval = DefaultAlertInterval
@@ -412,6 +430,17 @@ type Source struct {
 	// way bounds the map by the number of policies (tens) instead of by the
 	// number of subjects (tens of thousands).
 	warnedTies map[string]bool
+
+	// nodeGroupsFound is how many distinct node groups the last pass resolved,
+	// before MaxNodeGroups was applied. It is exported as its own gauge
+	// precisely so that it can disagree with subjects_tracked{NodeGroup}:
+	// "found 4,000, tracking 0" is the reading a misconfigured precedence list
+	// produces, and it is unrecoverable from the tracked count alone.
+	nodeGroupsFound int64
+	// warnedNodeGroupBound records that the over-the-bound warning has been
+	// logged. The pass runs every 30 s and the condition is a configuration
+	// mistake, so the second line onwards would be noise.
+	warnedNodeGroupBound bool
 
 	// logf overrides log.Printf for testing. nil = log.Printf.
 	logf func(format string, args ...any)
@@ -879,6 +908,125 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 	s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds, s.suppression(sub, start)))
 }
 
+// evaluateNodeGroups re-derives every node-group subject from the inventory
+// and scores it (FR-3).
+//
+// It runs on a timer rather than through the §6.4 coalescer, which is the
+// shape difference between this pass and evaluate: a node group has no
+// representative pod to read intent from, no owner chain to resolve and no
+// per-subject event to coalesce. What it has is the node inventory, and the
+// cheapest correct thing to do with a small, already-indexed collection is to
+// walk it whole. One pass is O(nodes), against O(pods) for the pod side.
+//
+// Three things about the scoring are decided here and nowhere else.
+//
+// **The intent is nil, deliberately.** A node group declared nothing that this
+// process can read — FR-3's non-goal rules out the MIG and ASG APIs, so all
+// leeway has is labels — and §8.1 reads a non-nil intent as the difference
+// between Tier C and Tier B. Handing these subjects a synthetic intent to
+// carry the weighting would quietly promote every pool in the estate to a
+// tier that emits signals by default. The weighting travels as
+// EligibilityOptions.UndeclaredWeighting instead, which is what that field is
+// for.
+//
+// **Eligibility is cluster-wide.** A pool's configured zones are not in the
+// labels, so the honest comparison is against the domains the cluster has:
+// the finding says "this pool sits in one of the three zones this cluster
+// spans", which is true, useful, and the only statement the available
+// evidence supports. A deliberately zonal pool therefore reads as drifting —
+// which is the other reason these subjects must stay Tier C, and why the
+// precedence list is configurable down to nothing.
+//
+// **The weighting is Equal, and §7.2 is amended to say so.** It named
+// AllocatableCPU as the default for node-group subjects; working the exit
+// criterion through showed that backwards. Capacity weighting apportions
+// objects over the cluster's allocatable CPU per domain, and a node group's
+// objects *are* that capacity, so the expectation contains the thing it is
+// meant to predict. Three zones of two nodes each plus a six-node pool wholly
+// in zone-a weights [32 8 8], which apportions the lopsided pool [4 1 1] —
+// partly excusing it — and apportions the *evenly spread* pool [4 1 1] as
+// well, reporting it as drifting because a different pool is lopsided. Equal
+// is the only expectation for a node group that is not circular, and it is
+// pinned rather than defaulted: §7.2's ratio trigger would reintroduce exactly
+// the same contamination on any cluster with unequal zones.
+func (s *Source) evaluateNodeGroups(now time.Time) {
+	if s.cfg.MaxNodeGroups < 0 {
+		return
+	}
+	found := s.inv.NodeGroups(s.cfg.NodeGroupLabelKeys)
+	s.mu.Lock()
+	s.nodeGroupsFound = int64(len(found))
+	warned := s.warnedNodeGroupBound
+	over := len(found) > s.cfg.MaxNodeGroups
+	s.warnedNodeGroupBound = over
+	s.mu.Unlock()
+
+	if over {
+		// All of them, not the first MaxNodeGroups of them. Truncating would
+		// pick an arbitrary subset by map order — a different subset every
+		// pass — and score a cluster nobody configured. Dropping the lot
+		// leaves node_groups_discovered as the one honest number, which is the
+		// reading that sends somebody to the precedence list.
+		s.state.SetGroups(nil)
+		if !warned {
+			s.logger()("topology-drift: %d node groups resolved from %v, over the --topology-max-node-groups bound of %d — tracking none of them. "+
+				"This is usually a per-node label in the precedence list; lookout_leeway_node_groups_discovered keeps reporting the count",
+				len(found), s.cfg.NodeGroupLabelKeys, s.cfg.MaxNodeGroups)
+		}
+		return
+	}
+
+	// One eligibility per axis for the whole pass. Every node group shares it
+	// — the constraint set is empty, so the eligible domains are the cluster's
+	// — and computing it per group would walk every node once per pool.
+	eligible := make(map[leeway.TopologyKey]leeway.Eligibility, len(s.inv.Keys()))
+	for _, key := range s.inv.Keys() {
+		opts := leeway.DefaultEligibilityOptions()
+		opts.CapacityRatioTrigger = s.cfg.CapacityRatioTrigger
+		opts.UndeclaredWeighting = leeway.WeightEqual
+		eligible[key] = leeway.EligibleDomains(s.inv.NodeViews(key, Constraints{}), opts)
+	}
+
+	groups := make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution, len(found))
+	for name, byKey := range found {
+		groups[leeway.SubjectRef{Kind: leeway.SubjectNodeGroup, Name: name}] = byKey
+	}
+	s.state.SetGroups(groups)
+
+	res := Resolution{Eligible: eligible, Intents: map[leeway.TopologyKey]*leeway.Intent{}}
+	for sub := range groups {
+		// Snapshot rather than the map we just handed over: SetGroups adopts
+		// the distributions, so reading them back through the lock is what
+		// keeps this pass from racing the scrape callback walking the same
+		// pointers.
+		s.state.SetEvaluations(sub, ScoreSubject(res, s.state.Snapshot(sub), *s.cfg.Thresholds, s.nodeGroupSuppression(now)))
+	}
+}
+
+// nodeGroupSuppression is §7.6 for a node group.
+//
+// Two of the five rows are answerable and three are not, which is worth
+// stating rather than leaving to be inferred from a struct literal. Cluster
+// warmup applies — an inventory that has not synced reports pools in the
+// wrong places, the same as it reports pods there. Domain outage applies, and
+// matters most here: a zone whose nodes have all gone NotReady is a zone
+// every pool just emptied, and one domain finding beats one per pool. The
+// drain row does not, because a cordoned node is still in its group and still
+// counted; the rollout and recent-scale rows do not, because neither a
+// Deployment rollout nor a replica change is an event in a node group's life.
+// A pool being resized looks like a rollout and is not covered — that is
+// §7.6's gap for FR-3, and the dwell is what absorbs it.
+func (s *Source) nodeGroupSuppression(now time.Time) Suppressor {
+	warming := !s.HasSynced()
+	return func(key leeway.TopologyKey, eligible leeway.Eligibility) leeway.Suppression {
+		t := leeway.Transients{
+			Warming:      warming,
+			DomainOutage: s.domainOutage(key, eligible.Domains, now),
+		}
+		return t.Classify(now, s.cfg.Transient)
+	}
+}
+
 // suppression returns §7.6's Suppressor for one evaluation, closing over the
 // instant the evaluation started so that every axis of one subject is judged
 // against the same clock.
@@ -1294,9 +1442,16 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// in the cluster. Snapshotting it on a timer bounds that at one scan per
 	// interval, at the cost of a rollout being noticed up to one interval late,
 	// which is nothing against a ten-minute dwell.
+	//
+	// FR-3's node-group pass rides it too, for a third reason: a node group is
+	// a property of the cluster and not of any pod, so there is no event to
+	// coalesce it behind, and the inventory it is derived from is exactly what
+	// this tick already samples. It runs *after* the sample, because §7.6's
+	// outage row for a pool reads the series the sample just extended.
 	readyTick := time.NewTicker(s.cfg.ReadySampleInterval)
 	defer readyTick.Stop()
 	s.sampleCluster(time.Now())
+	s.evaluateNodeGroups(time.Now())
 
 	// §7.5, on its own timer and not on the evaluation path. A half-life is a
 	// statement about elapsed time, so a subject whose pods churn must not
@@ -1328,7 +1483,9 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		case <-alertTick.C:
 			s.runAlertPass(ctx)
 		case <-readyTick.C:
-			s.sampleCluster(time.Now())
+			now := time.Now()
+			s.sampleCluster(now)
+			s.evaluateNodeGroups(now)
 		case <-baselineTick.C:
 			s.sampleBaselines(time.Now())
 		case <-baselineFlush.C:
@@ -1647,6 +1804,7 @@ func (s *Source) startMetrics() error {
 		Meter:         s.cfg.Meter,
 		PerDomain:     s.cfg.perDomainGate(),
 		SubjectCounts: s.state.SubjectCounts,
+		NodeGroups:    s.nodeGroupsDiscovered,
 		DomainNodes:   s.domainNodes,
 		DomainObjects: s.domainObjects,
 		Evaluations:   s.state.EachEvaluation,
@@ -1747,6 +1905,14 @@ func (s *Source) noteChange(ch Change) {
 	s.mu.Unlock()
 }
 
+// nodeGroupsDiscovered is how many distinct node groups the last FR-3 pass
+// resolved, for lookout.leeway.node_groups_discovered.
+func (s *Source) nodeGroupsDiscovered() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nodeGroupsFound
+}
+
 // domainNodes reports usable nodes per domain, per axis, for
 // lookout.leeway.domain_ready_nodes.
 func (s *Source) domainNodes() map[leeway.TopologyKey]map[leeway.Domain]int64 {
@@ -1769,8 +1935,12 @@ func (s *Source) domainNodes() map[leeway.TopologyKey]map[leeway.Domain]int64 {
 // whole walk: a scrape must not be able to stall the delta path. The cost is
 // that two subjects in one scrape can be a few microseconds apart, which for a
 // gauge of a moving count is not a cost at all.
+// Node groups are walked alongside the pod subjects, through the same gate:
+// a pool's nodes per zone is the same kind of row as a Deployment's pods per
+// zone, and a reader looking at a drifting workload wants the pool underneath
+// it in the same query.
 func (s *Source) domainObjects(gate PerDomainGate, yield countObserver) {
-	for _, sub := range s.state.Subjects() {
+	for _, sub := range append(s.state.Subjects(), s.state.Groups()...) {
 		if !gate.Admits(s.state.DriftOf(sub)) {
 			continue
 		}

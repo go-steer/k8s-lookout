@@ -43,6 +43,7 @@ const MeterName = "github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 // dependency bump.
 const (
 	metricSubjectsTracked  = "lookout.leeway.subjects_tracked"
+	metricNodeGroups       = "lookout.leeway.node_groups_discovered"
 	metricDomainReadyNodes = "lookout.leeway.domain_ready_nodes"
 	metricDomainObjects    = "lookout.leeway.domain_objects"
 	metricDomainExpected   = "lookout.leeway.domain_expected"
@@ -66,7 +67,11 @@ const (
 // /metrics and the one MetricDocs hands the docs generator — and a help
 // string that says two different things is worse than one that says nothing.
 const (
-	descSubjectsTracked  = "Subjects with a tracked distribution, by kind."
+	descSubjectsTracked = "Subjects with a tracked distribution, by kind."
+	descNodeGroups      = "Distinct node groups resolved from the node-group label precedence list, before the tracking bound is applied. " +
+		"Read it against lookout_leeway_subjects_tracked with subject_kind=NodeGroup: the two agree on a healthy cluster, and a large " +
+		"number here with none tracked is leeway refusing a precedence list that resolved to something per-node. " +
+		"Raise --topology-max-node-groups only once you believe the count."
 	descDomainReadyNodes = "Usable nodes per topology domain."
 	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
 	descDomainExpected   = "Objects §7.2 apportioned to each topology domain, the expectation domain_objects is scored against."
@@ -166,6 +171,11 @@ func MetricDocs() []MetricDoc {
 			Type:   "gauge",
 			Labels: []string{"subject_kind"},
 			Help:   descSubjectsTracked,
+		},
+		{
+			Name: "lookout_leeway_node_groups_discovered",
+			Type: "gauge",
+			Help: descNodeGroups,
 		},
 		{
 			Name:   "lookout_leeway_domain_ready_nodes",
@@ -337,6 +347,10 @@ type metricsOptions struct {
 	// SubjectCounts returns the tracked subject count per kind.
 	SubjectCounts func() map[leeway.SubjectKind]int64
 
+	// NodeGroups returns how many node groups the last FR-3 pass resolved,
+	// before the tracking bound was applied.
+	NodeGroups func() int64
+
 	// DomainNodes returns the usable node count per domain, per axis.
 	DomainNodes func() map[leeway.TopologyKey]map[leeway.Domain]int64
 
@@ -436,6 +450,11 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricSubjectsTracked, err)
 	}
+	nodeGroups, err := meter.Int64ObservableGauge(metricNodeGroups,
+		metric.WithDescription(descNodeGroups))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricNodeGroups, err)
+	}
 	readyNodes, err := meter.Int64ObservableGauge(metricDomainReadyNodes,
 		metric.WithDescription(descDomainReadyNodes))
 	if err != nil {
@@ -515,6 +534,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		baselines:       baselines,
 		baselineSamples: baselineSamples,
 		subjects:        subjects,
+		nodeGroups:      nodeGroups,
 		readyNodes:      readyNodes,
 		objects:         objects,
 		intents:         intents,
@@ -548,6 +568,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 // transposition compiles and silently swaps two series.
 type observables struct {
 	subjects   metric.Int64ObservableGauge
+	nodeGroups metric.Int64ObservableGauge
 	readyNodes metric.Int64ObservableGauge
 	objects    metric.Int64ObservableGauge
 	intents    metric.Int64ObservableGauge
@@ -572,7 +593,7 @@ type observables struct {
 // collected.
 func (g observables) all() []metric.Observable {
 	return []metric.Observable{
-		g.subjects, g.readyNodes, g.objects, g.intents, g.expected,
+		g.subjects, g.nodeGroups, g.readyNodes, g.objects, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
 		g.alertState, g.transient, g.baselines, g.baselineSamples,
 	}
@@ -584,6 +605,13 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		for kind, n := range opts.SubjectCounts() {
 			o.ObserveInt64(g.subjects, n, metric.WithAttributes(attrSubjectKind.String(string(kind))))
 		}
+	}
+	if opts.NodeGroups != nil {
+		// Unconditional, unlike every other row in this callback: a zero is
+		// the answer that matters most here. A cluster whose nodes carry none
+		// of the precedence list's labels and one where the pass is not
+		// running look identical without it.
+		o.ObserveInt64(g.nodeGroups, opts.NodeGroups())
 	}
 	if opts.DomainNodes != nil {
 		for key, byDomain := range opts.DomainNodes() {
