@@ -274,6 +274,30 @@ func TestNeedsCapacityWeighting(t *testing.T) {
 	}
 }
 
+func TestNeedsCapacityWeightingAt_HonoursAConfiguredTrigger(t *testing.T) {
+	caps := []float64{100, 200} // 2×, over the 1.25 default
+
+	if !NeedsCapacityWeightingAt(caps, 0) {
+		t.Error("a trigger of zero did not fall back to the default")
+	}
+	if NeedsCapacityWeightingAt(caps, 4) {
+		t.Error("a 2× spread fired against a 4× trigger")
+	}
+	if !NeedsCapacityWeightingAt(caps, 1.5) {
+		t.Error("a 2× spread did not fire against a 1.5× trigger")
+	}
+	// The operator-facing escape hatch in both directions: a huge trigger keeps
+	// the even expectation on every cluster, and a trigger under 1 fires on any
+	// inequality at all. Both are documented on --topology-capacity-ratio, so
+	// both are pinned.
+	if NeedsCapacityWeightingAt([]float64{1, 1e6}, 1e9) {
+		t.Error("a trigger above the spread still fired")
+	}
+	if !NeedsCapacityWeightingAt([]float64{100, 101}, 1.001) {
+		t.Error("a sub-percent trigger did not fire on a one-percent spread")
+	}
+}
+
 func randomWeights(r *rand.Rand, m int) []float64 {
 	w := make([]float64, m)
 	for i := range w {

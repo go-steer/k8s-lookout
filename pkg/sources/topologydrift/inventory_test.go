@@ -430,7 +430,7 @@ func TestInventory_NodeViews(t *testing.T) {
 	inv.Upsert(node("n1", "zone-a", withAllocatable("4", "16Gi")))
 	inv.Upsert(node("n2", "zone-a", cordoned()))
 
-	views := inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU, Constraints{})
+	views := inv.NodeViews(zoneKey, Constraints{})
 	if len(views) != 3 {
 		t.Fatalf("got %d views, want 3", len(views))
 	}
@@ -441,7 +441,7 @@ func TestInventory_NodeViews(t *testing.T) {
 			t.Fatalf("views[%d] = %q, want %q", i, views[i].Name, want)
 		}
 	}
-	if views[0].Domain != "zone-a" || views[0].Capacity != 4000 {
+	if views[0].Domain != "zone-a" {
 		t.Errorf("n1 view = %+v", views[0])
 	}
 	if views[1].Schedulable {
@@ -451,15 +451,20 @@ func TestInventory_NodeViews(t *testing.T) {
 		t.Error("a subject that constrains nothing must match every untainted node")
 	}
 
-	if got := inv.NodeViews(zoneKey, leeway.WeightAllocatableMemory, Constraints{})[0].Capacity; got != 16*1024*1024*1024 {
-		t.Errorf("memory-weighted capacity = %v", got)
+	// Both allocatable amounts on every view, unconditionally. §7.2's ratio
+	// trigger reads the CPU capacities to CHOOSE the weighting, so a view
+	// that carried only the selected resource would make the trigger cost a
+	// second eligibility pass — see NodeViews.
+	if views[0].AllocatableCPU != 4000 {
+		t.Errorf("n1 allocatable CPU = %v, want 4000", views[0].AllocatableCPU)
 	}
-	// Equal weighting ignores capacity, so carrying a number there would be
-	// noise the engine has to remember to ignore.
-	if got := inv.NodeViews(zoneKey, leeway.WeightEqual, Constraints{})[0].Capacity; got != 0 {
-		t.Errorf("equal-weighted capacity = %v, want 0", got)
+	if views[0].AllocatableMemory != 16*1024*1024*1024 {
+		t.Errorf("n1 allocatable memory = %v", views[0].AllocatableMemory)
 	}
-	if inv.NodeViews("unconfigured", leeway.WeightEqual, Constraints{}) != nil {
+	if views[2].AllocatableCPU != 8000 {
+		t.Errorf("n3 allocatable CPU = %v, want 8000", views[2].AllocatableCPU)
+	}
+	if inv.NodeViews("unconfigured", Constraints{}) != nil {
 		t.Error("NodeViews returned views for an unconfigured key")
 	}
 }
@@ -472,7 +477,7 @@ func TestInventory_NodeViewsFeedEligibility(t *testing.T) {
 	inv.Upsert(node("a1", "zone-a"))
 	inv.Upsert(node("b1", "zone-b", notReady()))
 
-	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, leeway.WeightEqual, Constraints{}), leeway.DefaultEligibilityOptions())
+	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, Constraints{}), leeway.DefaultEligibilityOptions())
 	if !slices.Equal(el.Domains, []leeway.Domain{"zone-a"}) {
 		t.Errorf("eligible domains = %v, want [zone-a]", el.Domains)
 	}
@@ -507,7 +512,7 @@ func TestInventory_ConcurrentReadsAndWrites(t *testing.T) {
 					_ = inv.Generation()
 				default:
 					_ = inv.Stats(zoneKey)
-					_ = inv.NodeViews(zoneKey, leeway.WeightAllocatableCPU, Constraints{})
+					_ = inv.NodeViews(zoneKey, Constraints{})
 				}
 			}
 		}()

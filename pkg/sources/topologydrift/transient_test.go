@@ -50,7 +50,7 @@ func evenlyEligible(domains ...leeway.Domain) leeway.Eligibility {
 	e := leeway.Eligibility{Domains: domains}
 	for range domains {
 		e.NodeCount = append(e.NodeCount, 4)
-		e.Capacity = append(e.Capacity, 4)
+		e.CapacityCPU = append(e.CapacityCPU, 4)
 	}
 	return e
 }

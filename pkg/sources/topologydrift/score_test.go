@@ -25,9 +25,9 @@ import (
 // tests want and none of them are about.
 func threeEligibleZones() leeway.Eligibility {
 	return leeway.Eligibility{
-		Domains:   []leeway.Domain{"zone-a", "zone-b", "zone-c"},
-		NodeCount: []int64{4, 4, 4},
-		Capacity:  []float64{4, 4, 4},
+		Domains:     []leeway.Domain{"zone-a", "zone-b", "zone-c"},
+		NodeCount:   []int64{4, 4, 4},
+		CapacityCPU: []float64{4, 4, 4},
 	}
 }
 

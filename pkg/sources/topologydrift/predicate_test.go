@@ -256,7 +256,7 @@ func TestInventory_NodeViewsApplyConstraints(t *testing.T) {
 		NodeSelector: map[string]string{"pool": "gpu"},
 		Tolerations:  []corev1.Toleration{{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists}},
 	}})
-	views := inv.NodeViews(zoneKey, leeway.WeightEqual, c)
+	views := inv.NodeViews(zoneKey, c)
 	if len(views) != 2 {
 		t.Fatalf("got %d views, want 2", len(views))
 	}
@@ -270,7 +270,7 @@ func TestInventory_NodeViewsApplyConstraints(t *testing.T) {
 	// Tolerated is reported per node whatever the policy is; it is §7.1's
 	// NodeTaintsPolicy that decides whether it bars eligibility. A workload
 	// with no toleration for the GPU taint still *matches* the selector.
-	bare := inv.NodeViews(zoneKey, leeway.WeightEqual, Constraints{NodeSelector: map[string]string{"pool": "gpu"}})
+	bare := inv.NodeViews(zoneKey, Constraints{NodeSelector: map[string]string{"pool": "gpu"}})
 	if !bare[0].MatchesSelector || bare[0].Tolerated {
 		t.Errorf("untolerated GPU node = %+v, want matching but not tolerated", bare[0])
 	}
@@ -313,7 +313,7 @@ func TestEligibility_ClassPinnedWorkloadIsNotDrifting(t *testing.T) {
 	// test is that honouring it still yields the right answer.
 	opts.Policies.NodeTaintsPolicy = corev1.NodeInclusionPolicyHonor
 
-	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, leeway.WeightEqual, ConstraintsOf(admitted)), opts)
+	el := leeway.EligibleDomains(inv.NodeViews(zoneKey, ConstraintsOf(admitted)), opts)
 	if !slices.Equal(el.Domains, []leeway.Domain{"us-central1-f"}) {
 		t.Fatalf("eligible domains = %v, want [us-central1-f]", el.Domains)
 	}

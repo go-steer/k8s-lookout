@@ -49,8 +49,15 @@ func ParseIntentMode(s string) (IntentMode, bool) {
 }
 
 // ParseWeighting reads a Weighting by name.
+//
+// WeightAuto is spellable, because a policy that wants the §7.2 trigger back
+// after inheriting a declared weighting has to be able to say so, and because
+// a round-trip through String that loses a value is a trap. It is not the
+// failure value: an unrecognised name returns Equal and false, so a caller
+// that ignores the bool gets the conservative reading rather than one that
+// quietly re-enables a default the operator was trying to name.
 func ParseWeighting(s string) (Weighting, bool) {
-	for _, w := range []Weighting{WeightEqual, WeightNodeCount, WeightAllocatableCPU, WeightAllocatableMemory} {
+	for _, w := range []Weighting{WeightAuto, WeightEqual, WeightNodeCount, WeightAllocatableCPU, WeightAllocatableMemory} {
 		if fold(w.String()) == fold(s) {
 			return w, true
 		}

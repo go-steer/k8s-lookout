@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`topology-drift` now apportions its expected distribution by allocatable CPU
+  when a workload's eligible zones are materially different sizes.** Until now
+  every workload was expected to spread evenly, which is wrong on any cluster
+  that grew into a bigger machine type and kept its old zones: ten replicas
+  sitting eight-one-one across zones of 64, 8 and 8 cores are placed exactly
+  where their capacity puts them, and were reported as 40 % drift with a remedy
+  that amounted to moving four pods into zones that cannot hold them. The switch
+  is automatic above a max/min capacity ratio of 1.25 and is a default rather
+  than a rule — a workload that declares a weighting keeps it, including a
+  declared `Equal`. A workload that declares a `maxSkew` or a hard per-domain
+  ceiling also keeps the even expectation, because those are contracts over pods
+  and not over cores: weighting them by capacity would raise the floor they are
+  measured against until the constraint the scheduler is about to violate could
+  not be reported at all. Where the switch does happen, the finding says so and
+  quotes the ratio.
+
+### Added
+
+- **`--topology-capacity-ratio`** sets the max/min allocatable-CPU ratio above
+  which that switch happens (default `1.25`). Pass a large value to keep the
+  even expectation everywhere, or a value below 1 to apportion by capacity on
+  every cluster.
+
 ## [0.26.0] - 2026-09-21
 
 This release is about the failures that leave nothing broken to look
