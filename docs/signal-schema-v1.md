@@ -291,9 +291,15 @@ than half-succeed. And their `reason` is the judging rule
 rather than a suspected cause, because a rank verdict names the
 measurement it failed, not a hypothesis about why.
 
-One settled leeway name is still deliberately absent until a code path
-can emit it: `leeway.domain_unavailable` is raised by the source rather
-than by a verdict (Phase 7).
+`leeway.domain_unavailable` is the one leeway kind whose subject is not
+something that was placed: `kind_of_object` is `Domain` and `name` is
+the domain, so a zone with no usable node is one signal for the cluster
+rather than one per workload that drifted because of it — those stay
+suppressed by §7.6. Its `uid` is the same `leeway:<subject>|<axis>`
+shape, and its `reason` is the suspected cause
+(`consolidation`, `domain_outage`, `taint_exclusion`), which is what
+separates a zone whose nodes were deleted from one whose nodes were
+cordoned.
 
 ## Frozen field sets
 

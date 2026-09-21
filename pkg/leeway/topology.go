@@ -49,6 +49,11 @@ const (
 	SubjectJob         SubjectKind = "Job"
 	SubjectNodeGroup   SubjectKind = "NodeGroup"
 	SubjectCustom      SubjectKind = "Custom"
+	// SubjectDomain is a topology domain itself — the subject of
+	// leeway.domain_unavailable, and the one subject kind that holds no
+	// objects. Every other kind names something placed *into* domains; this
+	// one names a domain that nothing can be placed into.
+	SubjectDomain SubjectKind = "Domain"
 	// SubjectPreferenceAxis is one ordered fallback list (§7.7) — the subject
 	// of every rank finding.
 	//

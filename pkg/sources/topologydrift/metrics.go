@@ -44,6 +44,7 @@ const MeterName = "github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 const (
 	metricSubjectsTracked  = "lookout.leeway.subjects_tracked"
 	metricNodeGroups       = "lookout.leeway.node_groups_discovered"
+	metricDomainsOut       = "lookout.leeway.domains_unavailable"
 	metricDomainReadyNodes = "lookout.leeway.domain_ready_nodes"
 	metricDomainObjects    = "lookout.leeway.domain_objects"
 	metricDomainExpected   = "lookout.leeway.domain_expected"
@@ -72,6 +73,9 @@ const (
 		"Read it against lookout_leeway_subjects_tracked with subject_kind=NodeGroup: the two agree on a healthy cluster, and a large " +
 		"number here with none tracked is leeway refusing a precedence list that resolved to something per-node. " +
 		"Raise --topology-max-node-groups only once you believe the count."
+	descDomainsOut = "Topology domains with no usable node, by axis (leeway §2.3). Reported per configured axis and zero when nothing is out, " +
+		"so the series exists before the first outage. This is the live reading; lookout_leeway_alert_state with subject_kind=Domain is the " +
+		"same fact after its dwell, and that is what leeway.domain_unavailable is emitted from."
 	descDomainReadyNodes = "Usable nodes per topology domain."
 	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
 	descDomainExpected   = "Objects §7.2 apportioned to each topology domain, the expectation domain_objects is scored against."
@@ -176,6 +180,12 @@ func MetricDocs() []MetricDoc {
 			Name: "lookout_leeway_node_groups_discovered",
 			Type: "gauge",
 			Help: descNodeGroups,
+		},
+		{
+			Name:   "lookout_leeway_domains_unavailable",
+			Type:   "gauge",
+			Labels: []string{"topology_key"},
+			Help:   descDomainsOut,
 		},
 		{
 			Name:   "lookout_leeway_domain_ready_nodes",
@@ -351,6 +361,10 @@ type metricsOptions struct {
 	// before the tracking bound was applied.
 	NodeGroups func() int64
 
+	// UnavailableDomains returns how many domains have no usable node, per
+	// axis, for every axis §2.3's detector is configured on.
+	UnavailableDomains func() map[leeway.TopologyKey]int64
+
 	// DomainNodes returns the usable node count per domain, per axis.
 	DomainNodes func() map[leeway.TopologyKey]map[leeway.Domain]int64
 
@@ -455,6 +469,11 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricNodeGroups, err)
 	}
+	domainsOut, err := meter.Int64ObservableGauge(metricDomainsOut,
+		metric.WithDescription(descDomainsOut))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainsOut, err)
+	}
 	readyNodes, err := meter.Int64ObservableGauge(metricDomainReadyNodes,
 		metric.WithDescription(descDomainReadyNodes))
 	if err != nil {
@@ -535,6 +554,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		baselineSamples: baselineSamples,
 		subjects:        subjects,
 		nodeGroups:      nodeGroups,
+		domainsOut:      domainsOut,
 		readyNodes:      readyNodes,
 		objects:         objects,
 		intents:         intents,
@@ -569,6 +589,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 type observables struct {
 	subjects   metric.Int64ObservableGauge
 	nodeGroups metric.Int64ObservableGauge
+	domainsOut metric.Int64ObservableGauge
 	readyNodes metric.Int64ObservableGauge
 	objects    metric.Int64ObservableGauge
 	intents    metric.Int64ObservableGauge
@@ -593,7 +614,7 @@ type observables struct {
 // collected.
 func (g observables) all() []metric.Observable {
 	return []metric.Observable{
-		g.subjects, g.nodeGroups, g.readyNodes, g.objects, g.intents, g.expected,
+		g.subjects, g.nodeGroups, g.domainsOut, g.readyNodes, g.objects, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
 		g.alertState, g.transient, g.baselines, g.baselineSamples,
 	}
@@ -612,6 +633,14 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		// of the precedence list's labels and one where the pass is not
 		// running look identical without it.
 		o.ObserveInt64(g.nodeGroups, opts.NodeGroups())
+	}
+	if opts.UnavailableDomains != nil {
+		// Unconditional for the same reason as the node-group count, and see
+		// descDomainsOut: the map carries a row per configured axis, so a zero
+		// is exported rather than an absent series.
+		for key, n := range opts.UnavailableDomains() {
+			o.ObserveInt64(g.domainsOut, n, metric.WithAttributes(attrTopologyKey.String(string(key))))
+		}
 	}
 	if opts.DomainNodes != nil {
 		for key, byDomain := range opts.DomainNodes() {

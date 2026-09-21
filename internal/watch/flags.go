@@ -86,6 +86,7 @@ type flags struct {
 	topologyCapacityRatio float64
 	topologyNodeGroupKeys string
 	topologyMaxNodeGroups int
+	topologyDomainKeys    string
 	topologyTierC         bool
 	topologyLearn         bool
 	topologyHalfLife      time.Duration
@@ -266,6 +267,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.Float64Var(&f.topologyCapacityRatio, "topology-capacity-ratio", leeway.CapacityWeightingRatioTrigger, "How unequal a subject's eligible zones have to be, as a max/min ratio of allocatable CPU, before an even split stops being the expectation and capacity does (§7.2). Three zones where one is a quarter the size of the others cannot hold a third of anything; scoring them evenly reports drift on a cluster behaving exactly as its shape requires. Applies only where nobody declared a weighting — a policy that names one is always honoured. Raise it to keep the even expectation on mildly uneven clusters; below 1 it fires on any inequality at all. Must be > 0.")
 	fs.StringVar(&f.topologyNodeGroupKeys, "topology-node-group-keys", strings.Join(topologydrift.DefaultNodeGroupLabelKeys, ","), "Comma-separated node labels a node group's name is read from, in precedence order, first match wins (FR-3). Node groups are tracked as subjects of their own, so a pool that was configured for three zones and has all its nodes in one is one finding naming the pool rather than one per workload riding it. Compute class comes before node pool in the default because auto-provisioned pools are named per machine type and are numerous and short-lived. A label that is unique per node turns every node into a group — see --topology-max-node-groups, which is what stops that reaching your metrics.")
 	fs.IntVar(&f.topologyMaxNodeGroups, "topology-max-node-groups", topologydrift.DefaultMaxNodeGroups, "How many node groups may be tracked before leeway tracks none of them. Past the bound nothing is scored and nothing is exported except the discovered count, which is the reading that sends you to --topology-node-group-keys; truncating instead would score an arbitrary subset that changes every pass. Pass a negative value to turn node-group subjects off entirely.")
+	fs.StringVar(&f.topologyDomainKeys, "topology-domain-unavailable-keys", strings.Join(defaultDomainUnavailableKeys(), ","), "Comma-separated topology axes on which a domain with no usable node raises leeway.domain_unavailable (§2.3). The subject is the domain, so a zone that goes away is one finding for the cluster instead of one per workload that drifted because of it, and the workloads stay suppressed. Defaults to zone and region. Only name axes whose domains hold many nodes: an axis that is unique per node — kubernetes.io/hostname is one, and is a topology key — would raise a finding per NotReady node, which is objectstate's job and not this one. Pass an empty string to turn the detector off.")
 	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach — or, once one is learned, against its own §7.5 baseline — and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
 
 	// Baseline knobs (§7.5). The three here are the ones with a visible
@@ -841,7 +843,23 @@ func defaultTopologyKeys() []string {
 	return out
 }
 
-// topologyKeysFrom parses --topology-keys into the source's key type.
+// defaultDomainUnavailableKeys renders the source's own §2.3 axis default as
+// the --topology-domain-unavailable-keys default, for the reason above.
+func defaultDomainUnavailableKeys() []string {
+	out := make([]string, 0, len(topologydrift.DefaultDomainUnavailableKeys))
+	for _, k := range topologydrift.DefaultDomainUnavailableKeys {
+		out = append(out, string(k))
+	}
+	return out
+}
+
+// topologyKeysFrom parses a comma-separated axis list into the source's key
+// type.
+//
+// The empty string yields an empty but non-nil slice, and that is load-bearing
+// for --topology-domain-unavailable-keys: Config reads nil as "unset, take the
+// default" and empty as "off", which is the only way an operator can turn the
+// §2.3 detector off by naming no axes.
 func topologyKeysFrom(s string) []leeway.TopologyKey {
 	names := splitCSV(s)
 	out := make([]leeway.TopologyKey, 0, len(names))
