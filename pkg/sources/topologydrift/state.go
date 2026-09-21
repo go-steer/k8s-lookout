@@ -96,6 +96,25 @@ type State struct {
 	// counts is the distributions themselves, per subject per axis.
 	counts map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution
 
+	// groups is FR-3's node-group subjects: the same shape as counts and read
+	// by the same accessors, but derived rather than accumulated.
+	//
+	// A second map rather than more rows in counts, because everything around
+	// counts is pod machinery that would be wrong here. The §6.3 delta rules
+	// key off placements and byNode, which a node group has neither of;
+	// §6.5's verifier rebuilds a subject from the pod cache and would find a
+	// node group empty, report it as counter drift and Repair it to nothing;
+	// and the sweep enqueues Subjects() onto the coalescer, which resolves
+	// intent from a representative pod. So the two live side by side:
+	// tracked, Snapshot and SubjectCounts answer for both, Subjects() stays
+	// pod-only and Groups() is the other half.
+	//
+	// Replaced wholesale by SetGroups rather than maintained incrementally.
+	// A node group is a property of the node inventory, which is small,
+	// already indexed and re-derivable in one pass — the cost the delta rules
+	// exist to avoid is O(pods), and this is O(nodes) on a timer.
+	groups map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution
+
 	// representatives is subject → one of its pods, by UID and name.
 	//
 	// Intent is inferred from an *admitted pod* and never from a controller's
@@ -161,6 +180,7 @@ func NewState(opts StateOptions) *State {
 		subjects:   make(map[types.UID]leeway.SubjectRef),
 		byNode:     make(map[string]map[types.UID]struct{}),
 		counts:     make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution),
+		groups:     make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution),
 
 		representatives: make(map[leeway.SubjectRef]representative),
 		intents:         make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Intent),
@@ -325,7 +345,9 @@ func (s *State) Snapshot(sub leeway.SubjectRef) map[leeway.TopologyKey]*leeway.D
 	defer s.mu.Unlock()
 	byKey, ok := s.counts[sub]
 	if !ok {
-		return nil
+		if byKey, ok = s.groups[sub]; !ok {
+			return nil
+		}
 	}
 	out := make(map[leeway.TopologyKey]*leeway.Distribution, len(byKey))
 	for key, dist := range byKey {
@@ -334,7 +356,14 @@ func (s *State) Snapshot(sub leeway.SubjectRef) map[leeway.TopologyKey]*leeway.D
 	return out
 }
 
-// Subjects returns every subject currently holding a count.
+// Subjects returns every *pod* subject currently holding a count.
+//
+// Node groups are deliberately absent, and the two callers are why. The sweep
+// re-enqueues this list onto the §6.4 coalescer, whose callback resolves
+// intent from a representative pod; and §6.5's verifier shards over
+// SubjectsInShard and rebuilds each subject from the pod cache, which for a
+// node group would find nothing, call it counter drift and repair it away.
+// See Groups for the other half, and groups for why they are separate.
 func (s *State) Subjects() []leeway.SubjectRef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -343,6 +372,43 @@ func (s *State) Subjects() []leeway.SubjectRef {
 		out = append(out, sub)
 	}
 	return out
+}
+
+// Groups returns every node-group subject currently registered (FR-3).
+func (s *State) Groups() []leeway.SubjectRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]leeway.SubjectRef, 0, len(s.groups))
+	for sub := range s.groups {
+		out = append(out, sub)
+	}
+	return out
+}
+
+// SetGroups replaces the node-group registry with a freshly derived one.
+//
+// Wholesale rather than merged, because the input is a complete re-derivation
+// from the node inventory: a group that is absent from it has no nodes left,
+// and merging would keep a decommissioned pool's last distribution — and its
+// evaluations, and its metric series — for the life of the process. Departed
+// groups are forgotten the same way a subject whose last pod went is, so an
+// episode open against a pool that no longer exists resolves as
+// object_deleted on the next pass rather than sitting firing forever.
+//
+// The distributions are adopted, not copied. The caller derived them and must
+// not retain them.
+func (s *State) SetGroups(groups map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sub := range s.groups {
+		if _, still := groups[sub]; !still {
+			s.forgetLocked(sub)
+		}
+	}
+	if groups == nil {
+		groups = make(map[leeway.SubjectRef]map[leeway.TopologyKey]*leeway.Distribution)
+	}
+	s.groups = groups
 }
 
 // Tracked reports whether this subject currently holds a count.
@@ -367,6 +433,9 @@ func (s *State) SubjectCounts() map[leeway.SubjectKind]int64 {
 	defer s.mu.Unlock()
 	out := make(map[leeway.SubjectKind]int64, 4)
 	for sub := range s.counts {
+		out[sub.Kind]++
+	}
+	for sub := range s.groups {
 		out[sub.Kind]++
 	}
 	return out
@@ -795,9 +864,13 @@ func (s *State) forgetLocked(sub leeway.SubjectRef) {
 	delete(s.evaluations, sub)
 }
 
-// tracked reports whether the subject has counts. Caller holds the lock.
+// tracked reports whether the subject has counts, from either half. Caller
+// holds the lock.
 func (s *State) tracked(sub leeway.SubjectRef) bool {
-	_, ok := s.counts[sub]
+	if _, ok := s.counts[sub]; ok {
+		return true
+	}
+	_, ok := s.groups[sub]
 	return ok
 }
 

@@ -23,10 +23,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and not over cores: weighting them by capacity would raise the floor they are
   measured against until the constraint the scheduler is about to violate could
   not be reported at all. Where the switch does happen, the finding says so and
-  quotes the ratio.
+  quotes the ratio. Node groups are the one subject that never takes it: their
+  objects are nodes, so the capacity being apportioned over is the same capacity
+  being measured, and a pool concentrated in one zone would both partly excuse
+  itself and drag every *balanced* pool next to it into looking skewed.
 
 ### Added
 
+- **`topology-drift` now tracks node pools and compute classes as subjects in
+  their own right**, so a pool spread across one of the three zones it is
+  configured for is reported once, naming the pool — instead of showing up as
+  drift on each of the dozen workloads that happen to ride it, none of which can
+  do anything about it. Workloads pinned to such a pool stay quiet, because a
+  workload is only ever measured against the domains it can actually reach.
+  Groups are resolved from a node-label precedence list in which compute class
+  outranks node pool, since auto-created pools are per-machine-type and churn.
+  These subjects are Tier C — metrics-only unless `--topology-tier-c-signals` —
+  and that is deliberate rather than provisional: a pool's *intended* zones are
+  not recorded anywhere lookout can read, so a deliberately single-zone pool has
+  no way to say so and will read as drifting.
+- **`--topology-node-group-keys`** is that precedence list (default
+  `cloud.google.com/compute-class,karpenter.sh/nodepool,eks.amazonaws.com/nodegroup,cloud.google.com/gke-nodepool,kops.k8s.io/instancegroup,agentpool`).
+  Pass an empty value to turn node-group subjects off without turning the source
+  off.
+- **`--topology-max-node-groups`** bounds how many groups will be tracked
+  (default `200`); a negative value turns the pass off entirely. Past the bound
+  nothing is tracked — not an arbitrary subset — and the new
+  `lookout_leeway_node_groups_discovered` gauge keeps reporting how many were
+  found, which is the number that tells you a key in the list resolved to
+  something per-node.
 - **`--topology-capacity-ratio`** sets the max/min allocatable-CPU ratio above
   which that switch happens (default `1.25`). Pass a large value to keep the
   even expectation everywhere, or a value below 1 to apportion by capacity on

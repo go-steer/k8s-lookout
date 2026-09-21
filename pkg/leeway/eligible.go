@@ -106,8 +106,10 @@ type EligibilityOptions struct {
 	RequireReady       bool
 	RequireSchedulable bool
 
-	// CapacityRatioTrigger is copied onto the result; see the field there.
+	// CapacityRatioTrigger and UndeclaredWeighting are copied onto the result;
+	// see the fields there.
 	CapacityRatioTrigger float64
+	UndeclaredWeighting  Weighting
 }
 
 // DefaultEligibilityOptions returns the defaults described on the fields.
@@ -142,6 +144,29 @@ type Eligibility struct {
 	// would put a tuning parameter in the signature of the function every
 	// scoring path calls.
 	CapacityRatioTrigger float64
+
+	// UndeclaredWeighting is what an undeclared weighting resolves to,
+	// bypassing §7.2's capacity trigger entirely. Zero — WeightAuto — leaves
+	// the trigger in charge, which is §7.2's rule for workload subjects.
+	//
+	// It exists for node-group subjects, and it exists to pin them to Equal.
+	// §7.2 originally named AllocatableCPU as their default; phase 7 found
+	// that backwards and amended it. Capacity weighting apportions a subject's
+	// objects over the cluster's allocatable CPU per domain — it answers
+	// "where can this go", a question about nodes. A node group's objects are
+	// nodes, so its own capacity is inside its own expectation, and the
+	// contamination runs both ways: a pool concentrated in one zone raises its
+	// expectation in that zone and partly excuses itself, and it raises every
+	// *other* pool's expectation there too, so a pool spread evenly over three
+	// zones is reported as drifting because a different pool is lopsided. The
+	// only expectation that is not circular is an even one over the domains
+	// the group's cluster spans. A group with genuinely unequal machine sizes
+	// per zone is the cost, and it is the smaller error.
+	//
+	// It is set here rather than by handing those subjects a synthetic intent,
+	// because an intent is a claim that somebody asked for something, and
+	// §8.1 reads a non-nil intent as the difference between Tier C and Tier B.
+	UndeclaredWeighting Weighting
 
 	// NodeCount is the number of eligible nodes per domain, index-aligned.
 	NodeCount []int64
@@ -223,6 +248,7 @@ func EligibleDomains(nodes []NodeView, opts EligibilityOptions) Eligibility {
 		res.NodeCount[i] = agg[d].eligible
 	}
 	res.CapacityRatioTrigger = opts.CapacityRatioTrigger
+	res.UndeclaredWeighting = opts.UndeclaredWeighting
 
 	// kube-scheduler treats a shortfall against minDomains as domains that
 	// exist and hold zero, which makes the skew calculation see the gap. We
@@ -311,18 +337,21 @@ func (a *domainAgg) reason() string {
 
 // WeightsFor builds the apportionment weights an intent asks for: its
 // explicitly declared shares where it has them, and its weighting mode
-// otherwise. A nil intent weights every domain equally.
+// otherwise.
 //
 // This exists for the same reason EligibilityPolicies does — so no caller has
 // to remember which of two fields shapes the expectation. Reading Weighting
 // straight off an intent that carries ExplicitShares would silently apportion
 // a declared 40/40/20 as an even third each, and the resulting drift would be
 // reported against a distribution the operator never asked for.
+//
+// A nil intent goes through EffectiveWeighting like any other. It used to
+// short-circuit to EqualWeights here, which made §7.2's trigger unreachable for
+// exactly the population it exists for: a subject with no declared or inferred
+// intent is the Tier C case, it is the majority of any estate, and it is the
+// one that was never going to be apportioned a share its zone cannot hold.
 func (e *Eligibility) WeightsFor(i *Intent) []float64 {
-	if i == nil {
-		return EqualWeights(len(e.Domains))
-	}
-	if len(i.ExplicitShares) > 0 {
+	if i != nil && len(i.ExplicitShares) > 0 {
 		out := make([]float64, len(e.Domains))
 		for idx, d := range e.Domains {
 			// A domain the declaration does not name weights zero: the
@@ -362,6 +391,11 @@ func (e *Eligibility) WeightsFor(i *Intent) []float64 {
 // `DoNotSchedule` constraint will be violated, and inferring the operator into
 // agreement with their cluster is the one thing a contract check must not do.
 //
+// A caller that set UndeclaredWeighting takes neither the trigger nor Equal.
+// That is the node-group case and the bypass is the point of the field: see
+// its doc for why apportioning nodes by the capacity those same nodes provide
+// is circular.
+//
 // Never returns WeightAuto: the point of calling this is to be rid of it.
 func (e *Eligibility) EffectiveWeighting(i *Intent) Weighting {
 	if i != nil {
@@ -371,6 +405,9 @@ func (e *Eligibility) EffectiveWeighting(i *Intent) Weighting {
 		if i.MaxSkew != nil || i.MaxPerDomain != nil {
 			return WeightEqual
 		}
+	}
+	if e.UndeclaredWeighting != WeightAuto {
+		return e.UndeclaredWeighting
 	}
 	if NeedsCapacityWeightingAt(e.realCapacityCPU(), e.CapacityRatioTrigger) {
 		return WeightAllocatableCPU

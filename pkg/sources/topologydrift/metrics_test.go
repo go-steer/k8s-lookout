@@ -107,6 +107,7 @@ func fullOptions() metricsOptions {
 		SubjectCounts: func() map[leeway.SubjectKind]int64 {
 			return map[leeway.SubjectKind]int64{leeway.SubjectDeployment: 3, leeway.SubjectDaemonSet: 1}
 		},
+		NodeGroups: func() int64 { return 2 },
 		DomainNodes: func() map[leeway.TopologyKey]map[leeway.Domain]int64 {
 			return map[leeway.TopologyKey]map[leeway.Domain]int64{
 				zoneKey: {"us-central1-a": 7, "us-central1-b": 5},
@@ -215,6 +216,10 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		"lookout_leeway_last_event_timestamp_seconds",
 		"lookout_leeway_evaluation_duration_seconds",
 		"lookout_leeway_subjects_tracked",
+		// FR-3's cardinality canary. Unconditional like the baseline gauge and
+		// for the same reason: zero groups discovered and no pass running have
+		// to look different.
+		"lookout_leeway_node_groups_discovered",
 		// §8.2's episodes. A gauge rather than a counter, because the question
 		// it answers is "what is firing now", not "how many ever did".
 		"lookout_leeway_alert_state",
