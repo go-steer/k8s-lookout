@@ -15,6 +15,9 @@
 package topologydrift
 
 import (
+	"fmt"
+	"math"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -74,6 +77,11 @@ type ResolveConfig struct {
 	// no cluster that had left --topology-cluster-defaults unset ever scored a
 	// subject against a learned intent. See the IntentSource list for the rest.
 	Baselines map[leeway.TopologyKey]*leeway.Intent
+
+	// CapacityRatioTrigger is §7.2's max/min allocatable-CPU ratio above
+	// which an intent that declared no weighting is apportioned by capacity.
+	// Zero means leeway.CapacityWeightingRatioTrigger.
+	CapacityRatioTrigger float64
 }
 
 // Resolve infers a subject's placement intent from one admitted pod and
@@ -147,18 +155,79 @@ func Resolve(pod *corev1.Pod, inv *Inventory, cfg ResolveConfig) Resolution {
 		// to the whole cluster. The accessor answers on a nil receiver, which
 		// is the case for an axis with no intent.
 		opts.Policies = intent.EligibilityPolicies()
-
-		weighting := leeway.WeightEqual
+		opts.CapacityRatioTrigger = cfg.CapacityRatioTrigger
 		if intent != nil {
 			opts.MinDomains = intent.MinDomains
-			weighting = intent.Weighting
 		}
 
-		eligible := leeway.EligibleDomains(inv.NodeViews(key, weighting, constraints), opts)
+		eligible := leeway.EligibleDomains(inv.NodeViews(key, constraints), opts)
 		res.Eligible[key] = eligible
 		if intent != nil {
 			intent.EligibleDomains = sets.New(eligible.Domains...)
+			applyWeighting(intent, eligible)
 		}
 	}
 	return res
+}
+
+// applyWeighting resolves §7.2's Auto against the domains an intent turned out
+// to be eligible for, writing the answer back onto the intent.
+//
+// The write-back is what keeps one fact from having two values. Weighting is
+// already an intent_info label and a §8.5 payload field; leaving Auto on the
+// intent and resolving it again inside WeightsFor would export the string
+// "Auto" next to an expectation apportioned by CPU, and a reader comparing the
+// two would be right to conclude one of them was lying.
+//
+// An intent that declared a weighting is untouched, including one that
+// declared Equal. That is the whole reason Auto exists as a distinct zero
+// value: a trigger that overrode a declaration would not be a default.
+func applyWeighting(in *leeway.Intent, eligible leeway.Eligibility) {
+	if in.Weighting != leeway.WeightAuto {
+		return
+	}
+	in.Weighting = eligible.EffectiveWeighting(in)
+	if in.Weighting == leeway.WeightEqual {
+		// The common case, and silent on purpose. An evidence line on every
+		// homogeneous cluster in the world would say only that nothing
+		// happened.
+		return
+	}
+	in.Evidence = append(in.Evidence, leeway.EvidenceItem{
+		Source: in.Source,
+		Detail: fmt.Sprintf(
+			"apportioned by allocatable CPU: eligible domains differ in capacity by %.2f× (over the %.2f× trigger), so an equal expectation would reserve a share the smallest domain cannot hold",
+			capacityRatio(eligible), triggerOf(eligible)),
+	})
+}
+
+// capacityRatio is the max/min allocatable-CPU ratio over the real eligible
+// domains — the number the trigger compared. Reported rather than recomputed
+// from a second snapshot, for the reason §8.5 gives about evidence: a finding
+// that quotes a figure the decision was not made on is worse than one that
+// quotes none.
+func capacityRatio(e leeway.Eligibility) float64 {
+	caps := e.CapacityCPU
+	if n := len(caps) - e.SyntheticDomains; n >= 0 {
+		caps = caps[:n]
+	}
+	minC, maxC := math.Inf(1), 0.0
+	for _, c := range caps {
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < 0 {
+			continue
+		}
+		minC = math.Min(minC, c)
+		maxC = math.Max(maxC, c)
+	}
+	if minC <= 0 || math.IsInf(minC, 1) {
+		return math.Inf(1)
+	}
+	return maxC / minC
+}
+
+func triggerOf(e leeway.Eligibility) float64 {
+	if e.CapacityRatioTrigger > 0 {
+		return e.CapacityRatioTrigger
+	}
+	return leeway.CapacityWeightingRatioTrigger
 }

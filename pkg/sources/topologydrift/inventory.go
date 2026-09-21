@@ -336,7 +336,12 @@ func (inv *Inventory) Stats(key leeway.TopologyKey) map[leeway.Domain]DomainStat
 //
 // The result is sorted by node name so that eligibility, and therefore every
 // score derived from it, does not depend on Go's map iteration order.
-func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighting, c Constraints) []leeway.NodeView {
+//
+// Both allocatable amounts are always filled. This used to take the weighting
+// and project one of them, which made §7.2's ratio trigger unimplementable
+// without computing eligibility twice — the trigger reads the CPU capacities
+// in order to choose the weighting.
+func (inv *Inventory) NodeViews(key leeway.TopologyKey, c Constraints) []leeway.NodeView {
 	ordinal, ok := inv.Ordinal(key)
 	if !ok {
 		return nil
@@ -353,7 +358,9 @@ func (inv *Inventory) NodeViews(key leeway.TopologyKey, weighting leeway.Weighti
 			Schedulable:     n.schedulable,
 			MatchesSelector: c.MatchesNode(n.name, n.labels),
 			Tolerated:       c.ToleratesNode(n.taints),
-			Capacity:        n.capacity(weighting),
+
+			AllocatableCPU:    float64(n.cpuMilli),
+			AllocatableMemory: float64(n.memBytes),
 		})
 	}
 	sort.Slice(views, func(a, b int) bool { return views[a].Name < views[b].Name })
@@ -612,17 +619,6 @@ func (n *nodeFacts) domain(ordinal int) leeway.Domain {
 		return leeway.DomainUnknown
 	}
 	return n.domains[ordinal]
-}
-
-func (n *nodeFacts) capacity(w leeway.Weighting) float64 {
-	switch w {
-	case leeway.WeightAllocatableCPU:
-		return float64(n.cpuMilli)
-	case leeway.WeightAllocatableMemory:
-		return float64(n.memBytes)
-	default:
-		return 0
-	}
 }
 
 // topologyValue reads a topology key from a node's labels, falling back to the

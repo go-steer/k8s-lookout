@@ -83,6 +83,7 @@ type flags struct {
 	topologyPerDomain     bool
 	topologyMinDrift      float64
 	topologyDwell         time.Duration
+	topologyCapacityRatio float64
 	topologyTierC         bool
 	topologyLearn         bool
 	topologyHalfLife      time.Duration
@@ -260,6 +261,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
 	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
 	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
+	fs.Float64Var(&f.topologyCapacityRatio, "topology-capacity-ratio", leeway.CapacityWeightingRatioTrigger, "How unequal a subject's eligible zones have to be, as a max/min ratio of allocatable CPU, before an even split stops being the expectation and capacity does (§7.2). Three zones where one is a quarter the size of the others cannot hold a third of anything; scoring them evenly reports drift on a cluster behaving exactly as its shape requires. Applies only where nobody declared a weighting — a policy that names one is always honoured. Raise it to keep the even expectation on mildly uneven clusters; below 1 it fires on any inequality at all. Must be > 0.")
 	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach — or, once one is learned, against its own §7.5 baseline — and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
 
 	// Baseline knobs (§7.5). The three here are the ones with a visible
@@ -631,6 +633,13 @@ func (f *flags) validate() error {
 	}
 	if f.topologyBand <= 0 {
 		return errors.New("--topology-baseline-band must be > 0 (a zero-width band breaches on every sample)")
+	}
+	// Zero is not "off" here, it is "divide by nothing": Config.normalize()
+	// would hand back the default, and an operator who typed 0 meant either
+	// "never weight by capacity" — which is --topology-capacity-ratio with a
+	// very large value — or nothing at all.
+	if f.topologyCapacityRatio <= 0 {
+		return errors.New("--topology-capacity-ratio must be > 0 (it is a max/min ratio; pass a large value to keep the even expectation on every cluster)")
 	}
 	// Compute-class knobs (§7.7). The two durations are checked for the
 	// same reason as the topology ones — Config.normalize() reads zero as

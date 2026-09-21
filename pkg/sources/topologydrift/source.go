@@ -171,6 +171,15 @@ type Config struct {
 	// cluster. Take DefaultThresholds and amend it.
 	Thresholds *leeway.Thresholds
 
+	// CapacityRatioTrigger is §7.2's max/min allocatable-CPU ratio above
+	// which a subject that declared no weighting is apportioned by capacity
+	// instead of equally. Zero takes leeway.CapacityWeightingRatioTrigger.
+	//
+	// Not folded into Thresholds, which are §7.4's scoring cut-offs: this one
+	// changes the expectation a score is taken against rather than how big a
+	// score has to be to count.
+	CapacityRatioTrigger float64
+
 	// Dwell is §8.2's timing. The zero value takes leeway.DefaultDwell, and a
 	// partial one is completed by the machine itself — see leeway.Dwell.
 	Dwell leeway.Dwell
@@ -253,6 +262,9 @@ func (c Config) normalize() Config {
 	if c.Thresholds == nil {
 		t := leeway.DefaultThresholds()
 		c.Thresholds = &t
+	}
+	if c.CapacityRatioTrigger <= 0 {
+		c.CapacityRatioTrigger = leeway.CapacityWeightingRatioTrigger
 	}
 	if c.AlertInterval <= 0 {
 		c.AlertInterval = DefaultAlertInterval
@@ -854,9 +866,10 @@ func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
 		return
 	}
 	res := Resolve(pod, s.inv, ResolveConfig{
-		ClusterDefaults: s.cfg.ClusterDefaultConstraints,
-		Policy:          s.policyFor(sub, pod),
-		Baselines:       s.baselineIntents(sub, start),
+		ClusterDefaults:      s.cfg.ClusterDefaultConstraints,
+		Policy:               s.policyFor(sub, pod),
+		Baselines:            s.baselineIntents(sub, start),
+		CapacityRatioTrigger: s.cfg.CapacityRatioTrigger,
 	})
 	s.state.SetIntents(sub, res.Intents)
 

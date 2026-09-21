@@ -252,6 +252,7 @@ func falsePositiveCorpus(t *testing.T) []fpFixture {
 		smallN(t),
 		cappedDomains(t),
 		deliberateColocation(t),
+		heterogeneousCapacity(t),
 	}
 }
 
@@ -603,6 +604,68 @@ func cappedDomains(t *testing.T) fpFixture {
 			if breach, reason := scores.Breach(got.intent, leeway.DefaultThresholds()); !breach {
 				t.Errorf("the same placement scored uncapped did not breach (%q); "+
 					"the caps are no longer what is saving this fixture", reason)
+			}
+		},
+	}
+}
+
+// heterogeneousCapacity: ten replicas over three zones whose nodes are not the
+// same size. zone-a holds two 32-core nodes and its neighbours two 4-core nodes
+// each, so the zones are 64, 8 and 8 cores — a cluster that grew into a bigger
+// machine type and kept the old zones. The pods sit [8,1,1], which is the share
+// of the cluster each zone actually is.
+//
+// Judged against an even expectation this is a loud, confident finding: thirds
+// are [4,3,3], ρ = 0.4 is over any threshold anyone would set, and the remedy it
+// implies is to move four pods into zones with nowhere to put them. §7.2's
+// capacity trigger is what saves it — the eligible zones differ by 8×, far over
+// the 1.25× trigger, so the expectation is apportioned by allocatable CPU and
+// lands on exactly the placement the scheduler already chose.
+//
+// The intent is a *preferred* podAntiAffinity on purpose, and it is the only
+// fixture here inferred from one. It is the inference source that asks for a
+// spread without also stating a pod-count contract, and capacity weighting is
+// deliberately confined to those: a declared maxSkew bounds pods, not
+// millicores. See TestCapacityWeighting_APodCountContractKeepsTheEvenExpectation
+// for the other half of that rule, and pinnedVolumes for the fixture that found
+// it — a capacity-weighted expectation raises S* until the maxSkew the fixture
+// is about cannot be violated.
+func heterogeneousCapacity(t *testing.T) fpFixture {
+	inv := zonedInventory(t,
+		zoneSpec{zone: "zone-a", nodes: 2, opts: []nodeOpt{withAllocatable("32", "128Gi")}},
+		zoneSpec{zone: "zone-b", nodes: 2, opts: []nodeOpt{withAllocatable("4", "16Gi")}},
+		zoneSpec{zone: "zone-c", nodes: 2, opts: []nodeOpt{withAllocatable("4", "16Gi")}},
+	)
+	rep := affPod(antiPreferred(100, selfTerm(corev1.LabelTopologyZone)))
+
+	return fpFixture{
+		name: "heterogeneous capacity: one zone eight times the size of its neighbours",
+		inv:  inv,
+		rep:  rep,
+		pods: replicas(rep,
+			"zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0",
+			"zone-a-1", "zone-a-1", "zone-a-1", "zone-a-1",
+			"zone-b-0", "zone-c-0"),
+		also: func(t *testing.T, got fpResult) {
+			if got.intent == nil || got.intent.Weighting != leeway.WeightAllocatableCPU {
+				t.Fatalf("intent = %+v, want one resolved to AllocatableCPU — the trigger is not what is saving this fixture", got.intent)
+			}
+			if want := []int64{8, 1, 1}; !slices.Equal(got.scores.Expected, want) {
+				t.Fatalf("expected = %v, want %v — the apportionment does not follow the capacities: %s",
+					got.scores.Expected, want, got)
+			}
+			if got.scores.Relocation != 0 {
+				t.Errorf("R = %d, want 0 — every pod is in the zone its share of the cluster puts it in: %s",
+					got.scores.Relocation, got)
+			}
+
+			// The counterfactual: the same pods under the even expectation, as
+			// they would be scored if the trigger regressed. It must breach.
+			even := leeway.Apportion(10, leeway.EqualWeights(len(got.eligible.Domains)), nil)
+			scores := leeway.Score(got.eligible.Domains, got.scores.Actual, even, got.intent.MaxSkew, leeway.DefaultThresholds())
+			if breach, reason := scores.Breach(got.intent, leeway.DefaultThresholds()); !breach {
+				t.Errorf("the same placement scored on even thirds did not breach (%q); "+
+					"capacity weighting is no longer what is saving this fixture", reason)
 			}
 		},
 	}

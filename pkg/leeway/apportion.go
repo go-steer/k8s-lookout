@@ -235,7 +235,20 @@ const CapacityWeightingRatioTrigger = 1.25
 //
 // A zero-capacity domain makes the ratio infinite by definition, so it returns
 // true — a domain with no capacity is precisely the case Equal gets wrong.
+// Callers must exclude synthetic MinDomains padding before asking; see
+// Eligibility.EffectiveWeighting for why.
 func NeedsCapacityWeighting(capacities []float64) bool {
+	return NeedsCapacityWeightingAt(capacities, CapacityWeightingRatioTrigger)
+}
+
+// NeedsCapacityWeightingAt is NeedsCapacityWeighting against a configured
+// trigger. A trigger at or below zero means the §10.2 default; one at or below
+// 1 would fire on any inequality at all, which is a legitimate thing to ask
+// for and is left to the operator.
+func NeedsCapacityWeightingAt(capacities []float64, trigger float64) bool {
+	if trigger <= 0 {
+		trigger = CapacityWeightingRatioTrigger
+	}
 	if len(capacities) < 2 {
 		return false
 	}
@@ -253,5 +266,5 @@ func NeedsCapacityWeighting(capacities []float64) bool {
 	if minC <= 0 {
 		return true
 	}
-	return maxC/minC > CapacityWeightingRatioTrigger
+	return maxC/minC > trigger
 }

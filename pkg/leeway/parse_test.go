@@ -61,8 +61,10 @@ func TestParseWeighting_RoundTripsEveryDeclaredWeighting(t *testing.T) {
 			t.Errorf("ParseWeighting(%q) = %v, want %v", w.String(), got, w)
 		}
 	}
-	if n != 4 {
-		t.Errorf("walked %d weightings, want 4 — update this test with the new one", n)
+	// Five since §7.2's trigger shipped: Auto joined as the zero value, so
+	// that "declared Equal" and "declared nothing" stop being the same value.
+	if n != 5 {
+		t.Errorf("walked %d weightings, want 5 — update this test with the new one", n)
 	}
 }
 

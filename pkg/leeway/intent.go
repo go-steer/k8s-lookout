@@ -179,8 +179,19 @@ type Weighting uint8
 // The weightings. Equal is the default for workloads; AllocatableCPU is the
 // default for node-group subjects and for workloads whose eligible domains
 // have materially unequal capacity (§7.2).
+//
+// WeightAuto is the zero value, and that is deliberate rather than
+// alphabetical. §7.2 makes capacity weighting a *default* that a declaration
+// overrides, which only works if "nobody said" and "somebody said Equal" are
+// different values — with Equal at zero an operator who declared it on a
+// heterogeneous cluster would be silently overruled by the trigger, which is
+// the inverse of what a declaration is for. Nothing outside Eligibility
+// should ever see Auto: EffectiveWeighting resolves it against the capacities
+// in hand, and resolve.go writes the answer back so that the intent_info
+// label and the finding payload report what was actually apportioned.
 const (
-	WeightEqual Weighting = iota
+	WeightAuto Weighting = iota
+	WeightEqual
 	WeightNodeCount
 	WeightAllocatableCPU
 	WeightAllocatableMemory
@@ -189,6 +200,8 @@ const (
 // String implements fmt.Stringer.
 func (w Weighting) String() string {
 	switch w {
+	case WeightAuto:
+		return "Auto"
 	case WeightEqual:
 		return "Equal"
 	case WeightNodeCount:

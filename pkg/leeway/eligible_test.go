@@ -33,7 +33,7 @@ func node(name string, domain Domain, opts ...func(*NodeView)) NodeView {
 		Schedulable:     true,
 		MatchesSelector: true,
 		Tolerated:       true,
-		Capacity:        1,
+		AllocatableCPU:  1,
 	}
 	for _, o := range opts {
 		o(&n)
@@ -45,8 +45,18 @@ func notReady(n *NodeView)     { n.Ready = false }
 func cordoned(n *NodeView)     { n.Schedulable = false }
 func noMatch(n *NodeView)      { n.MatchesSelector = false }
 func notTolerated(n *NodeView) { n.Tolerated = false }
+
+// capacity sets both allocatable dimensions to the same number, which is what
+// most of these tests want: they are about eligibility and apportionment, not
+// about which resource was read. memory overrides the second one, so a test
+// that asserts memory weighting reads the memory field can make the two
+// disagree and would fail if it silently read CPU.
 func capacity(c float64) func(*NodeView) {
-	return func(n *NodeView) { n.Capacity = c }
+	return func(n *NodeView) { n.AllocatableCPU, n.AllocatableMemory = c, c }
+}
+
+func memory(m float64) func(*NodeView) {
+	return func(n *NodeView) { n.AllocatableMemory = m }
 }
 
 func TestEligibleDomains_OneUsableNodeMakesADomainEligible(t *testing.T) {
@@ -193,11 +203,11 @@ func TestEligibleDomains_MinDomainsPadsWithSyntheticDomains(t *testing.T) {
 		}
 	}
 	// Index alignment is what makes Capacity and NodeCount usable as weights.
-	if len(got.Capacity) != 3 || len(got.NodeCount) != 3 {
-		t.Fatalf("Capacity=%v NodeCount=%v must stay index-aligned with Domains", got.Capacity, got.NodeCount)
+	if len(got.CapacityCPU) != 3 || len(got.NodeCount) != 3 {
+		t.Fatalf("Capacity=%v NodeCount=%v must stay index-aligned with Domains", got.CapacityCPU, got.NodeCount)
 	}
-	if got.Capacity[1] != 0 || got.NodeCount[1] != 0 {
-		t.Errorf("synthetic domain has capacity %v / %d nodes, want zero", got.Capacity[1], got.NodeCount[1])
+	if got.CapacityCPU[1] != 0 || got.NodeCount[1] != 0 {
+		t.Errorf("synthetic domain has capacity %v / %d nodes, want zero", got.CapacityCPU[1], got.NodeCount[1])
 	}
 
 	// §7.1: the whole point of the padding is that the skew becomes visible.
@@ -255,10 +265,12 @@ func TestSyntheticDomain_IsStable(t *testing.T) {
 }
 
 func TestEligibility_Weights(t *testing.T) {
+	// The memory numbers are deliberately not the CPU ones: a Weights that
+	// read the wrong field would otherwise pass both capacity rows.
 	e := EligibleDomains([]NodeView{
-		node("a1", "a", capacity(4)),
-		node("a2", "a", capacity(4)),
-		node("b1", "b", capacity(16)),
+		node("a1", "a", capacity(4), memory(40)),
+		node("a2", "a", capacity(4), memory(40)),
+		node("b1", "b", capacity(16), memory(160)),
 	}, DefaultEligibilityOptions())
 
 	tests := []struct {
@@ -268,7 +280,10 @@ func TestEligibility_Weights(t *testing.T) {
 		{WeightEqual, []float64{1, 1}},
 		{WeightNodeCount, []float64{2, 1}},
 		{WeightAllocatableCPU, []float64{8, 16}},
-		{WeightAllocatableMemory, []float64{8, 16}},
+		{WeightAllocatableMemory, []float64{80, 160}},
+		// Auto is not a weighting and must not resolve itself here; see
+		// Weights. EffectiveWeighting is what turns it into one.
+		{WeightAuto, []float64{1, 1}},
 		{Weighting(99), []float64{1, 1}},
 	}
 	for _, tc := range tests {
@@ -288,14 +303,115 @@ func TestEligibility_WeightsDoNotAliasTheEligibility(t *testing.T) {
 
 	w := e.Weights(WeightAllocatableCPU)
 	w[0] = 999
-	if e.Capacity[0] != 4 {
-		t.Errorf("mutating the weights changed Eligibility.Capacity: %v", e.Capacity)
+	if e.CapacityCPU[0] != 4 {
+		t.Errorf("mutating the weights changed Eligibility.CapacityCPU: %v", e.CapacityCPU)
 	}
 
 	nc := e.Weights(WeightNodeCount)
 	nc[0] = 999
 	if e.NodeCount[0] != 1 {
 		t.Errorf("mutating the weights changed Eligibility.NodeCount: %v", e.NodeCount)
+	}
+}
+
+func TestEligibility_EffectiveWeighting(t *testing.T) {
+	// 4 and 16 cores: a 4× spread, well over the 1.25 trigger.
+	uneven := EligibleDomains([]NodeView{
+		node("a1", "a", capacity(4)),
+		node("b1", "b", capacity(16)),
+	}, DefaultEligibilityOptions())
+	// 100 and 104: real clusters are never exactly equal, and 1.04× must not
+	// move a homogeneous cluster off the even expectation.
+	even := EligibleDomains([]NodeView{
+		node("a1", "a", capacity(100)),
+		node("b1", "b", capacity(104)),
+	}, DefaultEligibilityOptions())
+
+	maxSkew := int32(1)
+	ceiling := int64(2)
+
+	tests := []struct {
+		name string
+		e    Eligibility
+		in   *Intent
+		want Weighting
+	}{
+		{"nil intent on an uneven cluster takes the trigger", uneven, nil, WeightAllocatableCPU},
+		{"nil intent on an even cluster does not", even, nil, WeightEqual},
+		{"undeclared on an uneven cluster takes the trigger", uneven, &Intent{}, WeightAllocatableCPU},
+		{"undeclared on an even cluster does not", even, &Intent{}, WeightEqual},
+
+		// A declaration is a declaration. §7.2 makes capacity weighting a
+		// default, and a default that overrode what the operator wrote would
+		// be a rule, so an explicit Equal survives the trigger.
+		{"declared Equal beats the trigger", uneven, &Intent{Weighting: WeightEqual}, WeightEqual},
+		{"declared NodeCount beats the trigger", uneven, &Intent{Weighting: WeightNodeCount}, WeightNodeCount},
+		{"declared memory beats the trigger", even, &Intent{Weighting: WeightAllocatableMemory}, WeightAllocatableMemory},
+
+		// The pod-count carve-out. Both of these are contracts over objects,
+		// and a capacity-weighted expectation raises MinAchievableSkew until
+		// they cannot be violated; see EffectiveWeighting.
+		{"a maxSkew keeps the even expectation", uneven, &Intent{MaxSkew: &maxSkew}, WeightEqual},
+		{"a per-domain ceiling keeps the even expectation", uneven, &Intent{MaxPerDomain: &ceiling}, WeightEqual},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.e.EffectiveWeighting(tc.in); got != tc.want {
+				t.Errorf("EffectiveWeighting = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEligibility_EffectiveWeightingIgnoresSyntheticPadding is the subtlest of
+// the trigger's rules, and the one with the worst failure mode: synthetic
+// MinDomains padding carries zero capacity, a zero makes the ratio infinite,
+// and capacity weighting then apportions zero objects to the padding — so the
+// missing domain the padding exists to expose scores as perfectly balanced.
+func TestEligibility_EffectiveWeightingIgnoresSyntheticPadding(t *testing.T) {
+	min := int32(3)
+	opts := DefaultEligibilityOptions()
+	opts.MinDomains = &min
+
+	e := EligibleDomains([]NodeView{node("a1", "a", capacity(8))}, opts)
+	if e.SyntheticDomains != 2 {
+		t.Fatalf("SyntheticDomains = %d, want 2 — the fixture is not testing what it claims", e.SyntheticDomains)
+	}
+	if got := e.EffectiveWeighting(nil); got != WeightEqual {
+		t.Errorf("EffectiveWeighting = %v, want Equal: the zero-capacity padding drove the ratio", got)
+	}
+
+	// And the even expectation still asks the padding to hold objects, which
+	// is what makes the gap visible: a subject sitting [3 0 0] is measured
+	// against [1 1 1] and scores the two missing domains, instead of being
+	// apportioned [3 0 0] by capacity and coming out perfect.
+	ap := Apportion(3, e.WeightsFor(nil), nil)
+	if want := []int64{1, 1, 1}; !reflect.DeepEqual(ap.Expected, want) {
+		t.Errorf("expected = %v, want %v — the padding must be expected to hold objects it does not have",
+			ap.Expected, want)
+	}
+}
+
+// TestEligibility_CapacityRatioTriggerIsConfigurable: the operator knob reaches
+// the decision rather than only the free function it delegates to.
+func TestEligibility_CapacityRatioTriggerIsConfigurable(t *testing.T) {
+	nodes := []NodeView{node("a1", "a", capacity(4)), node("b1", "b", capacity(16))}
+
+	opts := DefaultEligibilityOptions()
+	if opts.CapacityRatioTrigger != CapacityWeightingRatioTrigger {
+		t.Errorf("default trigger = %v, want %v", opts.CapacityRatioTrigger, CapacityWeightingRatioTrigger)
+	}
+
+	opts.CapacityRatioTrigger = 8 // above the fixture's 4× spread
+	lenient := EligibleDomains(nodes, opts)
+	if got := lenient.EffectiveWeighting(nil); got != WeightEqual {
+		t.Errorf("EffectiveWeighting = %v, want Equal — a 4× spread should not cross an 8× trigger", got)
+	}
+
+	opts.CapacityRatioTrigger = 2
+	strict := EligibleDomains(nodes, opts)
+	if got := strict.EffectiveWeighting(nil); got != WeightAllocatableCPU {
+		t.Errorf("EffectiveWeighting = %v, want AllocatableCPU at a 2× trigger", got)
 	}
 }
 
@@ -346,9 +462,9 @@ func TestDefaultEligibilityOptions(t *testing.T) {
 
 func TestEligibility_WeightsFor(t *testing.T) {
 	e := &Eligibility{
-		Domains:   []Domain{"a", "b", "c"},
-		NodeCount: []int64{10, 5, 1},
-		Capacity:  []float64{40, 20, 4},
+		Domains:     []Domain{"a", "b", "c"},
+		NodeCount:   []int64{10, 5, 1},
+		CapacityCPU: []float64{40, 20, 4},
 	}
 
 	t.Run("nil intent weights equally", func(t *testing.T) {
