@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-21
+
+This release is about the failures that leave nothing broken to look
+at. Every source lookout had before this one starts from something the
+cluster is already unhappy about: a pod that will not start, a rollout
+that will not finish, a certificate running out. But a Deployment whose
+six replicas all migrated into one zone is at full replica count with
+every probe green, and a workload that GKE quietly provisioned onto the
+third machine family in its compute class is running exactly as many
+pods as it asked for. Nothing is failing. Something is wrong. That gap
+is what `leeway` is, and this release is the whole of it except the
+node-group half.
+
+Two new sources, both on by default where their inputs exist. The first,
+`topology-drift`, tracks where a workload's objects actually sit across
+the topology axes its nodes are labelled with, and compares that against
+the placement the workload's *intent* implies — a declared spread
+constraint or anti-affinity where there is one, an intent inferred from
+node selectors, tolerations and volume pinning where there is not, and,
+where nobody expressed anything at all, the placement the workload has
+held all along. That last case is new territory for this tool and is
+treated accordingly: a learned baseline is a Tier C observation, it says
+"this changed" rather than "this is wrong", and it is exported as a
+metric and kept off the wire unless you ask for it. The second,
+`compute-class`, measures which rung of a GKE custom compute class's
+priority ladder your estate is running on, weighted by time rather than
+sampled — a ninety-second burst of fallback nodes during a scale-up and
+three weeks parked on spot look identical to a gauge, and only one of
+them is worth knowing about.
+
+Both shipped counters first and findings second, deliberately, and the
+counters audit themselves: `topology-drift` rebuilds a twelfth of its
+subjects from scratch every five minutes and compares the result against
+what it has been counting incrementally, and `compute-class`
+independently re-derives each node's priority and counts every
+disagreement with GKE's own annotation. A non-zero rate on either is a
+bug in k8s-lookout rather than a cluster condition, which is the point:
+a default-on source watching every pod in the cluster is only a safe
+thing to build in public if a mistake in it is a wrong number on a
+dashboard instead of a page at 3am. Seven new signal kinds in all,
+taking the frozen v1 inventory from 49 to 56, additive as v1 requires.
+
+The release also narrows what the sentinel reads. `--exclude-namespace`
+used to filter signals after the fact; it is now a real watch scope, so
+an excluded namespace is not read at all, and Pods and Nodes are trimmed
+on their way into the shared cache rather than held whole.
+
 ### Added
 
 - **A `topology-drift` source, on by default, that counts where a workload's
