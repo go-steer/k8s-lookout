@@ -107,6 +107,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stays out of the fingerprint — turning a source on must not re-identify
   every open episode as new. The sentinel also logs a missing source at startup.
 
+- **`rollout_bias` can now win.** The `rollout` source records when each
+  workload's rollout *stopped* — the falling edge of the same predicate that
+  relaxes leeway's thresholds while one is running — and `topology-drift` reads
+  it, so drift that appeared during a rollout and outlived its settle window is
+  attributed to the rollout instead of falling through to whatever is next on
+  the ladder. It is deliberately not the stricter "rollout complete" stamp,
+  which additionally requires every replica to be available: a Deployment with
+  one pod in CrashLoopBackOff never reaches that, and those are exactly the
+  workloads most likely to have left drift behind. A workload the sentinel met
+  already settled, or met after a restart, has no stamp and reports
+  `rollout_bias` as untested rather than as ruled out.
+
 - **The OTLP metric push path now reports on itself, and a dead collector can no
   longer reach the recording path.** `--otel-exporter=otlp` adds five series to
   the scrape endpoint — `lookout_otlp_exports_total{outcome}`,

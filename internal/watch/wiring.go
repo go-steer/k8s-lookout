@@ -1103,6 +1103,11 @@ func (r *runner) run(ctx context.Context) error {
 			// this is the only place that already knows about both, and
 			// neither should have to import the other to be testable.
 			bs.topoDrift.WithRolloutOracle(rolloutOracle(bs.rollout))
+			// §8.5's rolloutEndedAt — the other edge of the same predicate.
+			// One source, two oracles, because §7.6 must read an absent
+			// answer as "nothing is rolling out" while §8.5 must not read it
+			// as "the rollout ended long ago".
+			bs.topoDrift.WithRolloutEndOracle(rolloutEndOracle(bs.rollout))
 		}
 		if bs.capacity != nil {
 			// §8.5's pending-pod rows, on the same argument: the capacity
@@ -1456,6 +1461,36 @@ func rolloutOracle(src rollingOutReporter) topologydrift.RolloutOracle {
 				continue
 			}
 			out = append(out, leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name})
+		}
+		return out
+	}
+}
+
+// rolloutEndReporter is the half of *rollout.Source that rolloutEndOracle
+// needs. Separate from rollingOutReporter so each adapter's test builds only
+// the answer it is about.
+type rolloutEndReporter interface {
+	RolloutEnded() map[rollout.WorkloadRef]time.Time
+}
+
+// rolloutEndOracle adapts the rollout source's completion stamps into the
+// SubjectRefs leeway keys on (docs/leeway-design.md §8.5).
+//
+// Drops kinds leeway does not track, for rolloutOracle's reason: an entry
+// nothing can match is a row in a map and nothing else. Subjects with no
+// watched completion never reach here at all — the source omits them rather
+// than reporting the zero time, which is what keeps "we have not seen one"
+// from reading as a rollout that ended at the epoch.
+func rolloutEndOracle(src rolloutEndReporter) topologydrift.RolloutEndOracle {
+	return func() map[leeway.SubjectRef]time.Time {
+		ended := src.RolloutEnded()
+		out := make(map[leeway.SubjectRef]time.Time, len(ended))
+		for w, at := range ended {
+			kind := leeway.SubjectKind(w.Kind)
+			if kind != leeway.SubjectDeployment && kind != leeway.SubjectStatefulSet {
+				continue
+			}
+			out[leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name}] = at
 		}
 		return out
 	}

@@ -202,10 +202,13 @@ func TestSource_EvidenceFor(t *testing.T) {
 		t.Error("no capacity oracle is wired and the evidence does not report it unavailable")
 	}
 	if !ev.RolloutEndedAt.IsZero() {
-		t.Errorf("RolloutEndedAt = %v, want the zero value until its seam exists", ev.RolloutEndedAt)
+		t.Errorf("RolloutEndedAt = %v, want the zero value with no oracle wired", ev.RolloutEndedAt)
 	}
-	if !ev.Unavailable.RolloutCompletion || !ev.Unavailable.Consolidation {
-		t.Errorf("the two seams that do not exist yet must report unavailable, got %+v", ev.Unavailable)
+	if !ev.Unavailable.RolloutCompletion {
+		t.Error("no rollout-end oracle is wired and the evidence does not report it unavailable")
+	}
+	if !ev.Unavailable.Consolidation {
+		t.Error("nothing produces a consolidation stamp and the evidence does not report it unavailable")
 	}
 	for d, facts := range ev.Domains {
 		if !facts.ConsolidatedAt.IsZero() {
@@ -248,6 +251,39 @@ func TestSource_EvidenceForReadsTheCapacityOracle(t *testing.T) {
 	}
 	if ev.Unavailable.Capacity {
 		t.Error("a capacity oracle is wired and the evidence still reports it unavailable")
+	}
+}
+
+func TestSource_EvidenceForReadsTheRolloutEndOracle(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
+	s.inv.Upsert(node("n-a1", "us-central1-a"))
+
+	ended := t0.Add(-30 * time.Minute)
+	other := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "default", Name: "api"}
+	s.WithRolloutEndOracle(func() map[leeway.SubjectRef]time.Time {
+		return map[leeway.SubjectRef]time.Time{webSubject: ended, other: t0.Add(-time.Minute)}
+	})
+
+	// Read from the last cluster sample, not from the oracle directly: the
+	// answer is cluster-wide and a pass covers every subject.
+	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0); !got.RolloutEndedAt.IsZero() {
+		t.Errorf("RolloutEndedAt = %v before the first sample, want the zero value", got.RolloutEndedAt)
+	}
+	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0); got.Unavailable.RolloutCompletion {
+		t.Error("an oracle is wired and the evidence reports rollout completion unavailable")
+	}
+
+	s.sampleCluster(t0)
+
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0)
+	if !ev.RolloutEndedAt.Equal(ended) {
+		t.Errorf("RolloutEndedAt = %v, want this subject's stamp %v", ev.RolloutEndedAt, ended)
+	}
+
+	// Another subject's rollout is not this subject's.
+	untouched := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "default", Name: "cache"}
+	if got := s.evidenceFor(untouched, zoneKey, evenlyEligible("us-central1-a"), nil, t0); !got.RolloutEndedAt.IsZero() {
+		t.Errorf("RolloutEndedAt = %v for a subject with no stamp, want the zero value", got.RolloutEndedAt)
 	}
 }
 
