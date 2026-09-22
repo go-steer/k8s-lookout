@@ -39,18 +39,19 @@ import (
 // RolloutEndOracle and sampled on the cluster tick rather than per finding
 // because it is a cluster-wide answer.
 //
-// One evidence field remains at its zero value, and it is a whole sibling
-// source rather than a missing line: DomainFacts.ConsolidatedAt is the
-// autoscaler's, and nothing in this deployment records node removals as
-// consolidations yet.
+// ConsolidatedAt comes from the inventory rather than from a sibling: the
+// autoscaler announces itself on the node object, with a taint nobody else
+// applies, and this source is already the one watching nodes. There is nothing
+// to be unavailable, which is why EvidenceGaps names only the two seams that
+// can genuinely be absent.
 //
-// Its absence is reported rather than implied. Evidence.Unavailable says
-// which sources could not be asked, and Attribute turns that into the
+// Every gap that remains is reported rather than implied. Evidence.Unavailable
+// says which sources could not be asked, and Attribute turns that into the
 // finding's `untested` list, so a deployment missing a source is
 // distinguishable from one where the hypothesis was tested and lost. The cost
-// stays bounded either way: `consolidation` and `rollout_bias` cannot win, and
-// attribution falls through to the cause below them on the ladder — never to a
-// wrong one, because every rule needs positive evidence.
+// stays bounded either way: the cause simply cannot win, and attribution falls
+// through to the one below it on the ladder — never to a wrong one, because
+// every rule needs positive evidence.
 func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, now time.Time) leeway.Evidence {
 	ev := leeway.Evidence{
 		Domains:        make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
@@ -58,20 +59,17 @@ func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, elig
 		Unavailable: leeway.EvidenceGaps{
 			Capacity:          s.capacity == nil,
 			RolloutCompletion: s.rolloutEnd == nil,
-			// Still nobody's job. PR order, not an oversight: no seam reports a
-			// node removal as a consolidation, and saying so is what stops a
-			// finding claiming it ruled one out.
-			Consolidation: true,
 		},
 	}
 	s.pendingEvidence(&ev, sub)
 
 	stats := s.inv.Stats(key)
 	drains := s.inv.DrainTimes(key, eligible.Domains)
+	packed := s.inv.ConsolidationTimes(key, eligible.Domains)
 	cutoff := now.Add(-s.cfg.Cause.Window)
 
 	for _, d := range eligible.Domains {
-		facts := leeway.DomainFacts{TaintedAt: drains[d]}
+		facts := leeway.DomainFacts{TaintedAt: drains[d], ConsolidatedAt: packed[d]}
 		if st, ok := stats[d]; ok {
 			facts.ReadyNodes = st.Ready
 			// Present but not Ready. Not redundant with a fall in the series:

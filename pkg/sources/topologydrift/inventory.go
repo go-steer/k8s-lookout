@@ -18,6 +18,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -99,6 +100,12 @@ type nodeFacts struct {
 	// recently, and the pods a completed drain evicted are still landing for
 	// some minutes after the node is handed back.
 	cordonedAt time.Time
+
+	// disruptedAt is when an autoscaler claimed this node for removal, or the
+	// zero time if none has. It is read once, at Remove: the node leaving is
+	// what makes it a consolidation rather than an intention, and a claim the
+	// autoscaler withdrew leaves no trace.
+	disruptedAt time.Time
 }
 
 // Change describes what a node event actually altered, so the caller can do the
@@ -146,6 +153,7 @@ type Inventory struct {
 	nodes    map[string]*nodeFacts
 	stats    []map[leeway.Domain]*DomainStats // indexed by ordinal
 	ready    []map[leeway.Domain][]leeway.ReadyCount
+	consol   []map[leeway.Domain]time.Time // indexed by ordinal
 	gen      uint64
 
 	// now is the clock, overridden in tests. Held because Upsert dates a cordon
@@ -180,6 +188,7 @@ func NewInventory(keys []leeway.TopologyKey) *Inventory {
 		inv.keys = append(inv.keys, k)
 		inv.stats = append(inv.stats, make(map[leeway.Domain]*DomainStats))
 		inv.ready = append(inv.ready, make(map[leeway.Domain][]leeway.ReadyCount))
+		inv.consol = append(inv.consol, make(map[leeway.Domain]time.Time))
 	}
 	return inv
 }
@@ -229,6 +238,7 @@ func (inv *Inventory) Upsert(node *corev1.Node) Change {
 	prev, known := inv.nodes[next.name]
 	if !known {
 		next.cordonedAt = cordonTime(nil, next, inv.now())
+		next.disruptedAt = disruptionTime(nil, next, inv.now())
 		inv.nodes[next.name] = next
 		inv.addStats(next, +1)
 		inv.gen++
@@ -236,6 +246,7 @@ func (inv *Inventory) Upsert(node *corev1.Node) Change {
 	}
 
 	next.cordonedAt = cordonTime(prev, next, inv.now())
+	next.disruptedAt = disruptionTime(prev, next, inv.now())
 
 	var ch Change
 	if !slices.Equal(prev.domains, next.domains) {
@@ -272,6 +283,7 @@ func (inv *Inventory) Remove(name string) Change {
 	if !known {
 		return Change{}
 	}
+	inv.recordConsolidation(prev)
 	inv.addStats(prev, -1)
 	delete(inv.nodes, name)
 	inv.intern.forget(prev.name)
@@ -550,6 +562,165 @@ func taintTime(taints []corev1.Taint) *time.Time {
 		}
 	}
 	return nil
+}
+
+// disruptionTaints are the taints an autoscaler applies to a node it has
+// decided to remove. They are the positive evidence §8.5's `consolidation`
+// rung needs: an operator draining a node sets spec.unschedulable, or the
+// unschedulable taint, and neither of those is one of these — which is what
+// keeps "the autoscaler packed you up" distinguishable from "somebody cordoned
+// a machine", two rungs with genuinely different remedies.
+//
+// Not a flag, unlike FR-3's node-group labels. That list varies per cloud
+// provider because the *name* of a pool does; this one is two upstream
+// projects' constants, and a third autoscaler needs a line here rather than a
+// deployment-time decision.
+//
+// DeletionCandidateOfClusterAutoscaler is deliberately absent. It is
+// PreferNoSchedule and it means the autoscaler is *considering* the node;
+// cluster-autoscaler adds and removes it as utilisation moves, and counting a
+// candidacy would attribute drift to a consolidation that never happened.
+var disruptionTaints = []string{
+	"ToBeDeletedByClusterAutoscaler", // cluster-autoscaler, GKE included
+	"karpenter.sh/disrupted",         // Karpenter v1
+	"karpenter.sh/disruption",        // Karpenter v0.32–v0.37
+}
+
+// disruptionTime dates an autoscaler's claim on a node, on the same terms
+// cordonTime dates a cordon: the API server's TimeAdded where it exists,
+// otherwise the moment we watched the taint appear.
+//
+// A node first seen already claimed gets the zero time, for cordonTime's
+// reason — a restart must not make every node the autoscaler happens to be
+// working on look freshly consolidated. Cluster-autoscaler softens that for
+// itself by writing the deletion time into the taint's *value*, which survives
+// us, so the common case recovers the real answer across a restart anyway.
+//
+// A withdrawn claim clears the stamp, unlike cordonedAt which survives an
+// uncordon. The asymmetry is the two rungs': a drain's evicted pods are still
+// landing after the node comes back, so §7.6 wants the memory, whereas a node
+// that outlived the autoscaler's decision about it was not consolidated and
+// never will have been.
+func disruptionTime(prev, next *nodeFacts, now time.Time) time.Time {
+	t, claimed := disruptionTaint(next.taints)
+	if !claimed {
+		return time.Time{}
+	}
+	if t.TimeAdded != nil {
+		return t.TimeAdded.Time
+	}
+	if at, ok := autoscalerDeletionValue(t); ok {
+		return at
+	}
+	if prev == nil {
+		return time.Time{}
+	}
+	if _, was := disruptionTaint(prev.taints); was {
+		// Still claimed: the clock started when it was, not now.
+		return prev.disruptedAt
+	}
+	return now
+}
+
+// disruptionTaint returns the first disruption taint on a node.
+func disruptionTaint(taints []corev1.Taint) (corev1.Taint, bool) {
+	for _, t := range taints {
+		if slices.Contains(disruptionTaints, t.Key) {
+			return t, true
+		}
+	}
+	return corev1.Taint{}, false
+}
+
+// autoscalerDeletionValue reads cluster-autoscaler's deletion timestamp out of
+// the taint value, which it writes as unix seconds. Karpenter's value is a
+// disruption reason rather than a time, so it simply fails to parse.
+func autoscalerDeletionValue(t corev1.Taint) (time.Time, bool) {
+	secs, err := strconv.ParseInt(t.Value, 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0).UTC(), true
+}
+
+// recordConsolidation latches a departing node's disruption against every
+// domain it was in. Caller holds the write lock.
+//
+// A per-domain latch rather than a log of removals, because that is the shape
+// the question has: §8.5 asks whether *this domain* lost a node to the
+// autoscaler recently, and an autoscaler packing forty nodes out of a zone is
+// one answer, not forty. It also bounds the memory by the cluster's domain
+// count instead of by its churn.
+//
+// The stamp is the claim, not the deletion. They are minutes apart at most,
+// and the claim is when the pods started moving — the deletion is just when we
+// found out it finished.
+func (inv *Inventory) recordConsolidation(n *nodeFacts) {
+	if n.disruptedAt.IsZero() {
+		return
+	}
+	for ordinal := range inv.keys {
+		if ordinal >= len(n.domains) {
+			break
+		}
+		d := n.domains[ordinal]
+		if at := inv.consol[ordinal][d]; at.After(n.disruptedAt) {
+			continue
+		}
+		inv.consol[ordinal][d] = n.disruptedAt
+	}
+}
+
+// PruneConsolidations forgets consolidations older than retain.
+//
+// Separate from SampleReady's pruning rather than folded into it, even though
+// Config.readyRetention is currently the longer of the two windows and would
+// keep these as a side effect. The latch is read by exactly one rule, over
+// exactly one window, and taking that window at the call site is what keeps
+// the two independent: the ready series' retention is defined as whatever
+// §7.6's peak scan needs, and a consolidation outliving its own rule because
+// an unrelated outage window grew is an accident, not a design.
+//
+// A retention of zero is no opinion rather than forget everything. There is
+// nothing to fall back on here — unlike the ready series, whose default is
+// what the peak scan needs — and erasing the evidence is the worse guess.
+func (inv *Inventory) PruneConsolidations(now time.Time, retain time.Duration) {
+	if retain <= 0 {
+		return
+	}
+	cutoff := now.Add(-retain)
+
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	for ordinal := range inv.keys {
+		for d, at := range inv.consol[ordinal] {
+			if !at.After(cutoff) {
+				delete(inv.consol[ordinal], d)
+			}
+		}
+	}
+}
+
+// ConsolidationTimes is the most recent autoscaler consolidation in each of the
+// given domains, omitting the domains where none is remembered.
+//
+// The shape and the single pass are DrainTimes', for DrainTimes' reason: §8.5
+// asks this of every domain a subject is eligible for.
+func (inv *Inventory) ConsolidationTimes(key leeway.TopologyKey, domains []leeway.Domain) map[leeway.Domain]time.Time {
+	ordinal, ok := inv.Ordinal(key)
+	if !ok || len(domains) == 0 {
+		return nil
+	}
+
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	out := make(map[leeway.Domain]time.Time)
+	for _, d := range domains {
+		if at, seen := inv.consol[ordinal][d]; seen {
+			out[d] = at
+		}
+	}
+	return out
 }
 
 // factsOf extracts the retained facts from a Node. Caller holds the lock,

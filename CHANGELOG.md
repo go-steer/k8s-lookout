@@ -119,6 +119,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already settled, or met after a restart, has no stamp and reports
   `rollout_bias` as untested rather than as ruled out.
 
+- **`consolidation` can now win, and drift attribution is complete.** When an
+  autoscaler removes a node it first taints it — `ToBeDeletedByClusterAutoscaler`
+  for cluster-autoscaler and GKE, `karpenter.sh/disrupted` for Karpenter — and
+  the sentinel now remembers that, per domain, for as long as it could still
+  explain a finding. A zone the autoscaler packed up is reported as
+  `suspectedCause: consolidation` rather than as the capacity shortfall it is
+  otherwise indistinguishable from, which matters because the two have different
+  remedies. A node an operator cordoned, a node that was preempted and a node
+  the autoscaler merely marked as a deletion *candidate* are all still reported
+  as what they are. With every source consumed, `untestedCauses` now only ever
+  names `rollout_bias`, and only on a deployment not running the rollout source.
+
 - **The OTLP metric push path now reports on itself, and a dead collector can no
   longer reach the recording path.** `--otel-exporter=otlp` adds five series to
   the scrape endpoint — `lookout_otlp_exports_total{outcome}`,

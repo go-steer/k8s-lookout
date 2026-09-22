@@ -207,13 +207,55 @@ func TestSource_EvidenceFor(t *testing.T) {
 	if !ev.Unavailable.RolloutCompletion {
 		t.Error("no rollout-end oracle is wired and the evidence does not report it unavailable")
 	}
-	if !ev.Unavailable.Consolidation {
-		t.Error("nothing produces a consolidation stamp and the evidence does not report it unavailable")
-	}
+	// Consolidation has no seam to be missing: it is read off the node objects
+	// this source already watches, so a domain with no consolidation carries
+	// the zero stamp and means it.
 	for d, facts := range ev.Domains {
 		if !facts.ConsolidatedAt.IsZero() {
-			t.Errorf("%s carries a consolidation stamp; nothing produces one yet", d)
+			t.Errorf("%s carries a consolidation stamp and no node here was ever claimed", d)
 		}
+	}
+}
+
+// The other half of the same call: a domain the autoscaler packed up carries
+// the stamp §8.5's consolidation rung reads, and its neighbours do not.
+func TestSource_EvidenceForCarriesTheConsolidationStamp(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
+	now := t0
+	s.inv.now = func() time.Time { return now }
+
+	packedAt := t0.Add(-9 * time.Minute)
+	s.inv.Upsert(node("n-a1", "us-central1-a"))
+	s.inv.Upsert(node("n-b1", "us-central1-b"))
+	s.inv.Upsert(node("n-b1", "us-central1-b", disruptedAtTaint(packedAt)))
+	s.inv.Remove("n-b1")
+
+	eligible := evenlyEligible("us-central1-a", "us-central1-b")
+	ev := s.evidenceFor(webSubject, zoneKey, eligible, nil, now)
+
+	if got := ev.Domains["us-central1-b"].ConsolidatedAt; !got.Equal(packedAt) {
+		t.Errorf("zone b ConsolidatedAt = %v, want the autoscaler's stamp %v", got, packedAt)
+	}
+	if got := ev.Domains["us-central1-a"].ConsolidatedAt; !got.IsZero() {
+		t.Errorf("zone a ConsolidatedAt = %v; the consolidation was in another zone", got)
+	}
+
+	// And the rung is genuinely reachable, which is the whole claim: run the
+	// same Attribute call emit makes. Consolidation has to outrank the
+	// shortfall it is indistinguishable from — both are a domain short of
+	// nodes, and "the autoscaler removed it" is a different remedy.
+	scores := &leeway.Scores{
+		Domains:    []leeway.Domain{"us-central1-a", "us-central1-b"},
+		Actual:     []int64{4, 0},
+		Expected:   []int64{2, 2},
+		Total:      4,
+		Relocation: 2,
+		Drift:      0.5,
+		Evaluable:  true,
+	}
+	a := scores.Attribute(nil, ev, now, leeway.DefaultCauseConfig())
+	if a.Cause != leeway.CauseConsolidation {
+		t.Errorf("Cause = %q, want %q", a.Cause, leeway.CauseConsolidation)
 	}
 }
 
