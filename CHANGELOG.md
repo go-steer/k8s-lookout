@@ -239,6 +239,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even expectation everywhere, or a value below 1 to apportion by capacity on
   every cluster.
 
+### Fixed
+
+- **`lookout_leeway_evaluation_duration_seconds` had the wrong bucket
+  boundaries, so every quantile drawn off it was an artefact.** The instrument
+  is declared in seconds but carried no explicit boundaries, and OpenTelemetry's
+  default set — 0, 5, 10, 25 … 10000 — is chosen for a duration measured in
+  *milliseconds*. Every observation this histogram will ever make therefore
+  landed in the same bucket, "under five seconds", and a p99 read 5000 ms no
+  matter how fast the subsystem was. Measured on a 5,400-pod kwok fleet, the
+  real figure is 1 ms. The boundaries are now explicit and span the range the
+  operation occupies, 100 µs to 5 s. Anyone who has a dashboard or an alert on
+  this histogram should expect the numbers to drop by three orders of magnitude,
+  and should re-set any threshold derived from the old ones; nothing else about
+  the instrument changes.
+
 ## [0.26.0] - 2026-09-21
 
 This release is about the failures that leave nothing broken to look

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -300,6 +301,61 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 
 	if got := h.names(t); !slices.Equal(got, want) {
 		t.Errorf("exported metric names:\n got %q\nwant %q", got, want)
+	}
+}
+
+// The evaluation-duration histogram has to be able to tell a fast evaluation
+// from a slow one, and inheriting OTel's default explicit buckets means it
+// cannot: those start at 0 and jump to 5, because they are chosen for a
+// duration in milliseconds, and this one is in seconds. Under them every
+// observation this instrument will ever make lands in "under five seconds"
+// and every quantile drawn off it is an artefact of the bucket layout.
+//
+// Measured, not assumed: on the kwok scale tier a Deployment evaluates in
+// about 90 µs, so the fast end has to resolve below a millisecond.
+func TestInstruments_EvaluationBucketsResolveTheDurationsWeSee(t *testing.T) {
+	h := newPromHarness(t, fullOptions())
+	ctx := context.Background()
+
+	// Two evaluations four orders of magnitude apart. A histogram that
+	// cannot separate these separates nothing.
+	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 90*time.Microsecond)
+	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 900*time.Millisecond)
+
+	f := h.family(t, "lookout_leeway_evaluation_duration_seconds")
+	if f == nil {
+		t.Fatal("no evaluation_duration family")
+	}
+	buckets := f.GetMetric()[0].GetHistogram().GetBucket()
+
+	// The bucket the fast observation lands in must not also hold the slow
+	// one: find the first boundary at or above 90 µs and check its
+	// cumulative count is exactly 1.
+	var fastBound float64
+	var fastCount uint64
+	for _, b := range buckets {
+		if b.GetUpperBound() >= 90e-6 {
+			fastBound, fastCount = b.GetUpperBound(), b.GetCumulativeCount()
+			break
+		}
+	}
+	if fastBound == 0 {
+		t.Fatal("no bucket boundary at or above 90 µs — the fast end has no resolution at all")
+	}
+	if fastCount != 1 {
+		t.Errorf("the bucket ending at %gs holds %d of the two observations, want 1: "+
+			"a 90 µs evaluation and a 900 ms one are in the same bucket", fastBound, fastCount)
+	}
+
+	// And the top boundary must be finite and in the right decade: a
+	// histogram whose last boundary is 10000 is measuring milliseconds
+	// under a name that says seconds.
+	top := buckets[len(buckets)-1].GetUpperBound()
+	if math.IsInf(top, 1) {
+		top = buckets[len(buckets)-2].GetUpperBound()
+	}
+	if top < 1 || top > 60 {
+		t.Errorf("largest finite boundary is %gs; the unit is seconds, so this is the wrong decade", top)
 	}
 }
 
