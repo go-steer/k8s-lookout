@@ -22,9 +22,9 @@ package watch
 // goes stale: a fleet that adopts sidecars, or an admission controller that
 // starts writing annotations, moves the p50 without anything here changing.
 //
-// This is deliberately a skipped test rather than a dev/tools binary. It needs
-// the UNEXPORTED sharedTransform — measuring a reimplementation of the
-// transform would measure the reimplementation — and a binary that links
+// This is deliberately a skipped test rather than a dev/tools binary: it calls
+// the real kube.Transform, because measuring a reimplementation of the
+// transform would measure the reimplementation, and a binary that links
 // client-go for one measurement is a maintenance cost with no other reader.
 //
 //	LOOKOUT_MEASURE_CONTEXT=<kubecontext> go test ./internal/watch -run ObjectSizes -v
@@ -76,7 +76,7 @@ func TestObjectSizes_OnALiveCluster(t *testing.T) {
 
 	t.Logf("cluster %s: %d pods, %d nodes", kubeContext, len(pods.Items), len(nodes.Items))
 
-	// Kept because sharedTransform mutates in place: without a copy taken now,
+	// Kept because kube.Transform mutates in place: without a copy taken now,
 	// there is nothing left to measure the untransformed heap cost against, and
 	// the transform's saving — the whole quantitative case for §6.1 — could only
 	// be stated on the wire, where it is a different and smaller number.
@@ -91,7 +91,7 @@ func TestObjectSizes_OnALiveCluster(t *testing.T) {
 		// before size has to be taken first. Measuring a deep copy instead
 		// would measure the copy's encoding, which is the same — but this
 		// ordering is one less thing to be wrong about.
-		trimmed, err := sharedTransform(p)
+		trimmed, err := kube.Transform(p)
 		if err != nil {
 			t.Fatalf("transform pod %s/%s: %v", p.Namespace, p.Name, err)
 		}
@@ -104,7 +104,7 @@ func TestObjectSizes_OnALiveCluster(t *testing.T) {
 		n := &nodes.Items[i]
 		images = append(images, len(n.Status.Images))
 		nodeBefore = append(nodeBefore, sizeOf(t, n))
-		trimmed, err := sharedTransform(n)
+		trimmed, err := kube.Transform(n)
 		if err != nil {
 			t.Fatalf("transform node %s: %v", n.Name, err)
 		}
@@ -143,7 +143,7 @@ func TestObjectSizes_OnALiveCluster(t *testing.T) {
 // heapPer is the retained heap cost of one cached object, measured by holding
 // enough copies that the difference is far above allocator noise.
 //
-// The objects handed in have already been through sharedTransform in place, so
+// The objects handed in have already been through kube.Transform in place, so
 // this measures what the informer cache actually holds. DeepCopy is what the
 // cache effectively does on each delta, and — more to the point here — it is
 // what stops every copy sharing one backing array and reading as free.

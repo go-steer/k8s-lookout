@@ -12,26 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package kube
 
 import (
-	"slices"
-	"strings"
-
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 )
 
-// Object trimming for the shared informer factory.
+// Object trimming for shared informer factories.
 //
-// sharedTransform is attached to the one shared factory in wiring.go, so these
-// functions run on every Pod and Node entering the process (§6.1). The gate the
-// maintainer decision put on that — "source on, transform off" until the
-// preserved-field registry in transform_registry.go exists and its guard test
-// passes — is satisfied; the registry is the standing control, not a one-time
-// review.
+// Transform is attached to every factory this repo constructs, so these
+// functions run on every Pod and Node entering any process built from it
+// (§6.1). The gate the maintainer decision put on that — "source on, transform
+// off" until the preserved-field registry in transform_registry.go exists and
+// its guard test passes — is satisfied; the registry is the standing control,
+// not a one-time review.
+//
+// # Why this lives in pkg/kube
+//
+// It began in internal/watch, next to the sentinel's runner, which is where
+// the only factory used to be built. It is here now because it is not the
+// sentinel's property: cmd/leeway runs a single source outside the runner and
+// needs the identical transform, and §2.4 discipline 4 says that binary may not
+// import internal/watch. A transform reachable from only one of the two
+// binaries is how the standalone one came to cache resolved secret env values.
+// pkg/kube is what both may import, so this is where the one definition goes.
 //
 // Read transform_registry.go before editing anything here. A transform on a
 // shared factory mutates objects every other consumer sees, and a nil slice is
@@ -40,12 +46,12 @@ import (
 // quietly stop finding things. The registry names every field this code touches
 // and every field it deliberately does not, with the reader that requires it.
 
-// sharedTransform is the single cache.TransformFunc the shared factory applies
-// to every informer it serves. A factory takes one transform for all of them,
-// so the dispatch has to happen here, and anything that is not a Pod or a Node
-// must pass through untouched — the factory also serves Deployments,
-// ReplicaSets, Events, HPAs, Ingresses and Services, and the registry has no
-// opinion about those.
+// Transform is the single cache.TransformFunc every factory in this repo
+// applies to every informer it serves. A factory takes one transform for all of
+// them, so the dispatch has to happen here, and anything that is not a Pod or a
+// Node must pass through untouched — the sentinel's factory also serves
+// Deployments, ReplicaSets, Events, HPAs, Ingresses and Services, and the
+// registry has no opinion about those.
 //
 // Two contract points from client-go, both load-bearing:
 //
@@ -53,8 +59,8 @@ import (
 //     Replace(), and a second pass over an object other goroutines are reading
 //     must not change it (delta_fifo.go:501-506). trimPod and trimNode are
 //     idempotent by construction — they assign zero values and filter to a fixed
-//     key set, never append or accumulate — and TestSharedTransform_IsIdempotent
-//     pins that.
+//     key set, never append or accumulate — and TestTransform_IsIdempotent pins
+//     that.
 //   - It never sees a DeletedFinalStateUnknown tombstone, and never runs on a
 //     Sync: DeltaFIFO skips the transformer for both, because in each case the
 //     object has already been through it (delta_fifo.go:507-516). The type
@@ -64,7 +70,7 @@ import (
 // It is also on the hot path for every watch event in the process, so it stays
 // a type switch and two field-assignment passes. No allocation beyond what the
 // annotation filter needs.
-func sharedTransform(obj any) (any, error) {
+func Transform(obj any) (any, error) {
 	switch obj.(type) {
 	case *corev1.Pod:
 		return trimPod(obj)
@@ -75,120 +81,24 @@ func sharedTransform(obj any) (any, error) {
 	}
 }
 
-// sharedFactories are the informer factories one runner owns.
+// NewTransformingFactory builds an unfiltered shared informer factory with the
+// §6.1 transform attached.
 //
-// Without --exclude-namespace both fields hold THE SAME factory, which is the
-// shape the process has always had: one factory, one informer per object type,
-// the 13-stream floor PR #390 established. The pair only splits when the deny
-// list turns into a watch scope, and it has to split then — see
-// newSharedFactories.
-type sharedFactories struct {
-	// Namespaced serves every namespaced informer: Pods, Events, Deployments,
-	// ReplicaSets, StatefulSets, EndpointSlices, PDBs, Jobs, CronJobs and HPAs.
-	Namespaced informers.SharedInformerFactory
-
-	// Cluster serves the cluster-scoped informers. Nodes is the only one, and
-	// the only reason this field exists.
-	Cluster informers.SharedInformerFactory
-}
-
-// sameFactory presents one factory in both roles: the unscoped shape, and the
-// only shape tests that are not about scoping should use.
-func sameFactory(f informers.SharedInformerFactory) sharedFactories {
-	return sharedFactories{Namespaced: f, Cluster: f}
-}
-
-// Split reports whether the two roles are served by different factories, which
-// is exactly "a namespace deny list is in force".
-func (sf sharedFactories) Split() bool { return sf.Cluster != sf.Namespaced }
-
-// Start starts every informer registered so far, once per factory. Callers must
-// not reach for Namespaced.Start directly: when the pair is split, the node
-// informer lives on the other one and would never be started.
-func (sf sharedFactories) Start(stopCh <-chan struct{}) {
-	sf.Namespaced.Start(stopCh)
-	if sf.Split() {
-		sf.Cluster.Start(stopCh)
-	}
-}
-
-// newSharedFactories builds the runner's informer factories, with the transform
-// attached, excluding the named namespaces at the API server when any are given.
+// Every factory this repo constructs comes from here or from the sentinel
+// runner's namespace-filtered sibling, which attaches the same Transform. The
+// reason that matters is §6.1's security property rather than its memory one:
+// resolved secret env values are not supposed to be in the process at all, and
+// a factory built without the transform put them there. The memory saving is
+// real but is S8's measurement on real GKE objects (~25% of pod retained heap,
+// ~70% of node), not something the kwok scale ladder can see — that fixture
+// pads with annotations, which trimPod deliberately leaves alone.
 //
-// This exists so that there is exactly one place a factory is constructed. The
-// alternative — wiring.go builds its own and the test builds a matching one —
-// passes happily on the day someone drops an option from wiring, because the
-// test is still constructing a factory that has it. The tests call this.
-//
-// # Why two factories
-//
-// A field selector set through WithTweakListOptions applies to every informer
-// the factory serves, and `metadata.namespace` is not a selectable field on a
-// cluster-scoped resource. The API server does not ignore it, it refuses:
-//
-//	$ kubectl get nodes --field-selector='metadata.namespace!=kube-system'
-//	Error from server (BadRequest): Unable to find "/v1, Resource=nodes" that
-//	match label selector "", field selector "metadata.namespace!=kube-system":
-//	field label not supported: metadata.namespace
-//
-// So a single filtered factory would not filter the node watch, it would break
-// it — and break it in the worst way, since the failure surfaces as a reflector
-// that never syncs rather than as a startup error. Nodes therefore ride an
-// unfiltered factory of their own, which costs nothing: they are cluster-scoped,
-// so there is nothing for a namespace deny list to remove from them anyway.
-//
-// Verified against every namespaced type the factory serves (Events,
-// EndpointSlices, Deployments, ReplicaSets, StatefulSets, Jobs, CronJobs, PDBs,
-// HorizontalPodAutoscalers): all accept the selector, only Nodes rejects it.
-func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string) sharedFactories {
-	selector := namespaceExclusionSelector(excludeNamespaces)
-	if selector == "" {
-		// One factory, used for both roles. Deliberately the same object and
-		// not two equivalent ones: Start and Shutdown are then idempotent
-		// across the pair for free, and the unset-flag path keeps exactly the
-		// stream count it had before this option existed.
-		return sameFactory(informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithTransform(sharedTransform)))
-	}
-	return sharedFactories{
-		Namespaced: informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithTransform(sharedTransform),
-			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-				opts.FieldSelector = selector
-			})),
-		Cluster: informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithTransform(sharedTransform)),
-	}
-}
-
-// namespaceExclusionSelector renders a deny list as a field selector, or ""
-// when there is nothing to exclude.
-//
-// Field-selector requirements are ANDed, and `!=` is supported, so an
-// exclusion of any length is one selector on one stream. An *inclusion* list
-// is not: field selectors have no OR, so `metadata.namespace=a` can name
-// exactly one namespace and watching M of them needs M factories. That
-// asymmetry is the whole reason the deny list can become a watch scope cheaply
-// and the allow list cannot (issue #407).
-func namespaceExclusionSelector(excludeNamespaces []string) string {
-	seen := make(map[string]struct{}, len(excludeNamespaces))
-	for _, ns := range excludeNamespaces {
-		if ns = strings.TrimSpace(ns); ns != "" {
-			seen[ns] = struct{}{}
-		}
-	}
-	if len(seen) == 0 {
-		return ""
-	}
-	// Sorted so the selector is stable across restarts: it is visible in API
-	// server audit logs and in the reflector's own error messages, and a string
-	// that reorders per process start cannot be diffed against the last one.
-	terms := make([]string, 0, len(seen))
-	for ns := range seen {
-		terms = append(terms, "metadata.namespace!="+ns)
-	}
-	slices.Sort(terms)
-	return strings.Join(terms, ",")
+// What this guarantees is the part that must not diverge: there is one
+// definition of what enters a cache, and no caller can construct a factory that
+// skips it without writing informers.NewSharedInformerFactory themselves.
+func NewTransformingFactory(client kubernetes.Interface) informers.SharedInformerFactory {
+	return informers.NewSharedInformerFactoryWithOptions(client, 0,
+		informers.WithTransform(Transform))
 }
 
 // retainedNodeAnnotations is load-bearing, not cosmetic. GKE records the

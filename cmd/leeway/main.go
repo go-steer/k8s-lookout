@@ -60,6 +60,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.opentelemetry.io/otel/metric"
+	"k8s.io/client-go/informers"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
@@ -238,10 +239,11 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 		return err
 	}
 
-	srcs, err := buildSources(o, mp, stderr)
+	srcs, stopFactory, err := buildSources(o, mp, stderr)
 	if err != nil {
 		return err
 	}
+	defer stopFactory()
 
 	// Serving starts before the sources do. A process whose informers
 	// are still listing is up and not yet ready, and that window is the
@@ -280,27 +282,35 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 // itself when none is injected (§2.4 discipline 2 read the other way
 // round: injectable, not injected), which is what keeps this function
 // short enough to be obviously correct.
-func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]sources.Source, error) {
+// The factory it builds for topology-drift is returned so the caller can shut
+// it down: Run only shuts down a factory it owns, and this one it does not.
+func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]sources.Source, func(), error) {
 	names := splitCSV(o.sources)
 	if len(names) == 0 {
-		return nil, errors.New("--sources names nothing to run")
+		return nil, nil, errors.New("--sources names nothing to run")
+	}
+	var factory informers.SharedInformerFactory
+	stop := func() {
+		if factory != nil {
+			factory.Shutdown()
+		}
 	}
 
 	kopts := kube.Options{InCluster: o.inCluster, Kubeconfig: o.kubeconfig, Context: o.kubeContext}
 	client, err := kube.BuildClient(kopts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	dyn, err := kube.BuildDynamicClient(kopts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var out []sources.Source
 	seen := map[string]bool{}
 	for _, name := range names {
 		if seen[name] {
-			return nil, fmt.Errorf("--sources names %q twice", name)
+			return nil, nil, fmt.Errorf("--sources names %q twice", name)
 		}
 		seen[name] = true
 		switch name {
@@ -308,11 +318,11 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 			keys := o.topologyKeys
 			parsed, perr := topologydrift.ParseClusterDefaults(o.topologyDefaults)
 			if perr != nil {
-				return nil, perr
+				return nil, nil, perr
 			}
 			topoKeys := topologyKeysFrom(keys)
 			if len(topoKeys) == 0 {
-				return nil, errors.New("--topology-keys must name at least one node label")
+				return nil, nil, errors.New("--topology-keys must name at least one node label")
 			}
 			cfg := topologydrift.Config{
 				TopologyKeys:              topoKeys,
@@ -321,6 +331,15 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 				TierCSignals:              o.topologyTierC,
 			}
 			src := topologydrift.New(client, cfg)
+			// The transform, exactly as in the sentinel. Left to build
+			// its own factory the source gets one with no transform on
+			// it, so every Pod and Node enters the cache untrimmed —
+			// resolved secret env values included, which §6.1 says must
+			// never be in the process, and for a binary whose whole
+			// purpose is measuring what the subsystem costs, measuring
+			// a configuration that does not ship.
+			factory = kube.NewTransformingFactory(client)
+			src.WithFactory(factory)
 			// Optional, exactly as in the sentinel: a nil dynamic client
 			// would just mean no LeewayPolicy watch, which is the state
 			// of every cluster that never installed the CRD.
@@ -344,20 +363,20 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 			cfg.TierCSignals = o.computeClassTierC
 			src, cerr := computeclass.New(client, dyn, cfg)
 			if cerr != nil {
-				return nil, cerr
+				return nil, nil, cerr
 			}
 			src.WithMeter(mp.Meter(computeclass.MeterName))
 			out = append(out, src)
 		default:
-			return nil, fmt.Errorf("--sources: unknown source %q (this binary runs %s)",
+			return nil, nil, fmt.Errorf("--sources: unknown source %q (this binary runs %s)",
 				name, strings.Join(defaultSources, " and "))
 		}
 		fmt.Fprintf(stderr, "leeway: source %s enabled\n", name)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("every source was skipped: this process would export an empty endpoint forever, which is indistinguishable from a healthy cluster")
+		return nil, nil, errors.New("every source was skipped: this process would export an empty endpoint forever, which is indistinguishable from a healthy cluster")
 	}
-	return out, nil
+	return out, stop, nil
 }
 
 func topologyKeysFrom(csv string) []leeway.TopologyKey {

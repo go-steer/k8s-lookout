@@ -339,6 +339,143 @@ useful kind: the read path's cost at 300 nodes is not where to look for
 a scaling problem, and there is now a cheap way to re-check that claim
 whenever the sources change.
 
+## leeway-scale
+
+`bench` measures the read path — a command runs, answers and exits.
+`leeway-scale` measures the *watch* path, which is the one
+[leeway-design §6.6](../../docs/leeway-design.md) sets an NFR on: what
+the placement subsystem costs to hold a cluster in memory and to keep
+up with it changing.
+
+It runs the standalone `leeway` binary rather than `lookout watch`,
+and that is the point. Measuring one source's marginal cost inside a
+sentinel running eleven others measures the sentinel. Each run appends
+a row to `$STATE_DIR/leeway-scale.tsv` and reprints the ladder:
+
+```
+examples/kwok/leeway-scale            # rung 0, on the empty cluster
+examples/kwok/scale-up 400 4000 3
+examples/kwok/leeway-scale            # a loaded rung
+examples/kwok/leeway-scale --report   # just reprint
+```
+
+**Two rungs, not one.** A single measurement carries the fixed cost of
+an idle Go process inside it, so it cannot be divided by the pod count.
+The harness differences the extreme *quiet* rungs and reports the
+slope, which is the number §6.6 extrapolates from, plus the intercept,
+which is what the process costs before it caches anything.
+
+**Two axes, never mixed.** Memory is a function of object count and CPU
+is a function of event rate. A rung with no churn measures the first
+cleanly and honestly reports ~0.001 core for the second. Set
+`LEEWAY_SCALE_CHURN` to a number of parallel rollout drivers to get the
+second:
+
+```
+LEEWAY_SCALE_CHURN=12 LEEWAY_SCALE_WINDOW=90 examples/kwok/leeway-scale
+```
+
+Churn is `kubectl rollout restart`, not pod deletion. A delete puts
+kubectl on the critical path once per pod and tops out around seven
+lifecycles a second; a rollout is one API call the Deployment
+controller turns into `replicas` lifecycles at controller speed, and it
+is the event the subsystem exists to watch. The rate that lands in the
+ladder is **counted from the apiserver** — fleet pods whose
+`creationTimestamp` falls inside the window — not inferred from what
+the driver issued.
+
+**Mind the denominator.** Pod lifecycles are what the driver produces;
+they are not what the subsystem reacts to. One rollout is a Deployment
+write, a ReplicaSet create, a long tail of status updates and
+`replicas` pod lifecycles, and leeway re-evaluates on the Deployment
+write. So the report gives the per-*evaluation* cost, differenced off
+the evaluator's own histogram, and splits it into the evaluator's share
+and the whole process's. Neither is a per-watch-event figure: nothing
+in the tree counts watch events, so §6.6.1's per-event model stays
+modelled.
+
+Two optional ceilings turn the measurement into a regression guard,
+both off by default because a human taking a ladder wants the number
+rather than a verdict:
+
+| | |
+|---|---|
+| `LEEWAY_SCALE_MAX_KIB_PER_POD` | fail if the ladder's marginal resident cost exceeds this |
+| `LEEWAY_SCALE_MAX_P99_MS` | fail if this rung's evaluation p99 exceeds this |
+
+CI sets both; see [`.github/workflows/scale-kwok.yml`](../../.github/workflows/scale-kwok.yml),
+which takes rung 0 on the empty cluster, scales up and takes the second
+with the verdict attached.
+
+A rung whose fixtures are unpadded is not recorded, and neither is one
+that reported a counter mismatch — the first would quote a fleet of toy
+objects as a scale result, which is the specific mistake spike S8
+exists to prevent, and the second would quote the cost of a subsystem
+that was getting the answer wrong.
+
+## soak
+
+`leeway-scale` answers "what does it cost". `soak` answers the
+question §6.6.1 cannot: **does it stay there.**
+
+```
+LEEWAY_SOAK_HOURS=2 examples/kwok/soak
+examples/kwok/soak --report
+examples/kwok/soak --selftest   # checks the verdict; needs no cluster
+```
+
+This one runs `lookout watch` with the full source set, deliberately
+the opposite choice from `leeway-scale`: a leak is a property of the
+shipped process, and a leak in the plumbing eleven sources share is
+still a leak an operator pages on. It churns the fleet throughout,
+samples RSS and Go heap every `LEEWAY_SOAK_SAMPLE` seconds, and fits a
+least-squares slope over everything after `LEEWAY_SOAK_WARMUP`.
+
+Both series are fitted because they answer different questions — a
+rising heap is lookout retaining objects, a rising RSS with a flat heap
+is the allocator not returning pages, and only the first is a bug.
+
+**The third series is the control, and it is what stops the other two
+lying.** Each sample also counts the fleet's own pods and ReplicaSets,
+because the thing that drives this soak — a rollout, over and over —
+*creates objects*. A rising RSS over a rising object count is the
+process doing its job; a rising RSS over a flat one is the only shape
+that is a leak, and without the count there is no way to tell them
+apart. For the same reason the fleet template pins
+`revisionHistoryLimit: 2`: at the default of 10, four thousand
+Deployments rolled for two hours leave tens of thousands of dead
+ReplicaSets behind, and a soak with no control column would read the
+driver's own litter as the process leaking.
+
+**So the verdict is defined rather than eyeballed, and which test it is
+depends on what the control did.** When the fleet holds still across the
+window, the verdict is RSS against time: the fitted slope projected over
+24 hours must come to less than `LEEWAY_SOAK_TOLERANCE` (default 0.10)
+of the mean. When the fleet grows, that test is meaningless, so the
+verdict becomes the *marginal resident cost of an object* — RSS fitted
+against the object count, over the first half of the window against the
+second — and the same tolerance applies to the change between them.
+Later objects costing more than earlier ones is what unbounded retention
+looks like, and answering that needs no extrapolation in time at all.
+
+Do not be tempted to collapse the two by fitting RSS-per-object against
+time instead. That ratio is `(intercept + marginal·N)/N`, which is not
+linear in *t* for any *N(t)*, so its slope extrapolates to nonsense: the
+first full two-hour run projects it to −128% of its own mean over 24
+hours.
+
+`--selftest` feeds synthetic series with known answers through the real
+verdict — a flat fleet with and without a leak, a growing fleet with and
+without one, and the two refusals — and needs no cluster. It exists
+because the verdict shipped gating on raw RSS, which is the opposite of
+what the paragraphs above describe, and it would have failed the first
+real run: the fleet grew 121% in two hours, RSS rose 847 MiB/h, and the
+marginal cost per object *fell*, 53.4 KiB to 50.5. A verdict on RSS and
+a verdict on marginal cost disagree only while the fleet is growing,
+which is precisely the case a run against a healthy cluster never
+distinguishes from a leak, so the check has to be synthetic. CI runs it
+before it builds a cluster.
+
 ## Metrics
 
 `up --metrics` installs kwok's resource-usage simulation, which serves

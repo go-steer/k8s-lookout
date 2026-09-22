@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# leeway-scale — what the placement subsystem costs at the current
+# cluster's size. One rung of the §6.6 ladder.
+#
+#   examples/kwok/scale-up 100 200 3
+#   examples/kwok/leeway-scale
+#   examples/kwok/scale-up 200 400 3     # grows the SAME cluster
+#   examples/kwok/leeway-scale
+#   examples/kwok/leeway-scale --report
+#
+# Each run appends a row to $STATE_DIR/leeway-scale.tsv and reprints the
+# ladder. With two or more rungs it also differences them into a
+# marginal per-pod cost, which is the number §6.6 extrapolates from.
+#
+# It measures `leeway`, not `lookout watch`, and that is the point:
+# measuring the subsystem's marginal cost inside a sentinel running
+# eleven other sources measures the sentinel. The soak tier is the
+# other way round — full source set, sustained churn, flat RSS — and
+# this script is not it.
+#
+# What is measured, and what each number is for:
+#
+#   ready       seconds from start to /readyz 200 — the initial LIST
+#               draining. This is the one that grows worst with object
+#               count and the one an operator feels on every rollout.
+#   rss         peak resident set over the sample window. Peak, not
+#               mean: the informer's decode churn is what sizes a
+#               memory limit, and a limit set from the mean is a limit
+#               that OOMKills during resync.
+#   cpu         process CPU seconds per wall second, averaged over the
+#               window, after settling. Steady state, not startup.
+#   p99         evaluation_duration_seconds p99 from the histogram.
+#   evals/s     evaluations completed per second over the window,
+#               differenced off the histogram's _count. This is the
+#               denominator §6.6.1's cost model is actually written in;
+#               see the note on denominators below.
+#   mismatch    counter_mismatch_total. NOT a performance number — a
+#               non-zero reading means this rung measured a subsystem
+#               that was getting the answer wrong, so the rung is void.
+#
+# Env:
+#   LEEWAY_SCALE_SETTLE   seconds to settle after ready (default 45)
+#   LEEWAY_SCALE_WINDOW   seconds to sample for (default 60)
+#   LEEWAY_SCALE_CHURN    parallel rollout drivers to run during the
+#                         sample window (default 0, no churn)
+#   LEEWAY_SCALE_MAX_P99_MS
+#                         fail if this rung's evaluation p99 exceeds
+#                         this (default 0, report but do not judge)
+#   LEEWAY_SCALE_MAX_KIB_PER_POD
+#                         fail if the ladder's marginal resident cost
+#                         exceeds this (default 0, same)
+#
+# The two ceilings are what make this a regression guard rather than a
+# measurement, and they are off by default because a human taking a
+# ladder wants the number, not a verdict. CI sets them; see
+# .github/workflows/scale-kwok.yml.
+#
+# On churn, and why the default is zero. Memory is a function of object
+# count and CPU is a function of EVENT RATE — §6.6's two independent
+# axes. A rung with no churn measures the first cleanly and reports
+# ~0.000 core for the second, which is the honest reading of an idle
+# process and not a result. Set LEEWAY_SCALE_CHURN to put the cost
+# model of §6.6.1 under load.
+#
+# Churn is `fleet_churn` in kwok/lib.sh — parallel `kubectl rollout
+# restart`, not pod deletion; see the comment there for why.
+#
+# The rate that lands in the ladder is the one ACHIEVED, and it is
+# COUNTED FROM THE APISERVER — fleet pods whose creationTimestamp falls
+# inside the sample window — not inferred from what the driver issued.
+# A CPU-per-lifecycle number divided by a rate that never happened is
+# worse than no number.
+#
+# ON DENOMINATORS. Pod lifecycles are what the CHURN DRIVER produces, so
+# they are the right unit for "did the load I asked for arrive". They
+# are the wrong unit for "what does the subsystem cost", because one
+# `rollout restart` is a Deployment write, a ReplicaSet create, a long
+# tail of status updates on both, and `replicas` pod lifecycles — and
+# leeway re-evaluates the subject on the Deployment write, not on the
+# pods. Dividing process CPU by pods created therefore charges the whole
+# rollout to the pods and reports a per-pod cost tens of times too
+# large. So this reports BOTH, and the one to quote against §6.6.1 is
+# the per-EVALUATION figure, which is differenced off the histogram the
+# evaluator maintains about itself.
+#
+# Quoting a run whose fixtures are unpadded is the specific mistake
+# spike S8 exists to prevent, so this refuses to write a row unless
+# verify-padding passes. KWOK_PAD=0 runs still print, marked void.
+
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+SETTLE="${LEEWAY_SCALE_SETTLE:-45}"
+WINDOW="${LEEWAY_SCALE_WINDOW:-60}"
+CHURN="${LEEWAY_SCALE_CHURN:-0}"
+LADDER="$STATE_DIR/leeway-scale.tsv"
+CHURNED=0
+
+# Regression ceilings. Both default to 0, meaning "report, do not
+# judge" — which is what a human taking a ladder wants. CI sets them,
+# and that is the whole difference between this being a measurement and
+# being a guard.
+MAX_P99_MS="${LEEWAY_SCALE_MAX_P99_MS:-0}"
+MAX_KIB_PER_POD="${LEEWAY_SCALE_MAX_KIB_PER_POD:-0}"
+
+# ---- the ladder ----------------------------------------------------------
+
+report() {
+  if [[ ! -s "$LADDER" ]]; then
+    echo "▸ no rungs recorded yet — run examples/kwok/leeway-scale after a scale-up"
+    return 0
+  fi
+
+  echo
+  echo "▸ ladder ($LADDER)"
+  echo
+  printf '%9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n' \
+    NODES PODS SUBJECTS READY-S PEAK-MB HEAP-MB CPU-CORE P99-MS CHURN-S EVALS-S
+  printf '%9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n' \
+    --------- --------- --------- --------- --------- --------- --------- --------- --------- ---------
+  awk -F'\t' '{ printf "%9d %9d %9d %9.1f %9.1f %9.1f %9.3f %9.1f %9.1f %9.2f\n",
+    $1, $2, $3, $4, $5, $9, $6, $7, $8, $10 }' "$LADDER"
+
+  local rungs
+  rungs="$(grep -c . "$LADDER")"
+  if ((rungs < 2)); then
+    echo
+    echo "  One rung. A single measurement carries the fixed cost of an idle"
+    echo "  process inside it, so it cannot be divided by the pod count to get"
+    echo "  a per-pod cost. Add a rung."
+    return 0
+  fi
+
+  # Difference the extreme rungs rather than fitting: two honest
+  # endpoints beat a regression through five points that were taken on
+  # a machine doing other things. The fixed cost cancels either way.
+  #
+  # Memory only. CPU is a function of EVENT RATE, not object count, so
+  # differencing two rungs that churned at different rates would divide
+  # one axis by the other and call the quotient a cost. The CPU model
+  # is reported below, from the churn rungs alone.
+  echo
+  awk -F'\t' -v maxkib="$MAX_KIB_PER_POD" '
+    # Memory endpoints come from QUIET rungs only. A churning rung
+    # holds the garbage of a few thousand in-flight pod lifecycles, so
+    # its RSS is a burst figure; differencing it against a quiet rung
+    # would charge that burst to the pod count.
+    $8 == 0 && (!quiet_n || $2 < lo_pods) { lo_pods = $2; lo_rss = $5; lo_heap = $9 }
+    $8 == 0 && (!quiet_n || $2 > hi_pods) { hi_pods = $2; hi_rss = $5; hi_heap = $9 }
+    $8 == 0 { quiet_n++ }
+    $8 > 0 {
+      churn_cpu += $6; churn_rate += $8; churn_n++
+      churn_evals += $10; churn_evus += $10 * $11
+    }
+    END {
+      if (quiet_n < 2) {
+        print "  Fewer than two quiet rungs, so there is nothing to difference for"
+        print "  memory. The RSS of a churning rung is a burst figure; take one"
+        print "  at each end of the ladder without LEEWAY_SCALE_CHURN set."
+      } else {
+      dp = hi_pods - lo_pods
+      if (dp <= 0) { print "  Every quiet rung is the same size; nothing to difference."; exit }
+      krss = (hi_rss - lo_rss) / dp * 1024
+      fixed = lo_rss - krss * lo_pods / 1024
+      printf "▸ marginal memory, differencing %d pods against %d pods\n\n", hi_pods, lo_pods
+      printf "  %-24s %8.2f KiB/pod\n", "resident set", krss
+      printf "  %-24s %8.1f MiB   (the process at zero pods)\n", "intercept", fixed
+      # Heap only if both endpoints have it. A rung taken before the
+      # column existed carries a zero, and differencing against a zero
+      # would report the whole heap as marginal.
+      if (lo_heap > 0 && hi_heap > 0)
+        printf "  %-24s %8.2f KiB/pod   (compare S8: 18.6 KiB retained per GKE pod)\n",
+          "Go heap in use", (hi_heap - lo_heap) / dp * 1024
+      else
+        printf "  %-24s %s\n", "Go heap in use",
+          "not on both endpoint rungs; re-run them to get it"
+      print ""
+      print "▸ EXTRAPOLATED, not measured — linear in pod count, which holds only"
+      print "  while the per-object caches dominate and nothing starts swapping:"
+      print ""
+      for (n = 200000; n <= 1000000; n *= 5)
+        printf "  %9d pods   %8.2f GiB resident\n", n, (fixed + krss * n / 1024) / 1024
+      print ""
+      print "  Quote these as extrapolation. The 200k rung is measurable on a"
+      print "  large machine with tuned etcd and should be MEASURED before it is"
+      print "  quoted; the 1M rung is headroom arithmetic and cannot be."
+
+      if (maxkib > 0) {
+        print ""
+        if (krss > maxkib) {
+          printf "  ✗ REGRESSION: %.2f KiB/pod resident, ceiling is %.2f.\n", krss, maxkib
+          printf "    Something started retaining per-pod state. The ceiling is a\n"
+          printf "    regression guard, not a target — raise it only with a reason.\n"
+          failed = 1
+        } else {
+          printf "  ✓ %.2f KiB/pod resident, inside the %.2f ceiling.\n", krss, maxkib
+        }
+      }
+      }
+
+      if (churn_n == 0) {
+        print ""
+        print "▸ no rung churned, so nothing here measures CPU. Set"
+        print "  LEEWAY_SCALE_CHURN and take one: memory is a function of object"
+        print "  count and CPU is a function of event rate, and an idle process"
+        print "  answers only the first."
+        exit failed
+      }
+      print ""
+      printf "▸ event-rate cost, from %d churn rung(s)\n\n", churn_n
+      # The mean across churn rungs for display, but the quotient below
+      # divides the SUMMED cpu by the SUMMED rate — that is a
+      # sample-weighted mean of the per-lifecycle cost, which is what
+      # you want when the rungs ran at different rates.
+      printf "  %-24s %8.1f lifecycles/s (mean of %d)\n", \
+        "driven churn", churn_rate / churn_n, churn_n
+      if (churn_evals <= 0) {
+        print "  evaluations/s        not on these rungs; they predate the column"
+        exit failed
+      }
+      printf "  %-24s %8.2f /s\n", "evaluations", churn_evals / churn_n
+      printf "  %-24s %8.1f µs/evaluation\n", \
+        "evaluator only", churn_evus / churn_evals
+      printf "  %-24s %8.4f core   (evaluations/s × mean)\n", \
+        "evaluator share", churn_evus / churn_n * 1e-6
+      printf "  %-24s %8.4f core   (decode, reflector, GC included)\n", \
+        "whole process", churn_cpu / churn_n
+      print ""
+      print "  Read the last two as a split, not as a rate per event. §6.6.1"
+      print "  models the cost per WATCH EVENT, and nothing in the tree counts"
+      print "  watch events, so that decomposition stays modelled — what is"
+      print "  measurable here is per EVALUATION, and the two differ by however"
+      print "  many events the coalescing window folded into one. Quoting a"
+      print "  per-evaluation figure as a per-event one would overstate it by"
+      print "  exactly that factor."
+      exit failed
+    }
+  ' "$LADDER"
+}
+
+if [[ "${1:-}" == "--report" ]]; then
+  # Not guarded: a breached ceiling is a non-zero exit, and that is what
+  # makes this usable as a CI gate.
+  report
+  exit
+fi
+
+require_examples_context
+require_kwok_installed
+
+# ---- the binary ----------------------------------------------------------
+
+bin="$(leeway_bin)"
+
+nodes="$(kubectl get nodes -o name | grep -c . || true)"
+pods="$(kubectl get pods -A -o name | grep -c . || true)"
+
+echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) faked by kwok)"
+echo "▸ binary:  $bin"
+
+# An empty cluster is the intercept rung, and it is the one rung that
+# is SUPPOSED to have no fleet in it — the whole point of taking it is
+# to measure the process at zero pods so the others can be differenced
+# against it. verify-padding correctly fails on an empty fleet, so the
+# padding gate has to know the difference between "no objects" and
+# "objects that deflated".
+fleet_pods="$(kubectl get pods -A -l "$FLEET_LABEL" -o name 2>/dev/null | grep -c . || true)"
+
+void=""
+if ((fleet_pods == 0)); then
+  echo "  ▸ intercept rung: no synthetic fleet, so no padding to check"
+elif ! ((KWOK_PAD)); then
+  void="unpadded fixtures (KWOK_PAD=0)"
+elif ! "$(kwok_root)/verify-padding" >/dev/null 2>&1; then
+  void="verify-padding failed"
+fi
+if [[ -n "$void" ]]; then
+  echo "  ⚠ VOID: $void — this rung will print but will not be recorded." >&2
+fi
+
+# ---- run it --------------------------------------------------------------
+
+log="$(mktemp)"
+trap 'rm -f "$log"' EXIT
+
+# Only topology-drift: compute-class needs a GKE CRD kwok does not
+# serve, and letting it auto-skip would leave the source set depending
+# on which cluster the rung was taken against.
+"$bin" \
+  --sources=topology-drift \
+  --cluster-name=kwok-scale \
+  --metrics-addr=127.0.0.1:0 \
+  --exit-after="$((SETTLE + WINDOW + 120))s" >"$log" 2>&1 &
+pid=$!
+trap 'kill "$pid" 2>/dev/null || true; rm -f "$log"' EXIT
+
+addr=""
+for _ in $(seq 1 100); do
+  addr="$(sed -n 's#^leeway: serving /metrics /healthz /readyz on ##p' "$log" | head -1)"
+  [[ -n "$addr" ]] && break
+  kill -0 "$pid" 2>/dev/null || { cat "$log" >&2; echo "ERROR: leeway exited before listening" >&2; exit 1; }
+  sleep 0.2
+done
+[[ -n "$addr" ]] || { cat "$log" >&2; echo "ERROR: leeway never logged its listener" >&2; exit 1; }
+echo "▸ leeway pid $pid on $addr"
+
+# ---- time to ready -------------------------------------------------------
+
+started="$(date +%s.%N)"
+ready=""
+for _ in $(seq 1 1200); do
+  if curl -sf -o /dev/null "http://$addr/readyz" 2>/dev/null; then
+    ready="$(awk -v a="$started" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
+    break
+  fi
+  kill -0 "$pid" 2>/dev/null || { cat "$log" >&2; echo "ERROR: leeway exited before ready" >&2; exit 1; }
+  sleep 0.5
+done
+[[ -n "$ready" ]] || { echo "ERROR: /readyz never came up — the initial LIST did not drain" >&2; exit 1; }
+echo "▸ ready in ${ready}s — the initial LIST has drained"
+
+# ---- settle, then sample -------------------------------------------------
+
+echo "▸ settling ${SETTLE}s, then sampling for ${WINDOW}s"
+sleep "$SETTLE"
+
+churn_pid=""
+churn_since=""
+if ((CHURN > 0)); then
+  echo "▸ churning: ${CHURN} parallel rollout drivers for the window"
+  # Taken before the first rollout and truncated DOWN to the second, so
+  # the count that comes back can only over-count by whatever else the
+  # fleet was doing in that same second — never under-count the churn.
+  churn_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fleet_churn "$WINDOW" "$CHURN" &
+  churn_pid=$!
+fi
+
+# The evaluator's own totals at the top of the window. Two scrapes
+# bracket the sample — cheap, where the twenty a sampled series would
+# need are not — and the rate is taken over the WALL TIME BETWEEN THEM
+# rather than over $WINDOW, so the closing scrape landing a second or
+# two late shrinks the rate instead of inflating it.
+# Summed across label sets: the histogram is per-domain, and the cost
+# being measured is the process's, not any one domain's.
+eval_hist() {
+  awk -v m="$1" '$1 ~ "^"m"([{ ]|$)" { s += $NF } END { printf "%.6f", s }'
+}
+t_open="$(date +%s.%N)"
+open_metrics="$(curl -sf "http://$addr/metrics" || true)"
+evals_open="$(eval_hist lookout_leeway_evaluation_duration_seconds_count <<<"$open_metrics")"
+evsum_open="$(eval_hist lookout_leeway_evaluation_duration_seconds_sum <<<"$open_metrics")"
+
+# CPU over the window, from /proc rather than from `time`: this has to
+# be steady state, and a whole-process total would carry the LIST.
+ticks="$(getconf CLK_TCK)"
+cpu_before="$(awk '{ print $14 + $15 }' "/proc/$pid/stat")"
+peak_kb=0
+for _ in $(seq 1 "$((WINDOW / 3))"); do
+  rss="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null || echo 0)"
+  ((rss > peak_kb)) && peak_kb="$rss"
+  sleep 3
+done
+cpu_after="$(awk '{ print $14 + $15 }' "/proc/$pid/stat")"
+
+cpu_core="$(awk -v a="$cpu_before" -v b="$cpu_after" -v t="$ticks" -v w="$WINDOW" \
+  'BEGIN { printf "%.4f", (b - a) / t / w }')"
+peak_mb="$(awk -v k="$peak_kb" 'BEGIN { printf "%.1f", k / 1024 }')"
+
+if [[ -n "$churn_pid" ]]; then
+  wait "$churn_pid" 2>/dev/null || true
+  CHURNED="$(fleet_pods_created_since "$churn_since")"
+fi
+
+# ---- what the subsystem says about itself --------------------------------
+
+metrics="$(curl -sf "http://$addr/metrics")"
+t_close="$(date +%s.%N)"
+
+sum_of() {
+  awk -v m="$1" '$1 ~ "^"m"([{ ]|$)" { s += $NF } END { printf "%.0f", s }' <<<"$metrics"
+}
+
+subjects="$(sum_of lookout_leeway_subjects_tracked)"
+mismatch="$(sum_of lookout_leeway_counter_mismatch_total)"
+unavailable="$(sum_of lookout_leeway_domains_unavailable)"
+
+# Live heap, taken from this one scrape and not sampled through the
+# window. RSS and heap answer different questions — RSS is what sizes a
+# container limit, heap is what compares to S8's per-object retained
+# cost — and both are wanted. It is scraped once, AFTER the CPU sample
+# closes, because /metrics on a 5,000-pod fleet is tens of thousands of
+# series and scraping it twenty times inside the window would cost more
+# CPU than the thing being measured.
+heap_mb="$(awk '/^go_memstats_heap_inuse_bytes /{ printf "%.1f", $2 / 1048576; found = 1; exit }
+  END { if (!found) print "0" }' <<<"$metrics")"
+
+# Evaluations completed in the window, and the mean time the evaluator
+# spent inside one. The mean comes from the histogram's _sum, not from
+# the buckets: _sum is exact, and a mean reconstructed from bucket
+# midpoints is an artefact of the layout. It is the evaluator's own
+# time — the marginal share §6.6.1 models at ~2.5 µs — where the CPU
+# figure beside it is the whole process, decode included.
+evals_close="$(eval_hist lookout_leeway_evaluation_duration_seconds_count <<<"$metrics")"
+evsum_close="$(eval_hist lookout_leeway_evaluation_duration_seconds_sum <<<"$metrics")"
+read -r evals_per_s eval_us <<<"$(awk \
+  -v c0="$evals_open" -v c1="$evals_close" \
+  -v s0="$evsum_open" -v s1="$evsum_close" \
+  -v t0="$t_open" -v t1="$t_close" 'BEGIN {
+    dc = c1 - c0; dt = t1 - t0
+    printf "%.2f %.1f", (dt > 0 ? dc / dt : 0), (dc > 0 ? (s1 - s0) / dc * 1e6 : 0)
+  }')"
+
+# p99 off the histogram buckets, interpolation-free: the smallest
+# bucket boundary whose cumulative count reaches 99%. An upper bound on
+# the p99 rather than an estimate of it, which is the honest read of a
+# bucketed histogram and is never optimistic.
+p99_ms="$(awk '
+  /^lookout_leeway_evaluation_duration_seconds_bucket/ {
+    match($0, /le="[^"]*"/)
+    le = substr($0, RSTART + 4, RLENGTH - 5)
+    gsub(/"/, "", le)
+    c[le] += $NF
+    order[++n] = le
+  }
+  /^lookout_leeway_evaluation_duration_seconds_count/ { total += $NF }
+  END {
+    if (total == 0) { print "0"; exit }
+    best = "+Inf"
+    for (i = 1; i <= n; i++) {
+      le = order[i]
+      if (le == "+Inf") continue
+      if (c[le] >= total * 0.99 && (best == "+Inf" || le + 0 < best + 0)) best = le
+    }
+    if (best == "+Inf") print "-1"; else printf "%.1f", best * 1000
+  }
+' <<<"$metrics")"
+
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+
+# ---- report --------------------------------------------------------------
+
+echo
+printf '  %-22s %s\n' "nodes / pods" "$nodes / $pods"
+printf '  %-22s %s\n' "subject-axes tracked" "$subjects"
+printf '  %-22s %s s\n' "time to ready" "$ready"
+printf '  %-22s %s MiB\n' "peak RSS" "$peak_mb"
+printf '  %-22s %s MiB\n' "Go heap in use" "$heap_mb"
+printf '  %-22s %s core\n' "steady-state CPU" "$cpu_core"
+if [[ "$p99_ms" == "-1" ]]; then
+  printf '  %-22s %s\n' "evaluation p99" "above the largest bucket"
+else
+  printf '  %-22s %s ms (bucket upper bound)\n' "evaluation p99" "$p99_ms"
+fi
+printf '  %-22s %s /s\n' "evaluations" "$evals_per_s"
+printf '  %-22s %s µs (evaluator only, from the histogram sum)\n' \
+  "mean evaluation" "$eval_us"
+printf '  %-22s %s\n' "domains unavailable" "$unavailable"
+printf '  %-22s %s\n' "counter mismatches" "$mismatch"
+
+churn_rate=0
+if ((CHURN > 0)); then
+  churn_rate="$(awk -v c="$CHURNED" -v w="$WINDOW" 'BEGIN { printf "%.1f", c / w }')"
+  printf '  %-22s %s /s counted (%s rollout drivers)\n' \
+    "pod lifecycle churn" "$churn_rate" "$CHURN"
+  # Whole-process CPU divided by the rate the subsystem actually reacts
+  # at. Not by the pod rate — see ON DENOMINATORS in the header.
+  awk -v cpu="$cpu_core" -v r="$evals_per_s" -v us="$eval_us" 'BEGIN {
+    if (r <= 0) exit
+    printf "  %-22s %.4f core of %.4f\n",
+      "evaluator share", r * us * 1e-6, cpu
+  }'
+fi
+
+if ((mismatch > 0)); then
+  echo
+  echo "  ✗ VOID: $mismatch counter mismatches. This rung measured a subsystem" >&2
+  echo "    that was getting the distribution wrong, so its cost is not the cost" >&2
+  echo "    of the subsystem working. Not recorded." >&2
+  exit 1
+fi
+
+if [[ -n "$void" ]]; then
+  echo
+  echo "  Not recorded: $void"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$LADDER")"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$nodes" "$pods" "$subjects" "$ready" "$peak_mb" "$cpu_core" "${p99_ms/-1/0}" \
+  "$churn_rate" "$heap_mb" "$evals_per_s" "$eval_us" >>"$LADDER"
+
+# The p99 ceiling is judged here rather than in report(): it is a
+# property of this one rung and needs no ladder. The row is written
+# first either way, so a breach leaves the evidence behind instead of
+# only a complaint. -1 means "above the largest bucket", which is over
+# every ceiling there is.
+p99_verdict=0
+if [[ "$MAX_P99_MS" != "0" ]]; then
+  if awk -v p="$p99_ms" -v m="$MAX_P99_MS" 'BEGIN { exit !(p < 0 || p > m) }'; then
+    echo >&2
+    echo "  ✗ REGRESSION: evaluation p99 is ${p99_ms} ms, ceiling is ${MAX_P99_MS} ms." >&2
+    echo "    Evaluation cost grows with domain count and subject width, so a" >&2
+    echo "    breach at an unchanged fleet size is a change in the evaluator." >&2
+    p99_verdict=1
+  else
+    echo "  ✓ evaluation p99 ${p99_ms} ms, inside the ${MAX_P99_MS} ms ceiling"
+  fi
+fi
+
+report || exit 1
+exit "$p99_verdict"

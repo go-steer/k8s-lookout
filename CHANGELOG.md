@@ -239,6 +239,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even expectation everywhere, or a value below 1 to apportion by capacity on
   every cluster.
 
+- **Two harnesses that say what the placement subsystem costs, and a weekly job
+  that keeps the answer honest.** `examples/kwok/leeway-scale` takes a rung of a
+  scale ladder against a padded kwok fleet and `examples/kwok/soak` runs the
+  steady state for hours. Both exist because a single measurement cannot answer
+  either question: the memory number needs *two* rungs, since one carries the
+  fixed cost of an idle process inside it and dividing by the pod count charges
+  that to the pods; and the CPU number needs *churn*, since memory is a function
+  of object count and CPU is a function of event rate, and an idle process
+  answers only the first. The scale harness therefore reports a marginal
+  KiB/pod from a difference, refuses to record a rung whose fleet failed its
+  padding check, and marks its 200k- and 1M-pod projections as extrapolation
+  rather than measurement. It reports cost per *evaluation* and not per watch
+  event, because nothing in the tree counts watch events
+  ([#491](https://github.com/go-steer/k8s-lookout/issues/491)) — quoting one as
+  the other would overstate the per-event cost by however many events the
+  coalescing window folded together. The soak samples RSS, Go heap and the
+  fleet's own object count past a warm-up, and takes its verdict *against the
+  fleet*, because a rising RSS over a rising object count is the process doing
+  its job and only a rising RSS over a flat one is a leak: when the fleet holds
+  still it fits RSS against time and calls a projected 24 h drift under 10%
+  flat, and when the fleet grows it fits RSS against the object count over each
+  half of the window and asks whether an object costs more at the end than at
+  the start. Those two disagree only while the fleet is growing — which is
+  exactly the case a green run cannot distinguish from a leak — so
+  `examples/kwok/soak --selftest` checks the verdict against synthetic series
+  with known answers, with no cluster, and CI runs it. Measured over two hours
+  against the 403-node fleet under four rollout drivers: RSS rose 847 MiB/h
+  while the fleet grew 121%, and the marginal cost per object *fell* from 53.4
+  to 50.5 KiB. A new weekly *Scale (kwok)* workflow runs
+  the ladder on a small tier after every merge that can move it and a larger one
+  on Tuesdays, with ceilings set as regression guards rather than targets.
+  Numbers, and the line between the measured and the extrapolated, are in
+  *leeway-design* §6.6.
+
 ### Fixed
 
 - **The `rollout` source cost a full core on clusters with a few thousand
@@ -273,6 +307,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this histogram should expect the numbers to drop by three orders of magnitude,
   and should re-set any threshold derived from the old ones; nothing else about
   the instrument changes.
+
+- **The standalone `leeway` binary cached Pods and Nodes untrimmed.** The §6.1
+  transform — the one that strips resolved secret env values, `managedFields`
+  and `status.images` on the way into the informer cache — is attached to the
+  informer factory, and the factory is built by the sentinel's runner. Running a
+  source outside the runner, which is the whole purpose of this binary, meant it
+  built a factory of its own with no transform on it. Two consequences, and the
+  first is the one that matters: **resolved secret env values were held in that
+  process's pod cache**, which §6.1 exists to prevent — they were never logged,
+  emitted or exported, but "not in memory at all" is the property that was
+  claimed and it did not hold there. Second, because this is also the process
+  the kwok scale harness measures, the per-object cost it reported described a
+  configuration that does not ship. The transform and its preserved-field
+  registry have moved from `internal/watch` to `pkg/kube`, which is where both
+  binaries can reach them — a transform visible to only one of the two is how
+  this happened — and both now go through one constructor, with a wiring test on
+  each. The sentinel's namespace-filtered factory is the one site that cannot
+  use that constructor, since it has a scope to express, so it has a wiring test
+  of its own. Expect a smaller resident set too,
+  though how much smaller depends entirely on the objects: spike S8 measured the
+  pod transform at ~25% of retained heap and the node transform at ~70% on real
+  GKE objects, and on clusters whose bulk is annotations rather than
+  `managedFields`, env values and `status.images` it will be less. **`lookout
+  watch` was never affected** — the sentinel has always applied the transform,
+  and every shipped manifest runs the sentinel. Anyone who has run `leeway`
+  standalone against a cluster whose pods carry literal secrets in `env` should
+  treat that process's memory as having contained them.
+
+- **The kwok fixture's host-network archetype could not schedule itself.** A
+  `containerPort` on a `hostNetwork` pod is a *host* port to the scheduler, and
+  the fleet gave every container the same one, so three replicas of a host-ns
+  workload could never share a node and the archetype alone left
+  `3 × workloads/10 − nodes` pods Pending for good — 560 of them at the
+  400-node tier. That is not a finding the fixture is trying to produce, it is
+  the fixture failing to place itself, and it also cost every scale rung ten
+  minutes of wall clock waiting for a Running count it could never reach. The
+  host-ns archetype now declares no port; `hostNetwork` and `hostPID`, which are
+  what it exists to exercise, are unchanged. `scale-up`'s header also now says
+  out loud that its arguments are absolute sizes rather than increments —
+  objects are named from index zero, so running it twice with the same number
+  re-applies the same fleet.
 
 ## [0.26.0] - 2026-09-21
 
