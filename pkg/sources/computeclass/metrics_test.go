@@ -16,6 +16,7 @@ package computeclass
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -164,6 +165,37 @@ func (h *promHarness) family(t *testing.T, name string) *dto.MetricFamily {
 		}
 	}
 	return nil
+}
+
+// otelMetricPkg is where every instrument interface is declared. Used to tell
+// an instrument field from bookkeeping state by type rather than by name.
+const otelMetricPkg = "go.opentelemetry.io/otel/metric"
+
+// TestInstrumentFields_EveryOneHasADocRow is §12.1's "by construction rather
+// than by someone remembering", the sibling of topologydrift's test of the
+// same name.
+//
+// The spelling pin below and TestMetricDocs_MatchTheExporter both compare the
+// documented names against what a fully-exercised harness gathers, so an
+// instrument the harness never touches is invisible to both — no row on the
+// metrics page, no pin on its derived spelling. This counts what is DECLARED.
+func TestInstrumentFields_EveryOneHasADocRow(t *testing.T) {
+	declared := 0
+	st := reflect.TypeOf(instruments{})
+	for i := range st.NumField() {
+		f := st.Field(i)
+		// metric.Registration holds the observable callback so Close can
+		// unregister it; it is the one OTel-typed field that is not a series.
+		if f.Type.PkgPath() == otelMetricPkg && f.Type.Name() != "Registration" {
+			declared++
+		}
+	}
+	if declared == 0 {
+		t.Fatalf("no instrument fields found — the type check above has stopped matching")
+	}
+	if got := len(MetricDocs()); got != declared {
+		t.Fatalf("%d instruments declared, %d MetricDocs rows — a new instrument needs a row in MetricDocs, an entry in TestInstrumentNames_PrometheusSpelling's want list, and an observation in newPromHarness so its derived name is actually pinned", declared, got)
+	}
 }
 
 // TestInstrumentNames_PrometheusSpelling pins the derivation the exporter

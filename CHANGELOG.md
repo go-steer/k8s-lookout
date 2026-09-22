@@ -65,6 +65,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The OTLP metric push path now reports on itself, and a dead collector can no
+  longer reach the recording path.** `--otel-exporter=otlp` adds five series to
+  the scrape endpoint — `lookout_otlp_exports_total{outcome}`,
+  `lookout_otlp_points_exported_total`, `lookout_otlp_points_dropped_total`,
+  `lookout_otlp_export_last_success_timestamp_seconds` and
+  `lookout_otlp_export_inflight` — so an operator learns that a dashboard is
+  stale from the endpoint that still works rather than from the backend that
+  does not. Alert on the *age* of the last success: the failure counter also
+  stays flat when the export path stops running at all. There is no export
+  queue by design, so an unreachable collector costs samples and not memory,
+  and the per-export deadline is now derived from the push interval (half of
+  it, clamped to 5s–30s) and is always strictly below it — previously a
+  shortened interval could leave one wedged export owning the reader's loop.
+  The standard `OTEL_METRIC_EXPORT_INTERVAL` and `OTEL_METRIC_EXPORT_TIMEOUT`
+  still apply, with the deadline capped at three quarters of the interval so it
+  cannot reintroduce that hazard.
+  The exporter's retry budget is bounded by the same deadline. `/metrics` is
+  unaffected throughout, as before. `dev/tools/soak-otlp` runs the path against
+  a collector that accepts every connection and answers none. See
+  *Operations → Observing lookout → Pushing metrics over OTLP*.
+
 - **A standalone `leeway` binary, for clusters that want the placement signal
   without running the sentinel.** It runs the `topology-drift` and
   `compute-class` sources against one cluster and exports their metrics — no

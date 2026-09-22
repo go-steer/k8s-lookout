@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -188,6 +189,43 @@ func fullOptions() metricsOptions {
 				Weighting:         leeway.WeightEqual,
 			})
 		},
+	}
+}
+
+// otelMetricPkg is where every instrument interface is declared. Used to tell
+// an instrument field from bookkeeping state by type rather than by name.
+const otelMetricPkg = "go.opentelemetry.io/otel/metric"
+
+// TestInstrumentFields_EveryOneHasADocRow is what makes the two golden lists
+// below complete BY CONSTRUCTION rather than by someone remembering (§12.1's
+// export-pipeline row).
+//
+// Both of them — the spelling pin and the MetricDocs cross-check — compare the
+// documented names against what a fully-exercised harness gathers. An
+// instrument the harness never touches is therefore invisible to both: a
+// series with no observation is not exported at all, so it ships with no row
+// on the metrics page and no pin on its derived spelling, which is exactly the
+// failure the double-suffix bug was. This counts what is DECLARED instead, so
+// the harness has to grow with the struct.
+func TestInstrumentFields_EveryOneHasADocRow(t *testing.T) {
+	declared := 0
+	for _, s := range []any{instruments{}, observables{}} {
+		st := reflect.TypeOf(s)
+		for i := range st.NumField() {
+			f := st.Field(i)
+			// metric.Registration is the one field of an OTel type that is
+			// not a series: it holds the observable callback so Close can
+			// unregister it.
+			if f.Type.PkgPath() == otelMetricPkg && f.Type.Name() != "Registration" {
+				declared++
+			}
+		}
+	}
+	if declared == 0 {
+		t.Fatalf("no instrument fields found — the type check above has stopped matching")
+	}
+	if got := len(MetricDocs()); got != declared {
+		t.Fatalf("%d instruments declared across instruments+observables, %d MetricDocs rows — a new instrument needs a row in MetricDocs, an entry in TestInstrumentNames_PrometheusSpelling's want list, and an observation in newPromHarness so its derived name is actually pinned", declared, got)
 	}
 }
 

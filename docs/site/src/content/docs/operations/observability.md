@@ -235,6 +235,8 @@ Prefix `lookout_` omitted:
 | `info_dropped_total` | Info-class signals counted and discarded because no `--store` is set. Not a fault, but if you expected the store to have them, this is the tell. |
 | `watchboard_buffered` (gauge) | Stuck above `--watchboard-batch` across scrapes means flushes are failing — see `inject_errors_total`. |
 | `source_denied` | A permission the sentinel held at startup is denied now (`--access-recheck`). Any series at `1` means coverage you used to have is gone, so that source's silence no longer means the cluster is healthy — `required="true"` also means the cluster's runner has stopped. |
+| `otlp_export_last_success_timestamp_seconds` | Only with `--otel-exporter=otlp`. Alert on its **age**: a collector that is down, wrong, or refusing the batch makes every dashboard fed by the push path silently stale. The scrape endpoint is unaffected, which is the point of alerting from it. |
+| `otlp_points_dropped_total` | The size of what the staleness above cost. There is no retry queue — a dead collector costs samples, not memory — so a sustained rate means holes in the pushed series for as long as it lasts. |
 | `findings_total{severity="critical"}` | The only entry here that is about the cluster rather than the sentinel. A rate step change means something broke; a rate that goes to zero on a cluster that normally has one means the sentinel stopped seeing, which the machine metrics above will not tell you. |
 
 `active_incidents`, `storms_active`, and `recovery_tracking` are the
@@ -259,6 +261,65 @@ expiry: cert-manager CRD not found — Certificate renewal-state scanning disabl
 A missing "enabled/ready" line for a stage you configured, or any
 startup RBAC-probe error, is a misconfiguration — see
 [Troubleshooting](/operations/troubleshooting/).
+
+## Pushing metrics over OTLP
+
+`--otel-exporter=otlp` adds a **second reader** over the same meter
+provider, so every series above is both scraped and pushed.
+`OTEL_METRICS_EXPORTER` overrides the flag, and the resolved endpoint
+(`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, then
+`OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`) is logged
+at startup along with the interval and the per-export deadline.
+
+**`/metrics` is unconditional.** No value of `--otel-exporter` can
+empty the scrape endpoint — which is what makes it possible to alert on
+a pipeline that does not itself depend on the collector being up.
+
+**There is no export queue, by design.** The reader holds one point per
+series and ships it on a timer; a batch that fails is gone rather than
+retained. So an unreachable collector costs *samples*, not memory, and
+it cannot slow the scoring pass down — a blocked recording path would
+turn a collector outage into a detection outage. Temporality is
+cumulative, so what a failed export loses is the sample and not the
+counter value: the next export that lands carries the full running
+total, and the graph has a hole rather than a reset.
+
+The cadence defaults to 60s and is set with the standard
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds). The per-export deadline is
+derived from it — half, clamped to 5s–30s — and is always **strictly
+below** it. That matters if you shorten the interval: the reader
+collects, exports and waits in one goroutine, so a deadline at or above
+the interval would let one wedged export own the loop, and the SLIs that
+would say so would stop moving at the same instant. The exporter's retry
+budget is bounded by the same deadline rather than by the SDK's 60s
+default.
+
+`OTEL_METRIC_EXPORT_TIMEOUT` (milliseconds) overrides the derived
+deadline, but is **capped at three quarters of the interval** so it
+cannot reintroduce that hazard; the cap is logged when it applies. If
+your collector needs longer than that, raise the interval too.
+
+The push path reports on itself, on the scrape endpoint:
+
+| Metric | Meaning |
+| --- | --- |
+| `lookout_otlp_exports_total{outcome}` | Export attempts, `ok` or `failed`. Both exist at zero from the first scrape. |
+| `lookout_otlp_points_exported_total` | Data points the collector accepted. |
+| `lookout_otlp_points_dropped_total` | Data points discarded because their export failed or ran out of time. |
+| `lookout_otlp_export_last_success_timestamp_seconds` | When the last batch landed; zero until the first one. |
+| `lookout_otlp_export_inflight` | `1` while an export is running. Stuck at `1` across scrapes means wedged against the deadline. |
+
+**Alert on `time() - lookout_otlp_export_last_success_timestamp_seconds`,
+not on the failure counter alone** — the counter also stays flat when
+the export path stops running at all, and those two look identical from
+the backend that is not receiving anything either way. Failures are
+additionally printed as `lookout: otel-export: …` at most once per
+interval; the metrics are the thing to page on, because they survive the
+outage that took the collector with it.
+
+`dev/tools/soak-otlp` runs the whole path against a collector that
+accepts every connection and answers none, and prints heap, RSS, drops
+and series count over the run.
 
 ## Traces
 

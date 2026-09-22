@@ -63,6 +63,13 @@ type MetricsOptions struct {
 	// PushInterval overrides DefaultPushInterval. Ignored when no push
 	// reader is configured.
 	PushInterval time.Duration
+
+	// pushExporter replaces the OTLP exporter the otlp mode would build.
+	// A test seam, unexported so only this package can set it: it is
+	// what lets the hardening tests drive the REAL reader wiring — the
+	// deadline, the guard, the SLIs — instead of a copy of it that can
+	// pass while the shipped path regresses.
+	pushExporter sdkmetric.Exporter
 }
 
 // SetupMetrics builds a MeterProvider that exports the SAME instruments
@@ -128,18 +135,45 @@ func SetupMetrics(ctx context.Context, opts MetricsOptions) (metric.MeterProvide
 		sdkmetric.WithReader(promReader),
 	}
 	if mode == ModeOTLP {
-		exp, eerr := otlpmetrichttp.New(ctx)
-		if eerr != nil {
-			return nil, noop, fmt.Errorf("telemetry: metrics: otlp exporter: %w", eerr)
+		interval := resolvePushInterval(opts.PushInterval)
+		timeout := resolveExportTimeout(interval)
+
+		exp := opts.pushExporter
+		if exp == nil {
+			var eerr error
+			// The retry budget is bounded by the same deadline rather
+			// than left at the SDK's 60s default, which disagrees with
+			// every interval shorter than a minute: an attempt cancelled
+			// mid-retry is a drop nobody chose, and the last thing the
+			// exporter does before the deadline should be giving up, not
+			// starting again.
+			exp, eerr = otlpmetrichttp.New(ctx, otlpmetrichttp.WithRetry(otlpmetrichttp.RetryConfig{
+				Enabled:         true,
+				InitialInterval: time.Second,
+				MaxInterval:     timeout / 2,
+				MaxElapsedTime:  timeout,
+			}))
+			if eerr != nil {
+				return nil, noop, fmt.Errorf("telemetry: metrics: otlp exporter: %w", eerr)
+			}
 		}
-		interval := opts.PushInterval
-		if interval <= 0 {
-			interval = DefaultPushInterval
+
+		// §8.4's export SLIs, on the PULL registry. See exportSLIs on
+		// why they are not instruments on the provider they describe.
+		slis := newExportSLIs()
+		if serr := slis.register(opts.Registerer); serr != nil {
+			return nil, noop, serr
 		}
+
 		providerOpts = append(providerOpts, sdkmetric.WithReader(
-			sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(interval))))
-		fmt.Fprintf(os.Stderr, "lookout: telemetry: OTLP HTTP metric exporter → %s (every %s)\n",
-			otlpMetricsEndpoint(), interval)
+			sdkmetric.NewPeriodicReader(
+				newGuardedExporter(exp, timeout, slis),
+				sdkmetric.WithInterval(interval),
+				// Strictly below the interval, always: see exportTimeout.
+				sdkmetric.WithTimeout(timeout),
+			)))
+		fmt.Fprintf(os.Stderr, "lookout: telemetry: OTLP HTTP metric exporter → %s (every %s, %s deadline)\n",
+			otlpMetricsEndpoint(), interval, timeout)
 	}
 
 	mp := sdkmetric.NewMeterProvider(providerOpts...)
