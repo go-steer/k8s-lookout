@@ -245,10 +245,17 @@ Prefix `lookout_` omitted:
 | `source_denied` | A permission the sentinel held at startup is denied now (`--access-recheck`). Any series at `1` means coverage you used to have is gone, so that source's silence no longer means the cluster is healthy — `required="true"` also means the cluster's runner has stopped. |
 | `otlp_export_last_success_timestamp_seconds` | Only with `--otel-exporter=otlp`. Alert on its **age**: a collector that is down, wrong, or refusing the batch makes every dashboard fed by the push path silently stale. The scrape endpoint is unaffected, which is the point of alerting from it. |
 | `otlp_points_dropped_total` | The size of what the staleness above cost. There is no retry queue — a dead collector costs samples, not memory — so a sustained rate means holes in the pushed series for as long as it lasts. |
+| `leeway_counter_mismatch_total` | A subject's incrementally-maintained placement distribution disagreed with a rebuild from the pod cache. Threshold **zero**. The disagreement is repaired in place, so the exported numbers are right — but the increments that produced them were not. |
+| `leeway_preference_disagreement` | A node's compute-class rank annotation and the sentinel's own inference of the same rank disagree. Threshold **zero**, and the more serious of the two: the annotation wins, so this is not a wrong number on a graph, it is a reading that our understanding of the class's rules is wrong. |
 | `findings_total{severity="critical"}` | The only entry here that is about the cluster rather than the sentinel. A rate step change means something broke; a rate that goes to zero on a cluster that normally has one means the sentinel stopped seeing, which the machine metrics above will not tell you. |
 
 `active_incidents`, `storms_active`, and `recovery_tracking` are the
 load gauges worth graphing rather than alerting on.
+
+The two `leeway_` rows above are the trustworthiness half of the
+placement subsystem's instruments; the rest of that set, including the
+two gauges that say whether a quiet estate is quiet or suppressed, is in
+[Tuning placement findings](/operations/placement/#is-the-measurement-sound).
 
 ## The startup log is a checklist
 
