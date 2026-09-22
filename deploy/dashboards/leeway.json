@@ -1,0 +1,779 @@
+{
+  "title": "k8s-lookout — placement (leeway)",
+  "uid": "lookout-leeway",
+  "tags": ["k8s-lookout", "leeway", "placement"],
+  "description": "Topology drift and compute-class ranks. The first row is deliberately not drift: it is whether drift is being measured correctly.",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "",
+  "graphTooltip": 1,
+  "annotations": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "prometheus",
+        "refresh": 1,
+        "hide": 0,
+        "current": {},
+        "options": []
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Cluster",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(lookout_leeway_subjects_tracked, cluster)",
+        "query": { "query": "label_values(lookout_leeway_subjects_tracked, cluster)", "refId": "cluster" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" },
+        "options": []
+      },
+      {
+        "type": "query",
+        "name": "topology_key",
+        "label": "Topology key",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(lookout_leeway_drift{cluster=~\"$cluster\"}, topology_key)",
+        "query": { "query": "label_values(lookout_leeway_drift{cluster=~\"$cluster\"}, topology_key)", "refId": "topology_key" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" },
+        "options": []
+      },
+      {
+        "type": "query",
+        "name": "namespace",
+        "label": "Namespace",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(lookout_leeway_drift{cluster=~\"$cluster\"}, namespace)",
+        "query": { "query": "label_values(lookout_leeway_drift{cluster=~\"$cluster\"}, namespace)", "refId": "namespace" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Is the measurement sound?",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Counter mismatches",
+      "description": "The self-check: leeway's own tally of a subject's objects against the informer's. Non-zero means the numbers on this dashboard are wrong, not that the cluster is. Threshold is zero, over the dashboard range.",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(increase(lookout_leeway_counter_mismatch_total{cluster=~\"$cluster\"}[$__range])) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Rank disagreement",
+      "description": "Nodes where GKE's own ccc_priority_index and leeway's inferred rank do not agree. Also threshold zero, and also a statement about the sentinel rather than about the estate.",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(lookout_leeway_preference_disagreement{cluster=~\"$cluster\"}) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Ranks pending",
+      "description": "Nodes whose rank has not resolved yet. Briefly non-zero is normal — GKE writes the annotation 33–44 s after a node registers — so read the shape, not the value: a spike that drains is a scale-up, a floor that never returns to zero is not.",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (provider, axis) (lookout_leeway_preference_rank_pending{cluster=~\"$cluster\"})",
+          "legendFormat": "{{provider}} / {{axis}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Informer staleness",
+      "description": "Age of the last informer event leeway processed, per resource. A line that climbs without bound is a watch that stopped; on a quiet cluster a slow climb on a rarely-changing resource is expected.",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "time() - max by (resource) (lookout_leeway_last_event_timestamp_seconds{cluster=~\"$cluster\"})",
+          "legendFormat": "{{resource}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Subject-axes under a transient",
+      "description": "Judgement suppressed or relaxed, by the state responsible. Read this before believing a quiet estate: a fleet-wide domain-outage row is leeway declining to page four hundred workloads about one dead zone, and a cluster-warmup row that never clears is a sentinel that never synced. No rows is the healthy reading.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (transient, topology_key) (lookout_leeway_transient_subjects{cluster=~\"$cluster\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{transient}} — {{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Domains unavailable",
+      "description": "Domains on each axis with no Ready node. The denominator of every expectation moves when this does, so a drift number that changed at the same moment this did changed for this reason.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (topology_key) (lookout_leeway_domains_unavailable{cluster=~\"$cluster\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Per-domain series withheld",
+      "description": "Subject-axes whose per-domain breakdown was not exported, by why. Non-zero is not a fault — it is a cardinality control doing its job — but it does mean the per-domain panels below are not showing everything. An absent series and a zero are different statements.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (reason) (lookout_leeway_domain_series_withheld{cluster=~\"$cluster\"})",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Topology drift",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Subjects tracked",
+      "description": "How much of the estate the source is watching, by kind. The scale factor behind every other panel here.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (subject_kind) (lookout_leeway_subjects_tracked{cluster=~\"$cluster\"})",
+          "legendFormat": "{{subject_kind}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Drift (ρ) — worst 20",
+      "description": "The fraction of a subject's objects that would have to move to meet its expectation. Not every high ρ is a finding: what is alertable depends on the subject's tier, which the episode table below reports.",
+      "gridPos": { "h": 7, "w": 16, "x": 8, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "topk(20, lookout_leeway_drift{cluster=~\"$cluster\", namespace=~\"$namespace\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{namespace}}/{{subject}} — {{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Excess skew — worst 20",
+      "description": "Observed skew beyond what the arithmetic and the declared bound allow. Zero is the normal reading even for a subject that looks lopsided, which is why raw skew is not what gets alerted on.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "topk(20, lookout_leeway_excess_skew{cluster=~\"$cluster\", namespace=~\"$namespace\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{namespace}}/{{subject}} — {{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Max domain share — worst 20",
+      "description": "The share of a subject's objects held by its fullest domain. This is the Tier C escalation input: a subject with no declared intent moves from info to warning on a breach here.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "topk(20, lookout_leeway_max_domain_share{cluster=~\"$cluster\", namespace=~\"$namespace\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{namespace}}/{{subject}} — {{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "Relocation distance — worst 20",
+      "description": "R, the number of objects that would have to move. The absolute companion to ρ: a 0.5 on a two-pod Deployment and a 0.5 on a four-hundred-pod one are the same ratio and very different work.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "topk(20, lookout_leeway_relocation_distance{cluster=~\"$cluster\", namespace=~\"$namespace\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{namespace}}/{{subject}} — {{topology_key}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "id": 15,
+      "title": "Open episodes",
+      "description": "Every subject-axis currently in the dwell machine: 1 pending, 2 firing. Only subjects with an open episode are present, so an empty table is the healthy reading and a row disappearing is a recovery — which is why this series reads as noise under rate-of-change.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "lookout_leeway_alert_state{cluster=~\"$cluster\", namespace=~\"$namespace\", topology_key=~\"$topology_key\"}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true, "container": true, "endpoint": true, "pod": true, "service": true }, "renameByName": { "Value": "state" } } },
+        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "state", "desc": true }] } }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" } },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "state" },
+            "properties": [
+              { "id": "mappings", "value": [{ "type": "value", "options": { "1": { "text": "pending", "color": "yellow", "index": 0 }, "2": { "text": "firing", "color": "red", "index": 1 } } }] },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Ready nodes per domain",
+      "description": "The capacity the expectation is computed against. A step here that lines up with a step in drift is the cluster changing shape, not the workload moving.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (topology_key, domain) (lookout_leeway_domain_ready_nodes{cluster=~\"$cluster\", topology_key=~\"$topology_key\"})",
+          "legendFormat": "{{topology_key}} — {{domain}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Compute-class ranks",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Pod-time by rank",
+      "description": "Where the estate is actually running, weighted by time. A ninety-second burst of rank-3 pods during a scale-up and three weeks parked on a spot fallback look identical to a gauge, which is why this is a rate over a counter and not a pod count.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (axis, rank) (rate(lookout_leeway_preference_pod_time_seconds_total{cluster=~\"$cluster\"}[$__rate_interval]))",
+          "legendFormat": "{{axis}} — rank {{rank}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 30, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Mean achieved rank",
+      "description": "Rank-weighted pod-time over pod-time, tier ranks only. 0.0 is an estate getting its first choice; a number that climbs is capacity quietly draining out from under it. The unknown, unsatisfiable and off-axis buckets are excluded from both halves — a mean over a bucket whose rank is 'unsatisfiable' is not a mean of anything.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (provider, axis) (rate(lookout_leeway_preference_rank_weighted_time_seconds_total{cluster=~\"$cluster\"}[$__rate_interval]))\n  /\nsum by (provider, axis) (rate(lookout_leeway_preference_pod_time_seconds_total{cluster=~\"$cluster\", rank!~\"unknown|unsatisfiable|off-axis\"}[$__rate_interval]))",
+          "legendFormat": "{{provider}} / {{axis}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Wedged pods",
+      "description": "Pods a compute class cannot place at all. Unlike a fallback, this does not resolve itself by getting worse capacity — it does not resolve.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (provider, class) (lookout_leeway_preference_wedged_pods{cluster=~\"$cluster\"})",
+          "legendFormat": "{{provider}} / {{class}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Axis health",
+      "description": "The tri-states: nodes leeway could not judge, and why. These are deliberately not folded into a rank — an unjudged node is not a rank-N node, and counting it as one would be the failure mode this panel exists to show.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_unmatched{cluster=~\"$cluster\"})", "legendFormat": "unmatched — {{axis}}" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_ambiguous{cluster=~\"$cluster\"})", "legendFormat": "ambiguous — {{axis}}" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_no_rule_matching{cluster=~\"$cluster\"})", "legendFormat": "no rule matching — {{axis}}" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_off_axis{cluster=~\"$cluster\"})", "legendFormat": "off axis — {{axis}}" },
+        { "refId": "E", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_out_of_range{cluster=~\"$cluster\"})", "legendFormat": "out of range — {{axis}}" },
+        { "refId": "F", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (axis) (lookout_leeway_preference_axis_invalid{cluster=~\"$cluster\"})", "legendFormat": "axis invalid — {{axis}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Rank transitions",
+      "description": "Nodes moving between placements. Node-level, not pod-level: a fallback provisions a new node and the ReplicaSet creates a new pod on it, so no pod ever changes rank. lateral=true is churn within one preference level — it shows where the estate is thrashing and is excluded from every degradation signal.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (axis, lateral) (rate(lookout_leeway_preference_transitions_total{cluster=~\"$cluster\"}[$__rate_interval]))",
+          "legendFormat": "{{axis}} — lateral={{lateral}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "id": 25,
+      "title": "Open rank episodes",
+      "description": "The compute-class half of the dwell machine: 1 pending, 2 firing. rank_rule renders which preference level the episode is about.",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "lookout_leeway_preference_alert_state{cluster=~\"$cluster\"}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true, "container": true, "endpoint": true, "pod": true, "service": true }, "renameByName": { "Value": "state" } } },
+        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "state", "desc": true }] } }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" } },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "state" },
+            "properties": [
+              { "id": "mappings", "value": [{ "type": "value", "options": { "1": { "text": "pending", "color": "yellow", "index": 0 }, "2": { "text": "firing", "color": "red", "index": 1 } } }] },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Baselines and cost",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Baselines by state",
+      "description": "Read this before turning Tier C baseline signals on: mature is how many subjects would start being judged against what they normally do rather than against an even split. The three states overlap — a frozen baseline is also learning or mature — so they do not sum to the total.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (state) (lookout_leeway_baselines{cluster=~\"$cluster\"})",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Baseline samples by outcome",
+      "description": "A healthy estate is almost all applied. A sustained reset rate is the one worth alerting on: the domain set is the invalidation fingerprint, so something churning it — a zone label appearing and disappearing on nodes — restarts every affected baseline's history and keeps it permanently immature, silently.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (outcome) (rate(lookout_leeway_baseline_samples_total{cluster=~\"$cluster\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Evaluation latency",
+      "description": "Time to evaluate one coalesced subject. This is the subsystem's own cost, not the cluster's: a p99 that climbs with subject count is the thing sizing is meant to prevent.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(lookout_leeway_evaluation_duration_seconds_bucket{cluster=~\"$cluster\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lookout_leeway_evaluation_duration_seconds_bucket{cluster=~\"$cluster\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(lookout_leeway_evaluation_duration_seconds_bucket{cluster=~\"$cluster\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

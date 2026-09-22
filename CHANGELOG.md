@@ -143,6 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before believing a quiet estate, since a fleet-wide suppression and a healthy
   fleet look identical from the findings alone.
 
+  A **Grafana dashboard** over the same instrument set ships with it, at
+  `deploy/dashboards/leeway.json`. Its first row is deliberately not drift but
+  those four SLIs, for the reason they exist. Import the JSON anywhere, or
+  `kubectl apply -k` the ConfigMap wrapper next to it for the Grafana sidecar;
+  like the ServiceMonitor it sits outside the base bundle, because
+  `kubectl apply -k deploy/` must not assume a monitoring stack.
+
 - **The OTLP metric push path now reports on itself, and a dead collector can no
   longer reach the recording path.** `--otel-exporter=otlp` adds five series to
   the scrape endpoint — `lookout_otlp_exports_total{outcome}`,
