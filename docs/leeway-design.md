@@ -1387,13 +1387,29 @@ overhead, no delta queue, nothing leeway adds.
 > but it is now measured rather than suspected, so it is filed against Phase 8 as
 > [#480](https://github.com/go-steer/k8s-lookout/issues/480) rather than left in a
 > design document.
+>
+> **Re-derived and shipped 2026-09-22.** `deploy/51-deployment-watcher.yaml` and
+> the chart now carry `requests.memory: 128Mi`, `limits.memory: 768Mi` and
+> `GOMEMLIMIT: 600MiB`, from the Typical row plus ~100 MiB for the other eleven
+> streams, the store, the graph and the runtime, times ~1.3 for GC headroom, with
+> the soft ceiling at ~80% of the limit. The `manifests` job diffs the two copies
+> so they cannot drift apart. `/metrics` also gained the standard Go and process
+> collectors, which a bare `prometheus.NewRegistry()` does not include — the
+> sizing table was otherwise unverifiable from lookout's own output, and
+> `process_resident_memory_bytes` is the number the table predicts. The table by
+> cluster size, and the levers when it is not enough, are in *Operations →
+> Sizing*. **This is derived from the measured per-object cost and not confirmed
+> by a scale run at 15,000 pods**; the padded kwok harness exists for that and it
+> belongs to Phase 8's scale gate ([#478](https://github.com/go-steer/k8s-lookout/issues/478)).
 
 The "Typical" row is added deliberately: lookout DESIGN §6.2 puts real clusters at
 1–15k pods, and at that size leeway costs single-digit MiB. The larger rows exist
 because the design has no cliff in it, not because we expect them.
 
 Set `GOMEMLIMIT` to ~80% of the container limit so the GC becomes aggressive under
-pressure instead of the kernel OOM-killing us.
+pressure instead of the kernel OOM-killing us. The shipped manifests do this as of
+#480; before that the recommendation was in this document and nowhere in the
+deployment, which is the same as not having made it.
 
 #### 6.6.1 Event-rate cost model
 

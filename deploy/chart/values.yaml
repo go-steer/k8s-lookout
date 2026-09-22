@@ -173,13 +173,27 @@ networkPolicy:
   #         kubernetes.io/metadata.name: monitoring
   extraIngressFrom: []
 
+# Sized from the measured per-object cache cost, not from a round
+# number: a trimmed pod is 18,630 B of retained heap on GKE and a node
+# 5,308 B, so the top of the 1-15k pod range lookout calls typical is
+# ~275 MiB of object cache before anything else allocates. The previous
+# 256Mi default ran out at ~14k pods. Operations -> Sizing has the table
+# per cluster size, and the levers when the limit is not enough.
 resources:
   requests:
     cpu: "50m"
-    memory: "64Mi"
+    memory: "128Mi"
   limits:
     cpu: "200m"
-    memory: "256Mi"
+    memory: "768Mi"
+
+# Soft heap ceiling, set to ~80% of resources.limits.memory. Without it
+# the Go heap grows until the kernel OOM-kills the process, losing the
+# store's in-flight writes and every watch; with it the GC gets
+# aggressive first, which is slow but survivable. Raise it with the
+# limit — the downward API cannot do the arithmetic, so the two are kept
+# in step by hand. Set to "" to leave GOMEMLIMIT unset.
+goMemLimit: "600MiB"
 
 podSecurityContext:
   runAsNonRoot: true

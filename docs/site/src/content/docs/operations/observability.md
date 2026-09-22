@@ -214,6 +214,14 @@ It ships outside the base bundle because `ServiceMonitor` is a CRD and
 have it. On Google Managed Prometheus the equivalent is a
 `PodMonitoring`; the port name and interval carry over.
 
+Alongside the `lookout_*` series the endpoint carries the standard Go
+and process collectors — `process_resident_memory_bytes`,
+`go_memstats_heap_inuse_bytes`, `go_memstats_next_gc_bytes` and the
+rest. They are not in the [metrics
+reference](/reference/metrics/), which documents lookout's own
+instruments, but they are how you check a sentinel against [Sizing a
+sentinel](/operations/sizing/).
+
 Two things to check if a scrape comes back empty: the NetworkPolicy in
 `deploy/16` admits **same-namespace** scrapers only — monitoring in its
 own namespace needs that `namespaceSelector` block uncommented — and

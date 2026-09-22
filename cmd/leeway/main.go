@@ -58,6 +58,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
@@ -201,6 +202,18 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 	// sources declare their instruments without knowing where they run,
 	// and one wrapper cannot be forgotten on the next metric added.
 	reg := prometheus.NewRegistry()
+
+	// Go and process collectors, as the sentinel registers them: the
+	// standalone's whole reason to exist is measuring leeway's cost in
+	// isolation, and it cannot do that without exporting what it costs.
+	// Unwrapped, deliberately — runtime metrics are the process's, not
+	// the cluster's, and a cluster label on them would invite summing
+	// across sentinels.
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+
 	var registerer prometheus.Registerer = reg
 	if o.cluster != "" {
 		registerer = prometheus.WrapRegistererWith(prometheus.Labels{"cluster": o.cluster}, reg)

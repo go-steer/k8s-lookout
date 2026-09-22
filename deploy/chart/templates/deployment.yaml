@@ -72,6 +72,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.daemonToken.secretName }}
                   key: {{ .Values.daemonToken.secretKey }}
+            {{- with .Values.goMemLimit }}
+            - name: GOMEMLIMIT
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
