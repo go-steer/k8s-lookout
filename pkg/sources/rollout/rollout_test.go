@@ -138,6 +138,17 @@ func statefulSet(uid, ns, name string, replicas, ready int32, current, update st
 	}
 }
 
+// settle runs the sweep Run's coalescing timer would have run within
+// CoalesceWindow of the events just delivered (#493).
+//
+// These tests drive the informer handlers directly, so nothing else
+// performs it. Before #493 each workload handler swept inline and this
+// step was implicit — and that implicit sweep, once per event over every
+// Deployment × every ReplicaSet in the cluster, was the bug. Written out
+// here because the thing it stands in for is now a real second of real
+// latency, and a test that hides it cannot notice if that second grows.
+func (s *Source) settle(now time.Time) { s.send(s.sweep(now)) }
+
 // seedBadDeploy loads the normative §7.2 fixture: old RS healthy
 // (3/3), new RS 0/1 ready, one crash-looping new pod.
 func seedBadDeploy(s *Source) {
@@ -145,6 +156,7 @@ func seedBadDeploy(s *Source) {
 	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 1, 0))
 	s.onPod(rolloutPod("p-new", "prod", "web-7b9-x1", "rs-new", "", false, "CrashLoopBackOff"))
 	s.onDeployment(deployment("d1", "prod", "web", 3, 1, 3, 4))
+	s.settle(s.clock())
 }
 
 func TestDeployment_BadDeploy_FiresOnceWithEvidence(t *testing.T) {
@@ -310,6 +322,7 @@ func TestDeployment_CompletionClears(t *testing.T) {
 	*clock = clock.Add(2 * time.Minute)
 	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 3, 3))
 	s.onDeployment(deployment("d1", "prod", "web", 3, 3, 3, 3))
+	s.settle(*clock)
 	verdict, ok = s.Clearance(inc)
 	if !ok || !verdict.Cleared {
 		t.Fatalf("verdict = %+v ok=%v, want cleared after completion", verdict, ok)
@@ -401,6 +414,7 @@ func seedBadSTSRollout(s *Source) {
 	s.onPod(rolloutPod("p1", "prod", "db-1", "s1", "rev-a", true, ""))
 	s.onPod(rolloutPod("p2", "prod", "db-2", "s1", "rev-b", false, "ImagePullBackOff"))
 	s.onStatefulSet(statefulSet("s1", "prod", "db", 3, 2, "rev-a", "rev-b"))
+	s.settle(s.clock())
 }
 
 func TestStatefulSet_BadRollout_FiresWithEvidence(t *testing.T) {
@@ -588,6 +602,7 @@ func TestDeployment_RollbackAfterPriorCompletion_StampsClearanceAtRollback(t *te
 	// Steady state: the deployment has been complete for hours.
 	s.onReplicaSet(replicaSet("rs-old", "prod", "web-5f6", "d1", "1", 3, 3))
 	s.onDeployment(deployment("d1", "prod", "web", 3, 3, 3, 3))
+	s.settle(*clock)
 	priorCompletion := *clock
 
 	// The bad deploy, two hours later; the stall fires after the
@@ -596,6 +611,7 @@ func TestDeployment_RollbackAfterPriorCompletion_StampsClearanceAtRollback(t *te
 	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 1, 0))
 	s.onPod(rolloutPod("p-new", "prod", "web-7b9-x1", "rs-new", "", false, "CrashLoopBackOff"))
 	s.onDeployment(deployment("d1", "prod", "web", 3, 1, 3, 4))
+	s.settle(*clock)
 	*clock = clock.Add(3 * time.Minute)
 	s.send(s.sweep(*clock))
 	if len(col.all()) != 1 {
@@ -616,6 +632,7 @@ func TestDeployment_RollbackAfterPriorCompletion_StampsClearanceAtRollback(t *te
 	s.onReplicaSet(replicaSet("rs-new", "prod", "web-7b9", "d1", "2", 0, 0))
 	s.onReplicaSet(replicaSet("rs-old", "prod", "web-5f6", "d1", "3", 3, 3))
 	s.onDeployment(deployment("d1", "prod", "web", 3, 3, 3, 3))
+	s.settle(*clock)
 
 	verdict, ok := s.Clearance(inc)
 	if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionRecovered {
