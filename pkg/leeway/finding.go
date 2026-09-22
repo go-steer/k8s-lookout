@@ -144,6 +144,16 @@ type Finding struct {
 	SuspectedCause      SuspectedCause `json:"suspectedCause"`
 	ContributingFactors []string       `json:"contributingFactors,omitempty"`
 
+	// UntestedCauses names the more specific explanations this deployment
+	// could not evaluate, because the source owning their evidence is not
+	// running. Omitted — the normal case — on a deployment running the full
+	// source set, where the ladder's silence really does mean "ruled out".
+	//
+	// Deliberately outside the fingerprint. Turning a source on would
+	// otherwise re-identify every open episode in the cluster as new, which is
+	// a page for each of them saying nothing happened.
+	UntestedCauses []SuspectedCause `json:"untestedCauses,omitempty"`
+
 	// FirstSeenAt is the dwell state's, not this evaluation's. A finding
 	// re-emitted an hour into an episode still reports when the episode
 	// started, because "how long has this been true" is the question that
@@ -194,6 +204,7 @@ func NewFinding(in FindingInput) Finding {
 		Severity:            in.Verdict.Severity,
 		SuspectedCause:      in.Attribution.Cause,
 		ContributingFactors: in.Attribution.Factors,
+		UntestedCauses:      in.Attribution.Untested,
 		FirstSeenAt:         in.State.FirstSeenAt.UTC(),
 		Transient:           in.Verdict.Transient.String(),
 		Relaxed:             in.Verdict.Relaxed,

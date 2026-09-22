@@ -17,6 +17,8 @@ package topologydrift
 import (
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 )
 
@@ -28,24 +30,39 @@ import (
 // exists to enforce — a rules engine that could recompute its own inputs would
 // eventually disagree with the source that owns them.
 //
-// Four of the evidence fields are deliberately left at their zero values —
-// three on Evidence and DomainFacts.ConsolidatedAt on every row — and each one
-// is a whole sibling source rather than a missing line:
+// The pending-pod rows come from the `capacity` source through CapacityOracle,
+// which is §8.5's "consumes sibling sources" made literal: that source owns
+// the judgement about why a pod did not land, and reading FailedScheduling
+// here would be a second, worse answer to a question already answered.
 //
-//   - InsufficientResource and SchedulingMessage are `capacity`'s judgement
-//     about Pending pods. Reading FailedScheduling events here would be a
-//     second, worse answer to a question another source already answers.
-//   - ConsolidatedAt is the autoscaler's, for the same reason.
+// Two evidence fields remain at their zero values, and each is a whole sibling
+// source rather than a missing line:
+//
+//   - DomainFacts.ConsolidatedAt is the autoscaler's. Nothing in this
+//     deployment records node removals as consolidations yet.
 //   - RolloutEndedAt needs a rollout's *completion* time; the §7.6 seam reports
 //     only which workloads are rolling out right now.
 //
-// §14 puts "cause attribution consuming sibling sources" in Phase 8, and the
-// cost of their absence is bounded and known: `domain_capacity_shortfall` loses
-// its corroborating pod evidence and `consolidation` and `rollout_bias` cannot
-// win at all, so attribution falls through to the cause below them on the
-// ladder — never to a wrong one, because every rule needs positive evidence.
-func (s *Source) evidenceFor(key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, now time.Time) leeway.Evidence {
-	ev := leeway.Evidence{Domains: make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains))}
+// Their absence is reported rather than implied. Evidence.Unavailable says
+// which sources could not be asked, and Attribute turns that into the
+// finding's `untested` list, so a deployment missing a source is
+// distinguishable from one where the hypothesis was tested and lost. The cost
+// stays bounded either way: `consolidation` and `rollout_bias` cannot win, and
+// attribution falls through to the cause below them on the ladder — never to a
+// wrong one, because every rule needs positive evidence.
+func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, now time.Time) leeway.Evidence {
+	ev := leeway.Evidence{
+		Domains: make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
+		Unavailable: leeway.EvidenceGaps{
+			Capacity: s.capacity == nil,
+			// Still nobody's job. PR order, not an oversight: the seams these
+			// two need do not exist yet, and saying so is what stops a finding
+			// claiming it ruled them out.
+			Consolidation:     true,
+			RolloutCompletion: true,
+		},
+	}
+	s.pendingEvidence(&ev, sub)
 
 	stats := s.inv.Stats(key)
 	drains := s.inv.DrainTimes(key, eligible.Domains)
@@ -70,6 +87,48 @@ func (s *Source) evidenceFor(key leeway.TopologyKey, eligible leeway.Eligibility
 		ev.Domains[d] = facts
 	}
 	return ev
+}
+
+// pendingEvidence fills the two pending-pod rows from the capacity oracle.
+//
+// The intersection runs from the oracle's side: its snapshot holds only pods
+// the scheduler has refused, which is a handful even on a cluster in trouble,
+// while this source's index holds every pod in the cluster. Walking the small
+// set and asking the index who owns each one costs the size of the problem.
+//
+// Only pods citing insufficient resources are counted. A subject whose pods
+// are all refused for an untolerated taint has a real problem, but it is not
+// the one `domain_capacity_shortfall` names, and counting them here would let
+// the ladder answer "not enough room" to a question about a taint.
+//
+// The message is one pod's, not a summary: the scheduler's text already
+// enumerates every predicate that failed and across how many nodes, so the
+// second message is nearly always the first one again. The earliest refusal
+// wins, tie-broken by UID, because a stable choice is what lets two findings
+// an hour apart be diffed — picking whichever pod the map yielded first would
+// churn the payload on every pass with nothing having changed.
+func (s *Source) pendingEvidence(ev *leeway.Evidence, sub leeway.SubjectRef) {
+	if s.capacity == nil {
+		return
+	}
+	var (
+		bestUID   types.UID
+		bestSince time.Time
+	)
+	for uid, fact := range s.capacity() {
+		if !fact.InsufficientResource {
+			continue
+		}
+		if owner, ok := s.state.SubjectOfPod(uid); !ok || owner != sub {
+			continue
+		}
+		ev.InsufficientResource++
+		if bestUID == "" || fact.Since.Before(bestSince) ||
+			(fact.Since.Equal(bestSince) && uid < bestUID) {
+			bestUID, bestSince = uid, fact.Since
+			ev.SchedulingMessage = fact.Message
+		}
+	}
 }
 
 // peakAndFall reads the two history-derived facts out of one domain's ready

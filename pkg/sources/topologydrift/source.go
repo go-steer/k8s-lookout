@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -443,6 +444,11 @@ type Source struct {
 	// Nil means the row is unanswered — see RolloutOracle.
 	rollouts RolloutOracle
 
+	// capacity, when set via WithCapacityOracle, answers §8.5's pending-pod
+	// rows. Nil means they are unanswered — see CapacityOracle — and the
+	// finding says so rather than reporting them negative.
+	capacity CapacityOracle
+
 	inv   *Inventory
 	state *State
 	queue *coalescer
@@ -626,6 +632,50 @@ type RolloutOracle func() []leeway.SubjectRef
 func (s *Source) WithRolloutOracle(fn RolloutOracle) {
 	if fn != nil {
 		s.rollouts = fn
+	}
+}
+
+// PendingFact is one pod the scheduler has refused, as the `capacity` source
+// judges it. §8.5 is explicit that attribution consumes sibling sources, and
+// this is the shape that judgement arrives in: a verdict and the scheduler's
+// own words, with nothing here for this package to re-derive.
+type PendingFact struct {
+	// Since is when the pod became unschedulable.
+	Since time.Time
+
+	// Message is the scheduler's FailedScheduling text, verbatim.
+	Message string
+
+	// InsufficientResource is whether the refusal cites capacity at all. A pod
+	// refused for an untolerated taint is unschedulable without the cluster
+	// being short of anything, and the ladder has a separate rung for that.
+	InsufficientResource bool
+}
+
+// CapacityOracle answers §8.5's pending-pod rows: which pods the scheduler is
+// currently refusing, and why.
+//
+// Asked once per finding for the whole cluster rather than once per subject,
+// like RolloutOracle and for the opposite reason: the refused set is small by
+// construction — only pods the scheduler has turned down are in it — while the
+// subject set is not, so intersecting from this side costs the size of the
+// problem rather than the size of the cluster. Keyed by pod UID because that
+// is the key this source's own index is on; matching by namespace and name
+// would re-answer "which workload owns this pod", which is a question both
+// sides have already answered and could answer differently.
+//
+// A function rather than an interface, dealing in a struct of this package's
+// own, so that neither this package nor `capacity` has to import the other —
+// the adapter belongs at the composition root that knows about both. Unset
+// means the rows go unanswered, and the finding reports them as unanswered
+// rather than as a negative result.
+type CapacityOracle func() map[types.UID]PendingFact
+
+// WithCapacityOracle sets the callback that answers §8.5's pending-pod rows.
+// Call before Run; nil is ignored.
+func (s *Source) WithCapacityOracle(fn CapacityOracle) {
+	if fn != nil {
+		s.capacity = fn
 	}
 }
 
@@ -1428,6 +1478,14 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		// seeing no rollout bucket should be able to find out here whether that
 		// means no rollouts or no answer.
 		s.logger()("topologydrift: no rollout source wired — §7.6 will not relax thresholds during a rollout")
+	}
+	if s.capacity == nil {
+		// Same rule, applied to §8.5's ladder: a finding whose evidence shows
+		// no pending pods, on a deployment that has no source for pending
+		// pods, is reporting an absence of an answer as an answer. The finding
+		// itself now carries that distinction; this is so an operator does not
+		// have to read a finding to discover it.
+		s.logger()("topologydrift: no capacity source wired — §8.5 findings will report pending-pod evidence as unavailable")
 	}
 
 	// §13 S4's fourth mitigation, and the cheapest one: say once, out loud,

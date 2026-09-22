@@ -120,6 +120,52 @@ type Evidence struct {
 	// RolloutEndedAt is when the subject's most recent rollout completed.
 	// A rollout still in progress is §7.6's business, not attribution's.
 	RolloutEndedAt time.Time
+
+	// Unavailable names the evidence a sibling source owns and that this
+	// deployment has no source for.
+	//
+	// It is the difference between "we asked and the answer was no" and "we
+	// could not ask", and the ladder must not collapse them. A metrics-only
+	// deployment runs topology-drift without capacity or rollout; if a
+	// missing oracle read the same as an absent fact, that deployment would
+	// silently lose two causes while its findings claimed to have ruled them
+	// out. Every zero value here means "answered", which is the right default
+	// for a caller that populates the evidence fully.
+	Unavailable EvidenceGaps
+}
+
+// EvidenceGaps records which sibling sources could not be consulted.
+//
+// One flag per source rather than per field, because that is the unit that
+// goes missing: a deployment does not run half of `capacity`.
+type EvidenceGaps struct {
+	// Capacity means InsufficientResource and SchedulingMessage are
+	// unanswered rather than negative. Capacity shortfall stays reachable
+	// without them — the node census is its own evidence — but it loses the
+	// pod-level corroboration that makes the finding actionable.
+	Capacity bool
+
+	// Consolidation means DomainFacts.ConsolidatedAt is unanswered on every
+	// domain, and CauseConsolidation cannot be reached.
+	Consolidation bool
+
+	// RolloutCompletion means RolloutEndedAt is unanswered, and
+	// CauseRolloutBias cannot be reached.
+	RolloutCompletion bool
+}
+
+// untested lists the causes whose deciding evidence was unavailable, in
+// ladder order. A cause appears here only when it could not be tested at
+// all — a cause that was tested and lost is not untested, it is ruled out.
+func (g EvidenceGaps) untested() []SuspectedCause {
+	var out []SuspectedCause
+	if g.Consolidation {
+		out = append(out, CauseConsolidation)
+	}
+	if g.RolloutCompletion {
+		out = append(out, CauseRolloutBias)
+	}
+	return out
 }
 
 // CauseConfig tunes the attribution rules.
@@ -189,6 +235,19 @@ type Attribution struct {
 	// Notes is index-aligned with the Scores' Domains, empty string where
 	// there is nothing to say. This is the payload's per-domain `note`.
 	Notes []string
+
+	// Untested names the causes this deployment could not evaluate, because
+	// the source that owns their evidence is not running. It is empty on a
+	// deployment running the full source set, which is the case the design
+	// describes and the only one where the ladder's silence means "ruled
+	// out".
+	//
+	// It is not a hedge on the Cause that did win. The ladder never picks a
+	// cause without positive evidence, so the winner is as true here as
+	// anywhere; what Untested says is that something above it on the ladder
+	// was never asked, and a reader deciding whether to act on the headline
+	// deserves to know which.
+	Untested []SuspectedCause
 }
 
 // Attribute runs §8.5's rules engine over evidence we already hold.
@@ -209,7 +268,7 @@ type Attribution struct {
 func (s *Scores) Attribute(intent *Intent, ev Evidence, now time.Time, c CauseConfig) Attribution {
 	c = c.normalize()
 	if s == nil {
-		return Attribution{Cause: CauseUnknown}
+		return Attribution{Cause: CauseUnknown, Untested: ev.Unavailable.untested()}
 	}
 
 	under, over := s.fillSides()
@@ -234,7 +293,44 @@ func (s *Scores) Attribute(intent *Intent, ev Evidence, now time.Time, c CauseCo
 
 	a.Factors = s.factors(intent, ev, under, over, now, c)
 	s.notes(ev, a.Notes, now, c)
+
+	// Only causes the winner did not already beat. A ladder that picked
+	// domain_outage has tested nothing below it either, but the ones it
+	// skipped are ranked less specific than the answer it found — reporting
+	// those as open questions would make every finding look uncertain. What
+	// is worth saying is that a MORE specific cause went unasked.
+	for _, u := range ev.Unavailable.untested() {
+		if causeRank(u) < causeRank(a.Cause) {
+			a.Untested = append(a.Untested, u)
+		}
+	}
 	return a
+}
+
+// causeRank is the ladder position used to decide whether an untested cause is
+// worth reporting: lower is more specific, and only a cause more specific than
+// the winner is an open question. CauseUnknown ranks last so that every
+// untested cause outranks it — a finding with no explanation at all is exactly
+// where a missing source matters most.
+func causeRank(c SuspectedCause) int {
+	switch c {
+	case CauseDomainOutage:
+		return 0
+	case CauseConsolidation:
+		return 1
+	case CauseTaintExclusion:
+		return 2
+	case CauseCapacityShortfall:
+		return 3
+	case CauseVolumePinning:
+		return 4
+	case CauseRolloutBias:
+		return 5
+	case CauseConstraintIgnored:
+		return 6
+	default:
+		return 7
+	}
 }
 
 // fillSides returns which domain indices hold more than their share and which

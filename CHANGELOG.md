@@ -90,6 +90,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **leeway findings now cite the scheduler's own refusals, and say which
+  explanations they could not test.** When the `capacity` source is running,
+  `topology-drift` reads its table of pods the scheduler turned down instead of
+  re-reading `FailedScheduling` itself, so a `domain_capacity_shortfall` finding
+  carries how many of the workload's pods are pending for want of room and the
+  scheduler's verbatim message. Only refusals citing insufficient resources
+  count — a pod refused for an untolerated taint is unschedulable without the
+  cluster being short of anything, and that is a different rung on the ladder.
+  Findings also gained `untestedCauses`, which names the more specific
+  explanations a deployment could not evaluate because the source owning their
+  evidence is not running. That is the difference between "we checked and it
+  wasn't consolidation" and "nothing here can see consolidations", and until now
+  a finding said the first when it meant the second. It is empty on a deployment
+  running the full source set, lists only causes ranked *above* the one that won,
+  and stays out of the fingerprint — turning a source on must not re-identify
+  every open episode as new. The sentinel also logs a missing source at startup.
+
 - **The OTLP metric push path now reports on itself, and a dead collector can no
   longer reach the recording path.** `--otel-exporter=otlp` adds five series to
   the scrape endpoint — `lookout_otlp_exports_total{outcome}`,

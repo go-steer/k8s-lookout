@@ -448,6 +448,24 @@ func (s *State) Len() int {
 	return len(s.placements)
 }
 
+// SubjectOfPod returns the subject a pod was counted under.
+//
+// This is the index a caller holding pod UIDs from somewhere else — the
+// `capacity` source's refused-pod table, in §8.5's case — uses to find out
+// which of them belong to the workload it is asking about. Answering from
+// here rather than re-reading the pod's owner references is the whole point:
+// two subsystems that resolve ownership separately will eventually disagree,
+// and this source's counts are already keyed on the answer it reached.
+//
+// False means the pod is not counted, which includes a pod this source has
+// deliberately excluded (Succeeded, Failed) as well as one it has not seen.
+func (s *State) SubjectOfPod(uid types.UID) (leeway.SubjectRef, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := s.subjects[uid]
+	return sub, ok
+}
+
 // PlacementOf returns where a pod was last counted.
 func (s *State) PlacementOf(uid types.UID) (leeway.Placement, bool) {
 	s.mu.Lock()
