@@ -150,6 +150,24 @@ run_lookout() {
   "$(lookout_bin)" "$@"
 }
 
+# The standalone placement binary, resolved the same way. It is a second
+# binary rather than a subcommand, so it needs its own resolver — and a
+# separate build, because a `lookout` on PATH says nothing about whether
+# a `leeway` beside it came from the same tree.
+leeway_bin() {
+  if [[ -n "${LEEWAY_BIN:-}" ]]; then
+    echo "$LEEWAY_BIN"
+    return 0
+  fi
+  local cached="$STATE_DIR/bin/leeway"
+  if [[ ! -x "$cached" ]]; then
+    mkdir -p "$STATE_DIR/bin"
+    echo "▸ building leeway into $cached (first run only)" >&2
+    (cd "$(repo_root)" && go build -o "$cached" ./cmd/leeway)
+  fi
+  echo "$cached"
+}
+
 # ---- stub-daemon wire capture ---------------------------------------------
 
 # The stub daemon (dev/drills/stub-daemon.py, deployed by

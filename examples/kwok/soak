@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# soak — run the WHOLE sentinel against the synthetic fleet under
+# sustained churn for hours, and answer one question: is resident
+# memory flat?
+#
+# This is §6.6.1's steady-state soak, and it is deliberately
+# `lookout watch` with every source live rather than the standalone
+# `leeway` binary. The scale ladder (examples/kwok/leeway-scale)
+# isolates one subsystem to price it; this does the opposite, because
+# the failure it is looking for — a cache, a map keyed by something
+# unbounded, a goroutine per object that never exits — is most likely
+# to show up where eleven sources share one informer factory, and least
+# likely to show up in the one that was just written with this in mind.
+#
+# What "flat" means here. RSS is not expected to be constant: the Go
+# heap saws, and the fleet itself grows (every rollout leaves a
+# ReplicaSet behind, up to revisionHistoryLimit). Flat means the fitted
+# slope, projected over 24 hours, is a small fraction of the mean —
+# LEEWAY_SOAK_TOLERANCE, 10% by default. A leak shows up as a slope
+# that survives the fit over hours; a saw does not.
+#
+# The fit deliberately skips the first LEEWAY_SOAK_WARMUP of samples.
+# The initial LIST, the first GC cycles and the informer caches filling
+# are startup, and including them reports a leak on every run.
+#
+# Both RSS and Go heap are sampled. They answer different questions: a
+# rising heap is lookout retaining objects, a rising RSS with a flat
+# heap is the allocator or the runtime not returning pages, and the
+# second is a much less interesting finding than the first.
+#
+# Usage:
+#   examples/kwok/soak            # 2 hours, 4 rollout drivers
+#   examples/kwok/soak --report   # re-read the last run's samples
+#
+# Env:
+#   LEEWAY_SOAK_HOURS       wall-clock hours to soak for (default 2)
+#   LEEWAY_SOAK_SAMPLE      seconds between samples (default 30)
+#   LEEWAY_SOAK_CHURN       parallel rollout drivers (default 4; 0 is
+#                           a quiet soak, which measures much less)
+#   LEEWAY_SOAK_WARMUP      seconds to exclude from the fit (default 600)
+#   LEEWAY_SOAK_TOLERANCE   max 24 h projected growth, as a fraction of
+#                           the mean, before the verdict is a leak
+#                           (default 0.10)
+#
+# Needs the fleet to be up: examples/kwok/up then examples/kwok/scale-up.
+
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+HOURS="${LEEWAY_SOAK_HOURS:-2}"
+SAMPLE="${LEEWAY_SOAK_SAMPLE:-30}"
+CHURN="${LEEWAY_SOAK_CHURN:-4}"
+WARMUP="${LEEWAY_SOAK_WARMUP:-600}"
+TOLERANCE="${LEEWAY_SOAK_TOLERANCE:-0.10}"
+SAMPLES="$STATE_DIR/soak-samples.tsv"
+
+# ---- the verdict ----------------------------------------------------------
+
+# Least squares over (elapsed seconds, MiB) for every sample past the
+# warm-up, for both series. awk does the fit because the alternative is
+# a Python dependency in an examples/ script that has none.
+report() {
+  if [[ ! -s "$SAMPLES" ]]; then
+    echo "▸ no samples yet — run examples/kwok/soak"
+    return 0
+  fi
+
+  awk -F'\t' -v warmup="$WARMUP" -v tol="$TOLERANCE" '
+    { t[NR] = $1; rss[NR] = $2; heap[NR] = $3; objs[NR] = $4; last = NR }
+    $1 >= warmup { fitted++ }
+
+    function fit(t, y, n, warmup, label,   i, k, sx, sy, sxx, sxy, m, b, mean) {
+      k = 0
+      for (i = 1; i <= n; i++) {
+        if (t[i] < warmup) continue
+        k++
+        sx += t[i]; sy += y[i]; sxx += t[i] * t[i]; sxy += t[i] * y[i]
+      }
+      if (k < 3) {
+        printf "  %-10s too few samples past the warm-up to fit (%d)\n", label, k
+        return
+      }
+      # Guard the degenerate case rather than dividing by zero: every
+      # sample at the same instant cannot happen with a real clock, but
+      # a hand-edited samples file can.
+      if (k * sxx - sx * sx == 0) {
+        printf "  %-10s samples share one timestamp; no fit\n", label
+        return
+      }
+      m = (k * sxy - sx * sy) / (k * sxx - sx * sx)
+      b = (sy - m * sx) / k
+      mean = sy / k
+
+      # Observed drift first, projection second. The projection is what
+      # the verdict is taken on, because "will this pod last a day" is
+      # the operational question — but it multiplies the fitted slope
+      # by 24/window, so a two-hour soak amplifies whatever noise the
+      # fit picked up twelve-fold. Showing the drift that was actually
+      # seen is what stops that being mistaken for a measurement.
+      printf "  %-10s mean %7.1f MiB   drift %+7.1f MiB over %.1f h   → 24 h %+8.1f MiB (%+.1f%% of mean)\n",
+        label, mean, m * (t[n] - warmup), (t[n] - warmup) / 3600,
+        m * 86400, (mean > 0 ? m * 86400 / mean * 100 : 0)
+
+      if (label == "RSS") {
+        rss_mean = mean; rss_24h = m * 86400
+      }
+    }
+
+    END {
+      printf "\n▸ %d samples over %.2f h, fit over the %d past the %ds warm-up\n\n",
+        last, (t[last] - t[1]) / 3600, fitted + 0, warmup
+      if ((t[last] - warmup) < 3600)
+        printf "  ⚠ under an hour of fitted window. The 24 h projection below is\n    multiplying the slope by more than 24, so read it as a direction\n    rather than a number, and soak longer before gating on it.\n\n"
+      fit(t, rss, last, warmup, "RSS")
+      fit(t, heap, last, warmup, "Go heap")
+      printf "\n"
+      # The object count of the fleet itself, first and last. Not fitted, just
+      # shown: it is the control. The churn driver rolls Deployments,
+      # every roll leaves a dead ReplicaSet behind until the history
+      # limit reaps it, and the fleet therefore grows for a while
+      # before it plateaus. A rising RSS over a rising object count is
+      # the process doing its job; a rising RSS over a FLAT one is the
+      # only shape that is a leak.
+      printf "  %-10s %d objects at %ds → %d at %ds (%+.1f%%)\n\n",
+        "fleet", objs[1], t[1], objs[last], t[last],
+        (objs[1] > 0 ? (objs[last] - objs[1]) / objs[1] * 100 : 0)
+      if (rss_mean <= 0) {
+        print "  ? no RSS fit, so no verdict"
+        exit 0
+      }
+      if (rss_24h / rss_mean > tol) {
+        printf "  ✗ NOT FLAT: RSS projects %+.1f%% over 24 h, tolerance is %.0f%%.\n",
+          rss_24h / rss_mean * 100, tol * 100
+        print "    Read the Go heap line before calling it a leak: a flat heap"
+        print "    under a rising RSS is the allocator, not retention."
+        exit 1
+      }
+      printf "  ✓ FLAT: RSS projects %+.1f%% over 24 h, inside the %.0f%% tolerance.\n",
+        rss_24h / rss_mean * 100, tol * 100
+    }
+  ' "$SAMPLES"
+}
+
+if [[ "${1:-}" == "--report" ]]; then
+  # Not guarded with `|| true`: a non-flat verdict is a failing exit
+  # status, and that is what makes this usable as a CI gate.
+  report
+  exit
+fi
+
+# ---- preflight ------------------------------------------------------------
+
+require_examples_context
+require_kwok_installed
+
+nodes="$(kubectl get nodes --no-headers | wc -l | tr -d ' ')"
+pods="$(kubectl get pods -A --no-headers | wc -l | tr -d ' ')"
+fake="$(fake_node_count)"
+echo "▸ cluster: ${nodes} nodes, ${pods} pods (${fake} faked by kwok)"
+
+if ((fake == 0)); then
+  echo "ERROR: no fake nodes — run examples/kwok/scale-up first. Soaking an" >&2
+  echo "       empty cluster measures nothing." >&2
+  exit 1
+fi
+
+# Built from THIS TREE, unlike every other example here. `lookout_bin`
+# prefers a `lookout` on PATH, which is right for the read-path demos —
+# they are showing you the CLI you installed. It is wrong for a soak:
+# the answer goes into a design document as a property of this code, and
+# an installed binary says nothing about which commit it came from. The
+# one on this machine was a `go install` from three weeks and four
+# leeway phases ago, and it would have soaked a process with no
+# placement subsystem in it at all while reporting a clean verdict.
+# LOOKOUT_BIN still wins, for bisecting a leak across commits.
+if [[ -z "${LOOKOUT_BIN:-}" ]]; then
+  LOOKOUT_BIN="$STATE_DIR/bin/lookout-soak"
+  mkdir -p "$STATE_DIR/bin"
+  echo "▸ building lookout from the worktree into $LOOKOUT_BIN" >&2
+  (cd "$(repo_root)" && go build -o "$LOOKOUT_BIN" ./cmd/lookout)
+  export LOOKOUT_BIN
+fi
+bin="$(lookout_bin)"
+echo "▸ binary:  $bin ($("$bin" version 2>/dev/null | head -1))"
+
+# ---- the sentinel ---------------------------------------------------------
+
+# --dry-run, so this needs no daemon and no sink: the whole watch path
+# runs — informers, every source, filter, dedup, routing — and the
+# payloads that would have been POSTed are printed on stdout instead,
+# which goes to /dev/null. Keeping them would be the one thing
+# guaranteed to grow something over hours, and it would be the
+# harness's fault rather than a finding.
+#
+# --sources=auto and not an explicit list: the point is the full set
+# this deployment can support, whatever that turns out to be, and an
+# explicit list would go stale the next time a source is added.
+#
+# A FIXED metrics port, unlike the scale ladder's :0. `lookout watch`
+# does not print the address it bound, so an ephemeral port would be
+# unfindable; the ladder gets away with :0 only because `leeway` logs
+# its listener.
+addr="127.0.0.1:${LEEWAY_SOAK_PORT:-39090}"
+log="$STATE_DIR/soak-sentinel.log"
+mkdir -p "$STATE_DIR"
+
+"$bin" watch \
+  --dry-run \
+  --sources=auto \
+  --cluster-name=kwok-soak \
+  --metrics-addr="$addr" \
+  >/dev/null 2>"$log" &
+pid=$!
+# shellcheck disable=SC2064 — $pid must expand now, not at trap time
+trap "kill $pid 2>/dev/null || true" EXIT
+echo "▸ sentinel pid $pid on $addr (log: $log)"
+
+ready=""
+for _ in $(seq 1 1200); do
+  if curl -fsS "http://$addr/readyz" >/dev/null 2>&1; then
+    ready=yes
+    break
+  fi
+  kill -0 "$pid" 2>/dev/null || {
+    echo "ERROR: the sentinel exited during startup:" >&2
+    tail -20 "$log" >&2
+    exit 1
+  }
+  sleep 0.5
+done
+[[ -n "$ready" ]] || {
+  echo "ERROR: /readyz never came up — the informers did not finish listing" >&2
+  tail -20 "$log" >&2
+  exit 1
+}
+echo "▸ ready — every source's informers have listed"
+
+# ---- churn for the duration ----------------------------------------------
+
+secs="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 }')"
+echo "▸ soaking for ${HOURS} h (${secs}s), sampling every ${SAMPLE}s"
+
+churn_pid=""
+if ((CHURN > 0)); then
+  echo "▸ churning: ${CHURN} parallel rollout drivers, for the whole soak"
+  fleet_churn "$secs" "$CHURN" &
+  churn_pid=$!
+fi
+
+# ---- sample ---------------------------------------------------------------
+
+mkdir -p "$(dirname "$SAMPLES")"
+: >"$SAMPLES"
+started="$(date +%s)"
+
+while true; do
+  now="$(date +%s)"
+  elapsed=$((now - started))
+  ((elapsed < secs)) || break
+  kill -0 "$pid" 2>/dev/null || { echo "ERROR: the sentinel died at ${elapsed}s" >&2; break; }
+
+  rss_kb="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null || echo 0)"
+  heap_b="$(curl -fsS "http://$addr/metrics" 2>/dev/null |
+    awk '/^go_memstats_heap_inuse_bytes /{ print $2; exit }')"
+  [[ -n "$heap_b" ]] || heap_b=0
+  # The control for the memory series: what the process is being asked
+  # to hold. Pods and ReplicaSets only — the two the churn driver
+  # moves — and counted at the apiserver, not in lookout, so it stays
+  # an independent measurement of the same thing.
+  objs="$(kubectl get pods,replicasets -A -l "$FLEET_LABEL" \
+    -o name 2>/dev/null | grep -c . || true)"
+
+  awk -v e="$elapsed" -v r="$rss_kb" -v h="$heap_b" -v o="$objs" \
+    'BEGIN { printf "%d\t%.1f\t%.1f\t%d\n", e, r / 1024, h / 1048576, o }' >>"$SAMPLES"
+
+  # Progress on one line every ten minutes, so a soak left running in a
+  # terminal says something without producing hours of scrollback.
+  if ((elapsed % 600 < SAMPLE)); then
+    awk -v e="$elapsed" -v r="$rss_kb" -v h="$heap_b" \
+      'BEGIN { printf "  %5.1f h   RSS %7.1f MiB   heap %7.1f MiB\n",
+        e / 3600, r / 1024, h / 1048576 }'
+  fi
+  sleep "$SAMPLE"
+done
+
+if [[ -n "$churn_pid" ]]; then
+  kill "$churn_pid" 2>/dev/null || true
+  wait "$churn_pid" 2>/dev/null || true
+fi
+
+report

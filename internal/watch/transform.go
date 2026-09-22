@@ -147,8 +147,7 @@ func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string)
 		// not two equivalent ones: Start and Shutdown are then idempotent
 		// across the pair for free, and the unset-flag path keeps exactly the
 		// stream count it had before this option existed.
-		return sameFactory(informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithTransform(sharedTransform)))
+		return sameFactory(NewTransformingFactory(client))
 	}
 	return sharedFactories{
 		Namespaced: informers.NewSharedInformerFactoryWithOptions(client, 0,
@@ -156,9 +155,31 @@ func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string)
 			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
 				opts.FieldSelector = selector
 			})),
-		Cluster: informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithTransform(sharedTransform)),
+		Cluster: NewTransformingFactory(client),
 	}
+}
+
+// NewTransformingFactory builds an unfiltered shared informer factory with the
+// §6.1 transform attached.
+//
+// It is exported for the standalone single-source binaries — `cmd/leeway` —
+// which run one source outside the runner and would otherwise get a factory
+// with no transform on it at all. The reason that matters is §6.1's security
+// property rather than its memory one: resolved secret env values are not
+// supposed to be in this process at all, and without the transform they were.
+// The memory saving is real but is S8's measurement on real GKE objects (~25%
+// of pod retained heap, ~70% of node), not something the kwok scale ladder can
+// see — that fixture pads with annotations, which trimPod deliberately leaves
+// alone.
+//
+// The runner still goes through newSharedFactories, because a deny list needs
+// the second, filtered factory and this cannot express one. What this
+// guarantees is the part that must not diverge: there is one definition of
+// what enters a cache, and no caller can construct a factory that skips it
+// without writing informers.NewSharedInformerFactory themselves.
+func NewTransformingFactory(client kubernetes.Interface) informers.SharedInformerFactory {
+	return informers.NewSharedInformerFactoryWithOptions(client, 0,
+		informers.WithTransform(sharedTransform))
 }
 
 // namespaceExclusionSelector renders a deny list as a field selector, or ""

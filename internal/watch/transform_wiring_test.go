@@ -216,3 +216,44 @@ func TestSharedFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 		t.Error("an unretained condition survived")
 	}
 }
+
+// TestNewTransformingFactory_TrimsToo covers the other construction site — the
+// one cmd/leeway uses, because a standalone single-source binary has no runner
+// to build it a factory. It is a separate test rather than a case of the one
+// above because the failure it guards against is different: there, dropping
+// the option breaks the sentinel and half the suite notices; here, the only
+// symptom is that a process nobody is looking at caches untrimmed objects,
+// resolved secret values included, and the scale numbers taken from it quietly
+// describe a configuration that does not ship.
+func TestNewTransformingFactory_TrimsToo(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:          "api",
+			Namespace:     "prod",
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl"}},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "app",
+			Env:  []corev1.EnvVar{{Name: "DB_PASSWORD", Value: "hunter2"}},
+		}}},
+	}
+
+	factory := NewTransformingFactory(fake.NewSimpleClientset(pod))
+	lister := factory.Core().V1().Pods().Lister()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	factory.Start(ctx.Done())
+	factory.WaitForCacheSync(ctx.Done())
+
+	cached, err := lister.Pods("prod").Get("api")
+	if err != nil {
+		t.Fatalf("pod not in cache: %v", err)
+	}
+	if got := cached.Spec.Containers[0].Env[0].Value; got != "" {
+		t.Errorf("secret env value reached the standalone cache: %q", got)
+	}
+	if cached.ManagedFields != nil {
+		t.Error("ManagedFields reached the standalone cache")
+	}
+}

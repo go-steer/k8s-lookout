@@ -13,13 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Grow the current cluster by N fake nodes and a synthetic fleet on top
-# of them:
+# Add a fake fleet of N nodes and a synthetic workload set on top of
+# them to the current cluster:
 #
 #   examples/kwok/scale-up [nodes] [workloads] [replicas]
 #   examples/kwok/scale-up 300 400 3       # 300 nodes, 400 workloads
 #
 # Defaults: 100 nodes, 200 workloads, 3 replicas.
+#
+# THE ARGUMENTS ARE ABSOLUTE, NOT INCREMENTS. Nodes are named
+# kwok-node-0000 upward and workloads svc-0000 upward, both from zero,
+# so running this twice with the same N re-applies the same objects and
+# the fleet does not grow — which is what makes it safe to re-run, and
+# what makes a scale LADDER a sequence of increasing sizes rather than a
+# sequence of increments. `scale-up 100` then `scale-up 200` leaves 200
+# nodes; `scale-up 100` twice leaves 100.
 #
 # Every fake node carries the kwok.x-k8s.io/node=fake NoSchedule taint
 # and every generated pod tolerates it, so the fake fleet and the real
@@ -423,6 +431,13 @@ metadata:
     ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
 spec:
   replicas: ${replicas}
+  # Bounded because the soak harness rolls this fleet for hours. At the
+  # default of 10, each restart leaves another dead ReplicaSet behind
+  # and a few thousand Deployments accumulate tens of thousands of
+  # them — object growth the DRIVER caused, which a memory soak would
+  # then read as the process leaking. Two keeps a previous revision,
+  # which is all the §7.6 recent-scale row needs.
+  revisionHistoryLimit: 2
   selector:
     matchLabels:
       app: ${name}
@@ -474,8 +489,22 @@ EOF
       containers:
       - name: app
         image: fake-image:v1
-        ports:
-        - containerPort: 8080
+EOF
+
+  # A containerPort on a hostNetwork pod IS a host port to the
+  # scheduler, and three replicas that all want :8080 on a shared host
+  # network can never occupy the same node. At ten archetypes and three
+  # replicas that is 3 × WORKLOADS/10 pods competing for NODES slots, so
+  # the host-ns archetype alone leaves 3×WORKLOADS/10 − NODES pods
+  # Pending forever — 560 of them at the 400-node tier. They are not a
+  # finding, they are the fixture failing to schedule itself, and they
+  # cost the scale harness ten minutes of dead wall clock per rung
+  # waiting for a count it can never reach. Every other archetype keeps
+  # its port; this one declares none, which changes nothing any posture
+  # detector reads (hostNetwork and hostPID are what arch 7 is for).
+  ((arch != 7)) && printf '        ports:\n        - containerPort: 8080\n'
+
+  cat <<EOF
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: 500m, memory: 512Mi}

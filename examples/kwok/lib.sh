@@ -69,6 +69,75 @@ fake_node_count() {
   fake_nodes | grep -c . || true
 }
 
+# ---- driving the fleet ----------------------------------------------------
+
+# fleet_churn <seconds> <workers> — roll fleet Deployments as fast as
+# <workers> parallel drivers can, for <seconds>.
+#
+# The worker count is a knob and not a rate on purpose. A paced driver
+# can only pace down: kubectl issues one PATCH per Deployment over a
+# fresh TLS handshake, which costs about a second, so asking for a rate
+# it cannot reach just produces a number nobody achieved. Since the rate
+# has to be counted from the apiserver afterwards either way (see
+# fleet_pods_created_since), the honest knob is how hard to push.
+#
+# Rolling is how churn is generated, rather than deleting pods: a
+# delete puts kubectl on the critical path for every single pod and
+# tops out around 7 lifecycles/sec on a workstation, whereas one
+# rollout is a single API call the Deployment controller then turns
+# into `replicas` pod lifecycles at controller speed. It is also the
+# event this fleet exists to produce.
+#
+# Workers stride the snapshot and wrap. Wrapping onto a Deployment that
+# is still rolling queues the second rollout behind the first, which
+# silently caps throughput — fine over a soak measured in hours,
+# misleading over a sample window measured in seconds, so a short
+# window needs a fleet wider than workers × seconds.
+fleet_churn() {
+  local secs="$1" workers="$2" deadline w
+  deadline="$(($(date +%s) + secs))"
+
+  local -a targets
+  mapfile -t targets < <(kubectl get deployments -A -l "$FLEET_LABEL" \
+    -o 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' \
+    2>/dev/null || true)
+  ((${#targets[@]})) || return 0
+
+  for ((w = 0; w < workers; w++)); do
+    _fleet_churn_worker "$w" "$workers" "$deadline" "${targets[@]}" &
+  done
+  wait
+}
+
+# Worker $1 of $2 takes every $2-th entry, so no two workers ever roll
+# the same Deployment and none of them needs to coordinate. $3 is the
+# deadline; the rest are namespace/name targets.
+_fleet_churn_worker() {
+  local w="$1" workers="$2" deadline="$3"
+  shift 3
+  local -a targets=("$@")
+  local n=${#targets[@]} i entry
+
+  i="$w"
+  while (($(date +%s) < deadline)); do
+    entry="${targets[$((i % n))]}"
+    kubectl rollout restart deployment \
+      -n "${entry%%/*}" "${entry##*/}" >/dev/null 2>&1 || true
+    i=$((i + workers))
+  done
+}
+
+# fleet_pods_created_since <rfc3339> — how many fleet pods the apiserver
+# says were created at or after that instant. This is the achieved
+# lifecycle count: what happened, rather than what a driver asked for.
+# Timestamps are second-granularity UTC in a fixed layout, so a string
+# compare is a time compare.
+fleet_pods_created_since() {
+  kubectl get pods -A -l "$FLEET_LABEL" \
+    -o 'jsonpath={range .items[*]}{.metadata.creationTimestamp}{"\n"}{end}' \
+    2>/dev/null | awk -v since="$1" '$1 >= since { n++ } END { print n + 0 }'
+}
+
 require_kwok_installed() {
   if ! kubectl -n kube-system get deploy kwok-controller >/dev/null 2>&1; then
     echo "ERROR: kwok-controller is not installed — run examples/kwok/up first" >&2
