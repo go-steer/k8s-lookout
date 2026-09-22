@@ -65,6 +65,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A standalone `leeway` binary, for clusters that want the placement signal
+  without running the sentinel.** It runs the `topology-drift` and
+  `compute-class` sources against one cluster and exports their metrics — no
+  event watcher, no store, no inject path — and ships as `/leeway` in the same
+  image as `/lookout`, which is unchanged and still the entrypoint. It serves
+  `/metrics`, `/healthz` and `/readyz` on `--metrics-addr`, takes the handful of
+  flags that change what is watched or what it costs, and accepts port `0` for a
+  free port and `--exit-after` for a bounded run. **Do not run it against a
+  cluster already running `lookout watch`**: both build a Pod informer, and a
+  second one on the largest stream in the cluster buys you a duplicate of
+  numbers you already have. Nothing prevents it, so the two scrape targets are
+  told apart by `lookout_leeway_standalone_info`, which only the standalone
+  exports. Running store-less is supported rather than degraded — placement is
+  rebuilt from the informers on every start, so a restart costs the in-flight
+  dwell timers and the learned baselines, not correctness. `--sources` defaults
+  to both, and `compute-class` is skipped with a log line on any cluster that
+  does not serve the GKE ComputeClass CRD; naming it explicitly makes that a
+  startup error instead. See *Operations → The standalone leeway binary*.
+
 - **A topology domain with nothing schedulable left in it is now one signal for
   the cluster**, `leeway.domain_unavailable`. When a zone goes, every workload
   spread across it drifts at the same instant; lookout already held those

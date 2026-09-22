@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Multi-stage distroless build for the `lookout` multicall binary.
+# Multi-stage distroless build for the `lookout` multicall binary, plus
+# the optional `/leeway` standalone (DESIGN.md §4.1's one exception).
 # Mirrors core-agent's Dockerfile conventions (alpine builder,
 # distroless/static final stage, version stamped via -ldflags).
 #
@@ -92,6 +93,25 @@ RUN go build \
     -o /out/lookout \
     ./cmd/lookout
 
+# The standalone placement binary (DESIGN.md §4.1's one exception to
+# "one multicall binary"; see docs/site/.../operations/leeway-standalone).
+# Same image rather than a second one: it is the same source tree, the
+# same stamps and ~15 MB, and a separate image would be a second thing to
+# tag, sign and attest for an optional artifact.
+#
+# It is NOT the entrypoint and must not be run alongside `lookout watch`
+# against one cluster — both build a Pod informer. A deployment that
+# wants it overrides `command: ["/leeway"]`.
+RUN go build \
+    -tags "${BUILD_TAGS}" \
+    -ldflags "-s -w \
+      -X github.com/go-steer/k8s-lookout/internal/version.Version=${VERSION} \
+      -X github.com/go-steer/k8s-lookout/internal/version.Commit=${COMMIT} \
+      -X github.com/go-steer/k8s-lookout/internal/version.Date=${BUILD_DATE}" \
+    -trimpath \
+    -o /out/leeway \
+    ./cmd/leeway
+
 # ---- Final stage ----
 # distroless/static-debian12 carries only the bits needed to run a
 # static Go binary (CA certs, /etc/passwd with the nonroot user,
@@ -110,6 +130,7 @@ LABEL org.opencontainers.image.source="https://github.com/go-steer/k8s-lookout" 
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /out/lookout /lookout
+COPY --from=builder /out/leeway /leeway
 
 WORKDIR /workspace
 

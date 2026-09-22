@@ -14,6 +14,11 @@ the known gaps). Hard rules for contributors are in
 k8s-lookout/
 ├── cmd/lookout/          # multicall entrypoint: subcommand dispatch, --help, provider
 │                         #   blank-imports behind build tags, nm-based isolation test
+├── cmd/leeway/           # the ONE exception to §4.1's single binary: the placement
+│                         #   subsystem standalone, metrics-only, no store and no inject
+│                         #   path. Never run alongside `lookout watch` (both build a Pod
+│                         #   informer). It is also the enforcement: the day a source
+│                         #   reaches into internal/watch, this stops compiling
 ├── internal/
 │   ├── watch/            # the sentinel wiring (`lookout watch`): flag surface, dispatcher,
 │   │                     #   watchboard, enrichment, recovery/storm/triage dispatch, distiller,
