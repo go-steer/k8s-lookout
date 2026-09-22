@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
@@ -128,6 +129,18 @@ func MetricsInventory() []MetricDoc {
 	// reader looking for a flag that does not exist.
 	for _, d := range computeclass.MetricDocs() {
 		out = append(out, MetricDoc{Name: d.Name, Type: d.Type, Labels: d.Labels, Help: d.Help})
+	}
+	// §8.4's OTLP export SLIs. Plain collectors like the sentinel's own
+	// — so the name and help are derived, not written twice — but owned
+	// by internal/telemetry, because that is where the reader they
+	// describe is built. All optional: unlike the leeway series, which
+	// read zero to prove they are looking, these describe a push
+	// pipeline that does not exist until --otel-exporter=otlp builds
+	// one, and a zeroed export counter on a process with no exporter
+	// would claim a path that was never wired.
+	for _, d := range telemetry.ExportSLIDocs() {
+		name, help := describeCollector(d.Collector)
+		out = append(out, MetricDoc{Name: name, Type: d.Type, Labels: d.Labels, Help: help, Optional: true})
 	}
 	return out
 }

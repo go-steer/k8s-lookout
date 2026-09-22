@@ -3125,6 +3125,121 @@ bind harder still, per the paragraph above.
 > independently in each walk would eventually have them disagree about which
 > axes exist, which renders as a dashboard dividing by nothing.
 
+> **The export hardening landed 2026-09-22** (#476), against "a dead collector
+> must not kill the process" above. The first thing to record is that the
+> requirement as written — *bounded queue, drop on full* — describes a design
+> the metric SDK does not have, and the deliverable changed accordingly.
+>
+> **There is no queue to bound.** A `PeriodicReader` collects the aggregation
+> state into one `ResourceMetrics` on a timer and calls `Export` synchronously
+> in its own goroutine. Nothing accumulates across failures: the pending data is
+> one point per series whether the last hundred exports succeeded or none of
+> them did. So the memory bound is the **cardinality** bound the block above
+> installs, not a queue depth; "drop on full" is "the failed batch is gone, and
+> is not re-offered"; and recording already cannot block on the exporter,
+> because the export runs after collect returns and holds no lock a recorder
+> wants. The work was therefore to *prove* that, to make the drops legible, and
+> to stop a configuration from reintroducing the hazard — not to add a bound
+> that the SDK's shape already provides.
+>
+> **The one way a configuration could reintroduce it: a deadline at or above the
+> interval.** The reader's loop is sequential — collect, export, wait for the
+> tick — so a black-holed export that outlives the interval owns the loop, and
+> the ticks it misses do not happen late, they do not happen. The SDK's own
+> defaults (30s deadline, 60s interval) satisfy the invariant; the pair an
+> operator can actually reach for — `OTEL_METRIC_EXPORT_INTERVAL` shortened
+> without `OTEL_METRIC_EXPORT_TIMEOUT` — does not.
+> `exportTimeout` now derives it — half the interval, clamped to 5s–30s, and
+> always strictly below the interval, which is asserted directly over a table of
+> intervals from 1ms to an hour. The exporter's own retry budget
+> (`MaxElapsedTime`) is bound to the same number rather than left at the SDK's
+> 60s default, so an attempt is never cancelled mid-retry by a deadline that
+> disagrees with it. The deadline is applied twice, on the reader and inside the
+> guard, so dropping the reader option in a refactor still leaves the export
+> bounded.
+>
+> Deriving the deadline forced this package to take over both standard knobs.
+> `newPeriodicReaderConfig` seeds itself from the environment and *then* applies
+> the option list, so an explicit `WithTimeout` silently discards whatever the
+> operator set in `OTEL_METRIC_EXPORT_TIMEOUT` — and a deadline derived from an
+> interval the reader is not using is the exact arrangement the invariant exists
+> to rule out. Both variables are therefore read here: the interval, behind an
+> explicit option (tests need the seam to be deterministic); the timeout,
+> honoured as set but capped at three quarters of the interval, with the cap
+> logged when it bites. Capping rather than refusing is deliberate — a long
+> requested deadline is an operator saying their collector is slow, and the
+> answer to that is a longer interval, which raises the cap with it. Refusing to
+> start a watch over a telemetry variable would be the worse trade.
+>
+> **The SLIs are plain Prometheus collectors on the pull registry, not
+> instruments on the MeterProvider they describe.** An export-failure counter
+> that reaches the operator only over the export path that is failing tells
+> nobody anything. This is the same argument that keeps the pull reader
+> unconditional, applied one level down.
+>
+> ```
+> lookout_otlp_exports_total {outcome}                        # ok | failed
+> lookout_otlp_points_exported_total
+> lookout_otlp_points_dropped_total
+> lookout_otlp_export_last_success_timestamp_seconds
+> lookout_otlp_export_inflight
+> ```
+>
+> Both `outcome` children are pre-registered at zero, for the reason the
+> withheld gauge is: "no export has failed" and "nothing is exporting" are
+> different states. **All five rows are `Optional` on the generated metrics
+> page** — a departure from the rule the §8.4 series follow, and deliberate.
+> Those read zero to prove they are looking; these describe a push pipeline that
+> does not exist until `--otel-exporter=otlp` builds one, and a zeroed export
+> counter on a process with no exporter would claim a path that was never wired.
+> The thing to alert on is the **age** of `last_success`, not the failure
+> counter, which also stays flat when the export path stops running entirely.
+>
+> The error is still returned to the SDK rather than swallowed: it is what
+> `ForceFlush` and `Shutdown` propagate, and a shutdown reporting success after
+> losing its final flush is worse than a noisy one. That costs one stderr line
+> per interval, which the docs name as a consequence rather than the signal.
+>
+> **The non-blocking test is not a timing threshold.** An exporter wedges in
+> `Export` and ignores its context — non-cooperation is the point, since an
+> exporter that politely returns on `ctx` would prove the deadline works rather
+> than the property claimed. 100k measurements are recorded and `/metrics` is
+> scraped, and only *after* both complete does the test release the export. So
+> completing is proof, not a race that went the right way.
+>
+> **What temporality does to the drop counter, which the help strings cannot
+> carry:** cumulative means a failed export loses the **sample**, not the
+> **value**. The next export that lands carries the full running total. Dropped
+> points mean the graph has a hole, not that the counter reset.
+>
+> **Soak status.** `dev/tools/soak-otlp` runs the real OTLP HTTP exporter
+> against a collector that accepts every connection and answers none, sampling
+> heap, RSS, the drop SLIs and the served family count. A **70 s run at a 5 s
+> cadence over 2,000 series** and a **45 min run at the production 60 s
+> cadence** are recorded below; **the 24 h run in the Phase 8 exit criterion has
+> not been performed**, and #476 stays open for it. The harness, the SLIs and
+> the tests are shipped.
+>
+> | Run | Heap | RSS | Drops | Families |
+> |---|---|---|---|---|
+> | 70 s @ 5 s, 2,000 series | 50 → 58 MiB, flat from the first sample | 89 → 127 MiB, flat | 4,000 per failed export, 13 failures | 7 throughout |
+> | 45 min @ 60 s, 2,000 series | 43–58 MiB, sawtooth, no trend | 98 → 130 MiB, flat from ~5 min | 176,000 over 44 failures, exactly 4,000 each | 7 throughout |
+>
+> The 45 min run recorded 108 M measurements and the black hole accepted 133
+> connections for 44 exports — the retry budget, spending the deadline rather
+> than outliving it. Heap oscillates between two values and returns to the lower
+> one; RSS reaches its plateau in the first few minutes and stays. Drops are
+> exactly the series count per failure, which is the shape the no-queue claim
+> predicts: one point per series pending, never two.
+>
+> One finding, and it is a measurement error rather than a product one: the
+> first black-hole harness parked its handler on the request context without
+> reading the body, and `net/http` only starts the background read that notices
+> a client hanging up once the body has hit EOF. The handlers therefore
+> accumulated one per export attempt — growth in the harness, charged to the
+> process under test, in the one test whose entire job is to detect growth. A
+> soak that measures its own scaffolding is worse than no soak.
+
 ### 8.5 Finding payload
 
 ```json
@@ -3691,6 +3806,23 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   name (this is what stops the §8.4 double-suffix bug reaching a dashboard); both
   readers reporting consistent values; a black-holed OTLP endpoint yielding rising
   drop counts with flat heap and an unaffected `/metrics`.
+  **Shipped 2026-09-22** (#476) except the 24 h duration: the consistency check and
+  the black-hole assertions are unit tests in `internal/telemetry`, and the long run
+  is `dev/tools/soak-otlp` — env-gated rather than build-tagged, because a soak that
+  stops compiling between soaks is a soak nobody runs twice. The added test the row
+  did not ask for is the one #476's exit criteria did: an exporter that wedges and
+  ignores its context, released only *after* the recording and the scrape have
+  finished, so "the recording path cannot block on the exporter" is proved rather
+  than timed.
+  **"By construction rather than by someone remembering"** is
+  `TestInstrumentFields_EveryOneHasADocRow`, in both metric packages. The golden list
+  and `MetricDocs` are both compared against what a fully-exercised harness gathers,
+  and a series with no observation is not exported at all — so an instrument the
+  harness never touches was invisible to both checks, and would have shipped with no
+  row on the metrics page and no pin on its derived spelling. Counting the DECLARED
+  instrument fields instead (by type: everything from the OTel metric API except the
+  `Registration` that holds the observable callback) makes the harness have to grow
+  with the struct.
 - **False-positive corpus** — a fixture set of clusters that are *fine* (unavoidable
   skew, restricted eligibility, pinned volumes below threshold, mid-rollout, small-n,
   capped domains). Reporting on any of them is a test failure. Grows with every false
@@ -4339,7 +4471,7 @@ independent of 5.
 | **5 — Baselines** (2 wks) | EWMA/EWMAD, freeze-while-firing, maturity gates, invalidation, Tier C. **The estimator shipped as library code, 2026-09-20** — `leeway.BaselineSet` holds one EWMA share and one EWMAD deviation per domain, matures behind both §7.5 gates, freezes while an episode fires (the clock stops, not just the arithmetic, so a week-long incident does not teach the baseline that the incident is normal), and invalidates on the events §7.5 lists. The warm-up bias is real and corrected: at a 12 h half-life a baseline matures having accumulated ~29 % of its weight, so raw EWMAD understates dispersion ~3.5× — `DevWeight` accumulates `α(1−w)` and `DeviationOf` divides by it. **Persistence shipped, 2026-09-20** — store migration v8 and `leeway_baseline`, written in one batched transaction every 30 s (§9.2's second write policy; alert state stays synchronous), with §9.3 step 7's downtime rules on restore: ≤ 2 h resume, ≤ 24 h widen ×1.5 for one half-life, beyond that mark stale. `DevWeight` persists, because a baseline restored without it would re-acquire the bias it was corrected for. **Wired into the source, 2026-09-20** — a sample timer on its own clock, independent of the evaluation coalescer, so what is learned is a placement's duration and not its edit rate. **Tier C turn-on, 2026-09-20 — PHASE 5 COMPLETE.** A mature baseline renders as an `*Intent` with `Source: LearnedBaseline`, so it reuses apportionment, scoring, the per-domain gauges and routing unchanged; the presence of `Bands` (k·max(deviation, floor)) is what switches the breach rule from ρ to the per-domain band test, and no declared source sets them. An immature baseline is nil, which means "scored against an even apportionment" and not "unmonitored". The finding reaches the wire as `leeway.baseline_breach`, the 52nd kind in the frozen schema, still metrics-only unless `--topology-tier-c-signals` says otherwise. Three flags: `--topology-learn-baselines` (default on), `--topology-baseline-half-life`, `--topology-baseline-band`. **This phase amended §5.1** — see the delta there: `SourceClusterDefaultAssumed` moved to the bottom of the precedence list, without which the whole phase would have shipped inert | Tier C detects injected drift in soak without firing on the FP corpus. **Both halves now hold as standing tests, 2026-09-20**: a Deployment that declared nothing and has always sat evenly across three zones, with all six replicas in one, produces exactly one `leeway.baseline_breach` quoting the *learned* expectation; and all seven §12 fixtures run a second time with their declarations stripped — so the baseline is what scores them — and add no findings at the narrowest (floor-width) band |
 | **6 — Preference ranks** (2 wks) | `compute-class` source: dynamic ComputeClass informer, configurable extractors, rank resolution with cross-check, time-weighted pod-seconds, attribution SLIs. **COMPLETE 2026-09-20.** The node model and rule matcher (#457), rank resolution and the pod-second tracker (#458), the ComputeClass reader (#459) and the source itself (#460) shipped counters-first, the same staging Phase 2 used. **Findings shipped 2026-09-20 (#462)**: the four §7.7.4 kinds, judged over a *sampled* window rather than the cumulative counters — the tracker's totals run for the axis's life, so a share taken off them would still be reporting a bad week in March in June; the judge keeps a ring and diffs the ends over `--compute-class-window`. §8.2's machine and `leeway.Reconcile` are reused unchanged, and the persisted rows share the one `leeway_alert_state` table with `topology-drift`, told apart by subject kind at `Load` on both sides. The incident UID prefix is `leeway-rank:` with a hyphen rather than a colon, so the other source's parse fails outright instead of half-succeeding and reporting a rank incident `cleared/object_deleted` on its first sweep. **A class with fewer than two priorities is not judged at all, which takes the wedged rule with it** — deliberate, and confirmed live: the four GKE-managed Autopilot classes each declare exactly one priority, and a Pending pod on one of those is the ordinary out-of-capacity story `capacity` already reports. `wedged_pods` still counts them. One §7.7.4 row is deferred to #463: mean achieved rank against the axis's own EWMA baseline, which needs §7.5's `BaselineSet` plumbed into this source | Rank shares match a hand-audited sample of a live GKE cluster; unmatched and disagreement rates 0. **Both met on `std-simian-test`, 2026-09-20**: `preference_nodes` read 2 at rank 0 for `n2-preferred` and 1 for `n4-preferred`, which is exactly what `kubectl get nodes -L cloud.google.com/compute-class` shows, and 100 % of pod-seconds on both axes sat at rank 0; `unmatched`, `disagreement`, `no_rule_matching`, `ambiguous`, `off_axis`, `out_of_range`, `axis_invalid` and `tracker_underflows_total` were **all zero** over the run |
 | **7 — Nodes** (1.5 wks) | Node-group subjects, capacity weighting, `leeway.domain_unavailable`. **Capacity weighting shipped 2026-09-21 (#468)**: `Weighting` gained an `Auto` zero value so that a declared `Equal` and an undeclared weighting stop being the same thing, every `NodeView` now carries both allocatable dimensions (the trigger has to read CPU to *choose* the weighting, so projecting one resource during eligibility was a chicken-and-egg), and §5.1 resolution writes the resolved weighting back onto the intent with an evidence line quoting the ratio. **This phase amended §7.2** — see the four carve-outs there; the pod-count one was found by breaking two §12 fixtures, and the `minDomains` one would have hidden every padded subject's missing domain. **Node-group subjects shipped 2026-09-21 (#469)**: the inventory groups nodes off FR-3's precedence list, a 30 s pass scores each group against the cluster's domains with no intent (Tier C, deliberately — see FR-3's three rules), and `--topology-max-node-groups` bounds the cardinality by dropping *all* groups rather than an arbitrary subset, with `lookout_leeway_node_groups_discovered` still reporting the true count. Node groups live in their own map inside `State`, absent from `Subjects()`: §6.5's verifier rebuilds each shard from the pod cache, and a subject with no pods would be found empty, called counter drift and erased every sweep. **This shipped a second §7.2 amendment, in the opposite direction to the first** — node-group subjects were to default to `AllocatableCPU` and are instead *pinned* to `Equal`, because a node group's objects are the capacity the weighting apportions over, and the circularity does not only excuse a lopsided pool, it makes an evenly spread pool alongside it read as drifting. **`leeway.domain_unavailable` shipped 2026-09-21 (#467) — PHASE 7 COMPLETE**: the last of §2.3's eight names now has a producer and the v1 ledger is 57 kinds. The subject is the domain, `SubjectDomain`, the one subject kind that holds no objects — which is why the §8.2 machine and the clearance observer took it unchanged but two things around them did not: `judgements` has to append the domain set or `Alerts.Pass` reads every domain episode as gone, and `Clearance` has to skip its pod-index check or it reports a zone that is still down as recovered-`object_deleted` on the first observation. The rule is `Known && usable == 0` against a latch of which domains the cluster has — see §2.3 on why not a window, why *usable* rather than Ready, and why the axis set is configuration | Node-pool imbalance detected and attributed. **The §12 corpus gained a heterogeneous-capacity fixture, 2026-09-21**: ten replicas sitting `[8 1 1]` across zones that are 64, 8 and 8 cores are quiet under the trigger and breach at ρ = 0.4 without it. **The node-group half now holds as a standing test, 2026-09-21**: three zones, a six-node pool wholly in one of them and a balanced pool alongside it — the concentrated pool produces one finding naming the pool (ρ = 2/3, R = 4), the balanced pool scores ρ = 0, and a Deployment pinned to the concentrated pool by `nodeSelector` is narrowed by FR-7 to that one zone and stays quiet rather than restating its pool's imbalance. **The domain half holds as a standing test, 2026-09-21**: three zones and twenty workloads spread over them, every node in one zone lost — **exactly one** `leeway.domain_unavailable` reaches the wire and not one of the twenty workloads emits, because §7.6's outage row suppresses them; cordoning every node in a zone instead produces the same kind with `taint_exclusion` where deleting them produces `consolidation`; and the zone coming back resolves through the existing clearance observer rather than as a second signal |
-| **8 — Hardening** (2 wks) | Cause attribution consuming sibling sources, cardinality controls, OTLP hardening, `cmd/leeway`, docs, dashboards. **§8.4's remaining three cardinality controls shipped 2026-09-22 (#475)** — collapsed states, an axis cap taking a prefix of `--topology-keys` rather than of the drift ranking, and the namespace lists, each independently reversible, with `lookout_leeway_domain_series_withheld{reason}` counting what they drop in subjects rather than folding it into an `other` bucket that would count the same pod on every axis; the 20k-subject budget is now an executable assertion rather than a paragraph. **`cmd/leeway` shipped 2026-09-22 (#477)** — the standalone runs both sources metrics-only and store-less, `/leeway` rides in the same image, and it is built and executed by a Go smoke test so `go test ./...` covers it everywhere. §2.4's two import-graph disciplines stopped being conventions in the same change: `TestLayering_TheImportGraphMatchesTheDesign` enforces the boundary (`pkg/...` never reaches `internal/...`) rather than the one forbidden package, and fails when a rule's pattern matches nothing. Discipline 2's narrow informer interface is deliberately **not** in it — see §2.4 | Scale + soak met on the padded kwok harness; **`cmd/leeway` built and smoke-tested in CI — met 2026-09-22**; process survives a black-holed OTLP endpoint for 24 h with flat RSS |
+| **8 — Hardening** (2 wks) | Cause attribution consuming sibling sources, cardinality controls, OTLP hardening, `cmd/leeway`, docs, dashboards. **§8.4's remaining three cardinality controls shipped 2026-09-22 (#475)** — collapsed states, an axis cap taking a prefix of `--topology-keys` rather than of the drift ranking, and the namespace lists, each independently reversible, with `lookout_leeway_domain_series_withheld{reason}` counting what they drop in subjects rather than folding it into an `other` bucket that would count the same pod on every axis; the 20k-subject budget is now an executable assertion rather than a paragraph. **`cmd/leeway` shipped 2026-09-22 (#477)** — the standalone runs both sources metrics-only and store-less, `/leeway` rides in the same image, and it is built and executed by a Go smoke test so `go test ./...` covers it everywhere. §2.4's two import-graph disciplines stopped being conventions in the same change: `TestLayering_TheImportGraphMatchesTheDesign` enforces the boundary (`pkg/...` never reaches `internal/...`) rather than the one forbidden package, and fails when a rule's pattern matches nothing. Discipline 2's narrow informer interface is deliberately **not** in it — see §2.4. **OTLP hardening shipped 2026-09-22 (#476)** — with the requirement restated: the SDK has no export queue to bound, so the deliverable was proving the structural bound, making the drops legible (five `lookout_otlp_*` SLIs on the *pull* registry, because a drop counter readable only over the broken pipe is useless), and stopping a configuration from reintroducing the hazard (the per-export deadline is now derived from the interval and always strictly below it, with the retry budget bound to the same number). The recording path's inability to block is proved by releasing a wedged exporter only after the recording and the scrape have already finished | Scale + soak met on the padded kwok harness; **`cmd/leeway` built and smoke-tested in CI — met 2026-09-22**; process survives a black-holed OTLP endpoint for 24 h with flat RSS — **harness, SLIs and tests met 2026-09-22; the 24 h duration is NOT yet run** (bounded runs recorded in §8.4; #476 stays open for it) |
 
 Roughly 14 weeks, against ~19 for the standalone version — the difference is almost
 entirely the plumbing lookout already owns.

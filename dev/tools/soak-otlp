@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The black-hole OTLP soak (leeway design §14, phase 8): run the real
+# OTLP HTTP exporter against a collector that accepts every connection
+# and answers none, and check that the drop SLIs rise while the heap,
+# the RSS and /metrics stay put.
+#
+# Deliberately NOT a CI step. A 24 h run has nowhere to live in a PR
+# check, and a soak short enough for one proves nothing a unit test does
+# not already prove (internal/telemetry/otlpexport_test.go has the
+# bounded, non-blocking and both-readers-agree assertions). This is the
+# thing you run on a spare machine before a release that touched the
+# export path, and whose table you paste into docs/leeway-design.md.
+#
+# Usage:
+#   dev/tools/soak-otlp                 # the 24 h exit-criterion run
+#   dev/tools/soak-otlp 30m             # a shorter confidence run
+#   LOOKOUT_SOAK_PUSH_INTERVAL=60s dev/tools/soak-otlp   # production cadence
+#
+# Env:
+#   LOOKOUT_SOAK_PUSH_INTERVAL  export cadence (default 10s, so a
+#                               bounded run still sees many failures)
+#   LOOKOUT_SOAK_SERIES         distinct label sets (default 2000)
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+cd "$(repo_root)"
+
+DURATION="${1:-24h}"
+case "$DURATION" in
+  -h|--help)
+    echo "Usage: dev/tools/soak-otlp [duration]   (default 24h)"
+    exit 0
+    ;;
+esac
+
+# The go test timeout has to outlast the soak itself, or the harness
+# kills the run just before it reports. An hour of headroom covers the
+# final flush into the black hole, which waits out one export deadline.
+if [[ ! "$DURATION" =~ ^([0-9]+)([smh])$ ]]; then
+  echo "soak-otlp: cannot parse duration '$DURATION' (want 90s, 30m, 24h)" >&2
+  exit 2
+fi
+case "${BASH_REMATCH[2]}" in
+  s) seconds=$(( BASH_REMATCH[1] )) ;;
+  m) seconds=$(( BASH_REMATCH[1] * 60 )) ;;
+  h) seconds=$(( BASH_REMATCH[1] * 3600 )) ;;
+esac
+TIMEOUT="$(( seconds + 3600 ))s"
+
+echo "▸ black-hole OTLP soak: duration=$DURATION go-test-timeout=$TIMEOUT"
+echo "  (interval=${LOOKOUT_SOAK_PUSH_INTERVAL:-10s} series=${LOOKOUT_SOAK_SERIES:-2000})"
+echo
+
+exec env LOOKOUT_SOAK=1 LOOKOUT_SOAK_DURATION="$DURATION" \
+  go test -v -count=1 -run 'TestSoak_ABlackHoledOTLPEndpoint' \
+  -timeout "$TIMEOUT" ./internal/telemetry/
