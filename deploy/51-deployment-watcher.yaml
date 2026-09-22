@@ -135,17 +135,31 @@ spec:
                 secretKeyRef:
                   name: lookout-watch-token
                   key: token
+            # Keep at ~80% of limits.memory. Without it the Go heap grows
+            # until the kernel OOM-kills the process, which loses the
+            # store's in-flight writes and every watch; with it the GC
+            # gets aggressive first, which is slow but survivable. The
+            # downward API cannot do arithmetic, so this tracks the limit
+            # below by hand — move them together.
+            - name: GOMEMLIMIT
+              value: "600MiB"
           ports:
             - name: metrics
               containerPort: 9090
               protocol: TCP
+          # Sized from the measured per-object cache cost, not from a
+          # round number: a trimmed pod is 18,630 B of retained heap on
+          # GKE and a node 5,308 B, so the top of the 1-15k pod range
+          # lookout calls typical is ~275 MiB of object cache before
+          # anything else allocates. 256Mi ran out at ~14k pods.
+          # See Operations -> Sizing for the table and the levers.
           resources:
             requests:
               cpu: "50m"
-              memory: "64Mi"
+              memory: "128Mi"
             limits:
               cpu: "200m"
-              memory: "256Mi"
+              memory: "768Mi"
           livenessProbe:
             httpGet:
               path: /healthz

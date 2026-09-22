@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The default memory limit is raised from 256Mi to 768Mi, and the manifests now
+  set `GOMEMLIMIT`.** Spike S8 measured what a cached object actually costs — a
+  trimmed pod is 18,630 B of *retained heap* on GKE, 1.7× its size on the wire —
+  and at that rate the pod cache alone exhausted 256Mi at about 14,000 pods,
+  inside the 1–15k range lookout calls typical. Requests move 64Mi → 128Mi,
+  limits 256Mi → 768Mi, and `GOMEMLIMIT: 600MiB` ships in both
+  `deploy/51-deployment-watcher.yaml` and the chart, so the GC gets aggressive
+  under pressure instead of the kernel OOM-killing the process and taking the
+  store's in-flight writes and every established watch with it. The new default
+  is derived from the measured per-object cost rather than rounded up, and
+  *Operations → Sizing* has the table by cluster size, the constants it comes
+  from, and the levers — `--exclude-namespace` is the one that cuts the cache
+  directly. Anyone who had already raised the limit is unaffected; anyone running
+  a cluster near the top of the range should also raise the *request*, or the
+  sentinel is the first thing evicted on a node under pressure. This is a
+  sentinel defect older than the leeway subsystem that measured it.
+
+- **`/metrics` now carries the standard Go and process collectors.** A bare
+  `prometheus.NewRegistry()` has neither, which left the sizing guidance above
+  unverifiable from lookout's own output — `process_resident_memory_bytes` is the
+  number the table predicts, and `go_memstats_heap_inuse_bytes` is what says
+  whether the object cache is responsible for it. Both the sentinel and the
+  standalone `leeway` binary register them. They are deliberately absent from the
+  generated metrics reference, which documents lookout's own instruments.
+
 - **`topology-drift`'s per-domain metrics now cost roughly half what they did,
   and there are three new ways to make them cost less.** `domain_objects` and
   `domain_expected` are subjects × topology keys × domains × states, which on a

@@ -26,7 +26,9 @@ single most expensive watch there is, and running two of them doubles
 the apiserver's outbound traffic and the memory held by the caches, in
 exchange for a second copy of numbers you already have. Consolidating
 onto one shared informer is a thing the sentinel went out of its way to
-do; standing a second process next to it undoes that in one step.
+do; standing a second process next to it undoes that in one step. [Sizing
+a sentinel](/operations/sizing/) is what that second cache costs — the
+pod-cache row applies unchanged here, because it is the same cache.
 
 There is no interlock that stops you. Nothing in either binary can see
 the other, and a cluster has no place to record "a sentinel is already

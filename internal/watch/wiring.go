@@ -37,6 +37,7 @@ import (
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
@@ -161,6 +162,18 @@ func realMain(argv []string) error {
 	// (multi-cluster; single-cluster N=1 still carries the label so
 	// several sentinels stay filterable in one Prometheus).
 	metricsReg := prometheus.NewRegistry()
+
+	// The standard Go and process collectors, which a bare registry does
+	// not get. They are not lookout's own metrics and so are absent from
+	// the generated reference page, but without them nobody can check the
+	// sizing table in Operations -> Sizing against the process it
+	// describes: process_resident_memory_bytes is the measurement, and
+	// go_memstats_heap_inuse_bytes is what says whether the cache or
+	// something else is responsible.
+	metricsReg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
 
 	// Readiness tracker behind /readyz (issue #285). Built before the
 	// server so the endpoint exists from the first moment it can be
