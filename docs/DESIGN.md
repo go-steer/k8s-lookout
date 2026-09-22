@@ -244,6 +244,36 @@ lookout net      probe --dns|--tcp|--http    # active checks (§5, phase M3)
 One release, one image, shared informer/client bootstrap, one output-envelope
 implementation, and the agent discovers the whole surface from one `--help`.
 
+**The one exception: `cmd/leeway`.** The repo builds a second binary, and it is
+named here rather than left to be discovered, because "one multicall binary" is
+the rule it departs from. `leeway` runs the placement subsystem — the
+topology-drift and compute-class sources of `docs/leeway-design.md` — against
+one cluster and exports their metrics, with no inject path, no store and no
+read-path commands. It exists for three things §2.4 of that document argues for:
+clusters not running lookout at all, a metrics-only deployment whose consumer is
+Grafana and a rotation rather than an agent, and isolating the subsystem under
+kwok for the scale runs.
+
+It is an **optional artifact, not a second user-facing CLI surface**. Nothing in
+it is reachable only from there — `lookout watch` runs the same two sources with
+a larger flag surface, a store and the inject path — so an operator choosing
+between them is choosing how much they want, never what is available. The
+argument against 25 binaries does not apply to it: it links the same client-go
+already linked, adds no SDK, and its whole cost is one more `go build` target.
+
+What it buys in return is enforcement. `docs/leeway-design.md` §2.4 names four
+layering disciplines the subsystem's embeddability rests on, and this binary is
+the thing that stops compiling when one slips — a property no amount of prose in
+`CONTRIBUTING.md` provides. The two that are import-graph properties are also
+checked directly, by `TestLayering_TheImportGraphMatchesTheDesign` in
+`pkg/sources`.
+
+**It must not run alongside `lookout watch` against the same cluster.** Both
+build a Pod informer, and a second one on the largest stream in the cluster is
+precisely the duplicate watch the shared-factory work exists to avoid. Run one or
+the other. `docs/site/src/content/docs/operations/leeway-standalone.md` states the
+constraint in operator-facing terms, alongside what the standalone gives up.
+
 ### 4.2 CLI contract
 
 - **Common flags:** `--namespace=<ns>|-A`, `--workload=<Kind>/<ns>/<name>`,
