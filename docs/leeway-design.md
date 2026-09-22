@@ -14,7 +14,8 @@ GKE managed collector is the OTLP endpoint, temporality is cumulative). **S7 is
 deferred by maintainer decision, and S6 closed without being run** — its question
 turned out to be answerable from the field-selector grammar rather than from a
 namespace count, and its method would have generalised an estate to a population.
-**S8 is the only spike still open**, and it does not gate Phase 1.
+**S8 resolved 2026-09-21, and every spike is now closed** — it found the pod memory
+model out by 12× (§6.1, §6.6) and shipped the kwok padding it existed to size.
 No spike gates a data model, and §7.7.2 carries no `UNVERIFIED` marker.
 **Tracking:** [#416](https://github.com/go-steer/k8s-lookout/issues/416)
 **Date:** 2026-09-16
@@ -887,10 +888,21 @@ never enter process memory; a `kubectl debug --env` container defeats it while
 every strip above still passes. The two container slices the sketch covered are
 the common case, not the boundary.
 
-**Consequence: the pod memory model in §6.6 needs remeasuring.** Retaining
-`ContainerStatuses` and the `Env` name/ref structure puts a trimmed pod well above
-the original ~1.5 KiB estimate. That is what spike **S8** exists to settle, and the
-tier table below should be treated as provisional until it does.
+**Consequence: the pod memory model in §6.6 was out by an order of magnitude, and
+spike S8 has now remeasured it (2026-09-21).** Retaining `ContainerStatuses` and the
+`Env` name/ref structure puts a trimmed pod at **18,630 B of retained heap** on
+`std-simian-test` and 10,007 B on a kind node — not the ~1.5 KiB above. The
+transform survives the measurement, but not the reason it was sold: it is a *wire*
+optimisation far more than a memory one, removing **40.6% of a pod's bytes and only
+25.7% of its heap**. §6.6 carries the corrected figures; §13 S8 carries the method
+and the two-cluster spread.
+
+The ~1.5 KiB was never reachable, either. It is quoted above as the standalone
+design stated it, and the strip it describes is *larger* than the one we ship — yet
+`ManagedFields` is already nil in the 18,630 B, so deleting the container statuses
+and the whole `Env` structure on top would have to find another 17 KB in a pod that
+does not contain it. The figure was an estimate presented as a measurement, which is
+the specific failure S8 exists to stop repeating.
 
 Nodes are simpler — nothing in the repo reads `status.images`, and it is the single
 largest node-side line item (10–40 KiB/node, ~2 GiB at 50k nodes):
@@ -1279,9 +1291,54 @@ opposite of how cluster scale is usually quoted.
 | Very large | 50,000 | 1,000,000 | 120,000 | 300 MiB | ~450 MiB |
 
 These are leeway's **marginal** cost. Object caches are the sentinel's and are
-already paid for — which is the entire quantitative case for §2.1. Absolute
-process footprint is lookout's number to own, and §6.1 means the pod-cache line in
-it has to be remeasured (spike S8).
+already paid for — which is the entire quantitative case for §2.1. The marginal
+columns stand; what spike **S8** corrected is the number they are marginal *to*.
+
+**Measured per-object cost (S8, 2026-09-21).** Arrows are before → after the §6.1
+transform. Retained heap is measured by holding 5,000 deep copies and reading
+`HeapAlloc`, not inferred from the wire size — `internal/watch/objectsize_test.go`
+is the measurement and re-runs against any cluster you point it at.
+
+| | `std-simian-test` (GKE 1.36) | kind |
+|---|---|---|
+| Pod, wire p50 | 18,164 → **10,788 B** | 7,854 → **4,284 B** |
+| Pod, retained heap | 25,068 → **18,630 B** | 13,393 → **10,007 B** |
+| Node, wire p50 | 25,163 → **3,381 B** | 6,888 → **1,823 B** |
+| Node, retained heap | 17,399 → **5,308 B** | 6,325 → **3,026 B** |
+
+Three things in there outlive the numbers:
+
+1. **Heap is not wire.** A trimmed GKE pod is 10,788 B on the wire and 18,630 B in
+   the cache — 1.7×. Every memory estimate in this document before S8 was derived
+   from serialised size, and that is where the order of magnitude went.
+2. **The pod transform is a ~25% heap win in both environments** (25.7% and 25.3%)
+   against a 40–46% wire win. Holding across two very unlike clusters is what makes
+   the *ratio* a mechanical one in the §13 S6 sense, quotable anywhere. The absolute
+   sizes are not: they are a population parameter, and they vary 1.9×.
+3. **The node transform is the large one** — 69.5% of heap on GKE, because
+   `status.images` is 25 entries there and nothing in the repo reads it.
+
+Extrapolating the shared object cache — lookout's number, not leeway's — from the
+GKE column, which is the conservative end:
+
+| Tier | Pods | Nodes | Shared object cache |
+|---|---|---|---|
+| Typical | 15,000 | 1,500 | ~275 MiB |
+| Baseline | 150,000 | 5,000 | ~2.6 GiB |
+| Large | 500,000 | 15,000 | ~8.8 GiB |
+| Very large | 1,000,000 | 50,000 | ~17.6 GiB |
+
+This is **extrapolation from measured per-object cost**, reported as such exactly as
+§12.1 requires of the 1M tier, and it counts only cached objects — no index
+overhead, no delta queue, nothing leeway adds.
+
+> **It also says the shipped default is too small, and that is the most actionable
+> thing S8 found.** `deploy/51-deployment-watcher.yaml` sets `memory: 256Mi`, which
+> the pod cache alone exhausts at **~14,000 GKE-sized pods** (~27,000 kind-sized
+> ones) — inside the 1–15k range lookout DESIGN §6.2 calls typical, and reached
+> before leeway allocates anything. This predates leeway and is not leeway's to fix,
+> but it is now measured rather than suspected, so it is filed against Phase 8 for
+> sizing guidance rather than left in a design document.
 
 The "Typical" row is added deliberately: lookout DESIGN §6.2 puts real clusters at
 1–15k pods, and at that size leeway costs single-digit MiB. The larger rows exist
@@ -3588,10 +3645,38 @@ What it buys, concretely:
 > be understated by the same factor.
 >
 > **Object padding is mandatory, not optional.** Node templates carry a realistic
-> `status.images` list; pod templates carry realistic managedFields, annotations, env
-> and container statuses, sized from percentiles measured on a real cluster (spike
-> **S8**). A CI check should assert the mean serialised object size in the fixture is
-> within tolerance of the measured p50, so fixtures cannot silently deflate over time.
+> `status.images` list; pod templates carry realistic annotations and env, sized from
+> percentiles measured on a real cluster (spike **S8**). A check asserts the mean
+> serialised object size in the fixture is within tolerance of the measured p50, so
+> fixtures cannot silently deflate over time.
+
+**Shipped 2026-09-21 with S8.** `pad_node_images`, `pad_pod_annotations` and
+`pad_pod_env` in `examples/kwok/lib.sh` do the padding (on by default; `KWOK_PAD=0`
+is a deliberate, loudly-announced opt-out), and `examples/kwok/verify-padding`
+enforces it — `scale-up` runs it for you. It measures the **applied** objects, not
+the manifests, because the largest thing a manifest cannot carry is `managedFields`,
+which the apiserver writes itself and which is 6 KB of a GKE pod. Two details are
+load-bearing and both cost time to find:
+
+- `kubectl get -o json` **strips `managedFields` by default**. Without
+  `--show-managed-fields` the check reads a third under the truth and a correctly
+  padded fixture fails itself. With it, kubectl and the Go measurement agree to
+  within 31 bytes, which is the only reason one can set the target the other asserts.
+- The padding separates a **target** (the real-cluster p50, reported) from a
+  **floor** (what the fixture actually reaches, enforced). The fixture lands at
+  83% of p50 for pods and 82% for nodes, and the gap is structural rather than
+  sloppy: kwok writes fewer `managedFields` entries, `status.conditions` is
+  deliberately unpadded because kwok's node stage owns that field and objectstate's
+  node detectors read it, and the node reaches its weight partly through
+  `last-applied-configuration`, which real nodes do not carry. Asserting the target
+  would fail forever; asserting nothing is how fixtures deflate.
+
+One finding from calibration is worth repeating because it fails so unhelpfully: do
+not pad with the beta AppArmor or alpha seccomp **pod annotations**. A kubelet that
+does not honour `container.apparmor.security.beta.kubernetes.io/*` rejects the pod,
+and behind a ReplicaSet that is an unbounded create-reject loop — 1,657 rejected
+pods from one replica before it was noticed. `examples/kwok/lib.sh` carries a comment
+saying so at the point where someone would add them back.
 
 **Practicalities.** etcd is the binding constraint, not our process: 200k pods needs a
 large machine and tuned etcd (`--quota-backend-bytes`, compaction interval). The 200k
@@ -3628,13 +3713,20 @@ the last two spikes that could have invalidated a data model. **No spike now gat
 data model.**
 
 **S4 and S5 closed 2026-09-16, S7 was deferred by the maintainer, and S6 closed
-2026-09-17 without being run**, which leaves **S8** as the only spike still open —
-and it does not gate Phase 1. S4 found what it expected (the managed control plane is
+2026-09-17 without being run.** S4 found what it expected (the managed control plane is
 unreadable) and spent its value on the mitigation instead; S5 answered all three of
 its questions, and answered the hardest one by reading the managed collector's own
 pipeline rather than by asking anyone. S6 is the odd one out and the most instructive:
 it was closed on its *method*, not on a finding, and the note below is as much about
 which spikes are worth running as about namespaces.
+
+**S8 closed 2026-09-21, and with it the whole spike programme.** It is the only
+spike that overturned a quantitative claim rather than confirming or narrowing one:
+the trimmed pod is 12× the assumed size, and the assumption had been carried, in
+writing, since the standalone design. It is also the only one whose output is code
+that keeps running — the padding and its check — rather than an amended paragraph.
+Both facts argue the same thing, which is that the spike worth running is the one
+measuring a number other numbers are derived from.
 
 | ID | Question | Unblocks | Effort |
 |---|---|---|---|
@@ -3645,7 +3737,7 @@ which spikes are worth running as about namespaces.
 | ~~S5~~ | ~~Prometheus series budget and OTLP backend~~ | **RESOLVED** — GMP (cost, not a cap), the GKE managed collector, cumulative | ~~0.25 d~~ |
 | ~~S6~~ | ~~Namespace count and watch-stream headroom~~ | **CLOSED without measuring** — the answer is the selector grammar, not a count; §6.7 rewritten, #431 shipped, #407 held | ~~0.25 d~~ |
 | ~~S7~~ | ~~Real pod event rate per scheduled pod~~ | **DEFERRED** by the maintainer — see below | ~~0.5 d~~ |
-| S8 | Real object sizes, for kwok padding and the trimmed-pod budget | §6.6, §12.1 validity | 0.5 d |
+| ~~S8~~ | ~~Real object sizes, for kwok padding and the trimmed-pod budget~~ | **RESOLVED** — §6.1 and §6.6 corrected (a trimmed pod is 18.6 KB of heap, not 1.5 KiB); padding shipped and enforced | ~~0.5 d~~ |
 | ~~S9~~ | ~~Does any source need terminal pods, or fields the transform strips?~~ | **RESOLVED** — §6.1 amended | done |
 | ~~S10~~ | ~~How much of §6.2 / §8.2 does `pkg/graph` + `pkg/engine` already provide?~~ | **RESOLVED** — §6.2 and §8.2 amended | done |
 | ~~S11~~ | ~~Cost of migrating the sentinel's ~30 metrics to the OTEL API~~ | **RESOLVED** — §8.4 amended; migration descoped | done |
@@ -3939,7 +4031,10 @@ future spike on this design:
 - **Mechanical ratios** — measure them anywhere, because estate bias is
   second-order. Events per pod lifecycle (S7), the §6.1 transform's reduction ratio
   (S8): these are properties of Kubernetes and of our code, and one cluster's answer
-  is approximately every cluster's answer.
+  is approximately every cluster's answer. **S8 later tested this split and it
+  held** — the transform's pod-heap ratio came out 25.7% on GKE and 25.3% on kind,
+  while the absolute pod size varied 1.9× between the same two clusters. Same spike,
+  same objects: the ratio generalises, the size does not.
 - **Population parameters** — never sample these, *declare* them as a support
   envelope. Namespace counts, pod-spec fatness, pod distribution across namespaces:
   these are properties of who is running the software, and a sample of the clusters
@@ -3965,11 +4060,35 @@ number the whole CPU budget scales off. *Method:* a throwaway watch on the busie
 cluster counting pod events over an hour against pods scheduled in the same window.
 *Done when* the multiplier is measured.
 
-**S8 — Real object sizes.** Now doing double duty: it sizes the kwok padding *and*
-settles the trimmed-pod budget that §6.1's narrowed transform invalidated. *Method:*
-sample p50/p95/p99 serialised sizes of `Pod` and `Node` on a real cluster, before and
-after the §6.1 transform, plus the `status.images` length distribution. *Done when* the
-kwok templates are padded to match and the §6.6 tiers are confirmed or corrected.
+**~~S8 — Real object sizes.~~ RESOLVED 2026-09-21, and it corrected the design.**
+Double duty as planned: it sized the kwok padding *and* settled the trimmed-pod
+budget that §6.1's narrowed transform invalidated. *Method:* `Pod` and `Node`
+sampled on two live clusters — `std-simian-test` (GKE 1.36) and a kind node —
+serialised before and after the real `sharedTransform`, plus the `status.images`
+length distribution, plus retained heap measured directly by holding 5,000 deep
+copies. The measurement is committed as `internal/watch/objectsize_test.go`,
+env-gated on `LOOKOUT_MEASURE_CONTEXT` and asserting nothing, so it re-runs against
+any cluster without becoming a test that fails on somebody else's hardware.
+
+Findings, in descending order of how much they changed:
+
+- **A trimmed pod is 18,630 B of retained heap, not ~1.5 KiB — 12× out.** §6.1 and
+  §6.6 are corrected. The error's mechanism is worth more than the number: memory
+  had been derived from serialised size, and a trimmed GKE pod is 1.7× larger in the
+  heap than on the wire.
+- **The default `memory: 256Mi` is exhausted by the pod cache at ~14k pods**, inside
+  the range DESIGN §6.2 calls typical. Not leeway's bug and not leeway's to fix, but
+  measured now rather than suspected.
+- **The transform's *ratios* are stable across both clusters** (pod heap 25.7% /
+  25.3%) while the absolute sizes vary 1.9×. That is the S6 mechanical-ratio versus
+  population-parameter split showing up again, in the one spike that measured both
+  kinds of quantity at once — and it is why the padding targets are quoted from GKE
+  and the tolerance is a floor rather than a band.
+- **Two measurement traps**, both of which produced confidently wrong numbers first:
+  `kubectl get -o json` silently strips `managedFields` (34% of a pod), and a Go
+  heap measurement that only takes `len()` of the slice it allocated measures
+  nothing, because the compiler proves the copies dead before the GC runs. §12.1
+  carries the first; the test carries a comment about the second.
 
 **S9 — Shared-transform safety. RESOLVED (2026-09-15), with one design change.**
 Four findings, all by inspection of this repo:
@@ -4107,7 +4226,7 @@ independent of 5.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**, S6 **closed unrun** (2026-09-17 — the selector grammar answered it); only S8 remains, and it does not gate Phase 1 | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
+| **0 — Spikes** (0.5 wk) | S1–S5 and S9–S11 **done**, S7 **deferred**, S6 **closed unrun** (2026-09-17 — the selector grammar answered it), **S8 resolved 2026-09-21** — the trimmed pod is 12× the assumed size (§6.1, §6.6) and the kwok padding it existed to size is shipped and enforced. **The spike programme is complete** | Package boundaries fixed (done); OTLP scope known (done); §7.7 transition model settled (done); scoring semantics settled (done); §8.4 export defaults measured rather than guessed (done); FR-9 mitigation designed (done); transform registry written (done) |
 | **1 — Engine** (2 wks) | `pkg/leeway`: intent model, eligibility, apportionment, scoring. No informers, no source | Property tests green; zero client-go imports, enforced by test |
 | **2 — Source skeleton** (2 wks) | `topology-drift` source, **default-on**: delta application, indexes, domain inventory, verifier, metrics on the OTEL API. Shared-transform change per S9, gated on its preserved-field registry | Counters provably correct under property tests at 10k pods; existing source tests still green; **transform attached (done, 2026-09-17)** — `newSharedFactory` is the single construction site and a cache-boundary test fails if the option is dropped; **domain inventory + `Placement` done, 2026-09-17**; **indexes, delta rules and subject resolution done, 2026-09-17** — counters checked against a from-scratch recount after 60k mixed events over 10k pods; **source skeleton, coalescing queue and OTEL instruments done, 2026-09-17** — the source runs against a live informer set and emits nothing, and the exported Prometheus names are pinned against the real exporter; **wired into the sentinel default-on, 2026-09-17** — `--topology-keys` and `--topology-per-domain-series`, no new watch stream and no new grant, and the bridged metrics documented against a real exporter because `MetricsInventory` cannot derive them; **§6.5 verifier done, 2026-09-17** — one shard of subjects rebuilt from the pod cache every 5 minutes, `lookout_leeway_counter_mismatch_total` on disagreement, repaired in place, proven by replaying the 60k-event churn with 1 event in 12 dropped. **Phase 2 complete.** |
 | **3 — Intent inference** (2 wks) | TSC, affinity/anti-affinity, node selectors, tolerations, volume pinning, cluster defaults, precedence. **FR-7's node predicate done, 2026-09-18** — `Constraints` is read from an admitted Pod (never a template, per the S3 injection finding) and decides `MatchesSelector`/`Tolerated` for `NodeViews`, so §7.1 eligibility is now real; the §7.7.6 class-pinned arrangement is a test asserting zero drift rather than maximal skew. **COMPLETE 2026-09-19** — FR-4…FR-10 all shipped, ending with the three-state cluster defaults (FR-9) and the policy CRD (FR-10), and both exit criteria are now standing tests: a 22-scenario intent corpus exhaustive per axis, and a false-positive corpus scored end to end through `Resolve` → `Apportion` → `Score` → `Breach`. Nothing emits yet — that is Phase 4, which owns the state machine, dwell, hysteresis, tiers and severity routing | Correct intent on the scenario corpus; false-positive corpus clean |
@@ -4143,9 +4262,14 @@ paper and nobody had seen.
 keys" reads as desk work you could skip, and skipping it would have shipped a
 `Reservation string` that silently conflates same-named reservations in different
 projects — a wrong answer on exactly the multi-project clusters least able to notice.
-The keys were as predicted; the *arity* was not. S8 is now the remaining gate, a softer
-one on Phase 8: without it, the scale numbers are measured against undersized objects
-and mean nothing.
+The keys were as predicted; the *arity* was not.
+
+**S8 is the fourth shape, and the only one that made the design wrong rather than
+incomplete.** Every other spike confirmed a claim, narrowed one, or deleted work.
+S8 took a number the document had carried since the standalone design — the trimmed
+pod at ~1.5 KiB — and found it 12× out, which in turn was the difference between
+Phase 8's scale gate meaning something and being theatre. It had been sitting at the
+bottom of the list as the soft one.
 
 Phases 1–4 are a shippable increment at around week 9: declared and inferred intent,
 findings, restart-safe, no baselines and no compute classes.
@@ -4175,9 +4299,11 @@ findings, restart-safe, no baselines and no compute classes.
 3. ~~Scale posture~~ — **resolved 2026-09-15: the higher targets stand, and
    DESIGN §6.2 was edited.** 200k pods and 500 pods/sec are now the repo's stated
    design point, split across the two axes they were always two answers to. See
-   §2.5 item 2 and DESIGN §6.2. Residual: **S8**, which remeasures the pod-cache
-   line that §6.1's narrowed transform invalidated, and therefore the §6.6 tier
-   table.
+   §2.5 item 2 and DESIGN §6.2. **Residual closed 2026-09-21 by S8**, which
+   remeasured the pod-cache line §6.1's narrowed transform invalidated: 18,630 B per
+   trimmed pod, so the shared cache at the 200k design point is ~3.5 GiB and the
+   shipped 256Mi default is undersized from ~14k pods. The §6.6 tiers are corrected;
+   the sizing consequence is Phase 8's.
 4. ~~Should `topology-drift` be enabled by default?~~ — **resolved 2026-09-15:
    yes, default-on.** §8.3 routes Tier C to metrics only, so the default
    deployment adds roughly zero agent sessions, and a drift detector nobody turns
@@ -4188,7 +4314,8 @@ findings, restart-safe, no baselines and no compute classes.
    deliverable** — the preserved-field registry and the test that fails when a field
    is added to the strip list without an entry. Until that lands, the source builds
    default-on but the transform stays off, which costs only the pod-cache memory
-   S8 is measuring. Both land in Phase 2.
+   S8 has since measured (25.7% of a pod's heap, 40.6% of its bytes). Both landed in
+   Phase 2.
 5. **Is fallback depth per-workload or per-class?** §7.7 aggregates per axis by
    default. If two Deployments share a class but only one is falling back, per-axis
    metrics hide it — but per-subject labels multiply cardinality.

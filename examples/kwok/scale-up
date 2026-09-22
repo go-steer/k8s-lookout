@@ -241,6 +241,7 @@ status:
     kubeletVersion: fake
     operatingSystem: linux
   phase: Running
+$(pad_node_images)
 EOF
   done
 }
@@ -430,6 +431,7 @@ spec:
       labels:
         app: ${name}
         ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
+$(pad_pod_annotations)
     spec:
       nodeSelector:
         type: kwok
@@ -477,6 +479,7 @@ EOF
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: 500m, memory: 512Mi}
+$(pad_pod_env)
 EOF
 
   ((arch == 6)) && printf '        securityContext:\n          privileged: true\n'
@@ -507,6 +510,11 @@ while :; do
   sleep 5
 done
 ((running >= pods)) && printf '\r  ✓ %s pods Running          \n' "$running"
+
+# A fleet that is up but underweight is worse than no fleet: it produces
+# numbers, and the numbers are wrong in the flattering direction. Check
+# before anyone can quote them.
+"$(kwok_root)/verify-padding"
 
 echo
 echo "Fleet up:"
