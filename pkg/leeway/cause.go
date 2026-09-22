@@ -145,9 +145,10 @@ type EvidenceGaps struct {
 	// pod-level corroboration that makes the finding actionable.
 	Capacity bool
 
-	// Consolidation means DomainFacts.ConsolidatedAt is unanswered on every
-	// domain, and CauseConsolidation cannot be reached.
-	Consolidation bool
+	// There is deliberately no Consolidation flag. ConsolidatedAt is read off
+	// the node object by whoever is already watching nodes, so a caller that
+	// can populate Domains at all can answer it, and a gap that cannot occur
+	// should not be representable.
 
 	// RolloutCompletion means RolloutEndedAt is unanswered, and
 	// CauseRolloutBias cannot be reached.
@@ -159,9 +160,6 @@ type EvidenceGaps struct {
 // all — a cause that was tested and lost is not untested, it is ruled out.
 func (g EvidenceGaps) untested() []SuspectedCause {
 	var out []SuspectedCause
-	if g.Consolidation {
-		out = append(out, CauseConsolidation)
-	}
 	if g.RolloutCompletion {
 		out = append(out, CauseRolloutBias)
 	}

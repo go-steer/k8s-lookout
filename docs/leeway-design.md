@@ -3452,6 +3452,47 @@ pipeline is for.
 > restart, never gets a stamp: inventing one would make every subject in the
 > cluster look freshly rolled out for the length of the attribution window.
 >
+> **`consolidatedAt` shipped 2026-09-22 (#474) — §8.5 now has every row it
+> was designed with, and closes OQ 8.** Not a sibling source, which is the
+> surprise: the autoscaler announces itself on the node object, with a taint
+> nobody else applies, and this source is already the one watching nodes.
+> `ToBeDeletedByClusterAutoscaler` and Karpenter's `karpenter.sh/disrupted` are
+> the positive evidence; `DeletionCandidateOfClusterAutoscaler` deliberately is
+> not, because cluster-autoscaler adds and removes it as utilisation moves and
+> counting a candidacy would attribute drift to a consolidation that never
+> happened. That closed set is a constant rather than a flag, unlike FR-3's
+> node-group labels: those vary per cloud provider because the *name* of a pool
+> does, whereas a third autoscaler needs a line of code, not a deployment-time
+> decision.
+>
+> **The claim only becomes a consolidation when the node actually leaves.** The
+> stamp is read once, at removal, so an autoscaler that withdraws a claim —
+> which both of them do — leaves no trace. That is the opposite of `cordonedAt`,
+> which survives an uncordon on purpose, and the asymmetry is the two rungs':
+> a drain's evicted pods are still landing after the node comes back, while a
+> node that outlived the decision about it was never consolidated. The
+> unclaimed cases fall where they should: a preemption or a repair is a
+> ready-count fall and therefore a shortfall, and an operator's cordon is
+> `taint_exclusion`.
+>
+> It is stored as a **per-domain latch**, not a log of removals, because that is
+> the shape of the question — an autoscaler packing forty nodes out of a zone is
+> one answer, not forty — and because it bounds the memory by the cluster's
+> domain count rather than by its churn. Dating follows `cordonTime`'s rules,
+> with one addition worth having: cluster-autoscaler writes no `TimeAdded` but
+> puts the deletion time in the taint's *value*, which survives us, so the
+> common case recovers a real answer across a restart where an undated taint
+> would have to report nothing rather than guess `now`. The latch is pruned on
+> the attribution window, taken at the call site rather than inherited from the
+> ready series' retention: the two happen to compare today, and a consolidation
+> outliving its own rule because an unrelated outage window grew would be an
+> accident rather than a design.
+>
+> With a producer in place, `EvidenceGaps` loses its `Consolidation` flag
+> entirely. A gap that cannot occur should not be representable — any caller
+> able to populate `Domains` at all can answer this one — so the struct now
+> names exactly the two seams that can genuinely be absent.
+>
 > **A missing source is now distinguishable from a ruled-out cause.**
 > `Evidence.Unavailable` names the sibling sources this deployment could not
 > consult, and `Attribute` turns it into the payload's `untestedCauses` — the
@@ -4652,6 +4693,13 @@ findings, restart-safe, no baselines and no compute classes.
    drift by design. Default Karpenter-managed pools to `Ignore` on zone, or alert with
    consolidation as an annotated suspected cause? Leaning the latter — intentional and
    safe are not the same thing.
+   **Resolved 2026-09-22 (#474): the latter, and with no Karpenter-specific
+   configuration at all.** A consolidation is recognised from the disruption taint
+   the autoscaler puts on the node it is removing, so it is a `suspectedCause:
+   consolidation` on the ordinary finding rather than a pool-level `Ignore` — see
+   §8.5. Defaulting managed pools to `Ignore` would have required knowing which
+   pools an autoscaler owns *and* would have silenced the imbalances it did not
+   cause. No residual.
 9. **Descheduler integration.** Emitting a
    `RemovePodsViolatingTopologySpreadConstraint` hint is a natural v2 and sits
    uncomfortably against lookout's read-only posture. Worth reserving surface now?

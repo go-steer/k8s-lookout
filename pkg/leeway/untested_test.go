@@ -39,12 +39,12 @@ func TestAttribute_AFullSourceSetLeavesNothingUntested(t *testing.T) {
 // The distinction #474 exists for: an unexplained finding on a deployment
 // missing two sources must not read as "we looked and found nothing".
 func TestAttribute_AMissingSourceIsNotARuledOutCause(t *testing.T) {
-	gaps := EvidenceGaps{Capacity: true, Consolidation: true, RolloutCompletion: true}
+	gaps := EvidenceGaps{Capacity: true, RolloutCompletion: true}
 	a := attribute(drifted(), Evidence{Unavailable: gaps})
 	if a.Cause != CauseUnknown {
 		t.Fatalf("Cause = %q, want %q", a.Cause, CauseUnknown)
 	}
-	want := []SuspectedCause{CauseConsolidation, CauseRolloutBias}
+	want := []SuspectedCause{CauseRolloutBias}
 	if !slices.Equal(a.Untested, want) {
 		t.Errorf("Untested = %v, want %v", a.Untested, want)
 	}
@@ -72,30 +72,39 @@ func TestAttribute_AMissingCapacitySourceStillReachesTheShortfall(t *testing.T) 
 // answer it found — listing it would make every finding look uncertain while
 // telling the reader nothing they would act on.
 func TestAttribute_OnlyCausesMoreSpecificThanTheWinnerAreReported(t *testing.T) {
-	gaps := EvidenceGaps{Consolidation: true, RolloutCompletion: true}
+	gaps := EvidenceGaps{RolloutCompletion: true}
 
-	outage := attribute(drifted(), Evidence{
-		Domains:     map[Domain]DomainFacts{zoneC: {ReadyNodes: 3, NotReadyNodes: 9}},
-		Unavailable: gaps,
-	})
-	if outage.Cause != CauseDomainOutage {
-		t.Fatalf("Cause = %q, want %q", outage.Cause, CauseDomainOutage)
-	}
-	if len(outage.Untested) != 0 {
-		t.Errorf("Untested = %v; nothing outranks an outage", outage.Untested)
+	for _, tc := range []struct {
+		name  string
+		facts DomainFacts
+		cause SuspectedCause
+	}{
+		{"an outage", DomainFacts{ReadyNodes: 3, NotReadyNodes: 9}, CauseDomainOutage},
+		{"a consolidation", DomainFacts{ReadyNodes: 12, PeakReadyNodes: 12, ConsolidatedAt: cago(5 * time.Minute)}, CauseConsolidation},
+		{"a taint", DomainFacts{ReadyNodes: 12, PeakReadyNodes: 12, TaintedAt: cago(5 * time.Minute)}, CauseTaintExclusion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := attribute(drifted(), Evidence{
+				Domains:     map[Domain]DomainFacts{zoneC: tc.facts},
+				Unavailable: gaps,
+			})
+			if a.Cause != tc.cause {
+				t.Fatalf("Cause = %q, want %q", a.Cause, tc.cause)
+			}
+			if len(a.Untested) != 0 {
+				t.Errorf("Untested = %v; %s outranks rollout bias", a.Untested, tc.name)
+			}
+		})
 	}
 
-	// A taint ranks below consolidation and above rollout bias, so exactly one
-	// of the two gaps survives the filter.
-	tainted := attribute(drifted(), Evidence{
-		Domains:     map[Domain]DomainFacts{zoneC: {ReadyNodes: 12, PeakReadyNodes: 12, TaintedAt: cago(5 * time.Minute)}},
-		Unavailable: gaps,
-	})
-	if tainted.Cause != CauseTaintExclusion {
-		t.Fatalf("Cause = %q, want %q", tainted.Cause, CauseTaintExclusion)
+	// Nothing on the ladder answered, which is the one case where an untested
+	// cause is worth the reader's attention.
+	unexplained := attribute(drifted(), Evidence{Unavailable: gaps})
+	if unexplained.Cause != CauseUnknown {
+		t.Fatalf("Cause = %q, want %q", unexplained.Cause, CauseUnknown)
 	}
-	if want := []SuspectedCause{CauseConsolidation}; !slices.Equal(tainted.Untested, want) {
-		t.Errorf("Untested = %v, want %v", tainted.Untested, want)
+	if want := []SuspectedCause{CauseRolloutBias}; !slices.Equal(unexplained.Untested, want) {
+		t.Errorf("Untested = %v, want %v", unexplained.Untested, want)
 	}
 }
 
@@ -104,11 +113,11 @@ func TestAttribute_OnlyCausesMoreSpecificThanTheWinnerAreReported(t *testing.T) 
 // sweep and the emit is exactly where an unexplained finding turns up.
 func TestAttribute_ANilScoresStillReportsWhatWasUntested(t *testing.T) {
 	var s *Scores
-	a := attribute(s, Evidence{Unavailable: EvidenceGaps{Consolidation: true}})
+	a := attribute(s, Evidence{Unavailable: EvidenceGaps{RolloutCompletion: true}})
 	if a.Cause != CauseUnknown {
 		t.Fatalf("Cause = %q, want %q", a.Cause, CauseUnknown)
 	}
-	if want := []SuspectedCause{CauseConsolidation}; !slices.Equal(a.Untested, want) {
+	if want := []SuspectedCause{CauseRolloutBias}; !slices.Equal(a.Untested, want) {
 		t.Errorf("Untested = %v, want %v", a.Untested, want)
 	}
 }

@@ -1223,6 +1223,11 @@ func (s *Source) sampleCluster(now time.Time) {
 	// whose nodes are gone is only still knowable through its history.
 	s.sampleDomains(now)
 
+	// The attribution window, read here rather than inherited from the ready
+	// retention: §8.5 keeps a consolidation for exactly as long as it could
+	// still explain a finding.
+	s.inv.PruneConsolidations(now, s.cfg.Cause.Window)
+
 	// Both rollout oracles are sampled here rather than read per subject: each
 	// builds a cluster-wide answer, and an evaluation pass covers tens of
 	// thousands of subjects. A snapshot one tick stale costs nothing either
