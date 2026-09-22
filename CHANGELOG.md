@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The kwok scale harness now builds objects the weight of real ones, and
+  checks that they stay that way.** `examples/kwok/scale-up` produced pods and
+  nodes several times smaller than a real cluster's, because the bytes that make
+  a real object big — `managedFields`, `status.images`, annotations, container
+  env — are exactly the bytes a synthetic one does not have. Every scale run
+  therefore passed every memory budget while validating nothing, and understated
+  decode cost by the same factor, since that scales with wire size. Node and pod
+  templates are now padded to percentiles measured on live clusters, and
+  `examples/kwok/verify-padding` (which `scale-up` runs for you) fails the run if
+  the fixture drifts back below a floor. Set `KWOK_PAD=0` to opt out; it says
+  loudly that the run's numbers are no longer comparable. The measurement behind
+  the targets is `internal/watch/objectsize_test.go`, which is skipped unless you
+  point `LOOKOUT_MEASURE_CONTEXT` at a cluster and never asserts anything, so it
+  can be re-run against your own.
+
 - **`topology-drift` now apportions its expected distribution by allocatable CPU
   when a workload's eligible zones are materially different sizes.** Until now
   every workload was expected to spread evenly, which is wrong on any cluster

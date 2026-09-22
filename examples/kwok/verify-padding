@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# verify-padding — assert the synthetic fleet's objects are the size real
+# ones are. Spike S8's durable half.
+#
+# The measurement in internal/watch/objectsize_test.go establishes what a
+# Pod and a Node actually weigh; padding the templates to match is a
+# one-time act; this is what stops them drifting back. Without it the
+# failure is silent and slow: somebody trims a template to make a
+# scenario readable, every scale number in §6.6 quietly gets better, and
+# nothing anywhere says the fixture stopped resembling a cluster.
+#
+# It measures the APPLIED objects rather than the manifests, because the
+# largest single thing a manifest cannot carry is managedFields — the
+# apiserver writes that itself, and it is real bulk.
+#
+# Run after scale-up; scale-up runs it for you.
+#
+#   examples/kwok/verify-padding
+
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+require_kwok_installed
+
+if ! ((KWOK_PAD)); then
+  echo "▸ padding check skipped: KWOK_PAD=0"
+  echo "  This run's object sizes are not comparable to §6.6 — do not quote"
+  echo "  its numbers as a scale result."
+  exit 0
+fi
+
+# mean_size <kubectl-args...> — mean serialised bytes of the listed
+# objects.
+#
+# --show-managed-fields is not optional and is the whole reason this
+# function exists rather than being inlined. kubectl STRIPS managedFields
+# from -o json by default, and managedFields is 5–6 KB of a pod: without
+# the flag this reads a third under the truth, and a correctly padded
+# fixture fails its own check.
+#
+# tojson is the compact form, which is what the Go measurement in
+# internal/watch/objectsize_test.go produces too. The two agreed to within
+# 31 bytes on the same cluster, which is the only reason the targets below
+# can be quoted from one and asserted by the other.
+mean_size() {
+  kubectl "$@" --show-managed-fields -o json |
+    jq -r '[.items[] | (. | tojson | length)] | if length == 0 then "0 0" else "\(add) \(length)" end' |
+    awk '{ if ($2 == 0) print 0; else printf "%d\n", $1 / $2 }'
+}
+
+# check <label> <measured> <floor> <target>
+#
+# The floor is enforced; the target is reported. A fixture below the floor
+# has been trimmed and the run is worthless. A fixture between the two is
+# the expected state — see lib.sh for the two shortfalls that are
+# structural — and printing the ratio is how that stays visible rather
+# than becoming folklore.
+check() {
+  local label="$1" got="$2" floor="$3" target="$4"
+  if ((got < floor)); then
+    echo "  ✗ $label: mean ${got} B, below the ${floor} B floor" >&2
+    return 1
+  fi
+  echo "  ✓ $label: mean ${got} B — ${floor} B floor, $((got * 100 / target))% of the ${target} B real-cluster p50"
+}
+
+echo "▸ checking the synthetic fleet is the weight of a real one"
+
+pods="$(mean_size get pods -A -l "$FLEET_LABEL")"
+nodes="$(mean_size get nodes -l "$FAKE_NODE_LABEL")"
+
+if ((pods == 0)); then
+  echo "ERROR: no fleet pods found — run examples/kwok/scale-up first" >&2
+  exit 1
+fi
+
+rc=0
+check "Pod " "$pods" "$PAD_POD_FLOOR_BYTES" "$PAD_POD_TARGET_BYTES" || rc=1
+check "Node" "$nodes" "$PAD_NODE_FLOOR_BYTES" "$PAD_NODE_TARGET_BYTES" || rc=1
+
+if ((rc)); then
+  cat >&2 <<EOF
+
+The fixture has deflated. kwok objects that are lighter than real ones
+make every §6.6 budget pass while validating nothing, and understate the
+CPU model by the same factor, since decode cost scales with wire size.
+
+Either restore the padding (pad_node_images / pad_pod_annotations /
+pad_pod_env in examples/kwok/lib.sh), or — if real objects have genuinely
+got smaller — re-measure and move the targets:
+
+  LOOKOUT_MEASURE_CONTEXT=<ctx> go test ./internal/watch -run ObjectSizes -v
+EOF
+  exit 1
+fi
