@@ -241,6 +241,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `rollout` source cost a full core on clusters with a few thousand
+  Deployments, and on a large enough one the sentinel never became ready at
+  all.** Every Deployment, ReplicaSet and StatefulSet event swept the whole
+  fleet, and every Deployment in that sweep scanned every ReplicaSet in the
+  cluster to find the handful it owns — so one ReplicaSet status write cost
+  *deployments × replicasets* of work, on a single handler goroutine that no
+  amount of machine helps. Measured on a 403-node fleet with 2,883 Deployments
+  and 6,318 ReplicaSets: the sentinel sat at a flat 107% of one core, drained
+  its watch backlog at 16 events/s, climbed past 3.0 GiB of RSS and was still
+  reporting `/readyz` 503 twenty-four minutes in — which means a Deployment of
+  it never finishes rolling out, and, worse, a cluster reads as healthy because
+  nothing has looked at it yet. Ownership is now an index built once per sweep,
+  and workload events ask for a sweep within a one-second coalescing window
+  instead of performing one each. Same fleet after the fix: ready in 28 s,
+  0.1–0.5% of a core, 788 MiB. Detection latency for a stall is unchanged in
+  practice — the verdict was always gated on a three-minute observation window
+  and a fifteen-second clock — but a rollout-completion timestamp can now land
+  up to a second later than the event that completed it, which is invisible
+  against the five-minute recovery stability window it feeds.
+
 - **`lookout_leeway_evaluation_duration_seconds` had the wrong bucket
   boundaries, so every quantile drawn off it was an artefact.** The instrument
   is declared in seconds but carried no explicit boundaries, and OpenTelemetry's

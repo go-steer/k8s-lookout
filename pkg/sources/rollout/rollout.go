@@ -110,6 +110,16 @@ type Config struct {
 	// producing informer updates — the clock has to notice) and the
 	// state-TTL prune. Default 15s.
 	TickInterval time.Duration
+	// CoalesceWindow is how long a workload event waits for company
+	// before it earns a sweep of its own (issue #493). A sweep costs
+	// O(deployments + replicasets) however many events provoked it,
+	// so the window is what decouples this source's CPU from the
+	// cluster's write rate: a rollout across a thousand Deployments
+	// is one sweep per window, not one per status write. Default 1s —
+	// small enough that detection latency stays under the resolution
+	// of anything §7.4 asserts, large enough that a fleet-wide
+	// rolling restart cannot turn the sweep into a busy loop.
+	CoalesceWindow time.Duration
 	// StateTTL bounds per-object memory (safety net behind
 	// DeleteFunc). Default 24h.
 	StateTTL time.Duration
@@ -118,10 +128,11 @@ type Config struct {
 // DefaultConfig returns the shipped thresholds.
 func DefaultConfig() Config {
 	return Config{
-		Observe:       3 * time.Minute,
-		OldReadyRatio: 0.9,
-		TickInterval:  15 * time.Second,
-		StateTTL:      24 * time.Hour,
+		Observe:        3 * time.Minute,
+		OldReadyRatio:  0.9,
+		TickInterval:   15 * time.Second,
+		CoalesceWindow: time.Second,
+		StateTTL:       24 * time.Hour,
 	}
 }
 
@@ -136,6 +147,9 @@ func (c Config) normalize() Config {
 	}
 	if c.TickInterval <= 0 {
 		c.TickInterval = d.TickInterval
+	}
+	if c.CoalesceWindow <= 0 {
+		c.CoalesceWindow = d.CoalesceWindow
 	}
 	if c.StateTTL <= 0 {
 		c.StateTTL = d.StateTTL
@@ -214,6 +228,15 @@ type Source struct {
 	// sentinel sources and the graph).
 	factory informers.SharedInformerFactory
 
+	// dirty carries "a workload changed, sweep soon" from the informer
+	// handlers to Run's loop. Capacity 1 and a non-blocking send: the
+	// signal is a boolean, so a thousand events between two sweeps
+	// collapse into the one token already queued. Created in New and
+	// never reassigned, so the handler goroutines read it without the
+	// mutex; nothing reads it at all in the unit tests that drive the
+	// handlers directly and sweep by hand.
+	dirty chan struct{}
+
 	mu sync.Mutex
 	// armed flips true after every informer cache syncs (§7.2
 	// restart discipline — see the package comment).
@@ -236,6 +259,7 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 	return &Source{
 		client:       client,
 		cfg:          cfg.normalize(),
+		dirty:        make(chan struct{}, 1),
 		deployments:  make(map[types.UID]*objEntry[*appsv1.Deployment]),
 		replicasets:  make(map[types.UID]*objEntry[*appsv1.ReplicaSet]),
 		statefulsets: make(map[types.UID]*objEntry[*appsv1.StatefulSet]),
@@ -377,13 +401,33 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.armed = true
 	s.mu.Unlock()
 
+	// Two things provoke a sweep and they answer different questions.
+	// The ticker is the clock: a stalled rollout produces no informer
+	// traffic at all, so nothing but elapsed time can notice it. The
+	// coalescing timer is the events: a rollout that IS moving should
+	// be re-judged promptly, but at most once per window however many
+	// objects moved (issue #493).
 	ticker := time.NewTicker(s.cfg.TickInterval)
 	defer ticker.Stop()
+	coalesce := time.NewTimer(0)
+	if !coalesce.Stop() {
+		<-coalesce.C
+	}
+	defer coalesce.Stop()
+	pending := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			s.send(s.sweep(s.clock()))
+		case <-s.dirty:
+			if !pending {
+				pending = true
+				coalesce.Reset(s.cfg.CoalesceWindow)
+			}
+		case <-coalesce.C:
+			pending = false
 			s.send(s.sweep(s.clock()))
 		}
 	}
@@ -421,14 +465,32 @@ func (s *Source) asPod(obj any, fn func(*corev1.Pod)) {
 	}
 }
 
-// ---- informer handlers: record state, evaluate on workload/RS touches ----
+// ---- informer handlers: record state, ask for a sweep ----
+
+// markDirty asks Run's loop for a sweep within CoalesceWindow.
+//
+// Never sweeps inline. Before issue #493 each of the three workload
+// handlers did, and a sweep is O(deployments + replicasets) — so on a
+// cluster with a few thousand Deployments the source spent a full core
+// re-deciding the whole fleet's rollout state on every ReplicaSet status
+// write, which on a 400-node fleet was enough that the sentinel never
+// reached /readyz at all. The sweep was already designed to run on a
+// clock (see observeRolloutEdges' comment, which makes exactly this
+// argument about exactly this cost); the inline calls were a latency
+// optimisation that quietly turned the write rate into a CPU cost.
+func (s *Source) markDirty() {
+	select {
+	case s.dirty <- struct{}{}:
+	default: // a sweep is already pending; it will see this object too
+	}
+}
 
 func (s *Source) onDeployment(d *appsv1.Deployment) {
 	now := s.clock()
 	s.mu.Lock()
 	s.deployments[d.UID] = &objEntry[*appsv1.Deployment]{obj: d, lastSeen: now}
 	s.mu.Unlock()
-	s.send(s.sweep(now))
+	s.markDirty()
 }
 
 func (s *Source) onDeploymentDelete(d *appsv1.Deployment) {
@@ -443,7 +505,7 @@ func (s *Source) onReplicaSet(rs *appsv1.ReplicaSet) {
 	s.mu.Lock()
 	s.replicasets[rs.UID] = &objEntry[*appsv1.ReplicaSet]{obj: rs, lastSeen: now}
 	s.mu.Unlock()
-	s.send(s.sweep(now))
+	s.markDirty()
 }
 
 func (s *Source) onReplicaSetDelete(rs *appsv1.ReplicaSet) {
@@ -457,7 +519,7 @@ func (s *Source) onStatefulSet(sts *appsv1.StatefulSet) {
 	s.mu.Lock()
 	s.statefulsets[sts.UID] = &objEntry[*appsv1.StatefulSet]{obj: sts, lastSeen: now}
 	s.mu.Unlock()
-	s.send(s.sweep(now))
+	s.markDirty()
 }
 
 func (s *Source) onStatefulSetDelete(sts *appsv1.StatefulSet) {
@@ -519,20 +581,55 @@ func waitingReason(p *corev1.Pod) string {
 
 // ---- sweep: the stall verdict ----
 
+// ownerIndex groups the two high-cardinality collections by their
+// controlling owner, once per sweep.
+//
+// Without it each Deployment scanned every ReplicaSet in the cluster to
+// find its own, and each StatefulSet scanned every pod: O(D×R + S×P) per
+// sweep, against O(D + R + S + P) with it. On the 403-node fleet of
+// issue #493 that was 2,883 × 6,318 ≈ 18 M owner-ref comparisons per
+// sweep, and sweeps ran per event. activeReplicaSets already did this
+// for the rolling-out predicate and its comment already called the
+// alternative quadratic; this is the same move for the stall verdict.
+type ownerIndex struct {
+	replicasets map[types.UID][]*appsv1.ReplicaSet
+	pods        map[types.UID][]*podInfo
+}
+
+// indexOwners builds the per-sweep ownership index. Called under s.mu.
+func (s *Source) indexOwners() ownerIndex {
+	ix := ownerIndex{
+		replicasets: make(map[types.UID][]*appsv1.ReplicaSet, len(s.deployments)),
+		pods:        make(map[types.UID][]*podInfo, len(s.statefulsets)+len(s.replicasets)),
+	}
+	for _, e := range s.replicasets {
+		if uid, ok := controllerUID(e.obj.OwnerReferences); ok {
+			ix.replicasets[uid] = append(ix.replicasets[uid], e.obj)
+		}
+	}
+	for _, p := range s.pods {
+		if p.ownerUID != "" {
+			ix.pods[p.ownerUID] = append(ix.pods[p.ownerUID], p)
+		}
+	}
+	return ix
+}
+
 // sweep evaluates every workload's rollout state and prunes
 // TTL-expired memory. Returns the signals to emit (the caller sends
 // them outside the lock).
 func (s *Source) sweep(now time.Time) []engine.Signal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ix := s.indexOwners()
 	var out []engine.Signal
 	for _, de := range s.deployments {
-		if sig := s.evalDeployment(de.obj, now); sig != nil {
+		if sig := s.evalDeployment(de.obj, ix, now); sig != nil {
 			out = append(out, *sig)
 		}
 	}
 	for _, se := range s.statefulsets {
-		if sig := s.evalStatefulSet(se.obj, now); sig != nil {
+		if sig := s.evalStatefulSet(se.obj, ix, now); sig != nil {
 			out = append(out, *sig)
 		}
 	}
@@ -829,17 +926,12 @@ func rsRevision(rs *appsv1.ReplicaSet) int64 {
 
 // evalDeployment applies the stall verdict to one Deployment. Called
 // under s.mu; returns the signal to emit, if any.
-func (s *Source) evalDeployment(d *appsv1.Deployment, now time.Time) *engine.Signal {
+func (s *Source) evalDeployment(d *appsv1.Deployment, ix ownerIndex, now time.Time) *engine.Signal {
 	// Owned ReplicaSets, newest (highest revision) vs old.
 	var newest *appsv1.ReplicaSet
 	var newestRev int64 = -1
-	var owned []*appsv1.ReplicaSet
-	for _, e := range s.replicasets {
-		rs := e.obj
-		if !ownedBy(rs.OwnerReferences, d.UID) {
-			continue
-		}
-		owned = append(owned, rs)
+	owned := ix.replicasets[d.UID]
+	for _, rs := range owned {
 		if rev := rsRevision(rs); rev > newestRev || (rev == newestRev && newest != nil && rs.Name > newest.Name) {
 			newestRev, newest = rev, rs
 		}
@@ -886,7 +978,7 @@ func (s *Source) evalDeployment(d *appsv1.Deployment, now time.Time) *engine.Sig
 		return nil // old revision unhealthy too — not a bad-deploy shape
 	}
 	tr.fired[newest.Name] = true
-	waiting := s.topWaitingReason(func(p *podInfo) bool { return p.ownerUID == newest.UID })
+	waiting := topWaitingReason(ix.pods[newest.UID], nil)
 	sig := s.newStall("Deployment", d.Namespace, d.Name, string(d.UID),
 		fmt.Sprintf("new ReplicaSet %s", newest.Name),
 		newReady, newDesired, oldReady, oldDesired, now.Sub(tr.since), waiting, now)
@@ -895,7 +987,7 @@ func (s *Source) evalDeployment(d *appsv1.Deployment, now time.Time) *engine.Sig
 
 // evalStatefulSet applies the stall verdict to one StatefulSet.
 // Called under s.mu; returns the signal to emit, if any.
-func (s *Source) evalStatefulSet(sts *appsv1.StatefulSet, now time.Time) *engine.Signal {
+func (s *Source) evalStatefulSet(sts *appsv1.StatefulSet, ix ownerIndex, now time.Time) *engine.Signal {
 	tr := s.trackFor(sts.UID, now)
 	if stsComplete(sts) {
 		tr.markComplete(now)
@@ -919,10 +1011,7 @@ func (s *Source) evalStatefulSet(sts *appsv1.StatefulSet, now time.Time) *engine
 	// Count new/old revision pods from the pod mirror (the STS
 	// controller labels each pod with its ControllerRevision hash).
 	var newReady, oldReady, oldCount int32
-	for _, p := range s.pods {
-		if p.ownerUID != sts.UID {
-			continue
-		}
+	for _, p := range ix.pods[sts.UID] {
 		switch p.revisionHash {
 		case update:
 			if p.ready {
@@ -949,30 +1038,33 @@ func (s *Source) evalStatefulSet(sts *appsv1.StatefulSet, now time.Time) *engine
 		return nil
 	}
 	tr.fired[update] = true
-	waiting := s.topWaitingReason(func(p *podInfo) bool { return p.ownerUID == sts.UID && p.revisionHash == update })
+	waiting := topWaitingReason(ix.pods[sts.UID], func(p *podInfo) bool { return p.revisionHash == update })
 	sig := s.newStall("StatefulSet", sts.Namespace, sts.Name, string(sts.UID),
 		fmt.Sprintf("update revision %s", update),
 		newReady, newDesired, oldReady, oldCount, now.Sub(tr.since), waiting, now)
 	return &sig
 }
 
-// ownedBy reports whether refs contain a controller reference to uid.
-func ownedBy(refs []metav1.OwnerReference, uid types.UID) bool {
+// controllerUID returns the UID of the controlling owner reference, if
+// there is one. The API server allows at most one controller ref per
+// object, which is what lets ownership be an index key rather than a
+// predicate evaluated against every candidate owner.
+func controllerUID(refs []metav1.OwnerReference) (types.UID, bool) {
 	for _, ref := range refs {
-		if ref.Controller != nil && *ref.Controller && ref.UID == uid {
-			return true
+		if ref.Controller != nil && *ref.Controller {
+			return ref.UID, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // topWaitingReason tallies waiting reasons across the pods matching
 // sel and returns the most frequent (ties broken lexicographically
 // for determinism). Called under s.mu.
-func (s *Source) topWaitingReason(sel func(*podInfo) bool) string {
+func topWaitingReason(pods []*podInfo, sel func(*podInfo) bool) string {
 	counts := make(map[string]int)
-	for _, p := range s.pods {
-		if sel(p) && p.waitingReason != "" {
+	for _, p := range pods {
+		if p.waitingReason != "" && (sel == nil || sel(p)) {
 			counts[p.waitingReason]++
 		}
 	}
