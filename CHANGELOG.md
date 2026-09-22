@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`topology-drift`'s per-domain metrics now cost roughly half what they did,
+  and there are three new ways to make them cost less.** `domain_objects` and
+  `domain_expected` are subjects × topology keys × domains × states, which on a
+  20,000-subject cluster is up to 480,000 series — under managed Prometheus that
+  is a line item rather than a failure, so nothing tells you about it. The
+  `state` label is now collapsed to `active` (running or terminating — the
+  object is holding the domain's capacity) and `waiting` (pending or
+  unschedulable), which halves the count and changes no finding; pass
+  `--topology-per-domain-collapse-states=false` for the previous four. Two new
+  bounds sit alongside the existing drift floor: `--topology-per-domain-max-keys`
+  (default 4) caps how many topology axes one subject contributes a breakdown
+  on, taking them in `--topology-keys` order, and
+  `--topology-per-domain-namespaces` / `--topology-per-domain-exclude-namespaces`
+  narrow the breakdown to the namespaces you care about. Neither affects
+  scoring, findings, or the per-subject aggregates, and cluster-scoped subjects
+  — node pools, and the domains themselves — are never filtered by namespace. A
+  new gauge, `lookout_leeway_domain_series_withheld{reason}`, counts the
+  subjects each control withheld, so a missing breakdown has an explanation
+  rather than being a mystery.
+
 - **The kwok scale harness now builds objects the weight of real ones, and
   checks that they stay that way.** `examples/kwok/scale-up` produced pods and
   nodes several times smaller than a real cluster's, because the bytes that make

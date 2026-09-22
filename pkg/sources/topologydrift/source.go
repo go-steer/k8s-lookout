@@ -161,6 +161,25 @@ type Config struct {
 	// scored subject.
 	PerDomainSeriesMinDrift float64
 
+	// PerDomainSeriesMaxKeys caps the topology axes one subject contributes a
+	// per-domain breakdown on. Zero takes DefaultPerDomainMaxKeys; negative is
+	// unlimited.
+	PerDomainSeriesMaxKeys int
+
+	// PerDomainCollapseStates folds the four scheduling states onto two in the
+	// per-domain series, and it defaults ON — the zero value collapses, which
+	// is why this is not spelled ExpandStates. See collapse.
+	PerDomainCollapseStates *bool
+
+	// PerDomainNamespaces is §8.4's allow-list on the per-domain series. Empty
+	// admits every namespace. Cluster-scoped subjects are never filtered by
+	// either list — see PerDomainGate.admitsNamespace.
+	PerDomainNamespaces []string
+
+	// PerDomainExcludeNamespaces is §8.4's deny-list, applied ahead of the
+	// allow-list.
+	PerDomainExcludeNamespaces []string
+
 	// Thresholds are §7.4's scoring thresholds. Nil takes
 	// leeway.DefaultThresholds.
 	//
@@ -282,6 +301,9 @@ func (c Config) normalize() Config {
 	if c.PerDomainSeriesMinDrift == 0 {
 		c.PerDomainSeriesMinDrift = DefaultPerDomainSeriesMinDrift
 	}
+	if c.PerDomainSeriesMaxKeys == 0 {
+		c.PerDomainSeriesMaxKeys = DefaultPerDomainMaxKeys
+	}
 	if c.Thresholds == nil {
 		t := leeway.DefaultThresholds()
 		c.Thresholds = &t
@@ -346,11 +368,43 @@ func (c Config) readyRetention() time.Duration {
 // as a zero floor — drift is never negative, so passing it through unchanged
 // would work by accident rather than by contract.
 func (c Config) perDomainGate() PerDomainGate {
-	g := PerDomainGate{All: c.PerDomainSeries, MinDrift: c.PerDomainSeriesMinDrift}
+	g := PerDomainGate{
+		All:               c.PerDomainSeries,
+		MinDrift:          c.PerDomainSeriesMinDrift,
+		MaxKeys:           c.PerDomainSeriesMaxKeys,
+		CollapseStates:    c.perDomainCollapseStates(),
+		Namespaces:        namespaceSet(c.PerDomainNamespaces),
+		ExcludeNamespaces: namespaceSet(c.PerDomainExcludeNamespaces),
+	}
 	if g.MinDrift < 0 {
 		g.MinDrift = 0
 	}
+	// Negative is the configured way to say "no cap", which the gate spells as
+	// a zero — the same shape as the floor above, for the same reason.
+	if g.MaxKeys < 0 {
+		g.MaxKeys = 0
+	}
 	return g
+}
+
+// perDomainCollapseStates is PerDomainCollapseStates with its default applied:
+// nil collapses.
+func (c Config) perDomainCollapseStates() bool {
+	return c.PerDomainCollapseStates == nil || *c.PerDomainCollapseStates
+}
+
+// namespaceSet turns a configured list into the gate's lookup. Nil for an
+// empty list, because the gate reads an empty allow-list as "every namespace"
+// and an allocated-but-empty map would say the same thing more expensively.
+func namespaceSet(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set
 }
 
 // Source implements sources.Source for the topology-drift row of §3.
@@ -1858,6 +1912,7 @@ func (s *Source) startMetrics() error {
 
 		UnavailableDomains: s.unavailableDomains,
 		DomainNodes:        s.domainNodes,
+		DomainSeriesPlan:   s.domainSeriesPlan,
 		DomainObjects:      s.domainObjects,
 		Evaluations:        s.state.EachEvaluation,
 		Intents:            s.state.EachIntent,
@@ -1991,14 +2046,20 @@ func (s *Source) domainNodes() map[leeway.TopologyKey]map[leeway.Domain]int64 {
 // a pool's nodes per zone is the same kind of row as a Deployment's pods per
 // zone, and a reader looking at a drifting workload wants the pool underneath
 // it in the same query.
-func (s *Source) domainObjects(gate PerDomainGate, yield countObserver) {
+func (s *Source) domainObjects(plan *seriesPlan, yield countObserver) {
+	collapsed := plan == nil || plan.gate.CollapseStates
 	for _, sub := range append(s.state.Subjects(), s.state.Groups()...) {
-		if !gate.Admits(s.state.DriftOf(sub)) {
-			continue
-		}
 		for key, dist := range s.state.Snapshot(sub) {
+			if !plan.admits(sub, key) {
+				continue
+			}
 			for _, domain := range dist.Domains() {
 				c := dist.ByDomain[domain]
+				// Collapsed, two scheduling states land on one label, so the
+				// counts have to be summed before they are observed: two
+				// ObserveInt64 calls with identical attributes is not a sum,
+				// it is whichever the SDK kept.
+				byState := make(map[seriesState]int64, 4)
 				for _, sc := range []struct {
 					state leeway.CountState
 					n     int64
@@ -2008,11 +2069,82 @@ func (s *Source) domainObjects(gate PerDomainGate, yield countObserver) {
 					{leeway.StateUnschedulable, c.Unschedulable},
 					{leeway.StateTerminating, c.Terminating},
 				} {
-					if sc.n != 0 {
-						yield(sub, key, domain, sc.state, sc.n)
+					if sc.n == 0 {
+						continue
 					}
+					if collapsed {
+						byState[collapse(sc.state)] += sc.n
+						continue
+					}
+					byState[seriesState(sc.state.String())] += sc.n
+				}
+				for state, n := range byState {
+					yield(sub, key, domain, state, n)
 				}
 			}
 		}
 	}
+}
+
+// domainSeriesPlan makes §8.4's admission decision for one scrape.
+//
+// Walking the subjects twice — once here, once in domainObjects — is
+// deliberate. The alternative is deciding inside the emission walk, which
+// would leave domain_expected (filled from a different walk, over evaluations
+// rather than distributions) to make the same decision independently and get
+// it subtly differently the first time either side changed.
+func (s *Source) domainSeriesPlan(gate PerDomainGate) *seriesPlan {
+	plan := newSeriesPlan(gate)
+	open := s.openSubjects()
+	for _, sub := range append(s.state.Subjects(), s.state.Groups()...) {
+		drift, scored := s.state.DriftOf(sub)
+		series := SubjectSeries{Ref: sub, Drift: drift, Scored: scored, Open: open[sub]}
+		if !gate.Admits(series) {
+			// Which control turned it away is the whole value of the metric,
+			// so the namespace lists are asked separately rather than inferred
+			// from the composite answer.
+			if !gate.admitsNamespace(sub) {
+				plan.reject(withheldNamespace)
+				continue
+			}
+			plan.reject(withheldGate)
+			continue
+		}
+		plan.admit(sub, s.orderedKeys(sub))
+	}
+	return plan
+}
+
+// orderedKeys returns a subject's tracked axes in the configured precedence
+// order, which is the order the §8.4 key cap takes its prefix from.
+//
+// Precedence rather than drift ranking, because the cap has to be stable: an
+// axis that came and went from /metrics as its drift crossed another axis's
+// would break every rate() over it, and the operator already stated which axes
+// matter most by the order they wrote --topology-keys in.
+//
+// Iterating the configured list rather than the snapshot is also what makes
+// the order deterministic — the snapshot is a map, and ranging it would hand
+// the cap a different victim every scrape. The two cannot disagree about
+// membership: State counts on the Inventory's axes, and the Inventory is built
+// from this same list.
+func (s *Source) orderedKeys(sub leeway.SubjectRef) []leeway.TopologyKey {
+	tracked := s.state.Snapshot(sub)
+	ordered := make([]leeway.TopologyKey, 0, len(tracked))
+	for _, key := range s.cfg.TopologyKeys {
+		if _, ok := tracked[key]; ok {
+			ordered = append(ordered, key)
+		}
+	}
+	return ordered
+}
+
+// openSubjects is the set of subjects with a non-OK §8.2 episode on any axis,
+// which §8.4 admits to the per-domain series whatever their drift.
+func (s *Source) openSubjects() map[leeway.SubjectRef]bool {
+	open := map[leeway.SubjectRef]bool{}
+	s.alerts.Each(func(sub leeway.SubjectRef, _ leeway.TopologyKey, _ leeway.AlertState, _ leeway.Tier) {
+		open[sub] = true
+	})
+	return open
 }

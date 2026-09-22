@@ -566,26 +566,47 @@ func TestSource_MetricProjections(t *testing.T) {
 		}
 	})
 
-	t.Run("domainObjects yields one row per non-zero state", func(t *testing.T) {
-		type row struct {
-			domain leeway.Domain
-			state  leeway.CountState
-			n      int64
-		}
+	type row struct {
+		domain leeway.Domain
+		state  seriesState
+		n      int64
+	}
+	walk := func(t *testing.T, gate PerDomainGate) []row {
+		t.Helper()
 		var rows []row
-		s.domainObjects(PerDomainGate{All: true}, func(sub leeway.SubjectRef, key leeway.TopologyKey, d leeway.Domain, st leeway.CountState, n int64) {
+		s.domainObjects(s.domainSeriesPlan(gate), func(sub leeway.SubjectRef, key leeway.TopologyKey, d leeway.Domain, st seriesState, n int64) {
 			if sub.Name != "db" || key != zoneKey {
 				t.Errorf("unexpected row for %s on %s", sub, key)
 			}
 			rows = append(rows, row{d, st, n})
 		})
+		slices.SortFunc(rows, func(a, b row) int { return strings.Compare(string(a.domain), string(b.domain)) })
+		return rows
+	}
+
+	t.Run("domainObjects yields one row per non-zero state", func(t *testing.T) {
+		got := walk(t, PerDomainGate{All: true})
 		want := []row{
-			{"us-central1-a", leeway.StateRunning, 1},
-			{"us-central1-b", leeway.StateTerminating, 1},
+			{"us-central1-a", seriesState("running"), 1},
+			{"us-central1-b", seriesState("terminating"), 1},
 		}
-		slices.SortFunc(rows, func(a, b row) int { return int(a.state) - int(b.state) })
-		if !slices.Equal(rows, want) {
-			t.Errorf("rows = %+v, want %+v", rows, want)
+		if !slices.Equal(got, want) {
+			t.Errorf("rows = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("collapsed, a terminating pod is still occupying its domain", func(t *testing.T) {
+		// The collapse is not a relabelling of Running: Terminating lands on
+		// `active` too, because the capacity is still held. A reader who sees
+		// the b-zone row vanish under the default would conclude the zone had
+		// emptied.
+		got := walk(t, PerDomainGate{All: true, CollapseStates: true})
+		want := []row{
+			{"us-central1-a", seriesActive, 1},
+			{"us-central1-b", seriesActive, 1},
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("rows = %+v, want %+v", got, want)
 		}
 	})
 }
@@ -828,5 +849,163 @@ func TestSource_SubjectPodBeforeRun(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{})
 	if got := s.subjectPod(webSubject); got != nil {
 		t.Errorf("subjectPod before Run = %v, want nil", got)
+	}
+}
+
+// TestSource_PerDomainSeriesAtTheScaleTier is §8.4's cardinality budget,
+// written down.
+//
+// The per-domain breakdown is the one leeway metric whose cost is
+// multiplicative — subjects × axes × domains × states — so it is also the one
+// where adding a label is a four-figure multiplier rather than a column. This
+// test measures the per-subject series count for each control setting on a
+// miniature estate and multiplies it out to §6.6's baseline row, so that a
+// future label lands as a failing assertion here rather than as a bill.
+//
+// The estate is deliberately the worst case rather than a realistic one: every
+// domain holds a pod in all four scheduling states, which in a real cluster an
+// unschedulable pod could not contribute to, because it is bound to no node. A
+// budget built on the typical shape would be exceeded by the first cluster
+// that was not typical.
+func TestSource_PerDomainSeriesAtTheScaleTier(t *testing.T) {
+	// §6.6's baseline row, and #475's headline.
+	const scaleTierSubjects = 20_000
+	// Small enough to stay a unit test, large enough that a per-subject count
+	// is not an artefact of one subject.
+	const estateSubjects = 10
+
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey, regionKey}})
+	for i, zone := range []string{"us-central1-a", "us-central1-b", "us-central1-c"} {
+		name := fmt.Sprintf("n-%d", i)
+		s.inv.Upsert(node(name, zone, withLabel(corev1.LabelTopologyRegion, fmt.Sprintf("r-%d", i))))
+		for sub := range estateSubjects {
+			owner := ownedBy("StatefulSet", fmt.Sprintf("db-%d", sub))
+			s.state.OnPodAdd(pod(fmt.Sprintf("db-%d-%d-run", sub, i), "prod", name, owner))
+			s.state.OnPodAdd(pod(fmt.Sprintf("db-%d-%d-term", sub, i), "prod", name, owner, terminating()))
+			s.state.OnPodAdd(pod(fmt.Sprintf("db-%d-%d-pend", sub, i), "prod", name, owner, phase(corev1.PodPending)))
+			s.state.OnPodAdd(pod(fmt.Sprintf("db-%d-%d-unsch", sub, i), "prod", name, owner, unschedulablePod()))
+		}
+	}
+
+	count := func(gate PerDomainGate) int {
+		n := 0
+		s.domainObjects(s.domainSeriesPlan(gate), func(leeway.SubjectRef, leeway.TopologyKey, leeway.Domain, seriesState, int64) {
+			n++
+		})
+		return n
+	}
+
+	for _, tc := range []struct {
+		name       string
+		gate       PerDomainGate
+		perSubject int
+	}{
+		// 2 axes × 3 domains × 4 states. This is the posture #475 was filed
+		// against, and it is what every control turned off still gives you.
+		{"every control off", PerDomainGate{All: true}, 24},
+		// Running folds onto Terminating and Pending onto Unschedulable, so
+		// four states become two: exactly half.
+		{"collapsed states", PerDomainGate{All: true, CollapseStates: true}, 12},
+		// The cap does not bite at two axes — it is there for the cluster that
+		// named six — so this is the shipped default on a default cluster.
+		{"the shipped defaults, with everything admitted", admitAll(s.cfg.perDomainGate()), 12},
+		// And at one axis it halves again.
+		{"collapsed, one axis", PerDomainGate{All: true, CollapseStates: true, MaxKeys: 1}, 6},
+		// The namespace lists are the only control that can reach zero, which
+		// is what makes them the answer for a cluster whose cost is one
+		// namespace.
+		{"the estate's namespace excluded", PerDomainGate{All: true, ExcludeNamespaces: namespaceSet([]string{"prod"})}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := count(tc.gate)
+			if want := tc.perSubject * estateSubjects; got != want {
+				t.Fatalf("%d series for %d subjects, want %d (%d each)", got, estateSubjects, want, tc.perSubject)
+			}
+			t.Logf("%d series per subject — %d at §6.6's %d-subject baseline",
+				tc.perSubject, tc.perSubject*scaleTierSubjects, scaleTierSubjects)
+		})
+	}
+
+	// The control that actually holds a production cluster down is the ρ
+	// floor, and it is not one of the rows above because it does not scale
+	// anything: it admits the handful of subjects somebody is about to
+	// investigate and nobody else. Nothing here has been scored, so at the
+	// shipped floor the whole estate is withheld and the budget is zero.
+	t.Run("the shipped floor withholds an unscored estate entirely", func(t *testing.T) {
+		gate := s.cfg.perDomainGate()
+		if got := count(gate); got != 0 {
+			t.Errorf("%d series for an estate with no scores, want none", got)
+		}
+		if got := s.domainSeriesPlan(gate).withheld[withheldGate]; got != estateSubjects {
+			t.Errorf("withheld[gate] = %d, want all %d subjects", got, estateSubjects)
+		}
+	})
+}
+
+// admitAll lifts a gate's admission floor, which is how the scale table costs
+// a control in isolation: the floor's effect is the row below the table, and
+// mixing it into the multipliers would measure both at once.
+func admitAll(g PerDomainGate) PerDomainGate {
+	g.All = true
+	return g
+}
+
+func TestSource_OrderedKeysFollowsTheConfiguredPrecedence(t *testing.T) {
+	// The cap takes a prefix of this, so the order is what decides which axes
+	// a capped subject exports. Axes nobody listed sort after the listed ones
+	// and among themselves lexicographically — an arbitrary order would make
+	// the cap's victim depend on Go's map iteration and change every scrape.
+	rackKey := leeway.TopologyKey("topology.example.com/rack")
+	cellKey := leeway.TopologyKey("topology.example.com/cell")
+	// Deliberately neither alphabetical nor reverse-alphabetical, so that a
+	// map range or an accidental sort cannot produce this answer by luck.
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{rackKey, zoneKey, cellKey, regionKey}})
+	s.inv.Upsert(node("n-a", "us-central1-a",
+		withLabel(corev1.LabelTopologyRegion, "us-central1"),
+		withLabel(string(rackKey), "r7"),
+		withLabel(string(cellKey), "c3"),
+	))
+	s.state.OnPodAdd(pod("db-0", "prod", "n-a", ownedBy("StatefulSet", "db")))
+	sub := leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: "prod", Name: "db"}
+
+	want := []leeway.TopologyKey{rackKey, zoneKey, cellKey, regionKey}
+	// Repeated, because the failure this guards against is a map range: one
+	// pass agreeing is not evidence.
+	for range 20 {
+		if got := s.orderedKeys(sub); !slices.Equal(got, want) {
+			t.Fatalf("orderedKeys = %v, want %v", got, want)
+		}
+	}
+
+	// And the cap takes the front of exactly that.
+	plan := newSeriesPlan(PerDomainGate{All: true, MaxKeys: 2})
+	plan.admit(sub, s.orderedKeys(sub))
+	for _, key := range want[:2] {
+		if !plan.admits(sub, key) {
+			t.Errorf("%s was capped away, want the first two of the configured order", key)
+		}
+	}
+	for _, key := range want[2:] {
+		if plan.admits(sub, key) {
+			t.Errorf("%s survived a cap of 2", key)
+		}
+	}
+}
+
+func TestSource_TheWithheldReasonNamesTheControlThatDidIt(t *testing.T) {
+	// The gauge is only worth exporting if it tells an operator which knob to
+	// reach for, so the namespace lists are asked separately rather than
+	// inferred from the composite admission answer — All would otherwise
+	// attribute every namespace exclusion to the gate.
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
+	s.inv.Upsert(node("n-a", "us-central1-a"))
+	s.state.OnPodAdd(pod("db-0", "prod", "n-a", ownedBy("StatefulSet", "db")))
+
+	plan := s.domainSeriesPlan(PerDomainGate{All: true, ExcludeNamespaces: namespaceSet([]string{"prod"})})
+	if got := plan.withheld[withheldNamespace]; got != 1 {
+		t.Errorf("withheld[namespace] = %d, want the one excluded subject", got)
+	}
+	if got := plan.withheld[withheldGate]; got != 0 {
+		t.Errorf("withheld[gate] = %d, want 0 — the namespace list did this, not the floor", got)
 	}
 }

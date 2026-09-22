@@ -47,6 +47,7 @@ const (
 	metricDomainsOut       = "lookout.leeway.domains_unavailable"
 	metricDomainReadyNodes = "lookout.leeway.domain_ready_nodes"
 	metricDomainObjects    = "lookout.leeway.domain_objects"
+	metricDomainWithheld   = "lookout.leeway.domain_series_withheld"
 	metricDomainExpected   = "lookout.leeway.domain_expected"
 	metricObservedSkew     = "lookout.leeway.observed_skew"
 	metricExcessSkew       = "lookout.leeway.excess_skew"
@@ -77,10 +78,21 @@ const (
 		"so the series exists before the first outage. This is the live reading; lookout_leeway_alert_state with subject_kind=Domain is the " +
 		"same fact after its dwell, and that is what leeway.domain_unavailable is emitted from."
 	descDomainReadyNodes = "Usable nodes per topology domain."
-	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state."
-	descDomainExpected   = "Objects §7.2 apportioned to each topology domain, the expectation domain_objects is scored against."
-	descObservedSkew     = "S, the difference between the fullest and emptiest eligible domain (leeway §7.3)."
-	descExcessSkew       = "E, observed skew beyond what the arithmetic and the declared bound allow (leeway §7.3). " +
+	descDomainObjects    = "Objects counted per subject, topology domain and scheduling state. " +
+		"By default `state` is collapsed to two values: `active` for an object holding the domain's capacity " +
+		"(running, or terminating and not yet gone) and `waiting` for one that is not (pending or unschedulable). " +
+		"Pass --topology-per-domain-collapse-states=false for the four raw states, which share no label value with " +
+		"the two, so a query written for one mode returns nothing at all under the other rather than an undercount."
+	descDomainWithheld = "Subjects whose per-domain breakdown is absent or incomplete, by the §8.4 cardinality control responsible. " +
+		"Read this before concluding a subject has no objects in a domain: the absence of a domain_objects row means " +
+		"either that or that leeway declined to export it, and this is which. `gate` is below the drift floor and not " +
+		"alerting, which is the intended standing state and is normally most of the estate; `namespace` is the allow or " +
+		"deny list; `key_cap` counts subjects that kept some axes and lost the rest, and is the one to watch, because it " +
+		"is the reading that says a dashboard is missing an axis rather than a subject. Counted in subjects for all three, " +
+		"so they are summable."
+	descDomainExpected = "Objects §7.2 apportioned to each topology domain, the expectation domain_objects is scored against."
+	descObservedSkew   = "S, the difference between the fullest and emptiest eligible domain (leeway §7.3)."
+	descExcessSkew     = "E, observed skew beyond what the arithmetic and the declared bound allow (leeway §7.3). " +
 		"Zero is the normal reading: a subject that cannot be spread any more evenly than it already is scores zero here " +
 		"however lopsided S looks, which is the whole reason drift is not alerted on S."
 	descDrift          = "ρ, the fraction of a subject's objects that would have to move to meet its expectation (leeway §7.3)."
@@ -127,6 +139,7 @@ var (
 	attrTopologyKey = attribute.Key("topology_key")
 	attrDomain      = attribute.Key("domain")
 	attrState       = attribute.Key("state")
+	attrReason      = attribute.Key("reason")
 	attrNamespace   = attribute.Key("namespace")
 	attrSubject     = attribute.Key("subject")
 	attrResource    = attribute.Key("resource")
@@ -199,6 +212,12 @@ func MetricDocs() []MetricDoc {
 			Labels:   []string{"namespace", "subject", "subject_kind", "topology_key", "domain", "state"},
 			Help:     descDomainObjects,
 			Optional: true,
+		},
+		{
+			Name:   "lookout_leeway_domain_series_withheld",
+			Type:   "gauge",
+			Labels: []string{"reason"},
+			Help:   descDomainWithheld,
 		},
 		{
 			Name:     "lookout_leeway_domain_expected",
@@ -294,8 +313,42 @@ const (
 	resourceNode = "node"
 )
 
-// countObserver is handed each per-domain count during a scrape.
-type countObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64)
+// countObserver is handed each per-domain count during a scrape. The state is
+// already rendered, because §8.4's collapse means a row can be the sum of two
+// leeway.CountStates and no longer *is* one of them.
+type countObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state seriesState, n int64)
+
+// seriesState is the value of the per-domain series' `state` label.
+//
+// It is a type of its own rather than leeway.CountState.String() because with
+// §8.4's collapse on, a row is the sum of two scheduling states and calling it
+// by either one's name would be a lie in a label.
+type seriesState string
+
+// The collapsed pair. Uncollapsed rows carry leeway.CountState's own spelling,
+// which is a disjoint set of four — `running`, `pending`, `unschedulable`,
+// `terminating` — so a query can always tell which mode produced a series.
+const (
+	seriesActive  seriesState = "active"
+	seriesWaiting seriesState = "waiting"
+)
+
+// collapse folds the four scheduling states onto the two a dashboard actually
+// partitions on: an object occupying the domain, and one waiting for it.
+//
+// Terminating is active because it is still holding the capacity — a domain
+// full of terminating pods is a full domain. Unschedulable is waiting because
+// it is not holding anything, whatever the scheduler thinks of its chances.
+// The distinction §7.6 needs between the four is upstream of this and is
+// unaffected: this is the metrics label, not the count.
+func collapse(s leeway.CountState) seriesState {
+	switch s {
+	case leeway.StatePending, leeway.StateUnschedulable:
+		return seriesWaiting
+	default:
+		return seriesActive
+	}
+}
 
 // intentObserver is handed each resolved intent during a scrape.
 type intentObserver func(sub leeway.SubjectRef, key leeway.TopologyKey, in *leeway.Intent)
@@ -312,6 +365,15 @@ type evalObserver func(sub leeway.SubjectRef, ev *Evaluation)
 // one that is not does not.
 const DefaultPerDomainSeriesMinDrift = 0.05
 
+// DefaultPerDomainMaxKeys is §8.4's cap on how many topology axes one subject
+// contributes a per-domain breakdown on.
+//
+// Four is deliberately above the two well-known labels the defaults partition
+// on, so on a stock deployment it binds nothing. It exists for the cluster that
+// names a rack, a cell and a power domain alongside them, where the series
+// count is linear in a number nobody costed when they added the fourth axis.
+const DefaultPerDomainMaxKeys = 4
+
 // PerDomainGate is §8.4's cardinality gate on the per-domain series.
 //
 // The series count of a per-domain breakdown is subjects × keys × domains
@@ -324,6 +386,11 @@ const DefaultPerDomainSeriesMinDrift = 0.05
 // Phase 2 shipped this as a plain boolean because the floor needs a drift
 // figure and there was none until intent inference landed. The boolean survives
 // as All, for a small estate that would rather have everything.
+//
+// The zero value is the unbounded behaviour that shipped before Phase 8: every
+// admitted subject, every axis, all four states, every namespace. Each field
+// below narrows it, and each has a flag, so turning them all off reproduces
+// that exactly.
 type PerDomainGate struct {
 	// All exports the breakdown for every counted subject, scored or not.
 	All bool
@@ -333,12 +400,159 @@ type PerDomainGate struct {
 	// floor, because a subject with no drift figure is not one the floor can
 	// say anything about.
 	MinDrift float64
+
+	// Namespaces is §8.4's allow-list. Empty admits every namespace.
+	Namespaces map[string]struct{}
+
+	// ExcludeNamespaces is §8.4's deny-list, applied first: a namespace named
+	// in both is denied. Naming the noisy namespace is the common case and is
+	// one entry, where allow-listing around it is every other namespace.
+	ExcludeNamespaces map[string]struct{}
+
+	// CollapseStates folds the four scheduling states onto seriesActive and
+	// seriesWaiting, halving the series count. Off in the zero value; the flag
+	// default turns it on.
+	CollapseStates bool
+
+	// MaxKeys caps the topology axes one subject contributes a breakdown on.
+	// Zero or negative is unlimited. Which axes survive is the configured
+	// precedence order, not the drift ranking — see seriesPlan.
+	MaxKeys int
 }
 
-// Admits reports whether a subject's per-domain series should be exported,
-// given its highest drift across axes and whether it was scored at all.
-func (g PerDomainGate) Admits(drift float64, scored bool) bool {
-	return g.All || (scored && drift >= g.MinDrift)
+// SubjectSeries is what the gate knows about one subject at scrape time.
+type SubjectSeries struct {
+	Ref leeway.SubjectRef
+
+	// Drift is the subject's highest drift across its axes, and Scored says
+	// whether there is one at all.
+	Drift  float64
+	Scored bool
+
+	// Open is true when the subject has a non-OK §8.2 episode on any axis.
+	Open bool
+}
+
+// Admits reports whether a subject's per-domain series should be exported.
+//
+// The `Open` term is §8.4's other half and is not a knob: a subject is
+// admitted when it is drifting past the floor *or* when it has an open
+// episode. Without it the floor eats itself — an episode that fires and then
+// settles just under ρ loses its breakdown at the moment somebody opens the
+// dashboard to find out what happened, and a resolving episode loses it for
+// the whole resolve dwell.
+func (g PerDomainGate) Admits(s SubjectSeries) bool {
+	if !g.admitsNamespace(s.Ref) {
+		return false
+	}
+	return g.All || s.Open || (s.Scored && s.Drift >= g.MinDrift)
+}
+
+// admitsNamespace applies the allow and deny lists.
+//
+// A cluster-scoped subject — a node group, a domain — has no namespace and is
+// always admitted. The lists name workload namespaces, and an allow-list that
+// silently took the node-pool rows away would remove the infrastructure
+// context the workload rows are read against, which is the thing #469 made
+// pools subjects in order to provide.
+func (g PerDomainGate) admitsNamespace(ref leeway.SubjectRef) bool {
+	if ref.Namespace == "" {
+		return true
+	}
+	if _, denied := g.ExcludeNamespaces[ref.Namespace]; denied {
+		return false
+	}
+	if len(g.Namespaces) == 0 {
+		return true
+	}
+	_, allowed := g.Namespaces[ref.Namespace]
+	return allowed
+}
+
+// stateOf renders a count's `state` label under the gate's collapse setting.
+func (g PerDomainGate) stateOf(s leeway.CountState) seriesState {
+	if g.CollapseStates {
+		return collapse(s)
+	}
+	return seriesState(s.String())
+}
+
+// Reasons a subject's per-domain breakdown is absent or incomplete, as the
+// `reason` label of lookout_leeway_domain_series_withheld.
+const (
+	withheldGate      = "gate"
+	withheldNamespace = "namespace"
+	withheldKeyCap    = "key_cap"
+)
+
+// seriesPlan is §8.4's decision for one scrape: which subject-axes get a
+// per-domain breakdown, and how much was left out to stay inside the bound.
+//
+// It exists because two metrics have to agree. domain_objects and
+// domain_expected are read against each other — the second is the expectation
+// the first is scored against — so an axis present in one and missing from the
+// other is a dashboard dividing by nothing. Deciding once per scrape and
+// consulting the decision twice is what stops the two walks drifting apart.
+type seriesPlan struct {
+	// keys is the admitted axes per admitted subject. A subject the gate
+	// rejected is absent rather than present-and-empty.
+	keys map[leeway.SubjectRef]map[leeway.TopologyKey]struct{}
+
+	// withheld counts subjects, not series, per reason — one unit, so the
+	// three are summable. A subject counted under keyCap is one that kept
+	// some axes and lost others, which is why it can be both admitted and
+	// withheld.
+	withheld map[string]int64
+
+	// collapse is carried so the emission side renders labels the same way
+	// the plan was costed.
+	gate PerDomainGate
+}
+
+// newSeriesPlan returns an empty plan with every withheld reason at zero, so
+// the series exists before anything is withheld.
+func newSeriesPlan(gate PerDomainGate) *seriesPlan {
+	return &seriesPlan{
+		keys: map[leeway.SubjectRef]map[leeway.TopologyKey]struct{}{},
+		withheld: map[string]int64{
+			withheldGate:      0,
+			withheldNamespace: 0,
+			withheldKeyCap:    0,
+		},
+		gate: gate,
+	}
+}
+
+// admit records a subject's admitted axes. keys must already be in the
+// configured precedence order; the cap takes a prefix of it.
+func (p *seriesPlan) admit(sub leeway.SubjectRef, keys []leeway.TopologyKey) {
+	if p.gate.MaxKeys > 0 && len(keys) > p.gate.MaxKeys {
+		keys = keys[:p.gate.MaxKeys]
+		p.withheld[withheldKeyCap]++
+	}
+	set := make(map[leeway.TopologyKey]struct{}, len(keys))
+	for _, k := range keys {
+		set[k] = struct{}{}
+	}
+	p.keys[sub] = set
+}
+
+// reject records a subject the gate turned away, under the reason that did it.
+func (p *seriesPlan) reject(reason string) {
+	p.withheld[reason]++
+}
+
+// admits reports whether one subject-axis is in the plan.
+func (p *seriesPlan) admits(sub leeway.SubjectRef, key leeway.TopologyKey) bool {
+	if p == nil {
+		return true
+	}
+	keys, ok := p.keys[sub]
+	if !ok {
+		return false
+	}
+	_, ok = keys[key]
+	return ok
 }
 
 // metricsOptions wires the observable instruments to the state they read.
@@ -368,9 +582,15 @@ type metricsOptions struct {
 	// DomainNodes returns the usable node count per domain, per axis.
 	DomainNodes func() map[leeway.TopologyKey]map[leeway.Domain]int64
 
-	// DomainObjects walks every non-zero per-domain count of every subject the
-	// gate admits.
-	DomainObjects func(PerDomainGate, countObserver)
+	// DomainSeriesPlan makes §8.4's admission decision for the whole scrape,
+	// once, so that DomainObjects and the domain_expected half of Evaluations
+	// cover exactly the same subject-axes. A nil plan admits everything, which
+	// is what a test wiring only one of the two wants.
+	DomainSeriesPlan func(PerDomainGate) *seriesPlan
+
+	// DomainObjects walks every non-zero per-domain count of every subject-axis
+	// the plan admits.
+	DomainObjects func(*seriesPlan, countObserver)
 
 	// Evaluations walks each scored subject's §7.3 result, one call per axis.
 	Evaluations func(evalObserver)
@@ -484,6 +704,11 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainObjects, err)
 	}
+	withheld, err := meter.Int64ObservableGauge(metricDomainWithheld,
+		metric.WithDescription(descDomainWithheld))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricDomainWithheld, err)
+	}
 	intents, err := meter.Int64ObservableGauge(metricIntentInfo,
 		metric.WithDescription(descIntentInfo))
 	if err != nil {
@@ -557,6 +782,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		domainsOut:      domainsOut,
 		readyNodes:      readyNodes,
 		objects:         objects,
+		withheld:        withheld,
 		intents:         intents,
 		expected:        expected,
 		observedSkew:    observedSkew,
@@ -592,6 +818,7 @@ type observables struct {
 	domainsOut metric.Int64ObservableGauge
 	readyNodes metric.Int64ObservableGauge
 	objects    metric.Int64ObservableGauge
+	withheld   metric.Int64ObservableGauge
 	intents    metric.Int64ObservableGauge
 	expected   metric.Int64ObservableGauge
 
@@ -614,7 +841,7 @@ type observables struct {
 // collected.
 func (g observables) all() []metric.Observable {
 	return []metric.Observable{
-		g.subjects, g.nodeGroups, g.domainsOut, g.readyNodes, g.objects, g.intents, g.expected,
+		g.subjects, g.nodeGroups, g.domainsOut, g.readyNodes, g.objects, g.withheld, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
 		g.alertState, g.transient, g.baselines, g.baselineSamples,
 	}
@@ -622,6 +849,16 @@ func (g observables) all() []metric.Observable {
 
 // observe fills the observable gauges from the wired callbacks.
 func (opts metricsOptions) observe(o metric.Observer, g observables) {
+	// §8.4's admission is decided once and consulted by both per-domain walks,
+	// so domain_objects and domain_expected cannot disagree about which axes
+	// exist. See seriesPlan.
+	var plan *seriesPlan
+	if opts.DomainSeriesPlan != nil {
+		plan = opts.DomainSeriesPlan(opts.PerDomain)
+		for reason, n := range plan.withheld {
+			o.ObserveInt64(g.withheld, n, metric.WithAttributes(attrReason.String(reason)))
+		}
+	}
 	if opts.SubjectCounts != nil {
 		for kind, n := range opts.SubjectCounts() {
 			o.ObserveInt64(g.subjects, n, metric.WithAttributes(attrSubjectKind.String(string(kind))))
@@ -653,14 +890,14 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		}
 	}
 	if opts.DomainObjects != nil {
-		opts.DomainObjects(opts.PerDomain, func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state leeway.CountState, n int64) {
+		opts.DomainObjects(plan, func(sub leeway.SubjectRef, key leeway.TopologyKey, domain leeway.Domain, state seriesState, n int64) {
 			o.ObserveInt64(g.objects, n, metric.WithAttributes(
 				attrSubjectKind.String(string(sub.Kind)),
 				attrNamespace.String(sub.Namespace),
 				attrSubject.String(sub.Name),
 				attrTopologyKey.String(string(key)),
 				attrDomain.String(string(domain)),
-				attrState.String(state.String()),
+				attrState.String(string(state)),
 			))
 		})
 	}
@@ -672,7 +909,7 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		// leeway holding its tongue, and about what" — is a fleet question.
 		byTransient := map[transientBucket]int64{}
 		opts.Evaluations(func(sub leeway.SubjectRef, ev *Evaluation) {
-			opts.observeScores(o, g, sub, ev)
+			opts.observeScores(o, g, plan, sub, ev)
 			if ev != nil && ev.Suppression.State != leeway.TransientNone {
 				byTransient[transientBucket{key: ev.Key, state: ev.Suppression.State}]++
 			}
@@ -791,7 +1028,7 @@ func alertLevel(p leeway.AlertPhase) int64 {
 // The per-domain expectation rides the same gate as domain_objects, because the
 // two are a numerator and a denominator: exporting one without the other gives
 // a dashboard a number it cannot draw a comparison from.
-func (opts metricsOptions) observeScores(o metric.Observer, g observables, sub leeway.SubjectRef, ev *Evaluation) {
+func (opts metricsOptions) observeScores(o metric.Observer, g observables, plan *seriesPlan, sub leeway.SubjectRef, ev *Evaluation) {
 	if ev == nil || !ev.Scores.Evaluable {
 		return
 	}
@@ -807,7 +1044,7 @@ func (opts metricsOptions) observeScores(o metric.Observer, g observables, sub l
 	o.ObserveFloat64(g.drift, ev.Scores.Drift, attrs)
 	o.ObserveFloat64(g.maxDomainShare, ev.Scores.MaxDomainShare, attrs)
 
-	if !opts.PerDomain.Admits(ev.Scores.Drift, true) {
+	if !plan.admits(sub, ev.Key) {
 		return
 	}
 	for i, domain := range ev.Scores.Domains {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -116,15 +117,25 @@ func fullOptions() metricsOptions {
 				zoneKey: {"us-central1-a": 7, "us-central1-b": 5},
 			}
 		},
-		// The stub applies the gate, as Source.domainObjects does: a harness
-		// whose walker yielded unconditionally would make every gate assertion
-		// below pass for the wrong reason.
-		DomainObjects: func(g PerDomainGate, yield countObserver) {
-			if !g.Admits(fullOptionsDrift, true) {
+		// The stub builds the plan the same way Source.domainSeriesPlan does
+		// and then honours it, as Source.domainObjects does: a harness whose
+		// walker yielded unconditionally would make every gate assertion below
+		// pass for the wrong reason.
+		DomainSeriesPlan: func(g PerDomainGate) *seriesPlan {
+			plan := newSeriesPlan(g)
+			if g.Admits(SubjectSeries{Ref: subA, Drift: fullOptionsDrift, Scored: true}) {
+				plan.admit(subA, []leeway.TopologyKey{zoneKey})
+			} else {
+				plan.reject(withheldGate)
+			}
+			return plan
+		},
+		DomainObjects: func(plan *seriesPlan, yield countObserver) {
+			if !plan.admits(subA, zoneKey) {
 				return
 			}
-			yield(subA, zoneKey, "us-central1-a", leeway.StateRunning, 4)
-			yield(subA, zoneKey, "us-central1-b", leeway.StatePending, 1)
+			yield(subA, zoneKey, "us-central1-a", plan.gate.stateOf(leeway.StateRunning), 4)
+			yield(subA, zoneKey, "us-central1-b", plan.gate.stateOf(leeway.StatePending), 1)
 		},
 		Evaluations: func(yield evalObserver) {
 			yield(subA, &Evaluation{
@@ -241,6 +252,11 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		// non-zero reading (outcome="reset") is a silent failure.
 		"lookout_leeway_baselines",
 		"lookout_leeway_baseline_samples_total",
+		// §8.4's accounting for what the cardinality controls dropped. Every
+		// reason reads zero until something is withheld, rather than the
+		// series appearing when it is: a reader has to be able to tell
+		// "nothing was dropped" from "nothing is looking".
+		"lookout_leeway_domain_series_withheld",
 	}
 	slices.Sort(want)
 
@@ -603,13 +619,13 @@ func TestPerDomainGate_ASubjectWithNoScoreIsNeverAdmittedByTheFloor(t *testing.T
 	// drift figure for a floor to compare against — admitting it on a zero
 	// would put the whole estate's breakdown on the wire the moment somebody
 	// set the floor to zero meaning "everything that is measured".
-	if (PerDomainGate{}).Admits(0, false) {
+	if (PerDomainGate{}).Admits(SubjectSeries{}) {
 		t.Error("a zero floor admitted an unscored subject")
 	}
-	if !(PerDomainGate{All: true}).Admits(0, false) {
+	if !(PerDomainGate{All: true}).Admits(SubjectSeries{}) {
 		t.Error("All must admit an unscored subject: it is the every-subject switch")
 	}
-	if !(PerDomainGate{}).Admits(0, true) {
+	if !(PerDomainGate{}).Admits(SubjectSeries{Scored: true}) {
 		t.Error("a zero floor must admit a scored subject that is not drifting")
 	}
 }
@@ -670,6 +686,192 @@ func TestInstruments_ThePerDomainBreakdownStopsAtTheShorterSlice(t *testing.T) {
 	}
 	if len(f.GetMetric()) != 1 {
 		t.Errorf("got %d series, want the one domain the expectation covers", len(f.GetMetric()))
+	}
+}
+
+func TestPerDomainGate_TheNamespaceListsNarrowTheBreakdown(t *testing.T) {
+	// §8.4's third mitigation. The lists are the knob for a cluster where one
+	// namespace is most of the estate: they take its per-domain breakdown away
+	// without taking it out of the watch, so it is still scored and still
+	// alerts, it just stops being 300k series.
+	ns := func(names ...string) map[string]struct{} { return namespaceSet(names) }
+	pool := leeway.SubjectRef{Kind: leeway.SubjectNodeGroup, Name: "np-1"}
+
+	for _, tc := range []struct {
+		name string
+		gate PerDomainGate
+		ref  leeway.SubjectRef
+		want bool
+	}{
+		{"no lists admits everything", PerDomainGate{All: true}, subA, true},
+		{"an allow-list admits the named namespace", PerDomainGate{All: true, Namespaces: ns("prod")}, subA, true},
+		{"an allow-list withholds every other", PerDomainGate{All: true, Namespaces: ns("staging")}, subA, false},
+		{"a deny-list withholds the named namespace", PerDomainGate{All: true, ExcludeNamespaces: ns("prod")}, subA, false},
+		// Both lists naming it is the operator contradicting themselves, and
+		// the deny wins — the narrower reading of an ambiguous instruction is
+		// the one that cannot cost money.
+		{"deny beats allow", PerDomainGate{All: true, Namespaces: ns("prod"), ExcludeNamespaces: ns("prod")}, subA, false},
+		// The lists name workload namespaces. A node pool is in none of them,
+		// and an allow-list that took the pool rows away would remove the
+		// infrastructure context the workload rows are read against.
+		{"an allow-list never touches a cluster-scoped subject", PerDomainGate{All: true, Namespaces: ns("staging")}, pool, true},
+		{"nor does a deny-list", PerDomainGate{All: true, ExcludeNamespaces: ns("prod")}, pool, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.gate.Admits(SubjectSeries{Ref: tc.ref, Scored: true, Drift: 1}); got != tc.want {
+				t.Errorf("Admits(%s) = %v, want %v", tc.ref, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPerDomainGate_TheNamespaceListsOutrankEveryOtherAdmission(t *testing.T) {
+	// The namespace decision is first and unconditional, because the other two
+	// terms are both overrides: All is "export everything" and Open is "this
+	// one is on fire". An operator who excluded a namespace to control a bill
+	// would find neither of those a good reason to hand the series back.
+	g := PerDomainGate{All: true, ExcludeNamespaces: namespaceSet([]string{"prod"})}
+	if g.Admits(SubjectSeries{Ref: subA, Open: true, Scored: true, Drift: 1}) {
+		t.Error("an open episode reopened an excluded namespace")
+	}
+}
+
+func TestSeriesPlan_TheKeyCapTakesThePrecedencePrefix(t *testing.T) {
+	// §8.4's second mitigation. A cluster that names six axes in
+	// --topology-keys multiplies every admitted subject by six, and the axes
+	// past the first few are almost never the one being read.
+	//
+	// The prefix is the configured precedence order rather than the drift
+	// ranking, so which axes a subject exports is the same on every scrape. A
+	// cap that kept the top-drifting axes would make a series appear and
+	// vanish as placement moved, which is the one thing a dashboard cannot
+	// survive.
+	keys := []leeway.TopologyKey{"zone", "region", "rack", "cell", "host"}
+	plan := newSeriesPlan(PerDomainGate{All: true, MaxKeys: 3})
+	plan.admit(subA, keys)
+
+	for _, k := range keys[:3] {
+		if !plan.admits(subA, k) {
+			t.Errorf("%s was capped away, want the first three", k)
+		}
+	}
+	for _, k := range keys[3:] {
+		if plan.admits(subA, k) {
+			t.Errorf("%s survived a cap of 3", k)
+		}
+	}
+	// One subject, counted once, however many axes it lost — the gauge is in
+	// subjects so that its three reasons can be added up.
+	if got := plan.withheld[withheldKeyCap]; got != 1 {
+		t.Errorf("withheld[key_cap] = %d, want 1", got)
+	}
+	// And it is still an admitted subject: the cap narrows a breakdown, it
+	// does not withhold one.
+	if _, ok := plan.keys[subA]; !ok {
+		t.Error("a capped subject was dropped entirely")
+	}
+}
+
+func TestSeriesPlan_AnUncappedPlanKeepsEveryAxis(t *testing.T) {
+	// Zero is the gate's spelling of "no cap" — Config.perDomainGate folds the
+	// negative flag value onto it — so the zero-value gate has to be the
+	// pre-Phase-8 behaviour exactly.
+	plan := newSeriesPlan(PerDomainGate{All: true})
+	plan.admit(subA, []leeway.TopologyKey{"zone", "region", "rack", "cell", "host"})
+	if got := len(plan.keys[subA]); got != 5 {
+		t.Errorf("kept %d axes, want all 5", got)
+	}
+	if got := plan.withheld[withheldKeyCap]; got != 0 {
+		t.Errorf("withheld[key_cap] = %d, want 0 on an uncapped plan", got)
+	}
+}
+
+func TestSeriesPlan_EveryReasonReadsZeroBeforeAnythingIsWithheld(t *testing.T) {
+	// The gauge has to exist at zero. A series that only appears once
+	// something is dropped cannot be alerted on before the first drop, and
+	// "absent" would be indistinguishable from a build that predates §8.4.
+	plan := newSeriesPlan(PerDomainGate{All: true})
+	for _, reason := range []string{withheldGate, withheldNamespace, withheldKeyCap} {
+		if n, ok := plan.withheld[reason]; !ok || n != 0 {
+			t.Errorf("withheld[%s] = %d (present=%v), want a zero", reason, n, ok)
+		}
+	}
+}
+
+func TestSeriesPlan_ANilPlanAdmitsEverything(t *testing.T) {
+	// The walkers take the plan as a pointer, and a source constructed without
+	// one — every caller that predates this, and the tests that build
+	// metricsOptions by hand — must keep exporting rather than silently export
+	// nothing.
+	var plan *seriesPlan
+	if !plan.admits(subA, zoneKey) {
+		t.Error("a nil plan withheld a breakdown")
+	}
+}
+
+func TestInstruments_TheWithheldGaugeIsLabelledByReason(t *testing.T) {
+	opts := fullOptions()
+	// A floor above the harness subject's drift, so the gate turns it away and
+	// the plan records why.
+	opts.PerDomain = PerDomainGate{MinDrift: 2}
+	h := newPromHarness(t, opts)
+
+	f := h.family(t, "lookout_leeway_domain_series_withheld")
+	if f == nil {
+		t.Fatal("lookout_leeway_domain_series_withheld absent")
+	}
+	got := map[string]float64{}
+	for _, m := range f.GetMetric() {
+		for _, l := range m.GetLabel() {
+			if l.GetName() == "reason" {
+				got[l.GetValue()] = m.GetGauge().GetValue()
+			}
+		}
+	}
+	want := map[string]float64{withheldGate: 1, withheldNamespace: 0, withheldKeyCap: 0}
+	if !maps.Equal(got, want) {
+		t.Errorf("withheld = %v, want %v", got, want)
+	}
+}
+
+func TestInstruments_CollapsingStatesHalvesTheLabelSet(t *testing.T) {
+	// §8.4's first mitigation, and the only one that changes a label rather
+	// than dropping a series. The four scheduling states are what §7.6 needs
+	// upstream; two is what a dashboard partitions on.
+	for _, tc := range []struct {
+		name string
+		gate PerDomainGate
+		want []string
+	}{
+		{"collapsed", PerDomainGate{All: true, CollapseStates: true}, []string{"active", "waiting"}},
+		// The uncollapsed labels are the raw CountState spellings, which share
+		// no value with the collapsed pair. That is deliberate: a dashboard
+		// written against one mode and pointed at the other returns nothing at
+		// all rather than a plausible undercount.
+		{"expanded", PerDomainGate{All: true}, []string{"pending", "running"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := fullOptions()
+			opts.PerDomain = tc.gate
+			h := newPromHarness(t, opts)
+
+			f := h.family(t, "lookout_leeway_domain_objects")
+			if f == nil {
+				t.Fatal("lookout_leeway_domain_objects absent")
+			}
+			var states []string
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "state" {
+						states = append(states, l.GetValue())
+					}
+				}
+			}
+			slices.Sort(states)
+			if !slices.Equal(states, tc.want) {
+				t.Errorf("state labels = %q, want %q", states, tc.want)
+			}
+		})
 	}
 }
 

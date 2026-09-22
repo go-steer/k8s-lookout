@@ -82,6 +82,10 @@ type flags struct {
 	topologyDefaults      string
 	topologyPerDomain     bool
 	topologyMinDrift      float64
+	topologyMaxKeys       int
+	topologyCollapse      bool
+	topologyDomainNS      string
+	topologyDomainNotNS   string
 	topologyDwell         time.Duration
 	topologyCapacityRatio float64
 	topologyNodeGroupKeys string
@@ -263,6 +267,10 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
 	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
 	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
+	fs.IntVar(&f.topologyMaxKeys, "topology-per-domain-max-keys", topologydrift.DefaultPerDomainMaxKeys, "How many topology axes one subject may contribute a per-domain breakdown on. A cluster that names five or six axes in --topology-keys multiplies every admitted subject's series by that many, and the axes past the first two or three are almost never the one being read. Which survive is the --topology-keys precedence order, so the cap is stable across scrapes rather than following whichever axis drifted. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"key_cap\"}. Pass a negative value for no cap.")
+	fs.BoolVar(&f.topologyCollapse, "topology-per-domain-collapse-states", true, "Halve the per-domain series count by folding the four scheduling states onto two labels: state=\"active\" for an object holding the domain's capacity (running or terminating) and state=\"waiting\" for one that is not (pending or unschedulable). The distinction §7.6 needs between the four is upstream of the metric and is unaffected — this changes the label, not the count or any finding. Turn it off to get running/pending/unschedulable/terminating back, at twice the series.")
+	fs.StringVar(&f.topologyDomainNS, "topology-per-domain-namespaces", "", "Comma-separated namespaces whose subjects may export a per-domain breakdown. Empty — the default — admits every namespace, so this is the narrowing knob for a cluster that wants the breakdown standing for the namespaces it cares about and the aggregate everywhere else. Cluster-scoped subjects (node groups, and the domains themselves) are never filtered by this: they belong to no namespace, and dropping them would silently remove the cluster-wide reading. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"namespace\"}.")
+	fs.StringVar(&f.topologyDomainNotNS, "topology-per-domain-exclude-namespaces", "", "Comma-separated namespaces whose subjects never export a per-domain breakdown, applied AHEAD of --topology-per-domain-namespaces — naming a namespace in both excludes it. This is the knob for the one churning namespace that dominates the series count; it does not stop the namespace being watched, scored or alerted on, only its per-domain breakdown being exported.")
 	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
 	fs.Float64Var(&f.topologyCapacityRatio, "topology-capacity-ratio", leeway.CapacityWeightingRatioTrigger, "How unequal a subject's eligible zones have to be, as a max/min ratio of allocatable CPU, before an even split stops being the expectation and capacity does (§7.2). Three zones where one is a quarter the size of the others cannot hold a third of anything; scoring them evenly reports drift on a cluster behaving exactly as its shape requires. Applies only where nobody declared a weighting — a policy that names one is always honoured. Raise it to keep the even expectation on mildly uneven clusters; below 1 it fires on any inequality at all. Must be > 0.")
 	fs.StringVar(&f.topologyNodeGroupKeys, "topology-node-group-keys", strings.Join(topologydrift.DefaultNodeGroupLabelKeys, ","), "Comma-separated node labels a node group's name is read from, in precedence order, first match wins (FR-3). Node groups are tracked as subjects of their own, so a pool that was configured for three zones and has all its nodes in one is one finding naming the pool rather than one per workload riding it. Compute class comes before node pool in the default because auto-provisioned pools are named per machine type and are numerous and short-lived. A label that is unique per node turns every node into a group — see --topology-max-node-groups, which is what stops that reaching your metrics.")
@@ -639,6 +647,14 @@ func (f *flags) validate() error {
 	}
 	if f.topologyBand <= 0 {
 		return errors.New("--topology-baseline-band must be > 0 (a zero-width band breaches on every sample)")
+	}
+	// The third instance of the same hazard, and the sharpest: zero is the
+	// value an operator would type to mean "no per-domain breakdown at all",
+	// and Config.normalize() would hand back the default of 4 — the opposite.
+	// Nothing is the aggregate-only posture, which is already what you get by
+	// leaving --topology-per-domain-series off.
+	if f.topologyMaxKeys == 0 {
+		return errors.New("--topology-per-domain-max-keys cannot be 0 (pass a negative value for no cap; for no per-domain series at all, leave --topology-per-domain-series off)")
 	}
 	// Zero is not "off" here, it is "divide by nothing": Config.normalize()
 	// would hand back the default, and an operator who typed 0 meant either
