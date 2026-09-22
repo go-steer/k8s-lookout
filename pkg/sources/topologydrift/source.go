@@ -449,6 +449,10 @@ type Source struct {
 	// finding says so rather than reporting them negative.
 	capacity CapacityOracle
 
+	// rolloutEnd, when set via WithRolloutEndOracle, answers §8.5's
+	// rolloutEndedAt. Nil means the row is unanswered — see RolloutEndOracle.
+	rolloutEnd RolloutEndOracle
+
 	inv   *Inventory
 	state *State
 	queue *coalescer
@@ -486,6 +490,10 @@ type Source struct {
 	// rollingOut is the last snapshot the rollout oracle gave us. Nil until
 	// the first cluster sample, which reads as "nothing is rolling out".
 	rollingOut map[leeway.SubjectRef]bool
+	// rolloutEnds is the last snapshot the rollout-end oracle gave us. Nil
+	// until the first cluster sample, which reads as "no rollout has been
+	// watched to its end" — the same thing a fresh process honestly knows.
+	rolloutEnds map[leeway.SubjectRef]time.Time
 	// domainSeen is §2.3's latch: when each domain was last observed to exist
 	// on each axis. It is the memory that keeps a dead zone reported after its
 	// ready history has aged out — see sampleDomains.
@@ -632,6 +640,29 @@ type RolloutOracle func() []leeway.SubjectRef
 func (s *Source) WithRolloutOracle(fn RolloutOracle) {
 	if fn != nil {
 		s.rollouts = fn
+	}
+}
+
+// RolloutEndOracle answers §8.5's `rolloutEndedAt`: when each subject's most
+// recent rollout finished.
+//
+// Separate from RolloutOracle rather than folded into it, because the two are
+// different questions with different failure modes even though one source
+// answers both. §7.6 asks what is moving *now* and treats an absent answer as
+// "nothing is", which costs a threshold that was not relaxed. §8.5 asks when
+// the movement stopped and must not treat an absent answer as "long ago",
+// which would attribute a drift to a rollout nobody watched.
+//
+// Subjects with no watched completion are absent from the map rather than
+// present at the zero time, so a caller cannot read "we have not seen one" as
+// a rollout that ended at the epoch. Unset means the row goes unanswered.
+type RolloutEndOracle func() map[leeway.SubjectRef]time.Time
+
+// WithRolloutEndOracle sets the callback that answers §8.5's rolloutEndedAt.
+// Call before Run; nil is ignored.
+func (s *Source) WithRolloutEndOracle(fn RolloutEndOracle) {
+	if fn != nil {
+		s.rolloutEnd = fn
 	}
 }
 
@@ -1192,17 +1223,27 @@ func (s *Source) sampleCluster(now time.Time) {
 	// whose nodes are gone is only still knowable through its history.
 	s.sampleDomains(now)
 
-	if s.rollouts == nil {
-		return
+	// Both rollout oracles are sampled here rather than read per subject: each
+	// builds a cluster-wide answer, and an evaluation pass covers tens of
+	// thousands of subjects. A snapshot one tick stale costs nothing either
+	// way — §7.6 relaxes rather than suppresses, and §8.5 compares its stamp
+	// against a ten-minute settle window.
+	if s.rollouts != nil {
+		refs := s.rollouts()
+		set := make(map[leeway.SubjectRef]bool, len(refs))
+		for _, ref := range refs {
+			set[ref] = true
+		}
+		s.mu.Lock()
+		s.rollingOut = set
+		s.mu.Unlock()
 	}
-	refs := s.rollouts()
-	set := make(map[leeway.SubjectRef]bool, len(refs))
-	for _, ref := range refs {
-		set[ref] = true
+	if s.rolloutEnd != nil {
+		ends := s.rolloutEnd()
+		s.mu.Lock()
+		s.rolloutEnds = ends
+		s.mu.Unlock()
 	}
-	s.mu.Lock()
-	s.rollingOut = set
-	s.mu.Unlock()
 }
 
 // isRollingOut reports whether the last cluster sample found this subject
@@ -1213,6 +1254,17 @@ func (s *Source) isRollingOut(sub leeway.SubjectRef) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.rollingOut[sub]
+}
+
+// rolloutEndedAt reports when the last cluster sample saw this subject's most
+// recent rollout finish. The zero time means no rollout has been watched to
+// its end, which §8.5's rule reads as "not recently rolled out" — the same
+// answer a subject that genuinely has not had one gives, and the reason
+// Evidence.Unavailable carries whether anybody was asked at all.
+func (s *Source) rolloutEndedAt(sub leeway.SubjectRef) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rolloutEnds[sub]
 }
 
 // onScalable records a Deployment's or StatefulSet's declared size for §7.6's
@@ -1478,6 +1530,9 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		// seeing no rollout bucket should be able to find out here whether that
 		// means no rollouts or no answer.
 		s.logger()("topologydrift: no rollout source wired — §7.6 will not relax thresholds during a rollout")
+	}
+	if s.rolloutEnd == nil {
+		s.logger()("topologydrift: no rollout-completion source wired — §8.5 findings will report rollout_bias as untested")
 	}
 	if s.capacity == nil {
 		// Same rule, applied to §8.5's ladder: a finding whose evidence shows

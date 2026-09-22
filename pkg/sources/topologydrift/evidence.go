@@ -35,15 +35,16 @@ import (
 // the judgement about why a pod did not land, and reading FailedScheduling
 // here would be a second, worse answer to a question already answered.
 //
-// Two evidence fields remain at their zero values, and each is a whole sibling
-// source rather than a missing line:
+// RolloutEndedAt comes from the `rollout` source the same way, through
+// RolloutEndOracle and sampled on the cluster tick rather than per finding
+// because it is a cluster-wide answer.
 //
-//   - DomainFacts.ConsolidatedAt is the autoscaler's. Nothing in this
-//     deployment records node removals as consolidations yet.
-//   - RolloutEndedAt needs a rollout's *completion* time; the §7.6 seam reports
-//     only which workloads are rolling out right now.
+// One evidence field remains at its zero value, and it is a whole sibling
+// source rather than a missing line: DomainFacts.ConsolidatedAt is the
+// autoscaler's, and nothing in this deployment records node removals as
+// consolidations yet.
 //
-// Their absence is reported rather than implied. Evidence.Unavailable says
+// Its absence is reported rather than implied. Evidence.Unavailable says
 // which sources could not be asked, and Attribute turns that into the
 // finding's `untested` list, so a deployment missing a source is
 // distinguishable from one where the hypothesis was tested and lost. The cost
@@ -52,14 +53,15 @@ import (
 // wrong one, because every rule needs positive evidence.
 func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, now time.Time) leeway.Evidence {
 	ev := leeway.Evidence{
-		Domains: make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
+		Domains:        make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
+		RolloutEndedAt: s.rolloutEndedAt(sub),
 		Unavailable: leeway.EvidenceGaps{
-			Capacity: s.capacity == nil,
-			// Still nobody's job. PR order, not an oversight: the seams these
-			// two need do not exist yet, and saying so is what stops a finding
-			// claiming it ruled them out.
-			Consolidation:     true,
-			RolloutCompletion: true,
+			Capacity:          s.capacity == nil,
+			RolloutCompletion: s.rolloutEnd == nil,
+			// Still nobody's job. PR order, not an oversight: no seam reports a
+			// node removal as a consolidation, and saying so is what stops a
+			// finding claiming it ruled one out.
+			Consolidation: true,
 		},
 	}
 	s.pendingEvidence(&ev, sub)

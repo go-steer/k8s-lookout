@@ -190,7 +190,18 @@ type track struct {
 	// cleared_after/observed_stable_for durations.
 	complete    bool
 	completedAt time.Time
-	lastSeen    time.Time
+	// rollingOut is whether the LAST sweep saw §7.6's rolling-out
+	// predicate hold, and rolloutEndedAt stamps the true→false edge.
+	// Deliberately NOT completedAt: that one is deploymentComplete,
+	// which also requires every replica to be available, so a
+	// Deployment with one pod in CrashLoopBackOff never reaches it.
+	// §8.5's rollout_bias asks when the placement stopped moving, and
+	// the controller stops moving pods whether or not the new ones
+	// become healthy — the same distinction RollingOut already makes
+	// for the relaxation, read at its other edge.
+	rollingOut     bool
+	rolloutEndedAt time.Time
+	lastSeen       time.Time
 }
 
 // Source implements sources.Source (and engine.ClearanceObserver) for
@@ -525,6 +536,7 @@ func (s *Source) sweep(now time.Time) []engine.Signal {
 			out = append(out, *sig)
 		}
 	}
+	s.observeRolloutEdges(now)
 	// TTL prune (safety net behind DeleteFunc).
 	cutoff := now.Add(-s.cfg.StateTTL)
 	for uid, e := range s.deployments {
@@ -673,9 +685,27 @@ func (s *Source) RollingOut() []WorkloadRef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Count the owned ReplicaSets still holding replicas, per Deployment, in
-	// one pass. Per-Deployment scanning would be quadratic on a cluster with
-	// thousands of each, which is exactly the size where this is asked.
+	active := s.activeReplicaSets()
+
+	var out []WorkloadRef
+	for uid, e := range s.deployments {
+		if deploymentRollingOut(e.obj, active[uid]) {
+			out = append(out, WorkloadRef{Kind: "Deployment", Namespace: e.obj.Namespace, Name: e.obj.Name})
+		}
+	}
+	for _, e := range s.statefulsets {
+		if stsRollingOut(e.obj) {
+			out = append(out, WorkloadRef{Kind: "StatefulSet", Namespace: e.obj.Namespace, Name: e.obj.Name})
+		}
+	}
+	return out
+}
+
+// activeReplicaSets counts the owned ReplicaSets still holding replicas, per
+// owner, in one pass. Per-Deployment scanning would be quadratic on a cluster
+// with thousands of each, which is exactly the size where this is asked.
+// Called under s.mu.
+func (s *Source) activeReplicaSets() map[types.UID]int {
 	active := make(map[types.UID]int)
 	for _, e := range s.replicasets {
 		if int32OrOne(e.obj.Spec.Replicas) == 0 {
@@ -687,16 +717,73 @@ func (s *Source) RollingOut() []WorkloadRef {
 			}
 		}
 	}
+	return active
+}
 
-	var out []WorkloadRef
+// observeRolloutEdges records, once per sweep, which workloads stopped rolling
+// out since the last one. Called under s.mu.
+//
+// On the sweep rather than on each informer event because the Deployment
+// predicate needs a cluster-wide aggregate — how many of its ReplicaSets still
+// hold replicas — and recomputing that per event would be quadratic on exactly
+// the clusters where rollouts are frequent. The cost is that the stamp has the
+// sweep's resolution, which is the right trade for a fact §8.5 compares
+// against a ten-minute settle window.
+//
+// A workload this source meets already settled never gets a stamp, and that is
+// the honest answer rather than a gap: we did not watch a rollout end, so we
+// cannot date one. Same after a restart. §8.5's rule needs the *last* rollout,
+// and a stamp invented at startup would make every subject look freshly rolled
+// out for the length of the attribution window.
+func (s *Source) observeRolloutEdges(now time.Time) {
+	active := s.activeReplicaSets()
 	for uid, e := range s.deployments {
-		if deploymentRollingOut(e.obj, active[uid]) {
-			out = append(out, WorkloadRef{Kind: "Deployment", Namespace: e.obj.Namespace, Name: e.obj.Name})
+		s.observeRolloutEdge(uid, deploymentRollingOut(e.obj, active[uid]), now)
+	}
+	for uid, e := range s.statefulsets {
+		s.observeRolloutEdge(uid, stsRollingOut(e.obj), now)
+	}
+}
+
+// observeRolloutEdge records one workload's rolling-out state, stamping the
+// moment it stopped. Called under s.mu.
+func (s *Source) observeRolloutEdge(uid types.UID, rollingOut bool, now time.Time) {
+	tr := s.trackFor(uid, now)
+	if tr.rollingOut && !rollingOut {
+		tr.rolloutEndedAt = now
+	}
+	tr.rollingOut = rollingOut
+}
+
+// RolloutEnded reports, per workload, when this source last watched a rollout
+// finish. Workloads it has never seen finish one are absent rather than
+// present at the zero time, so a caller reading the map cannot mistake "we
+// have not seen one" for "one ended at the epoch".
+//
+// This is docs/leeway-design.md §8.5's `rolloutEndedAt`, and it exists for the
+// same reason RollingOut does: leeway consumes this source's answer instead of
+// deriving a second one. The two are edges of the same predicate — RollingOut
+// is what relaxes the thresholds while the pods are moving, and this is when
+// that relaxation lapsed, which is the clock `rollout_bias` runs its settle
+// window on. Answering it from `completedAt` instead would have used a
+// stricter predicate that a Deployment with one unhealthy pod never satisfies,
+// and the bias would go permanently unattributed on exactly the workloads
+// most likely to have it.
+//
+// The whole cluster in one call, for RollingOut's reason: the caller asks on
+// its own cadence for tens of thousands of subjects.
+func (s *Source) RolloutEnded() map[WorkloadRef]time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[WorkloadRef]time.Time, len(s.tracks))
+	for uid, e := range s.deployments {
+		if tr, ok := s.tracks[uid]; ok && !tr.rolloutEndedAt.IsZero() {
+			out[WorkloadRef{Kind: "Deployment", Namespace: e.obj.Namespace, Name: e.obj.Name}] = tr.rolloutEndedAt
 		}
 	}
-	for _, e := range s.statefulsets {
-		if stsRollingOut(e.obj) {
-			out = append(out, WorkloadRef{Kind: "StatefulSet", Namespace: e.obj.Namespace, Name: e.obj.Name})
+	for uid, e := range s.statefulsets {
+		if tr, ok := s.tracks[uid]; ok && !tr.rolloutEndedAt.IsZero() {
+			out[WorkloadRef{Kind: "StatefulSet", Namespace: e.obj.Namespace, Name: e.obj.Name}] = tr.rolloutEndedAt
 		}
 	}
 	return out

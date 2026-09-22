@@ -17,6 +17,7 @@ package watch
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
@@ -67,6 +68,41 @@ func TestRolloutOracle_DropsAKindLeewayDoesNotTrack(t *testing.T) {
 func TestRolloutOracle_AQuietClusterAnswersEmpty(t *testing.T) {
 	t.Parallel()
 	if got := rolloutOracle(fakeRollouts(nil))(); len(got) != 0 {
+		t.Errorf("oracle() = %v, want nothing", got)
+	}
+}
+
+type fakeRolloutEnds map[rollout.WorkloadRef]time.Time
+
+func (f fakeRolloutEnds) RolloutEnded() map[rollout.WorkloadRef]time.Time { return f }
+
+// The other edge of the same predicate, for docs/leeway-design.md §8.5. What
+// matters here is that the stamp arrives under a key leeway can look up: one
+// that does not is a rollout_bias attribution that silently never happens.
+func TestRolloutEndOracle_CarriesTheStampsAcrossTheSeam(t *testing.T) {
+	t.Parallel()
+	web := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	db := web.Add(-time.Hour)
+	got := rolloutEndOracle(fakeRolloutEnds{
+		{Kind: "Deployment", Namespace: "prod", Name: "web"}:         web,
+		{Kind: "StatefulSet", Namespace: "prod", Name: "db"}:         db,
+		{Kind: "DaemonSet", Namespace: "kube-system", Name: "agent"}: web,
+	})()
+
+	if len(got) != 2 {
+		t.Fatalf("oracle() = %v, want the two kinds leeway tracks", got)
+	}
+	if at := got[leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: "web"}]; !at.Equal(web) {
+		t.Errorf("Deployment prod/web = %v, want %v", at, web)
+	}
+	if at := got[leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: "prod", Name: "db"}]; !at.Equal(db) {
+		t.Errorf("StatefulSet prod/db = %v, want %v", at, db)
+	}
+}
+
+func TestRolloutEndOracle_AClusterWithNoWatchedRolloutAnswersEmpty(t *testing.T) {
+	t.Parallel()
+	if got := rolloutEndOracle(fakeRolloutEnds(nil))(); len(got) != 0 {
 		t.Errorf("oracle() = %v, want nothing", got)
 	}
 }

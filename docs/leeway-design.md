@@ -3410,7 +3410,8 @@ pipeline is for.
 > every rule needs positive evidence.
 >
 > **`insufficientResource` and `schedulingMessage` shipped 2026-09-22 (#474),
-> along with the `untestedCauses` field the other two need.** `CapacityOracle`
+> along with the `untestedCauses` field the remaining rows need.**
+> `CapacityOracle`
 > is the seam, adapted at the composition root exactly like §7.6's rollout one,
 > and it is asked once per finding for the whole cluster rather than once per
 > subject — the refused set holds only pods the scheduler turned down, so
@@ -3424,6 +3425,32 @@ pipeline is for.
 > — the earliest refusal, tie-broken by UID — because the scheduler's text
 > already enumerates every failed predicate and across how many nodes, and a
 > stable choice is what lets two findings an hour apart be diffed.
+>
+> **`rolloutEndedAt` shipped 2026-09-22 (#474), off the other edge of §7.6's
+> predicate.** The `rollout` source stamps the moment `RollingOut` stops
+> holding for a workload and `RolloutEnded` reports it, adapted through a
+> second oracle rather than folded into the first — the two rows have opposite
+> failure modes even though one source answers both. §7.6 asks what is moving
+> *now* and reads an absent answer as "nothing is", costing a threshold that
+> was not relaxed; §8.5 asks when the movement stopped and must not read an
+> absent answer as "long ago", which would blame a drift on a rollout nobody
+> watched. Subjects with no observed completion are therefore **absent from the
+> map**, not present at the zero time.
+>
+> Deliberately **not** `completedAt`, the stamp §7.4's clearance already keeps.
+> That one is `deploymentComplete`, which additionally requires every replica
+> to be *available*, so a Deployment with one pod in CrashLoopBackOff never
+> reaches it — and the bias would go permanently unattributed on exactly the
+> workloads most likely to have left some behind. The controller stops moving
+> pods whether or not the new ones become healthy, and that is when the settle
+> window should start. The edge is recorded on the source's own sweep rather
+> than per informer event, because the Deployment predicate needs a
+> cluster-wide aggregate (how many of its ReplicaSets still hold replicas) that
+> would be quadratic to recompute per event on exactly the clusters where
+> rollouts are frequent. A sweep's resolution is the right trade against a
+> ten-minute settle window. A workload met already settled, or met after a
+> restart, never gets a stamp: inventing one would make every subject in the
+> cluster look freshly rolled out for the length of the attribution window.
 >
 > **A missing source is now distinguishable from a ruled-out cause.**
 > `Evidence.Unavailable` names the sibling sources this deployment could not
