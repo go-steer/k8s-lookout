@@ -64,6 +64,21 @@ const (
 	metricBaselineSamples  = "lookout.leeway.baseline_samples"
 )
 
+// Bucket boundaries for evaluation_duration, in seconds. Sixteen buckets,
+// the same count OTel's default gives, spread over the range this operation
+// actually occupies: tens of microseconds for a small Deployment, up to a
+// second for a very wide subject on a very large cluster. The top boundary
+// is 5 s and not 10 s because an evaluation that slow has already missed
+// every window that reads it, and one more bucket above it would say
+// nothing a +Inf overflow does not.
+var evalDurationBuckets = []float64{
+	0.0001, 0.00025, 0.0005,
+	0.001, 0.0025, 0.005,
+	0.01, 0.025, 0.05,
+	0.1, 0.25, 0.5,
+	1, 2.5, 5,
+}
+
 // Instrument descriptions. Hoisted to constants because they are the help
 // string on BOTH sides of the export — the one the exporter writes into
 // /metrics and the one MetricDocs hands the docs generator — and a help
@@ -661,9 +676,17 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	); err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricLastEvent, err)
 	}
+	// The boundaries are not optional. OTel's default explicit buckets start
+	// at 0 and then jump to 5, 10, 25 … 10000 — they are chosen for a
+	// duration measured in MILLISECONDS, and this one is in seconds.
+	// Inherited, they put every observation this instrument will ever make
+	// into the second bucket, "under five seconds", and every quantile drawn
+	// off it is an artefact of the bucket layout rather than a reading.
+	// Measured on the kwok scale tier: a Deployment evaluates in ~90 µs.
 	if in.evalDuration, err = meter.Float64Histogram(metricEvalDuration,
 		metric.WithUnit("s"),
 		metric.WithDescription(descEvalDuration),
+		metric.WithExplicitBucketBoundaries(evalDurationBuckets...),
 	); err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricEvalDuration, err)
 	}
