@@ -1,0 +1,58 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optional add-on for clusters whose Grafana runs the dashboard sidecar.
+# Applied separately from the base bundle because it assumes a
+# provisioning mechanism the bundle must not assume:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=vX.Y.Z"
+#
+# No prerequisite: the ConfigMap stands alone, and a dashboard with
+# nothing to query renders empty rather than failing.
+#
+# The sidecar only picks this up if it is searching agent-triage.
+# Grafana's chart defaults sidecar.dashboards.searchNamespace to its own
+# release namespace, so more often than not it is NOT. To put the
+# ConfigMap somewhere else, wrap this rather than editing it:
+#
+#   apiVersion: kustomize.config.k8s.io/v1beta1
+#   kind: Kustomization
+#   resources:
+#     - github.com/go-steer/k8s-lookout/deploy/dashboards?ref=vX.Y.Z
+#   namespace: monitoring
+#
+# If you provision dashboards some other way — Terraform, the Grafana
+# API, a git-synced folder, or the import button — take leeway.json on
+# its own and ignore this file. It is the source of truth either way;
+# this only wraps it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-triage
+
+configMapGenerator:
+  - name: lookout-leeway-dashboard
+    files:
+      - leeway.json
+    options:
+      labels:
+        # What the sidecar selects on. The value is not read.
+        grafana_dashboard: "1"
+        app.kubernetes.io/name: k8s-lookout
+        app.kubernetes.io/component: dashboard
+
+generatorOptions:
+  # The sidecar keys its files by ConfigMap name. A hash suffix would
+  # make every edit a new ConfigMap and leave the previous dashboard
+  # behind, so the same dashboard would accumulate one copy per change.
+  disableNameSuffixHash: true

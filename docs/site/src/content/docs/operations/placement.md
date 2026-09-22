@@ -16,7 +16,8 @@ This page is about turning them up and down. For what each flag does
 line by line see the [`watch` reference](/reference/watch/); for what
 each metric is see the [metrics reference](/reference/metrics/); for
 running the subsystem as its own process see [The standalone `leeway`
-binary](/operations/leeway-standalone/).
+binary](/operations/leeway-standalone/). There is a [prebuilt Grafana
+dashboard](#the-dashboard) over everything on this page.
 
 ## The three tiers
 
@@ -155,3 +156,54 @@ with an **open episode** — 1 for pending, 2 for firing — so a series
 disappearing is a subject that recovered, not a subject that stopped
 being scraped. Rate-of-change on it reads as noise; use it to answer
 "what is open right now".
+
+## The dashboard
+
+`deploy/dashboards/leeway.json` is a Grafana dashboard over the whole
+instrument set, built the way this page is ordered. Its first row is
+deliberately **not** drift — it is the four SLIs above, because a
+dashboard that shows drift without showing whether drift is being
+measured correctly is the failure they exist to prevent. Drift,
+compute-class ranks, and baselines-and-cost follow.
+
+The JSON is the artifact. Import it through Grafana's UI, point
+Terraform or the Grafana API at it, drop it in a git-synced folder — it
+carries no provisioning assumptions and prompts for a Prometheus data
+source on import. For the sidecar, there is a ConfigMap wrapper:
+
+```sh
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.26.0"
+```
+
+That lands `lookout-leeway-dashboard` in `agent-triage` with the
+`grafana_dashboard: "1"` label. **The sidecar only picks it up if it is
+searching that namespace**, and Grafana's chart defaults
+`sidecar.dashboards.searchNamespace` to its own release namespace, so
+more often than not it is not. Wrap the overlay with a `namespace:` of
+your own rather than editing it in place; the comment at the top of
+`deploy/dashboards/kustomization.yaml` has the four lines.
+
+It is outside the base bundle for the same reason the ServiceMonitor is:
+`kubectl apply -k deploy/` must not assume a monitoring stack. Unlike
+the ServiceMonitor, there is no Helm equivalent — a chart can only
+`.Files.Get` inside its own directory, so shipping it through the chart
+would mean a second copy of an eight-hundred-line JSON kept in sync by
+convention, and this file is short enough to apply on its own that the
+trade is not worth making.
+
+Four choices in it are worth knowing about, because they are the ones
+you would otherwise have to rediscover:
+
+- **Mean achieved rank** divides rank-weighted pod-time by pod-time over
+  **tier ranks only** — `rank!~"unknown|unsatisfiable|off-axis"`. A mean
+  over a bucket whose rank is `unsatisfiable` is not a mean of anything,
+  and leaving those in the denominator drags the number toward zero
+  exactly when a class stops being satisfiable.
+- **Pod-time by rank** is a rate over a counter, not a pod count. Ninety
+  seconds of rank-3 pods during a scale-up and three weeks parked on a
+  spot fallback are the same picture to a gauge.
+- **Both episode tables are instant queries**, for the reason in the
+  note above: the series only exists while an episode is open.
+- **The subject panels are `topk(20, …)`**, which keeps them readable on
+  a large estate and means they are a worst-offenders view rather than a
+  census. `lookout_leeway_subjects_tracked` is the census.

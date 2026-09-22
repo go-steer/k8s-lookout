@@ -214,6 +214,24 @@ It ships outside the base bundle because `ServiceMonitor` is a CRD and
 have it. On Google Managed Prometheus the equivalent is a
 `PodMonitoring`; the port name and interval carry over.
 
+### Something to look at
+
+`deploy/dashboards/leeway.json` is a Grafana dashboard over the
+placement subsystem — drift, compute-class ranks, and the SLIs that say
+whether either is being measured correctly. Import the JSON, or apply
+the ConfigMap wrapper for the Grafana sidecar:
+
+```sh
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.26.0"
+```
+
+It is the only dashboard that ships with the sentinel, because it is the
+only part of the output that is a time series first and a finding
+second. Everything else is better read through the findings themselves.
+See [Tuning placement
+findings](/operations/placement/#the-dashboard) for what is on it and
+the namespace the sidecar has to be searching.
+
 Alongside the `lookout_*` series the endpoint carries the standard Go
 and process collectors — `process_resident_memory_bytes`,
 `go_memstats_heap_inuse_bytes`, `go_memstats_next_gc_bytes` and the
