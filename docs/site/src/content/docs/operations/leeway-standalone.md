@@ -16,6 +16,11 @@ exports their metrics. Nothing else: no event watcher, no store, no
 inject path, no read-path commands. It ships in the same image and the
 same release as `lookout`.
 
+The two sources behave identically either way, so everything in [Tuning
+placement findings](/operations/placement/) — the tiers, the flags that
+move them, the cardinality controls and the SLIs that say whether the
+numbers are sound — applies here unchanged.
+
 ## The constraint
 
 **Do not run `leeway` against a cluster that is already running

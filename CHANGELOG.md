@@ -131,6 +131,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as what they are. With every source consumed, `untestedCauses` now only ever
   names `rollout_bias`, and only on a deployment not running the rollout source.
 
+- **Operator documentation for the placement subsystem**, at *Operations →
+  Tuning placement findings*. What each of the three confidence tiers means and
+  where its expectation came from, which flag moves which tier, the seven
+  controls on the per-domain series cardinality, and — the part a reference
+  table cannot give you — the four series that say whether the drift numbers are
+  worth reading at all. Two of those are threshold-zero alerts and are now in
+  *Observability*'s alert table alongside the rest of the sentinel's:
+  `lookout_leeway_counter_mismatch_total` and
+  `lookout_leeway_preference_disagreement`. The other two are the ones to check
+  before believing a quiet estate, since a fleet-wide suppression and a healthy
+  fleet look identical from the findings alone.
+
 - **The OTLP metric push path now reports on itself, and a dead collector can no
   longer reach the recording path.** `--otel-exporter=otlp` adds five series to
   the scrape endpoint — `lookout_otlp_exports_total{outcome}`,
