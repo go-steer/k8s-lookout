@@ -1337,8 +1337,9 @@ overhead, no delta queue, nothing leeway adds.
 > the pod cache alone exhausts at **~14,000 GKE-sized pods** (~27,000 kind-sized
 > ones) — inside the 1–15k range lookout DESIGN §6.2 calls typical, and reached
 > before leeway allocates anything. This predates leeway and is not leeway's to fix,
-> but it is now measured rather than suspected, so it is filed against Phase 8 for
-> sizing guidance rather than left in a design document.
+> but it is now measured rather than suspected, so it is filed against Phase 8 as
+> [#480](https://github.com/go-steer/k8s-lookout/issues/480) rather than left in a
+> design document.
 
 The "Typical" row is added deliberately: lookout DESIGN §6.2 puts real clusters at
 1–15k pods, and at that size leeway costs single-digit MiB. The larger rows exist
@@ -4078,7 +4079,7 @@ Findings, in descending order of how much they changed:
   heap than on the wire.
 - **The default `memory: 256Mi` is exhausted by the pod cache at ~14k pods**, inside
   the range DESIGN §6.2 calls typical. Not leeway's bug and not leeway's to fix, but
-  measured now rather than suspected.
+  measured now rather than suspected — [#480](https://github.com/go-steer/k8s-lookout/issues/480).
 - **The transform's *ratios* are stable across both clusters** (pod heap 25.7% /
   25.3%) while the absolute sizes vary 1.9×. That is the S6 mechanical-ratio versus
   population-parameter split showing up again, in the one spike that measured both
