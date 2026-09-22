@@ -14,8 +14,8 @@
 # limitations under the License.
 #
 # soak — run the WHOLE sentinel against the synthetic fleet under
-# sustained churn for hours, and answer one question: is resident
-# memory flat?
+# sustained churn for hours, and answer one question: does resident
+# memory track the fleet, or does it outgrow it?
 #
 # This is §6.6.1's steady-state soak, and it is deliberately
 # `lookout watch` with every source live rather than the standalone
@@ -26,12 +26,20 @@
 # to show up where eleven sources share one informer factory, and least
 # likely to show up in the one that was just written with this in mind.
 #
-# What "flat" means here. RSS is not expected to be constant: the Go
-# heap saws, and the fleet itself grows (every rollout leaves a
-# ReplicaSet behind, up to revisionHistoryLimit). Flat means the fitted
-# slope, projected over 24 hours, is a small fraction of the mean —
-# LEEWAY_SOAK_TOLERANCE, 10% by default. A leak shows up as a slope
-# that survives the fit over hours; a saw does not.
+# What passing means here. RSS is not expected to be constant: the Go
+# heap saws, and the fleet itself grows, because every rollout leaves a
+# ReplicaSet behind up to revisionHistoryLimit and four drivers create
+# them faster than the limit reaps. Over the first full two-hour run the
+# fleet grew 129%, so a verdict on raw RSS would have called a healthy
+# process a catastrophic leak.
+#
+# So the verdict is taken against the fleet. When the fleet holds still,
+# it is the fitted RSS slope projected over 24 hours, as a fraction of
+# the mean. When the fleet grows, it is the marginal resident cost of an
+# object — RSS fitted against the object count, over the first half of
+# the window against the second. Either way the threshold is
+# LEEWAY_SOAK_TOLERANCE, 10% by default, and either way a leak shows up
+# as something that survives the fit over hours while a saw does not.
 #
 # The fit deliberately skips the first LEEWAY_SOAK_WARMUP of samples.
 # The initial LIST, the first GC cycles and the informer caches filling
@@ -44,7 +52,9 @@
 #
 # Usage:
 #   examples/kwok/soak            # 2 hours, 4 rollout drivers
-#   examples/kwok/soak --report   # re-read the last run's samples
+#   examples/kwok/soak --report   # re-read the last run of samples
+#   examples/kwok/soak --selftest # check the verdict against synthetic
+#                                 # series; needs no cluster
 #
 # Env:
 #   LEEWAY_SOAK_HOURS       wall-clock hours to soak for (default 2)
@@ -70,9 +80,41 @@ SAMPLES="$STATE_DIR/soak-samples.tsv"
 
 # ---- the verdict ----------------------------------------------------------
 
-# Least squares over (elapsed seconds, MiB) for every sample past the
-# warm-up, for both series. awk does the fit because the alternative is
-# a Python dependency in an examples/ script that has none.
+# Least squares, in awk, because the alternative is a Python dependency
+# in an examples/ script that has none.
+#
+# WHICH TEST IS THE VERDICT depends on what the fleet did, and the two
+# cases are different measurements rather than one measurement with a
+# different threshold:
+#
+#   Flat fleet   — RSS against TIME. This is the classic leak test and
+#                  it is only valid when the denominator holds still.
+#   Fleet grows  — RSS against OBJECT COUNT, fitted separately over each
+#                  half of the window. The question is whether the Nth
+#                  object costs more than the first, which is what
+#                  unbounded retention looks like, and answering it needs
+#                  no extrapolation in time at all.
+#
+# The prose in this file always said that the leak signature is a rising
+# RSS over a FLAT object count and that a rising RSS over a rising one is
+# the process doing its job — but the verdict used to gate on raw RSS,
+# which is the opposite test, and the first full two-hour run is what
+# exposed the gap. Four churn drivers create ReplicaSets faster than
+# revisionHistoryLimit reaps them, so the fleet grew 129% in two hours;
+# RSS grew +847 MiB/h, which reads as a catastrophic leak; and the
+# marginal cost behind it was 53.6 KiB/object over the first half of the
+# window against 50.5 over the second. Per-object resident FELL, 62.5 KiB
+# to 55.7, because a fixed ~330 MiB intercept was amortising over a
+# doubling denominator.
+#
+# Do not be tempted to fit RSS-per-object against time instead and save
+# the second regime: that ratio is (intercept + marginal·N)/N, which is
+# not linear in t for any N(t), so its slope extrapolates to nonsense —
+# the two-hour run projects it to -128% of its own mean over 24 h.
+#
+# The raw series stay printed either way, because a flat heap under a
+# rising RSS is a different finding (the allocator, not retention) and
+# you cannot see it in a ratio.
 report() {
   if [[ ! -s "$SAMPLES" ]]; then
     echo "▸ no samples yet — run examples/kwok/soak"
@@ -81,84 +123,211 @@ report() {
 
   awk -F'\t' -v warmup="$WARMUP" -v tol="$TOLERANCE" '
     { t[NR] = $1; rss[NR] = $2; heap[NR] = $3; objs[NR] = $4; last = NR }
-    $1 >= warmup { fitted++ }
 
-    function fit(t, y, n, warmup, label,   i, k, sx, sy, sxx, sxy, m, b, mean) {
+    # Least squares of y on x over the inclusive index range [lo, hi].
+    # The results land in globals rather than in a return value, because
+    # awk has one of those and this needs three.
+    function fitxy(x, y, lo, hi,   i, k, sx, sy, sxx, sxy, d) {
       k = 0
-      for (i = 1; i <= n; i++) {
-        if (t[i] < warmup) continue
+      for (i = lo; i <= hi; i++) {
         k++
-        sx += t[i]; sy += y[i]; sxx += t[i] * t[i]; sxy += t[i] * y[i]
+        sx += x[i]; sy += y[i]; sxx += x[i] * x[i]; sxy += x[i] * y[i]
       }
-      if (k < 3) {
-        printf "  %-10s too few samples past the warm-up to fit (%d)\n", label, k
+      fit_n = k; fit_ok = 0
+      if (k < 3) return 0
+      d = k * sxx - sx * sx
+      # Every sample sharing one x. A real clock cannot do that, but a
+      # hand-edited samples file can, and so can a fleet that never moved
+      # once x is the object count rather than the time.
+      if (d == 0) return 0
+      fit_m = (k * sxy - sx * sy) / d
+      fit_mean = sy / k
+      fit_ok = 1
+      return 1
+    }
+
+    function drift(y, lo, hi, label, unit,   span) {
+      if (!fitxy(t, y, lo, hi)) {
+        printf "  %-14s no usable fit over the window (%d samples)\n", label, fit_n
         return
       }
-      # Guard the degenerate case rather than dividing by zero: every
-      # sample at the same instant cannot happen with a real clock, but
-      # a hand-edited samples file can.
-      if (k * sxx - sx * sx == 0) {
-        printf "  %-10s samples share one timestamp; no fit\n", label
-        return
-      }
-      m = (k * sxy - sx * sy) / (k * sxx - sx * sx)
-      b = (sy - m * sx) / k
-      mean = sy / k
-
-      # Observed drift first, projection second. The projection is what
-      # the verdict is taken on, because "will this pod last a day" is
-      # the operational question — but it multiplies the fitted slope
-      # by 24/window, so a two-hour soak amplifies whatever noise the
-      # fit picked up twelve-fold. Showing the drift that was actually
-      # seen is what stops that being mistaken for a measurement.
-      printf "  %-10s mean %7.1f MiB   drift %+7.1f MiB over %.1f h   → 24 h %+8.1f MiB (%+.1f%% of mean)\n",
-        label, mean, m * (t[n] - warmup), (t[n] - warmup) / 3600,
-        m * 86400, (mean > 0 ? m * 86400 / mean * 100 : 0)
-
-      if (label == "RSS") {
-        rss_mean = mean; rss_24h = m * 86400
-      }
+      span = t[hi] - t[lo]
+      # Observed drift first, projection second. The projection multiplies
+      # the fitted slope by 24/window, so a two-hour soak amplifies
+      # whatever noise the fit picked up twelvefold; printing the drift
+      # that was actually seen next to it is what stops the projection
+      # being read as a measurement.
+      printf "  %-14s mean %8.1f %-3s  drift %+8.1f %s over %.1f h  → 24 h %+9.1f %s (%+.1f%% of mean)\n",
+        label, fit_mean, unit, fit_m * span, unit, span / 3600,
+        fit_m * 86400, unit, (fit_mean > 0 ? fit_m * 86400 / fit_mean * 100 : 0)
     }
 
     END {
-      printf "\n▸ %d samples over %.2f h, fit over the %d past the %ds warm-up\n\n",
-        last, (t[last] - t[1]) / 3600, fitted + 0, warmup
-      if ((t[last] - warmup) < 3600)
-        printf "  ⚠ under an hour of fitted window. The 24 h projection below is\n    multiplying the slope by more than 24, so read it as a direction\n    rather than a number, and soak longer before gating on it.\n\n"
-      fit(t, rss, last, warmup, "RSS")
-      fit(t, heap, last, warmup, "Go heap")
-      printf "\n"
-      # The object count of the fleet itself, first and last. Not fitted, just
-      # shown: it is the control. The churn driver rolls Deployments,
-      # every roll leaves a dead ReplicaSet behind until the history
-      # limit reaps it, and the fleet therefore grows for a while
-      # before it plateaus. A rising RSS over a rising object count is
-      # the process doing its job; a rising RSS over a FLAT one is the
-      # only shape that is a leak.
-      printf "  %-10s %d objects at %ds → %d at %ds (%+.1f%%)\n\n",
-        "fleet", objs[1], t[1], objs[last], t[last],
-        (objs[1] > 0 ? (objs[last] - objs[1]) / objs[1] * 100 : 0)
-      if (rss_mean <= 0) {
-        print "  ? no RSS fit, so no verdict"
+      printf "\n▸ %d samples over %.2f h\n", last, (t[last] - t[1]) / 3600
+      w1 = 0
+      for (i = 1; i <= last; i++) if (t[i] >= warmup) { w1 = i; break }
+      if (!w1 || last - w1 < 5) {
+        printf "  ? %d samples past the %ds warm-up is not enough to fit — soak longer\n",
+          (w1 ? last - w1 + 1 : 0), warmup
         exit 0
       }
-      if (rss_24h / rss_mean > tol) {
-        printf "  ✗ NOT FLAT: RSS projects %+.1f%% over 24 h, tolerance is %.0f%%.\n",
+      printf "  fitted over the %d samples from %ds to %ds\n\n", last - w1 + 1, t[w1], t[last]
+      if ((t[last] - t[w1]) < 3600)
+        printf "  ⚠ under an hour of fitted window: read every 24 h projection below\n    as a direction rather than a number.\n\n"
+
+      # Context, in the units an operator sizes a pod in.
+      drift(rss, w1, last, "RSS", "MiB")
+      rss_ok = fit_ok; rss_mean = fit_mean; rss_24h = fit_m * 86400
+      drift(heap, w1, last, "Go heap", "MiB")
+      printf "\n"
+
+      printf "  %-14s %d objects at %ds → %d at %ds (%+.1f%%)\n",
+        "fleet", objs[w1], t[w1], objs[last], t[last],
+        (objs[w1] > 0 ? (objs[last] - objs[w1]) / objs[w1] * 100 : 0)
+      if (objs[w1] <= 0 || objs[last] <= 0) {
+        print "\n  ? the fleet control read zero, so there is no denominator and"
+        print "    no verdict. Re-run the soak."
+        exit 0
+      }
+      printf "  %-14s %.1f KiB at %ds → %.1f KiB at %ds\n\n", "RSS/object",
+        rss[w1] * 1024 / objs[w1], t[w1], rss[last] * 1024 / objs[last], t[last]
+
+      # Which of the two tests applies is a question about the
+      # denominator, so measure how far it actually travelled.
+      omin = omax = objs[w1]
+      for (i = w1; i <= last; i++) {
+        if (objs[i] < omin) omin = objs[i]
+        if (objs[i] > omax) omax = objs[i]
+      }
+      moved = (omax - omin) / omax
+
+      if (moved < 0.05) {
+        printf "  the fleet moved %.1f%% across the window, so the verdict is RSS\n  against time.\n\n", moved * 100
+        if (!rss_ok || rss_mean <= 0) {
+          print "  ? no RSS fit, so no verdict"
+          exit 0
+        }
+        if (rss_24h / rss_mean > tol) {
+          printf "  ✗ NOT FLAT: RSS projects %+.1f%% over 24 h against a fleet that did\n    not grow, tolerance is %.0f%%.\n",
+            rss_24h / rss_mean * 100, tol * 100
+          print "    Read the Go heap line before calling it a leak: a flat heap"
+          print "    under a rising RSS is the allocator, not retention."
+          exit 1
+        }
+        printf "  ✓ FLAT: RSS projects %+.1f%% over 24 h, inside the %.0f%% tolerance.\n",
           rss_24h / rss_mean * 100, tol * 100
+        exit 0
+      }
+
+      printf "  the fleet moved %.1f%% across the window, so the verdict is the\n  marginal resident cost of an object, fitted over each half.\n\n", moved * 100
+      mid = int((w1 + last) / 2)
+      if (!fitxy(objs, rss, w1, mid)) {
+        print "  ? the first half has no usable RSS-against-objects fit, so no verdict"
+        exit 0
+      }
+      m1 = fit_m * 1024
+      if (!fitxy(objs, rss, mid, last)) {
+        print "  ? the second half has no usable RSS-against-objects fit, so no verdict"
+        exit 0
+      }
+      m2 = fit_m * 1024
+      printf "  %-14s %.1f KiB/object over the first half, %.1f over the second\n\n",
+        "marginal", m1, m2
+      if (m1 <= 0) {
+        print "  ? the first half fitted a non-positive marginal cost, which is noise"
+        print "    rather than a measurement. Soak longer, or churn harder."
+        exit 0
+      }
+      if ((m2 - m1) / m1 > tol) {
+        printf "  ✗ DRIFTING: each fleet object costs %+.1f%% more resident in the second\n    half than in the first, tolerance is %.0f%%. Later objects costing more\n    than earlier ones is what unbounded retention looks like.\n",
+          (m2 - m1) / m1 * 100, tol * 100
         print "    Read the Go heap line before calling it a leak: a flat heap"
         print "    under a rising RSS is the allocator, not retention."
         exit 1
       }
-      printf "  ✓ FLAT: RSS projects %+.1f%% over 24 h, inside the %.0f%% tolerance.\n",
-        rss_24h / rss_mean * 100, tol * 100
+      printf "  ✓ STABLE: the marginal cost changed %+.1f%% between the halves, inside\n    the %.0f%% tolerance — the RSS rise above is the fleet growing under the\n    churn drivers, not retention.\n",
+        (m2 - m1) / m1 * 100, tol * 100
     }
   ' "$SAMPLES"
+}
+
+# ---- the self-test --------------------------------------------------------
+
+# Synthetic series whose answer is known by construction, fed through the
+# real report(). The bug this exists to catch is a verdict that gates on
+# the wrong quantity, which is what shipped here — and no amount of
+# running the soak against a healthy cluster would have shown it, because
+# a verdict on raw RSS and a verdict on marginal cost disagree only when
+# the fleet is growing, which is the case a green run never distinguishes
+# from a leak. grow-ok and grow-leak have RSS curves of the same shape;
+# only the marginal test separates them.
+#
+# Needs no cluster, no kwok and no fleet, and runs in about a second.
+gen_series() { # gen_series <mode> <file>
+  awk -v mode="$1" 'BEGIN {
+    n = 240; rss = 300; objs = 20000; heap = 800
+    for (i = 0; i < n; i++) {
+      t = i * 30
+      if (mode == "grow-leak") {
+        # Marginal cost climbing from 50 to 80 KiB per object: RSS rises
+        # like grow-ok does, but faster than the fleet explains.
+        printf "%d\t%.1f\t%.1f\t%d\n", t, rss, heap, objs
+        rss += 100 * (50 + 30 * i / n) / 1024
+        objs += 100
+        continue
+      }
+      if (mode == "short" && i >= 23) break
+      if (mode == "flat-ok")    { rss = 1000 + (i % 5); objs = 20000 }
+      if (mode == "flat-leak")  { rss = 1000 + t * 100 / 3600; objs = 20000 }
+      if (mode == "grow-ok")    { objs = 20000 + i * 100; rss = 300 + objs * 50 / 1024 }
+      if (mode == "short")      { rss = 1000; objs = 20000 }
+      if (mode == "no-control") { rss = 1000; objs = 0 }
+      printf "%d\t%.1f\t%.1f\t%d\n", t, rss, heap, objs
+    }
+  }' >"$2"
+}
+
+selftest() {
+  local dir out rc name want_rc want_msg fails=0
+  dir="$(mktemp -d)"
+  echo "▸ soak verdict self-test"
+  while read -r name want_rc want_msg; do
+    [[ -n "$name" ]] || continue
+    gen_series "$name" "$dir/$name.tsv"
+    SAMPLES="$dir/$name.tsv"
+    out="$(report 2>&1)" && rc=0 || rc=$?
+    if [[ "$rc" != "$want_rc" || "$out" != *"$want_msg"* ]]; then
+      fails=$((fails + 1))
+      printf "  ✗ %-11s wanted exit %s and %s, got exit %s\n" "$name" "$want_rc" "$want_msg" "$rc"
+      printf '%s\n' "$out" | sed 's/^/      /'
+    else
+      printf "  ✓ %-11s exit %s, %s\n" "$name" "$rc" "$want_msg"
+    fi
+  done <<'CASES'
+flat-ok 0 ✓ FLAT
+flat-leak 1 ✗ NOT FLAT
+grow-ok 0 ✓ STABLE
+grow-leak 1 ✗ DRIFTING
+short 0 not enough to fit
+no-control 0 no denominator
+CASES
+  rm -rf "$dir"
+  if ((fails > 0)); then
+    echo "▸ $fails case(s) failed"
+    return 1
+  fi
+  echo "▸ all cases agreed"
 }
 
 if [[ "${1:-}" == "--report" ]]; then
   # Not guarded with `|| true`: a non-flat verdict is a failing exit
   # status, and that is what makes this usable as a CI gate.
   report
+  exit
+fi
+
+if [[ "${1:-}" == "--selftest" ]]; then
+  selftest
   exit
 fi
 

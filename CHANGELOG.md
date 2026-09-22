@@ -255,10 +255,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#491](https://github.com/go-steer/k8s-lookout/issues/491)) — quoting one as
   the other would overstate the per-event cost by however many events the
   coalescing window folded together. The soak samples RSS, Go heap and the
-  fleet's own object count, fits a slope over the post-warm-up window and calls
-  a projected 24 h drift under 10% flat; the object count is there because a
-  rising RSS over a rising object count is the process doing its job, and only a
-  rising RSS over a flat one is a leak. A new weekly *Scale (kwok)* workflow runs
+  fleet's own object count past a warm-up, and takes its verdict *against the
+  fleet*, because a rising RSS over a rising object count is the process doing
+  its job and only a rising RSS over a flat one is a leak: when the fleet holds
+  still it fits RSS against time and calls a projected 24 h drift under 10%
+  flat, and when the fleet grows it fits RSS against the object count over each
+  half of the window and asks whether an object costs more at the end than at
+  the start. Those two disagree only while the fleet is growing — which is
+  exactly the case a green run cannot distinguish from a leak — so
+  `examples/kwok/soak --selftest` checks the verdict against synthetic series
+  with known answers, with no cluster, and CI runs it. Measured over two hours
+  against the 403-node fleet under four rollout drivers: RSS rose 847 MiB/h
+  while the fleet grew 121%, and the marginal cost per object *fell* from 53.4
+  to 50.5 KiB. A new weekly *Scale (kwok)* workflow runs
   the ladder on a small tier after every merge that can move it and a larger one
   on Tuesdays, with ceilings set as regression guards rather than targets.
   Numbers, and the line between the measured and the extrapolated, are in

@@ -106,6 +106,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Soak verdict self-test
+        # The soak itself is too long to run here — it is the manual
+        # sibling of this workflow — but its verdict is ordinary logic
+        # and it has already been wrong once, in the direction that a
+        # green run cannot detect. This checks it against synthetic
+        # series with known answers. No cluster, about a second, and
+        # first so that a broken verdict fails before the twenty minutes
+        # of cluster below.
+        run: examples/kwok/soak --selftest
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

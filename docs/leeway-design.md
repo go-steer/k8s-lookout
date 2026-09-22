@@ -1499,6 +1499,58 @@ Extrapolating the measured slope, and saying plainly that this is arithmetic:
 > p99 stays at 5 ms under churn against an NFR that has room for three orders of
 > magnitude more, and nothing in the subsystem's own SLIs moved while it happened.
 
+**Measured steady-state soak (2026-09-22, #478).** `examples/kwok/soak` is the other
+half of the gate, and it runs the opposite experiment: the *whole sentinel*, eleven
+sources sharing one informer factory, against the 403-node fleet under four rollout
+drivers for two hours, sampling RSS, Go heap and the fleet object count every 30 s.
+237 samples, fitted over the 217 past a 600 s warm-up:
+
+| Series | Mean | Observed drift | Projected 24 h |
+|---|---|---|---|
+| RSS | 2,491.6 MiB | +1,547.5 MiB over 1.8 h | +20,338 MiB (+816%) |
+| Go heap | 1,880.2 MiB | +1,243.8 MiB over 1.8 h | +16,347 MiB (+869%) |
+| Fleet | — | 26,999 → 59,768 objects (+121%) | — |
+
+Read the first row alone and the subsystem is leaking catastrophically. Read it
+against the third and it is not leaking at all. Four churn drivers create
+ReplicaSets faster than `revisionHistoryLimit` reaps them, so the denominator more
+than doubled during the window, and **the marginal resident cost of a fleet object
+was 53.4 KiB over the first half against 50.5 KiB over the second** — it fell 5.3%,
+and per-object resident fell with it, 62.5 KiB to 55.7 KiB, as a fixed ~330 MiB
+intercept amortised over the growing fleet. +16,983 objects/h × 50.9 KiB/object is
+the +847 MiB/h that was observed. There is nothing left for a leak to be.
+
+That 50.9 KiB is **not** comparable to the ladder's 63.3 KiB/pod above: this
+denominator is every fleet object, pods and their Deployments and every dead
+ReplicaSet, and the numerator is a sentinel running twelve sources rather than the
+standalone binary running one.
+
+> **The harness was measuring the wrong thing, and this run is what exposed it.**
+> The soak has always said in its own prose that a rising RSS over a *flat* object
+> count is the leak signature and that a rising RSS over a rising one is the process
+> doing its job — and its verdict gated on raw RSS, which is the opposite test. It
+> would have failed this run. The verdict now picks its test from what the
+> denominator did: RSS against time when the fleet holds still, marginal cost per
+> object fitted over each half of the window when it grows. A verdict on raw RSS and
+> a verdict on marginal cost disagree *only* when the fleet is growing, which is
+> precisely the case a green run never distinguishes from a leak, so the logic is
+> now checked against synthetic series with known answers by
+> `examples/kwok/soak --selftest` — which the Scale (kwok) workflow runs before it
+> builds a cluster.
+>
+> Three harness defects had to be fixed before the soak produced any data at all,
+> and all three were reachable only at this scale (`fe86f6a`). The worst: the heap
+> sample piped `curl /metrics` into an `awk` that exited on the match, which closes
+> the pipe mid-write, kills curl with EPIPE, and takes the whole script down under
+> `pipefail` — a race that a 19 KB scrape wins and a 3 MB one loses, so the soak had
+> been dying after exactly one sample and reading as a sentinel crash.
+>
+> **What this does not establish.** Two hours is not 24, and the projection column
+> above multiplies a two-hour slope twelvefold. The fleet never plateaued, so the
+> flat-fleet regime of the verdict has been exercised only against synthetic series,
+> not against this cluster. And the drivers sustained the same 4.6 lifecycles/s as
+> the ladder rung, three orders of magnitude below §6.6.1's target rate.
+
 #### 6.6.1 Event-rate cost model
 
 This, not memory, is what the design target stresses. At 500 pods/sec sustained

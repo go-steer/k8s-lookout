@@ -421,6 +421,7 @@ question §6.6.1 cannot: **does it stay there.**
 ```
 LEEWAY_SOAK_HOURS=2 examples/kwok/soak
 examples/kwok/soak --report
+examples/kwok/soak --selftest   # checks the verdict; needs no cluster
 ```
 
 This one runs `lookout watch` with the full source set, deliberately
@@ -430,12 +431,9 @@ still a leak an operator pages on. It churns the fleet throughout,
 samples RSS and Go heap every `LEEWAY_SOAK_SAMPLE` seconds, and fits a
 least-squares slope over everything after `LEEWAY_SOAK_WARMUP`.
 
-"Flat" is defined rather than eyeballed: the fitted slope projected
-over 24 hours must come to less than `LEEWAY_SOAK_TOLERANCE` (default
-0.10) of the mean. Both series are fitted because they answer different
-questions — a rising heap is lookout retaining objects, a rising RSS
-with a flat heap is the allocator not returning pages, and only the
-first is a bug.
+Both series are fitted because they answer different questions — a
+rising heap is lookout retaining objects, a rising RSS with a flat heap
+is the allocator not returning pages, and only the first is a bug.
 
 **The third series is the control, and it is what stops the other two
 lying.** Each sample also counts the fleet's own pods and ReplicaSets,
@@ -448,6 +446,35 @@ apart. For the same reason the fleet template pins
 Deployments rolled for two hours leave tens of thousands of dead
 ReplicaSets behind, and a soak with no control column would read the
 driver's own litter as the process leaking.
+
+**So the verdict is defined rather than eyeballed, and which test it is
+depends on what the control did.** When the fleet holds still across the
+window, the verdict is RSS against time: the fitted slope projected over
+24 hours must come to less than `LEEWAY_SOAK_TOLERANCE` (default 0.10)
+of the mean. When the fleet grows, that test is meaningless, so the
+verdict becomes the *marginal resident cost of an object* — RSS fitted
+against the object count, over the first half of the window against the
+second — and the same tolerance applies to the change between them.
+Later objects costing more than earlier ones is what unbounded retention
+looks like, and answering that needs no extrapolation in time at all.
+
+Do not be tempted to collapse the two by fitting RSS-per-object against
+time instead. That ratio is `(intercept + marginal·N)/N`, which is not
+linear in *t* for any *N(t)*, so its slope extrapolates to nonsense: the
+first full two-hour run projects it to −128% of its own mean over 24
+hours.
+
+`--selftest` feeds synthetic series with known answers through the real
+verdict — a flat fleet with and without a leak, a growing fleet with and
+without one, and the two refusals — and needs no cluster. It exists
+because the verdict shipped gating on raw RSS, which is the opposite of
+what the paragraphs above describe, and it would have failed the first
+real run: the fleet grew 121% in two hours, RSS rose 847 MiB/h, and the
+marginal cost per object *fell*, 53.4 KiB to 50.5. A verdict on RSS and
+a verdict on marginal cost disagree only while the fleet is growing,
+which is precisely the case a run against a healthy cluster never
+distinguishes from a leak, so the check has to be synthetic. CI runs it
+before it builds a cluster.
 
 ## Metrics
 
