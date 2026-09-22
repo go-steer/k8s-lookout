@@ -1535,13 +1535,19 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 				ClusterDefaultConstraints: clusterDefaults,
 				PerDomainSeries:           f.topologyPerDomain,
 				PerDomainSeriesMinDrift:   f.topologyMinDrift,
-				Dwell:                     leeway.Dwell{For: f.topologyDwell},
-				CapacityRatioTrigger:      f.topologyCapacityRatio,
-				NodeGroupLabelKeys:        splitCSV(f.topologyNodeGroupKeys),
-				MaxNodeGroups:             f.topologyMaxNodeGroups,
-				DomainUnavailableKeys:     topologyKeysFrom(f.topologyDomainKeys),
-				TierCSignals:              f.topologyTierC,
-				LearnBaselines:            &f.topologyLearn,
+				PerDomainSeriesMaxKeys:    f.topologyMaxKeys,
+				// A pointer for the same reason as LearnBaselines below: the
+				// default is on, so the zero value cannot carry it.
+				PerDomainCollapseStates:    &f.topologyCollapse,
+				PerDomainNamespaces:        splitCSV(f.topologyDomainNS),
+				PerDomainExcludeNamespaces: splitCSV(f.topologyDomainNotNS),
+				Dwell:                      leeway.Dwell{For: f.topologyDwell},
+				CapacityRatioTrigger:       f.topologyCapacityRatio,
+				NodeGroupLabelKeys:         splitCSV(f.topologyNodeGroupKeys),
+				MaxNodeGroups:              f.topologyMaxNodeGroups,
+				DomainUnavailableKeys:      topologyKeysFrom(f.topologyDomainKeys),
+				TierCSignals:               f.topologyTierC,
+				LearnBaselines:             &f.topologyLearn,
 				// Only the two knobs the flags expose are set; every other
 				// field stays zero and Normalized() fills it from the §7.5
 				// defaults. Naming the defaults here as well would give the

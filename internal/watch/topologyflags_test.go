@@ -69,3 +69,54 @@ func TestTopologyKeysEmpty_IsRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestPerDomainCardinalityFlags_Defaults pins §8.4's shipped posture.
+//
+// Three of the four controls have to be right by default, because the operator
+// who most needs them is the one who has not read this far: the states are
+// collapsed, the axes are capped, and the namespace lists are empty so that
+// nothing is silently missing from a cluster nobody configured.
+func TestPerDomainCardinalityFlags_Defaults(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if !f.topologyCollapse {
+		t.Error("--topology-per-domain-collapse-states defaults off; the four-state label set is twice the series for a distinction no dashboard draws")
+	}
+	if got, want := f.topologyMaxKeys, topologydrift.DefaultPerDomainMaxKeys; got != want {
+		t.Errorf("--topology-per-domain-max-keys default = %d, want the source's %d", got, want)
+	}
+	if f.topologyDomainNS != "" || f.topologyDomainNotNS != "" {
+		t.Errorf("namespace lists default to %q/%q, want empty: a default that hid a namespace would be a silent gap",
+			f.topologyDomainNS, f.topologyDomainNotNS)
+	}
+}
+
+// TestPerDomainMaxKeysZero_IsRejected is the same hazard as the emptied
+// --topology-keys above: Config.normalize() reads a zero as "unset" and would
+// hand back the default of 4, so an operator who typed 0 meaning "no
+// breakdown" would get the largest one the cap allows.
+func TestPerDomainMaxKeysZero_IsRejected(t *testing.T) {
+	f, err := parseFlags([]string{"--topology-per-domain-max-keys=0", "--dry-run"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	err = f.validate()
+	if err == nil {
+		t.Fatal("validate accepted --topology-per-domain-max-keys=0")
+	}
+	if !strings.Contains(err.Error(), "--topology-per-domain-max-keys") {
+		t.Errorf("error %q does not name the flag", err)
+	}
+	// And the two values that do mean something are accepted.
+	for _, arg := range []string{"--topology-per-domain-max-keys=1", "--topology-per-domain-max-keys=-1"} {
+		f, err := parseFlags([]string{arg, "--dry-run"})
+		if err != nil {
+			t.Fatalf("parseFlags(%s): %v", arg, err)
+		}
+		if err := f.validate(); err != nil {
+			t.Errorf("validate(%s) = %v, want accepted", arg, err)
+		}
+	}
+}

@@ -3021,6 +3021,63 @@ bind harder still, per the paragraph above.
 > tracked subject has no `drift` series finds it in `subjects_tracked` and
 > absent here, which is the same answer.
 
+> **The remaining three mitigations landed 2026-09-22** (#475), completing the
+> paragraph above. Each has a flag, each is independently reversible, and with
+> all three off the export is byte-for-byte what it was the day before. Four
+> things to record, two of which are departures from the draft.
+>
+> | Control | Flag | Default | Effect at §6.6's baseline row |
+> |---|---|---|---|
+> | ρ floor / non-OK | `--topology-per-domain-min-drift` | 0.05 | admits a handful, not 20k |
+> | Collapse `state` | `--topology-per-domain-collapse-states` | on | 24 → 12 series per subject |
+> | Cap axes | `--topology-per-domain-max-keys` | 4 | no effect at 2 axes; 6 axes → 4 |
+> | Namespace lists | `--topology-per-domain-namespaces`, `…-exclude-namespaces` | empty | whatever you ask for, incl. 0 |
+>
+> The numbers are not an estimate: `TestSource_PerDomainSeriesAtTheScaleTier`
+> measures series per subject on a worst-case miniature estate and multiplies
+> out, so the budget is an assertion and a future label lands as a red test.
+>
+> **The collapsed labels are `active`/`waiting`, not `active`/`pending`** as
+> drafted. `pending` is also one of the four uncollapsed `CountState` spellings,
+> so the two label sets would have overlapped on exactly one value — and a
+> dashboard written against four states and pointed at a collapsed exporter
+> would then have rendered `state="pending"` as a plausible number that was
+> actually pending-plus-unschedulable, while silently losing running and
+> terminating. Disjoint sets make the same mistake return no data, which is a
+> question somebody asks rather than a number they believe. (`Terminating`
+> collapses to `active`: the pod is still holding the domain's capacity, and a
+> zone draining is not a zone that has drained.)
+>
+> **What the caps drop is counted, rather than folded into an `other` bucket.**
+> `reasonLabelCap` is the cited precedent and it folds, which is right there —
+> it caps *event reasons*, and the overflow is a count of events that can be
+> summed into a residual. It is wrong here: the overflow is a topology *axis*,
+> and the same pods are counted on every axis, so an `other` row summing the
+> capped axes' `domain_objects` would report the same object two or three times
+> under a label that looks like a domain. Instead there is one new gauge:
+>
+> ```
+> lookout.leeway.domain_series_withheld {reason}   # gate | namespace | key_cap
+> ```
+>
+> counted in **subjects** for all three reasons, so they are summable, and
+> present at zero from the first scrape so "nothing was dropped" is
+> distinguishable from "nothing is looking". A subject can be admitted and still
+> counted under `key_cap` — that reason means a breakdown was narrowed, not
+> withheld.
+>
+> **The cap takes a prefix of `--topology-keys`, not of the drift ranking.**
+> Keeping the top-drifting axes would sound better and would be unusable: an
+> axis would enter and leave `/metrics` as placement moved, breaking every
+> `rate()` over it. The operator already stated which axes matter most, in the
+> order they wrote the flag.
+>
+> **The decision is made once per scrape** (`seriesPlan`), because
+> `domain_objects` and `domain_expected` are filled from two different walks —
+> distributions and evaluations — and are read against each other. Deciding
+> independently in each walk would eventually have them disagree about which
+> axes exist, which renders as a dashboard dividing by nothing.
+
 ### 8.5 Finding payload
 
 ```json
