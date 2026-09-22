@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
@@ -162,7 +163,7 @@ func TestSource_EvidenceFor(t *testing.T) {
 		"us-central1-b": {Running: 1, Pinned: 1},
 	}}
 
-	ev := s.evidenceFor(zoneKey, eligible, dist, now)
+	ev := s.evidenceFor(webSubject, zoneKey, eligible, dist, now)
 
 	if len(ev.Domains) != 3 {
 		t.Fatalf("evidence covers %d domains, want one per eligible domain", len(ev.Domains))
@@ -190,16 +191,63 @@ func TestSource_EvidenceFor(t *testing.T) {
 		t.Errorf("zone c TaintedAt = %v, want the cordon's stamp %v", got, drainedAt)
 	}
 
-	// The sibling-source fields stay zero until Phase 8 fills them, and that is
-	// a contract the attribution rules depend on: a rule with no evidence loses
-	// rather than guessing.
-	if ev.InsufficientResource != 0 || ev.SchedulingMessage != "" || !ev.RolloutEndedAt.IsZero() {
-		t.Errorf("a sibling-source field was populated before Phase 8: %+v", ev)
+	// No capacity oracle wired: the pending-pod fields stay zero, and the
+	// evidence says they are unanswered rather than negative. That difference
+	// is the whole of #474 — a rule with no evidence still loses, but the
+	// finding no longer claims the hypothesis was tested.
+	if ev.InsufficientResource != 0 || ev.SchedulingMessage != "" {
+		t.Errorf("pending-pod evidence with no oracle wired: %+v", ev)
+	}
+	if !ev.Unavailable.Capacity {
+		t.Error("no capacity oracle is wired and the evidence does not report it unavailable")
+	}
+	if !ev.RolloutEndedAt.IsZero() {
+		t.Errorf("RolloutEndedAt = %v, want the zero value until its seam exists", ev.RolloutEndedAt)
+	}
+	if !ev.Unavailable.RolloutCompletion || !ev.Unavailable.Consolidation {
+		t.Errorf("the two seams that do not exist yet must report unavailable, got %+v", ev.Unavailable)
 	}
 	for d, facts := range ev.Domains {
 		if !facts.ConsolidatedAt.IsZero() {
-			t.Errorf("%s carries a consolidation stamp; that is the autoscaler's answer (Phase 8)", d)
+			t.Errorf("%s carries a consolidation stamp; nothing produces one yet", d)
 		}
+	}
+}
+
+func TestSource_EvidenceForReadsTheCapacityOracle(t *testing.T) {
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
+	s.inv.Upsert(node("n-a1", "us-central1-a"))
+
+	other := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "default", Name: "api"}
+	s.state.subjects = map[types.UID]leeway.SubjectRef{
+		"mine-late":  webSubject,
+		"mine-early": webSubject,
+		"mine-taint": webSubject,
+		"theirs":     other,
+	}
+	s.WithCapacityOracle(func() map[types.UID]PendingFact {
+		return map[types.UID]PendingFact{
+			"mine-late":  {Since: t0.Add(-time.Minute), Message: "late", InsufficientResource: true},
+			"mine-early": {Since: t0.Add(-time.Hour), Message: "early", InsufficientResource: true},
+			// Refused, but not for room: a taint is a different rung.
+			"mine-taint": {Since: t0.Add(-2 * time.Hour), Message: "taint", InsufficientResource: false},
+			// Another workload's problem entirely.
+			"theirs": {Since: t0.Add(-3 * time.Hour), Message: "theirs", InsufficientResource: true},
+			// Refused, counted, but this source has never seen the pod.
+			"unknown": {Since: t0.Add(-4 * time.Hour), Message: "unknown", InsufficientResource: true},
+		}
+	})
+
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0)
+
+	if ev.InsufficientResource != 2 {
+		t.Errorf("InsufficientResource = %d, want the 2 of this subject's pods refused for room", ev.InsufficientResource)
+	}
+	if ev.SchedulingMessage != "early" {
+		t.Errorf("SchedulingMessage = %q, want the earliest refusal's so the payload is stable across passes", ev.SchedulingMessage)
+	}
+	if ev.Unavailable.Capacity {
+		t.Error("a capacity oracle is wired and the evidence still reports it unavailable")
 	}
 }
 
@@ -210,7 +258,7 @@ func TestSource_EvidenceForToleratesAnAbsentDistribution(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
 	s.inv.Upsert(node("n-a1", "us-central1-a"))
 
-	ev := s.evidenceFor(zoneKey, evenlyEligible("us-central1-a", "us-central1-b"), nil, t0)
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a", "us-central1-b"), nil, t0)
 	if got := ev.Domains["us-central1-a"].ReadyNodes; got != 1 {
 		t.Errorf("zone a ready = %d, want 1", got)
 	}

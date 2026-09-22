@@ -93,7 +93,7 @@ func scoredHere(kind leeway.SubjectKind) bool {
 // told about is still the thing an operator asks to see when they turn the
 // opt-in on.
 func (s *Source) findingFor(sub leeway.SubjectRef, ev *Evaluation, st leeway.AlertState, dist *leeway.Distribution, now time.Time) (leeway.Finding, leeway.Delivery) {
-	evidence := s.evidenceFor(ev.Key, ev.Eligible, dist, now)
+	evidence := s.evidenceFor(sub, ev.Key, ev.Eligible, dist, now)
 	return leeway.NewFinding(leeway.FindingInput{
 		Subject:     sub,
 		TopologyKey: ev.Key,

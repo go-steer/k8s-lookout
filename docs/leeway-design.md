@@ -3409,6 +3409,39 @@ pipeline is for.
 > through to a cause below them on the ladder, never to a wrong one, because
 > every rule needs positive evidence.
 >
+> **`insufficientResource` and `schedulingMessage` shipped 2026-09-22 (#474),
+> along with the `untestedCauses` field the other two need.** `CapacityOracle`
+> is the seam, adapted at the composition root exactly like §7.6's rollout one,
+> and it is asked once per finding for the whole cluster rather than once per
+> subject — the refused set holds only pods the scheduler turned down, so
+> intersecting from that side costs the size of the problem rather than the size
+> of the cluster. Matching is by pod UID against this source's own index, not by
+> namespace and name: "which workload owns this pod" is a question both sides
+> have already answered, and re-answering it is how they come to disagree. Only
+> refusals citing insufficient resources are counted, because a pod refused for
+> an untolerated taint is unschedulable without the cluster being short of
+> anything and the ladder has a separate rung for that. The message is one pod's
+> — the earliest refusal, tie-broken by UID — because the scheduler's text
+> already enumerates every failed predicate and across how many nodes, and a
+> stable choice is what lets two findings an hour apart be diffed.
+>
+> **A missing source is now distinguishable from a ruled-out cause.**
+> `Evidence.Unavailable` names the sibling sources this deployment could not
+> consult, and `Attribute` turns it into the payload's `untestedCauses` — the
+> whole of #474's argument, which is that a finding on a metrics-only deployment
+> that reports `unknown` with no pending pods is reporting an *absence of an
+> answer* as an answer. Two rules keep the field from becoming noise. Only
+> causes ranked **more specific than the winner** are listed: a finding that
+> landed on `domain_outage` has not tested `rollout_bias` either, but saying so
+> would make every finding look uncertain while telling the reader nothing they
+> would act on. And a missing `capacity` source puts nothing on the list at all,
+> because `domain_capacity_shortfall` is decided on the node census this source
+> owns — losing `capacity` costs the finding its corroborating pod evidence, not
+> its ability to reach the cause. The field is deliberately **outside the
+> fingerprint**: turning a source on must not re-identify every open episode in
+> the cluster as new. The absence is also said out loud at startup, so an
+> operator does not have to read a finding to discover it.
+>
 > Reading the peak and the fall out of the ready series made the retention the
 > longer of §7.6's window and this one: **one series, two readers.** Both scan
 > their own window over identical samples, so they cannot disagree about when a

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -1103,6 +1104,13 @@ func (r *runner) run(ctx context.Context) error {
 			// neither should have to import the other to be testable.
 			bs.topoDrift.WithRolloutOracle(rolloutOracle(bs.rollout))
 		}
+		if bs.capacity != nil {
+			// §8.5's pending-pod rows, on the same argument: the capacity
+			// source has already decided which pods the scheduler refused and
+			// whether it refused them for room, and a second reading of
+			// FailedScheduling here would be a second answer.
+			bs.topoDrift.WithCapacityOracle(capacityOracle(bs.capacity))
+		}
 		if occStore != nil {
 			// §9.1: the dwell timers ride the same --store the occurrence
 			// records do. Guarded rather than passed unconditionally, because
@@ -1448,6 +1456,34 @@ func rolloutOracle(src rollingOutReporter) topologydrift.RolloutOracle {
 				continue
 			}
 			out = append(out, leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name})
+		}
+		return out
+	}
+}
+
+// unschedulableReporter is the half of *capacity.Source that capacityOracle
+// needs, narrow for the same reasons rollingOutReporter is.
+type unschedulableReporter interface {
+	Unschedulables() map[types.UID]capacity.Unschedulable
+}
+
+// capacityOracle adapts the capacity source's refused-pod table into the shape
+// leeway's attribution ladder reads (docs/leeway-design.md §8.5).
+//
+// A straight field-for-field copy, and deliberately no more than that: the
+// judgement about *why* a pod did not land belongs to the source that watched
+// it happen, and the point of the seam is that this function has no opinion to
+// add. It exists so neither package imports the other.
+func capacityOracle(src unschedulableReporter) topologydrift.CapacityOracle {
+	return func() map[types.UID]topologydrift.PendingFact {
+		pending := src.Unschedulables()
+		out := make(map[types.UID]topologydrift.PendingFact, len(pending))
+		for uid, p := range pending {
+			out[uid] = topologydrift.PendingFact{
+				Since:                p.Since,
+				Message:              p.Message,
+				InsufficientResource: p.InsufficientResource,
+			}
 		}
 		return out
 	}
