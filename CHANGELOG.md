@@ -310,8 +310,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emitted or exported, but "not in memory at all" is the property that was
   claimed and it did not hold there. Second, because this is also the process
   the kwok scale harness measures, the per-object cost it reported described a
-  configuration that does not ship. Both binaries now go through one
-  constructor, with a wiring test on each. Expect a smaller resident set too,
+  configuration that does not ship. The transform and its preserved-field
+  registry have moved from `internal/watch` to `pkg/kube`, which is where both
+  binaries can reach them — a transform visible to only one of the two is how
+  this happened — and both now go through one constructor, with a wiring test on
+  each. The sentinel's namespace-filtered factory is the one site that cannot
+  use that constructor, since it has a scope to express, so it has a wiring test
+  of its own. Expect a smaller resident set too,
   though how much smaller depends entirely on the objects: spike S8 measured the
   pod transform at ~25% of retained heap and the node transform at ~70% on real
   GKE objects, and on clusters whose bulk is annotations rather than

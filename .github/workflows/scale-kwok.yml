@@ -44,10 +44,13 @@ name: Scale (kwok)
 # moving, which is not what this is guarding.
 #
 # The ceilings are regression guards, not targets. As measured on
-# 2026-09-22 the figures are ~75 KiB/pod resident and a 1 ms p99 at
-# 5,400 pods; the ceilings sit well above both, because a hosted runner
-# is noisy and a guard that fires on noise gets ignored. Raise them
-# only with a reason written down.
+# 2026-09-22 across four rungs from 14 to 8,814 pods the figures are
+# 63.3 KiB/pod marginal resident over a 52.9 MiB idle intercept, and a
+# 1 ms evaluation p99 at 8,814 pods idle (5 ms under churn — the p99 is
+# a function of event rate, not of pod count, so quote the churn number
+# when comparing against a live cluster). The ceilings sit well above
+# all of those, because a hosted runner is noisy and a guard that fires
+# on noise gets ignored. Raise them only with a reason written down.
 #
 # On failure the unattended tiers file or update one tracking issue,
 # for the same reason e2e-kind does: under auto-merge nobody watches

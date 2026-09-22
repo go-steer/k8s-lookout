@@ -64,7 +64,6 @@ import (
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
-	"github.com/go-steer/k8s-lookout/internal/watch"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
@@ -339,7 +338,7 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 			// never be in the process, and for a binary whose whole
 			// purpose is measuring what the subsystem costs, measuring
 			// a configuration that does not ship.
-			factory = watch.NewTransformingFactory(client)
+			factory = kube.NewTransformingFactory(client)
 			src.WithFactory(factory)
 			// Optional, exactly as in the sentinel: a nil dynamic client
 			// would just mean no LeewayPolicy watch, which is the state

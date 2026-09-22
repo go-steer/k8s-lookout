@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package watch
+package kube
 
 import (
 	"context"
@@ -27,7 +27,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// The transform is attached to the shared factory (§6.1, Phase 2). The tests in
+// The transform is attached to a shared factory (§6.1, Phase 2). The tests in
 // transform_test.go check what trimPod and trimNode do to an object; these
 // check that the objects actually reach them.
 //
@@ -35,31 +35,34 @@ import (
 // is dead code if the option is missing from the factory, and nothing else in
 // the suite would notice: the unit tests call the trim functions directly, so
 // they stay green on a build where no informer has a transform at all.
+//
+// The sentinel's namespace-filtered factory is the one construction site this
+// package cannot see; internal/watch/factories_test.go covers it.
 
-func TestSharedTransform_Dispatches(t *testing.T) {
+func TestTransform_Dispatches(t *testing.T) {
 	pod := fullPod(t)
-	if _, err := sharedTransform(pod); err != nil {
-		t.Fatalf("sharedTransform(Pod): %v", err)
+	if _, err := Transform(pod); err != nil {
+		t.Fatalf("Transform(Pod): %v", err)
 	}
 	if pod.ManagedFields != nil {
 		t.Error("Pod was not routed to trimPod")
 	}
 
 	node := fullNode(t)
-	if _, err := sharedTransform(node); err != nil {
-		t.Fatalf("sharedTransform(Node): %v", err)
+	if _, err := Transform(node); err != nil {
+		t.Fatalf("Transform(Node): %v", err)
 	}
 	if node.Status.Images != nil {
 		t.Error("Node was not routed to trimNode")
 	}
 }
 
-// TestSharedTransform_PassesThroughEverythingElse: the factory serves far more
-// than Pods and Nodes, and one transform covers all of them. A type the
-// registry has no opinion about must come back byte-identical — not a copy,
-// the same pointer — because anything else is an unreviewed mutation of an
-// object some other source depends on.
-func TestSharedTransform_PassesThroughEverythingElse(t *testing.T) {
+// TestTransform_PassesThroughEverythingElse: a factory serves far more than
+// Pods and Nodes, and one transform covers all of them. A type the registry has
+// no opinion about must come back byte-identical — not a copy, the same pointer
+// — because anything else is an unreviewed mutation of an object some other
+// source depends on.
+func TestTransform_PassesThroughEverythingElse(t *testing.T) {
 	others := []any{
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc"}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm"}},
@@ -68,7 +71,7 @@ func TestSharedTransform_PassesThroughEverythingElse(t *testing.T) {
 		nil,
 	}
 	for _, in := range others {
-		out, err := sharedTransform(in)
+		out, err := Transform(in)
 		if err != nil {
 			t.Errorf("%T: unexpected error %v", in, err)
 		}
@@ -78,13 +81,13 @@ func TestSharedTransform_PassesThroughEverythingElse(t *testing.T) {
 	}
 }
 
-// TestSharedTransform_IsIdempotent pins a client-go requirement, not a
-// preference: objects already in the cache can be passed back to Replace(),
-// where a second pass would mutate an object other goroutines are reading
+// TestTransform_IsIdempotent pins a client-go requirement, not a preference:
+// objects already in the cache can be passed back to Replace(), where a second
+// pass would mutate an object other goroutines are reading
 // (delta_fifo.go:501-506). A transform that appended to a slice or accumulated
 // into a map instead of assigning would violate this, and the symptom would be
 // a data race under load rather than a test failure here.
-func TestSharedTransform_IsIdempotent(t *testing.T) {
+func TestTransform_IsIdempotent(t *testing.T) {
 	tests := []struct {
 		name string
 		obj  func(*testing.T) any
@@ -94,11 +97,11 @@ func TestSharedTransform_IsIdempotent(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			once, err := sharedTransform(tc.obj(t))
+			once, err := Transform(tc.obj(t))
 			if err != nil {
 				t.Fatalf("first pass: %v", err)
 			}
-			twice, err := sharedTransform(once)
+			twice, err := Transform(once)
 			if err != nil {
 				t.Fatalf("second pass: %v", err)
 			}
@@ -109,15 +112,15 @@ func TestSharedTransform_IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestSharedTransform_Tombstone documents a case the transform cannot currently
+// TestTransform_Tombstone documents a case the transform cannot currently
 // reach. DeltaFIFO skips the transformer for a DeletedFinalStateUnknown and for
 // a Sync, because the object has already been through it
 // (delta_fifo.go:507-516). Pinned rather than assumed: if that changes
 // upstream, a tombstone must pass through rather than be mistaken for an object
 // and mutated, and the failure otherwise would be a nil-deref in a delete path.
-func TestSharedTransform_Tombstone(t *testing.T) {
+func TestTransform_Tombstone(t *testing.T) {
 	tomb := cache.DeletedFinalStateUnknown{Key: "ns/pod", Obj: fullPod(t)}
-	out, err := sharedTransform(tomb)
+	out, err := Transform(tomb)
 	if err != nil {
 		t.Fatalf("tombstone: %v", err)
 	}
@@ -130,16 +133,16 @@ func TestSharedTransform_Tombstone(t *testing.T) {
 	}
 }
 
-// TestSharedFactory_TrimsOnTheWayIntoTheCache is the wiring proof, and the only
-// test here that would fail if informers.WithTransform were dropped from
-// newSharedFactories. It runs a real informer over a fake API server and reads
-// the cache the way a source does — through the lister — rather than calling
-// the transform itself.
+// TestNewTransformingFactory_TrimsOnTheWayIntoTheCache is the wiring proof, and
+// the only test in this package that would fail if informers.WithTransform were
+// dropped from the constructor. It runs a real informer over a fake API server
+// and reads the cache the way a source does — through the lister — rather than
+// calling the transform itself.
 //
 // A secret value is the assertion worth having: §6.1's security goal is that
 // resolved secret values never enter process memory, and this is the only test
 // that observes that at the cache boundary.
-func TestSharedFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
+func TestNewTransformingFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:          "api",
@@ -169,16 +172,14 @@ func TestSharedFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 		},
 	}
 
-	client := fake.NewSimpleClientset(pod, node)
-	factories := newSharedFactories(client, nil)
-	podLister := factories.Namespaced.Core().V1().Pods().Lister()
-	nodeLister := factories.Cluster.Core().V1().Nodes().Lister()
+	factory := NewTransformingFactory(fake.NewSimpleClientset(pod, node))
+	podLister := factory.Core().V1().Pods().Lister()
+	nodeLister := factory.Core().V1().Nodes().Lister()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	factories.Start(ctx.Done())
-	factories.Namespaced.WaitForCacheSync(ctx.Done())
-	factories.Cluster.WaitForCacheSync(ctx.Done())
+	factory.Start(ctx.Done())
+	factory.WaitForCacheSync(ctx.Done())
 
 	cached, err := podLister.Pods("prod").Get("api")
 	if err != nil {
@@ -214,46 +215,5 @@ func TestSharedFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 	}
 	if hasCondition(cachedNode.Status.Conditions, corev1.NodeMemoryPressure) {
 		t.Error("an unretained condition survived")
-	}
-}
-
-// TestNewTransformingFactory_TrimsToo covers the other construction site — the
-// one cmd/leeway uses, because a standalone single-source binary has no runner
-// to build it a factory. It is a separate test rather than a case of the one
-// above because the failure it guards against is different: there, dropping
-// the option breaks the sentinel and half the suite notices; here, the only
-// symptom is that a process nobody is looking at caches untrimmed objects,
-// resolved secret values included, and the scale numbers taken from it quietly
-// describe a configuration that does not ship.
-func TestNewTransformingFactory_TrimsToo(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:          "api",
-			Namespace:     "prod",
-			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl"}},
-		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{
-			Name: "app",
-			Env:  []corev1.EnvVar{{Name: "DB_PASSWORD", Value: "hunter2"}},
-		}}},
-	}
-
-	factory := NewTransformingFactory(fake.NewSimpleClientset(pod))
-	lister := factory.Core().V1().Pods().Lister()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
-
-	cached, err := lister.Pods("prod").Get("api")
-	if err != nil {
-		t.Fatalf("pod not in cache: %v", err)
-	}
-	if got := cached.Spec.Containers[0].Env[0].Value; got != "" {
-		t.Errorf("secret env value reached the standalone cache: %q", got)
-	}
-	if cached.ManagedFields != nil {
-		t.Error("ManagedFields reached the standalone cache")
 	}
 }

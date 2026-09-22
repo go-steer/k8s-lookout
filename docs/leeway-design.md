@@ -987,7 +987,7 @@ roughly 170 events/s even at 50k nodes.
 > radius, and it should land with the first transform, not after the second
 > incident.
 >
-> **Done — `internal/watch/transform_registry.go`.** Every field the transform
+> **Done — `pkg/kube/transform_registry.go`.** Every field the transform
 > touches has an entry justifying it; every field it deliberately preserves names
 > the informer-reachable reader that requires it, with the `file:line` of the
 > read. The guard is deliberately *not* a declared strip list diffed against the
@@ -999,13 +999,23 @@ roughly 170 events/s even at 50k nodes.
 > fails and an entry for a strip that no longer happens fails too. Verified by
 > mutation in both directions.
 >
-> **Attached in Phase 2.** `newSharedFactory` in `internal/watch/transform.go` is
-> now the single place the shared factory is constructed, with
-> `informers.WithTransform(sharedTransform)` on it, and `wiring.go` calls that
-> rather than building its own — a test that constructs a matching factory of its
-> own would stay green on the day someone drops the option. The dispatch lives in
-> one `TransformFunc` because a factory takes one for all its informers: `Pod` and
-> `Node` are trimmed, everything else passes through by identity.
+> **Attached in Phase 2.** `kube.NewTransformingFactory` in
+> `pkg/kube/transform.go` is the single place a factory is constructed, with
+> `informers.WithTransform(kube.Transform)` on it, and callers go through it
+> rather than building their own — a test that constructs a matching factory of
+> its own would stay green on the day someone drops the option. The dispatch
+> lives in one `TransformFunc` because a factory takes one for all its informers:
+> `Pod` and `Node` are trimmed, everything else passes through by identity.
+>
+> **Moved to `pkg/kube` in Phase 8.** It began in `internal/watch`, next to the
+> runner, which is where the only factory then was. That placement is what let
+> the standalone `leeway` binary cache Pods and Nodes untrimmed: §2.4
+> discipline 4 forbids `cmd/leeway` from importing `internal/watch`, so the one
+> definition of what enters a cache was out of reach of one of the two binaries
+> that needs it. What is in *scope* is still the sentinel's own business —
+> `newSharedFactories` in `internal/watch/factories.go` splits the pair when a
+> namespace deny list is in force, and its filtered half is the one construction
+> site that must attach `kube.Transform` by hand, with a wiring test saying so.
 >
 > This closes the "source on, transform off" half of the default-on decision
 > (§15 Q4). Two client-go contract points constrain it: the transform must be
@@ -4609,7 +4619,7 @@ Four findings, all by inspection of this repo:
   (`objectstate.go:1220`). §6.1 now excludes `Succeeded` only.
 
 *Remaining work* was the deliverable, not the question — and it is **done**
-(2026-09-16): `internal/watch/transform_registry.go` plus the behavioural guard in
+(2026-09-16): `pkg/kube/transform_registry.go` plus the behavioural guard in
 `transform_test.go`. The Phase 2 change it was blocking — attaching the transform
 to the factory — landed on 2026-09-17; see §6.1.
 
