@@ -225,8 +225,17 @@ mkdir -p "$STATE_DIR"
   --metrics-addr="$addr" \
   >/dev/null 2>"$log" &
 pid=$!
-# shellcheck disable=SC2064 — $pid must expand now, not at trap time
-trap "kill $pid 2>/dev/null || true" EXIT
+# Kill the whole process GROUP's children, not just the sentinel. The
+# churn drivers and the object counter are background jobs of this
+# shell, and an earlier run that died mid-loop left four drivers rolling
+# Deployments against the cluster for as long as nobody noticed —
+# because the trap named one pid and `jobs -p` was never consulted.
+cleanup() {
+  kill "$pid" 2>/dev/null || true
+  local j
+  for j in $(jobs -p); do kill "$j" 2>/dev/null || true; done
+}
+trap cleanup EXIT
 echo "▸ sentinel pid $pid on $addr (log: $log)"
 
 ready=""
@@ -265,6 +274,43 @@ fi
 
 mkdir -p "$(dirname "$SAMPLES")"
 : >"$SAMPLES"
+
+# The control for the memory series: what the process is being asked to
+# hold. Pods and ReplicaSets only — the two the churn driver moves — and
+# counted at the apiserver, not in lookout, so it stays an independent
+# measurement of the same thing.
+#
+# It runs in the BACKGROUND, writing the latest count to a file the
+# sampler reads, because at fleet scale the count is far and away the
+# most expensive thing in the loop: 20k objects took kubectl ~57s with
+# `-o name` and ~19s with server-side printing, against milliseconds for
+# RSS and the scrape. Inline, it set the sample cadence — a soak
+# configured for 30s samples produced one row every ten minutes, and a
+# two-hour run could not collect enough points past the warm-up to fit.
+# It is also the one measurement that does not need 30s resolution: it
+# is a slowly-rising denominator, and reading a value up to a minute old
+# changes nothing it is used for.
+OBJECTS="$STATE_DIR/soak-objects"
+count_objects_once() {
+  # --no-headers, not -o name: server-side printing sends a Table rather
+  # than whole objects, which is 3x less work for the same count.
+  # Failures write nothing, so the sampler keeps the last good value
+  # rather than recording a spurious zero.
+  local n
+  n="$(kubectl get pods,replicasets -A -l "$FLEET_LABEL" \
+    --no-headers 2>/dev/null | grep -c . || true)"
+  ((n > 0)) && echo "$n" >"$OBJECTS"
+  return 0
+}
+# Primed synchronously, before the clock starts. The control is reported
+# as first-to-last, so a first sample taken before the background count
+# has landed would compare a real number against zero and call any fleet
+# growth +0.0%.
+echo "▸ counting the fleet…"
+count_objects_once
+echo "▸ fleet control: $(cat "$OBJECTS") objects"
+( while true; do sleep "$SAMPLE"; count_objects_once; done ) &
+
 started="$(date +%s)"
 
 while true; do
@@ -274,15 +320,20 @@ while true; do
   kill -0 "$pid" 2>/dev/null || { echo "ERROR: the sentinel died at ${elapsed}s" >&2; break; }
 
   rss_kb="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null || echo 0)"
+  # Read the WHOLE scrape and pick the value at END, rather than exiting
+  # awk on the match. Exiting closes the pipe while curl is still
+  # writing, curl dies of EPIPE with status 23, and under `set -o
+  # pipefail` that is the pipeline's status and `set -e` takes the soak
+  # down with no message at all. It is a race the small registry of a
+  # toy cluster always wins and a real one always loses: the first
+  # scrape here is ~19 KB and survives, every scrape after the sources
+  # register is ~3 MB and does not. That is how a soak configured for
+  # two hours ended after one sample, killed the sentinel through its
+  # own EXIT trap, and left the churn drivers running.
   heap_b="$(curl -fsS "http://$addr/metrics" 2>/dev/null |
-    awk '/^go_memstats_heap_inuse_bytes /{ print $2; exit }')"
+    awk '/^go_memstats_heap_inuse_bytes /{ v = $2 } END { print v + 0 }' || true)"
   [[ -n "$heap_b" ]] || heap_b=0
-  # The control for the memory series: what the process is being asked
-  # to hold. Pods and ReplicaSets only — the two the churn driver
-  # moves — and counted at the apiserver, not in lookout, so it stays
-  # an independent measurement of the same thing.
-  objs="$(kubectl get pods,replicasets -A -l "$FLEET_LABEL" \
-    -o name 2>/dev/null | grep -c . || true)"
+  objs="$(cat "$OBJECTS" 2>/dev/null || echo 0)"
 
   awk -v e="$elapsed" -v r="$rss_kb" -v h="$heap_b" -v o="$objs" \
     'BEGIN { printf "%d\t%.1f\t%.1f\t%d\n", e, r / 1024, h / 1048576, o }' >>"$SAMPLES"
