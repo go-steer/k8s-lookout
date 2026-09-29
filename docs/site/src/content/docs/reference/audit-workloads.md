@@ -56,7 +56,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 
 | Field | Meaning |
 | --- | --- |
-| `replicas` | the workload's spec.replicas (nil defaults to 1, matching the API server); absent on DaemonSets, whose replica count is the node count |
+| `replicas` | the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count |
+| `autoscaler` | the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load |
 | `namespace_pdbs` | PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed |
 | `containers` | containers implicated by the finding: those missing the probe, or missing the request the autoscaler's utilization target divides by |
 | `container_names` | their names, capped at 8 with a +N more tail |

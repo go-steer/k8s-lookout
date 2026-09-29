@@ -96,7 +96,8 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			checks.Kind(kindSuspendedCron, "a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that", emit.SeverityWarning),
 		},
 		Output: []checks.OutputField{
-			{Name: "replicas", Doc: "the workload's spec.replicas (nil defaults to 1, matching the API server); absent on DaemonSets, whose replica count is the node count"},
+			{Name: "replicas", Doc: "the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count"},
+			{Name: "autoscaler", Doc: "the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load"},
 			{Name: "namespace_pdbs", Doc: "PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed"},
 			{Name: "containers", Doc: "containers implicated by the finding: those missing the probe, or missing the request the autoscaler's utilization target divides by"},
 			{Name: "container_names", Doc: "their names, capped at 8 with a +N more tail"},
@@ -274,6 +275,35 @@ func (w workload) wantReplicas() int32 {
 	return *w.replicas
 }
 
+// replicaFloor is the replica count the availability and placement
+// claims judge: spec.replicas, unless an HPA targets the workload, in
+// which case it is the HPA's minReplicas (#268).
+//
+// Under an HPA, spec.replicas is the autoscaler's current answer, not
+// anyone's intent. A workload idling at one replica and serving at
+// five would otherwise gain and lose audit.single_replica with load,
+// and a posture claim that clears itself with no change anyone made is
+// the one thing a posture claim must not do. minReplicas is the
+// standing property: it is how low the autoscaler will let the
+// workload fall, which is exactly the state a drain has to survive.
+// KEDA is covered by the same path, because a ScaledObject drives an
+// HPA of its own.
+//
+// The second return names the HPA, as a detail, when one was used.
+func (ix *workloadIndex) replicaFloor(w workload) (int32, []emit.Field) {
+	for _, h := range ix.hpas {
+		if !hpaTargets(h, w.kind, w.namespace, w.name) {
+			continue
+		}
+		floor := int32(1)
+		if h.Spec.MinReplicas != nil {
+			floor = *h.Spec.MinReplicas
+		}
+		return floor, []emit.Field{{Key: "autoscaler", Value: h.Name}}
+	}
+	return w.wantReplicas(), nil
+}
+
 // workloadIndex holds the listed objects a posture pass needs: the
 // pod-template owners, the PDBs that may or may not cover them, the
 // HPAs that may or may not be able to scale them, and the nodes their
@@ -446,7 +476,7 @@ func (ix *workloadIndex) availability(w workload) []emit.Finding {
 	if w.kind == "DaemonSet" {
 		return nil
 	}
-	want := w.wantReplicas()
+	want, via := ix.replicaFloor(w)
 	if want == 0 {
 		return nil
 	}
@@ -457,12 +487,16 @@ func (ix *workloadIndex) availability(w workload) []emit.Finding {
 	// single replica is a drain gridlock, which is a DIFFERENT
 	// finding (stab drain → drain.pdb_gridlock).
 	if want == 1 {
+		msg := "spec.replicas=1: a node drain, upgrade, or eviction takes the workload fully down, and no PodDisruptionBudget can prevent that"
+		if via != nil {
+			msg = "HorizontalPodAutoscaler " + via[0].Value + " has minReplicas=1: whenever load is low the workload runs one replica, and a node drain, upgrade, or eviction then takes it fully down — a drain raises no metric the autoscaler would scale up on"
+		}
 		return []emit.Finding{{
 			Kind:     kindSingle,
 			Severity: emit.SeverityWarning,
 			Reason:   "SingleReplica",
-			Message:  "spec.replicas=1: a node drain, upgrade, or eviction takes the workload fully down, and no PodDisruptionBudget can prevent that",
-			Details:  []emit.Field{{Key: "replicas", Value: itoa(int(want))}},
+			Message:  msg,
+			Details:  append([]emit.Field{{Key: "replicas", Value: itoa(int(want))}}, via...),
 		}}
 	}
 
@@ -474,10 +508,10 @@ func (ix *workloadIndex) availability(w workload) []emit.Finding {
 			Reason:   "NoPodDisruptionBudget",
 			Message: fmt.Sprintf("%d replicas and no PodDisruptionBudget selecting them: the eviction API will let a drain or upgrade take all %d at once",
 				want, want),
-			Details: []emit.Field{
+			Details: append([]emit.Field{
 				{Key: "replicas", Value: itoa(int(want))},
 				{Key: "namespace_pdbs", Value: itoa(ix.pdbsByNS[w.namespace])},
-			},
+			}, via...),
 		})
 	}
 	if !spreadConstrained(w.template.Spec) {
@@ -487,7 +521,7 @@ func (ix *workloadIndex) availability(w workload) []emit.Finding {
 			Reason:   "NoTopologySpread",
 			Message: fmt.Sprintf("%d replicas with no topologySpreadConstraints and no pod anti-affinity: nothing in the spec stops the scheduler putting them all on one node, and the cluster-level default spread is best-effort (whenUnsatisfiable=ScheduleAnyway)",
 				want),
-			Details: []emit.Field{{Key: "replicas", Value: itoa(int(want))}},
+			Details: append([]emit.Field{{Key: "replicas", Value: itoa(int(want))}}, via...),
 		})
 	}
 	return out
