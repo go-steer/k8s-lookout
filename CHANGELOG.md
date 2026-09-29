@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `state keda` (MCP `k8s_keda_scalers`), in the bare `scan`: KEDA scalers that have stopped scaling. It reports a ScaledObject whose target Deployment or StatefulSet does not exist (`keda.missing_target`; a renamed workload runs unscaled), a trigger whose TriggerAuthentication or ClusterTriggerAuthentication does not exist (`keda.missing_auth`), and a ScaledObject or ScaledJob KEDA itself reports not Ready (`keda.not_ready`), one cause per scaler. Paused and not-yet-reconciled scalers are silent; clusters without KEDA get the usual `crd.unavailable`. (#268)
+
 - **A compute class is now judged against its own learned normal** (#463).
   The new `rank-baseline` rule learns each class's mean achieved rank with
   the same estimator `topology-drift` uses for placement, and reports

@@ -94,6 +94,9 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `route.missing_backend` | critical | the route's backendRef Service does not exist |
 | `route.backend_port` | critical | the route's backendRef Service exists but does not expose the named port |
 | `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (no coverage lies) |
+| `keda.missing_target` | warning | the ScaledObject's scaleTargetRef names a Deployment or StatefulSet that does not exist — nothing is being scaled |
+| `keda.missing_auth` | warning | a trigger's authenticationRef names a TriggerAuthentication or ClusterTriggerAuthentication that does not exist — the scaler cannot read its metric |
+| `keda.not_ready` | warning | KEDA reports the scaler Ready=False: scaling has stopped at the current size |
 | `wi.gsa_missing` | critical | the annotated Google service account does not exist — every GCP call from these pods fails |
 | `wi.unbound` | critical | the KSA annotates a GSA but the roles/iam.workloadIdentityUser binding is missing or malformed |
 | `wi.unannotated_use` | info | a pod sets GOOGLE_APPLICATION_CREDENTIALS but its ServiceAccount carries no Workload Identity annotation |
@@ -230,6 +233,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `api_group` | crd.unavailable: the API group-version this command needed |
 | `resources` | crd.unavailable: the resources it would have read |
 | `unavailable` | summary-line note: why the group could not be read (absent CRDs, or discovery denied) |
+| `target` | the scaleTargetRef the ScaledObject names, as \<Kind>/\<name> |
+| `trigger` | trigger type (prometheus, kafka, …) whose authenticationRef does not resolve |
+| `authentication` | the authenticationRef that does not resolve, as \<Kind>/\<name> |
 | `gsa` | the cloud identity (GSA email) the ServiceAccount's annotation claims |
 | `problem` | machine-matchable problem code from the provider (e.g. no-workload-identity-binding) |
 | `env` | the credential-file env var found (GOOGLE_APPLICATION_CREDENTIALS) |

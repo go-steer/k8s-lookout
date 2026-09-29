@@ -128,6 +128,7 @@ var stage1 = []string{
 	"state volumes",
 	"state storage",
 	"state gateway",
+	"state keda",
 	"state wi",
 	"stab drift",
 }

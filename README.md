@@ -148,6 +148,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `state volumes` | RWO multi-attach / cross-zone PV locks |
 | `state storage` | why a PersistentVolumeClaim will never bind: missing StorageClass, no cluster default, static-only class, stranded volumes |
 | `state gateway` ‡ | the Gateway API path end to end: GatewayClass → Gateway → listener → HTTPRoute → Service, and every hop that is rejected, unprogrammed, or points at nothing |
+| `state keda` ‡ | KEDA scalers that have stopped scaling: a ScaledObject whose target Deployment/StatefulSet is gone, a trigger whose TriggerAuthentication does not exist, or a scaler KEDA reports not Ready |
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |
