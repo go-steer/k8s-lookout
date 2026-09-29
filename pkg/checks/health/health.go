@@ -14,17 +14,20 @@
 
 // Package health implements `lookout health` (DESIGN.md §5): the
 // "are there issues with this cluster?" scorecard. One composed pass
-// over ten check categories — control-plane latency, node
+// over twelve check categories — control-plane latency, node
 // conditions, crash loops, aged Pending, rollout stalls, PVC/storage
 // health, system add-ons, ResourceQuotas, cert expiry, webhook
-// health — each reporting healthy, degraded, or unavailable. The
+// health, Service routing, and disruption readiness — each reporting
+// healthy, degraded, or unavailable. The
 // scorecard always answers: every category emits exactly one
 // `health.category` finding, healthy included, followed by the
 // detailed findings of the degraded categories.
 //
 // Composition, not new checks: the delta-backed categories delegate
 // to pkg/checks/delta's scan; the webhooks category delegates to
-// `state webhooks`' exported core (state.CheckWebhooks); storage and
+// `state webhooks`' exported core (state.CheckWebhooks); services
+// delegates to the target-free edge sweep `lookout scan` runs
+// (state.Cluster.EdgeSweepFindings); storage and
 // certs are the two lightweight checks that have no standalone
 // command yet. Control-plane latency delegates to the shipped
 // `perf probe` packs (perf.ControlPlaneProbe, the apiserver pack)
@@ -123,6 +126,16 @@ var categoryOrder = []string{
 	"quota",
 	"certs",
 	"webhooks",
+	// services and disruption are not §5 categories. services is the
+	// routing half of `state edges` (#379): a Service whose selector
+	// matches no pods routes nowhere while every pod behind the
+	// intended workload is Running and Ready, so nothing above sees it.
+	// disruption is delta's pdb class (#378): readiness to be drained
+	// rather than health, which is why it scores last and on its own
+	// line — but a caller told "healthy" about a namespace nothing can
+	// drain was answered a question it did not ask.
+	"services",
+	"disruption",
 }
 
 // New builds the `health` command around deps.
@@ -130,7 +143,7 @@ func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "health",
 		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a ten-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
+		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},
@@ -192,9 +205,10 @@ var perfFields = map[string]bool{
 }
 
 // delegatedOutput pulls the delegated commands' glossaries — `triage
-// delta` for the delta-backed categories and `perf probe` (apiserver
-// pack fields only) for the control-plane category — minus the keys
-// health declares itself and any overlap between the two.
+// delta` for the delta-backed categories, `state edges` for the
+// services category, and `perf probe` (apiserver pack fields only) for
+// the control-plane category — minus the keys health declares itself
+// and any overlap between them.
 func delegatedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"category": true, "status": true, "total": true, "top": true,
@@ -204,7 +218,7 @@ func delegatedOutput() []checks.OutputField {
 		"object_selector": true, "timeout": true,
 	}
 	var out []checks.OutputField
-	for _, name := range []string{"triage delta", "perf probe"} {
+	for _, name := range []string{"triage delta", "state edges", "perf probe"} {
 		c, ok := checks.Lookup(name)
 		if !ok {
 			continue // isolated test registry; contract test asserts presence
@@ -228,11 +242,23 @@ var perfKinds = map[string]bool{
 	"perf.apiserver_p99": true, "perf.pack_unavailable": true,
 }
 
+// sweepKinds is the subset of the edge ledger the services category
+// can reach. The sweep has no workload, so the workload-scoped checks
+// never run, and a Service it looks at is by construction one that
+// selects nothing, so it has no endpoints or readiness to judge. The
+// certificate kinds are reachable but dropped: see the services pass
+// in run.
+var sweepKinds = map[string]bool{
+	"edge.selector_empty": true, "edge.backend_missing": true,
+	"edge.missing_ref": true, "edge.unclassed": true,
+}
+
 // delegatedKinds pulls the delegated commands' kind ledgers on the
 // same principle as delegatedOutput: `triage delta` for the
-// delta-backed categories, `state webhooks` for the webhooks one, and
-// `perf probe` (apiserver pack only) for control-plane. Health emits
-// those findings verbatim, so it must declare exactly what they do.
+// delta-backed categories, `state webhooks` for the webhooks one, the
+// edge sweep's reachable subset for services, and `perf probe`
+// (apiserver pack only) for control-plane. Health emits those
+// findings verbatim, so it must declare exactly what they do.
 func delegatedKinds() []checks.KindField {
 	seen := map[string]bool{
 		"health.category": true,
@@ -249,6 +275,12 @@ func delegatedKinds() []checks.KindField {
 			if seen[k.Name] || (name == "perf probe" && !perfKinds[k.Name]) {
 				continue
 			}
+			seen[k.Name] = true
+			out = append(out, k)
+		}
+	}
+	for _, k := range state.EdgeKinds() {
+		if sweepKinds[k.Name] && !seen[k.Name] {
 			seen[k.Name] = true
 			out = append(out, k)
 		}
@@ -291,11 +323,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	scanned := 0
 
 	// Delta-backed categories: nodes, crashloops, pending, rollouts,
-	// addons, quota — one delta pass, findings bucketed by kind. The
-	// pdb class stays with `triage delta`: PDB gridlock is disruption
-	// *readiness*, not one of the §5 health categories.
+	// addons, quota, disruption — one delta pass, findings bucketed by
+	// kind.
 	dScanned, dFindings, err := delta.ScanCluster(ctx, client, ns, now, delta.Config{},
-		"pods", "nodes", "system", "quota")
+		"pods", "nodes", "pdb", "system", "quota")
 	if err != nil {
 		return 0, err
 	}
@@ -339,6 +370,26 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 	} else {
 		card.unavailable["webhooks"] = "webhook configurations are cluster-scoped; run without --namespace"
+	}
+
+	// services: the edge sweep `lookout scan` runs as its stage 2,
+	// over only the objects it reads. Strict like every other category
+	// here: a sweep that could not list Services would score healthy,
+	// and that is silence.
+	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists))
+	if err != nil {
+		return 0, err
+	}
+	scanned += cluster.Scanned()
+	for _, f := range cluster.EdgeSweepFindings(certWarn, now) {
+		// The sweep also judges Ingress TLS certificates. The certs
+		// category already judges every TLS Secret in scope, so here
+		// they would be the same certificate reported twice under two
+		// kinds.
+		if strings.HasPrefix(f.Kind, "edge.cert_") {
+			continue
+		}
+		card.add("services", f)
 	}
 
 	// control-plane: the §5 "control-plane latency (perf probe
@@ -447,12 +498,26 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	return scanned, nil
 }
 
+// serviceLists is what the edge sweep reads: Services and the pods
+// their selectors match, Ingresses and their classes, and the Secrets
+// an Ingress names for TLS — without which every such Secret would
+// look missing.
+var serviceLists = []state.ListRequirement{
+	{Group: "", Resource: "pods"},
+	{Group: "", Resource: "services"},
+	{Group: "networking.k8s.io", Resource: "ingresses"},
+	{Group: "networking.k8s.io", Resource: "ingressclasses"},
+	{Group: "", Resource: "secrets"},
+}
+
 // deltaCategory buckets a delta finding kind into its scorecard
 // category.
 func deltaCategory(kind string) string {
 	switch {
 	case kind == "pod.pending":
 		return "pending"
+	case strings.HasPrefix(kind, "pdb."):
+		return "disruption"
 	case strings.HasPrefix(kind, "node."):
 		return "nodes"
 	case strings.HasPrefix(kind, "addon."):

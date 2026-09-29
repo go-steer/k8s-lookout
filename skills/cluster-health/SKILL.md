@@ -1,6 +1,6 @@
 ---
 name: cluster-health
-description: Answer "any issues in this cluster?" — on demand or on a schedule — with lookout health's one-call ten-category scorecard, then drill into degraded categories with lookout triage delta, state edges, or bundle.
+description: Answer "any issues in this cluster?" — on demand or on a schedule — with lookout health's one-call twelve-category scorecard, then drill into degraded categories with lookout triage delta, state edges, or bundle.
 ---
 
 # cluster-health — assessment with lookout
@@ -13,8 +13,8 @@ lookout health
 ```
 
 `health` and `scan` answer the same question two ways over the same
-checks: `health` scores ten categories and always emits a line per
-category, so a healthy cluster is ten `status=healthy` lines; `scan`
+checks: `health` scores twelve categories and always emits a line per
+category, so a healthy cluster is twelve `status=healthy` lines; `scan`
 emits findings only, so a healthy cluster is a bare summary line. Reach
 for the scorecard when you owe someone a status, for `lookout scan` when
 you want the raw list to work through — or when you want to pipe it into
@@ -39,11 +39,18 @@ kind=health.category severity=critical category=certs status=degraded total=1 to
 kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff fingerprint=sha256:e2957792a0b3ad9e29db2051dbc69ff01dfe3a52da8dbb6d1331aa44fe946f8b category=crashloops container=app restarts=12 last_state=Error exit_code=1
 kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" fingerprint=sha256:dd1c9738112cd7229a73b1920b06122bccee7bb0e7867c93752fa0b0e522557d category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
 …
-scanned=10 findings=20 elapsed=100ms
+scanned=15 findings=24 elapsed=100ms
 ```
 
-- A fully healthy cluster is 10 `status=healthy`/`unavailable` scorecard
+- A fully healthy cluster is 12 `status=healthy`/`unavailable` scorecard
   lines and a summary — nothing else.
+- The last two categories are not pod health. `services` is a Service
+  whose selector matches no pod (`edge.selector_empty`), or an Ingress
+  in front of one: it routes nowhere while every pod behind the
+  intended workload is Running and Ready, so no other category sees it.
+  `disruption` is a PodDisruptionBudget with no headroom
+  (`pdb.gridlocked`): nothing is down, but nothing can be drained, so a
+  node upgrade will stall. Report it as readiness, not as an outage.
 - `status=unavailable` is *not* degraded: the category could not be
   assessed and the `message` says why. `control-plane unavailable
   ("requires cloud provider metrics")` is expected on vanilla (non-GKE)
@@ -71,6 +78,8 @@ scanned=10 findings=20 elapsed=100ms
 | storage | `lookout triage spec pvc/prod/data-claim` for the named PVC |
 | certs | `lookout state edges --workload=Deployment/prod/api --cert-warn=720h` for the workload behind the cert, or `lookout triage spec Secret/prod/old-tls` (keys and expiry only — values never render) |
 | webhooks | `lookout state webhooks` — the full audit: dead backends × failurePolicy, namespace/rule blast radius, timeout stall risk, CA-bundle expiry (health's webhooks category delegates to the same check) |
+| services | `lookout state edges --workload=Service/prod/web` — enters from the Service, and names the workload it was probably meant to select (`likely_workload=`) |
+| disruption | `lookout stab drain -A` — every drain blocker, gridlocked budgets included, with the pods behind each |
 | control-plane (GKE, provider configured) | `lookout perf probe --pack=apiserver` — p99 latency by verb/resource; also `--pack=apf`, `--pack=etcd`, `--pack=startup` |
 
 Once the drill-down names a specific broken workload, switch to the

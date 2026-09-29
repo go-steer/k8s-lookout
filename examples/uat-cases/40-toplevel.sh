@@ -236,7 +236,7 @@ uat_toplevel_secrets() {
     "triage spec with no target → says what to pass"
 }
 
-# ---- health: the ten-category scorecard ------------------------------------
+# ---- health: the twelve-category scorecard ---------------------------------
 
 uat_toplevel_health() {
   uat_section "health: the scorecard always answers"
@@ -255,7 +255,7 @@ uat_toplevel_health() {
   # A scorecard that omits its healthy rows cannot be distinguished
   # from one that failed to run them.
   local cat
-  for cat in control-plane nodes crashloops pending rollouts storage addons quota certs webhooks; do
+  for cat in control-plane nodes crashloops pending rollouts storage addons quota certs webhooks services disruption; do
     uat_expect_stdout "kind=health\.category.*category=$cat status=(healthy|degraded|unavailable)" \
       "health → category $cat answers"
   done
