@@ -97,6 +97,7 @@ MCP tool with the same payload:
 | is DNS/TCP/HTTP to it actually broken? | `lookout net probe --dns=api.prod.svc.cluster.local` | active confirmation from wherever lookout runs — see "Confirming a network hypothesis" |
 | creates/updates hang or fail with "failed calling webhook"? | `lookout state webhooks` | audits every admission webhook: dead backends × failurePolicy (Fail + dead backend rejects everything that matches), blast radius, timeout stall risk, CA-bundle expiry |
 | pod stuck in ContainerCreating with Multi-Attach / FailedAttachVolume? | `lookout state volumes` | joins VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO wanted on two nodes, attach errors with age, cross-zone PV locks |
+| KEDA-scaled workload stuck at one size / not scaling on its queue or metric? | `lookout state keda` | reports the broken link per ScaledObject/ScaledJob: target gone (renamed workload runs unscaled), missing TriggerAuthentication, or KEDA's own not-Ready reason; silent without KEDA installed |
 | GKE pod gets 403s / metadata-server errors calling GCP APIs? | `lookout state wi` | verifies the Workload Identity chain (KSA annotation → workloadIdentityUser binding) and reports only the broken links; vanilla clusters report an explicit unavailable |
 
 Concrete `state edges` output when a referenced ConfigMap key is missing

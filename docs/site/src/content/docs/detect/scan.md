@@ -108,6 +108,17 @@ When traffic through the Gateway API does not arrive — walk GatewayClass → G
 | `route.backend_port` | critical | the route's backendRef Service exists but does not expose the named port |
 | `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (no coverage lies) |
 
+### [`lookout state keda`](/reference/state-keda/)
+
+When a KEDA-scaled workload stops scaling — report every ScaledObject or ScaledJob whose target is gone, whose trigger authentication does not exist, or that KEDA itself reports not Ready. Silent, and cheap, on clusters without KEDA installed.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `keda.missing_target` | warning | the ScaledObject's scaleTargetRef names a Deployment or StatefulSet that does not exist — nothing is being scaled |
+| `keda.missing_auth` | warning | a trigger's authenticationRef names a TriggerAuthentication or ClusterTriggerAuthentication that does not exist — the scaler cannot read its metric |
+| `keda.not_ready` | warning | KEDA reports the scaler Ready=False: scaling has stopped at the current size |
+| `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (no coverage lies) |
+
 ### [`lookout state wi`](/reference/state-wi/)
 
 When a GKE pod gets 403s or metadata-server errors calling GCP APIs, verify the Workload Identity chain — KSA annotation (iam.gke.io/gcp-service-account) → roles/iam.workloadIdentityUser binding on the GSA — reporting only the broken links; vanilla clusters report an explicit unavailable.

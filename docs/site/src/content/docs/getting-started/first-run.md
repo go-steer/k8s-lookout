@@ -29,7 +29,7 @@ kind=workload.rollout severity=critical namespace=lookout-demo kind_of_object=De
 kind=crd.unavailable severity=info reason=APIGroupNotServed message="Gateway API is not installed: the gateway.networking.k8s.io/v1 API group is not served by this cluster…" check="state gateway" api_group=gateway.networking.k8s.io/v1
 kind=cloud.unavailable severity=info reason=CapabilityUnavailable message="state wi needs the provider workload-identity capability: no cloud provider configured" check="state wi" capability=workload-identity provider=none
 kind=edge.missing_ref severity=critical namespace=lookout-demo kind_of_object=ConfigMap name=missing-config reason=FailedMount message="configmap missing-config not found (volume config)" check="state edges" workload=Deployment/lookout-demo/mounter volume=config pods=1
-scanned=330 findings=9 elapsed=442ms unavailable="state gateway,state wi" detection=none detection_reason=no-majority-manager candidate=kubectl-client-side-apply share=45% checks=7 skipped=audit,cloud,perf drilldown=3
+scanned=330 findings=9 elapsed=442ms unavailable="state gateway,state keda,state wi" detection=none detection_reason=no-majority-manager candidate=kubectl-client-side-apply share=45% checks=7 skipped=audit,cloud,perf drilldown=3
 ```
 
 (Real output against a kind cluster with three faults staged, abridged.)
