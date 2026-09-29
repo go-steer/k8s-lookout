@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-29
+
+**If you run a cluster with more than a couple of thousand Deployments,
+upgrade for the first fix below and read the rest later.** The `rollout`
+source swept the whole fleet on every Deployment, ReplicaSet and
+StatefulSet event, and scanned every ReplicaSet in the cluster for each
+Deployment in that sweep — so a single status write cost *deployments ×
+replicasets* of work, on one handler goroutine. On a 403-node fleet it
+held a full core flat, drained its watch backlog at 16 events a second,
+and was still reporting not-ready twenty-four minutes in. It now indexes
+ownership and coalesces sweeps, and the same fleet is ready in 28
+seconds at under half a percent of a core. This one predates the
+placement work and was found by measuring it.
+
+The rest of the release finishes `leeway`. v0.26.0 shipped the
+placement subsystem without its node-group half; this adds it. Node
+pools and compute classes are now subjects in their own right, so a pool
+that has shrunk to one of its three zones is reported once, naming the
+pool, rather than as drift on each of the dozen workloads riding it —
+as a Tier C, metrics-only observation, because a pool's intended zones
+are recorded nowhere lookout can read. And the expected distribution is
+now apportioned by allocatable CPU once the domains of an axis differ
+enough in size for an even split to be wrong. A zone with nothing schedulable left in it is
+now one finding for the cluster, `leeway.domain_unavailable`, naming the
+zone and separating the three ways it emptied — nodes gone, nodes not
+Ready, or nodes Ready and all cordoned — instead of the silence the
+held-back per-workload findings used to produce. And every drift finding
+now says *why* it thinks it happened, from evidence other sources
+already hold: the scheduler's own refusals, a rollout that completed
+inside the window, an autoscaler consolidation. The verdict is a
+suspected cause, labelled as one, and a finding that could not test a
+cause says which ones went untested.
+
+Then the parts that make it operable by someone who did not build it.
+An *Operations → Placement* page and a Grafana dashboard over the
+subsystem's own health SLIs, so drift is never shown without whether it
+is being measured correctly. A standalone `leeway` binary in the same
+image, for clusters that want the placement signal without the rest of
+the sentinel. An OTLP push path that reports its own drops on the pull
+registry, where a dead collector cannot hide them. Per-domain metrics at
+roughly half their previous cardinality, with the controls that shed
+series counting what they withheld. And the cost measured rather than
+modelled: 63.3 KiB of resident memory per pod over a 53 MiB idle
+process, linear across three decades of pod count, 5 ms evaluation p99
+under churn, and no growth over a two-hour soak that did not track the
+fleet. The 200k-pod and 500-pods-a-second design targets were **not**
+reached on kind and are published as extrapolation, labelled as such.
+
+**One default changes under you.** The shipped memory limit rises from
+256Mi to 768Mi and the request from 64Mi to 128Mi, with `GOMEMLIMIT` set
+to 600MiB so the garbage collector tightens before the kernel kills the
+pod. Measured at 18,630 bytes of retained heap per cached pod, the pod
+cache alone exhausted the old limit at about 14,000 pods — inside the
+range lookout calls typical. If you set your own resources, nothing
+changes; if you took the defaults, the pod's limit triples and its
+request doubles. *Operations → Sizing* has the derivation and a table by
+cluster size.
+
 ### Changed
 
 - **The default memory limit is raised from 256Mi to 768Mi, and the manifests now
