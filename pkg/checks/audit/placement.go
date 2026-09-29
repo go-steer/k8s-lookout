@@ -72,7 +72,7 @@ func (ix *workloadIndex) placement(w workload) []emit.Finding {
 	if w.kind == "DaemonSet" {
 		return nil
 	}
-	want := w.wantReplicas()
+	want, via := ix.replicaFloor(w)
 	if want == 0 {
 		return nil
 	}
@@ -118,7 +118,7 @@ func (ix *workloadIndex) placement(w workload) []emit.Finding {
 			Reason:   reasonSingleNode,
 			Message: fmt.Sprintf("%d replicas but exactly one node satisfies the required placement constraint (%s): every replica lands on it, so losing that one node takes the workload down whatever the replica count or PodDisruptionBudget says",
 				want, cappedList(sel.keys)),
-			Details: details(emit.Field{Key: "replicas", Value: itoa(int(want))}),
+			Details: details(append([]emit.Field{{Key: "replicas", Value: itoa(int(want))}}, via...)...),
 		}}
 	case eligible < int(want):
 		return []emit.Finding{{
@@ -127,7 +127,7 @@ func (ix *workloadIndex) placement(w workload) []emit.Finding {
 			Reason:   reasonFewerNodes,
 			Message: fmt.Sprintf("%d replicas but only %d nodes satisfy the required placement constraint (%s): replicas must stack, so one node loss takes more than one of them, and a DoNotSchedule spread rule leaves the surplus Pending",
 				want, eligible, cappedList(sel.keys)),
-			Details: details(emit.Field{Key: "replicas", Value: itoa(int(want))}),
+			Details: details(append([]emit.Field{{Key: "replicas", Value: itoa(int(want))}}, via...)...),
 		}}
 	}
 	return nil

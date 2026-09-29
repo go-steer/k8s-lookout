@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the instrument existed and was dropped. A resource that has seen
   no event still exports no series. The name, labels and help text are
   unchanged.
+- **`audit workloads` judges an autoscaled workload by its HPA's
+  `minReplicas`** (#268), not by `spec.replicas`. Under an HPA,
+  `spec.replicas` is the autoscaler's current answer, so
+  `audit.single_replica` came and went with load on a workload nobody had
+  changed: present overnight at one replica, gone at five. Now an HPA
+  with `minReplicas: 1` is reported at any load, and one with
+  `minReplicas: 3` never is. The same floor drives `audit.no_pdb`,
+  `audit.no_spread` and `audit.rigid_scheduling`, and those findings gain
+  an `autoscaler=` detail naming the HPA. KEDA is covered, because a
+  ScaledObject works through an HPA of its own. Fingerprints are
+  unchanged.
 
 ## [0.27.0] - 2026-09-29
 

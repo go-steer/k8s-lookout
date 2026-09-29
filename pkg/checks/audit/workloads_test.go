@@ -1048,3 +1048,82 @@ func kindSet(t *testing.T, stdout string) map[string]bool {
 	}
 	return out
 }
+
+// #268: under an HPA, spec.replicas is the autoscaler's current answer.
+// Judging it made audit.single_replica come and go with load — present
+// overnight at one replica, gone at five — on a workload nobody
+// touched. The floor judged is the HPA's minReplicas, which does not
+// move with load.
+func TestWorkloadsReplicaFloorFollowsTheAutoscaler(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replicas   int32 // spec.replicas, the HPA's current answer
+		min        int32 // 0 = unset, the API default of 1
+		wantSingle bool
+		wantNoPDB  string // the replicas= on no_pdb, "" = no claim
+	}{
+		{"idle-at-floor-one", 1, 1, true, ""},
+		{"busy-above-floor-one", 5, 1, true, ""},
+		{"unset-min-is-one", 5, 0, true, ""},
+		{"floor-three-idle-at-one", 1, 3, false, "3"},
+		{"floor-three-busy", 7, 3, false, "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []runtime.Object{
+				deploy("prod", "x", tc.replicas, spread(template(map[string]string{"app": "x"},
+					requests(container("app", true, true), "1")))),
+				hpa("prod", "x-hpa", "Deployment", "x", tc.min, 10, cpuUtil(70)),
+			}
+			res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+			var single, noPDB map[string]string
+			for _, r := range findingLines(t, res.Stdout) {
+				switch r["kind"] {
+				case "audit.single_replica":
+					single = r
+				case "audit.no_pdb":
+					noPDB = r
+				}
+			}
+			if (single != nil) != tc.wantSingle {
+				t.Fatalf("single_replica present = %v, want %v:\n%s", single != nil, tc.wantSingle, res.Stdout)
+			}
+			if single != nil {
+				if single["replicas"] != "1" || single["autoscaler"] != "x-hpa" || single["reason"] != "SingleReplica" {
+					t.Errorf("single_replica = %v", single)
+				}
+				if !strings.Contains(single["message"], "minReplicas=1") {
+					t.Errorf("message should name the floor it judged: %q", single["message"])
+				}
+			}
+			switch {
+			case tc.wantNoPDB == "" && noPDB != nil:
+				t.Errorf("unexpected no_pdb: %v", noPDB)
+			case tc.wantNoPDB != "" && (noPDB == nil || noPDB["replicas"] != tc.wantNoPDB || noPDB["autoscaler"] != "x-hpa"):
+				t.Errorf("no_pdb = %v, want replicas=%s autoscaler=x-hpa:\n%s", noPDB, tc.wantNoPDB, res.Stdout)
+			}
+		})
+	}
+}
+
+// The fingerprint must not move with the fix: a single_replica claim a
+// fleet already tracks keeps its identity whether or not an HPA was
+// consulted, so the fix does not read as one claim closing and another
+// opening.
+func TestWorkloadsReplicaFloorKeepsTheFingerprint(t *testing.T) {
+	tmpl := spread(template(map[string]string{"app": "x"}, requests(container("app", true, true), "1")))
+	fp := func(objs ...runtime.Object) string {
+		res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+		for _, r := range findingLines(t, res.Stdout) {
+			if r["kind"] == "audit.single_replica" {
+				return r["fingerprint"]
+			}
+		}
+		t.Fatalf("want single_replica:\n%s", res.Stdout)
+		return ""
+	}
+	plain := fp(deploy("prod", "x", 1, tmpl))
+	scaled := fp(deploy("prod", "x", 4, tmpl), hpa("prod", "x-hpa", "Deployment", "x", 1, 10, cpuUtil(70)))
+	if plain == "" || plain != scaled {
+		t.Errorf("fingerprint moved: plain=%q under-hpa=%q", plain, scaled)
+	}
+}
