@@ -16,6 +16,7 @@ package triage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -187,6 +188,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 			return 0, err
 		}
 		scanned += len(rows)
+		if err := placeDeleted(ctx, st, rows, hood, wl, depth); err != nil {
+			return 0, err
+		}
 		entries = append(entries, logEntries(rows, hood)...)
 		// Events still come from the live API (they are not in the
 		// delta log); in --at mode there is no client and the window
@@ -260,6 +264,81 @@ func neighborhood(snap *graph.Snapshot, id graph.NodeID, depth int) map[string]s
 		}
 	}
 	return m
+}
+
+// graphHistory is the slice of *store.Store placeDeleted reads.
+type graphHistory interface {
+	GraphAt(ctx context.Context, at time.Time) (*graph.Snapshot, error)
+}
+
+// placeDeleted adds to hood every object the window deleted that was
+// in the target's neighborhood while it lived (#393).
+//
+// hood is resolved against one graph — the one at --at, or the live
+// one — and an object deleted before that instant is by construction
+// absent from it, so without this its delete record, and every add
+// and update it made in the window, would fail the scope lookup and
+// vanish. A post-mortem that silently omits a deletion reports a
+// clean window over a destructive change.
+//
+// Each delete is placed against the graph as of the instant before
+// it, which is the one graph that is certain to still hold the
+// object; the window start is not, because an object created and
+// deleted inside the window never appears there. The relation it
+// takes is the one it had then. One GraphAt per delete that is not
+// already placed, oldest first, and a graph read for one delete
+// places every other pending delete it also holds — which in the
+// common case of one rollout's worth of pods is a single read.
+// Scoped to the target's namespace and to cluster-scoped objects,
+// the only places a neighborhood reaches, so deletes elsewhere in
+// the cluster cost nothing.
+//
+// A delete that predates the store's first snapshot, or one from a
+// moment the target itself did not exist, is left unplaced: there is
+// no graph that can say what it was to the target.
+func placeDeleted(ctx context.Context, st graphHistory, rows []store.GraphChange, hood map[string]string, wl emit.WorkloadRef, depth int) error {
+	pending := map[string]time.Time{}
+	var order []string
+	for _, rec := range rows {
+		if rec.Op != "delete" || (rec.Namespace != "" && rec.Namespace != wl.Namespace) {
+			continue
+		}
+		key := refKey(rec.Kind, rec.Namespace, rec.Name)
+		if _, placed := hood[key]; placed {
+			continue
+		}
+		if _, seen := pending[key]; !seen {
+			order = append(order, key)
+		}
+		pending[key] = rec.At
+	}
+	for _, key := range order {
+		at, ok := pending[key]
+		if !ok {
+			continue // placed by an earlier read
+		}
+		then, err := st.GraphAt(ctx, at.Add(-time.Nanosecond))
+		if errors.Is(err, store.ErrNoHistory) {
+			delete(pending, key)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		id, err := lookupTarget(then, wl, at)
+		if err != nil {
+			delete(pending, key)
+			continue
+		}
+		for k, rel := range neighborhood(then, id, depth) {
+			if _, want := pending[k]; want {
+				hood[k] = rel
+				delete(pending, k)
+			}
+		}
+		delete(pending, key)
+	}
+	return nil
 }
 
 func refKey(kind, namespace, name string) string {

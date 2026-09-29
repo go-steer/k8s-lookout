@@ -273,8 +273,8 @@ would pass just as well if `--at` silently reported *now*, which is the
 one wrong answer a post-mortem tool must never give. So its fixture
 manufactures an object that exists only inside the window, and each
 `--at` assertion has a live control that must fail to find what `--at`
-finds. It also pins two known gaps as refutations naming their issues
-(#393, #396), so a fix breaks the assertion instead of going unnoticed.
+finds. It also pins a known gap as a refutation naming its issue
+(#396), so a fix breaks the assertion instead of going unnoticed.
 
 ## CI
 

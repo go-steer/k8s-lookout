@@ -58,6 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the answer. The HPAs are now listed in every mode, and only when a
   `SuccessfulRescale` event is inside the window. An HPA deleted since
   its events were written still reports without `target=`.
+- **`triage changes --store` now reports deletions** (#393). An object
+  deleted inside the window used to disappear from the answer entirely:
+  no `reason=Deleted` row, and its earlier `Added` and `Updated` rows
+  were dropped too. The neighborhood was taken from the graph at `--at`
+  (or the live graph), and a deleted object is not in it. Each deletion
+  is now placed against the graph just before it, so the object's rows
+  come back with the relation it had while it lived. This costs one
+  history read per deletion in the target's namespace, and one read
+  usually places a whole rollout's worth. A deletion from before the
+  store's first snapshot, or from a moment the target did not exist,
+  is still left out.
 - **`lookout_leeway_last_event_timestamp_seconds` no longer costs ~490 ns
   and 4 allocations per informer event** (#499). The gauge is now stamped
   in an atomic and read at scrape time, so an inert pod update drops from

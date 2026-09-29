@@ -190,24 +190,21 @@ uat_store_changes() {
   uat_refute_stdout "name=$POSTMORTEM_CANARY" \
     "triage changes (live) → but cannot see the canary, which is the whole difference"
 
-  # A KNOWN GAP, asserted so it is visible rather than discovered
-  # (issue #393). Ask the same question at the far edge of the window —
-  # an instant the store answers for in which the canary is already
-  # gone — and its Added record from earlier in that same window has
-  # vanished retroactively, with no Deleted record in its place.
-  # `reason=Deleted` is structurally unreachable: the neighbourhood is
-  # built from the snapshot as of --at, so an object absent from that
-  # snapshot has every one of its records filtered out, including the
-  # one saying it went away. The instant is recorded by the fixture
-  # rather than computed here, because "deleted" and "absent from the
-  # newest snapshot" are up to one snapshot interval apart and the
-  # assertion must not race that.
+  # #393: ask the same question at the far edge of the window — an
+  # instant the store answers for in which the canary is already gone.
+  # The canary is absent from the graph as of --at, so its records are
+  # scoped against the graph just before its delete instead, and both
+  # the Added and the Deleted rows come back with the relation it had
+  # while it lived. The instant is recorded by the fixture rather than
+  # computed here, because "deleted" and "absent from the newest
+  # snapshot" are up to one snapshot interval apart and the assertion
+  # must not race that.
   uat_run triage changes "$web" --at "$UAT_STORE_AFTER" --store "$POSTMORTEM_STORE" --since=30m
   uat_expect_exit 0 "triage changes --at (after the delete) → exit 0"
-  uat_refute_stdout 'reason=Deleted' \
-    "triage changes --at → no deletion is ever reported (#393)"
-  uat_refute_stdout "name=$POSTMORTEM_CANARY" \
-    "triage changes --at → and after the delete the canary's earlier Added record is gone too (#393)"
+  uat_expect_stdout "kind_of_object=Pod name=$POSTMORTEM_CANARY reason=Deleted .*relation=lateral origin=log" \
+    "triage changes --at → the canary's deletion is reported, at the relation it had while it lived (#393)"
+  uat_expect_stdout "kind_of_object=Pod name=$POSTMORTEM_CANARY reason=Added .*relation=lateral origin=log" \
+    "triage changes --at → and its earlier Added record is still there (#393)"
 }
 
 # ---- triage status: the one read-path command that writes ------------------

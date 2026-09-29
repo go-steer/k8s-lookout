@@ -29,8 +29,8 @@ one wrong answer a post-mortem tool must never give.
 
 The two instants bracket the window because the answer changes across
 it: at **onset** the canary is in the topology; at **after** it is not,
-and — issue #393 — its `Added` record from earlier in the same window
-has retroactively vanished with no `Deleted` record in its place.
+and the same window reports its `Added` record and its `Deleted` record,
+both at the relation it had while it lived (#393).
 
 ## Why a local sentinel
 
@@ -97,16 +97,14 @@ lookout triage changes Deployment/lookout-demo/web        --at "$onset" --store 
 - History rows carry no `ready=` and mark referenced-only kinds
   `observed=unknown`; live rows do the opposite.
 
-## Known gaps, asserted rather than ignored
+## Known gap, asserted rather than ignored
 
 - **#396** — history has no `Selects`/`RoutesTo` at all: the graph feed
   watches pods, nodes and replicasets, so the whole routing layer is
   missing from `--at` and nothing in the output says so.
-- **#393** — `reason=Deleted` is structurally unreachable, and a deleted
-  object's earlier records disappear with it.
 
-`examples/uat-cases/60-store.sh` pins both with refutations that will
-fail — loudly, naming the issue — the moment either is fixed.
+`examples/uat-cases/60-store.sh` pins it with a refutation that will
+fail — loudly, naming the issue — the moment it is fixed.
 
 ## What is left behind
 

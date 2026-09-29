@@ -309,8 +309,9 @@ What changed in the window before onset; **graph-backed**.
   `source=history at=… window=…`; live degrades to `source=
   live-approximation` reconstructed from Events (`origin=event`) and
   cannot see the canary at all; a field delta carries names, counts and
-  hashes only (§6.5). Deletions are a **known gap** (#393) and are
-  asserted as absent, naming the issue.
+  hashes only (§6.5). Asked again after the canary is gone, the same
+  window reports both its `Added` and its `Deleted` row at the relation
+  it had while it lived (#393).
 
 ## `state` group
 
@@ -870,7 +871,7 @@ these ticks are for the command's *own* behaviour.
 - [x] `triage radius` (live + `--at`, the deleted-object differential,
       `--depth` from a Pod, the fidelity gaps, exit 1 before history)
 - [x] `triage changes` (live + `--at`, all three relations, the field
-      delta, live-approximation, #393 asserted as a gap)
+      delta, live-approximation, the deletion after the fact — #393)
 - [x] `state edges` (+ `--cert-warn` both directions)
 - [x] `state webhooks` (+ `--cert-warn`)
 - [ ] `state wi` (unavailable + real)
