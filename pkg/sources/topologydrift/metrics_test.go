@@ -182,6 +182,9 @@ func fullOptions() metricsOptions {
 			yield(resourcePod, outcomeInert, 80)
 			yield(resourcePod, outcomeApplied, 20)
 		},
+		LastEvents: func(yield func(resource string, unix int64)) {
+			yield(resourcePod, 1_700_000_000)
+		},
 		Intents: func(yield intentObserver) {
 			skew := int32(1)
 			yield(subA, zoneKey, &leeway.Intent{
@@ -248,7 +251,6 @@ func TestInstrumentFields_EveryOneHasADocRow(t *testing.T) {
 func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 	h := newPromHarness(t, fullOptions())
 	ctx := context.Background()
-	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
 	// A counter with no Add is not exported at all, so the one metric we hope
 	// never moves in production has to move here or it cannot be checked.
@@ -377,7 +379,6 @@ func TestInstruments_EvaluationBucketsResolveTheDurationsWeSee(t *testing.T) {
 func TestMetricDocs_MatchTheExporter(t *testing.T) {
 	h := newPromHarness(t, fullOptions())
 	ctx := context.Background()
-	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
 	// A counter with no Add is not exported at all, so the one metric we hope
 	// never moves in production has to move here or it cannot be checked.
@@ -432,7 +433,6 @@ func TestMetricDocs_OptionalMatchesTheGate(t *testing.T) {
 	opts.PerDomain = PerDomainGate{MinDrift: 2}
 	h := newPromHarness(t, opts)
 	ctx := context.Background()
-	h.in.recordEvent(ctx, resourcePod, time.Unix(1_700_000_000, 0))
 	h.in.recordEvaluation(ctx, leeway.SubjectDeployment, 250*time.Millisecond)
 	// A counter with no Add is not exported at all, so the one metric we hope
 	// never moves in production has to move here or it cannot be checked.
@@ -994,7 +994,6 @@ func TestInstruments_NilMeterUsesTheNoopProvider(t *testing.T) {
 	}
 	// Recording against the no-op provider must be safe, since this is the
 	// shape every unit test and every telemetry-less process runs in.
-	in.recordEvent(context.Background(), resourceNode, time.Now())
 	in.recordEvaluation(context.Background(), leeway.SubjectJob, time.Second)
 	if err := in.Close(); err != nil {
 		t.Errorf("Close: %v", err)
@@ -1018,7 +1017,6 @@ func TestInstruments_CloseIsIdempotentAndNilSafe(t *testing.T) {
 
 func TestInstruments_NilRecordersAreSafe(t *testing.T) {
 	var in *instruments
-	in.recordEvent(context.Background(), resourcePod, time.Now())
 	in.recordEvaluation(context.Background(), leeway.SubjectDeployment, time.Second)
 	in.recordMismatch(context.Background(), leeway.SubjectDeployment)
 }

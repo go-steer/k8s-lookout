@@ -1605,8 +1605,10 @@ server-side.
 > registered before the instruments exist and a synchronous counter would drop the
 > initial sync. On an EPYC 7B12 the add is 2.5 ns against a 117 ns inert pod event
 > (`BenchmarkSource_InertPodEvent`), so it does not move the ladder. The same benchmark
-> shows the pre-existing `last_event_timestamp` Record costs ~490 ns and 4 allocations
-> per event, which is 80% of the metered inert path
+> showed the pre-existing `last_event_timestamp` Record cost ~490 ns and 4 allocations
+> per event, which was 80% of the metered inert path. #499 moved that gauge onto the
+> same atomics-at-scrape pattern; the metered inert path is now 115 ns and 0 allocations,
+> the same as the bare one
 > ([#499](https://github.com/go-steer/k8s-lookout/issues/499)). The rows above stay modelled until
 > the churn rung is re-run against this counter.
 >

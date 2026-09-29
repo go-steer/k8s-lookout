@@ -14,7 +14,10 @@
 
 package topologydrift
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // eventResource is which informer delivered a watch event.
 type eventResource int
@@ -81,5 +84,32 @@ func (w *watchEvents) each(yield func(resource, outcome string, n int64)) {
 	for r := eventResource(0); r < numEventResources; r++ {
 		yield(r.label(), outcomeInert, w.n[r][0].Load())
 		yield(r.label(), outcomeApplied, w.n[r][1].Load())
+	}
+}
+
+// lastEvents is the instant of the last pod and node event, per resource, as
+// unix seconds (#499). It feeds last_event_timestamp the same way watchEvents
+// feeds the counter, and for the same two reasons: the stamps of the initial
+// sync, delivered before the instruments exist, now survive; and a
+// synchronous gauge Record with a per-call attribute set was ~490 ns and 4
+// allocations on every event, 80% of an inert pod update's cost.
+type lastEvents struct {
+	unix [numEventResources]atomic.Int64
+}
+
+// stamp records an event for r at at.
+func (l *lastEvents) stamp(r eventResource, at time.Time) {
+	l.unix[r].Store(at.Unix())
+}
+
+// each yields the resources that have seen an event. A resource that has not
+// is withheld rather than reported as 1970: a zero timestamp reads as an
+// informer silent for fifty years, which is precisely the alert this gauge
+// exists to drive.
+func (l *lastEvents) each(yield func(resource string, unix int64)) {
+	for r := eventResource(0); r < numEventResources; r++ {
+		if v := l.unix[r].Load(); v != 0 {
+			yield(r.label(), v)
+		}
 	}
 }
