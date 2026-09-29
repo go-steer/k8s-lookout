@@ -1598,6 +1598,18 @@ server-side.
 > points), which also makes the "~8 events per lifecycle" constant and the "~80%
 > inert" split measurable rather than asserted.
 >
+> **The instrument shipped (2026-09-29, #491); the measurement has not been re-run.**
+> `lookout_leeway_watch_events_total{resource,outcome}` is labelled `resource` rather
+> than `kind` so it joins `last_event_timestamp`, and `outcome` is `inert` or `applied`.
+> It is kept in plain atomics and read at scrape time, because the handlers are
+> registered before the instruments exist and a synchronous counter would drop the
+> initial sync. On an EPYC 7B12 the add is 2.5 ns against a 117 ns inert pod event
+> (`BenchmarkSource_InertPodEvent`), so it does not move the ladder. The same benchmark
+> shows the pre-existing `last_event_timestamp` Record costs ~490 ns and 4 allocations
+> per event, which is 80% of the metered inert path
+> ([#499](https://github.com/go-steer/k8s-lookout/issues/499)). The rows above stay modelled until
+> the churn rung is re-run against this counter.
+>
 > What the churn rung *did* measure, off
 > `lookout_leeway_evaluation_duration_seconds`, is the cost per **evaluation**:
 >
@@ -4257,8 +4269,9 @@ The measured ladder, the marginal cost it yields and the line between the measur
 the extrapolated are in §6.6, along with the soak: the memory model holds under two
 hours of sustained churn, with the marginal resident cost of a fleet object falling
 5.3% between the halves of the window. The per-event decomposition this paragraph
-promised as a regression gate is in §6.6.1 and is **still modelled**, because nothing
-counts watch events ([#491](https://github.com/go-steer/k8s-lookout/issues/491)).
+promised as a regression gate is in §6.6.1 and is **still modelled**. The counter it
+needed now exists ([#491](https://github.com/go-steer/k8s-lookout/issues/491),
+`lookout_leeway_watch_events_total`), but the churn rung has not been re-run against it.
 
 ---
 

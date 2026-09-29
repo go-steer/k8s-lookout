@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`lookout_leeway_watch_events_total{resource,outcome}`** (#491) counts
+  every event the placement subsystem's informers deliver. `resource` is
+  `pod`, `node`, `deployment` or `statefulset`. `outcome` is `inert` for an
+  event that changed nothing leeway indexes (almost always pod status churn)
+  or `applied` for one that moved a count. All eight series read from zero.
+  Divide leeway's CPU by its rate to get a per-event cost. Read it against
+  `lookout_leeway_evaluation_duration_seconds_count` to see how many events
+  each evaluation absorbs. The counter includes the initial sync, and costs
+  about 2.5 ns per event.
+
 ## [0.27.0] - 2026-09-29
 
 **If you run a cluster with more than a couple of thousand Deployments,

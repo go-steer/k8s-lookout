@@ -178,6 +178,10 @@ func fullOptions() metricsOptions {
 				},
 			}
 		},
+		WatchEvents: func(yield func(resource, outcome string, n int64)) {
+			yield(resourcePod, outcomeInert, 80)
+			yield(resourcePod, outcomeApplied, 20)
+		},
 		Intents: func(yield intentObserver) {
 			skew := int32(1)
 			yield(subA, zoneKey, &leeway.Intent{
@@ -291,6 +295,10 @@ func TestInstrumentNames_PrometheusSpelling(t *testing.T) {
 		// non-zero reading (outcome="reset") is a silent failure.
 		"lookout_leeway_baselines",
 		"lookout_leeway_baseline_samples_total",
+		// #491's denominator. Observable, so every resource × outcome reads
+		// from zero: a rate over a series that appears on its first event
+		// is a rate that starts wrong.
+		"lookout_leeway_watch_events_total",
 		// §8.4's accounting for what the cardinality controls dropped. Every
 		// reason reads zero until something is withheld, rather than the
 		// series appearing when it is: a reader has to be able to tell

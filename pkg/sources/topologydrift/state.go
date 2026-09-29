@@ -195,8 +195,8 @@ func NewState(opts StateOptions) *State {
 // break the relist replays the whole cache as adds, and a handler that
 // incremented unconditionally would double every count in the cluster on a
 // dropped connection.
-func (s *State) OnPodAdd(pod *corev1.Pod) {
-	s.OnPodUpdate(nil, pod)
+func (s *State) OnPodAdd(pod *corev1.Pod) bool {
+	return s.OnPodUpdate(nil, pod)
 }
 
 // OnPodUpdate applies an update, doing nothing at all when the placement has
@@ -213,9 +213,12 @@ func (s *State) OnPodAdd(pod *corev1.Pod) {
 //
 // The previous object is ignored entirely, which is why the parameter is
 // unnamed. See OnPodDelete.
-func (s *State) OnPodUpdate(_, cur *corev1.Pod) {
+//
+// It reports whether the index moved, which is what separates §6.3's early
+// return from an applied delta on lookout_leeway_watch_events_total.
+func (s *State) OnPodUpdate(_, cur *corev1.Pod) bool {
 	if cur == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -227,19 +230,17 @@ func (s *State) OnPodUpdate(_, cur *corev1.Pod) {
 		// removed rather than left at its last placement. A completed pod
 		// occupies no domain, and leaving it counted would make a batch
 		// namespace look permanently fuller than it is.
-		s.uncount(uid)
-		return
+		return s.uncount(uid)
 	}
 
 	prev, known := s.placements[uid]
 	if known && prev.Equal(next) {
-		return
+		return false
 	}
 
 	sub, ok := s.subjectOf(cur, uid)
 	if !ok {
-		s.uncount(uid)
-		return
+		return s.uncount(uid)
 	}
 
 	if known {
@@ -259,6 +260,7 @@ func (s *State) OnPodUpdate(_, cur *corev1.Pod) {
 		s.representatives[sub] = representative{uid: uid, name: cur.Name}
 	}
 	s.enqueue(sub)
+	return true
 }
 
 // OnPodDelete applies a delete, accepting the tombstone an informer hands over
@@ -274,20 +276,22 @@ func (s *State) OnPodUpdate(_, cur *corev1.Pod) {
 // rules is not to need one. It is the same argument as decrementing from the
 // stored placement instead of the old object, applied to the other half of the
 // key.
-func (s *State) OnPodDelete(obj any) {
+//
+// It reports whether the pod was counted, for the same reason OnPodUpdate does.
+func (s *State) OnPodDelete(obj any) bool {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		tomb, isTomb := obj.(cache.DeletedFinalStateUnknown)
 		if !isTomb {
-			return
+			return false
 		}
 		if pod, ok = tomb.Obj.(*corev1.Pod); !ok {
-			return
+			return false
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.uncount(pod.UID)
+	return s.uncount(pod.UID)
 }
 
 // OnNodeUpsert applies a node event and fans out according to what changed.
@@ -793,11 +797,12 @@ func (s *State) subjectOf(pod *corev1.Pod, uid types.UID) (leeway.SubjectRef, bo
 	return resolveSubject(pod, s.owners)
 }
 
-// uncount removes a pod from every index. Caller holds the lock.
-func (s *State) uncount(uid types.UID) {
+// uncount removes a pod from every index, reporting whether it was in one.
+// Caller holds the lock.
+func (s *State) uncount(uid types.UID) bool {
 	p, known := s.placements[uid]
 	if !known {
-		return
+		return false
 	}
 	sub, hadSubject := s.subjects[uid]
 	s.applyLocked(sub, p, -1)
@@ -820,6 +825,7 @@ func (s *State) uncount(uid types.UID) {
 	if hadSubject {
 		s.enqueue(sub)
 	}
+	return true
 }
 
 // applyLocked folds a placement into (sign +1) or out of (sign -1) its
