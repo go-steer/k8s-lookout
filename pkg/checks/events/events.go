@@ -222,6 +222,22 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			return 0, err
 		}
 	}
+	// Namespace and -A mode never listed HPAs above, so the target
+	// map is empty there — and namespace mode is the discovery path,
+	// the caller who does not yet know what is oscillating (#377).
+	// Paid only when a rescale survived the cutoff: a namespace with
+	// no HPA activity does not List HPAs for nothing.
+	if match == nil && len(rescales) > 0 {
+		hpas, err := listHPAs(ctx, client, listNS)
+		if err != nil {
+			return 0, err
+		}
+		for i := range hpas {
+			h := &hpas[i]
+			ref := h.Spec.ScaleTargetRef
+			hpaTargets[h.Namespace+"/"+h.Name] = ref.Kind + "/" + ref.Name
+		}
+	}
 	for _, f := range thrashFindings(rescales, hpaTargets, window, minFlips) {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err

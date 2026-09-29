@@ -393,11 +393,11 @@ uat_fixture_hpa() {
     "triage events --namespace → the oscillating HPA is still reported"
   uat_refute_stdout 'kind=event\.hpa_thrash.*name=ramp' \
     "triage events --namespace → a monotonic ramp, however fast, is NOT thrash"
-  # #377: namespace mode resolves no HPA objects, so the scaleTargetRef
-  # join is workload-mode only. Asserted so the gap is visible rather
-  # than discovered.
-  uat_refute_stdout 'kind=event\.hpa_thrash.*target=' \
-    "triage events --namespace → target= is a workload-mode join (#377)"
+  # #377: namespace mode is the discovery path, so it names the scale
+  # target too — the caller who does not yet know which workload is
+  # oscillating is the one who needs it.
+  uat_expect_stdout 'kind=event\.hpa_thrash.*target=Deployment/web' \
+    "triage events --namespace → target= names the scale target (#377)"
 }
 
 # ---- net probe: the one fixture that is not in the cluster -----------------
