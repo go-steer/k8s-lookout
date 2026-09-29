@@ -238,6 +238,13 @@ func (l *baselineLog) Load(recs []leeway.BaselineRecord, now time.Time, cfg leew
 			// key. Dropping it in memory leaves the row for the prune.
 			continue
 		}
+		if !scoredHere(sub.Kind) {
+			// compute-class persists its rank baselines in this table under
+			// a PreferenceAxis subject (#463). Adopting one would make it a
+			// key nothing here scores, and the first reap would delete a
+			// row this source never wrote.
+			continue
+		}
 		k := baselineKey{Subject: sub, Key: leeway.TopologyKey(rec.TopologyKey)}
 		// A set already in memory wins. Load runs after arming and the
 		// sampler starts with the queue, so a subject sampled in that window

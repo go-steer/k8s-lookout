@@ -45,6 +45,11 @@ const (
 	// occupied — a dead rung on the ladder, or a reservation being paid for
 	// and never drawn on.
 	RankRuleTierUnused
+	// RankRuleBaseline is mean achieved rank rising out of the band the axis
+	// has learned as its own normal (#463). Last in the list because it was
+	// added last; JudgeRank returns it after the two absolute share rules it
+	// is a third measurement alongside.
+	RankRuleBaseline
 )
 
 // String renders a rule for the `rule` metric label and the finding payload.
@@ -60,6 +65,8 @@ func (r RankRule) String() string {
 		return "no-migration"
 	case RankRuleTierUnused:
 		return "tier-unused"
+	case RankRuleBaseline:
+		return "rank-baseline"
 	default:
 		return ""
 	}
@@ -71,12 +78,13 @@ func (r RankRule) String() string {
 // `rank_depth` into `rank_degraded` and `rank_tier_unused` because a dead
 // preference level is a different thing from a degraded one, but "too little
 // time at the top" and "too much time at the bottom" are two measurements of
-// the same complaint and do not want separate names.
+// the same complaint and do not want separate names. The baseline rule is a
+// third measurement of it, and does not want a fourth.
 func (r RankRule) Kind() string {
 	switch r {
 	case RankRuleWedged:
 		return KindRankWedged
-	case RankRuleRank0Share, RankRuleLastRank:
+	case RankRuleRank0Share, RankRuleLastRank, RankRuleBaseline:
 		return KindRankDegraded
 	case RankRuleNoMigration:
 		return KindRankNoMigration
@@ -97,13 +105,17 @@ func (r RankRule) Kind() string {
 // somebody should look at, not a page. Tier C is the only row that routes to
 // severity info, and putting it anywhere else would page on a rung of a ladder
 // being unused, which is frequently the correct configuration.
+//
+// RankRuleBaseline is Tier C on the ordinary reading: a learned normal is not a
+// promise anybody made, which is the reasoning §8.1 applies to
+// leeway.baseline_breach.
 func (r RankRule) Tier() Tier {
 	switch r {
 	case RankRuleWedged:
 		return TierA
 	case RankRuleRank0Share, RankRuleLastRank, RankRuleNoMigration:
 		return TierB
-	case RankRuleTierUnused:
+	case RankRuleTierUnused, RankRuleBaseline:
 		return TierC
 	default:
 		return TierNone
@@ -335,6 +347,12 @@ type RankObservation struct {
 	Improving     int64   `json:"improving"`
 	Worsening     int64   `json:"worsening"`
 	Lateral       int64   `json:"lateral"`
+
+	// Baseline is the axis's learned normal for MeanRank, absent until one
+	// has matured. Carried on every verdict for the reason the rest of this
+	// struct is: "what is normal for this class" is the first question a
+	// reader of any rank finding asks.
+	Baseline *RankBaseline `json:"baseline,omitempty"`
 }
 
 // RankVerdict is one rule's judgement of one axis.
@@ -383,6 +401,10 @@ type RankInput struct {
 
 	Window     RankWindow
 	Conditions RankConditions
+
+	// Baseline is the axis's learned normal, or nil where none has matured;
+	// see RankBaselineOf. Nil makes the baseline rule abstain.
+	Baseline *RankBaseline
 }
 
 // JudgeRank applies §7.7.4's rules to one axis.
@@ -420,6 +442,7 @@ func JudgeRank(in RankInput, t RankThresholds) []RankVerdict {
 		judgeWedged(in, obs),
 		judgeRank0Share(in, obs, t),
 		judgeLastRank(in, obs, t),
+		judgeRankBaseline(in, obs, t),
 		judgeNoMigration(in, obs, t),
 	}
 	out = append(out, judgeTierUnused(in, axis, obs, t)...)
@@ -443,6 +466,7 @@ func observe(in RankInput, axis *PreferenceAxis) RankObservation {
 		Improving:     w.Improving,
 		Worsening:     w.Worsening,
 		Lateral:       w.Lateral,
+		Baseline:      in.Baseline,
 	}
 }
 
@@ -515,6 +539,34 @@ func judgeLastRank(in RankInput, obs RankObservation, t RankThresholds) RankVerd
 	}
 	return verdict(RankRuleLastRank, RankUnknown, true, obs,
 		fmt.Sprintf("rank %s share %.2f is above the ceiling %.2f: running on last-resort capacity, which on most classes is the spot or the cheapest rule", obs.LastRank, obs.LastRankShare, t.LastRankShareCeiling))
+}
+
+// judgeRankBaseline is mean achieved rank rising out of the axis's learned
+// band (#463).
+//
+// Upward only. A class running better than it usually does is not a finding,
+// and a two-sided band would page on every recovery.
+//
+// This is the rule that sees what the absolute ones cannot: an estate whose
+// normal is a mean rank of 0.3 drifting to 1.4 has not crossed a 0.9 last-rank
+// ceiling and never will, because most of its pods are on rank 1 rather than
+// the last rung — and nobody set a rank-0 floor, because nobody knew what
+// their class's normal was.
+func judgeRankBaseline(in RankInput, obs RankObservation, t RankThresholds) RankVerdict {
+	b := in.Baseline
+	switch {
+	case b == nil:
+		return verdict(RankRuleBaseline, RankUnknown, false, obs,
+			"no mature baseline for this axis yet: the rule abstains until it has learned the axis's normal (§7.5)")
+	case !judgeable(in, obs, t):
+		return verdict(RankRuleBaseline, RankUnknown, false, obs, notJudgeable(in, t))
+	case obs.MeanRank <= b.Ceiling():
+		return verdict(RankRuleBaseline, RankUnknown, false, obs,
+			fmt.Sprintf("mean rank %.2f is within this axis's learned normal %.2f + %.2f", obs.MeanRank, b.Mean, b.Band))
+	}
+	return verdict(RankRuleBaseline, RankUnknown, true, obs,
+		fmt.Sprintf("mean rank %.2f is above this axis's learned normal %.2f + %.2f: the class is getting worse capacity than it usually does, learned from %d samples since %s",
+			obs.MeanRank, b.Mean, b.Band, b.Samples, b.FirstSeen.UTC().Format(time.RFC3339)))
 }
 
 // judgeNoMigration is §7.7.4's "active migration is not happening" row.

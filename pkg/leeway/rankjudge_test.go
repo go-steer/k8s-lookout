@@ -101,7 +101,7 @@ func TestJudgeRank_EveryApplicableRuleIsReturnedEvenWhenQuiet(t *testing.T) {
 	vs := JudgeRank(in, DefaultRankThresholds())
 
 	want := map[string]bool{
-		"wedged": false, "rank0-share": false, "last-rank": false, "no-migration": false,
+		"wedged": false, "rank0-share": false, "last-rank": false, "rank-baseline": false, "no-migration": false,
 		"tier-unused/0": false, "tier-unused/1": false, "tier-unused/2": false,
 	}
 	for _, v := range vs {
@@ -680,6 +680,7 @@ func TestRankRule_KindAndTierAgreeWithSection234(t *testing.T) {
 		{RankRuleLastRank, KindRankDegraded, TierB, "last-rank"},
 		{RankRuleNoMigration, KindRankNoMigration, TierB, "no-migration"},
 		{RankRuleTierUnused, KindRankTierUnused, TierC, "tier-unused"},
+		{RankRuleBaseline, KindRankDegraded, TierC, "rank-baseline"},
 		{RankRuleNone, "", TierNone, ""},
 	}
 	for _, tc := range tests {

@@ -73,6 +73,9 @@ type Source struct {
 	pendingByClass map[string]map[podRef]struct{}
 	// history is the per-axis sample ring the §7.7.4 windows are diffed from.
 	history map[leeway.AxisKey]*axisHistory
+	// baselines is each axis's learned normal for mean achieved rank (#463).
+	// Its own lock; never takes s.mu.
+	baselines *rankBaselines
 
 	in *instruments
 
@@ -81,6 +84,8 @@ type Source struct {
 	// store is §9.1's optional persistence. Nil is a supported deployment, not
 	// a degraded one — it is what `watch` does with no `--store`.
 	store AlertStore
+	// baselineStore is store, if it can also persist learned baselines.
+	baselineStore BaselineStore
 	// emit is the pipeline's sink, seated by Run.
 	emit func(sources.Signal)
 

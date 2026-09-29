@@ -244,6 +244,30 @@ func (a *rankAlerts) open(k alertKey) bool {
 	return ok
 }
 
+// degradedAxes reports every axis with an open episode on a rule that says
+// the class is getting worse capacity than it should: every rule but
+// tier-unused.
+//
+// It is the §7.5 freeze set for the rank baselines. A baseline that learned
+// through a fallback episode would decide the fallback is normal and then
+// read the recovery as the anomaly — and it is every degradation rule, not
+// only the baseline rule's own, because a class wedged or parked on its last
+// rank is exactly as unrepresentative a sample of its normal. tier-unused is
+// the exception because it is a cost observation that can stay open for as
+// long as a reservation goes undrawn, and a freeze keyed on it would stop an
+// axis learning for good.
+func (a *rankAlerts) degradedAxes() map[leeway.AxisKey]bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := map[leeway.AxisKey]bool{}
+	for k := range a.byKey {
+		if !strings.HasPrefix(k.Rule, leeway.RankRuleTierUnused.String()) {
+			out[k.Axis] = true
+		}
+	}
+	return out
+}
+
 // each walks every open episode. It holds the lock for the duration, so the
 // callback must not call back into rankAlerts.
 func (a *rankAlerts) each(yield func(alertKey, leeway.AlertState, leeway.Tier)) {
