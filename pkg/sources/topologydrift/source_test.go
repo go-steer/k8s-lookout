@@ -497,9 +497,8 @@ func drainQueue(s *Source) {
 func TestSource_NodeEventsArmTheSweepThroughTheHandler(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
 	s.logf = func(string, ...any) {}
-	ctx := context.Background()
 
-	s.onNode(ctx, node("n-a", "us-central1-a"))
+	s.onNode(node("n-a", "us-central1-a"))
 	if !s.sweepArmed() {
 		t.Error("a new node did not arm the sweep")
 	}
@@ -508,12 +507,12 @@ func TestSource_NodeEventsArmTheSweepThroughTheHandler(t *testing.T) {
 	s.mu.Unlock()
 
 	// A heartbeat-only update changes no retained fact, so nothing is armed.
-	s.onNode(ctx, node("n-a", "us-central1-a"))
+	s.onNode(node("n-a", "us-central1-a"))
 	if s.sweepArmed() {
 		t.Error("an unchanged node armed the sweep")
 	}
 
-	s.onNode(ctx, node("n-a", "us-central1-a", notReady()))
+	s.onNode(node("n-a", "us-central1-a", notReady()))
 	if !s.sweepArmed() {
 		t.Error("a node going NotReady did not arm the sweep")
 	}
@@ -521,7 +520,7 @@ func TestSource_NodeEventsArmTheSweepThroughTheHandler(t *testing.T) {
 	s.sweepPending = false
 	s.mu.Unlock()
 
-	s.onNodeDelete(ctx, node("n-a", "us-central1-a", notReady()))
+	s.onNodeDelete(node("n-a", "us-central1-a", notReady()))
 	if !s.sweepArmed() {
 		t.Error("a node removal did not arm the sweep")
 	}
@@ -540,9 +539,8 @@ func TestSource_HandlersIgnoreForeignObjects(t *testing.T) {
 	// An informer handler is the wrong place to panic. A type it cannot use is
 	// dropped; a tombstone is unwrapped by the State handlers themselves.
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
-	ctx := context.Background()
-	s.onPod(ctx, &corev1.Node{})
-	s.onNode(ctx, &corev1.Pod{})
+	s.onPod(&corev1.Node{})
+	s.onNode(&corev1.Pod{})
 	if s.state.Len() != 0 || s.inv.Len() != 0 {
 		t.Error("a foreign object changed the indexes")
 	}

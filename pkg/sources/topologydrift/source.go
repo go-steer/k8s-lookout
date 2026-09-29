@@ -464,6 +464,9 @@ type Source struct {
 	// not a pointer, so it counts from construction — before the instruments
 	// that read it exist.
 	events watchEvents
+	// last is when the pod and node informers last delivered (#499); a value
+	// for the same reason as events.
+	last   lastEvents
 	verify *Verifier
 	alerts *Alerts
 	// baselines is §7.5's live estimators. Always non-nil; a deployment with
@@ -1509,17 +1512,17 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Unlock()
 
 	podH, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { s.onPod(ctx, obj) },
-		UpdateFunc: func(_, obj any) { s.onPod(ctx, obj) },
-		DeleteFunc: func(obj any) { s.onPodDelete(ctx, obj) },
+		AddFunc:    s.onPod,
+		UpdateFunc: func(_, obj any) { s.onPod(obj) },
+		DeleteFunc: s.onPodDelete,
 	})
 	if err != nil {
 		return fmt.Errorf("topologydrift: register pod handler: %w", err)
 	}
 	nodeH, err := nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { s.onNode(ctx, obj) },
-		UpdateFunc: func(_, obj any) { s.onNode(ctx, obj) },
-		DeleteFunc: func(obj any) { s.onNodeDelete(ctx, obj) },
+		AddFunc:    s.onNode,
+		UpdateFunc: func(_, obj any) { s.onNode(obj) },
+		DeleteFunc: s.onNodeDelete,
 	})
 	if err != nil {
 		return fmt.Errorf("topologydrift: register node handler: %w", err)
@@ -2048,6 +2051,7 @@ func (s *Source) startMetrics() error {
 		Alerts:             s.alerts.Each,
 		Baselines:          func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
 		WatchEvents:        s.events.each,
+		LastEvents:         s.last.each,
 	})
 	if err != nil {
 		return err
@@ -2102,22 +2106,22 @@ func (s *Source) sweep() {
 // The four pod and node handlers count every event they are delivered, the
 // malformed ones included (as inert), so the watch-event total is the
 // informer's delivery count and not leeway's opinion of it.
-func (s *Source) onPod(ctx context.Context, obj any) {
+func (s *Source) onPod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		s.events.note(eventPod, false)
 		return
 	}
 	s.events.note(eventPod, s.state.OnPodAdd(pod))
-	s.metrics.recordEvent(ctx, resourcePod, time.Now())
+	s.last.stamp(eventPod, time.Now())
 }
 
-func (s *Source) onPodDelete(ctx context.Context, obj any) {
+func (s *Source) onPodDelete(obj any) {
 	s.events.note(eventPod, s.state.OnPodDelete(obj))
-	s.metrics.recordEvent(ctx, resourcePod, time.Now())
+	s.last.stamp(eventPod, time.Now())
 }
 
-func (s *Source) onNode(ctx context.Context, obj any) {
+func (s *Source) onNode(obj any) {
 	node, ok := obj.(*corev1.Node)
 	if !ok {
 		s.events.note(eventNode, false)
@@ -2126,14 +2130,14 @@ func (s *Source) onNode(ctx context.Context, obj any) {
 	ch := s.state.OnNodeUpsert(node)
 	s.events.note(eventNode, ch.Any())
 	s.noteChange(ch)
-	s.metrics.recordEvent(ctx, resourceNode, time.Now())
+	s.last.stamp(eventNode, time.Now())
 }
 
-func (s *Source) onNodeDelete(ctx context.Context, obj any) {
+func (s *Source) onNodeDelete(obj any) {
 	ch := s.state.OnNodeDelete(obj)
 	s.events.note(eventNode, ch.Any())
 	s.noteChange(ch)
-	s.metrics.recordEvent(ctx, resourceNode, time.Now())
+	s.last.stamp(eventNode, time.Now())
 }
 
 // noteChange applies the §6.3 node-event asymmetry. The narrow half is already

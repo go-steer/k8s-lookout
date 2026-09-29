@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
@@ -107,21 +108,20 @@ func TestScaleLog_ReportsWhetherItChanged(t *testing.T) {
 // attributed to an informer and is not counted at all.
 func TestSource_TheHandlersCountEveryDeliveredEvent(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
-	ctx := context.Background()
 	db := func(name, node string) *corev1.Pod {
 		return pod(name, "prod", node, ownedBy("StatefulSet", "db"))
 	}
 
-	s.onNode(ctx, node("n-a", "zone-a"))  // applied: added
-	s.onNode(ctx, node("n-a", "zone-a"))  // inert: heartbeat
-	s.onNode(ctx, "not a node")           // inert
-	s.onNodeDelete(ctx, node("n-z", "z")) // inert: never seen
-	s.onPod(ctx, db("db-0", "n-a"))       // applied
-	s.onPod(ctx, db("db-0", "n-a"))       // inert: the §6.3 early return
-	s.onPod(ctx, db("db-0", "n-a"))       // inert
-	s.onPod(ctx, "not a pod")             // inert
-	s.onPodDelete(ctx, db("db-0", "n-a")) // applied
-	s.onPodDelete(ctx, db("db-0", "n-a")) // inert
+	s.onNode(node("n-a", "zone-a"))  // applied: added
+	s.onNode(node("n-a", "zone-a"))  // inert: heartbeat
+	s.onNode("not a node")           // inert
+	s.onNodeDelete(node("n-z", "z")) // inert: never seen
+	s.onPod(db("db-0", "n-a"))       // applied
+	s.onPod(db("db-0", "n-a"))       // inert: the §6.3 early return
+	s.onPod(db("db-0", "n-a"))       // inert
+	s.onPod("not a pod")             // inert
+	s.onPodDelete(db("db-0", "n-a")) // applied
+	s.onPodDelete(db("db-0", "n-a")) // inert
 	s.onScalable(deploy("prod", "web", want32(3)))
 	s.onScalable(deploy("prod", "web", want32(3)))
 	s.onScalable(stateful("prod", "db", want32(3)))
@@ -150,7 +150,11 @@ func TestSource_TheHandlersCountEveryDeliveredEvent(t *testing.T) {
 // eight series, and the initial sync is in it. The handlers are registered
 // before the instruments exist, so a counter kept by the instruments would
 // have dropped exactly these events.
-func TestSource_WatchEventsReachTheRegistryIncludingTheInitialSync(t *testing.T) {
+// initialSyncRegistry runs a source against six StatefulSet pods on three
+// nodes, with the instruments bridged into a real Prometheus registry, and
+// returns that registry once the run has finished.
+func initialSyncRegistry(t *testing.T) *promHarness {
+	t.Helper()
 	reg := prometheus.NewRegistry()
 	exporter, err := otelprom.New(otelprom.WithRegisterer(reg), otelprom.WithoutTargetInfo(), otelprom.WithoutScopeInfo())
 	if err != nil {
@@ -166,8 +170,11 @@ func TestSource_WatchEventsReachTheRegistryIncludingTheInitialSync(t *testing.T)
 		pods = append(pods, pod(fmt.Sprintf("db-%d", i), "prod", []string{"n-a", "n-b", "n-c"}[i%3], ownedBy("StatefulSet", "db")))
 	}
 	runAlerting(t, cfg, nil, threeZoneCluster(pods...)...)
+	return &promHarness{registry: reg}
+}
 
-	h := &promHarness{registry: reg}
+func TestSource_WatchEventsReachTheRegistryIncludingTheInitialSync(t *testing.T) {
+	h := initialSyncRegistry(t)
 	fam := h.family(t, "lookout_leeway_watch_events_total")
 	got := map[string]float64{}
 	for _, m := range fam.GetMetric() {
@@ -197,8 +204,54 @@ func TestSource_WatchEventsReachTheRegistryIncludingTheInitialSync(t *testing.T)
 // that moves nothing. #491 asked that the counter not show up in it; read the
 // two benchmarks against each other.
 //
-// "metered" is the production shape: a real SDK meter, so the handler also
-// pays for last_event_timestamp's Record.
+// "metered" is the production shape, a real SDK meter. Since #499 the two
+// should read the same: nothing in the handler touches the meter any more.
+// TestSource_LastEventReachesTheRegistryIncludingTheInitialSync is #499's
+// other half. The gauge used to be recorded by the instruments, so the
+// initial sync — delivered before they exist — was never stamped, and a
+// source whose informers went quiet straight after it exported nothing to go
+// stale.
+func TestSource_LastEventReachesTheRegistryIncludingTheInitialSync(t *testing.T) {
+	before := time.Now().Unix()
+	h := initialSyncRegistry(t)
+	after := time.Now().Unix()
+
+	fam := h.family(t, "lookout_leeway_last_event_timestamp_seconds")
+	got := map[string]float64{}
+	for _, m := range fam.GetMetric() {
+		for _, l := range m.GetLabel() {
+			if l.GetName() == "resource" {
+				got[l.GetValue()] = m.GetGauge().GetValue()
+			}
+		}
+	}
+	// Pods and nodes only: the apps informers never stamped, and a resource
+	// with no event is withheld rather than exported as 1970.
+	if len(got) != 2 {
+		t.Fatalf("series = %v, want exactly pod and node", got)
+	}
+	for _, r := range []string{resourcePod, resourceNode} {
+		if v := int64(got[r]); v < before || v > after {
+			t.Errorf("%s = %d, want within the run [%d, %d]", r, v, before, after)
+		}
+	}
+}
+
+func TestLastEvents_WithholdsWhatHasNotHappened(t *testing.T) {
+	var l lastEvents
+	seen := map[string]int64{}
+	l.each(func(resource string, unix int64) { seen[resource] = unix })
+	if len(seen) != 0 {
+		t.Errorf("fresh lastEvents yielded %v, want nothing", seen)
+	}
+	l.stamp(eventNode, time.Unix(1_700_000_000, 0))
+	l.stamp(eventNode, time.Unix(1_700_000_060, 0))
+	l.each(func(resource string, unix int64) { seen[resource] = unix })
+	if len(seen) != 1 || seen[resourceNode] != 1_700_000_060 {
+		t.Errorf("yielded %v, want only node at its latest stamp", seen)
+	}
+}
+
 func BenchmarkSource_InertPodEvent(b *testing.B) {
 	for _, metered := range []bool{false, true} {
 		b.Run(map[bool]string{false: "bare", true: "metered"}[metered], func(b *testing.B) {
@@ -215,14 +268,13 @@ func BenchmarkSource_InertPodEvent(b *testing.B) {
 				}
 				b.Cleanup(func() { _ = s.metrics.Close() })
 			}
-			ctx := context.Background()
-			s.onNode(ctx, node("n-a", "zone-a"))
+			s.onNode(node("n-a", "zone-a"))
 			p := pod("db-0", "prod", "n-a", ownedBy("StatefulSet", "db"))
-			s.onPod(ctx, p)
+			s.onPod(p)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				s.onPod(ctx, p)
+				s.onPod(p)
 			}
 		})
 	}

@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each evaluation absorbs. The counter includes the initial sync, and costs
   about 2.5 ns per event.
 
+### Fixed
+
+- **`lookout_leeway_last_event_timestamp_seconds` no longer costs ~490 ns
+  and 4 allocations per informer event** (#499). The gauge is now stamped
+  in an atomic and read at scrape time, so an inert pod update drops from
+  610 ns to 115 ns. The initial sync is now stamped too; before, it arrived
+  before the instrument existed and was dropped. A resource that has seen
+  no event still exports no series. The name, labels and help text are
+  unchanged.
+
 ## [0.27.0] - 2026-09-29
 
 **If you run a cluster with more than a couple of thousand Deployments,

@@ -657,6 +657,10 @@ type metricsOptions struct {
 	// WatchEvents yields the delivered-event totals at scrape time. See
 	// watchEvents for why this is read rather than incremented.
 	WatchEvents func(yield func(resource, outcome string, n int64))
+
+	// LastEvents yields each resource's last-event instant, as unix seconds,
+	// at scrape time. See lastEvents.
+	LastEvents func(yield func(resource string, unix int64))
 }
 
 // instruments holds leeway's OTEL-native metric instruments (§8.4).
@@ -666,7 +670,6 @@ type metricsOptions struct {
 // the pull reader bridged into the sentinel's existing registry and the OTLP
 // push reader, with no second bookkeeping path to keep in sync.
 type instruments struct {
-	lastEvent       metric.Int64Gauge
 	evalDuration    metric.Float64Histogram
 	counterMismatch metric.Int64Counter
 
@@ -685,15 +688,6 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	in := &instruments{}
 	var err error
 
-	// Unit "s" on a gauge of a wall-clock instant: the exported name becomes
-	// ..._last_event_timestamp_seconds, which is the Prometheus convention for
-	// a unix timestamp.
-	if in.lastEvent, err = meter.Int64Gauge(metricLastEvent,
-		metric.WithUnit("s"),
-		metric.WithDescription(descLastEvent),
-	); err != nil {
-		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricLastEvent, err)
-	}
 	// The boundaries are not optional. OTel's default explicit buckets start
 	// at 0 and then jump to 5, 10, 25 … 10000 — they are chosen for a
 	// duration measured in MILLISECONDS, and this one is in seconds.
@@ -812,6 +806,16 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricBaselineSamples, err)
 	}
+	// Unit "s" on a gauge of a wall-clock instant: the exported name becomes
+	// ..._last_event_timestamp_seconds, which is the Prometheus convention for
+	// a unix timestamp.
+	lastEvent, err := meter.Int64ObservableGauge(metricLastEvent,
+		metric.WithUnit("s"),
+		metric.WithDescription(descLastEvent),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricLastEvent, err)
+	}
 	watchEvents, err := meter.Int64ObservableCounter(metricWatchEvents,
 		metric.WithDescription(descWatchEvents))
 	if err != nil {
@@ -824,6 +828,7 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 		baselines:       baselines,
 		baselineSamples: baselineSamples,
 		watchEvents:     watchEvents,
+		lastEvent:       lastEvent,
 		subjects:        subjects,
 		nodeGroups:      nodeGroups,
 		domainsOut:      domainsOut,
@@ -882,6 +887,7 @@ type observables struct {
 	baselineSamples metric.Int64ObservableCounter
 
 	watchEvents metric.Int64ObservableCounter
+	lastEvent   metric.Int64ObservableGauge
 }
 
 // all is every instrument the callback fills, for RegisterCallback. Kept
@@ -893,7 +899,7 @@ func (g observables) all() []metric.Observable {
 		g.subjects, g.nodeGroups, g.domainsOut, g.readyNodes, g.objects, g.withheld, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
 		g.alertState, g.transient, g.baselines, g.baselineSamples,
-		g.watchEvents,
+		g.watchEvents, g.lastEvent,
 	}
 }
 
@@ -1043,6 +1049,11 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 			))
 		})
 	}
+	if opts.LastEvents != nil {
+		opts.LastEvents(func(resource string, unix int64) {
+			o.ObserveInt64(g.lastEvent, unix, metric.WithAttributes(attrResource.String(resource)))
+		})
+	}
 }
 
 // transientBucket is one row of the §7.6 gauge: an axis and the state
@@ -1134,19 +1145,6 @@ func skewLabel(in *leeway.Intent) string {
 		return "max-per-domain=" + strconv.FormatInt(*in.MaxPerDomain, 10)
 	}
 	return "none"
-}
-
-// recordEvent stamps the arrival of an informer event for resource.
-//
-// Nil-safe, like recordEvaluation: the informer handlers are registered before
-// the instruments are declared, and a source driven directly by a unit test has
-// no instruments at all. Dropping a sample is the right failure here — an
-// unmeasured event is better than a source that panics on one.
-func (in *instruments) recordEvent(ctx context.Context, resource string, at time.Time) {
-	if in == nil {
-		return
-	}
-	in.lastEvent.Record(ctx, at.Unix(), metric.WithAttributes(attrResource.String(resource)))
 }
 
 // recordEvaluation records how long one coalesced evaluation took.
