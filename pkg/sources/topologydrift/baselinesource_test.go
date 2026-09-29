@@ -224,9 +224,10 @@ func TestSource_RestoresPersistedBaselines(t *testing.T) {
 	if got := in.ExplicitShares["us-central1-a"]; got != 0.5 {
 		t.Errorf("restored share for zone a = %v, want the persisted 0.5", got)
 	}
-	if !strings.Contains(logs.all(), "restored 1 learned baseline") {
-		t.Errorf("the restore was not logged: %s", logs.all())
-	}
+	// Load publishes the baseline before the line is written.
+	waitFor(t, "the restore to be logged", func() bool {
+		return strings.Contains(logs.all(), "restored 1 learned baseline")
+	})
 }
 
 // Never refuse to start: a store that cannot be read costs six hours of
@@ -236,9 +237,11 @@ func TestSource_AnUnreadableBaselineStoreIsNotFatal(t *testing.T) {
 	st.breadErr = errors.New("database is locked")
 	s, logs := runAlerting(t, quickLearning(), st, threeZoneCluster(webPods(6, "n-a", "n-b", "n-c")...)...)
 
-	if !strings.Contains(logs.all(), "could not read persisted baselines") {
-		t.Errorf("the read failure was not logged: %s", logs.all())
-	}
+	// The load runs on Run's goroutine and is not ordered against HasSynced,
+	// so the line can land after runAlerting returns.
+	waitFor(t, "the read failure to be logged", func() bool {
+		return strings.Contains(logs.all(), "could not read persisted baselines")
+	})
 	// And it keeps learning from scratch regardless.
 	waitFor(t, "learning to start anyway", func() bool { return s.baselines.Len() > 0 })
 }
