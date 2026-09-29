@@ -57,11 +57,12 @@ Workload security posture: containers running privileged or holding node-root ca
 
 ## [`lookout audit netpol`](/reference/audit-netpol/)
 
-NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.
+NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours, and individual policies whose selector matches no workload at all. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
+| `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 
 ## [`lookout audit upgrades`](/reference/audit-upgrades/)
 

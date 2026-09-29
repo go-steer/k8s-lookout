@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,11 @@ import (
 // kindNetpolMissing is the one condition this detector reports: traffic
 // in a direction that no NetworkPolicy restricts (#185).
 const kindNetpolMissing = "audit.netpol_missing"
+
+// kindNetpolSelectsNothing is the per-policy claim of #263: one
+// NetworkPolicy whose podSelector matches no pod template in its
+// namespace, where the namespace-subject claim does not already say so.
+const kindNetpolSelectsNothing = "audit.netpol_selects_nothing"
 
 // The reasons split that condition two ways — by direction, and by
 // whether the namespace is trying at all. The distinction is the whole
@@ -102,9 +108,10 @@ func NetpolCommand(deps Deps) checks.Command {
 		Name:        "audit netpol",
 		MCPName:     "k8s_audit_netpol",
 		MCPProfiles: []string{"audit"},
-		Summary:     "NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.",
+		Summary:     "NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours, and individual policies whose selector matches no workload at all. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindNetpolMissing, "nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindNetpolSelectsNothing, "this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing", emit.SeverityWarning),
 		},
 		Output: []checks.OutputField{
 			{Name: "policies", Doc: "NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one"},
@@ -113,6 +120,8 @@ func NetpolCommand(deps Deps) checks.Command {
 			{Name: "host_network_workloads", Doc: "pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0"},
 			{Name: "covered_workloads", Doc: "pod templates in the namespace that ARE selected for this direction — the neighbours the subject fell out of step with"},
 			{Name: "pod_labels", Doc: "the template's own labels, which are what the policies' selectors failed to match, sorted and capped at 8"},
+			{Name: "pod_selector", Doc: "the dead policy's podSelector, in label-selector syntax"},
+			{Name: "policy_types", Doc: "the directions the dead policy names, after defaulting an unset policyTypes"},
 			{Name: "namespaces", Doc: "summary note: namespaces examined — the denominator for the namespace-subject claims, which `scanned` (pod templates) does not cover"},
 		},
 		Examples: []string{
@@ -307,6 +316,102 @@ func judgeNetpolNamespace(namespace string, templates []podTemplate, policies []
 	var out []emit.Finding
 	for _, d := range netpolDirections {
 		out = append(out, judgeNetpolDirection(namespace, d, subjects, inNamespace, hostNetwork)...)
+	}
+	return append(out, judgeDeadPolicies(subjects, inNamespace)...)
+}
+
+// judgeDeadPolicies reports each policy whose podSelector matches none
+// of the namespace's templates (#263).
+//
+// The namespace-subject claim already covers the case where EVERY
+// policy for a direction is dead: IngressPoliciesSelectNothing says the
+// namespace reads as policed and is not. What it cannot see is one dead
+// policy among live ones — an allow rule with a typo'd selector under a
+// default-deny, say, which leaves every workload covered, so neither
+// existing claim fires, while the traffic the rule was written to let
+// through stays blocked. So a dead policy is reported unless, in every
+// direction it names, nothing in the namespace is covered: there the
+// namespace finding is the same fact, and a second record would read as
+// a second problem.
+//
+// An empty podSelector selects every pod, so a default-deny policy is
+// never dead; this is also why k8sgpt's companion "allows all pods"
+// claim is not made — the empty selector is how default-deny is
+// written. hostNetwork templates are not subjects (judgeNetpolNamespace),
+// so a policy that selects only those is dead too: NetworkPolicy cannot
+// apply to them.
+func judgeDeadPolicies(subjects []podTemplate, inNamespace []networkingv1.NetworkPolicy) []emit.Finding {
+	matches := func(p networkingv1.NetworkPolicy) (labels.Selector, bool, bool) {
+		sel, err := metav1.LabelSelectorAsSelector(&p.Spec.PodSelector)
+		if err != nil {
+			// As in judgeNetpolDirection: not this check's problem.
+			return nil, false, false
+		}
+		for _, t := range subjects {
+			if sel.Matches(labels.Set(t.labels)) {
+				return sel, true, true
+			}
+		}
+		return sel, false, true
+	}
+	// anyCovered[d] reports whether some live policy isolates some
+	// template in direction d, which is what decides whether the
+	// namespace claim already names the dead ones.
+	anyCovered := map[networkingv1.PolicyType]bool{}
+	type dead struct {
+		policy networkingv1.NetworkPolicy
+		sel    labels.Selector
+	}
+	var candidates []dead
+	for _, p := range inNamespace {
+		sel, live, ok := matches(p)
+		if !ok {
+			continue
+		}
+		if !live {
+			candidates = append(candidates, dead{p, sel})
+			continue
+		}
+		for _, d := range netpolDirections {
+			if coversDirection(p, d.policyType) {
+				anyCovered[d.policyType] = true
+			}
+		}
+	}
+
+	var out []emit.Finding
+	for _, c := range candidates {
+		var types []string
+		shadowed := true
+		for _, d := range netpolDirections {
+			if !coversDirection(c.policy, d.policyType) {
+				continue
+			}
+			types = append(types, string(d.policyType))
+			if anyCovered[d.policyType] {
+				shadowed = false
+			}
+		}
+		if shadowed {
+			continue
+		}
+		f := emit.Finding{
+			Kind:     kindNetpolSelectsNothing,
+			Severity: emit.SeverityWarning,
+			Reason:   "PolicySelectsNothing",
+			Message: fmt.Sprintf("podSelector %s matches none of the %d %s in this namespace: the policy reads as applied and applies to nothing, so the pods it was written for get neither its isolation nor its allow rules — traffic it should admit may be dropped by the policies that do select them, and traffic it should stop is not stopped by it",
+				c.sel.String(), len(subjects), plural(len(subjects), "workload")),
+			Details: []emit.Field{
+				{Key: "pod_selector", Value: c.sel.String()},
+				{Key: "policy_types", Value: strings.Join(types, ",")},
+				{Key: "workloads", Value: itoa(len(subjects))},
+			},
+			Namespace:    c.policy.Namespace,
+			KindOfObject: "NetworkPolicy",
+			Name:         c.policy.Name,
+		}
+		f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+		out = append(out, f)
 	}
 	return out
 }

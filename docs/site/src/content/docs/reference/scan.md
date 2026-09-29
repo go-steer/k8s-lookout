@@ -113,6 +113,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
+| `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 | `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
 | `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
@@ -290,6 +291,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |
 | `covered_workloads` | pod templates in the namespace that ARE selected for this direction — the neighbours the subject fell out of step with |
 | `pod_labels` | the template's own labels, which are what the policies' selectors failed to match, sorted and capped at 8 |
+| `pod_selector` | the dead policy's podSelector, in label-selector syntax |
+| `policy_types` | the directions the dead policy names, after defaulting an unset policyTypes |
 | `version` | the current version of the finding's subject — the control plane's, or the node pool's |
 | `target_version` | the version the provider would move this cluster to: its channel's upgrade target where one is published, otherwise the channel's default |
 | `control_plane_version` | on a node-pool skew finding: the control-plane version the pool is measured against |
