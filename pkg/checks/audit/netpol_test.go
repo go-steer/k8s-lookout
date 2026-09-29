@@ -73,6 +73,8 @@ func onHostNetwork(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
 //	  Deployment/checkout   covered both ways
 //	  Deployment/payments   covered inbound, unselected outbound — one finding
 //	  DaemonSet/cni         hostNetwork, outside NetworkPolicy entirely
+//	  allow-frontend        an allow policy whose selector matches nothing —
+//	                        dead under the default-deny, its own finding
 //	platform   no policies at all — one namespace finding per direction
 //	  Deployment/mesh
 //	  CronJob/nightly
@@ -89,6 +91,7 @@ func netpolCluster() []runtime.Object {
 		nsObj("edge", nil),
 
 		netpol("prod", "default-deny-ingress", nil, networkingv1.PolicyTypeIngress),
+		netpol("prod", "allow-frontend", matching(map[string]string{"app": "frontnd"}), networkingv1.PolicyTypeIngress),
 		netpol("prod", "checkout-egress", matching(map[string]string{"app": "checkout"}), networkingv1.PolicyTypeEgress),
 		netpol("legacy", "ghost", matching(map[string]string{"app": "ghost"}), networkingv1.PolicyTypeIngress),
 
@@ -224,7 +227,13 @@ func TestNetpolPoliciesThatSelectNothing(t *testing.T) {
 // is its labels or a policy naming them — not a namespace decision.
 func TestNetpolUnselectedWorkloadIsItsOwnSubject(t *testing.T) {
 	res := checktest.Run(t, audit.NetpolCommand(testDeps(netpolCluster()...)), "--namespace=prod")
-	recs := findingLines(t, res.Stdout)
+	// prod's dead allow-frontend policy is a different claim (#263).
+	var recs []map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.netpol_missing" {
+			recs = append(recs, r)
+		}
+	}
 	if len(recs) != 1 {
 		t.Fatalf("only payments is unselected, got %d findings:\n%s", len(recs), res.Stdout)
 	}
@@ -399,7 +408,7 @@ func TestNetpolScopes(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"all-namespaces", []string{"-A"}, "scanned=8 findings=5 elapsed=100ms namespaces=4"},
+		{"all-namespaces", []string{"-A"}, "scanned=8 findings=6 elapsed=100ms namespaces=4"},
 		{"one-namespace", []string{"--namespace=legacy"}, "scanned=1 findings=2 elapsed=100ms namespaces=1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -445,5 +454,103 @@ func TestNetpolUnknownNamespaceIsAnError(t *testing.T) {
 	}
 	if res.Stdout != "" {
 		t.Errorf("a failed run must not emit a summary line, got %q", res.Stdout)
+	}
+}
+
+// #263: one dead policy among live ones. The default-deny covers every
+// workload, so audit.netpol_missing has nothing to say, and the typo'd
+// allow rule is the only record of the mistake.
+func TestNetpolDeadPolicyAmongLiveOnes(t *testing.T) {
+	objs := []runtime.Object{
+		nsObj("prod", nil),
+		netpol("prod", "default-deny", nil, networkingv1.PolicyTypeIngress),
+		netpol("prod", "allow-frontend", matching(map[string]string{"app": "frontnd"}), networkingv1.PolicyTypeIngress),
+		deploy("prod", "frontend", 2, app("frontend")),
+		deploy("prod", "api", 2, app("api")),
+	}
+	recs := findingLines(t, checktest.Run(t, audit.NetpolCommand(testDeps(objs...)), "--namespace=prod").Stdout)
+	var dead []map[string]string
+	for _, r := range recs {
+		if r["kind"] == "audit.netpol_selects_nothing" {
+			dead = append(dead, r)
+		}
+	}
+	if len(dead) != 1 {
+		t.Fatalf("want one dead-policy finding, got %v", recs)
+	}
+	want := map[string]string{
+		"severity":       "warning",
+		"namespace":      "prod",
+		"kind_of_object": "NetworkPolicy",
+		"name":           "allow-frontend",
+		"reason":         "PolicySelectsNothing",
+		"pod_selector":   "app=frontnd",
+		"policy_types":   "Ingress",
+		"workloads":      "2",
+	}
+	for k, v := range want {
+		if dead[0][k] != v {
+			t.Errorf("%s = %q, want %q", k, dead[0][k], v)
+		}
+	}
+}
+
+// A dead policy is reported unless the namespace claim already names it
+// in EVERY direction it covers. Here ingress is policed by someone else
+// and egress by nobody: the ingress half is news, so the policy is
+// reported, naming both directions.
+func TestNetpolDeadPolicyPartlyShadowed(t *testing.T) {
+	objs := []runtime.Object{
+		nsObj("prod", nil),
+		netpol("prod", "default-deny", nil, networkingv1.PolicyTypeIngress),
+		netpol("prod", "typo", matching(map[string]string{"app": "vender"}),
+			networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress),
+		deploy("prod", "vendor", 1, app("vendor")),
+	}
+	recs := findingLines(t, checktest.Run(t, audit.NetpolCommand(testDeps(objs...)), "--namespace=prod").Stdout)
+	got := map[string]string{}
+	for _, r := range recs {
+		got[r["kind"]+"/"+r["reason"]] = r["policy_types"]
+	}
+	if types, ok := got["audit.netpol_selects_nothing/PolicySelectsNothing"]; !ok || types != "Ingress,Egress" {
+		t.Errorf("want the dead policy reported with both directions, got %v", recs)
+	}
+	if _, ok := got["audit.netpol_missing/EgressPoliciesSelectNothing"]; !ok {
+		t.Errorf("the egress namespace claim still stands: %v", recs)
+	}
+}
+
+// NetworkPolicy cannot apply to a hostNetwork pod, so a policy that
+// selects only those is as dead as one that selects nothing, and an
+// undefaulted policyTypes reads as Ingress.
+func TestNetpolDeadPolicySelectingOnlyHostNetwork(t *testing.T) {
+	objs := []runtime.Object{
+		nsObj("prod", nil),
+		netpol("prod", "default-deny", nil, networkingv1.PolicyTypeIngress),
+		undefaulted(netpol("prod", "cni-only", matching(map[string]string{"app": "cni"}))),
+		deploy("prod", "api", 2, app("api")),
+		daemon("prod", "cni", onHostNetwork(app("cni"))),
+	}
+	var dead []map[string]string
+	for _, r := range findingLines(t, checktest.Run(t, audit.NetpolCommand(testDeps(objs...)), "--namespace=prod").Stdout) {
+		if r["kind"] == "audit.netpol_selects_nothing" {
+			dead = append(dead, r)
+		}
+	}
+	if len(dead) != 1 || dead[0]["name"] != "cni-only" || dead[0]["policy_types"] != "Ingress" {
+		t.Errorf("want cni-only reported as a dead ingress policy, got %v", dead)
+	}
+}
+
+// A policy in a namespace with nothing to protect is a policy written
+// ahead of its workloads, not a mistake.
+func TestNetpolDeadPolicyInEmptyNamespaceIsSilent(t *testing.T) {
+	objs := []runtime.Object{
+		nsObj("prod", nil),
+		netpol("prod", "default-deny", nil, networkingv1.PolicyTypeIngress),
+		netpol("prod", "allow-web", matching(map[string]string{"app": "web"}), networkingv1.PolicyTypeIngress),
+	}
+	if recs := findingLines(t, checktest.Run(t, audit.NetpolCommand(testDeps(objs...)), "--namespace=prod").Stdout); len(recs) != 0 {
+		t.Errorf("want silence, got %v", recs)
 	}
 }
