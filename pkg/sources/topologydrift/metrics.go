@@ -62,6 +62,7 @@ const (
 	metricTransient        = "lookout.leeway.transient_subjects"
 	metricBaselines        = "lookout.leeway.baselines"
 	metricBaselineSamples  = "lookout.leeway.baseline_samples"
+	metricWatchEvents      = "lookout.leeway.watch_events"
 )
 
 // Bucket boundaries for evaluation_duration, in seconds. Sixteen buckets,
@@ -141,6 +142,11 @@ const (
 		"invalidation fingerprint, so something churning it — a zone label appearing and disappearing on nodes — restarts every affected " +
 		"baseline's history and keeps it permanently immature, silently. `empty` is subjects with nothing to learn from (scaled to zero, " +
 		"or every pod Pending) and `held` is a frozen set, and neither is a problem."
+	descWatchEvents = "Informer events delivered to leeway, by resource and outcome (leeway §6.6.1). " +
+		"`inert` is the §6.3 early return — the event changed nothing leeway indexes, which for a pod is almost always status churn — " +
+		"and `applied` moved a count, a node's domains or eligibility, or a workload's recorded size. " +
+		"This is the unit the §6.6.1 cost model is written in: divide leeway's CPU by its rate for a per-event cost, " +
+		"and read it against lookout_leeway_evaluation_duration_seconds_count for how many events the coalescer folds into one evaluation."
 	descCounterMismatch = "Subjects whose incremental distribution disagreed with a rebuild from the pod cache and were repaired in place, by kind (leeway §6.5). " +
 		"The alert to write: threshold zero. The two numbers are two computations of the same thing, so any non-zero rate is a BUG IN K8S-LOOKOUT " +
 		"and not a cluster condition — every finding derived from the drifted counters until it is fixed is wrong in the same direction. " +
@@ -319,13 +325,21 @@ func MetricDocs() []MetricDoc {
 			Labels: []string{"outcome"},
 			Help:   descBaselineSamples,
 		},
+		{
+			Name:   "lookout_leeway_watch_events_total",
+			Type:   "counter",
+			Labels: []string{"resource", "outcome"},
+			Help:   descWatchEvents,
+		},
 	}
 }
 
-// Event resources for metricLastEvent.
+// Event resources for metricLastEvent and metricWatchEvents.
 const (
-	resourcePod  = "pod"
-	resourceNode = "node"
+	resourcePod         = "pod"
+	resourceNode        = "node"
+	resourceDeployment  = "deployment"
+	resourceStatefulSet = "statefulset"
 )
 
 // countObserver is handed each per-domain count during a scrape. The state is
@@ -639,6 +653,10 @@ type metricsOptions struct {
 	// the ones in trouble — and nothing an operator does with it needs more
 	// than "how many are mature yet".
 	Baselines func() baselineStats
+
+	// WatchEvents yields the delivered-event totals at scrape time. See
+	// watchEvents for why this is read rather than incremented.
+	WatchEvents func(yield func(resource, outcome string, n int64))
 }
 
 // instruments holds leeway's OTEL-native metric instruments (§8.4).
@@ -794,12 +812,18 @@ func newInstruments(opts metricsOptions) (*instruments, error) {
 	if err != nil {
 		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricBaselineSamples, err)
 	}
+	watchEvents, err := meter.Int64ObservableCounter(metricWatchEvents,
+		metric.WithDescription(descWatchEvents))
+	if err != nil {
+		return nil, fmt.Errorf("topologydrift: declare %s: %w", metricWatchEvents, err)
+	}
 
 	gauges := observables{
 		alertState:      alertState,
 		transient:       transient,
 		baselines:       baselines,
 		baselineSamples: baselineSamples,
+		watchEvents:     watchEvents,
 		subjects:        subjects,
 		nodeGroups:      nodeGroups,
 		domainsOut:      domainsOut,
@@ -856,6 +880,8 @@ type observables struct {
 
 	baselines       metric.Int64ObservableGauge
 	baselineSamples metric.Int64ObservableCounter
+
+	watchEvents metric.Int64ObservableCounter
 }
 
 // all is every instrument the callback fills, for RegisterCallback. Kept
@@ -867,6 +893,7 @@ func (g observables) all() []metric.Observable {
 		g.subjects, g.nodeGroups, g.domainsOut, g.readyNodes, g.objects, g.withheld, g.intents, g.expected,
 		g.observedSkew, g.excessSkew, g.relocation, g.drift, g.maxDomainShare,
 		g.alertState, g.transient, g.baselines, g.baselineSamples,
+		g.watchEvents,
 	}
 }
 
@@ -1007,6 +1034,14 @@ func (opts metricsOptions) observe(o metric.Observer, g observables) {
 		for out, n := range st.Outcomes {
 			o.ObserveInt64(g.baselineSamples, n, metric.WithAttributes(attrOutcome.String(out.String())))
 		}
+	}
+	if opts.WatchEvents != nil {
+		opts.WatchEvents(func(resource, outcome string, n int64) {
+			o.ObserveInt64(g.watchEvents, n, metric.WithAttributes(
+				attrResource.String(resource),
+				attrOutcome.String(outcome),
+			))
+		})
 	}
 }
 

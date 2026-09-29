@@ -61,7 +61,8 @@ func newScaleLog() *scaleLog {
 
 // Observe records a workload's current declared size, stamping now when it
 // differs from the size already on file. The first sighting stamps nothing.
-func (l *scaleLog) Observe(sub leeway.SubjectRef, replicas int32, now time.Time) {
+// It reports whether the log changed: a first sighting or a new size.
+func (l *scaleLog) Observe(sub leeway.SubjectRef, replicas int32, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	prev, known := l.at[sub]
@@ -70,20 +71,27 @@ func (l *scaleLog) Observe(sub leeway.SubjectRef, replicas int32, now time.Time)
 		l.at[sub] = scaleEntry{replicas: replicas}
 	case prev.replicas != replicas:
 		l.at[sub] = scaleEntry{replicas: replicas, changedAt: now}
+	default:
+		// Same size as last time: leave the entry alone. Re-stamping on every
+		// resync would turn the informer's own 30-second relist into a
+		// permanent scale event.
+		return false
 	}
-	// Same size as last time: leave the entry alone. Re-stamping on every
-	// resync would turn the informer's own 30-second relist into a permanent
-	// scale event.
+	return true
 }
 
 // Forget drops a workload's entry. A name that comes back is a new workload
 // as far as this log is concerned, and gets a first sighting rather than
 // inheriting the old one's size — which is right, because it really is a new
 // object and its replica count was never compared against anything.
-func (l *scaleLog) Forget(sub leeway.SubjectRef) {
+//
+// It reports whether there was an entry to drop.
+func (l *scaleLog) Forget(sub leeway.SubjectRef) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	_, known := l.at[sub]
 	delete(l.at, sub)
+	return known
 }
 
 // ScaledAt returns when this subject's replica count was last seen to change,

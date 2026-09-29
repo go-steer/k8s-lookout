@@ -460,8 +460,12 @@ type Source struct {
 	// when the apps informers are not running.
 	scales  *scaleLog
 	metrics *instruments
-	verify  *Verifier
-	alerts  *Alerts
+	// events counts what the informer handlers are delivered (#491). A value,
+	// not a pointer, so it counts from construction — before the instruments
+	// that read it exist.
+	events watchEvents
+	verify *Verifier
+	alerts *Alerts
 	// baselines is §7.5's live estimators. Always non-nil; a deployment with
 	// LearnBaselines off simply never feeds it.
 	baselines *baselineLog
@@ -1276,14 +1280,19 @@ func (s *Source) rolloutEndedAt(sub leeway.SubjectRef) time.Time {
 // recent-scale row. Anything else the informers might hand us is ignored
 // rather than guessed at — a workload whose size we cannot read is one whose
 // scale row stays unanswered, which is the same state as a DaemonSet.
+//
+// Both kinds share this handler, so an object of neither kind cannot be
+// attributed to an informer and is not counted as a watch event.
 func (s *Source) onScalable(obj any) {
 	switch o := obj.(type) {
 	case *appsv1.Deployment:
-		s.scales.Observe(leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name},
-			int32OrOne(o.Spec.Replicas), time.Now())
+		s.events.note(eventDeployment, s.scales.Observe(
+			leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name},
+			int32OrOne(o.Spec.Replicas), time.Now()))
 	case *appsv1.StatefulSet:
-		s.scales.Observe(leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name},
-			int32OrOne(o.Spec.Replicas), time.Now())
+		s.events.note(eventStatefulSet, s.scales.Observe(
+			leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name},
+			int32OrOne(o.Spec.Replicas), time.Now()))
 	}
 }
 
@@ -1295,9 +1304,11 @@ func (s *Source) onScalableDelete(obj any) {
 	}
 	switch o := obj.(type) {
 	case *appsv1.Deployment:
-		s.scales.Forget(leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name})
+		s.events.note(eventDeployment, s.scales.Forget(
+			leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name}))
 	case *appsv1.StatefulSet:
-		s.scales.Forget(leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name})
+		s.events.note(eventStatefulSet, s.scales.Forget(
+			leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name}))
 	}
 }
 
@@ -2036,6 +2047,7 @@ func (s *Source) startMetrics() error {
 		Intents:            s.state.EachIntent,
 		Alerts:             s.alerts.Each,
 		Baselines:          func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
+		WatchEvents:        s.events.each,
 	})
 	if err != nil {
 		return err
@@ -2087,31 +2099,40 @@ func (s *Source) sweep() {
 		len(subs), s.inv.Generation())
 }
 
+// The four pod and node handlers count every event they are delivered, the
+// malformed ones included (as inert), so the watch-event total is the
+// informer's delivery count and not leeway's opinion of it.
 func (s *Source) onPod(ctx context.Context, obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
+		s.events.note(eventPod, false)
 		return
 	}
-	s.state.OnPodAdd(pod)
+	s.events.note(eventPod, s.state.OnPodAdd(pod))
 	s.metrics.recordEvent(ctx, resourcePod, time.Now())
 }
 
 func (s *Source) onPodDelete(ctx context.Context, obj any) {
-	s.state.OnPodDelete(obj)
+	s.events.note(eventPod, s.state.OnPodDelete(obj))
 	s.metrics.recordEvent(ctx, resourcePod, time.Now())
 }
 
 func (s *Source) onNode(ctx context.Context, obj any) {
 	node, ok := obj.(*corev1.Node)
 	if !ok {
+		s.events.note(eventNode, false)
 		return
 	}
-	s.noteChange(s.state.OnNodeUpsert(node))
+	ch := s.state.OnNodeUpsert(node)
+	s.events.note(eventNode, ch.Any())
+	s.noteChange(ch)
 	s.metrics.recordEvent(ctx, resourceNode, time.Now())
 }
 
 func (s *Source) onNodeDelete(ctx context.Context, obj any) {
-	s.noteChange(s.state.OnNodeDelete(obj))
+	ch := s.state.OnNodeDelete(obj)
+	s.events.note(eventNode, ch.Any())
+	s.noteChange(ch)
 	s.metrics.recordEvent(ctx, resourceNode, time.Now())
 }
 
