@@ -52,6 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **History answers now name the kinds they cannot contain** (#396).
+  The sentinel's graph feed watches pods, nodes and replicasets, so the
+  topology `triage radius --at` restores has no Services,
+  EndpointSlices, Ingresses, NetworkPolicies or CronJobs, and the delta
+  log `triage changes --store` reads has no changes to them. Nothing in
+  the output said so: a routing layer missing from history read the same
+  as one missing from the cluster. Both commands now end with
+  `unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service`. The
+  list is derived from the kinds the store's snapshot actually watched,
+  so it shrinks by itself if the feed grows, and a store written by a
+  graph that watched everything prints none. Recording those kinds is
+  #507.
 - **`triage events --namespace` and `-A` now name what an HPA is
   thrashing** (#377). `event.hpa_thrash` carried `target=<Kind>/<name>`
   only with `--workload`, which is the one mode where you already know

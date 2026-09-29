@@ -25,6 +25,7 @@ package triage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -226,6 +227,43 @@ func historicalSnapshot(ctx context.Context, path string, at time.Time) (*graph.
 	}
 	defer func() { _ = st.Close() }()
 	return st.GraphAt(ctx, at)
+}
+
+// noteUnrecorded names, in the summary line, the kinds a history
+// snapshot cannot contain (issue #396): the sentinel's graph feed
+// watches pods, nodes and replicasets, so a Service or EndpointSlice
+// missing from a history answer is "not recorded", never "absent".
+// Silent when the snapshot can hold every kind.
+func noteUnrecorded(out *emit.Writer, snap *graph.Snapshot) error {
+	kinds := snap.Unrecorded()
+	if len(kinds) == 0 {
+		return nil
+	}
+	names := make([]string, len(kinds))
+	for i, k := range kinds {
+		names[i] = k.String()
+	}
+	return out.Note("unrecorded", strings.Join(names, ","))
+}
+
+// noteLogCeiling is noteUnrecorded for `triage changes --store`. The
+// delta log records exactly what the snapshots do, so in --at mode the
+// history snapshot already answers; without --at the neighborhood is
+// live and says nothing about the log, so the stored snapshot as of
+// the window's end is read for its watched set. A store with no
+// snapshot yet has an empty log too — nothing to qualify.
+func noteLogCeiling(ctx context.Context, out *emit.Writer, st graphHistory, snap *graph.Snapshot, at, to time.Time) error {
+	if at.IsZero() {
+		hist, err := st.GraphAt(ctx, to)
+		if errors.Is(err, store.ErrNoHistory) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		snap = hist
+	}
+	return noteUnrecorded(out, snap)
 }
 
 // isPodReady reports the PodReady condition.

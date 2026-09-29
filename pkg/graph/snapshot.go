@@ -14,7 +14,11 @@
 
 package graph
 
-import "sync"
+import (
+	"slices"
+	"strings"
+	"sync"
+)
 
 // Snapshot is one immutable, internally consistent view of the
 // topology. Readers obtain it from Graph.Snapshot and query it
@@ -127,6 +131,50 @@ func (s *Snapshot) Watches(kind NodeKind) bool {
 		return true
 	}
 	return s.watched[kind]
+}
+
+// declaredBy names, per kind, the kinds whose objects can bring a node
+// of that kind into the graph: the kind itself, plus every kind whose
+// spec or ownerReferences declare an edge to it (derive.go). Namespace
+// is absent — every namespaced node creates its own.
+var declaredBy = map[NodeKind][]NodeKind{
+	KindNode:                  {KindNode, KindPod},
+	KindZone:                  {KindNode},
+	KindPod:                   {KindPod, KindEndpointSlice},
+	KindContainer:             {KindPod},
+	KindService:               {KindService, KindEndpointSlice, KindIngress},
+	KindEndpointSlice:         {KindEndpointSlice},
+	KindIngress:               {KindIngress},
+	KindNetworkPolicy:         {KindNetworkPolicy},
+	KindConfigMap:             {KindConfigMap, KindPod},
+	KindSecret:                {KindSecret, KindPod},
+	KindPersistentVolumeClaim: {KindPersistentVolumeClaim, KindPod},
+	KindDeployment:            {KindDeployment, KindReplicaSet},
+	KindReplicaSet:            {KindReplicaSet, KindPod},
+	KindStatefulSet:           {KindStatefulSet, KindPod},
+	KindDaemonSet:             {KindDaemonSet, KindPod},
+	KindJob:                   {KindJob, KindPod},
+	KindCronJob:               {KindCronJob, KindJob},
+}
+
+// Unrecorded lists, sorted by name, the kinds this snapshot cannot
+// contain at all: no watched kind declares them, so their absence says
+// nothing about the cluster (issue #396). It is the kind-level
+// counterpart of Watches — an unwatched kind that pods reference still
+// shows up identity-only, but a Service nothing watched ever names is
+// simply not there. Empty for a snapshot that watches everything.
+func (s *Snapshot) Unrecorded() []NodeKind {
+	if s.watched == nil {
+		return nil
+	}
+	var out []NodeKind
+	for kind, decl := range declaredBy {
+		if !slices.ContainsFunc(decl, s.Watches) {
+			out = append(out, kind)
+		}
+	}
+	slices.SortFunc(out, func(a, b NodeKind) int { return strings.Compare(a.String(), b.String()) })
+	return out
 }
 
 // Out returns the outbound edges of id ("id --Kind--> Edge.To"),

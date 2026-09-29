@@ -110,15 +110,18 @@ uat_store_radius() {
   uat_refute_stdout 'ready=' \
     "triage radius --at → and readiness is absent rather than guessed from now"
 
-  # A KNOWN GAP, asserted so it is visible rather than discovered
-  # (issue #396). The graph feed watches pods, nodes and replicasets;
-  # Services and EndpointSlices are deliberately outside it, which is
-  # right for storm correlation and silently sets the ceiling for the
-  # post-mortem path too. Live has the routing layer two assertions
-  # above; history does not, and nothing in the output says so.
-  # Whichever way #396 is fixed, this refutation fails and points there.
+  # The graph feed watches pods, nodes and replicasets; Services and
+  # EndpointSlices are deliberately outside it, which is right for
+  # storm correlation and sets the ceiling for the post-mortem path
+  # too. Live has the routing layer above; history cannot, and says so
+  # by name (#396) — "not recorded" is not "absent".
+  uat_expect_stdout 'unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service' \
+    "triage radius --at → the summary names the kinds history cannot hold (#396)"
+  # A KNOWN GAP, asserted so it is visible rather than discovered:
+  # recording the routing layer is #507. When it lands this
+  # refutation fails and points there.
   uat_refute_stdout 'relation=(Selects|RoutesTo)' \
-    "triage radius --at → history has no routing layer at all (#396: it should at least say so)"
+    "triage radius --at → history still records no routing layer (#507)"
 
   # (c) --depth bounds the walk. Asserted from a POD, because from a
   # Deployment the interesting hops are laterals, and laterals are a

@@ -99,9 +99,12 @@ lookout triage changes Deployment/lookout-demo/web        --at "$onset" --store 
 
 ## Known gap, asserted rather than ignored
 
-- **#396** — history has no `Selects`/`RoutesTo` at all: the graph feed
+- **#507** — history has no `Selects`/`RoutesTo` at all: the graph feed
   watches pods, nodes and replicasets, so the whole routing layer is
-  missing from `--at` and nothing in the output says so.
+  missing from `--at`. The output does say so — the summary line ends
+  `unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service`
+  (#396), which the case asserts too — but the layer is still not
+  recorded.
 
 `examples/uat-cases/60-store.sh` pins it with a refutation that will
 fail — loudly, naming the issue — the moment it is fixed.

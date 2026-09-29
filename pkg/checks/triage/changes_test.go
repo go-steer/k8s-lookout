@@ -255,6 +255,9 @@ func TestChanges_StoreLive(t *testing.T) {
 	if !strings.Contains(res.Stdout, "source=history") {
 		t.Errorf("summary must say source=history:\n%s", res.Stdout)
 	}
+	if strings.Contains(res.Stdout, "unrecorded=") {
+		t.Errorf("a watch-everything log must not name unrecorded kinds:\n%s", res.Stdout)
+	}
 	// Chronology: the 10:20 label flip precedes the 10:22 rescale.
 	if li, ei := strings.Index(res.Stdout, "change.label"), strings.Index(res.Stdout, "SuccessfulRescale"); li < 0 || ei < 0 || li > ei {
 		t.Errorf("entries out of order (label@10:20 then rescale@10:22):\n%s", res.Stdout)

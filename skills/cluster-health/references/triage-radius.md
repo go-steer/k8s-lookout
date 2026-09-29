@@ -54,6 +54,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `ready` | pod readiness (live mode only — history stores topology, not status) |
 | `source` | summary-line note: live (one-shot List pass) or history (reconstructed from --store) |
 | `at` | summary-line note: the resolved --at instant the history answer is as of, RFC 3339 |
+| `unrecorded` | summary-line note, history only: comma-separated kinds the stored topology cannot contain (the sentinel's graph feed never watched them), so their absence is not a finding |
 
 ## Output contract
 

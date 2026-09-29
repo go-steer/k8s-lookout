@@ -71,6 +71,7 @@ func RadiusCommand(deps Deps) checks.Command {
 			{Name: "ready", Doc: "pod readiness (live mode only — history stores topology, not status)"},
 			{Name: "source", Doc: "summary-line note: live (one-shot List pass) or history (reconstructed from --store)"},
 			{Name: "at", Doc: "summary-line note: the resolved --at instant the history answer is as of, RFC 3339"},
+			{Name: "unrecorded", Doc: "summary-line note, history only: comma-separated kinds the stored topology cannot contain (the sentinel's graph feed never watched them), so their absence is not a finding"},
 		},
 		Examples: []string{
 			"lookout triage radius Deployment/prod/api",
@@ -109,6 +110,9 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 			return 0, err
 		}
 		if err := inv.Out.Note("at", inv.Scope.At.UTC().Format(time.RFC3339)); err != nil {
+			return 0, err
+		}
+		if err := noteUnrecorded(inv.Out, snap); err != nil {
 			return 0, err
 		}
 	} else {
