@@ -510,7 +510,7 @@ func TestWorkloadsScopeErrors(t *testing.T) {
 		{"contradictory-namespace", []string{"--namespace=batch", "--workload=Deployment/prod/checkout"}, "contradicts"},
 		// A Job owns a pod template but is a one-shot: none of the
 		// standing claims here mean anything for it.
-		{"unsupported-kind", []string{"--workload=Job/prod/migrate"}, "unsupported workload kind"},
+		{"unsupported-kind", []string{"--workload=ReplicaSet/prod/migrate"}, "unsupported workload kind"},
 		{"negative-cron-suspended", []string{"-A", "--cron-suspended=-1h"}, "--cron-suspended must not be negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

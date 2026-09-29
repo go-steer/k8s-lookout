@@ -435,7 +435,9 @@ func rolloutDetails(desired, ready, updated, available int32) []emit.Field {
 }
 
 // checkJobs flags Jobs the controller has marked Failed. Active and
-// suspended Jobs are nominal.
+// suspended Jobs are nominal: a suspension is deliberate and never
+// self-clears, so a forgotten one is posture (`audit workloads`,
+// audit.suspended_job), exactly as for CronJobs.
 func (s *scanner) checkJobs(jobs []batchv1.Job) {
 	for i := range jobs {
 		j := &jobs[i]

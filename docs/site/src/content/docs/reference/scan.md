@@ -125,6 +125,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
@@ -313,6 +314,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `suspended_since` | when the suspension is estimated to have started, RFC 3339 |
 | `pdbs` | summary note: PodDisruptionBudgets seen in scope |
 | `hpas` | summary note: HorizontalPodAutoscalers seen in scope |
+| `jobs` | summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads` |
 | `cidr` | the range's CIDR block |
 | `purpose` | what the range allocates: pods, services, or nodes |
 | `zone` | orphan.disk: the disk's zone |

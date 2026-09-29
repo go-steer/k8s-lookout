@@ -80,10 +80,12 @@ func WorkloadsCommand(deps Deps) checks.Command {
 		Name:        "audit workloads",
 		MCPName:     "k8s_audit_workloads",
 		MCPProfiles: []string{"audit"},
-		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, and CronJobs left suspended long enough to have skipped runs. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, and standalone Jobs left suspended past a maintenance window. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "cron-suspended", Type: emit.FlagDuration, Default: defaultCronSuspended.String(),
 				Help: "how long a CronJob must have been suspended before it reads as forgotten rather than as maintenance in progress; it must also have skipped at least one activation, so the claim scales to the schedule"},
+			{Name: "job-suspended", Type: emit.FlagDuration, Default: defaultJobSuspended.String(),
+				Help: "how long a standalone Job must have been suspended before it reads as forgotten rather than as maintenance in progress; Jobs owned by a controller or queued by Kueue are never judged"},
 		},
 		Kinds: []checks.KindField{
 			checks.Kind(kindNoPDB, "the workload has no PodDisruptionBudget: a drain can take every replica at once", emit.SeverityWarning),
@@ -94,6 +96,7 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			checks.Kind(kindRigidScheduling, "placement constraints pin the workload to too few nodes to survive losing one", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by", emit.SeverityWarning),
 			checks.Kind(kindSuspendedCron, "a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that", emit.SeverityWarning),
+			checks.Kind(kindSuspendedJob, "a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening", emit.SeverityInfo),
 		},
 		Output: []checks.OutputField{
 			{Name: "replicas", Doc: "the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count"},
@@ -113,18 +116,20 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "time_zone", Doc: "the CronJob's spec.timeZone, when set"},
 			{Name: "suspended_for", Doc: "how long spec.suspend has been true, rounded to whole days"},
 			{Name: "suspended_since", Doc: "when the suspension is estimated to have started, RFC 3339"},
-			{Name: "anchor", Doc: "the evidence that estimate came from: managed_field (the managedFields entry owning spec.suspend), last_schedule, or creation"},
+			{Name: "anchor", Doc: "the evidence that estimate came from: condition (a Job's Suspended condition), managed_field (the managedFields entry owning spec.suspend), last_schedule (CronJobs only), or creation"},
 			{Name: "missed_runs", Doc: "activations skipped since then; ≥N when the walk was capped, unknown when the schedule does not parse"},
 			{Name: "pdbs", Doc: "summary note: PodDisruptionBudgets seen in scope"},
 			{Name: "hpas", Doc: "summary note: HorizontalPodAutoscalers seen in scope"},
 			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against"},
 			{Name: "workloads", Doc: "summary note: workloads examined, broken down as deployments/statefulsets/daemonsets/cronjobs"},
+			{Name: "jobs", Doc: "summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads`"},
 		},
 		Examples: []string{
 			"lookout audit workloads -A",
 			"lookout audit workloads --namespace=prod",
 			"lookout audit workloads --workload=Deployment/prod/checkout",
 			"lookout audit workloads --workload=CronJob/prod/nightly-backup",
+			"lookout audit workloads --workload=Job/prod/migrate-v42",
 			"lookout audit workloads -A --exemptions=exemptions.yaml --format=json",
 		},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
@@ -142,6 +147,7 @@ var canonicalWorkloadKinds = map[string]string{
 	"statefulset": "StatefulSet", "statefulsets": "StatefulSet", "sts": "StatefulSet",
 	"daemonset": "DaemonSet", "daemonsets": "DaemonSet", "ds": "DaemonSet",
 	"cronjob": "CronJob", "cronjobs": "CronJob", "cj": "CronJob",
+	"job": "Job", "jobs": "Job",
 }
 
 func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
@@ -157,11 +163,13 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		// 0 is meaningful — judge on skipped activations alone — but a
 		// negative floor would report every suspended CronJob.
 		return 0, emit.UsageErrorf("--cron-suspended must not be negative, got %s", inv.Flags.Duration("cron-suspended"))
+	case inv.Flags.Duration("job-suspended") < 0:
+		return 0, emit.UsageErrorf("--job-suspended must not be negative, got %s", inv.Flags.Duration("job-suspended"))
 	}
 	if !wl.IsZero() {
 		canonical, ok := canonicalWorkloadKinds[strings.ToLower(wl.Kind)]
 		if !ok {
-			return 0, emit.UsageErrorf("unsupported workload kind %q (want Deployment|StatefulSet|DaemonSet|CronJob — the kinds that own a pod template)", wl.Kind)
+			return 0, emit.UsageErrorf("unsupported workload kind %q (want Deployment|StatefulSet|DaemonSet|CronJob|Job — the kinds that own a pod template)", wl.Kind)
 		}
 		wl.Kind = canonical
 	}
@@ -220,6 +228,20 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		}
 	}
 
+	// Jobs likewise: only the suspension claim applies (jobs.go).
+	jobSuspended := inv.Flags.Duration("job-suspended")
+	jobs := 0
+	for _, j := range ix.jobs {
+		if !wl.IsZero() && (wl.Kind != "Job" || j.Name != wl.Name) {
+			continue
+		}
+		scanned++
+		jobs++
+		if f := suspendedJob(j, now, jobSuspended); f != nil {
+			findings = append(findings, *f)
+		}
+	}
+
 	if !wl.IsZero() && scanned == 0 {
 		return 0, fmt.Errorf("workload %s not found", wl)
 	}
@@ -245,6 +267,7 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		{"hpas", itoa(len(ix.hpas))},
 		{"nodes", itoa(len(ix.nodes))},
 		{"workloads", fmt.Sprintf("%d/%d/%d/%d", counts[0], counts[1], counts[2], counts[3])},
+		{"jobs", itoa(jobs)},
 	}
 	for _, n := range notes {
 		if err := inv.Out.Note(n[0], n[1]); err != nil {
@@ -313,8 +336,10 @@ type workloadIndex struct {
 	// cronJobs are kept apart from workloads: only the suspension
 	// claim applies to them (cronjobs.go).
 	cronJobs []*batchv1.CronJob
-	pdbs     []*policyv1.PodDisruptionBudget
-	hpas     []*autoscalingv2.HorizontalPodAutoscaler
+	// jobs likewise (jobs.go).
+	jobs []*batchv1.Job
+	pdbs []*policyv1.PodDisruptionBudget
+	hpas []*autoscalingv2.HorizontalPodAutoscaler
 	// nodes are cluster-scoped, so this is the whole inventory even
 	// under --namespace: a placement constraint does not stop at a
 	// namespace boundary.
@@ -378,6 +403,17 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 				return l.Items, l.Continue, nil
 			}, func(c *batchv1.CronJob) {
 				ix.cronJobs = append(ix.cronJobs, c)
+			})
+		},
+		func() error {
+			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
+				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(j *batchv1.Job) {
+				ix.jobs = append(ix.jobs, j)
 			})
 		},
 		func() error {

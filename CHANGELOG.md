@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `state keda` (MCP `k8s_keda_scalers`), in the bare `scan`: KEDA scalers that have stopped scaling. It reports a ScaledObject whose target Deployment or StatefulSet does not exist (`keda.missing_target`; a renamed workload runs unscaled), a trigger whose TriggerAuthentication or ClusterTriggerAuthentication does not exist (`keda.missing_auth`), and a ScaledObject or ScaledJob KEDA itself reports not Ready (`keda.not_ready`), one cause per scaler. Paused and not-yet-reconciled scalers are silent; clusters without KEDA get the usual `crd.unavailable`. (#268)
 
+- `audit workloads` reports `audit.suspended_job` (info): a standalone Job suspended past `--job-suspended` (new flag, default 7d) without finishing, so the migration or backfill it carries is quietly not happening. It follows the `audit.suspended_cronjob` precedent (posture, not a `triage delta` incident). Jobs with a controller owner (CronJob, JobSet, workflow engines), Jobs queued by Kueue (`kueue.x-k8s.io/queue-name`), Jobs whose `spec.managedBy` names another controller, and finished Jobs are never judged, since suspension is their normal queueing state. The suspension age reads the Job's own `Suspended` condition first. `--workload=Job/<ns>/<name>` is accepted, and the summary gains a `jobs=` note counting the Jobs examined (they count toward `scanned`). (#265)
+
 - **A compute class is now judged against its own learned normal** (#463).
   The new `rank-baseline` rule learns each class's mean achieved rank with
   the same estimator `topology-drift` uses for placement, and reports
