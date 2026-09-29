@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`lookout health` scores two more categories: `services` and
+  `disruption`** (#379, #378). A healthy cluster now emits twelve
+  scorecard lines, not ten.
+  - `services` runs the edge sweep `lookout scan` already runs. It
+    reports a Service whose selector matches no pod, and Ingress
+    backends and classes that do not exist. Before this, a Service
+    installed with a typo'd selector was invisible to `health`, because
+    every pod behind the intended workload is healthy. Ingress TLS
+    certificates stay in `certs`, so one certificate is still reported
+    once.
+  - `disruption` is `triage delta`'s `pdb` class. It reports a
+    PodDisruptionBudget with no headroom. It scores last and on its own
+    line, because it is drain readiness rather than health. Before
+    this, `health --namespace` called a namespace nothing could drain
+    healthy while `triage delta` said `DisruptionsBlocked`.
+  - A consumer that alerts on any `status=degraded` line will now also
+    page on these two. Filter on `category=` to keep the old behaviour.
+
 ### Added
 
 - **`lookout_leeway_watch_events_total{resource,outcome}`** (#491) counts

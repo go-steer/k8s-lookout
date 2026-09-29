@@ -130,7 +130,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `mcp` | serve every read command 1:1 as MCP tools (stdio or localhost HTTP) — how a distroless daemon calls lookout |
 | `scan` | start here: one call runs every target-free incident check, then drills into the dependency edges of whatever it flagged. No target, no flags |
 | `bundle` | first call of every incident: sanitized spec + abnormal objects + broken edges + blast radius + distilled logs, one payload |
-| `health` | ten-category cluster scorecard, merged with open sentinel findings and triage-status records |
+| `health` | twelve-category cluster scorecard, merged with open sentinel findings and triage-status records |
 | `triage list` | what *exists*: `kubectl get` across every kind at once, one line per object, each leading with the `<Kind>/<namespace>/<name>` target the other reads take |
 | `triage delta` | one scan → everything abnormal: broken workloads, aged Pending, node pressure, gridlocked PDBs, degraded add-ons, hit quotas |
 | `triage logs` | template-fingerprint log dedup: ~150k tokens of logs → ~350 |

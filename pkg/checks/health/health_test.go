@@ -15,7 +15,7 @@
 package health_test
 
 // §13 testing conventions: fake.Clientset fixture clusters, the
-// all-healthy cluster proving the scorecard answers explicitly (ten
+// all-healthy cluster proving the scorecard answers explicitly (twelve
 // category findings, never silence), one broken fixture per
 // category, a golden mixed cluster, and the checktest contract
 // round-trip. TLS fixtures are generated in-test (self-signed,
@@ -41,6 +41,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	netv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -315,10 +317,29 @@ func lostPVC(ns, name string) *corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// selectingService is a Service whose selector is app=<app>.
+func selectingService(ns, name, app string) *corev1.Service {
+	svc := service(ns, name)
+	svc.Spec.Selector = map[string]string{"app": app}
+	return svc
+}
+
+// gridlockedPDB is a budget at exactly its minimum over two healthy
+// pods: nothing is violated yet, and nothing can be drained (#378).
+func gridlockedPDB(ns, name string) *policyv1.PodDisruptionBudget {
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Status: policyv1.PodDisruptionBudgetStatus{
+			DisruptionsAllowed: 0, CurrentHealthy: 2, DesiredHealthy: 2, ExpectedPods: 2,
+		},
+	}
+}
+
 // brokenObjects breaks every live category at once: crashloop +
 // aged-Pending pods, a dead rollout, a NotReady node, a degraded
 // system add-on, an exhausted quota, Pending and Lost PVCs, an
-// expired certificate, and a webhook pointing at a ghost service.
+// expired certificate, a webhook pointing at a ghost service, a
+// Service whose selector matches no pod, and a gridlocked budget.
 func brokenObjects(t *testing.T) []runtime.Object {
 	t.Helper()
 	return []runtime.Object{
@@ -332,6 +353,8 @@ func brokenObjects(t *testing.T) []runtime.Object {
 		quota("prod", "compute", 10, 10),
 		tlsSecret(t, "prod", "old-tls", "old.example.com", fixedNow.Add(-16*24*time.Hour)),
 		webhook("policy", "infra", "ghost"),
+		selectingService("prod", "web", "web-v2"),
+		gridlockedPDB("prod", "web"),
 	}
 }
 
@@ -403,8 +426,8 @@ func parseLine(t *testing.T, line string) map[string]string {
 	return out
 }
 
-// TestAllHealthyClusterAnswersExplicitly: ten category findings,
-// nine healthy plus the control-plane unavailable marker (the
+// TestAllHealthyClusterAnswersExplicitly: twelve category findings,
+// eleven healthy plus the control-plane unavailable marker (the
 // default fixture provider has no metrics capability) — never
 // silence.
 func TestAllHealthyClusterAnswersExplicitly(t *testing.T) {
@@ -414,8 +437,8 @@ func TestAllHealthyClusterAnswersExplicitly(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
 	findings := lines[:len(lines)-1]
-	if len(findings) != 10 {
-		t.Fatalf("want exactly 10 category findings, got %d:\n%s", len(findings), res.Stdout)
+	if len(findings) != 12 {
+		t.Fatalf("want exactly 12 category findings, got %d:\n%s", len(findings), res.Stdout)
 	}
 	status := map[string]string{}
 	for _, line := range findings {
@@ -425,7 +448,7 @@ func TestAllHealthyClusterAnswersExplicitly(t *testing.T) {
 		}
 		status[rec["category"]] = rec["status"]
 	}
-	for _, cat := range []string{"nodes", "crashloops", "pending", "rollouts", "storage", "addons", "quota", "certs", "webhooks"} {
+	for _, cat := range []string{"nodes", "crashloops", "pending", "rollouts", "storage", "addons", "quota", "certs", "webhooks", "services", "disruption"} {
 		if status[cat] != "healthy" {
 			t.Errorf("category %s = %q, want healthy", cat, status[cat])
 		}
@@ -463,6 +486,8 @@ func TestBrokenClusterPerCategory(t *testing.T) {
 		"quota":      {"quota.exhausted"},
 		"certs":      {"cert.expired"},
 		"webhooks":   {"webhook.failing_closed"},
+		"services":   {"edge.selector_empty"},
+		"disruption": {"pdb.gridlocked"},
 	}
 	for cat, kinds := range wantKinds {
 		if status[cat] != "degraded" {
@@ -726,7 +751,7 @@ func TestNamespaceScopedMarksClusterCategoriesUnavailable(t *testing.T) {
 			t.Errorf("category %s = %q under --namespace, want unavailable", cat, status[cat])
 		}
 	}
-	for _, cat := range []string{"crashloops", "pending", "rollouts", "storage", "quota", "certs"} {
+	for _, cat := range []string{"crashloops", "pending", "rollouts", "storage", "quota", "certs", "services", "disruption"} {
 		if status[cat] != "healthy" {
 			t.Errorf("category %s = %q under --namespace, want healthy", cat, status[cat])
 		}
@@ -789,4 +814,90 @@ func TestVerifyContract(t *testing.T) {
 	// declared glossary in both formats.
 	breaching := &fakeBackend{series: []cloud.Series{apiserverSeries("LIST", "secrets", 0.9, 2.5)}}
 	checktest.VerifyContract(t, testCommandWithMetrics(breaching, brokenObjects(t)...))
+}
+
+// TestServicesCategoryCatchesABornBrokenSelector is #379's reproduction:
+// a Deployment serving app=web with Running, Ready pods, and a Service
+// selecting app=web-v2. Every pod-shaped category is healthy, because
+// every pod is; the Service routes nowhere, and before the services
+// category no verb that `health` composes said so. A Service that does
+// select its pods stays quiet beside it.
+func TestServicesCategoryCatchesABornBrokenSelector(t *testing.T) {
+	web := healthyPod("shop", "web-0")
+	web.Labels = map[string]string{"app": "web"}
+	status, kinds, _ := statusesAndKinds(t, testCommand(
+		web,
+		deployment("shop", "web", 1, 1, nil),
+		selectingService("shop", "web", "web"),
+		selectingService("shop", "web-canary", "web-v2"),
+	), "--namespace=shop")
+
+	if status["services"] != "degraded" {
+		t.Fatalf("services = %q, want degraded", status["services"])
+	}
+	if got := strings.Join(kinds["services"], ","); got != "edge.selector_empty" {
+		t.Errorf("services details = %q, want exactly the one edge.selector_empty", got)
+	}
+	for _, cat := range []string{"crashloops", "pending", "rollouts"} {
+		if status[cat] != "healthy" {
+			t.Errorf("%s = %q, want healthy — the pods are fine, which is the whole fault", cat, status[cat])
+		}
+	}
+}
+
+// TestDisruptionCategoryReportsGridlockUnderNamespace is #378's
+// reproduction, in the invocation the report used: two pods under a
+// minAvailable=2 budget, `health --namespace`. It scored healthy on
+// every category while `triage delta` said DisruptionsBlocked.
+func TestDisruptionCategoryReportsGridlockUnderNamespace(t *testing.T) {
+	status, kinds, _ := statusesAndKinds(t, testCommand(
+		healthyPod("db", "db-0"),
+		healthyPod("db", "db-1"),
+		gridlockedPDB("db", "db"),
+	), "--namespace=db")
+
+	if status["disruption"] != "degraded" {
+		t.Fatalf("disruption = %q, want degraded", status["disruption"])
+	}
+	if got := strings.Join(kinds["disruption"], ","); got != "pdb.gridlocked" {
+		t.Errorf("disruption details = %q, want pdb.gridlocked", got)
+	}
+	// Bucketing is by prefix with crash loops as the default arm, so a
+	// kind nobody mapped lands there silently (see TestCronCategoryIsRollouts).
+	if status["crashloops"] != "healthy" {
+		t.Errorf("crashloops = %q, want healthy — a budget is not a crash loop", status["crashloops"])
+	}
+}
+
+// TestServicesCategoryLeavesCertificatesToCerts: the edge sweep also
+// judges an Ingress's TLS Secret, and the certs category already
+// judges every TLS Secret in scope. One expired certificate is one
+// finding, in certs.
+func TestServicesCategoryLeavesCertificatesToCerts(t *testing.T) {
+	ing := &netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web"},
+		Spec: netv1.IngressSpec{
+			TLS: []netv1.IngressTLS{{Hosts: []string{"old.example.com"}, SecretName: "old-tls"}},
+			DefaultBackend: &netv1.IngressBackend{Service: &netv1.IngressServiceBackend{
+				Name: "web", Port: netv1.ServiceBackendPort{Number: 443},
+			}},
+		},
+	}
+	status, kinds, _ := statusesAndKinds(t, testCommand(
+		tlsSecret(t, "prod", "old-tls", "old.example.com", fixedNow.Add(-16*24*time.Hour)),
+		selectingService("prod", "web", "web-v2"),
+		ing,
+	))
+
+	if got := strings.Join(kinds["certs"], ","); got != "cert.expired" {
+		t.Errorf("certs details = %q, want cert.expired", got)
+	}
+	for _, k := range kinds["services"] {
+		if strings.HasPrefix(k, "edge.cert_") {
+			t.Errorf("services reported %s; the certificate belongs to certs", k)
+		}
+	}
+	if status["services"] != "degraded" {
+		t.Errorf("services = %q, want degraded on the selector alone", status["services"])
+	}
 }

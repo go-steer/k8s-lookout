@@ -8,6 +8,8 @@ kind=health.category severity=warning category=addons status=degraded total=1 to
 kind=health.category severity=critical category=quota status=degraded total=1 top="quota.exhausted prod/compute"
 kind=health.category severity=critical category=certs status=degraded total=1 top="cert.expired prod/old-tls"
 kind=health.category severity=critical category=webhooks status=degraded total=1 top="webhook.failing_closed policy"
+kind=health.category severity=critical category=services status=degraded total=1 top="edge.selector_empty prod/web"
+kind=health.category severity=warning category=disruption status=degraded total=1 top="pdb.gridlocked prod/web"
 kind=node.notready severity=critical kind_of_object=Node name=node-1 reason=KubeletNotReady fingerprint=sha256:56b96792a8f9243462ff3fc3fa95ba298c991c4b02b6d01a6bef08d6566a2ff6 category=nodes age=10m0s
 kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff fingerprint=sha256:e2957792a0b3ad9e29db2051dbc69ff01dfe3a52da8dbb6d1331aa44fe946f8b category=crashloops container=app restarts=12 last_state=Error exit_code=1
 kind=pod.pending severity=critical namespace=prod kind_of_object=Pod name=batch-7 reason=Unschedulable message="0/3 nodes are available: 3 Insufficient cpu." fingerprint=sha256:bfe155c0a308d61bd8cf9701619a8859d28b2c9d7c05e458fa9b58dcd2cc7eae category=pending age=30m0s
@@ -18,4 +20,6 @@ kind=addon.degraded severity=warning namespace=kube-system kind_of_object=Deploy
 kind=quota.exhausted severity=critical namespace=prod kind_of_object=ResourceQuota name=compute reason=QuotaExhausted fingerprint=sha256:e15f9d113ddb4f1101190a7df89668253711b41d8e42c477ae62a91b155f14d7 category=quota resource=pods used=10 hard=10 pct=100
 kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" fingerprint=sha256:dd1c9738112cd7229a73b1920b06122bccee7bb0e7867c93752fa0b0e522557d category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
 kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/ghost not found — matching admissions are REJECTED (failurePolicy Fail)" fingerprint=sha256:97d32763a16d94df719af47c88fb7c70450caff3bbf5586bd21154feb19c91e5 category=webhooks webhook=policy/validate.example.com service=infra/ghost backend="service missing" gates="all namespaces"
-scanned=10 findings=20 elapsed=100ms
+kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=web reason=NoMatchingPods message="selector app=web-v2 selects no pods" fingerprint=sha256:52bf5b714fc9847ddec87bd2dcd3486f09b4e14a37639e18adac58655dc47a48 category=services selector="app=web-v2"
+kind=pdb.gridlocked severity=warning namespace=prod kind_of_object=PodDisruptionBudget name=web reason=DisruptionsBlocked fingerprint=sha256:53d8a361b10c0011af21b07a5da885d2d76d3b1cc8027e3a8929a2db22429d0e category=disruption healthy=2 required=2 pods=2
+scanned=15 findings=24 elapsed=100ms
