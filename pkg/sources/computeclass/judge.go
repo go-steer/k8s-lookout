@@ -184,6 +184,10 @@ func (s *Source) judgeAll(now time.Time) []rankJudgement {
 		}
 	}
 
+	// Read before s.mu: the alert machine has its own lock, and the two are
+	// never held together.
+	frozen := s.alerts.degradedAxes()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -220,6 +224,7 @@ func (s *Source) judgeAll(now time.Time) []rankJudgement {
 		h.observeRank0(t.rank0Pods, t.worsePods, now)
 
 		w := h.window(t.pods)
+		th := s.thresholds()
 		out = append(out, rankJudgement{
 			axis:   key,
 			class:  class,
@@ -228,9 +233,19 @@ func (s *Source) judgeAll(now time.Time) []rankJudgement {
 				Class:      class,
 				Window:     w,
 				Conditions: s.conditionsFor(class, h, t.podSeconds, now),
-			}, s.thresholds()),
+				Baseline:   s.baselines.baseline(class.Axis, now, s.cfg.Baselines),
+			}, th),
 		})
+		// Judged first, learned second, so a window is never compared against
+		// a normal it has already moved. And only a full-enough window is
+		// learned from: the ring is short after a start or a re-tiering, and
+		// a two-minute window seeding the estimate would make its first
+		// hours an estimate of those two minutes.
+		if class.Scorable() && w.Elapsed >= th.MinWindow {
+			s.baselines.observe(class.Axis, w, frozen[key], now, s.cfg.Baselines)
+		}
 	}
+	s.baselines.retain(live)
 
 	// An axis whose class was deleted keeps no history. Its episodes end by
 	// being absent from the pass, which is the same eviction rule topologydrift

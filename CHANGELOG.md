@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A compute class is now judged against its own learned normal** (#463).
+  The new `rank-baseline` rule learns each class's mean achieved rank with
+  the same estimator `topology-drift` uses for placement, and reports
+  `leeway.rank_degraded` with `reason=rank-baseline` when a window's mean
+  rank rises above it. That catches a class that always ran on rank 0 and
+  now runs half on rank 1, which the absolute rules allow. It is Tier C, so
+  it is metrics-only unless `--compute-class-tier-c-signals` is set. It
+  abstains until the baseline has 200 samples and is 6h old, and it stops
+  learning while any other degradation episode is open on the class.
+  Baselines persist with `--store`; without one, every restart starts the
+  6h clock again. No new kind, flag or metric.
 - **`lookout_leeway_watch_events_total{resource,outcome}`** (#491) counts
   every event the placement subsystem's informers deliver. `resource` is
   `pod`, `node`, `deployment` or `statefulset`. `outcome` is `inert` for an

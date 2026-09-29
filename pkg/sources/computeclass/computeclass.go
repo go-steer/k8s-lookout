@@ -186,8 +186,14 @@ type Config struct {
 
 	// TierCSignals routes the Tier C kinds to sinks as well as to metrics.
 	// Off by default (§8.3): an unused preference tier is a cost observation,
-	// and it is the operator's call whether it is worth waking up for.
+	// a class running worse than its own learned normal is not a promise
+	// anybody made, and it is the operator's call whether either is worth
+	// waking up for.
 	TierCSignals bool
+
+	// Baselines configures the §7.5 estimator behind the mean-rank baseline
+	// rule (#463). The zero value takes leeway's defaults, field by field.
+	Baselines leeway.BaselineConfig
 
 	// Cluster names this cluster in the persisted episode rows.
 	Cluster string
@@ -296,6 +302,7 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, cfg Config) (*Sourc
 		pendingByClass: map[string]map[podRef]struct{}{},
 		transitions:    map[transitionKey]int64{},
 		history:        map[leeway.AxisKey]*axisHistory{},
+		baselines:      newRankBaselines(),
 		alerts:         newRankAlerts(cfg.Dwell),
 	}, nil
 }
@@ -316,7 +323,8 @@ type AlertStore interface {
 	DeleteLeewayAlertState(ctx context.Context, cluster, subjectKey, topologyKey string) error
 }
 
-// WithStore gives the source somewhere to persist its dwell timers.
+// WithStore gives the source somewhere to persist its dwell timers, and — if
+// the store also satisfies BaselineStore — its learned rank baselines.
 //
 // Optional, and running without one is a supported deployment rather than a
 // degraded mode — it is what `watch` does with no `--store`. §9.2's rule is
@@ -328,6 +336,7 @@ func (s *Source) WithStore(st AlertStore, cluster string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.store = st
+	s.baselineStore, _ = st.(BaselineStore)
 	s.cfg.Cluster = cluster
 }
 
@@ -522,6 +531,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// touched it, which for a stable node is never.
 	s.reconcile(s.clock())
 	s.loadAlerts(ctx)
+	s.loadBaselines(ctx)
 
 	ticker := time.NewTicker(s.cfg.FlushInterval)
 	defer ticker.Stop()
@@ -584,6 +594,7 @@ func (s *Source) runAlertPass(ctx context.Context) {
 			s.emitFinding(byAxis[o.Key.Axis], o, now)
 		}
 	}
+	s.flushBaselines(ctx)
 }
 
 // emitFinding builds, routes and sends the §8.5 payload for one episode.

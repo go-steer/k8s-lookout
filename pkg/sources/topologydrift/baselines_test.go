@@ -293,8 +293,14 @@ func TestBaselineLog_LoadSkipsWhatItCannotUse(t *testing.T) {
 	noAxis := good
 	noAxis.SubjectKey = logKey("axisless").Subject.String()
 	noAxis.TopologyKey = ""
+	// compute-class's rank baseline, sharing the table (#463): a clean row
+	// with a subject this source does not score. Adopting it would get it
+	// reaped — and deleted from the store — on the first sample pass.
+	foreign := good
+	foreign.SubjectKey = leeway.SubjectRef{Kind: leeway.SubjectPreferenceAxis, Name: "n4-preferred"}.String()
+	foreign.TopologyKey = "gke-computeclass/rank-baseline"
 
-	n, _ := l.Load([]leeway.BaselineRecord{good, damaged, unparseable, noAxis}, logT0.Add(2*time.Hour), cfg)
+	n, _ := l.Load([]leeway.BaselineRecord{good, damaged, unparseable, noAxis, foreign}, logT0.Add(2*time.Hour), cfg)
 	if n != 1 || l.Len() != 1 {
 		t.Errorf("loaded %d (Len %d), want only the good row", n, l.Len())
 	}

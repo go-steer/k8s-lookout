@@ -287,7 +287,8 @@ persisted alert table: a common prefix would let topology-drift's
 clearance observer report a rank incident recovered on its first sweep,
 and a hyphen instead of a colon makes that parse fail outright rather
 than half-succeed. And their `reason` is the judging rule
-(`wedged`, `rank0-share`, `last-rank`, `no-migration`, `tier-unused`)
+(`wedged`, `rank0-share`, `last-rank`, `rank-baseline`, `no-migration`,
+`tier-unused`)
 rather than a suspected cause, because a rank verdict names the
 measurement it failed, not a hypothesis about why.
 
