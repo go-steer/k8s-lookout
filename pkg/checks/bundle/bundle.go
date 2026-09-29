@@ -203,7 +203,9 @@ func composedKinds() []checks.KindField {
 	var out []checks.KindField
 	add := func(kinds []checks.KindField) {
 		for _, k := range kinds {
-			if seen[k.Name] {
+			// delta.ScanObjects does not run the hpa class: the
+			// bundle lists no autoscalers.
+			if seen[k.Name] || strings.HasPrefix(k.Name, "hpa.") {
 				continue
 			}
 			seen[k.Name] = true

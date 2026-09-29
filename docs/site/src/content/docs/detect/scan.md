@@ -27,7 +27,7 @@ thing that is wrong is usually named before you finish reading.
 
 ### [`lookout triage delta`](/reference/triage-delta/)
 
-Every abnormal object in one scan — the first call for "anything wrong in this cluster?": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.
+Every abnormal object in one scan — the first call for "anything wrong in this cluster?": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits, autoscalers that cannot scale.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
@@ -54,6 +54,8 @@ Every abnormal object in one scan — the first call for "anything wrong in this
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
+| `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
 
 ### [`lookout state webhooks`](/reference/state-webhooks/)
 

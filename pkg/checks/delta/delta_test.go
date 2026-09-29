@@ -52,13 +52,14 @@ func TestHealthyClusterEmitsNothing(t *testing.T) {
 		pdb("prod", "web-pdb", 1, 3, 2, 3),
 		quota("prod", "compute", map[string][2]string{"pods": {"10", "1"}}),
 		healthyCronJob("prod", "backup"),
+		healthyHPA("prod", "web"),
 	)
 	res := checktest.Run(t, cmd)
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
 	}
-	// 1 pod + 2 deployments + 1 node + 1 pdb + 1 quota + 1 cronjob = 7.
-	if want := "scanned=7 findings=0 elapsed=100ms\n"; res.Stdout != want {
+	// 1 pod + 2 deployments + 1 node + 1 pdb + 1 quota + 1 cronjob + 1 hpa = 8.
+	if want := "scanned=8 findings=0 elapsed=100ms\n"; res.Stdout != want {
 		t.Errorf("stdout = %q, want %q (healthy objects must emit nothing)", res.Stdout, want)
 	}
 }
@@ -483,6 +484,7 @@ func mixedCluster() []runtime.Object {
 		pdb("prod", "api-pdb", 0, 3, 3, 3),
 		systemDeployment("coredns", map[string]string{"k8s-app": "kube-dns"}, 2, 0),
 		quota("prod", "compute-quota", map[string][2]string{"limits.cpu": {"10", "9"}}),
+		metricsDeadHPA("prod", "web", msgNoMetrics, 20*60e9),
 	}
 }
 
@@ -503,8 +505,9 @@ func TestGoldenMixedCluster(t *testing.T) {
 		`kind=pdb.gridlocked severity=warning namespace=prod kind_of_object=PodDisruptionBudget name=api-pdb reason=DisruptionsBlocked fingerprint=sha256:53d8a361b10c0011af21b07a5da885d2d76d3b1cc8027e3a8929a2db22429d0e healthy=3 required=3 pods=3`,
 		`kind=quota.near severity=warning namespace=prod kind_of_object=ResourceQuota name=compute-quota reason=QuotaNearLimit fingerprint=sha256:12321d595a6773a7b80678b967e8b7968056c361954652cbf25a10b8e7cbdc12 resource=limits.cpu used=9 hard=10 pct=90`,
 		`kind=job.failed severity=warning namespace=prod kind_of_object=Job name=etl reason=BackoffLimitExceeded message="Job has reached the specified backoff limit" fingerprint=sha256:45a13f2c2b0345dd176dbd913f958634ef940a94aa8e64dcb3b36a71bddf9d47 failed=4`,
+		`kind=hpa.scaling_inactive severity=warning namespace=prod kind_of_object=HorizontalPodAutoscaler name=web reason=FailedGetResourceMetric message="replicas held at 3: the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API" fingerprint=sha256:8763ddae5819cb82984b15a7c933b78cccf5e4733eeadb4d8d3e82ef7f704f62 condition="ScalingActive=False" scale_target=Deployment/web replicas=3 age=20m0s`,
 		`kind=workload.rollout severity=warning namespace=prod kind_of_object=Deployment name=web reason=RolloutIncomplete fingerprint=sha256:f954cac01a76847aa7e59722fb0e7f2f85cfe25d1c8dfd610432742cb1b0fc43 desired=3 ready=1 updated=1 available=1`,
-		`scanned=11 findings=9 elapsed=100ms`,
+		`scanned=12 findings=10 elapsed=100ms`,
 	}, "\n") + "\n"
 	if res.Stdout != want {
 		t.Errorf("golden mismatch\ngot:\n%s\nwant:\n%s", res.Stdout, want)

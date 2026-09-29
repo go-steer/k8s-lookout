@@ -2,7 +2,7 @@
 
 # lookout triage delta
 
-Every abnormal object in one scan — the first call for "anything wrong in this cluster?": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.
+Every abnormal object in one scan — the first call for "anything wrong in this cluster?": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits, autoscalers that cannot scale.
 
 MCP tool: `k8s_triage_delta` (MCP profile: `triage`)
 
@@ -14,11 +14,12 @@ MCP tool: `k8s_triage_delta` (MCP profile: `triage`)
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--only` | pods,nodes,pdb,system,quota | comma-separated finding classes to scan: any subset of pods,nodes,pdb,system,quota |
+| `--only` | pods,nodes,pdb,system,quota,hpa | comma-separated finding classes to scan: any subset of pods,nodes,pdb,system,quota,hpa |
 | `--restarts` | 5 | flag containers restarted at least this many times |
 | `--pending-age` | 5m | flag Pending pods older than this; also the grace before a not-ready container in a Running pod is flagged |
 | `--quota-warn` | 90 | warn when a ResourceQuota resource reaches this percent of its hard limit (the hard limit itself is always critical) |
 | `--cron-grace` | 5m | how late a CronJob activation may be before it counts as missed; absorbs normal controller scheduling latency |
+| `--hpa-grace` | 5m | how long an HPA's AbleToScale or ScalingActive condition must have been False before it is flagged; absorbs metrics-server blips |
 
 ## Common flags (every lookout command)
 
@@ -63,6 +64,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
+| `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
 
 ## Output fields
 
@@ -88,7 +91,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `time_zone` | a CronJob's spec.timeZone, when set |
 | `last_schedule` | a CronJob's status.lastScheduleTime, or never |
 | `active_jobs` | Jobs a CronJob still has running |
-| `condition` | node condition type that is abnormal |
+| `condition` | node condition type that is abnormal; for an HPA, the False condition (AbleToScale=False or ScalingActive=False) |
 | `taint` | taint key indicating reclaim/drain |
 | `pods` | pods affected (behind a cordoned node or a PDB) |
 | `healthy` | currently healthy pods behind a PDB |
@@ -98,6 +101,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `used` | quota usage from status |
 | `hard` | quota hard limit from status |
 | `pct` | quota usage as percent of the hard limit |
+| `scale_target` | an HPA's scaleTargetRef as Kind/name |
+| `replicas` | an HPA's current replica count, where the failure holds it |
+| `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
 
 ## Output contract
 

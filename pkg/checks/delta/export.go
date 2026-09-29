@@ -48,11 +48,14 @@ type Config struct {
 	// CronGrace is how late a CronJob activation may be before it
 	// counts as missed (default 5m).
 	CronGrace time.Duration
+	// HPAGrace is how long an HPA condition must have been False
+	// before it is flagged (default 5m).
+	HPAGrace time.Duration
 }
 
 // thresholds applies the flag defaults to zero fields.
 func (c Config) thresholds() thresholds {
-	th := thresholds{restarts: c.Restarts, pendingAge: c.PendingAge, quotaWarn: c.QuotaWarn, cronGrace: c.CronGrace}
+	th := thresholds{restarts: c.Restarts, pendingAge: c.PendingAge, quotaWarn: c.QuotaWarn, cronGrace: c.CronGrace, hpaGrace: c.HPAGrace}
 	if th.restarts == 0 {
 		th.restarts = 5
 	}
@@ -64,6 +67,9 @@ func (c Config) thresholds() thresholds {
 	}
 	if th.cronGrace == 0 {
 		th.cronGrace = 5 * time.Minute
+	}
+	if th.hpaGrace == 0 {
+		th.hpaGrace = 5 * time.Minute
 	}
 	return th
 }
@@ -91,7 +97,7 @@ type Objects struct {
 // ScanCluster runs the full `triage delta` pass — the same paged
 // Lists, the same derivations — over ns ("" = all namespaces) for
 // the given finding classes (any subset of pods, nodes, pdb, system,
-// quota; empty = all). `health` (§5) delegates its delta-backed
+// quota, hpa; empty = all). `health` (§5) delegates its delta-backed
 // scorecard categories here. Returns the scanned count for the
 // caller's summary line and the findings, sorted critical-first.
 func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (int, []emit.Finding, error) {

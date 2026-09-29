@@ -159,6 +159,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `used` | quota usage from status |
 | `hard` | quota hard limit from status |
 | `pct` | quota usage as percent of the hard limit |
+| `scale_target` | an HPA's scaleTargetRef as Kind/name |
+| `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
 | `template` | log template; <*> marks positions that varied across merged lines |
 | `count` | lines merged into this cluster (on log.probe_noise: probe lines stripped) |
 | `level` | guessed log level (fatal\|error\|warn\|info\|debug) from token/field match |
