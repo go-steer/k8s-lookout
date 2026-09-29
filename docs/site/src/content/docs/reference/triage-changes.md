@@ -75,6 +75,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `image` | first container image of a rollout's new pod template (live approximation) |
 | `window` | summary-line note: the (from, to] window the answer covers, RFC 3339 |
 | `source` | summary-line note: history (delta log from --store) or live-approximation (no store; see the fidelity gap in --help) |
+| `unrecorded` | summary-line note, history only: comma-separated kinds the delta log and its snapshots cannot contain (the sentinel's graph feed never watched them), so a change to one can never be reported |
 
 ## Output contract
 

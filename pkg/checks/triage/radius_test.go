@@ -310,6 +310,11 @@ func TestRadius_At(t *testing.T) {
 		!strings.Contains(before.Stdout, "at="+t0.Format(time.RFC3339)) {
 		t.Errorf("summary must say source=history at=<resolved>:\n%s", before.Stdout)
 	}
+	// A store written by a watch-everything graph can hold every
+	// kind, so nothing is qualified.
+	if strings.Contains(before.Stdout, "unrecorded=") {
+		t.Errorf("watch-everything history must not name unrecorded kinds:\n%s", before.Stdout)
+	}
 
 	after := checktest.Run(t, cmd, "Pod/pay/pay-1",
 		"--at="+t0.Add(time.Minute).Format(time.RFC3339), "--store="+path)
@@ -460,7 +465,7 @@ func TestRadius_At_DeploymentTarget(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("Deployment target must resolve through the owner chain: exit %d, stderr %q", res.Code, res.Stderr)
 	}
-	for _, want := range []string{"name=web-7b9d", "name=n1", "source=history"} {
+	for _, want := range []string{"name=web-7b9d", "name=n1", "source=history", sentinelUnrecorded} {
 		if !strings.Contains(res.Stdout, want) {
 			t.Errorf("stdout missing %q:\n%s", want, res.Stdout)
 		}
@@ -498,5 +503,55 @@ func TestChanges_At_DeploymentTarget(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "source=history") {
 		t.Errorf("summary must say source=history:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, sentinelUnrecorded) {
+		t.Errorf("summary must name the kinds the log cannot hold (%s):\n%s", sentinelUnrecorded, res.Stdout)
+	}
+}
+
+// sentinelUnrecorded is the summary note a store written by the
+// sentinel's graph feed (pods/nodes/replicasets) earns: the routing
+// layer, network policy and CronJobs are not recorded, so their
+// absence from a history answer is not a finding (issue #396).
+const sentinelUnrecorded = "unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service"
+
+// TestChanges_StoreLive_NamesTheLogCeiling: without --at the
+// neighborhood is live and holds the routing layer, but the delta log
+// still cannot — so the note comes from the stored snapshot, not from
+// the live graph.
+func TestChanges_StoreLive_NamesTheLogCeiling(t *testing.T) {
+	path, _ := seedSentinelHistory(t)
+	live := []runtime.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "pay", Name: "web"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "pay", Name: "web"}},
+	}
+	res := checktest.Run(t, ChangesCommand(fakeDeps(live...)), "Deployment/pay/web", "--store="+path)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, sentinelUnrecorded) {
+		t.Errorf("summary must name the kinds the log cannot hold (%s):\n%s", sentinelUnrecorded, res.Stdout)
+	}
+}
+
+// TestChanges_StoreLive_EmptyStore: a store with no snapshot yet has
+// an empty log too; there is nothing to qualify and it is no error.
+func TestChanges_StoreLive_EmptyStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lookout.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	live := []runtime.Object{&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "pay", Name: "web"}}}
+	res := checktest.Run(t, ChangesCommand(fakeDeps(live...)), "Deployment/pay/web", "--store="+path)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "unrecorded=") {
+		t.Errorf("an empty store must not name unrecorded kinds:\n%s", res.Stdout)
 	}
 }

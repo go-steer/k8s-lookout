@@ -60,7 +60,11 @@ import (
 //   - Services/EndpointSlices/Ingresses/NetworkPolicies/Jobs: not on
 //     the CommonAncestors relation (or marginal — CronJob-level
 //     grouping needs a jobs watch); they arrive with the full §6.1
-//     graph in the enrichment milestone (M3), not here.
+//     graph in the enrichment milestone (M3), not here. The history
+//     snapshots serialized from this graph inherit the same ceiling,
+//     and say so: Snapshot.Unrecorded derives the kinds they cannot
+//     hold from WatchedKinds, and `triage radius --at` / `triage
+//     changes --store` print them (#396; recording them is #507).
 //   - Zone is a storm key for NODE incidents only (issue #334): a
 //     failure domain going at once is one event, and nothing smaller
 //     than the zone explains it. Pods reach their zone transitively

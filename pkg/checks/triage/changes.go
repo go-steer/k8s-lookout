@@ -91,6 +91,7 @@ func ChangesCommand(deps Deps) checks.Command {
 			{Name: "image", Doc: "first container image of a rollout's new pod template (live approximation)"},
 			{Name: "window", Doc: "summary-line note: the (from, to] window the answer covers, RFC 3339"},
 			{Name: "source", Doc: "summary-line note: history (delta log from --store) or live-approximation (no store; see the fidelity gap in --help)"},
+			{Name: "unrecorded", Doc: "summary-line note, history only: comma-separated kinds the delta log and its snapshots cannot contain (the sentinel's graph feed never watched them), so a change to one can never be reported"},
 		},
 		Examples: []string{
 			"lookout triage changes Deployment/prod/api --store=/var/lib/lookout/lookout.db",
@@ -177,6 +178,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 			if err := inv.Out.Note("at", inv.Scope.At.UTC().Format(time.RFC3339)); err != nil {
 				return 0, err
 			}
+		}
+		if err := noteLogCeiling(ctx, inv.Out, st, snap, inv.Scope.At, to); err != nil {
+			return 0, err
 		}
 		id, err := lookupTarget(snap, wl, inv.Scope.At)
 		if err != nil {
