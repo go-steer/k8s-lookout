@@ -77,7 +77,7 @@ Upgrade and patch readiness, read from the cloud provider: how far the control p
 
 ## [`lookout audit workloads`](/reference/audit-workloads/)
 
-Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, and CronJobs left suspended long enough to have skipped runs. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
+Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, and standalone Jobs left suspended past a maintenance window. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
@@ -89,6 +89,7 @@ Workload reliability posture for workloads that are healthy right now: no PodDis
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
 
 ## See also
 
