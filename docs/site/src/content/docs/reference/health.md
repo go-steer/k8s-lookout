@@ -129,7 +129,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `time_zone` | a CronJob's spec.timeZone, when set |
 | `last_schedule` | a CronJob's status.lastScheduleTime, or never |
 | `active_jobs` | Jobs a CronJob still has running |
-| `condition` | node condition type that is abnormal |
+| `condition` | node condition type that is abnormal; for an HPA, the False condition (AbleToScale=False or ScalingActive=False) |
 | `taint` | taint key indicating reclaim/drain |
 | `pods` | pods affected (behind a cordoned node or a PDB) |
 | `healthy` | currently healthy pods behind a PDB |
@@ -139,6 +139,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `used` | quota usage from status |
 | `hard` | quota hard limit from status |
 | `pct` | quota usage as percent of the hard limit |
+| `scale_target` | an HPA's scaleTargetRef as Kind/name |
+| `replicas` | an HPA's current replica count, where the failure holds it |
+| `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
 | `workload` | the target the edges were traced from as \<Kind>/\<namespace>/\<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
 | `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
 | `env` | environment variable whose valueFrom reference is broken |

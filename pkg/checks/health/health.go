@@ -275,6 +275,10 @@ func delegatedKinds() []checks.KindField {
 			if seen[k.Name] || (name == "perf probe" && !perfKinds[k.Name]) {
 				continue
 			}
+			// The delta pass below does not run the hpa class.
+			if name == "triage delta" && strings.HasPrefix(k.Name, "hpa.") {
+				continue
+			}
 			seen[k.Name] = true
 			out = append(out, k)
 		}

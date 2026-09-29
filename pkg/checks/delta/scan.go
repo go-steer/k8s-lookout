@@ -23,6 +23,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -47,7 +48,8 @@ type scanner struct {
 // scanned counts the objects of the enabled classes: pods, apps
 // workloads, Jobs and CronJobs for the pods class; Nodes for nodes; PDBs for
 // pdb; kube-system Deployments/DaemonSets for system (unless the
-// pods class already counted them); ResourceQuotas for quota. A
+// pods class already counted them); ResourceQuotas for quota; HPAs
+// for hpa. A
 // list fetched only as auxiliary input (pods when just the nodes
 // class needs per-node occupancy) is not counted — the summary
 // reflects what was assessed, not what was downloaded.
@@ -145,6 +147,15 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 		}
 		scanned += len(quotas)
 		s.checkQuotas(quotas)
+	}
+
+	if s.classes[classHPA] {
+		hpas, err := listHPAs(ctx, s.client, s.ns)
+		if err != nil {
+			return 0, nil, err
+		}
+		scanned += len(hpas)
+		s.checkHPAs(hpas)
 	}
 
 	return scanned, s.findings, nil
@@ -280,6 +291,16 @@ func listQuotas(ctx context.Context, c kubernetes.Interface, ns string) ([]corev
 		l, err := c.CoreV1().ResourceQuotas(ns).List(ctx, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("listing resourcequotas: %w", err)
+		}
+		return l.Items, l.Continue, nil
+	})
+}
+
+func listHPAs(ctx context.Context, c kubernetes.Interface, ns string) ([]autoscalingv2.HorizontalPodAutoscaler, error) {
+	return paged(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]autoscalingv2.HorizontalPodAutoscaler, string, error) {
+		l, err := c.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, opts)
+		if err != nil {
+			return nil, "", fmt.Errorf("listing horizontalpodautoscalers: %w", err)
 		}
 		return l.Items, l.Continue, nil
 	})

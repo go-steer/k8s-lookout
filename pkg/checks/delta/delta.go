@@ -49,10 +49,11 @@ const (
 	classPDB    = "pdb"    // pdb.*
 	classSystem = "system" // addon.*
 	classQuota  = "quota"  // quota.*
+	classHPA    = "hpa"    // hpa.*
 )
 
 // allClasses is the --only default, in scan order.
-var allClasses = []string{classPods, classNodes, classPDB, classSystem, classQuota}
+var allClasses = []string{classPods, classNodes, classPDB, classSystem, classQuota, classHPA}
 
 func init() {
 	checks.Register(New(kube.DefaultSource()))
@@ -71,10 +72,10 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 		Name:        "triage delta",
 		MCPName:     "k8s_triage_delta",
 		MCPProfiles: []string{"triage"},
-		Summary:     "Every abnormal object in one scan — the first call for \"anything wrong in this cluster?\": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits.",
+		Summary:     "Every abnormal object in one scan — the first call for \"anything wrong in this cluster?\": broken/pending pods, stalled rollouts, workloads blocked from creating pods at all, node pressure/NPD/preemption, gridlocked PDBs, degraded kube-system add-ons, quotas at their limits, autoscalers that cannot scale.",
 		Flags: []emit.FlagSpec{
 			{Name: "only", Type: emit.FlagString, Default: strings.Join(allClasses, ","),
-				Help: "comma-separated finding classes to scan: any subset of pods,nodes,pdb,system,quota"},
+				Help: "comma-separated finding classes to scan: any subset of pods,nodes,pdb,system,quota,hpa"},
 			{Name: "restarts", Type: emit.FlagInt, Default: "5",
 				Help: "flag containers restarted at least this many times"},
 			{Name: "pending-age", Type: emit.FlagDuration, Default: "5m",
@@ -83,6 +84,8 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 				Help: "warn when a ResourceQuota resource reaches this percent of its hard limit (the hard limit itself is always critical)"},
 			{Name: "cron-grace", Type: emit.FlagDuration, Default: "5m",
 				Help: "how late a CronJob activation may be before it counts as missed; absorbs normal controller scheduling latency"},
+			{Name: "hpa-grace", Type: emit.FlagDuration, Default: "5m",
+				Help: "how long an HPA's AbleToScale or ScalingActive condition must have been False before it is flagged; absorbs metrics-server blips"},
 		},
 		Kinds: []checks.KindField{
 			// Not "is in CrashLoopBackOff": the kubelet only wears
@@ -111,6 +114,8 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("addon.degraded", "a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available", emit.SeverityCritical, emit.SeverityWarning),
 			checks.Kind("quota.near", "a ResourceQuota resource is at or past --quota-warn percent of its hard limit", emit.SeverityWarning),
 			checks.Kind("quota.exhausted", "a ResourceQuota resource is at its hard limit: the next create is rejected", emit.SeverityCritical),
+			checks.Kind("hpa.scale_failed", "an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale", emit.SeverityWarning),
+			checks.Kind("hpa.scaling_inactive", "an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count", emit.SeverityWarning),
 		},
 		Output: []checks.OutputField{
 			{Name: "container", Doc: "container the finding is about (init containers prefixed init:)"},
@@ -131,7 +136,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "time_zone", Doc: "a CronJob's spec.timeZone, when set"},
 			{Name: "last_schedule", Doc: "a CronJob's status.lastScheduleTime, or never"},
 			{Name: "active_jobs", Doc: "Jobs a CronJob still has running"},
-			{Name: "condition", Doc: "node condition type that is abnormal"},
+			{Name: "condition", Doc: "node condition type that is abnormal; for an HPA, the False condition (AbleToScale=False or ScalingActive=False)"},
 			{Name: "taint", Doc: "taint key indicating reclaim/drain"},
 			{Name: "pods", Doc: "pods affected (behind a cordoned node or a PDB)"},
 			{Name: "healthy", Doc: "currently healthy pods behind a PDB"},
@@ -141,6 +146,9 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "used", Doc: "quota usage from status"},
 			{Name: "hard", Doc: "quota hard limit from status"},
 			{Name: "pct", Doc: "quota usage as percent of the hard limit"},
+			{Name: "scale_target", Doc: "an HPA's scaleTargetRef as Kind/name"},
+			{Name: "replicas", Doc: "an HPA's current replica count, where the failure holds it"},
+			{Name: "audit_reason", Doc: "the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one"},
 		},
 		Examples: []string{
 			"lookout triage delta",
@@ -172,6 +180,7 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		pendingAge: inv.Flags.Duration("pending-age"),
 		quotaWarn:  inv.Flags.Int("quota-warn"),
 		cronGrace:  inv.Flags.Duration("cron-grace"),
+		hpaGrace:   inv.Flags.Duration("hpa-grace"),
 	}
 	if th.restarts < 1 {
 		return 0, emit.UsageErrorf("--restarts must be at least 1, got %d", th.restarts)
@@ -187,6 +196,9 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	// future as missed.
 	if th.cronGrace < 0 {
 		return 0, emit.UsageErrorf("--cron-grace must not be negative, got %s", th.cronGrace)
+	}
+	if th.hpaGrace < 0 {
+		return 0, emit.UsageErrorf("--hpa-grace must not be negative, got %s", th.hpaGrace)
 	}
 
 	client, err := d.source(ctx)
@@ -232,6 +244,7 @@ type thresholds struct {
 	pendingAge time.Duration
 	quotaWarn  int
 	cronGrace  time.Duration
+	hpaGrace   time.Duration
 }
 
 // parseOnly validates the --only list against the known classes.

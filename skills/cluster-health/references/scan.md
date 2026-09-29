@@ -64,6 +64,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
+| `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
 | `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
@@ -179,7 +181,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `time_zone` | a CronJob's spec.timeZone, when set |
 | `last_schedule` | a CronJob's status.lastScheduleTime, or never |
 | `active_jobs` | Jobs a CronJob still has running |
-| `condition` | node condition type that is abnormal |
+| `condition` | node condition type that is abnormal; for an HPA, the False condition (AbleToScale=False or ScalingActive=False) |
 | `taint` | taint key indicating reclaim/drain |
 | `pods` | pods affected (behind a cordoned node or a PDB) |
 | `healthy` | currently healthy pods behind a PDB |
@@ -189,6 +191,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `used` | quota usage from status |
 | `hard` | quota hard limit from status |
 | `pct` | quota usage as percent of the hard limit |
+| `scale_target` | an HPA's scaleTargetRef as Kind/name |
+| `replicas` | an HPA's current replica count, where the failure holds it |
+| `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
 | `webhook` | admission webhook as <configuration>/<webhook name> |
 | `service` | service backend the webhook points at, as <namespace>/<name> |
 | `backend` | why the backend is dead: service missing, no ready endpoints, or port <p> not on service |
@@ -298,13 +303,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scope` | how much of the upgrade stream that exclusion holds back: all-upgrades, minor-upgrades or minor-and-node-upgrades |
 | `ends` | when the exclusion lifts, or `end-of-support` for one that runs until the cluster's version leaves support |
 | `days_remaining` | how much longer the exclusion has left to run |
-| `replicas` | the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count |
 | `autoscaler` | the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load |
 | `namespace_pdbs` | PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed |
 | `min_replicas` | the HPA's spec.minReplicas (nil defaults to 1, matching the API server) |
 | `max_replicas` | the HPA's spec.maxReplicas |
 | `metric` | the utilization metric the HPA cannot compute, comma-separated if more than one |
-| `scale_target` | the HPA's scaleTargetRef as Kind/name |
 | `eligible_nodes` | nodes satisfying the workload's REQUIRED placement constraint; an upper bound, since taints and cordons are not subtracted |
 | `cluster_nodes` | nodes in the cluster, so `eligible_nodes` reads as a fraction |
 | `constraint` | the label and field keys that narrow placement, sorted and capped at 8 |
