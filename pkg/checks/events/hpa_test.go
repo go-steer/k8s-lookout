@@ -15,6 +15,7 @@
 package events
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -24,6 +25,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func hpaFixture(ns, name, uid, targetKind, targetName string) *autoscalingv2.HorizontalPodAutoscaler {
@@ -179,17 +182,48 @@ func TestHPAThrash_OtherWorkloadsHPAIsExcluded(t *testing.T) {
 	}
 }
 
-// TestHPAThrash_NamespaceMode: no workload, no HPA List — the
-// analysis still runs off the event stream alone (no target detail,
-// which needs the HPA object).
+// TestHPAThrash_NamespaceMode: namespace mode is the discovery path,
+// so it names the scale target too (#377) — the caller who does not
+// yet know which workload is oscillating is the one who needs it.
 func TestHPAThrash_NamespaceMode(t *testing.T) {
-	objs := oscillation("prod", "web-hpa", "h1")
-	recs, _ := runRecords(t, testCommand(objs...), "--namespace=prod")
+	objs := append(oscillation("prod", "web-hpa", "h1"), hpaFixture("prod", "web-hpa", "h1", "Deployment", "web"))
+	for _, scope := range []string{"--namespace=prod", "-A"} {
+		t.Run(scope, func(t *testing.T) {
+			recs, _ := runRecords(t, testCommand(objs...), scope)
+			thrash := thrashRecords(t, recs)
+			if len(thrash) != 1 {
+				t.Fatalf("thrash findings = %d, want 1:\n%v", len(thrash), recs)
+			}
+			if got := thrash[0]["target"]; got != "Deployment/web" {
+				t.Errorf("target = %q, want Deployment/web", got)
+			}
+		})
+	}
+}
+
+// TestHPAThrash_NamespaceModeWithTheHPAGone: the events outlive the
+// HPA, and the analysis still runs off the event stream alone — no
+// target, because nothing is left to read it from.
+func TestHPAThrash_NamespaceModeWithTheHPAGone(t *testing.T) {
+	recs, _ := runRecords(t, testCommand(oscillation("prod", "web-hpa", "h1")...), "--namespace=prod")
 	thrash := thrashRecords(t, recs)
 	if len(thrash) != 1 {
 		t.Fatalf("thrash findings = %d, want 1:\n%v", len(thrash), recs)
 	}
 	if _, ok := thrash[0]["target"]; ok {
-		t.Errorf("namespace mode cannot know the scale target, but emitted target=%q", thrash[0]["target"])
+		t.Errorf("emitted target=%q for an HPA that no longer exists", thrash[0]["target"])
+	}
+}
+
+// TestHPAThrash_NoRescaleNoHPAList: a namespace with no HPA activity
+// does not pay for an HPA List.
+func TestHPAThrash_NoRescaleNoHPAList(t *testing.T) {
+	client := fake.NewClientset(hpaFixture("prod", "web-hpa", "h1", "Deployment", "web"))
+	source := func(context.Context) (kubernetes.Interface, error) { return client, nil }
+	runRecords(t, newCommand(source, func() time.Time { return testNow }), "--namespace=prod")
+	for _, a := range client.Actions() {
+		if a.GetResource().Resource == "horizontalpodautoscalers" {
+			t.Fatalf("listed HPAs with no rescale to explain: %v", a)
+		}
 	}
 }

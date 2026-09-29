@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`triage events --namespace` and `-A` now name what an HPA is
+  thrashing** (#377). `event.hpa_thrash` carried `target=<Kind>/<name>`
+  only with `--workload`, which is the one mode where you already know
+  the answer. The HPAs are now listed in every mode, and only when a
+  `SuccessfulRescale` event is inside the window. An HPA deleted since
+  its events were written still reports without `target=`.
 - **`lookout_leeway_last_event_timestamp_seconds` no longer costs ~490 ns
   and 4 allocations per informer event** (#499). The gauge is now stamped
   in an atomic and read at scrape time, so an inert pod update drops from
