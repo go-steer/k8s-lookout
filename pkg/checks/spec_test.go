@@ -366,12 +366,24 @@ func TestSpecClusterScoped(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gke-prod-pool-1-8f2a",
 			Labels: map[string]string{"topology.kubernetes.io/zone": "us-central1-b"}},
 		Spec: corev1.NodeSpec{PodCIDR: "10.8.4.0/24"},
-		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
-			// Pressure polarity: True is the abnormal state.
-			{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue, Reason: "KubeletHasInsufficientMemory",
-				Message: "kubelet has insufficient memory available", LastTransitionTime: specTransition},
-			{Type: corev1.NodeReady, Status: corev1.ConditionTrue, LastTransitionTime: specTransition},
-		}},
+		Status: corev1.NodeStatus{
+			NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.33.4-gke.1245000", ContainerRuntimeVersion: "containerd://2.0.6"},
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("3920m"),
+				corev1.ResourceMemory: resource.MustParse("12698Mi"),
+				corev1.ResourcePods:   resource.MustParse("110"),
+			},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("16Gi"),
+				corev1.ResourcePods:   resource.MustParse("110"),
+			},
+			Conditions: []corev1.NodeCondition{
+				// Pressure polarity: True is the abnormal state.
+				{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue, Reason: "KubeletHasInsufficientMemory",
+					Message: "kubelet has insufficient memory available", LastTransitionTime: specTransition},
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue, LastTransitionTime: specTransition},
+			}},
 	}
 	res := checktest.Run(t, specCmd(node), "no/gke-prod-pool-1-8f2a")
 	if res.Code != emit.ExitData {
