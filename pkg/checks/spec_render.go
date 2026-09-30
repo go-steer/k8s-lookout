@@ -72,6 +72,14 @@ func specFindings(kind string, t specTarget, u map[string]any) []emit.Finding {
 		head.Details = append(head.Details, configMapDetails(u)...)
 	case "Secret":
 		head.Details = append(head.Details, secretDetails(u)...)
+	case "Node":
+		// The spec alone (podCIDR, providerID, taints, unschedulable)
+		// is not what a failing node is read for; the kubelet version
+		// and the allocatable/capacity pair live in status (#376).
+		if flat := flattenSpec(u); flat != "" {
+			head.Details = append(head.Details, emit.Field{Key: "spec", Value: flat})
+		}
+		head.Details = append(head.Details, nodeDetails(u)...)
 	default:
 		if flat := flattenSpec(u); flat != "" {
 			head.Details = append(head.Details, emit.Field{Key: "spec", Value: flat})
@@ -436,6 +444,40 @@ func serviceDetails(u map[string]any) []emit.Field {
 		add("session_affinity", sa)
 	}
 	return out
+}
+
+// --- Node --------------------------------------------------------------
+
+// nodeResources are the resources a node summary names, in order: the
+// three a scheduling or eviction story turns on.
+var nodeResources = []string{"cpu", "memory", "pods"}
+
+func nodeDetails(u map[string]any) []emit.Field {
+	status := subMap(u, "status")
+	info := subMap(status, "nodeInfo")
+	var out []emit.Field
+	add := func(key, val string) {
+		if val != "" {
+			out = append(out, emit.Field{Key: key, Value: val})
+		}
+	}
+	add("kubelet", str(info, "kubeletVersion"))
+	add("runtime", str(info, "containerRuntimeVersion"))
+	add("allocatable", resourceSummary(subMap(status, "allocatable")))
+	add("capacity", resourceSummary(subMap(status, "capacity")))
+	return out
+}
+
+// resourceSummary renders a ResourceList as name:quantity pairs over
+// nodeResources, skipping the ones absent.
+func resourceSummary(m map[string]any) string {
+	var parts []string
+	for _, r := range nodeResources {
+		if q := num(m, r); q != "" {
+			parts = append(parts, r+":"+q)
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func servicePort(pm map[string]any) string {

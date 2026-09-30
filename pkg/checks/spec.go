@@ -218,7 +218,11 @@ func SpecCommand(deps SpecDeps) Command {
 			{Name: "keys", Doc: "ConfigMap/Secret data KEYS with byte sizes — values are never rendered"},
 			{Name: "condition", Doc: "abnormal status condition as Type=Status"},
 			{Name: "since", Doc: "the condition's lastTransitionTime"},
-			{Name: "spec", Doc: "kinds without a dedicated renderer: sanitized spec flattened to path=value pairs"},
+			{Name: "spec", Doc: "kinds without a dedicated renderer, and Node: sanitized spec flattened to path=value pairs"},
+			{Name: "kubelet", Doc: "Node: kubelet version"},
+			{Name: "runtime", Doc: "Node: container runtime version"},
+			{Name: "allocatable", Doc: "Node: allocatable cpu, memory and pods as name:quantity pairs"},
+			{Name: "capacity", Doc: "Node: capacity cpu, memory and pods as name:quantity pairs"},
 		},
 		Examples: []string{
 			"lookout triage spec Deployment/prod/api",

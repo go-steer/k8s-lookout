@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `addonmanager.kubernetes.io/mode=Reconcile`) and aggregated ClusterRoles
   are excluded and counted in the summary line, never silently skipped.
 
+### Changed
+
+- **A node incident's enrichment bundle is about the node** (#376).
+  The bundle on an `objectstate.node_notready` inject now carries the
+  node's spec, its abnormal conditions and the pods it runs, with
+  `node=` on the head. Before this it carried only the radius when the
+  watcher had a live topology snapshot, and nothing at all without one.
+  The node and its pods are read by List, which is what the watcher's
+  grant allows, and the pod read is narrowed to that node. Losing either
+  read still ships the other with an `enrichment_error` trailer.
+- **`lookout triage spec Node/<name>` reports the node's status
+  fields** (#376): `kubelet`, `runtime`, `allocatable` and `capacity`
+  on the `spec.resource` line. These are additive fields.
+
 ## [0.28.0] - 2026-09-30
 
 **This release widens what lookout reads, and there is nothing you need

@@ -28,6 +28,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -130,46 +133,176 @@ func TestEnrich_ServiceTakesTheScopedPathEvenWithALiveGraph(t *testing.T) {
 	}
 }
 
-// TestEnrich_ANodeIsNotAWorkloadButItsRadiusIsStillTheIncident is the
-// other half of #366. There is no workload object to GET and no
-// workload edges to validate — but the pods on that node ARE what the
-// incident is about, so the bundle keeps its radius and reports the
-// missing sections as absent rather than broken.
-func TestEnrich_ANodeIsNotAWorkloadButItsRadiusIsStillTheIncident(t *testing.T) {
+// TestEnrich_ANodeIsEnrichedAsTheNode is issue #376: the bundle for a
+// node_notready signal is about the node — its spec (kubelet,
+// allocatable vs capacity), its abnormal conditions, and the pods on
+// it — on both read paths, rather than a radius with every other
+// section trailed away (live) or nothing at all (no graph).
+func TestEnrich_ANodeIsEnrichedAsTheNode(t *testing.T) {
 	t.Parallel()
-	cs := fake.NewClientset(enrichFixtureObjects()...)
-	e := testEnricher(newMetrics(), cs, enrichLogFixture())
-	e.snapshot = liveSnapshotOf(t, enrichPod(), enrichReplicaSet(), enrichNode())
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{{"live graph", true}, {"no graph", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cs := fake.NewClientset(nodeFixtureObjects()...)
+			e := testEnricher(newMetrics(), cs, enrichLogFixture())
+			if tc.live {
+				e.snapshot = liveSnapshotOf(t, enrichPod(), enrichReplicaSet(), notReadyNode())
+			}
 
-	b := e.Incident(context.Background(), nodeSignal())
+			b := e.Incident(context.Background(), nodeSignal())
 
-	if !strings.Contains(b, "section=radius") {
-		t.Errorf("a Node bundle is its radius — the pods on it:\n%s", b)
-	}
-	if strings.Contains(b, "enrichment_error") {
-		t.Errorf("absent sections are not failures:\n%s", b)
-	}
-	if strings.Contains(b, "unsupported workload kind") {
-		t.Errorf("the bundle must not describe the resolver (#366):\n%s", b)
-	}
-	// The overflow trailers still name a command that exists: a
-	// `--workload=Node//node-1` would not.
-	for _, want := range []string{
-		`overflow section=spec cmd="lookout triage delta --only=nodes"`,
-		`overflow section=edges cmd="lookout triage delta --only=nodes"`,
-	} {
-		if !strings.Contains(b, want) {
-			t.Errorf("Node bundle missing %q:\n%s", want, b)
-		}
+			head, _, _ := strings.Cut(b, "\n")
+			for _, want := range []string{"kind_of_object=Node", "name=node-1", "node=node-1", "pods=1", "sections=spec,delta,radius"} {
+				if !strings.Contains(head, want) {
+					t.Errorf("head missing %q: %s", want, head)
+				}
+			}
+			if strings.Contains(head, "workload=") {
+				t.Errorf("a Node has no workload form: %s", head)
+			}
+			for _, want := range []string{
+				"kubelet=v1.33.4-gke.1245000",
+				"allocatable=cpu:3920m,memory:12698Mi,pods:110",
+				"kind=node.notready severity=critical kind_of_object=Node name=node-1 reason=KubeletStopped",
+				"kind=pod.crashloop",
+				"kind=radius.neighbor severity=info namespace=prod kind_of_object=Pod name=" + enrichPod().Name + " section=radius",
+			} {
+				if !strings.Contains(b, want) {
+					t.Errorf("Node bundle missing %q:\n%s", want, b)
+				}
+			}
+			// No edges and no logs: nothing to validate and nothing on
+			// the API server to read, so no trailer promises either.
+			for _, bad := range []string{"section=edges", "section=logs", "enrichment_error", "radius.missing", "elsewhere"} {
+				if strings.Contains(b, bad) {
+					t.Errorf("Node bundle must not carry %q:\n%s", bad, b)
+				}
+			}
+			if got := testutil.ToFloat64(e.metrics.enrichments.WithLabelValues("ok")); got != 1 {
+				t.Errorf("enrichments{outcome=ok} = %v, want 1", got)
+			}
+		})
 	}
 }
 
-// TestEnrich_ANodeWithoutALiveGraphIsSkippedEntirely: the scoped path
-// can only produce a workload bundle, and a Node names no workload.
-// Nothing is the right answer — the resolver's complaint would spend
-// the inject's enrichment budget describing the enricher on every
-// node signal forever (#366).
-func TestEnrich_ANodeWithoutALiveGraphIsSkippedEntirely(t *testing.T) {
+// TestEnrich_ANodeWithoutAGraphReadsOnlyItsOwnPods: the scoped path's
+// pod read is one List narrowed to the node, never a cluster-wide
+// sweep, and the node itself is read by List (the watcher's grant)
+// rather than GET.
+func TestEnrich_ANodeWithoutAGraphReadsOnlyItsOwnPods(t *testing.T) {
+	t.Parallel()
+	cs := fake.NewClientset(nodeFixtureObjects()...)
+	e := testEnricher(newMetrics(), cs, enrichLogFixture())
+
+	e.Incident(context.Background(), nodeSignal())
+
+	selectors := map[string]string{}
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "get" {
+			t.Errorf("a Node bundle reads by List only, got a GET of %s", a.GetResource().Resource)
+		}
+		if l, ok := a.(k8stesting.ListAction); ok {
+			selectors[a.GetResource().Resource] = l.GetListRestrictions().Fields.String()
+		}
+	}
+	if got := selectors["pods"]; got != "spec.nodeName=node-1" {
+		t.Errorf("pods List field selector = %q, want spec.nodeName=node-1", got)
+	}
+	if got := selectors["nodes"]; got != "metadata.name=node-1" {
+		t.Errorf("nodes List field selector = %q, want metadata.name=node-1", got)
+	}
+}
+
+// TestEnrich_ANodeBundleSurvivesEitherReadFailing: the node and its
+// pods are separate reads, and losing one still ships the other.
+// Only losing both is a resolve failure.
+func TestEnrich_ANodeBundleSurvivesEitherReadFailing(t *testing.T) {
+	t.Parallel()
+	deny := func(resources ...string) *fake.Clientset {
+		cs := fake.NewClientset(nodeFixtureObjects()...)
+		for _, r := range resources {
+			cs.PrependReactor("list", r, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, fmt.Errorf("%s is forbidden", r)
+			})
+		}
+		return cs
+	}
+	for _, tc := range []struct {
+		name    string
+		denied  []string
+		want    []string
+		outcome string
+	}{
+		{"node denied", []string{"nodes"}, []string{"section=radius", "kind=pod.crashloop", "enrichment_error stage=spec"}, "partial"},
+		{"pods denied", []string{"pods"}, []string{"section=spec", "kind=node.notready", "enrichment_error stage=radius"}, "partial"},
+		{"both denied", []string{"nodes", "pods"}, []string{"enrichment_error stage=resolve", "nodes is forbidden"}, "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := testEnricher(newMetrics(), deny(tc.denied...), enrichLogFixture())
+			b := e.Incident(context.Background(), nodeSignal())
+			for _, want := range tc.want {
+				if !strings.Contains(b, want) {
+					t.Errorf("bundle missing %q:\n%s", want, b)
+				}
+			}
+			if got := testutil.ToFloat64(e.metrics.enrichments.WithLabelValues(tc.outcome)); got != 1 {
+				t.Errorf("enrichments{outcome=%s} = %v, want 1", tc.outcome, got)
+			}
+		})
+	}
+}
+
+// notReadyNode is node-1 as a node_notready signal finds it: Ready
+// False, with the status fields a Node spec section reads.
+func notReadyNode() *corev1.Node {
+	n := enrichNode()
+	n.Status = corev1.NodeStatus{
+		NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.33.4-gke.1245000", ContainerRuntimeVersion: "containerd://2.0.6"},
+		Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("3920m"),
+			corev1.ResourceMemory: resource.MustParse("12698Mi"),
+			corev1.ResourcePods:   resource.MustParse("110"),
+		},
+		Capacity: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("4"),
+			corev1.ResourceMemory: resource.MustParse("16Gi"),
+			corev1.ResourcePods:   resource.MustParse("110"),
+		},
+		Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionFalse, Reason: "KubeletStopped",
+			Message:            "kubelet stopped posting node status",
+			LastTransitionTime: metav1.Time{Time: enrichNow.Add(-3 * time.Minute)},
+		}},
+	}
+	return n
+}
+
+// nodeFixtureObjects is the enrichment fixture with node-1 NotReady,
+// plus a pod on another node that a node-1 bundle must not read.
+func nodeFixtureObjects() []runtime.Object {
+	var out []runtime.Object
+	for _, o := range enrichFixtureObjects() {
+		if n, ok := o.(*corev1.Node); ok && n.Name == "node-1" {
+			o = notReadyNode()
+		}
+		out = append(out, o)
+	}
+	elsewhere := enrichPod()
+	elsewhere.Name = "api-7c9d8-elsewhere"
+	elsewhere.Spec.NodeName = "node-2"
+	return append(out, elsewhere)
+}
+
+// TestEnrich_ANonWorkloadWithoutALiveGraphIsSkippedEntirely: the
+// scoped path can only produce a workload bundle, and a kind that
+// names none (a PersistentVolumeClaim here) gets nothing. The
+// resolver's complaint would spend the inject's enrichment budget
+// describing the enricher on every such signal forever (#366).
+func TestEnrich_ANonWorkloadWithoutALiveGraphIsSkippedEntirely(t *testing.T) {
 	t.Parallel()
 	cs := fake.NewClientset(enrichFixtureObjects()...)
 	// A skip is decided before the read, so the List must never
@@ -178,8 +311,10 @@ func TestEnrich_ANodeWithoutALiveGraphIsSkippedEntirely(t *testing.T) {
 		return true, nil, fmt.Errorf("a skipped enrichment must not List (asked for %s)", a.GetResource().Resource)
 	})
 	e := testEnricher(newMetrics(), cs, enrichLogFixture())
+	sig := nodeSignal()
+	sig.KindOfObject, sig.Namespace, sig.Name = "PersistentVolumeClaim", enrichNS, "data"
 
-	if b := e.Incident(context.Background(), nodeSignal()); b != "" {
+	if b := e.Incident(context.Background(), sig); b != "" {
 		t.Errorf("want no bundle at all, got:\n%s", b)
 	}
 	// Counted apart from failed: "we chose not to" and "we tried and

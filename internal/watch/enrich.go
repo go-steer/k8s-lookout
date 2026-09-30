@@ -71,6 +71,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -164,17 +165,25 @@ func (e *enricher) Incident(ctx context.Context, sig engine.Signal) string {
 	defer cancel()
 	what := fmt.Sprintf("%s/%s", sig.Namespace, sig.Name)
 	b := newEnrichBundle(e.cap)
+	if sig.KindOfObject == "Node" {
+		// A Node is enriched as the object it is, on either read path
+		// (issue #376): the node_notready family is the one critical
+		// signal class whose inject used to arrive bare with --storm
+		// off, and with it on carried only the radius.
+		e.nodeIncident(ctx, sig, b)
+		return e.finish(b, "Node/"+sig.Name)
+	}
 	if e.snapshot == nil || !e.liveIncident(ctx, sig, b) {
 		if !scopedTargetKinds[sig.KindOfObject] {
 			// Nothing to build: the scoped path can only produce a
 			// workload bundle, and this kind is not one and has no
-			// workload behind it (Node, in practice). Sending the
-			// resolver's complaint instead would spend the inject's
-			// enrichment budget saying so on every node signal
-			// forever — a fact about the enricher, not about the
-			// incident (issue #366). The live path above DOES have
-			// something to say about a Node (the pods on it), which
-			// is why this gate is here and not in front of it.
+			// workload behind it. Sending the resolver's complaint
+			// instead would spend the inject's enrichment budget
+			// saying so on every such signal forever — a fact about
+			// the enricher, not about the incident (issue #366). The
+			// live path above can still have something to say (the
+			// object's radius), which is why this gate is here and
+			// not in front of it.
 			return e.skipped(what, "no workload behind a "+sig.KindOfObject)
 		}
 		e.scopedIncident(ctx, sig, b)
@@ -339,9 +348,7 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 			pods = append(pods, p)
 		}
 	}
-	slices.SortFunc(pods, func(a, b *corev1.Pod) int {
-		return strings.Compare(a.Namespace+"/"+a.Name, b.Namespace+"/"+b.Name)
-	})
+	sortPods(pods)
 	b.setTarget(wl, len(pods))
 
 	var obj any
@@ -362,14 +369,14 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 		// comment) — the trailer names the command that computes it.
 		b.skip(enrichSectionEdges, edgesCmd(wl))
 	} else {
-		// A target that is not a workload — a Node, from the
-		// node_notready family — has no workload object to GET and no
+		// A target that is not a workload (and not a Node, which
+		// nodeIncident handles) has no workload object to GET and no
 		// workload edges to validate. Those sections are absent, not
-		// broken: running them put `unsupported workload kind "Node"`
-		// in every such bundle, which describes the enricher rather
-		// than the incident (issue #366). The radius below is the
-		// part that IS about the incident, so this bundle still earns
-		// its bytes.
+		// broken: running them put `unsupported workload kind` in
+		// every such bundle, which describes the enricher rather than
+		// the incident (issue #366). The radius below is the part
+		// that IS about the incident, so this bundle still earns its
+		// bytes.
 		cmd := nonWorkloadCmd(wl)
 		b.skip(enrichSectionSpec, cmd)
 		b.skip(enrichSectionDelta, cmd)
@@ -452,6 +459,153 @@ func (e *enricher) scopedIncident(ctx context.Context, sig engine.Signal, b *enr
 	})
 	b.stage(ctx, enrichSectionLogs, logsCmd(wl), func() ([]emit.Finding, error) {
 		return e.distillFindings(ctx, pods)
+	})
+}
+
+// nodeIncident builds a Node bundle (issue #376): the sections a
+// workload bundle has, read against the node instead.
+//
+//   - spec: the Node itself — labels, taints, kubelet and runtime
+//     versions, allocatable vs capacity.
+//   - delta: the node's abnormal conditions, taints and cordon, plus
+//     whatever is abnormal about the pods on it.
+//   - radius: the pods on it, from the live graph when it holds the
+//     node, otherwise from a one-shot graph over the node and its pods.
+//
+// There are no edges (a Node references no Service, ConfigMap or
+// RBAC object to validate) and no logs (kubelet logs are not on the
+// API server, and a NotReady node's pods cannot serve theirs), so
+// those sections are omitted rather than trailed.
+//
+// Both reads are Lists, not GETs: the watcher is granted list/watch
+// on nodes and pods cluster-wide, and nothing more is needed. Either
+// may fail alone and the bundle still carries what the other one
+// produced; only both failing is a resolve failure.
+func (e *enricher) nodeIncident(ctx context.Context, sig engine.Signal, b *enrichBundle) {
+	ref := emit.WorkloadRef{Kind: "Node", Name: sig.Name}
+	node, nodeErr := e.nodeByName(ctx, sig.Name)
+	snap, id, pods, podErr := e.nodeTopology(ctx, sig.Name, node)
+	if nodeErr != nil && podErr != nil {
+		b.fail(stageResolve, nodeErr)
+		return
+	}
+	// The bundle.target head, with `node=` where a workload bundle has
+	// `workload=`: a Node has no Kind/namespace/name workload form, and
+	// `workload=Node//x` would read as a flag value no command accepts.
+	b.setTarget(ref, len(pods))
+	b.head.Details[0] = emit.Field{Key: "node", Value: sig.Name}
+
+	nodeCmd := nonWorkloadCmd(ref)
+	b.stage(ctx, enrichSectionSpec, "lookout triage spec Node/"+sig.Name, func() ([]emit.Finding, error) {
+		if nodeErr != nil {
+			return nil, nodeErr
+		}
+		return checks.SpecFindings("Node", "", node.Name, node)
+	})
+	b.stage(ctx, enrichSectionDelta, nodeCmd, func() ([]emit.Finding, error) {
+		objs := delta.Objects{Pods: make([]corev1.Pod, 0, len(pods))}
+		for _, p := range pods {
+			objs.Pods = append(objs.Pods, *p)
+		}
+		if node != nil {
+			objs.Nodes = []corev1.Node{*node}
+		}
+		return delta.ScanObjects(e.now(), delta.Config{}, objs), nil
+	})
+	b.stage(ctx, enrichSectionRadius, nodeCmd, func() ([]emit.Finding, error) {
+		if podErr != nil {
+			return nil, podErr
+		}
+		return bundle.RadiusFindings(snap, id, enrichRadiusDepth), nil
+	})
+}
+
+// nodeByName reads one Node by a name-selected List (the watcher holds
+// list on nodes, not get). The fake clientset ignores field selectors,
+// so the name is matched here too.
+func (e *enricher) nodeByName(ctx context.Context, name string) (*corev1.Node, error) {
+	l, err := e.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", name).String(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range l.Items {
+		if l.Items[i].Name == name {
+			return &l.Items[i], nil
+		}
+	}
+	return nil, fmt.Errorf("node %q not found", name)
+}
+
+// nodeTopology returns the pods scheduled on the node and a snapshot
+// holding the node's neighborhood. The live graph serves both when it
+// has the node — its pods come from the informer cache, as on the
+// workload path. Otherwise one field-selected List across namespaces
+// finds the pods, and a one-shot graph over them and the node (when
+// it was read) carries the same radius shape. That graph declares it
+// watched only Nodes and Pods, so the owners and mounts it merely
+// references render as observed=unknown, never as missing.
+func (e *enricher) nodeTopology(ctx context.Context, name string, node *corev1.Node) (*graph.Snapshot, graph.NodeID, []*corev1.Pod, error) {
+	if e.snapshot != nil {
+		if snap, err := e.snapshot(); err == nil {
+			if id, ok := snap.Lookup(graph.KindNode, "", name); ok {
+				var pods []*corev1.Pod
+				for _, edge := range snap.In(id) {
+					if edge.Kind != graph.EdgeRunsOn {
+						continue
+					}
+					ref, ok := snap.Resolve(edge.To)
+					if !ok || !ref.Observed || ref.Kind != graph.KindPod {
+						continue
+					}
+					if p, err := e.podByName(ctx, ref.Namespace, ref.Name); err == nil {
+						pods = append(pods, p)
+					}
+				}
+				sortPods(pods)
+				return snap, id, pods, nil
+			}
+		}
+	}
+	l, err := e.client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", name).String(),
+	})
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	var pods []*corev1.Pod
+	objs := make([]any, 0, len(l.Items)+1)
+	if node != nil {
+		objs = append(objs, node)
+	}
+	for i := range l.Items {
+		if p := &l.Items[i]; p.Spec.NodeName == name {
+			pods = append(pods, p)
+			objs = append(objs, p)
+		}
+	}
+	sortPods(pods)
+	g := graph.New(graph.Options{SwapInterval: -1, WatchedKinds: []graph.NodeKind{graph.KindNode, graph.KindPod}})
+	if err := g.Writer().FromObjects(slices.Values(objs)); err != nil {
+		return nil, 0, nil, err
+	}
+	snap, err := g.Snapshot()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	// A node the List could not read still exists in the graph as the
+	// pods' RunsOn target; with no pods either, there is no radius.
+	id, ok := snap.Lookup(graph.KindNode, "", name)
+	if !ok {
+		return nil, 0, nil, fmt.Errorf("node %q: no pods and no node object to build a radius from", name)
+	}
+	return snap, id, pods, nil
+}
+
+func sortPods(pods []*corev1.Pod) {
+	slices.SortFunc(pods, func(a, b *corev1.Pod) int {
+		return strings.Compare(a.Namespace+"/"+a.Name, b.Namespace+"/"+b.Name)
 	})
 }
 

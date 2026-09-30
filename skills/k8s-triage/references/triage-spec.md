@@ -73,7 +73,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `keys` | ConfigMap/Secret data KEYS with byte sizes — values are never rendered |
 | `condition` | abnormal status condition as Type=Status |
 | `since` | the condition's lastTransitionTime |
-| `spec` | kinds without a dedicated renderer: sanitized spec flattened to path=value pairs |
+| `spec` | kinds without a dedicated renderer, and Node: sanitized spec flattened to path=value pairs |
+| `kubelet` | Node: kubelet version |
+| `runtime` | Node: container runtime version |
+| `allocatable` | Node: allocatable cpu, memory and pods as name:quantity pairs |
+| `capacity` | Node: capacity cpu, memory and pods as name:quantity pairs |
 
 ## Output contract
 

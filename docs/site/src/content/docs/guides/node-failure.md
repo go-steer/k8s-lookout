@@ -57,6 +57,14 @@ reachable — inherent to any burst — and were immediately superseded:
 dedup bindings were rebound, so all their followups and outcomes route to
 the storm.
 
+The seed incident's inject carries a bundle about the node itself: its
+spec section (kubelet and runtime versions, allocatable against
+capacity), its abnormal conditions from `triage delta`, and the pods it
+runs as the radius. The node and its pods are two separate reads, so
+losing one still ships the other with an `enrichment_error` trailer.
+Without a live topology snapshot the watcher reads only that node's pods
+(one List narrowed by `spec.nodeName`) rather than skipping the bundle.
+
 The `kind=storm` inject itself (abridged) names the ancestor, the spread,
 and representative incidents, and carries a radius-only enrichment bundle —
 the blast map of the node from the live topology snapshot:
