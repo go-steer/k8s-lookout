@@ -77,6 +77,7 @@ uat_build_invocations() {
     ["health"]="-A"
     ["stab drift"]="-A"
     ["state gateway"]="-A"
+    ["state keda"]="-A"
     ["state storage"]="-A"
     ["state volumes"]="-A"
     ["state wi"]="-A"
