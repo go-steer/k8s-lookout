@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-30
+
+**This release widens what lookout reads, and there is nothing you need
+to do to upgrade.** `lookout health` now scores Service routing and
+disruption readiness, so a Service whose selector matches no pod is no
+longer invisible when every pod behind it is healthy. `triage delta`
+gains an `hpa` class for an autoscaler that cannot scale right now,
+`lookout state keda` reports KEDA scalers that have stopped scaling, and
+`audit` reports Jobs left suspended and NetworkPolicies that select
+nothing. On the placement side, `leeway` now judges a compute class
+against its own learned mean rank rather than a fixed expectation, and
+counts the watch events it handles. The fixes make history and
+`changes --store` say what they cannot see: the kinds history does not
+record are named, and deletions are reported. The OTLP export pipeline
+also passed its 24-hour soak against a collector that never answers:
+heap stayed flat and points were dropped at a bounded rate the whole
+day.
+
 ### Changed
 
 - **`lookout health` scores two more categories: `services` and

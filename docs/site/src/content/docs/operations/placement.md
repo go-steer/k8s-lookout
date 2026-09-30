@@ -172,7 +172,7 @@ carries no provisioning assumptions and prompts for a Prometheus data
 source on import. For the sidecar, there is a ConfigMap wrapper:
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.27.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.28.0"
 ```
 
 That lands `lookout-leeway-dashboard` in `agent-triage` with the
