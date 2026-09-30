@@ -119,7 +119,7 @@ remedies differ enough that a fleet rollup merging them would be
 reporting a number nobody can act on. The kinds shipped so far, from
 `audit workloads` (#190), `audit exemptions` (#234),
 `audit hardening` (#183), `audit netpol` (#185), `audit cluster`
-(#186) and `audit upgrades` (#187):
+(#186), `audit upgrades` (#187) and `audit rbac` (#184):
 
 | Kind | Reason | Object classes |
 | --- | --- | --- |
@@ -150,6 +150,9 @@ reporting a number nobody can act on. The kinds shipped so far, from
 | `audit.upgrade_blocked` | `MaintenanceExclusionBlocksPatches`, `MaintenanceExclusionActive` | `Cluster` |
 | `audit.upgrade_blocked` | `StaleNodeImageType` | `NodePool` |
 | `audit.upgrade_unattended` | `NoMaintenanceWindow`, `NoUpgradeNotifications` | `Cluster` |
+| `audit.cluster_admin_binding` | `ClusterAdminClusterWide` | `ClusterRoleBinding` |
+| `audit.cluster_admin_binding` | `ClusterAdminInNamespace` | `RoleBinding` |
+| `audit.wildcard_rbac` | `FullWildcard`, `WildcardVerbs`, `WildcardResources` | `ClusterRole`, `Role` |
 
 Several of these carry more than one reason, which is the recipe
 working as intended rather than an exception to it. `audit.rigid_scheduling`,

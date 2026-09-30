@@ -73,6 +73,7 @@ uat_build_invocations() {
     # Namespace-scoped sweeps.
     ["audit hardening"]="-A"
     ["audit netpol"]="-A"
+    ["audit rbac"]="-A"
     ["audit workloads"]="-A"
     ["health"]="-A"
     ["stab drift"]="-A"

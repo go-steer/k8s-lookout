@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`lookout audit rbac` reports RBAC posture** (#184):
+  `audit.cluster_admin_binding` for a binding whose role grants every
+  verb on every resource (cluster-admin by name or by rules; warning for
+  a ClusterRoleBinding, info for a RoleBinding), and `audit.wildcard_rbac`
+  for a Role or ClusterRole with wildcard verbs or resources. Objects the
+  platform reconciles (`kubernetes.io/bootstrapping=rbac-defaults`,
+  `addonmanager.kubernetes.io/mode=Reconcile`) and aggregated ClusterRoles
+  are excluded and counted in the summary line, never silently skipped.
+
 ## [0.28.0] - 2026-09-30
 
 **This release widens what lookout reads, and there is nothing you need
