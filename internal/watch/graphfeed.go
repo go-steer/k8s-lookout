@@ -18,11 +18,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	netv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -57,14 +62,25 @@ import (
 //     so the shared-config ancestor exists as a referenced identity
 //     (Observed=false) without paying for informer caches of ConfigMap
 //     payloads — the correlation key needs the identity, not the data.
-//   - Services/EndpointSlices/Ingresses/NetworkPolicies/Jobs: not on
-//     the CommonAncestors relation (or marginal — CronJob-level
-//     grouping needs a jobs watch); they arrive with the full §6.1
-//     graph in the enrichment milestone (M3), not here. The history
-//     snapshots serialized from this graph inherit the same ceiling,
-//     and say so: Snapshot.Unrecorded derives the kinds they cannot
-//     hold from WatchedKinds, and `triage radius --at` / `triage
-//     changes --store` print them (#396; recording them is #507).
+//   - Services/EndpointSlices/Ingresses/NetworkPolicies: not on the
+//     CommonAncestors relation, so correlation never needs them. But
+//     the history snapshots and delta log are serialized from this
+//     graph, and "was the Service still selecting these pods at
+//     onset?" is often the whole post-mortem question. So with a
+//     --store they ARE watched (routingKinds, #507), and without one
+//     they cost nothing. They add Selects/Governs/RoutesTo edges and
+//     owner edges into themselves only — none of which the storm
+//     keys, the enrichment owner walk or NodeCount read — and
+//     Ancestors refuses to resolve a Service (see there), so a store
+//     changes what history can answer and never which session an
+//     incident lands in.
+//   - Jobs (and through them CronJobs): deliberately not, even with a
+//     store. A watched Job extends a pod's owner chain to its CronJob,
+//     which the storm keys and enrichment's top-owner walk both read,
+//     so recording it would make --store change correlation. CronJob
+//     therefore stays the one kind history names unrecorded
+//     (Snapshot.Unrecorded, printed by `triage radius --at` / `triage
+//     changes --store`, #396).
 //   - Zone is a storm key for NODE incidents only (issue #334): a
 //     failure domain going at once is one event, and nothing smaller
 //     than the zone explains it. Pods reach their zone transitively
@@ -72,11 +88,24 @@ import (
 type graphFeed struct {
 	factories sharedFactories
 	graph     *graph.Graph
+	// watched is the informer set Run registers — baseKinds plus the
+	// routing kinds this feed was given — and the graph's WatchedKinds.
+	watched []graph.NodeKind
 
 	mu    sync.Mutex
 	armed bool
 	buf   []graph.Delta
 }
+
+// baseKinds is the informer set storm correlation needs, and the whole
+// feed without a store.
+var baseKinds = []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet}
+
+// routingKinds is the §6.1 traffic/policy layer the feed additionally
+// watches when a --store is configured, so history answers the routing
+// questions live does (#507). Callers pass the subset
+// probeRoutingAccess found granted.
+var routingKinds = []graph.NodeKind{graph.KindService, graph.KindEndpointSlice, graph.KindIngress, graph.KindNetworkPolicy}
 
 // newGraphFeed constructs the feed over the runner's externally owned
 // shared informer factories (the same ones the object-state source
@@ -91,20 +120,84 @@ type graphFeed struct {
 // tracking entirely). Initial-sync deltas — the objects listed at
 // startup, including the handler Adds that race the listing — emit
 // nothing: they are baseline, covered by the first stored snapshot.
-func newGraphFeed(factories sharedFactories, onChange func(graph.ChangeRecord)) *graphFeed {
+//
+// routing names the routingKinds to watch as well — only ever with a
+// store, and only those whose grants probeRoutingAccess verified.
+func newGraphFeed(factories sharedFactories, onChange func(graph.ChangeRecord), routing ...graph.NodeKind) *graphFeed {
+	watched := append(slices.Clone(baseKinds), routing...)
 	return &graphFeed{
 		factories: factories,
+		watched:   watched,
 		graph: graph.New(graph.Options{
 			OnChange: onChange,
 			// The honesty declaration behind Ref.Observed: exactly the
-			// informer set Run registers (pods/nodes/replicasets). For
-			// these kinds an unobserved node is a REAL absence; every
-			// other kind exists here identity-only (see the "not
-			// watched" list above), so radius consumers must report it
-			// as unknown, never as missing.
-			WatchedKinds: []graph.NodeKind{graph.KindPod, graph.KindNode, graph.KindReplicaSet},
+			// informer set Run registers. For these kinds an unobserved
+			// node is a REAL absence; every other kind exists here
+			// identity-only (see the "not watched" list above), so
+			// radius consumers must report it as unknown, never as
+			// missing.
+			WatchedKinds: watched,
 		}),
 	}
+}
+
+// routingAccess is the RBAC each routing kind's informer needs.
+// EndpointSlices are already list+watch-granted for object-state and
+// degradation; the rest were list-only (or absent) before #507.
+var routingAccess = map[graph.NodeKind][]sources.Requirement{
+	graph.KindService: {
+		{Resource: "services", Verb: "list"},
+		{Resource: "services", Verb: "watch"},
+	},
+	graph.KindEndpointSlice: {
+		{Group: "discovery.k8s.io", Resource: "endpointslices", Verb: "list"},
+		{Group: "discovery.k8s.io", Resource: "endpointslices", Verb: "watch"},
+	},
+	graph.KindIngress: {
+		{Group: "networking.k8s.io", Resource: "ingresses", Verb: "list"},
+		{Group: "networking.k8s.io", Resource: "ingresses", Verb: "watch"},
+	},
+	graph.KindNetworkPolicy: {
+		{Group: "networking.k8s.io", Resource: "networkpolicies", Verb: "list"},
+		{Group: "networking.k8s.io", Resource: "networkpolicies", Verb: "watch"},
+	},
+}
+
+// probeRoutingAccess decides which routingKinds the feed can record.
+// Unlike probeGraphAccess this DEGRADES: --store is an opt-in to
+// history, not to recording any particular kind, so a missing grant
+// drops that kind with one line naming it, and the history written
+// says so itself — the kind lands in Snapshot.Unrecorded, so every
+// `--at` answer ends unrecorded=<kind>. A probe that cannot be
+// evaluated is still fatal (§11: "could not verify" is not "assumed
+// fine").
+func probeRoutingAccess(ctx context.Context, reviewer sources.AccessReviewer) (granted []graph.NodeKind, lines []string, err error) {
+	for _, kind := range routingKinds {
+		denied := ""
+		for _, req := range routingAccess[kind] {
+			d, err := reviewer.Allowed(ctx, req)
+			if err != nil {
+				return nil, nil, fmt.Errorf("graph history: capability probe for %q failed: %w", req, err)
+			}
+			if !d.Allowed {
+				denied = fmt.Sprintf("%q denied — %s", req, sources.DenialDetail(d))
+				break
+			}
+		}
+		if denied != "" {
+			lines = append(lines, fmt.Sprintf("graph history: not recording %s (%s) — history will name it unrecorded=; grant list+watch (deploy/12-clusterrole-watcher.yaml) to record it (#507)", kind, denied))
+			continue
+		}
+		granted = append(granted, kind)
+	}
+	if len(granted) > 0 {
+		names := make([]string, len(granted))
+		for i, k := range granted {
+			names[i] = k.String()
+		}
+		lines = append(lines, fmt.Sprintf("graph history: recording the routing layer (%s) because --store is set (#507)", strings.Join(names, ", ")))
+	}
+	return granted, lines, nil
 }
 
 // graphAccess is the RBAC the feed's informers need. pods/nodes match
@@ -146,15 +239,21 @@ func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) erro
 // deltas until ctx is cancelled. Blocking; the sentinel runs it in a
 // goroutine and treats an error as fatal.
 func (g *graphFeed) Run(ctx context.Context) error {
-	podInf := g.factories.Namespaced.Core().V1().Pods().Informer()
-	nodeInf := g.factories.Cluster.Core().V1().Nodes().Informer()
-	rsInf := g.factories.Namespaced.Apps().V1().ReplicaSets().Informer()
+	infs := make([]cache.SharedIndexInformer, 0, len(g.watched))
+	for _, kind := range g.watched {
+		infs = append(infs, g.informer(kind))
+	}
 
 	var regs []cache.ResourceEventHandlerRegistration
-	for _, inf := range []cache.SharedIndexInformer{podInf, nodeInf, rsInf} {
+	for _, inf := range infs {
 		h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj any) { g.enqueue(graph.OpAdd, obj) },
-			UpdateFunc: func(_, obj any) { g.enqueue(graph.OpUpdate, obj) },
+			AddFunc: func(obj any) { g.enqueue(graph.OpAdd, obj) },
+			UpdateFunc: func(old, obj any) {
+				if routingUnchanged(old, obj) {
+					return
+				}
+				g.enqueue(graph.OpUpdate, obj)
+			},
 			DeleteFunc: func(obj any) { g.enqueue(graph.OpDelete, tombstoneObj(obj)) },
 		})
 		if err != nil {
@@ -185,7 +284,7 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	// §6.6 delta log. The first snapshot stored after arming captures
 	// the baseline.
 	var objs []any
-	for _, inf := range []cache.SharedIndexInformer{podInf, nodeInf, rsInf} {
+	for _, inf := range infs {
 		objs = append(objs, inf.GetStore().List()...)
 	}
 	w := g.graph.Writer()
@@ -202,6 +301,69 @@ func (g *graphFeed) Run(ctx context.Context) error {
 	<-ctx.Done()
 	w.Close()
 	return nil
+}
+
+// informer returns the shared informer for one watched kind: nodes on
+// the cluster-scoped factory, everything else on the namespaced one.
+// newGraphFeed is only ever handed baseKinds and routingKinds, so the
+// default is unreachable.
+func (g *graphFeed) informer(kind graph.NodeKind) cache.SharedIndexInformer {
+	ns := g.factories.Namespaced
+	switch kind {
+	case graph.KindPod:
+		return ns.Core().V1().Pods().Informer()
+	case graph.KindNode:
+		return g.factories.Cluster.Core().V1().Nodes().Informer()
+	case graph.KindReplicaSet:
+		return ns.Apps().V1().ReplicaSets().Informer()
+	case graph.KindService:
+		return ns.Core().V1().Services().Informer()
+	case graph.KindEndpointSlice:
+		return ns.Discovery().V1().EndpointSlices().Informer()
+	case graph.KindIngress:
+		return ns.Networking().V1().Ingresses().Informer()
+	case graph.KindNetworkPolicy:
+		return ns.Networking().V1().NetworkPolicies().Informer()
+	default:
+		panic(fmt.Sprintf("graph feed: no informer for %v", kind))
+	}
+}
+
+// routingUnchanged reports an EndpointSlice update that moves nothing
+// the graph derives from it: its labels (the service-name link and the
+// tracked label summary), its owners, and the pods its endpoints
+// target. That is most of them. The endpoint controller rewrites a
+// slice on every readiness flip behind it, and a not-ready endpoint
+// stays listed, so membership only moves when a pod comes or goes.
+// Without this filter each flip would log one delta-log row per slice
+// on top of the pod's own — the store growth #507 warned about. Every
+// other kind passes through.
+func routingUnchanged(old, cur any) bool {
+	o, ok := old.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return false
+	}
+	c, ok := cur.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return false
+	}
+	return maps.Equal(o.Labels, c.Labels) &&
+		slices.EqualFunc(o.OwnerReferences, c.OwnerReferences, func(a, b metav1.OwnerReference) bool {
+			return a.Kind == b.Kind && a.Name == b.Name && a.UID == b.UID
+		}) &&
+		slices.Equal(endpointPods(o), endpointPods(c))
+}
+
+// endpointPods is the ordered list of pod names a slice's endpoints
+// target — the RoutesTo edges the graph derives from it.
+func endpointPods(eps *discoveryv1.EndpointSlice) []string {
+	var out []string
+	for i := range eps.Endpoints {
+		if ref := eps.Endpoints[i].TargetRef; ref != nil && ref.Kind == "Pod" {
+			out = append(out, ref.Name)
+		}
+	}
+	return out
 }
 
 // armAndReplay drains the pre-arm buffer, replays it onto the writer,
@@ -255,7 +417,8 @@ func tombstoneObj(obj any) any {
 // directly after.
 func (g *graphFeed) enqueue(op graph.Op, obj any) {
 	switch obj.(type) {
-	case *corev1.Pod, *corev1.Node, *appsv1.ReplicaSet:
+	case *corev1.Pod, *corev1.Node, *appsv1.ReplicaSet,
+		*corev1.Service, *discoveryv1.EndpointSlice, *netv1.Ingress, *netv1.NetworkPolicy:
 	default:
 		return // tombstone with unexpected content, etc.
 	}
@@ -340,7 +503,12 @@ func (g *graphFeed) Ancestors(ref engine.ObjectRef) []engine.Ancestor {
 		return nil
 	}
 	kind, ok := stormObjectKinds[ref.Kind]
-	if !ok {
+	if !ok || kind == graph.KindService {
+		// A Service is on no CommonAncestors relation, and before #507
+		// it was never in this index at all. With a --store it is, and
+		// resolving it would hand a Service incident a namespace key
+		// it never had — correlation that depends on whether history
+		// is configured. It stays per-incident, as it always was.
 		return nil
 	}
 	id, ok := snap.Lookup(kind, ref.Namespace, ref.Name)

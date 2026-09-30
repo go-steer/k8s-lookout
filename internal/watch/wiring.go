@@ -1164,11 +1164,26 @@ func (r *runner) run(ctx context.Context) error {
 		// graph delta also logs a ChangeRecord through the store's
 		// buffered writer. Without one, onChange stays nil and the
 		// graph skips change tracking entirely.
+		//
+		// The store also buys the routing layer (#507): Services,
+		// EndpointSlices, Ingresses and NetworkPolicies are watched so
+		// history can answer Selects/RoutesTo, each only if its grant
+		// probes allowed. A sentinel without a store never starts
+		// those informers — correlation does not read them.
 		var onChange func(graph.ChangeRecord)
+		var routing []graph.NodeKind
 		if occStore != nil {
 			onChange = occStore.RecordGraphChange
+			kinds, lines, err := probeRoutingAccess(ctx, sources.NewAccessReviewer(client))
+			if err != nil {
+				return err
+			}
+			for _, l := range lines {
+				log.Printf("%s", l)
+			}
+			routing = kinds
 		}
-		feed = newGraphFeed(factories, onChange)
+		feed = newGraphFeed(factories, onChange, routing...)
 	} else if f.storm == stormOn {
 		log.Printf("storm: disabled (--storm-window=0)")
 	}

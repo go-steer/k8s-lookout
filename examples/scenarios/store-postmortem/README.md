@@ -96,18 +96,17 @@ lookout triage changes Deployment/lookout-demo/web        --at "$onset" --store 
   and says `source=live-approximation`.
 - History rows carry no `ready=` and mark referenced-only kinds
   `observed=unknown`; live rows do the opposite.
-
-## Known gap, asserted rather than ignored
-
-- **#507** — history has no `Selects`/`RoutesTo` at all: the graph feed
-  watches pods, nodes and replicasets, so the whole routing layer is
-  missing from `--at`. The output does say so — the summary line ends
-  `unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service`
-  (#396), which the case asserts too — but the layer is still not
-  recorded.
-
-`examples/uat-cases/60-store.sh` pins it with a refutation that will
-fail — loudly, naming the issue — the moment it is fixed.
+- `radius --at` on `web` has the Service in front of it
+  (`relation=Selects`) and its EndpointSlice (`relation=RoutesTo`),
+  exactly as live does: with a `--store` the graph feed records the
+  routing layer (#507).
+- Both `--at` summaries end `unrecorded=CronJob` (#396). Jobs stay
+  unwatched even with a store — a watched Job would extend the owner
+  chain storm correlation keys on — so CronJob is the one kind history
+  says it cannot hold. The local sentinel runs on your admin kubeconfig,
+  so every routing grant is present; a sentinel whose role lacks one
+  logs `graph history: not recording <Kind>` at startup and names that
+  kind in `unrecorded=` too.
 
 ## What is left behind
 

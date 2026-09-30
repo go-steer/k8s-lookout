@@ -81,6 +81,17 @@ Two properties worth knowing:
   and ReplicaSets the live cluster has already deleted and forgotten —
   that is the point. History stores topology, not status, so fields like pod
   readiness are omitted in history mode rather than guessed.
+- **History holds what the feed watched, and says what it did not.**
+  The sentinel's graph watches pods, nodes and ReplicaSets for storm
+  correlation; with `--store` it also watches Services, EndpointSlices,
+  Ingresses and NetworkPolicies, so `--at` answers `Selects`/`RoutesTo`/
+  `Governs` the way live does. Jobs are never watched — a watched Job
+  would extend the owner chain storm correlation keys on, and a store
+  must not change which session an incident lands in — so every `--at`
+  answer ends `unrecorded=CronJob`, plus any routing kind whose grant
+  was missing at startup. EndpointSlice updates that only flip readiness
+  are not logged: the delta log records a slice when its labels, owner or
+  target pods change, which is everything the graph derives from it.
 - **Replay does not cross a sentinel restart.** Snapshot generations are
   per-process, so a `--at` window spanning a restart is currently
   unanswerable from the store — a known, documented gap. Post-mortems

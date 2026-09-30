@@ -99,7 +99,13 @@ Always check `source=` before trusting a historical answer:
 Two current limits, found and documented by the drill: replay cannot cross
 a sentinel restart (query within one incarnation), and historical targets
 must be a Pod or ReplicaSet (the sentinel graph feed holds Deployments
-identity-only). Both are known, tracked gaps.
+identity-only). Both are known, tracked gaps. The routing layer, by
+contrast, is recorded: a store written by a sentinel with the shipped
+ClusterRole holds Services, EndpointSlices, Ingresses and
+NetworkPolicies (#507), so "which Service was selecting these pods at
+onset?" has a history answer. The summary's `unrecorded=` field lists
+whatever the store cannot hold — `CronJob`, and any routing kind the
+sentinel's role could not watch.
 
 ## As an agent skill
 
