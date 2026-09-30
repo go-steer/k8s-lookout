@@ -110,18 +110,23 @@ uat_store_radius() {
   uat_refute_stdout 'ready=' \
     "triage radius --at → and readiness is absent rather than guessed from now"
 
-  # The graph feed watches pods, nodes and replicasets; Services and
-  # EndpointSlices are deliberately outside it, which is right for
-  # storm correlation and sets the ceiling for the post-mortem path
-  # too. Live has the routing layer above; history cannot, and says so
-  # by name (#396) — "not recorded" is not "absent".
-  uat_expect_stdout 'unrecorded=CronJob,EndpointSlice,Ingress,NetworkPolicy,Service' \
-    "triage radius --at → the summary names the kinds history cannot hold (#396)"
-  # A KNOWN GAP, asserted so it is visible rather than discovered:
-  # recording the routing layer is #507. When it lands this
-  # refutation fails and points there.
-  uat_refute_stdout 'relation=(Selects|RoutesTo)' \
-    "triage radius --at → history still records no routing layer (#507)"
+  # With a --store the graph feed also watches the routing layer
+  # (#507), so history answers the same Selects/RoutesTo live does
+  # above. This sentinel runs on an admin kubeconfig, so every routing
+  # grant probes allowed; a narrower role would drop a kind and name it
+  # in unrecorded= instead.
+  uat_expect_stdout 'kind_of_object=Service name=web direction=upstream relation=Selects' \
+    "triage radius --at → history holds the Service in front of the workload (#507)"
+  uat_expect_stdout 'kind_of_object=EndpointSlice .*direction=upstream relation=RoutesTo' \
+    "triage radius --at → and the EndpointSlice behind it (#507)"
+  # Jobs stay unwatched even with a store (a watched Job would extend
+  # the owner chain storm correlation keys on), so CronJob is the one
+  # kind history still cannot hold — and says so by name (#396): "not
+  # recorded" is not "absent".
+  uat_expect_stdout 'unrecorded=CronJob( |$)' \
+    "triage radius --at → the summary names only CronJob as unrecordable (#396, #507)"
+  uat_refute_stdout 'unrecorded=[A-Za-z,]*Service' \
+    "triage radius --at → Service is no longer named unrecorded (#507)"
 
   # (c) --depth bounds the walk. Asserted from a POD, because from a
   # Deployment the interesting hops are laterals, and laterals are a
@@ -165,8 +170,8 @@ uat_store_changes() {
   # instant and the window.
   uat_expect_stdout "^scanned=.* source=history at=$UAT_STORE_ONSET( [a-z_]+=[^ ]+)* window=" \
     "triage changes --at → the summary names the mode, the instant and the window"
-  uat_expect_stdout "^scanned=.* unrecorded=[A-Za-z,]*Service" \
-    "triage changes --at → the summary names the kinds history cannot contain (#396)"
+  uat_expect_stdout "^scanned=.* unrecorded=CronJob( |$)" \
+    "triage changes --at → the summary names the one kind history cannot contain (#396, #507)"
 
   # All three relations, from one query. The scoping vocabulary is
   # self|upstream|lateral, and a case that asserted one of them would

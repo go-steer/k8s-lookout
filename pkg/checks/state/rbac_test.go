@@ -63,6 +63,10 @@ var otherSourceBulkReads = []ListRequirement{
 	// operator's own hardware preference, not workload state. There are only
 	// ever a handful of these objects in a cluster.
 	{"cloud.google.com", "computeclasses"},
+	// graph history, #507: with --store the watch topology graph records
+	// NetworkPolicy→Pod Governs edges (internal/watch routingAccess). Pod
+	// selectors only; no informer starts without a store.
+	{"networking.k8s.io", "networkpolicies"},
 }
 
 // TestShippedClusterRoleGrantsSubsetOfLoadCluster is the least-privilege

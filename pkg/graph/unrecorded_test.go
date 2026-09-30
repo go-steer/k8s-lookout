@@ -85,9 +85,12 @@ func TestSnapshot_Unrecorded_IsExact(t *testing.T) {
 	objs := fullCluster()
 	sets := map[string][]NodeKind{
 		"sentinel graph feed": {KindPod, KindNode, KindReplicaSet},
-		"routing layer only":  {KindService, KindEndpointSlice, KindIngress},
-		"jobs without pods":   {KindJob},
-		"nodes only":          {KindNode},
+		// With --store the feed adds the routing layer (#507).
+		"sentinel graph feed with store": {KindPod, KindNode, KindReplicaSet,
+			KindService, KindEndpointSlice, KindIngress, KindNetworkPolicy},
+		"routing layer only": {KindService, KindEndpointSlice, KindIngress},
+		"jobs without pods":  {KindJob},
+		"nodes only":         {KindNode},
 	}
 	for name, watched := range sets {
 		t.Run(name, func(t *testing.T) {
@@ -119,29 +122,47 @@ func TestSnapshot_Unrecorded_IsExact(t *testing.T) {
 }
 
 // TestSnapshot_Unrecorded_SentinelFeed pins the answer #396 is about,
-// through the history encoding the --at path restores from: the
-// sentinel's snapshots cannot hold the routing layer, and say so.
+// through the history encoding the --at path restores from. The feed
+// without the routing layer (grants denied) cannot hold it, and says
+// so; the feed a --store gives it (#507) is short only CronJob, because
+// Jobs stay unwatched so a store never changes correlation.
 func TestSnapshot_Unrecorded_SentinelFeed(t *testing.T) {
 	t.Parallel()
-	g := New(Options{SwapInterval: -1, WatchedKinds: []NodeKind{KindPod, KindNode, KindReplicaSet}})
-	if err := g.Writer().FromObjects(slices.Values([]any{fullCluster()[KindPod]})); err != nil {
-		t.Fatal(err)
-	}
-	s, err := g.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := s.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	restored, err := Restore(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []NodeKind{KindCronJob, KindEndpointSlice, KindIngress, KindNetworkPolicy, KindService}
-	if got := restored.Unrecorded(); !slices.Equal(got, want) {
-		t.Errorf("Unrecorded() = %v, want %v", got, want)
+	for name, tc := range map[string]struct {
+		watched []NodeKind
+		want    []NodeKind
+	}{
+		"routing denied": {
+			watched: []NodeKind{KindPod, KindNode, KindReplicaSet},
+			want:    []NodeKind{KindCronJob, KindEndpointSlice, KindIngress, KindNetworkPolicy, KindService},
+		},
+		"with store": {
+			watched: []NodeKind{KindPod, KindNode, KindReplicaSet, KindService, KindEndpointSlice, KindIngress, KindNetworkPolicy},
+			want:    []NodeKind{KindCronJob},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			g := New(Options{SwapInterval: -1, WatchedKinds: tc.watched})
+			if err := g.Writer().FromObjects(slices.Values([]any{fullCluster()[KindPod]})); err != nil {
+				t.Fatal(err)
+			}
+			s, err := g.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := s.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := Restore(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := restored.Unrecorded(); !slices.Equal(got, tc.want) {
+				t.Errorf("Unrecorded() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

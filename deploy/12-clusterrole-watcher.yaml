@@ -80,6 +80,15 @@
 #                       resolves ON when this grant is present and
 #                       off (loudly) when it is not; --storm=on makes
 #                       the gap a fatal startup error instead.
+#   - list/watch services, ingresses, networkpolicies (+ the
+#     endpointslices grant below) — graph history (§6.6, #507): with
+#                       --store the topology graph also records the
+#                       routing layer, so `triage radius/changes --at`
+#                       answer Selects/RoutesTo/Governs the way live
+#                       does. No store, no informers. Each kind is
+#                       probed separately at startup and a denial
+#                       DEGRADES: one log line, and history names the
+#                       kind in its unrecorded= summary field.
 #   - list/watch horizontalpodautoscalers — the autoscaling source
 #                       (DESIGN.md §7.2, enabled via
 #                       --sources=…,autoscaling): HPA pinned-at-max
@@ -192,12 +201,25 @@ rules:
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    # Enrichment scoped-list continued: services + configmaps feed
-    # the bundle's edges section (reference-integrity checks). List
-    # only — ConfigMap VALUES never leave pkg/emit unsanitized, and
-    # the graph ingests metadata + content hashes only (§6.5).
-    resources: ["services", "configmaps"]
+    # Enrichment scoped-list continued: configmaps feed the bundle's
+    # edges section (reference-integrity checks). List only —
+    # ConfigMap VALUES never leave pkg/emit unsanitized, and the graph
+    # ingests metadata + content hashes only (§6.5).
+    resources: ["configmaps"]
     verbs: ["list"]
+  - apiGroups: [""]
+    # "list" for the enrichment scoped-list pass (above); "watch" for
+    # graph history (#507): with --store the topology graph watches
+    # Services so `--at` answers Selects/RoutesTo. Harmless without a
+    # store (no informer starts); denied, history names Service in
+    # unrecorded= rather than failing startup.
+    resources: ["services"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    # "list" for enrichment; "watch" for graph history's Ingress
+    # informer (#507), exactly as services above.
+    resources: ["ingresses"]
+    verbs: ["list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     # ingressclasses answers "is any controller configured to serve
     # this Ingress" — an Ingress naming an absent class, or naming
@@ -205,8 +227,16 @@ rules:
     # server and then served by nothing, with no event to find.
     # Cluster-scoped and tiny: names and the is-default-class
     # annotation, nothing else is read.
-    resources: ["ingresses", "ingressclasses"]
+    resources: ["ingressclasses"]
     verbs: ["list"]
+  - apiGroups: ["networking.k8s.io"]
+    # Graph history (#507): with --store the topology graph records
+    # NetworkPolicy→Pod Governs edges, so `--at` can say which
+    # policies selected a pod at onset. Pod selectors only — no rule
+    # content leaves the graph. Same degrade-not-fail semantics as
+    # services above.
+    resources: ["networkpolicies"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     # The topology-drift source's FR-8 pin predicate: a pod bound to a
     # volume that cannot follow it to another zone is drift nobody can

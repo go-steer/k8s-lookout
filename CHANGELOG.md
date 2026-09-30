@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform reconciles (`kubernetes.io/bootstrapping=rbac-defaults`,
   `addonmanager.kubernetes.io/mode=Reconcile`) and aggregated ClusterRoles
   are excluded and counted in the summary line, never silently skipped.
+- **Graph history now records the routing layer** (#507). With `--store`,
+  the sentinel's topology graph also watches Services, EndpointSlices,
+  Ingresses and NetworkPolicies, so `triage radius --at` and `triage
+  changes --at` answer `Selects`/`RoutesTo`/`Governs` the same way the live
+  path does — "was the Service still selecting these pods at onset?" is now
+  a question the store can answer. The `unrecorded=` summary field shrinks
+  to `unrecorded=CronJob`: Jobs stay unwatched, because a watched Job would
+  extend the owner chain storm correlation keys on, and a store must never
+  change which session an incident lands in. A sentinel without `--store`
+  starts none of these informers. EndpointSlice updates that change only
+  readiness (most of them) are not logged — a slice's graph edges move only
+  when its labels, owner or target pods do — so the delta log grows with
+  membership changes, not with every readiness flip. **The shipped
+  ClusterRole gains `watch` on `services` and `ingresses` and
+  `list`/`watch` on `networkpolicies`; operators who copied the ClusterRole
+  into their own manifests should add them.** Without them the sentinel
+  still starts: each routing kind is probed at startup, and a denied one is
+  skipped with a `graph history: not recording <Kind>` log line and named in
+  `unrecorded=` instead.
 
 ### Changed
 

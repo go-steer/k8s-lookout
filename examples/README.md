@@ -273,8 +273,9 @@ would pass just as well if `--at` silently reported *now*, which is the
 one wrong answer a post-mortem tool must never give. So its fixture
 manufactures an object that exists only inside the window, and each
 `--at` assertion has a live control that must fail to find what `--at`
-finds. It also pins a known gap as a refutation naming its issue
-(#507), so a fix breaks the assertion instead of going unnoticed.
+finds. It also pins the history's own honesty note: the routing layer
+is recorded (#507), so `Selects`/`RoutesTo` appear at `--at` too, and
+the summary names only `unrecorded=CronJob`.
 
 ## CI
 

@@ -30,9 +30,16 @@ graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — -
 - **Graph history** — compressed topology snapshots every
   `--graph-snapshot-interval` (default 5m) plus the per-delta change
   log. Written only when storm correlation runs (that is the graph
-feed). This
-  is what serves `--at` point-in-time queries and `triage changes`' full
-  delta log.
+  feed). This is what serves `--at` point-in-time queries and `triage
+  changes`' full delta log. A store also widens the feed: it watches
+  the routing layer (Services, EndpointSlices, Ingresses,
+  NetworkPolicies) so history answers `Selects`/`RoutesTo` like live
+  does (#507). Each of those kinds is probed at startup; one the role
+  cannot watch is skipped with a `graph history: not recording <Kind>`
+  line rather than failing the sentinel, and named in `unrecorded=`.
+  EndpointSlice updates that only flip readiness are filtered before
+  they reach the log, so the routing layer costs rows per membership
+  change, not per readiness flip.
 - **Triage-status records** — the diagnosis records written by
   [`lookout triage status`](/reference/triage-status/) and flipped to
   `resolved` automatically by recovery injects.
