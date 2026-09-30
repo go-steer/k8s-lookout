@@ -107,6 +107,7 @@ func init() {
 	checks.Register(ExemptionsCommand())
 	checks.Register(HardeningCommand(Deps{}))
 	checks.Register(NetpolCommand(Deps{}))
+	checks.Register(RBACCommand(Deps{}))
 	checks.Register(UpgradesCommand(Deps{}))
 	checks.Register(WorkloadsCommand(Deps{}))
 }

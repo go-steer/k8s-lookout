@@ -528,43 +528,19 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 			}, func(s *corev1.ServiceAccount) { ix.serviceAccounts[key(s.Namespace, s.Name)] = s; ix.scanned++ })
 		},
 		func() error {
-			return listPages("rolebindings", func(o metav1.ListOptions) ([]rbacv1.RoleBinding, string, error) {
-				l, err := client.RbacV1().RoleBindings(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(r *rbacv1.RoleBinding) { ix.roleBindings = append(ix.roleBindings, r); ix.scanned++ })
+			return ListRoleBindings(ctx, client, ns, func(r *rbacv1.RoleBinding) { ix.roleBindings = append(ix.roleBindings, r); ix.scanned++ })
 		},
 		func() error {
-			return listPages("roles", func(o metav1.ListOptions) ([]rbacv1.Role, string, error) {
-				l, err := client.RbacV1().Roles(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(r *rbacv1.Role) { ix.roles[key(r.Namespace, r.Name)] = true; ix.scanned++ })
+			return ListRoles(ctx, client, ns, func(r *rbacv1.Role) { ix.roles[key(r.Namespace, r.Name)] = true; ix.scanned++ })
 		},
 		func() error {
-			return listPages("clusterrolebindings", func(o metav1.ListOptions) ([]rbacv1.ClusterRoleBinding, string, error) {
-				l, err := client.RbacV1().ClusterRoleBindings().List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(r *rbacv1.ClusterRoleBinding) {
+			return ListClusterRoleBindings(ctx, client, func(r *rbacv1.ClusterRoleBinding) {
 				ix.clusterRoleBindings = append(ix.clusterRoleBindings, r)
 				ix.scanned++
 			})
 		},
 		func() error {
-			return listPages("clusterroles", func(o metav1.ListOptions) ([]rbacv1.ClusterRole, string, error) {
-				l, err := client.RbacV1().ClusterRoles().List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(r *rbacv1.ClusterRole) { ix.clusterRoles[r.Name] = true; ix.scanned++ })
+			return ListClusterRoles(ctx, client, func(r *rbacv1.ClusterRole) { ix.clusterRoles[r.Name] = true; ix.scanned++ })
 		},
 		func() error {
 			// StorageClasses, likewise name-only: a StatefulSet's

@@ -88,6 +88,7 @@ bench_one "scan"                 scan
 bench_one "audit workloads -A"   audit workloads -A
 bench_one "audit hardening -A"   audit hardening -A
 bench_one "audit netpol -A"      audit netpol -A
+bench_one "audit rbac -A"        audit rbac -A
 bench_one "triage delta -A"      triage delta -A
 bench_one "triage events -A"     triage events -A
 bench_one "triage top -A"        triage top -A

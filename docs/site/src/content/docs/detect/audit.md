@@ -64,6 +64,15 @@ NetworkPolicy coverage posture: namespaces where nothing restricts ingress or eg
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 
+## [`lookout audit rbac`](/reference/audit-rbac/)
+
+RBAC over-permission posture: bindings that grant cluster-admin, or a role whose rules are cluster-admin under another name, and Roles/ClusterRoles whose rules use `*` for verbs or resources. Judges a binding by the rules of the role it points at, not by the role's name. Objects the platform reconciles (the bootstrap defaults, addon-manager Reconcile objects) are counted, not reported. --namespace judges that namespace's Roles and RoleBindings; ClusterRoles and ClusterRoleBindings are judged under -A. scanned counts bindings and roles examined.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
+| `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+
 ## [`lookout audit upgrades`](/reference/audit-upgrades/)
 
 Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
