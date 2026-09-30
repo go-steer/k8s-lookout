@@ -161,8 +161,12 @@ uat_store_changes() {
   uat_run triage changes "$web" --at "$UAT_STORE_ONSET" --store "$POSTMORTEM_STORE" --since=30m
   uat_expect_exit 0 "triage changes --at → exit 0"
   uat_expect_summary_line "triage changes --at → summary line"
-  uat_expect_stdout "source=history at=$UAT_STORE_ONSET window=" \
+  # Other summary fields (unrecorded=, #396) may sit between the
+  # instant and the window.
+  uat_expect_stdout "^scanned=.* source=history at=$UAT_STORE_ONSET( [a-z_]+=[^ ]+)* window=" \
     "triage changes --at → the summary names the mode, the instant and the window"
+  uat_expect_stdout "^scanned=.* unrecorded=[A-Za-z,]*Service" \
+    "triage changes --at → the summary names the kinds history cannot contain (#396)"
 
   # All three relations, from one query. The scoping vocabulary is
   # self|upstream|lateral, and a case that asserted one of them would
