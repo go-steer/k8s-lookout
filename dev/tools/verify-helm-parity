@@ -160,6 +160,27 @@ else
   exit 1
 fi
 
+# ---- the no-secrets variant: rbac.secrets=false == deploy-no-secrets/ --
+#
+# The one non-default path with a manifest of its own (#149), so it gets
+# the same exact diff rather than a render_ok: the overlay and the value
+# must drop the same rules and add the same flag.
+
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.secrets=false >"$tmp/chart-ns.raw.yaml"
+kustomize build deploy-no-secrets/ >"$tmp/kustomize-ns.raw.yaml"
+normalize "$tmp/chart-ns.raw.yaml" "$tmp/chart-ns.yaml"
+normalize "$tmp/kustomize-ns.raw.yaml" "$tmp/kustomize-ns.yaml"
+
+if diff -u "$tmp/kustomize-ns.yaml" "$tmp/chart-ns.yaml" >"$tmp/diff-ns"; then
+  echo "✓ chart with rbac.secrets=false matches deploy-no-secrets/"
+else
+  echo "✗ helm template --set rbac.secrets=false and deploy-no-secrets/ have diverged." >&2
+  echo "  Left is kustomize build deploy-no-secrets/, right is helm template." >&2
+  echo >&2
+  cat "$tmp/diff-ns" >&2
+  exit 1
+fi
+
 # ---- the chart must also be valid on its own --------------------------
 
 helm lint "$CHART" --namespace "$NAMESPACE" --quiet
@@ -183,6 +204,13 @@ render_ok "rbac disabled"           --set rbac.create=false --set rbac.capacity=
 render_ok "serviceAccount external" --set serviceAccount.create=false --set serviceAccount.name=other
 render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
 render_ok "gke flavor"              --set image.flavor=gke
+# A user who already chose an --enrich-lists keeps it; the chart must
+# not append a second one.
+if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.secrets=false \
+    --set-json 'args=["--enrich-lists=pods"]' | grep -q -- '--enrich-lists=all'; then
+  echo "✗ rbac.secrets=false appended --enrich-lists over one already in args" >&2
+  exit 1
+fi
 # Off by default, so it never appears in the diffed render above — this is the
 # only check that the CRDs the chart serves from files/ are valid manifests.
 render_ok "leewayPolicyCRD.install" --set leewayPolicyCRD.install=true

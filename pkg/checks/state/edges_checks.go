@@ -312,6 +312,34 @@ func (e *edgeScan) workloadDetail() []emit.Field {
 
 func (e *edgeScan) add(f emit.Finding) { e.findings = append(e.findings, f) }
 
+// unread reports whether the List pass skipped this resource, in which
+// case an object's absence from the index says nothing about the
+// cluster. Every check that judges existence by lookup asks this first
+// and stays silent on an unread kind: otherwise a least-privilege
+// deployment without `secrets: list` reported every Secret reference,
+// and every workload's ServiceAccount, as a critical missing_ref. The
+// skipped= note on the bundle head already names the gap (#149).
+func (e *edgeScan) unread(group, resource string) bool {
+	for _, r := range e.ix.skipped {
+		if r.Group == group && r.Resource == resource {
+			return true
+		}
+	}
+	return false
+}
+
+// refKindUnread is unread for the two kinds podRefs yields.
+func (e *edgeScan) refKindUnread(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindConfigMap:
+		return e.unread("", "configmaps")
+	case graph.KindSecret:
+		return e.unread("", "secrets")
+	default:
+		return false
+	}
+}
+
 // observed reports whether the identified object was actually seen
 // from the API server (graph Ref.Observed): false means it exists
 // only as a dangling reference.
@@ -472,7 +500,7 @@ func (e *edgeScan) checkRefs() {
 				// regardless of validity outcome.
 				e.secretRefs[key(p.Namespace, r.name)] = true
 			}
-			if r.optional {
+			if r.optional || e.refKindUnread(r.kind) {
 				continue
 			}
 			kindName := r.kind.String()
@@ -608,6 +636,9 @@ var pullSecretTypes = map[corev1.SecretType]bool{
 // pod spec, so `kubectl get pod -o yaml` shows a pod with no
 // credentials problem at all.
 func (e *edgeScan) checkImagePullSecrets() {
+	if e.unread("", "secrets") {
+		return
+	}
 	type source struct {
 		secret         string
 		serviceAccount string // "" when named by the pod spec itself
@@ -741,7 +772,7 @@ func (e *edgeScan) checkStatefulSet() {
 		}
 		// serviceName is optional from apps/v1 onward; only a name that
 		// resolves to nothing is a broken edge.
-		if svc := s.Spec.ServiceName; svc != "" && e.ix.services[key(s.Namespace, svc)] == nil {
+		if svc := s.Spec.ServiceName; svc != "" && !e.unread("", "services") && e.ix.services[key(s.Namespace, svc)] == nil {
 			e.add(emit.Finding{
 				Kind:         "edge.missing_ref",
 				Severity:     emit.SeverityCritical,
@@ -759,7 +790,7 @@ func (e *edgeScan) checkStatefulSet() {
 			// nil means "use the cluster default" — a different claim,
 			// and `state storage` owns it. "" means "no dynamic
 			// provisioning", which is legal.
-			if sc == nil || *sc == "" || e.ix.storageClasses[*sc] {
+			if sc == nil || *sc == "" || e.ix.storageClasses[*sc] || e.unread("storage.k8s.io", "storageclasses") {
 				continue
 			}
 			e.add(emit.Finding{
@@ -1304,6 +1335,9 @@ func (e *edgeScan) checkIngressClass(ing *netv1.Ingress) {
 	if ing.Annotations[legacyIngressClassAnnotation] != "" {
 		return // pre-1.18 selection; controllers still honour it
 	}
+	if e.unread("networking.k8s.io", "ingressclasses") {
+		return
+	}
 	details := append(e.workloadDetail(), emit.Field{Key: "ingress", Value: ing.Name})
 
 	if name := ing.Spec.IngressClassName; name != nil && *name != "" {
@@ -1405,7 +1439,7 @@ func (e *edgeScan) checkCerts() {
 			// A mounted-but-missing secret is already reported by
 			// checkRefs; a missing Ingress TLS secret is reported
 			// here — it is an edge of the routing chain.
-			if fromIngress && !e.secretRefs[k] {
+			if fromIngress && !e.secretRefs[k] && !e.unread("", "secrets") {
 				e.add(emit.Finding{
 					Kind:         "edge.missing_ref",
 					Severity:     emit.SeverityCritical,
@@ -1520,7 +1554,7 @@ func (e *edgeScan) checkRBAC() {
 	}
 
 	for _, sa := range sortedKeys(sas) {
-		if e.ix.serviceAccounts[key(e.wl.Namespace, sa)] == nil {
+		if e.ix.serviceAccounts[key(e.wl.Namespace, sa)] == nil && !e.unread("", "serviceaccounts") {
 			e.add(emit.Finding{
 				Kind:         "edge.missing_ref",
 				Severity:     emit.SeverityCritical,
@@ -1561,11 +1595,11 @@ func (e *edgeScan) checkRBAC() {
 		}
 		switch rb.RoleRef.Kind {
 		case "Role":
-			if !e.ix.roles[key(rb.Namespace, rb.RoleRef.Name)] {
+			if !e.ix.roles[key(rb.Namespace, rb.RoleRef.Name)] && !e.unread("rbac.authorization.k8s.io", "roles") {
 				dangling("RoleBinding", rb.Namespace, rb.Name, sa, "Role", rb.RoleRef.Name)
 			}
 		case "ClusterRole":
-			if !e.ix.clusterRoles[rb.RoleRef.Name] {
+			if !e.ix.clusterRoles[rb.RoleRef.Name] && !e.unread("rbac.authorization.k8s.io", "clusterroles") {
 				dangling("RoleBinding", rb.Namespace, rb.Name, sa, "ClusterRole", rb.RoleRef.Name)
 			}
 		}
@@ -1575,7 +1609,7 @@ func (e *edgeScan) checkRBAC() {
 		if sa == "" {
 			continue
 		}
-		if crb.RoleRef.Kind == "ClusterRole" && !e.ix.clusterRoles[crb.RoleRef.Name] {
+		if crb.RoleRef.Kind == "ClusterRole" && !e.ix.clusterRoles[crb.RoleRef.Name] && !e.unread("rbac.authorization.k8s.io", "clusterroles") {
 			dangling("ClusterRoleBinding", "", crb.Name, sa, "ClusterRole", crb.RoleRef.Name)
 		}
 	}

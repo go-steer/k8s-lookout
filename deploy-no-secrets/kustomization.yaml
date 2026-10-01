@@ -1,0 +1,72 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The cluster-wide bundle WITHOUT the Secret list grant (#149). Use it
+# INSTEAD of deploy/, not on top of it:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=vX.Y.Z"
+#
+# It is deploy/ with exactly two changes:
+#   1. the ClusterRole loses its `secrets: list` and
+#      `serviceaccounts: list` rules — §11's broadest grant (cluster-wide
+#      Secret list returns VALUES; see deploy/12) and the one that pairs
+#      with it;
+#   2. the watcher gets --enrich-lists=all,-secrets,-serviceaccounts,
+#      so the enrichment pass never asks for them (no 403 per incident
+#      in the apiserver audit log) and every bundle head says
+#      skipped=secrets,serviceaccounts.
+#
+# What that costs (docs/site operations/scoping, "Without the Secret
+# grant"): the expiry source — under the default --sources=auto it
+# skips itself at startup with one log line, taking webhook CA and
+# cert-manager expiry with it — and the Secret/ServiceAccount
+# reference checks in enrichment bundles. Everything else runs as in
+# deploy/. Per-namespace Roles granting the two lists, plus
+# --expiry-namespaces, bring expiry back for those namespaces.
+#
+# It lives beside deploy/ rather than under it because kustomize
+# refuses an overlay nested inside the base it builds on.
+#
+# The `test` ops pin each removed rule's position: if deploy/12 gains
+# or reorders a rule above them, the build fails here instead of
+# silently deleting the wrong grant. Helm: rbac.secrets=false.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy
+patches:
+  - target:
+      kind: ClusterRole
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /rules/24/resources
+        value: ["serviceaccounts"]
+      - op: remove
+        path: /rules/24
+      - op: test
+        path: /rules/23/resources
+        value: ["secrets"]
+      - op: remove
+        path: /rules/23
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: watcher
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --enrich-lists=all,-secrets,-serviceaccounts

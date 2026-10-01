@@ -56,6 +56,16 @@ spec:
           # bare flags splice in behind `watch`.
           args:
             {{- toYaml .Values.args | nindent 12 }}
+            {{- if not .Values.rbac.secrets }}
+            {{- $selected := false }}
+            {{- range .Values.args }}{{ if hasPrefix "--enrich-lists" . }}{{ $selected = true }}{{ end }}{{ end }}
+            {{- if not $selected }}
+            # rbac.secrets=false (#149): never ask for what the
+            # ClusterRole no longer grants — deploy-no-secrets/ adds
+            # the same flag.
+            - --enrich-lists=all,-secrets,-serviceaccounts
+            {{- end }}
+            {{- end }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

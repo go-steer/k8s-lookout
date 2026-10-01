@@ -322,10 +322,18 @@ rules:
   #     Role binding this same rule set per namespace, and
   #     --expiry-namespaces so the startup probe verifies exactly the
   #     scoped namespaces; or
-  #   - delete the secrets + serviceaccounts rules from YOUR copy and
-  #     run --enrich=off — under --sources=auto the expiry source
-  #     then skips itself on the missing grant with one loud line,
-  #     and the remaining sources run clean.
+  #   - the SHIPPED deploy-no-secrets/ overlay (Helm: rbac.secrets=false,
+  #     #149): this file minus the next two rules, plus
+  #     --enrich-lists=all,-secrets,-serviceaccounts. Under
+  #     --sources=auto the expiry source skips itself on the missing
+  #     grant with one loud line; enrichment keeps running and marks
+  #     its bundles skipped=secrets,serviceaccounts. Per-namespace
+  #     Roles granting the two lists plus --expiry-namespaces bring
+  #     expiry back for those namespaces. Editing THIS file: the
+  #     overlay pins the two rules' positions with `test` ops, so a
+  #     rule added or moved above them fails its build on purpose —
+  #     update the indices there (verify-helm-parity diffs it against
+  #     the chart).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]

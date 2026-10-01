@@ -57,6 +57,15 @@ rbac:
   # it is the one grant outside the sentinel's own namespace that a
   # cluster admin may reasonably refuse.
   capacity: true
+  # The ClusterRole's cluster-wide `secrets: list` (and the paired
+  # `serviceaccounts: list`) — §11's broadest grant, since a Secret list
+  # returns values. false drops both rules and appends
+  # --enrich-lists=all,-secrets,-serviceaccounts to the watcher (unless
+  # `args` already sets --enrich-lists), the same deployment as the
+  # deploy-no-secrets/ overlay (#149). Costs the expiry source (it
+  # skips itself under --sources=auto) and the Secret/ServiceAccount
+  # reference checks in enrichment bundles.
+  secrets: true
 
 # -- The optional LeewayPolicy / ClusterLeewayPolicy CRDs, which let an
 # operator declare a workload's placement intent instead of letting the

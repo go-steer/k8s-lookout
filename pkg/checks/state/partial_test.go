@@ -18,10 +18,12 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -256,6 +258,87 @@ func TestParseListSelection(t *testing.T) {
 			}
 			if g := names(got); !equal(g, tc.want) {
 				t.Errorf("ParseListSelection(%q) = %v, want %v", tc.spec, g, tc.want)
+			}
+		})
+	}
+}
+
+// TestEdgesStaySilentOnUnreadKinds is #149's correctness half: a
+// least-privilege deployment that drops `secrets`/`serviceaccounts`
+// (or any other name-lookup list) must get a partial bundle, not one
+// that reports every reference to the unread kind as missing. The
+// first row loads everything and proves each reference really is
+// dangling, so silence in the other rows is the skip, not the fixture.
+func TestEdgesStaySilentOnUnreadKinds(t *testing.T) {
+	fixture := func() []runtime.Object {
+		objs := partialFixture()
+		p := objs[2].(*corev1.Pod)
+		p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "gone-pull"}}
+		p.Spec.Containers = []corev1.Container{{
+			Name:    "c",
+			EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "gone-secret"}}}},
+		}}
+		p.Spec.Volumes = []corev1.Volume{{Name: "cfg", VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "gone-cm"}},
+		}}}
+		subject := []rbacv1.Subject{{Kind: "ServiceAccount", Name: "api", Namespace: "prod"}}
+		return append(objs,
+			&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "rb-role"}, Subjects: subject, RoleRef: rbacv1.RoleRef{Kind: "Role", Name: "gone-role"}},
+			&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "rb-cr"}, Subjects: subject, RoleRef: rbacv1.RoleRef{Kind: "ClusterRole", Name: "gone-cr"}},
+			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "crb"}, Subjects: subject, RoleRef: rbacv1.RoleRef{Kind: "ClusterRole", Name: "gone-cr"}},
+		)
+	}
+	// What each dangling reference reports when its kind IS read,
+	// keyed by finding subject name.
+	dangling := map[string]string{
+		"gone-pull":   "edge.missing_ref",
+		"gone-secret": "edge.missing_ref",
+		"gone-cm":     "edge.missing_ref",
+		"api":         "edge.missing_ref", // the ServiceAccount
+		"rb-role":     "edge.rbac_dangling",
+		"rb-cr":       "edge.rbac_dangling",
+		"crb":         "edge.rbac_dangling",
+	}
+	for _, tc := range []struct {
+		name   string
+		denied []string
+		silent []string // subjects that must not be reported
+	}{
+		{"everything read", nil, nil},
+		{"no secrets", []string{"secrets"}, []string{"gone-pull", "gone-secret"}},
+		{"no secrets or serviceaccounts", []string{"secrets", "serviceaccounts"}, []string{"gone-pull", "gone-secret", "api"}},
+		{"no configmaps", []string{"configmaps"}, []string{"gone-cm"}},
+		{"no roles", []string{"roles"}, []string{"rb-role"}},
+		{"no clusterroles", []string{"clusterroles"}, []string{"rb-cr", "crb"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(fixture()...)
+			for _, r := range tc.denied {
+				denyList(cs, r, forbidden(r))
+			}
+			c, err := LoadCluster(context.Background(), cs, metav1.NamespaceAll, Tolerate())
+			if err != nil {
+				t.Fatalf("LoadCluster: %v", err)
+			}
+			fs, err := c.EdgeFindings(emit.WorkloadRef{Kind: "Deployment", Namespace: "prod", Name: "api"}, 0, time.Now())
+			if err != nil {
+				t.Fatalf("EdgeFindings: %v", err)
+			}
+			got := map[string]string{}
+			for _, f := range fs {
+				got[f.Name] = f.Kind
+			}
+			silent := map[string]bool{}
+			for _, n := range tc.silent {
+				silent[n] = true
+				if k, ok := got[n]; ok {
+					t.Errorf("%s reported as %s, but its kind was never read", n, k)
+				}
+			}
+			for n, want := range dangling {
+				if !silent[n] && got[n] != want {
+					t.Errorf("%s: got %q, want %s — a kind that was read must still be judged", n, got[n], want)
+				}
 			}
 		})
 	}

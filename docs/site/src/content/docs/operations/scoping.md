@@ -89,6 +89,81 @@ an empty cache. `--exclude-namespace` is the right tool when you hold a
 cluster-wide grant and want to spend less; RBAC is the right tool when
 the grant itself is the problem.
 
+## Without the Secret grant
+
+The shipped ClusterRole's broadest rule is `list` on `secrets`
+cluster-wide. A Secret list returns *values*, so whoever compromises
+the sentinel pod can read every Secret in the cluster, however
+carefully the sentinel itself masks them. If your security review
+will not accept that grant, deploy the shipped variant that does not
+hold it, `deploy-no-secrets/`, *instead of* `deploy/` (first shipped
+in v0.29.0):
+
+```sh
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.29.0"
+# or, from a clone
+kubectl apply -k deploy-no-secrets/
+```
+
+With the chart, set `rbac.secrets=false`:
+
+```sh
+helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
+  --namespace agent-triage --set rbac.secrets=false   # plus your usual args
+```
+
+Both produce the same deployment (CI diffs them). It is `deploy/` with
+two changes:
+
+- The ClusterRole loses its `secrets: list` and `serviceaccounts: list`
+  rules. Every other rule is unchanged, including the `services`,
+  `ingresses` and `networkpolicies` grants that routing and the store
+  read.
+- The watcher gets `--enrich-lists=all,-secrets,-serviceaccounts`, so
+  enrichment never requests the two lists and the apiserver audit log
+  shows no 403 per incident. The chart skips this flag if your `args`
+  already set `--enrich-lists`.
+
+### What it loses
+
+- **The `expiry` source, entirely.** Under the default
+  `--sources=auto` the startup probe finds the `secrets` grant missing
+  and skips the source with one log line. Its requirements are
+  all-or-nothing, so the skip also takes webhook CA bundle expiry and
+  cert-manager renewal state with it, not just TLS-Secret and
+  ServiceAccount-token expiry. If you name `expiry` in an explicit
+  `--sources` list, startup fails instead, which is the §11 rule for
+  named sources.
+- **Secret and ServiceAccount checks in an enrichment bundle's
+  `edges` section.** These are missing or wrong-typed Secret
+  references (env, `envFrom`, volumes, `imagePullSecrets`, including
+  those inherited from the ServiceAccount), missing Secret keys, an
+  Ingress TLS secret that does not exist, the TLS certificate
+  expiry/validity checks, and whether the workload's ServiceAccount
+  exists. The bundle head says
+  `skipped=secrets,serviceaccounts`, and those checks stay silent
+  rather than reporting every reference as missing. Edges run only on
+  enrichment's scoped-list path; the live `--storm` path never ran
+  them.
+
+Everything else runs exactly as it does under `deploy/`. That includes
+every other source, the topology graph and storm correlation, node
+incidents, capacity, ConfigMap/Service/Ingress/RBAC edge checks, and
+the occurrence store.
+
+### Bringing expiry back for chosen namespaces
+
+To get expiry back for chosen namespaces, keep the variant's
+ClusterRole. In each namespace whose certificates you care about,
+create a Role granting `list` on `secrets` and `serviceaccounts`, bind
+it to the `lookout-watch` ServiceAccount, and add
+`--expiry-namespaces=a,b` to the watcher. The flag narrows what the
+source declares: per-namespace Secret and ServiceAccount lists, plus
+the webhook rules, which the variant keeps cluster-wide. So the probe
+passes and expiry runs, scanning Secrets only in those namespaces.
+Enrichment stays as it was, because `--enrich-lists` still deselects
+both kinds.
+
 ## Sources
 
 `--sources` takes a comma-separated list, and nothing requires one
