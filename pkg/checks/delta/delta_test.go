@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
@@ -207,11 +208,56 @@ func TestCrashLoopIsOneIncidentAcrossBothSubPhases(t *testing.T) {
 	}
 	waiting := line(crashloopPod("prod", "api-0"))
 	terminated := line(crashloopTerminatedPod("prod", "api-0"))
+	running := line(crashloopRunningPod("prod", "api-0"))
 	if !strings.Contains(waiting, "kind=pod.crashloop severity=critical") {
 		t.Fatalf("waiting sub-phase = %q, want a critical pod.crashloop", waiting)
 	}
 	if terminated != waiting {
 		t.Errorf("the two sub-phases of one crash loop report differently\n terminated: %s\n    waiting: %s", terminated, waiting)
+	}
+	// #522: the third sub-phase, restarted and briefly running, read
+	// as healthy below --restarts — so a watch enrichment landing in
+	// it shipped an empty delta section.
+	if running != waiting {
+		t.Errorf("the running sub-phase of one crash loop reports differently\n running: %s\n waiting: %s", running, waiting)
+	}
+}
+
+// TestRunningSubPhaseIsBoundedByTheKubeletReset pins where #522's
+// branch stops. A running container with a failed last exit is inside
+// the loop only until it has stayed up for the kubelet's backoff
+// reset; past that, one old crash is history and churn (or nothing)
+// is the diagnosis. OOM keeps precedence because it has its own
+// remedy, and a clean last exit is never a loop.
+func TestRunningSubPhaseIsBoundedByTheKubeletReset(t *testing.T) {
+	pod := func(up time.Duration, restarts int32, reason string, exit int32) *corev1.Pod {
+		p := basePod("prod", "api-0")
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: "app", Ready: true, RestartCount: restarts,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: ago(up)}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Reason: reason, ExitCode: exit,
+			}},
+		}}
+		return p
+	}
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want []finding
+	}{
+		{"just restarted", pod(20*time.Second, 1, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
+		{"just inside the reset", pod(crashLoopBackOffReset-time.Second, 1, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
+		{"at the reset, below --restarts", pod(crashLoopBackOffReset, 1, "Error", 1), nil},
+		{"recovered hours ago, past --restarts", pod(3*time.Hour, 12, "Error", 1), []finding{{"pod.restarts", "api-0", "warning"}}},
+		{"OOM keeps precedence", pod(20*time.Second, 3, "OOMKilled", 137), []finding{{"pod.oomkilled", "api-0", "warning"}}},
+		{"a clean last exit is not a loop", pod(20*time.Second, 1, "Completed", 0), nil},
+		{"no restart yet", pod(20*time.Second, 0, "Error", 1), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := runFindings(t, testCommand(tc.pod), "--only=pods")
+			assertFindings(t, got, tc.want)
+		})
 	}
 }
 
@@ -232,6 +278,7 @@ func TestCrashLoopIgnoresTheRestartThreshold(t *testing.T) {
 	for _, pod := range []*corev1.Pod{
 		crashloopPod("prod", "api-0"),
 		crashloopTerminatedPod("prod", "api-0"),
+		crashloopRunningPod("prod", "api-0"),
 	} {
 		got, _ := runFindings(t, testCommand(pod), "--only=pods", "--restarts=100000")
 		assertFindings(t, got, []finding{{"pod.crashloop", "api-0", "critical"}})

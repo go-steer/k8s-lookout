@@ -20,6 +20,8 @@ package delta
 // stalled-progress detection.
 
 import (
+	"time"
+
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,6 +29,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// crashLoopBackOffReset is how long a restarted container must stay
+// up before the kubelet forgets its crash-loop backoff: twice the
+// 5-minute maximum backoff (kubelet's backOffPeriod doubling, reset
+// after 2×MaxContainerBackOff of clean running). Until then a running
+// container with a failed last exit is still inside the loop.
+const crashLoopBackOffReset = 10 * time.Minute
 
 // imagePullReasons are the waiting reasons that mean "the kubelet
 // cannot get the image" — the pod will never start without action.
@@ -136,7 +145,8 @@ func (s *scanner) checkPending(pod *corev1.Pod) {
 // checkContainer emits at most one finding per container, worst
 // state first: crashloop > image pull > other waiting error >
 // OOM history > crashloop the kubelet has not relabelled yet >
-// restart churn > not ready. It reports whether it emitted, so
+// crashloop restarted and briefly running > restart churn > not
+// ready. It reports whether it emitted, so
 // checkPod can suppress the generic aged-pending fallback when a
 // container already carries the diagnosis.
 func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, prefix string) bool {
@@ -153,9 +163,9 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 
 	// crashloop builds the finding from whichever termination record
 	// is the freshest one available. The reason is pinned to the
-	// literal on both call sites rather than read from the status,
+	// literal on every call site rather than read from the status,
 	// because the §8 fingerprint hashes the reason and it must not
-	// move between the two sub-phases below.
+	// move between the three sub-phases below.
 	crashloop := func(t *corev1.ContainerStateTerminated) emit.Finding {
 		f := base
 		f.Kind = "pod.crashloop"
@@ -230,6 +240,27 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 	// a single failure is the pair — a non-zero exit, and a kubelet
 	// that has already restarted it at least once.
 	if t := cs.State.Terminated; t != nil && t.ExitCode != 0 && cs.RestartCount > 0 {
+		s.add(crashloop(t))
+		return true
+	}
+
+	// The cycle's third sub-phase: the kubelet has restarted the
+	// container and it is `running` again, for the seconds it takes
+	// to fail next. Neither branch above sees it, and a restart count
+	// below --restarts meant this read as healthy, so an enrichment
+	// that landed in that window shipped an empty delta section
+	// (#522). It is the same loop, so it is the same finding — the
+	// crashloop helper keeps the fingerprint across all three.
+	//
+	// "Still in the loop" is the kubelet's own definition: it resets a
+	// container's backoff only once the container has stayed up for
+	// crashLoopBackOffReset since its last start. Inside that window a
+	// fresh failure is backed off from where the loop left off; past
+	// it, one old crash is history and falls through to the restart
+	// churn rule below. That keeps a container that recovered hours
+	// ago out of here without inventing a threshold of our own.
+	if r, t := cs.State.Running, cs.LastTerminationState.Terminated; r != nil && t != nil &&
+		t.ExitCode != 0 && cs.RestartCount > 0 && s.now.Sub(r.StartedAt.Time) < crashLoopBackOffReset {
 		s.add(crashloop(t))
 		return true
 	}

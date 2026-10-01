@@ -90,7 +90,9 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 		Kinds: []checks.KindField{
 			// Not "is in CrashLoopBackOff": the kubelet only wears
 			// that label for part of each restart cycle, and this
-			// finding deliberately covers both halves. See #403.
+			// finding deliberately covers the whole cycle: waiting,
+			// terminated (#403), and restarted-but-briefly-running
+			// (#522).
 			checks.Kind("pod.crashloop", "a container is crash looping", emit.SeverityCritical),
 			checks.Kind("pod.imagepull", "a container cannot pull its image", emit.SeverityCritical),
 			checks.Kind("pod.waiting", "a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …)", emit.SeverityWarning),
