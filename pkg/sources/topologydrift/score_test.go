@@ -128,6 +128,46 @@ func TestScoreAxis_ADeclaredBoundMakesItATierAFinding(t *testing.T) {
 	}
 }
 
+// The false-positive soak's first catch: one unlabelled schedulable node — kind's
+// control plane — gave every evenly spread workload an empty fourth domain, and
+// a DoNotSchedule 3/3/3 read as skew 3 against maxSkew 1. kube-scheduler skips
+// nodes without the key, so the pods can never go there.
+func TestScoreAxis_AnEmptyUnlabelledDomainIsNotAnExpectation(t *testing.T) {
+	e := evenlyEligible("us-central1-a", "us-central1-b", "us-central1-c", leeway.DomainUnknown)
+	skew := int32(1)
+	contract := &leeway.Intent{
+		TopologyKey:       zoneKey,
+		Mode:              leeway.ModeSpread,
+		Source:            leeway.SourceTopologySpreadConstraint,
+		Confidence:        leeway.ConfidenceDeclared,
+		MaxSkew:           &skew,
+		WhenUnsatisfiable: "DoNotSchedule",
+	}
+
+	for name, intent := range map[string]*leeway.Intent{"DoNotSchedule": contract, "no intent": nil} {
+		got := ScoreAxis(zoneKey, intent, e, running(e, 3, 3, 3, 0), leeway.DefaultThresholds(), leeway.Suppression{})
+		if got.Verdict.Breached {
+			t.Errorf("%s: verdict = %+v, want no breach for 3/3/3 beside an empty unlabelled bucket", name, got.Verdict)
+		}
+		if slices.Contains(got.Scores.Domains, leeway.DomainUnknown) || slices.Contains(got.Eligible.Domains, leeway.DomainUnknown) {
+			t.Errorf("%s: scored over %v, want the empty unlabelled bucket dropped", name, got.Scores.Domains)
+		}
+		if _, ok := got.Eligible.Excluded[leeway.DomainUnknown]; !ok {
+			t.Errorf("%s: Excluded = %v, want the drop explained", name, got.Eligible.Excluded)
+		}
+	}
+
+	// Objects actually on unlabelled nodes keep it visible: that placement is
+	// the topology defect the bucket exists to show.
+	got := ScoreAxis(zoneKey, nil, e, running(e, 1, 1, 1, 6), leeway.DefaultThresholds(), leeway.Suppression{})
+	if !slices.Equal(got.Scores.Domains, e.Domains) || !got.Verdict.Breached {
+		t.Errorf("scored over %v with verdict %+v, want all four domains and the pile-up reported", got.Scores.Domains, got.Verdict)
+	}
+	if !slices.Contains(e.Domains, leeway.DomainUnknown) {
+		t.Error("ScoreAxis narrowed the caller's eligibility in place")
+	}
+}
+
 func TestScoreSubject_ScoresEveryEligibleAxisAndNotOnlyTheDeclaredOnes(t *testing.T) {
 	// The loop runs over Eligible, not Intents. Driving it off the intents
 	// would silently stop measuring the majority of an estate, since most

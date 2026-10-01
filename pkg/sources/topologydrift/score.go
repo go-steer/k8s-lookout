@@ -107,14 +107,18 @@ func ScoreSubject(res Resolution, dists map[leeway.TopologyKey]*leeway.Distribut
 // judgement: the scores themselves are recorded as measured whatever is going
 // on, because §7.4's metrics are the evidence a suppression was right.
 func ScoreAxis(key leeway.TopologyKey, intent *leeway.Intent, eligible leeway.Eligibility, dist *leeway.Distribution, t leeway.Thresholds, sup leeway.Suppression) Evaluation {
-	ev := Evaluation{Key: key, Intent: intent, Eligible: eligible, Suppression: sup}
-
 	var actual []int64
 	if dist != nil {
 		actual = dist.Counts(eligible.Domains, leeway.StateRunning)
 	} else {
 		actual = make([]int64, len(eligible.Domains))
 	}
+	// Before anything reads the domain set: the unlabelled bucket is scored
+	// only when it holds something, or it is an expectation the scheduler can
+	// never meet.
+	eligible, actual = eligible.DropEmptyUnknown(actual)
+
+	ev := Evaluation{Key: key, Intent: intent, Eligible: eligible, Suppression: sup}
 
 	var n int64
 	for _, a := range actual {
