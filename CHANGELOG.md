@@ -51,6 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields** (#376): `kubelet`, `runtime`, `allocatable` and `capacity`
   on the `spec.resource` line. These are additive fields.
 
+### Fixed
+
+- **A crash-looping container that has just been restarted is reported
+  as a crash loop** (#522). For the seconds between a restart and the
+  next crash, the container reads `running`, and `triage delta`
+  reported nothing for it unless its restart count had reached
+  `--restarts`. A watch enrichment that landed in that window shipped a
+  bundle with no delta section. It is now `pod.crashloop`, with the
+  same fingerprint as the rest of the cycle. The window is the
+  kubelet's own: a container that has stayed up for 10 minutes since a
+  failed exit has its backoff reset, and from then on it falls back to
+  `pod.restarts` (or nothing) as before.
+
 ## [0.28.0] - 2026-09-30
 
 **This release widens what lookout reads, and there is nothing you need

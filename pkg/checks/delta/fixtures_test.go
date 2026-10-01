@@ -140,11 +140,29 @@ func oomPod(ns, name string) *corev1.Pod {
 	return p
 }
 
+// crashloopRunningPod is the SAME crash loop again, in the cycle's
+// third sub-phase: the kubelet has restarted the container and it is
+// `running` for the seconds it takes to fail next (#522).
+func crashloopRunningPod(ns, name string) *corev1.Pod {
+	p := basePod(ns, name)
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "app", Ready: false, RestartCount: 12,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: ago(20 * time.Second)}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Error", ExitCode: 1,
+		}},
+	}}
+	return p
+}
+
+// restartsPod is restart churn: a container that is up now, and has
+// stayed up past the kubelet's backoff reset, but got here the hard
+// way. Up for less than that, it would still be inside a crash loop.
 func restartsPod(ns, name string, count int32) *corev1.Pod {
 	p := basePod(ns, name)
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "app", Ready: true, RestartCount: count,
-		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: ago(time.Minute)}},
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: ago(30 * time.Minute)}},
 		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 			Reason: "Error", ExitCode: 2,
 		}},
