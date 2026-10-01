@@ -203,6 +203,35 @@ func TestEligibleDomains_UnlabelledNodesBecomeAVisibleDomain(t *testing.T) {
 	}
 }
 
+func TestEligibility_DropEmptyUnknown(t *testing.T) {
+	e := EligibleDomains([]NodeView{
+		node("a1", "a", capacity(4)), node("b1", "b", capacity(8)), node("x1", "", capacity(2)),
+	}, DefaultEligibilityOptions())
+
+	got, actual := e.DropEmptyUnknown([]int64{2, 3, 0})
+	if want := []Domain{"a", "b"}; !reflect.DeepEqual(got.Domains, want) {
+		t.Fatalf("Domains = %v, want %v", got.Domains, want)
+	}
+	if !reflect.DeepEqual(actual, []int64{2, 3}) || !reflect.DeepEqual(got.CapacityCPU, []float64{4, 8}) || !reflect.DeepEqual(got.NodeCount, []int64{1, 1}) {
+		t.Errorf("actual %v, cpu %v, nodes %v: want every parallel slice realigned", actual, got.CapacityCPU, got.NodeCount)
+	}
+	if _, ok := got.Excluded[DomainUnknown]; !ok {
+		t.Errorf("Excluded = %v, want the drop explained", got.Excluded)
+	}
+	// The input is untouched: eligibility is shared across a subject's axes.
+	if len(e.Domains) != 3 || len(e.Excluded) != 0 {
+		t.Errorf("input mutated: %v / %v", e.Domains, e.Excluded)
+	}
+
+	if kept, _ := e.DropEmptyUnknown([]int64{2, 3, 1}); len(kept.Domains) != 3 {
+		t.Errorf("Domains = %v, want an occupied unlabelled bucket kept", kept.Domains)
+	}
+	plain := EligibleDomains([]NodeView{node("a1", "a"), node("b1", "b")}, DefaultEligibilityOptions())
+	if same, _ := plain.DropEmptyUnknown([]int64{0, 1}); len(same.Domains) != 2 {
+		t.Errorf("Domains = %v, want an eligibility without the bucket unchanged", same.Domains)
+	}
+}
+
 func TestEligibleDomains_NoNodes(t *testing.T) {
 	got := EligibleDomains(nil, DefaultEligibilityOptions())
 	if len(got.Domains) != 0 {

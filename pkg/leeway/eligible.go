@@ -15,6 +15,8 @@
 package leeway
 
 import (
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -320,6 +322,44 @@ func nodeUsable(n NodeView, opts EligibilityOptions) (string, bool) {
 		return "cordoned", false
 	}
 	return "", true
+}
+
+// DropEmptyUnknown removes DomainUnknown from e when the subject holds none of
+// its objects there, returning the narrowed eligibility and the actual counts
+// realigned to it. Anything else returns its inputs unchanged.
+//
+// Unlabelled nodes stay a visible domain (§7.1) so that objects placed on them
+// are counted rather than lost. What they must not get is an expectation.
+// kube-scheduler skips a node that lacks the topology key, so a DoNotSchedule
+// pod can never land on one and no spread rule ever moves objects there. An
+// equal share apportioned to the bucket is unachievable, and every evenly
+// spread subject reads as under-filled in it — skew against a domain the
+// scheduler does not count, drift towards a zone that does not exist. One
+// unlabelled schedulable node, a kubeadm control plane being the usual one,
+// was enough to raise a Tier A finding on every 3/3/3 workload in the
+// cluster.
+func (e Eligibility) DropEmptyUnknown(actual []int64) (Eligibility, []int64) {
+	i := slices.Index(e.Domains, DomainUnknown)
+	if i < 0 || i >= len(actual) || actual[i] != 0 {
+		return e, actual
+	}
+	out := e
+	out.Domains = slices.Delete(slices.Clone(e.Domains), i, i+1)
+	if i < len(e.CapacityCPU) {
+		out.CapacityCPU = slices.Delete(slices.Clone(e.CapacityCPU), i, i+1)
+	}
+	if i < len(e.CapacityMemory) {
+		out.CapacityMemory = slices.Delete(slices.Clone(e.CapacityMemory), i, i+1)
+	}
+	if i < len(e.NodeCount) {
+		out.NodeCount = slices.Delete(slices.Clone(e.NodeCount), i, i+1)
+	}
+	out.Excluded = maps.Clone(e.Excluded)
+	if out.Excluded == nil {
+		out.Excluded = make(map[Domain]string, 1)
+	}
+	out.Excluded[DomainUnknown] = "nodes carry no value for the topology key and hold none of this subject's objects"
+	return out, slices.Delete(slices.Clone(actual), i, i+1)
 }
 
 // nodeReachable is the subject's half of nodeUsable: the node passes every

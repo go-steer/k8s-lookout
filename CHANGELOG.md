@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- leeway: one schedulable node without the topology label no longer
+  causes false findings on every evenly spread workload. A typical
+  example is a kubeadm or kind control plane. Leeway counted such nodes
+  as an `__unknown__` domain and expected each workload to place a
+  share there. kube-scheduler never spreads onto a node without the
+  key, so a `DoNotSchedule` 3/3/3 workload read as skew 3 (a critical
+  Tier A `contract_violated`), and the others as drift. The bucket is
+  now scored only for a workload that actually has pods on unlabelled
+  nodes. Found by the leeway false-positive soak.
 - leeway: a zone whose every node went NotReady is now treated as a
   §7.6 domain outage. Previously only a partial loss counted: the dead
   zone left the eligible set, so the outage test never saw it. Workload

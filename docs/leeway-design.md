@@ -1761,6 +1761,22 @@ Everything downstream is computed over `Eligible` only. **This single rule remov
 the largest class of false positives**, and §7.7.6 shows a real cluster where
 skipping it would have produced a guaranteed false alarm.
 
+> **An empty `__unknown__` bucket is not scored (amended 2026-10-01).** Nodes
+> without the topology label stay a visible domain so that objects placed on
+> them are counted rather than dropped. Until this amendment, though, the bucket
+> was also apportioned an equal expected share. kube-scheduler skips nodes that
+> lack the key: a `DoNotSchedule` pod can never land on one, and no spread rule
+> moves objects there. That expectation was therefore unachievable. The
+> leeway false-positive soak found it on its first day. A kind control plane
+> (one unlabelled, schedulable node) raised Tier A `max-skew` on every 3/3/3
+> `DoNotSchedule` workload, which read as skew 3 against an empty fourth
+> domain, and Tier C drift on the rest. `ScoreAxis` now drops `__unknown__`
+> when the subject holds none of its objects there, and records the reason in
+> `Excluded`. A subject that does have objects on unlabelled nodes is still
+> scored over the bucket, which is the "a mislabelled node is itself a defect"
+> case from §11. The separate low-severity unlabelled-node finding that row
+> describes has not been built.
+
 ### 7.2 Expected distribution
 
 Given `n` replicas, eligible domains `d₁..d_m` with weights `w_i` and optional caps
@@ -4095,7 +4111,7 @@ No write access to any workload or node.
 |---|---|
 | Replicas not divisible by domains | Min achievable skew (§7.3); never report below it |
 | Domain with zero eligible nodes | Excluded from expectation unless `minDomains` requires it |
-| Nodes missing the topology label | Bucketed as `__unknown__`, surfaced as a distinct low-severity finding — a mislabelled node is itself a topology defect |
+| Nodes missing the topology label | Bucketed as `__unknown__`; scored only for a subject with objects there, since the scheduler never spreads onto a keyless node (§7.1 amendment, 2026-10-01). The distinct low-severity finding is not built — a mislabelled node is itself a topology defect |
 | DaemonSets | Expectation is one pod per eligible node; drift = nodes missing a pod, not count imbalance |
 | StatefulSet with zonal PVs | Pods marked `Pinned`; excluded from actionable drift, and `leeway.placement_drift` carries `suspectedCause: volume_pinning` |
 | Multiple ReplicaSets during rollout | Aggregated at Deployment level; per-RS available for debugging |
