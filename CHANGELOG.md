@@ -58,6 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tier A `contract_violated`), and the others as drift. The bucket is
   now scored only for a workload that actually has pods on unlabelled
   nodes. Found by the leeway false-positive soak.
+- leeway: a workload with a required `podAffinity` on
+  `kubernetes.io/hostname` is no longer judged against the assumed
+  cluster-default zone spread. Its pods must share a node with what the
+  affinity names, so they share that node's zone too. With
+  `--topology-cluster-defaults` unset, six such replicas on their
+  anchor's node read as zone skew 6/0/0 against the assumed `maxSkew`
+  5, which raised a Tier B `rollout_bias`. The assumed default now
+  stands aside on any axis containing the colocated one (hostname
+  inside zone and region, zone inside region). A spread the pod, a
+  policy or an operator declared still applies. Found by the leeway
+  false-positive soak.
 - leeway: a zone whose every node went NotReady is now treated as a
   §7.6 domain outage. Previously only a partial loss counted: the dead
   zone left the eligible set, so the outage test never saw it. Workload

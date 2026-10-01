@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 )
@@ -854,5 +855,84 @@ func TestFalsePositiveCorpus_PinnedSkewIsNotYetSuppressed(t *testing.T) {
 	}
 	if want := "normalised drift over threshold"; got.reason != want {
 		t.Errorf("reason = %q, want %q: %s", got.reason, want, got)
+	}
+}
+
+// colocatedOnAnchorNode is the soak finding of 2026-10-01: six replicas with a
+// *required* podAffinity on kubernetes.io/hostname to an anchor pod, all bound
+// to the anchor's node because that is the only node the scheduler may use.
+//
+// The pod declares no topologySpreadConstraints, so with
+// --topology-cluster-defaults unset the assumed zone default (maxSkew 5)
+// applies — and against it a placement of [6 0 0] is a Tier B rollout_bias.
+// But a node lies in exactly one zone, so colocation on hostname is colocation
+// on zone; the assumed spread contradicts a requirement the scheduler enforces
+// and has to stand aside.
+func colocatedOnAnchorNode(t *testing.T) (*Inventory, *corev1.Pod, []*corev1.Pod) {
+	t.Helper()
+	inv := NewInventory(DefaultTopologyKeys)
+	for _, z := range []string{"zone-a", "zone-b", "zone-c"} {
+		for i := range 2 {
+			inv.Upsert(node(fmt.Sprintf("%s-%d", z, i), z))
+		}
+	}
+	anchor := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "anchor"}}
+	rep := affPod(affRequired(podTerm(hostKey, anchor)))
+	pods := replicas(rep, "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0")
+	return inv, rep, pods
+}
+
+func zoneVerdict(inv *Inventory, rep *corev1.Pod, pods []*corev1.Pod, cfg ResolveConfig) (Resolution, Evaluation) {
+	res := Resolve(rep, inv, cfg)
+	dist := leeway.NewDistribution()
+	for _, p := range pods {
+		dist.Add(domainOf(inv, zoneKey, p.Spec.NodeName), leeway.StateRunning, false)
+	}
+	ev := ScoreAxis(zoneKey, res.Intents[zoneKey], res.Eligible[zoneKey], dist, leeway.DefaultThresholds(), leeway.Suppression{})
+	return res, ev
+}
+
+func TestFalsePositiveCorpus_HostnameColocationIsZoneColocation(t *testing.T) {
+	inv, rep, pods := colocatedOnAnchorNode(t)
+
+	// Assumed defaults: the configuration the soak ran.
+	res, ev := zoneVerdict(inv, rep, pods, ResolveConfig{})
+	if host := res.Intents[hostKey]; host == nil || host.Mode != leeway.ModeColocate {
+		t.Fatalf("hostname intent = %+v, want the required colocation — the fixture is not testing what it claims", host)
+	}
+	if in := ev.Intent; in != nil && in.Source == leeway.SourceClusterDefaultAssumed {
+		t.Errorf("zone intent is the assumed cluster default (%v), which contradicts the required hostname colocation", in.Evidence)
+	}
+	if d := ev.Verdict.Route(false); d.Signal {
+		t.Errorf("a subject doing what its required affinity demands raised a %s signal (tier %v, %q)",
+			d.Severity, ev.Verdict.Tier, ev.Verdict.Reason)
+	}
+
+	// The counterfactual: the same pods with no affinity are still judged
+	// against the assumed default, so the fix did not drop defaults wholesale.
+	bare := undeclared(rep)
+	if _, ev := zoneVerdict(inv, bare, replicas(bare, "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0", "zone-a-0"), ResolveConfig{}); ev.Intent == nil ||
+		ev.Intent.Source != leeway.SourceClusterDefaultAssumed || !ev.Verdict.Breached {
+		t.Errorf("without the affinity the assumed zone default should still apply and breach: intent=%+v verdict=%+v", ev.Intent, ev.Verdict)
+	}
+}
+
+// TestResolve_HostnameColocationLeavesDeclaredZoneSpreadStanding: only the
+// guess stands aside. Anything somebody wrote about the zone axis — a
+// constraint on the pod or an operator-declared cluster default — keeps its
+// §5.1 place, and if it contradicts the affinity that is a finding about the
+// workload or the cluster, not something to explain away.
+func TestResolve_HostnameColocationLeavesDeclaredZoneSpreadStanding(t *testing.T) {
+	inv, rep, _ := colocatedOnAnchorNode(t)
+
+	withTSC := rep.DeepCopy()
+	withTSC.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{zoneSpread(1, corev1.ScheduleAnyway)}
+	if got := Resolve(withTSC, inv, ResolveConfig{}).Intents[zoneKey]; got == nil || got.Source != leeway.SourceTopologySpreadConstraint {
+		t.Errorf("zone intent = %+v, want the pod's own spread constraint", got)
+	}
+
+	declared := &[]corev1.TopologySpreadConstraint{{TopologyKey: corev1.LabelTopologyZone, MaxSkew: 5, WhenUnsatisfiable: corev1.ScheduleAnyway}}
+	if got := Resolve(rep, inv, ResolveConfig{ClusterDefaults: declared}).Intents[zoneKey]; got == nil || got.Source != leeway.SourceClusterDefaultDeclared {
+		t.Errorf("zone intent = %+v, want the operator-declared cluster default", got)
 	}
 }

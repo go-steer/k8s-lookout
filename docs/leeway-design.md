@@ -791,6 +791,29 @@ and the others are retained as evidence.
 > resolves here to the spread reading with the colocation kept as evidence. The
 > CRD's `inference.sources` list (§10.1) takes the same two additions.
 
+> **A required colocation unseats an assumed spread on every axis that contains
+> it (amended 2026-10-01).** "Multiple intents on *different* topology keys
+> coexist" was wrong for one pair. A required `podAffinity` on
+> `kubernetes.io/hostname` puts every replica on a node the scheduler picked for
+> it, and a node lies in one zone and one region, so the replicas are colocated on
+> those axes too. On a cluster with `--topology-cluster-defaults` unset the
+> assumed zone default (`maxSkew` 5) still applied there, and a kind soak scored
+> six replicas sitting on their anchor's node, `[6 0 0]`, as a Tier B
+> `rollout_bias`: a workload doing exactly what the scheduler is required to do,
+> judged against a guess the scheduler could not have honoured. Resolution now
+> drops a `SourceClusterDefaultAssumed` candidate on any axis that strictly
+> contains an axis carrying a `SourcePodAffinityRequired` colocation, after the
+> policy allowlist has run. Containment is the well-known chain only — hostname
+> nests in every axis, zone in region — and a custom axis nests in nothing.
+> Only the guess stands aside: the pod's own constraint, a policy and an
+> operator-declared default keep their place, because a declaration that
+> contradicts the affinity is a finding about the workload or the cluster. The
+> coarser axis is left with **no** intent rather than a derived colocation,
+> because an induced affinity concentrates only as far as the population it names
+> does, and a derived intent would turn an anchor spread across zones into a
+> finding of its own. Fixture:
+> `TestFalsePositiveCorpus_HostnameColocationIsZoneColocation`.
+
 The cluster-default source is split in two because S4 confirmed we cannot read the
 scheduler's configuration on managed GKE, so "the cluster default is X" is sometimes
 an operator's assertion and sometimes our assumption — and those must not be the same

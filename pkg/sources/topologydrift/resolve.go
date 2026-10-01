@@ -141,6 +141,9 @@ func Resolve(pod *corev1.Pod, inv *Inventory, cfg ResolveConfig) Resolution {
 		// candidates in the order §5.1 lists them.
 		candidates = append(candidates, cfg.Policy.Intents()...)
 	}
+	// After the allowlist, so a required affinity the policy said to disregard
+	// does not unseat anything either.
+	candidates = dropAssumedDefaultsContradicted(candidates)
 	res.Intents = leeway.ResolveIntents(candidates)
 
 	constraints := ConstraintsOf(pod)

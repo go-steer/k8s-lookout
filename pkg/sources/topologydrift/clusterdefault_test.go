@@ -311,3 +311,26 @@ func TestDescribeClusterDefaults(t *testing.T) {
 		t.Errorf("declared renders as %q", got)
 	}
 }
+
+func TestNestsWithin_OnlyTheWellKnownChain(t *testing.T) {
+	cases := []struct {
+		fine, coarse leeway.TopologyKey
+		want         bool
+	}{
+		{corev1.LabelHostname, corev1.LabelTopologyZone, true},
+		{corev1.LabelHostname, corev1.LabelTopologyRegion, true},
+		{corev1.LabelHostname, "example.com/rack", true},
+		{corev1.LabelTopologyZone, corev1.LabelTopologyRegion, true},
+		{corev1.LabelFailureDomainBetaZone, corev1.LabelTopologyRegion, true},
+		{corev1.LabelTopologyZone, corev1.LabelTopologyZone, false},
+		{corev1.LabelHostname, corev1.LabelHostname, false},
+		{corev1.LabelTopologyRegion, corev1.LabelTopologyZone, false},
+		{corev1.LabelTopologyZone, corev1.LabelHostname, false},
+		{"example.com/rack", corev1.LabelTopologyZone, false},
+	}
+	for _, c := range cases {
+		if got := nestsWithin(c.fine, c.coarse); got != c.want {
+			t.Errorf("nestsWithin(%s, %s) = %v, want %v", c.fine, c.coarse, got, c.want)
+		}
+	}
+}
