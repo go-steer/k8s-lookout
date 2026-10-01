@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-01
+
+**This release gives node incidents and history more to say, and adds
+three ClusterRole grants if you want routing history.** A node that goes
+NotReady now opens with a bundle about the node — its kubelet,
+allocatable against capacity, its conditions and the pods it runs —
+rather than a bare blast radius. With `--store`, graph history records
+Services, EndpointSlices, Ingresses and NetworkPolicies, so `--at` can
+answer whether a Service still selected its pods at onset; the shipped
+ClusterRole gains `watch` on `services` and `ingresses` and
+`list`/`watch` on `networkpolicies`, and a sentinel without them still
+starts and names what it is not recording. `lookout audit rbac` reports
+cluster-admin bindings and wildcard roles, judged by their rules rather
+than their names. For operators who will not grant a cluster-wide Secret
+list, `deploy-no-secrets/` (or `rbac.secrets=false` on the chart) ships
+that configuration, and bundles no longer report unread kinds as
+missing references. A crash-looping container caught between a restart
+and its next crash is now reported as the crash loop it is.
+
 ### Added
 
 - **`lookout audit rbac` reports RBAC posture** (#184):
@@ -48,19 +67,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--expiry-namespaces` bring expiry back for chosen namespaces. CI diffs
   the overlay against the chart value.
 
-### Fixed
-
-- **Bundles no longer report unread kinds as missing** (#149). When the
-  List pass skipped a kind (denied by RBAC, or deselected with
-  `--enrich-lists`/`--lists`), the edge checks still judged existence
-  against its empty index. So a watcher without `secrets: list` reported
-  every Secret reference, every imagePullSecret and the workload's
-  ServiceAccount as a critical `edge.missing_ref`, and skipped
-  ConfigMaps, Roles, ClusterRoles, IngressClasses, StorageClasses and
-  Services did the same. Those checks are now silent on a kind the
-  `skipped=` note already names. Selector and endpoint checks over
-  skipped pods or EndpointSlices are not yet covered.
-
 ### Changed
 
 - **A node incident's enrichment bundle is about the node** (#376).
@@ -87,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kubelet's own: a container that has stayed up for 10 minutes since a
   failed exit has its backoff reset, and from then on it falls back to
   `pod.restarts` (or nothing) as before.
+- **Bundles no longer report unread kinds as missing** (#149). When the
+  List pass skipped a kind (denied by RBAC, or deselected with
+  `--enrich-lists`/`--lists`), the edge checks still judged existence
+  against its empty index. So a watcher without `secrets: list` reported
+  every Secret reference, every imagePullSecret and the workload's
+  ServiceAccount as a critical `edge.missing_ref`, and skipped
+  ConfigMaps, Roles, ClusterRoles, IngressClasses, StorageClasses and
+  Services did the same. Those checks are now silent on a kind the
+  `skipped=` note already names. Selector and endpoint checks over
+  skipped pods or EndpointSlices are not yet covered.
 
 ## [0.28.0] - 2026-09-30
 
