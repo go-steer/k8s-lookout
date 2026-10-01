@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class that fits nothing from one whose fallback node is still
   booting, so the dwell has to outlast provisioning. No reference run
   is recorded yet.
+- `dev/soak/leeway-fp` is a soak harness for leeway false positives
+  (#416 follow-up). It runs the sentinel at production leeway defaults
+  against a seven-node, three-zone kind cluster with 36 workloads, under
+  seeded benign churn: rollouts, scaling, pod deletions, node drains and
+  node blips. Every leeway finding is listed with the churn that
+  preceded it and the placement at the time. It runs on a spare machine
+  or a GCE VM that powers itself off, and is not part of CI.
 
 ### Fixed
 
