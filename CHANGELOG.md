@@ -67,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   came back. A short NotReady flap therefore restarted six hours of
   Tier C learning. A zone down for longer than the 15-minute outage
   window still resets, as before.
+- leeway: a workload placed within its declared `DoNotSchedule`
+  `maxSkew` no longer raises Tier B `placement_drift`. A 7-replica
+  workload at 1/3/3 under `maxSkew: 2` has skew 2, inside the bound,
+  but its normalised drift against an even 3/2/2 is 0.29, and leeway
+  fell through to the drift rule and reported it. The declared bound
+  now decides both ways, as §7.3 intended: over it is a Tier A
+  `contract_violated`, within it is quiet. `ScheduleAnyway` constraints
+  are preferences and are still judged on drift. Found by the leeway
+  false-positive soak.
 
 ## [0.29.0] - 2026-10-01
 

@@ -253,6 +253,57 @@ func falsePositiveCorpus(t *testing.T) []fpFixture {
 		cappedDomains(t),
 		deliberateColocation(t),
 		heterogeneousCapacity(t),
+		satisfiedMaxSkew(t),
+	}
+}
+
+// satisfiedMaxSkew: seven pods placed [1,3,3] under a DoNotSchedule zone
+// constraint with maxSkew 2. Found on a kind soak (3 zones × 2 workers), where
+// it raised Tier B placement_drift at ρ = 2/7 against the even [3,2,2].
+//
+// The observed skew of 2 is exactly what the author declared acceptable, and
+// the scheduler is honouring it. §7.3 says E supersedes ρ where a hard
+// contract exists, so with E = 0 there is nothing to report: a distributional
+// finding here would contradict the operator's own written bound.
+//
+// The counterfactual pins the boundary of the fix: the same placement under
+// ScheduleAnyway is a preference, not a contract, and still judged on ρ.
+func satisfiedMaxSkew(t *testing.T) fpFixture {
+	inv := zonedInventory(t,
+		zoneSpec{zone: "zone-a", nodes: 2},
+		zoneSpec{zone: "zone-b", nodes: 2},
+		zoneSpec{zone: "zone-c", nodes: 2},
+	)
+	rep := tscPod(zoneSpread(2, corev1.DoNotSchedule))
+
+	return fpFixture{
+		name: "satisfied maxSkew: [1,3,3] under DoNotSchedule maxSkew 2",
+		inv:  inv,
+		rep:  rep,
+		pods: replicas(rep, "zone-a-0",
+			"zone-b-0", "zone-b-1", "zone-b-1",
+			"zone-c-0", "zone-c-0", "zone-c-1"),
+		also: func(t *testing.T, got fpResult) {
+			if got.intent == nil || !got.intent.HardSkewContract() {
+				t.Fatalf("intent = %+v, want a hard skew contract — the fixture is not testing what it claims", got.intent)
+			}
+			if got.scores.ObservedSkew != 2 || got.scores.ExcessSkew != 0 {
+				t.Errorf("S = %d, E = %d, want skew 2 inside the declared bound: %s",
+					got.scores.ObservedSkew, got.scores.ExcessSkew, got)
+			}
+			if got.scores.Drift <= leeway.DefaultThresholds().Drift {
+				t.Fatalf("premise broken: ρ = %.3f is under threshold, the fixture proves nothing: %s",
+					got.scores.Drift, got)
+			}
+
+			soft := *got.intent
+			soft.WhenUnsatisfiable = corev1.ScheduleAnyway
+			v := got.scores.Judge(&soft, leeway.DefaultThresholds())
+			if v.Kind != leeway.BreachDrift || v.Tier != leeway.TierB {
+				t.Errorf("the same placement under ScheduleAnyway = %v/%v (%q), want drift at Tier B — "+
+					"a preference is not a contract and stays judged on ρ", v.Kind, v.Tier, v.Reason)
+			}
+		},
 	}
 }
 
