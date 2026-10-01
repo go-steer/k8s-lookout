@@ -16,6 +16,7 @@ package topologydrift
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -150,6 +151,70 @@ func onlyTrackedAxes(intents []leeway.Intent, inv *Inventory) []leeway.Intent {
 		}
 	}
 	return out
+}
+
+// dropAssumedDefaultsContradicted removes an assumed cluster-default spread on
+// any axis that contains an axis the pod is required to colocate on (§5.1, as
+// amended 2026-10-01).
+//
+// A required podAffinity on kubernetes.io/hostname puts every replica on a node
+// the scheduler chose for it, and a node sits in exactly one zone and one
+// region, so the replicas are colocated on every coarser axis too. A zone
+// spread nobody declared then asks for something the scheduler is forbidden to
+// do, and scoring against it reports a workload doing exactly what it demanded
+// as Tier B drift. Precedence alone cannot catch this because the two intents
+// sit on different keys, where §5.1 lets them coexist.
+//
+// Only the assumed default stands aside. Anything somebody wrote about the
+// coarser axis — the pod's own constraint, a policy, an operator-declared
+// default — keeps its place: a declaration that contradicts the affinity is a
+// finding about the workload or the cluster, not ours to explain away. The axis
+// is left with no intent rather than given a colocation reading, because an
+// induced affinity (one naming another population) only concentrates as far as
+// that population does, and a derived colocation intent would turn an anchor
+// spread across zones into a finding of its own.
+func dropAssumedDefaultsContradicted(candidates []leeway.Intent) []leeway.Intent {
+	var colocated []leeway.TopologyKey
+	for i := range candidates {
+		if c := &candidates[i]; c.Source == leeway.SourcePodAffinityRequired && c.Mode == leeway.ModeColocate {
+			colocated = append(colocated, c.TopologyKey)
+		}
+	}
+	if len(colocated) == 0 {
+		return candidates
+	}
+	out := candidates[:0]
+	for _, c := range candidates {
+		if c.Source == leeway.SourceClusterDefaultAssumed && slices.ContainsFunc(colocated, func(fine leeway.TopologyKey) bool {
+			return nestsWithin(fine, c.TopologyKey)
+		}) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// nestsWithin reports whether every domain on the fine axis lies inside a
+// single domain on the coarse one, so that colocation on fine implies
+// colocation on coarse.
+//
+// Only the well-known chain is known: a hostname domain is one node, and a
+// node carries one value for any label, so hostname nests within every axis;
+// and a zone is a subdivision of its region. A custom axis (a rack, a cell) has
+// no nesting the label names promise, and answering false there keeps today's
+// behaviour rather than guessing at a hierarchy.
+func nestsWithin(fine, coarse leeway.TopologyKey) bool {
+	if fine == coarse {
+		return false
+	}
+	switch fine {
+	case corev1.LabelHostname:
+		return true
+	case corev1.LabelTopologyZone, corev1.LabelFailureDomainBetaZone:
+		return coarse == corev1.LabelTopologyRegion || coarse == corev1.LabelFailureDomainBetaRegion
+	}
+	return false
 }
 
 // describeClusterDefault renders one default constraint for a finding body,
