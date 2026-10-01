@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   booting, so the dwell has to outlast provisioning. No reference run
   is recorded yet.
 
+### Fixed
+
+- leeway: a zone whose every node went NotReady is now treated as a
+  §7.6 domain outage. Previously only a partial loss counted: the dead
+  zone left the eligible set, so the outage test never saw it. Workload
+  findings were not affected, since survivors are scored among
+  themselves. Learned baselines were: they were not frozen, so every
+  baseline on the axis reset when the zone went down and again when it
+  came back. A short NotReady flap therefore restarted six hours of
+  Tier C learning. A zone down for longer than the 15-minute outage
+  window still resets, as before.
+
 ## [0.29.0] - 2026-10-01
 
 **This release gives node incidents and history more to say, and adds
