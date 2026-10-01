@@ -96,12 +96,14 @@ rules:
   - apiGroups: ["leeway.lookout.go-steer.io"]
     resources: ["leewaypolicies", "clusterleewaypolicies"]
     verbs: ["list", "watch"]
+  {{- if .Values.rbac.secrets }}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["list"]
+  {{- end }}
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
     verbs: ["list"]

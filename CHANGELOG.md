@@ -36,6 +36,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still starts: each routing kind is probed at startup, and a denied one is
   skipped with a `graph history: not recording <Kind>` log line and named in
   `unrecorded=` instead.
+- **A shipped deployment without the Secret grant** (#149):
+  `kubectl apply -k deploy-no-secrets/`, or `--set rbac.secrets=false` on
+  the chart. It is `deploy/` minus the ClusterRole's cluster-wide
+  `secrets: list` and `serviceaccounts: list`, plus
+  `--enrich-lists=all,-secrets,-serviceaccounts`. It loses the expiry
+  source, which skips itself under `--sources=auto` and takes its webhook
+  CA and cert-manager targets with it, and the Secret/ServiceAccount
+  checks in enrichment bundles, whose heads read
+  `skipped=secrets,serviceaccounts`. Per-namespace Roles plus
+  `--expiry-namespaces` bring expiry back for chosen namespaces. CI diffs
+  the overlay against the chart value.
+
+### Fixed
+
+- **Bundles no longer report unread kinds as missing** (#149). When the
+  List pass skipped a kind (denied by RBAC, or deselected with
+  `--enrich-lists`/`--lists`), the edge checks still judged existence
+  against its empty index. So a watcher without `secrets: list` reported
+  every Secret reference, every imagePullSecret and the workload's
+  ServiceAccount as a critical `edge.missing_ref`, and skipped
+  ConfigMaps, Roles, ClusterRoles, IngressClasses, StorageClasses and
+  Services did the same. Those checks are now silent on a kind the
+  `skipped=` note already names. Selector and endpoint checks over
+  skipped pods or EndpointSlices are not yet covered.
 
 ### Changed
 

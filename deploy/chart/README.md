@@ -103,6 +103,14 @@ post-mortems to survive a restart. The chart's PVC carries no
 volume that outlives the release it belongs to is a surprise, and a
 `storageClass` with `Retain` is the right place to express "keep this".
 
+**`rbac.secrets`.** On by default. `false` drops the ClusterRole's
+cluster-wide `secrets: list` (and `serviceaccounts: list`) and appends
+`--enrich-lists=all,-secrets,-serviceaccounts` unless `args` already
+sets `--enrich-lists`. That is the same deployment as the
+`deploy-no-secrets/` overlay, and CI diffs the two. It costs the expiry
+source and the Secret/ServiceAccount edge checks in enrichment bundles
+(the docs site's *Scoping a sentinel* page has the full list).
+
 **`networkPolicy.extraIngressFrom`.** The default rule admits scrapers
 in the release namespace. Prometheus in `monitoring/`, or GMP in
 `gmp-system/`, needs a peer added here or it will time out against a

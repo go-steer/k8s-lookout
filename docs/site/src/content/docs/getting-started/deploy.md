@@ -42,8 +42,10 @@ One deliberate tradeoff to know about: the expiry source's `secrets`
 rule is the sentinel's only read of Secret values (`tls.crt` to parse
 `notAfter`; the token JWT for its `exp` claim), and it is `list` only —
 no watch, no get, no informer cache of secret material. Scope it with
-`--expiry-namespaces`, or remove the rule entirely if the expiry source
-stays disabled.
+`--expiry-namespaces`, or deploy `deploy-no-secrets/` (Helm:
+`rbac.secrets=false`), the shipped variant without it — see
+[Without the Secret grant](/operations/scoping/#without-the-secret-grant)
+for exactly what that costs.
 
 ### Narrowing the role — partial bundles, not errors
 
@@ -122,7 +124,9 @@ helm template lookout-watch deploy/chart -n agent-triage
 ```
 
 They must match resource for resource and field for field, modulo the
-three provenance labels Helm stamps on everything it renders. So the
+three provenance labels Helm stamps on everything it renders. The same
+diff holds `--set rbac.secrets=false` to `kustomize build
+deploy-no-secrets/`. So the
 manifest table above remains the one place to read about what a rule
 or a flag is for, and a chart that quietly keeps deploying last
 quarter's RBAC is a build failure rather than a discovery you make
