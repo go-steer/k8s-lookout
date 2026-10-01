@@ -78,11 +78,11 @@ fi
 # The saturation source refuses to start when metrics.k8s.io is
 # unavailable (by design — loud, not silent). Drop it if the API isn't
 # answering rather than crash-looping the sentinel.
-sources="k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity"
+sources="k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,topology-drift"
 if ! kubectl top nodes >/dev/null 2>&1; then
   echo "⚠ metrics.k8s.io not answering — dropping the saturation source" >&2
   echo "  (examples/kind/up installs metrics-server; on other clusters install it and re-run)" >&2
-  sources="k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity"
+  sources="k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,topology-drift"
 fi
 
 echo "▸ patching watcher: image=$image sources=$sources"
@@ -112,6 +112,14 @@ args=(
   "--expiry-interval=2m"
   "--expiry-namespaces=$DEMO_NS"
   "--severity=rollout.stall=critical"
+  # leeway (the topology-drift source): add the examples' own placement
+  # axis (see examples/kind/cluster.yaml) to both the scoring and the
+  # domain-availability axes, and cut the 10m dwell so a drift is on
+  # the wire in about a minute. The 30m resolve dwell is not tunable,
+  # which is why no scenario asserts a leeway resolution.
+  "--topology-keys=topology.kubernetes.io/zone,topology.kubernetes.io/region,$LEEWAY_ZONE_KEY"
+  "--topology-domain-unavailable-keys=topology.kubernetes.io/zone,topology.kubernetes.io/region,$LEEWAY_ZONE_KEY"
+  "--topology-dwell=60s"
 )
 args_json="$(printf '"%s",' "${args[@]}")"
 args_json="[${args_json%,}]"

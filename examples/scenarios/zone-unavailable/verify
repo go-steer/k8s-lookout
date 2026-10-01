@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify zone-unavailable"
+
+# Tier B, so it travels in the watchboard digest: 60s dwell, the next
+# evaluation, then up to --watchboard-flush (1m). The digest entry's
+# reason is the suspected cause, and a cordon with every node still
+# Ready is taint_exclusion — a dead zone would say domain_outage.
+await_inject zone-unavailable 300 'leeway\.domain_unavailable' 'zone-b' 'taint_exclusion'
+
+# Hold long enough for a per-workload finding raised by the same event
+# to clear its own dwell and a digest flush, then count. Anything that
+# was going to follow the domain finding onto the wire has by now.
+hold=$((120 * ${LOOKOUT_E2E_TIMEOUT_SCALE:-1}))
+echo "▸ holding ${hold}s for anything else the cordon puts on the wire"
+sleep "$hold"
+
+# One zone gone is one finding: the domain is the subject, once.
+n="$(leeway_wire_count zone-unavailable 'leeway\.domain_unavailable')"
+if ((n != 1)); then
+  echo "  ✗ $n leeway.domain_unavailable line(s) on the wire, want exactly 1" >&2
+  stub_since zone-unavailable | grep -E 'leeway\.domain_unavailable' | cut -c1-200 | sed 's/^/    wire: /' >&2
+  exit 1
+fi
+echo "  ✓ exactly one leeway.domain_unavailable"
+
+# And not again per workload. Both workloads have half their replicas
+# in the zone that went away; reporting either would be the same fact
+# twice more, which on a real cluster is once per workload in the zone.
+n="$(leeway_wire_count zone-unavailable 'leeway\.(contract_violated|placement_drift)' 'zone-(hard|soft)')"
+if ((n > 0)); then
+  echo "  ✗ $n per-workload leeway finding(s) for the zone's workloads — the zone was reported again" >&2
+  stub_since zone-unavailable | grep -E 'leeway\.(contract_violated|placement_drift)' | cut -c1-200 | sed 's/^/    wire: /' >&2
+  exit 1
+fi
+echo "  ✓ no per-workload leeway finding for zone-hard or zone-soft"

@@ -16,10 +16,24 @@
 # workers so the node-failure scenario can stop one worker while the
 # sentinel + stub daemon (pinned to the other by examples/sentinel/up)
 # keep running — the same shape as the M2 exit-check drill.
+#
+# Each worker is its own placement domain on lookout-examples/zone,
+# the axis the leeway scenarios (placement-drift, zone-unavailable)
+# spread across. A custom key rather than topology.kubernetes.io/zone
+# on purpose: the storm correlator keys node failures on the
+# well-known zone label, and labelling kind with it would change what
+# node-failure and every other storm assertion is testing. leeway
+# treats any axis named in --topology-keys identically. The scenarios
+# re-apply these labels themselves, so a cluster created before they
+# were added still works.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: lookout-examples
 nodes:
   - role: control-plane
   - role: worker
+    labels:
+      lookout-examples/zone: zone-a
   - role: worker
+    labels:
+      lookout-examples/zone: zone-b

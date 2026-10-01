@@ -1,0 +1,117 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two workloads spread across lookout-examples/zone, one per contract
+# strength. Both say nodeTaintsPolicy: Honor, which is the whole trick:
+# while inject holds zone-b behind a taint neither tolerates, Honor
+# takes zone-b out of the domain set for the scheduler AND for leeway,
+# so all four replicas landing in zone-a is correct placement. Lifting
+# the taint puts zone-b back in the set with nothing in it.
+#
+#   spread-hard  DoNotSchedule, maxSkew 1 → skew 4 is a broken contract
+#                (Tier A, critical: leeway.contract_violated, a session)
+#   spread-soft  ScheduleAnyway, maxSkew 1 → ρ = 0.5 against an even
+#                split (Tier B, warning: leeway.placement_drift, the
+#                watchboard digest)
+#
+# Under the default Ignore the scheduler would count tainted zone-b as
+# a domain at skew 0, and spread-hard's second replica would sit
+# Pending instead of placing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: leeway-drift
+  labels:
+    app.kubernetes.io/part-of: lookout-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-hard
+  namespace: leeway-drift
+  labels:
+    app.kubernetes.io/name: spread-hard
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spread-hard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spread-hard
+    spec:
+      topologySpreadConstraints:
+        - topologyKey: lookout-examples/zone
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: spread-hard
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: idle
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; time.sleep(10**9)"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-soft
+  namespace: leeway-drift
+  labels:
+    app.kubernetes.io/name: spread-soft
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spread-soft
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spread-soft
+    spec:
+      # ScheduleAnyway does not filter nodes that lack the key, so pin
+      # the workload to the axis explicitly; DoNotSchedule above gets
+      # this for free.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: lookout-examples/zone, operator: Exists }
+      topologySpreadConstraints:
+        - topologyKey: lookout-examples/zone
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: spread-soft
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: idle
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; time.sleep(10**9)"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }

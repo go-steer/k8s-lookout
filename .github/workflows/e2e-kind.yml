@@ -21,8 +21,8 @@ name: E2E (kind)
 #   - push to main   → smoke: crashloop + failed-mount + bad-rollout
 #                      (~10 min: reactive events, state edges, rollout
 #                      source, recovery closed loop)
-#   - weekly / manual → the full non-destructive set + node-failure
-#                      (~40 min)
+#   - weekly / manual → the full non-destructive set, the leeway
+#                      placement pair, then node-failure (~50 min)
 #
 # Both tiers then run the T1 CLI UAT (examples/uat) against the same
 # cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
@@ -47,7 +47,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: 'space-separated scenarios (empty = full set + node-failure)'
+        description: 'space-separated scenarios (empty = full set + leeway pair + node-failure)'
         required: false
         default: ''
   push:
@@ -114,11 +114,17 @@ jobs:
                 examples/e2e $SCENARIOS
               else
                 examples/e2e
+                examples/e2e placement-drift zone-unavailable
                 examples/e2e node-failure
               fi
               ;;
             *)
+              # The leeway pair before node-failure, never after: a
+              # stopped worker2 leaves zone-b's domain finding open for
+              # the 30m resolve dwell, and zone-unavailable would then
+              # have nothing new to put on the wire.
               examples/e2e
+              examples/e2e placement-drift zone-unavailable
               examples/e2e node-failure
               ;;
           esac

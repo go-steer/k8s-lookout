@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two kind scenarios now show leeway catching real placement problems
+  on a live cluster, from the scheduler through to the wire. Before
+  this, its detection was proven only by unit and fixture tests. Both
+  run in the weekly E2E (#416 follow-up).
+  - `placement-drift` holds zone-b behind a taint while two spread
+    workloads place, then lifts the taint. It asserts
+    `leeway.contract_violated` for the `DoNotSchedule` workload,
+    `leeway.placement_drift` for the `ScheduleAnyway` one, and no
+    `leeway.domain_unavailable`.
+  - `zone-unavailable` cordons zone-b's only node. It asserts exactly
+    one `leeway.domain_unavailable` (cause `taint_exclusion`) and no
+    per-workload finding.
+  - To support them, the examples sentinel enables `topology-drift`
+    with a 60s `--topology-dwell`, and the kind workers carry a
+    `lookout-examples/zone` label. It is a custom axis so that
+    storm-correlation keys stay as they were.
+
 ## [0.29.0] - 2026-10-01
 
 **This release gives node incidents and history more to say, and adds
