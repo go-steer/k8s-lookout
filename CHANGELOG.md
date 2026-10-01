@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with a 60s `--topology-dwell`, and the kind workers carry a
     `lookout-examples/zone` label. It is a custom axis so that
     storm-correlation keys stay as they were.
+- `dev/drills/compute-class-fallback.md` is a human-run GKE drill for
+  the `compute-class` source. Each class makes its rank 0 impossible
+  by shape (`n4`, spot, 128 cores), which needs no stockout luck. The
+  drill forces two findings:
+  - `leeway.rank_wedged`, from a class where no priority fits. This
+    part provisions nothing.
+  - `leeway.rank_degraded` (`last-rank`), from a class that falls back
+    to `n2`. This part costs one small node.
+
+  It gives the expected timeline from the source and the measured GKE
+  timings. It also covers a negative: the wedged rule can't tell a
+  class that fits nothing from one whose fallback node is still
+  booting, so the dwell has to outlast provisioning. No reference run
+  is recorded yet.
 
 ## [0.29.0] - 2026-10-01
 
