@@ -1853,6 +1853,27 @@ Let `a_i` be actual count in domain `i`, `e_i` expected.
 `max domain share` for severity escalation. `E` supersedes both where a hard
 contract (`maxSkew`) exists.
 
+> **Superseding works in both directions (amended 2026-10-01).** The breach
+> rule implemented only half of the sentence above: `E > 0` on a
+> `DoNotSchedule` `maxSkew` fired Tier A, but `E = 0` fell through to the ρ
+> rule. A placement inside the declared bound could therefore raise Tier B
+> `placement_drift`, which contradicts the operator's own statement of what
+> is acceptable. The leeway false-positive soak found it on kind: a
+> 7-replica workload at `[1 3 3]` under `maxSkew: 2` has skew 2 and `E = 0`,
+> but ρ = 2/7 ≈ 0.29 against the even `[3 2 2]`, over the 0.2 threshold.
+> Now a hard skew contract decides the verdict on its own: over the bound is
+> `max-skew`, within it is no breach, and §8.1's "ρ over threshold" Tier B
+> trigger applies only to subjects without one. The alternative was to
+> bound the apportionment by the skew envelope, comparing against the
+> nearest placement within `maxSkew` rather than the even one. It was not
+> taken because it gives the same verdict through a second expectation, and
+> §8.4 and §8.5 would then report a number nobody declared. `ScheduleAnyway`
+> is unchanged. It is a preference, not a contract (§11), and an ignored
+> preference is what Tier B exists to report. A per-domain ceiling from a
+> required anti-affinity is also unchanged: it bounds `max(a)`, not shape,
+> so ρ still applies beneath it. The §12 fixture is `satisfied maxSkew`, and
+> it carries the `ScheduleAnyway` counterfactual.
+
 > **Amended in Phase 4 — every metric above assumes the subject wanted to be
 > spread.** FR-6 infers `Colocate` intent from `podAffinity`, and under this table
 > a workload doing exactly what it asked for scores the worst ρ available

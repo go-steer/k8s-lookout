@@ -251,6 +251,26 @@ func TestScores_Breach(t *testing.T) {
 		}
 	})
 
+	// The other direction: a placement inside the declared maxSkew is not
+	// drift, even where ρ is over threshold. ScheduleAnyway is a preference
+	// and keeps the ρ rule.
+	t.Run("satisfied hard contract supersedes rho", func(t *testing.T) {
+		skew2 := int32(2)
+		s := scoreEqual([]int64{1, 3, 3}, &skew2)
+		if s.Drift <= DefaultThresholds().Drift || s.ExcessSkew != 0 {
+			t.Fatalf("premise broken: ρ=%v E=%d, want ρ over threshold and no excess", s.Drift, s.ExcessSkew)
+		}
+		within := &Intent{Mode: ModeSpread, MaxSkew: &skew2, WhenUnsatisfiable: v1.DoNotSchedule, Source: SourceTopologySpreadConstraint}
+		if v := s.Judge(within, DefaultThresholds()); v.Breached || v.Tier != TierNone {
+			t.Errorf("skew within a DoNotSchedule maxSkew breached at %v (%q)", v.Tier, v.Reason)
+		}
+		soft := *within
+		soft.WhenUnsatisfiable = v1.ScheduleAnyway
+		if v := s.Judge(&soft, DefaultThresholds()); v.Kind != BreachDrift || v.Tier != TierB {
+			t.Errorf("ScheduleAnyway = %v/%v (%q), want drift at Tier B", v.Kind, v.Tier, v.Reason)
+		}
+	})
+
 	// The S4 rule: the same numbers, sourced from a default nobody declared,
 	// must not reach the contract path.
 	t.Run("assumed cluster default cannot use the contract path", func(t *testing.T) {

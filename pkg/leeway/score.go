@@ -283,8 +283,18 @@ func (s *Scores) breach(intent *Intent, t Thresholds) (BreachKind, string) {
 	if intent.HardPerDomainContract() && s.MaxDomainObjects > *intent.MaxPerDomain {
 		return BreachPerDomainCeiling, "a domain holds more objects than the declared per-domain ceiling"
 	}
-	if intent.HardSkewContract() && s.ExcessSkew > 0 {
-		return BreachMaxSkew, "observed skew exceeds the declared maxSkew"
+	if intent.HardSkewContract() {
+		if s.ExcessSkew > 0 {
+			return BreachMaxSkew, "observed skew exceeds the declared maxSkew"
+		}
+		// Superseding means both directions. A DoNotSchedule maxSkew is the
+		// operator's written statement of which placements are acceptable,
+		// so a placement inside it is not drift however ρ reads: [1,3,3]
+		// under maxSkew 2 is ρ = 2/7 against an even [3,2,2], and falling
+		// through to ρ raised Tier B against a bound the scheduler is
+		// honouring. ScheduleAnyway is a preference, not a contract, and
+		// never reaches this branch — it stays judged on ρ.
+		return BreachNone, "observed skew within the declared maxSkew"
 	}
 
 	// Colocation inverts the frame: the objects are meant to be together, so
