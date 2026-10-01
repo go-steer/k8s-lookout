@@ -1,0 +1,101 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two correctly spread workloads with something to lose when zone-b
+# goes: a hard contract and a soft one, the same shapes as
+# placement-drift but placed normally. When zone-b becomes unusable,
+# the cluster has ONE problem — the zone — and the scenario asserts
+# that neither of these reports it a second time.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: leeway-zone
+  labels:
+    app.kubernetes.io/part-of: lookout-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-hard
+  namespace: leeway-zone
+  labels:
+    app.kubernetes.io/name: zone-hard
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zone-hard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zone-hard
+    spec:
+      topologySpreadConstraints:
+        - topologyKey: lookout-examples/zone
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: zone-hard
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: idle
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; time.sleep(10**9)"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-soft
+  namespace: leeway-zone
+  labels:
+    app.kubernetes.io/name: zone-soft
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zone-soft
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zone-soft
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: lookout-examples/zone, operator: Exists }
+      topologySpreadConstraints:
+        - topologyKey: lookout-examples/zone
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: zone-soft
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: idle
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c", "import time; time.sleep(10**9)"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }

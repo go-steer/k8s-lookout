@@ -44,6 +44,10 @@ EXAMPLES_CONTEXT="${LOOKOUT_EXAMPLES_CONTEXT:-kind-${CLUSTER_NAME}}"
 SENTINEL_NS="agent-triage"
 DEMO_NS="lookout-demo"
 STATE_DIR="${LOOKOUT_EXAMPLES_STATE:-${TMPDIR:-/tmp}/lookout-examples}"
+# The placement axis the leeway scenarios spread across — one domain
+# per kind worker. examples/kind/cluster.yaml labels it and
+# examples/sentinel/up names it in --topology-keys.
+LEEWAY_ZONE_KEY="lookout-examples/zone"
 
 require_examples_context() {
   local ctx
@@ -430,6 +434,38 @@ postmortem_sentinel_stop() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   rm -f "$POSTMORTEM_PID"
+}
+
+# ---- leeway placement domains ---------------------------------------------
+
+# leeway_zones — put each kind worker in its own $LEEWAY_ZONE_KEY
+# domain: -worker is zone-a, -worker2 is zone-b.
+#
+# examples/kind/cluster.yaml already creates the nodes labelled; this
+# is for a cluster created before it did. Idempotent, and it never
+# REMOVES a label. A domain that loses its last node is exactly what
+# leeway.domain_unavailable reports, so unlabelling on revert would put
+# a finding on the wire for every scenario that ran.
+leeway_zones() {
+  kubectl label node "${CLUSTER_NAME}-worker" "$LEEWAY_ZONE_KEY=zone-a" --overwrite >/dev/null
+  kubectl label node "${CLUSTER_NAME}-worker2" "$LEEWAY_ZONE_KEY=zone-b" --overwrite >/dev/null
+}
+
+# leeway_wire_count <name> <pattern...> — how many stub lines since
+# stub_mark <name> match every pattern. For the assertions that
+# something reached the wire exactly once, or not at all.
+leeway_wire_count() {
+  local name="$1" out pat
+  shift
+  out="$(stub_since "$name")"
+  for pat in "$@"; do
+    out="$(grep -E "$pat" <<<"$out" || true)"
+  done
+  [[ -n "$out" ]] || {
+    echo 0
+    return 0
+  }
+  wc -l <<<"$out" | tr -d ' '
 }
 
 # soft <command...> — run a check but only warn on failure (for signals
