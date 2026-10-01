@@ -103,6 +103,38 @@ func TestEligibleDomains_ExclusionsAreExplained(t *testing.T) {
 	}
 }
 
+// TestEligibleDomains_UnreadyNamesOnlyTheDomainsLostToHealth: §7.6 asks
+// whether a domain this subject could reach has gone down, so a domain that
+// was never reachable — pinned away, or tainted against it — is not one, and
+// neither is a cordon, which is an operator's decision rather than an outage.
+func TestEligibleDomains_UnreadyNamesOnlyTheDomainsLostToHealth(t *testing.T) {
+	nodes := []NodeView{
+		node("a1", "a"),
+		node("b1", "b", notReady),
+		node("c1", "c", notReady, noMatch),
+		node("d1", "d", cordoned),
+		node("e1", "e", cordoned), node("e2", "e", notReady),
+		node("f1", "f", notReady, notTolerated),
+	}
+	opts := DefaultEligibilityOptions()
+	opts.Policies.NodeTaintsPolicy = v1.NodeInclusionPolicyHonor
+
+	got := EligibleDomains(nodes, opts)
+	if want := []Domain{"a"}; !reflect.DeepEqual(got.Domains, want) {
+		t.Fatalf("Domains = %v, want %v", got.Domains, want)
+	}
+	if want := []Domain{"b", "e"}; !reflect.DeepEqual(got.Unready, want) {
+		t.Errorf("Unready = %v, want %v", got.Unready, want)
+	}
+
+	// Not requiring readiness means NotReady excludes nothing, so nothing was
+	// lost to it.
+	opts.RequireReady = false
+	if got := EligibleDomains(nodes, opts); len(got.Unready) != 0 {
+		t.Errorf("Unready without RequireReady = %v, want none", got.Unready)
+	}
+}
+
 // TestEligibleDomains_MixedExclusionReasonsAreAllReported: a domain excluded
 // for two different reasons must say both, or the reader fixes the cordon and
 // wonders why the zone is still missing.

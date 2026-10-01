@@ -1184,7 +1184,7 @@ func (s *Source) nodeGroupSuppression(now time.Time) Suppressor {
 	return func(key leeway.TopologyKey, eligible leeway.Eligibility) leeway.Suppression {
 		t := leeway.Transients{
 			Warming:      warming,
-			DomainOutage: s.domainOutage(key, eligible.Domains, now),
+			DomainOutage: s.domainOutage(key, eligible, now),
 		}
 		return t.Classify(now, s.cfg.Transient)
 	}
@@ -1213,7 +1213,7 @@ func (s *Source) suppression(sub leeway.SubjectRef, now time.Time) Suppressor {
 			Warming:           warming,
 			RolloutInProgress: rolling,
 			ScaledAt:          scaledAt,
-			DomainOutage:      s.domainOutage(key, eligible.Domains, now),
+			DomainOutage:      s.domainOutage(key, eligible, now),
 			DrainedAt:         s.inv.LastDrainIn(key, eligible.Domains),
 		}
 		return t.Classify(now, s.cfg.Transient)
@@ -1333,11 +1333,21 @@ func int32OrOne(p *int32) int32 {
 // the cluster the expectation was apportioned over, and one dead zone out of
 // three is enough to make them describe something else. A subject eligible for
 // no domains cannot be affected by one going down, and scores as a gate anyway.
-func (s *Source) domainOutage(key leeway.TopologyKey, domains []leeway.Domain, now time.Time) bool {
+//
+// The Unready domains are walked too, and they are the total outage: a zone
+// whose every node is NotReady is no longer eligible, so the eligible set
+// alone would catch a zone losing two nodes of three and never one losing all
+// three. Its workloads score quietly either way — the dead zone leaves the
+// expectation and the survivors are judged among themselves — but without
+// the suppression their baselines are not frozen, and a shrunken domain set
+// resets every one of them, then resets them again when the zone returns.
+func (s *Source) domainOutage(key leeway.TopologyKey, eligible leeway.Eligibility, now time.Time) bool {
 	stats := s.inv.Stats(key)
-	for _, d := range domains {
-		if s.cfg.Transient.DomainOutage(s.inv.ReadyHistory(key, d), stats[d].Ready, now) {
-			return true
+	for _, ds := range [][]leeway.Domain{eligible.Domains, eligible.Unready} {
+		for _, d := range ds {
+			if s.cfg.Transient.DomainOutage(s.inv.ReadyHistory(key, d), stats[d].Ready, now) {
+				return true
+			}
 		}
 	}
 	return false

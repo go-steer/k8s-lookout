@@ -300,9 +300,12 @@ func runDomainSource(t *testing.T, objs ...runtime.Object) (*Source, func() []so
 	t.Helper()
 	cfg := quickAlerts()
 	cfg.ReadySampleInterval = 5 * time.Millisecond
+	// A health change reaches the subjects through the broad-change sweep,
+	// not through their pods, so the sweep has to run at test speed too.
+	cfg.EligibilitySweepInterval = 5 * time.Millisecond
 	// Tier C would be metrics-only by default, which would make "no workload
-	// emitted" true for the wrong reason. With the opt-in on, the only thing
-	// keeping the twenty quiet is §7.6.
+	// emitted" true for the wrong reason. With the opt-in on, what keeps the
+	// workloads quiet is §7.1 dropping the lost zone and §7.6 holding them.
 	cfg.TierCSignals = true
 
 	s := New(fake.NewSimpleClientset(objs...), cfg)
@@ -341,7 +344,10 @@ func runDomainSource(t *testing.T, objs ...runtime.Object) (*Source, func() []so
 
 // Phase 7's exit criterion, end to end through Run: a zone whose nodes all go
 // away produces exactly one leeway.domain_unavailable, and the workloads that
-// drifted because of it stay suppressed rather than each emitting their own.
+// lost their pods there stay quiet rather than each emitting their own. They
+// are quiet because §7.1 drops a zone with no nodes and the survivors are
+// judged among themselves; a removed zone has no ready history to call an
+// outage. The NotReady zone, which §7.6 does hold, is totaloutage_test.go.
 func TestSource_ADeadZoneIsExactlyOneFindingAndTheWorkloadsStayQuiet(t *testing.T) {
 	objs := []runtime.Object{
 		node("n-a", "us-central1-a"), node("n-b", "us-central1-b"),

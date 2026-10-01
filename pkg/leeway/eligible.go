@@ -177,6 +177,17 @@ type Eligibility struct {
 	// cluster has four must be able to say why.
 	Excluded map[Domain]string
 
+	// Unready are the excluded domains this subject could reach but for node
+	// health: at least one node passes its selector, affinity and taint
+	// checks, and none of those is Ready. Canonical order.
+	//
+	// §7.6 needs them and nothing else does. A zone whose every node has gone
+	// NotReady drops out of Domains, so an outage test that walks only the
+	// eligible set sees a zone half dead and never one wholly dead — and the
+	// subject's baselines then read the shrunken domain set as a different
+	// cluster and reset, once when the zone goes and again when it returns.
+	Unready []Domain
+
 	// SyntheticDomains is how many present-with-zero domains were added for
 	// MinDomains. They have no nodes, so they can never hold a pod — an
 	// expectation placed in one is unachievable by construction, and §7.3's
@@ -219,6 +230,9 @@ func EligibleDomains(nodes []NodeView, opts EligibilityOptions) Eligibility {
 		a.seen++
 		if reason, ok := nodeUsable(n, opts); !ok {
 			a.note(reason)
+			if opts.RequireReady && !n.Ready && nodeReachable(n, opts) {
+				a.unready++
+			}
 			continue
 		}
 		a.eligible++
@@ -229,8 +243,12 @@ func EligibleDomains(nodes []NodeView, opts EligibilityOptions) Eligibility {
 	for d, a := range agg {
 		if a.eligible == 0 {
 			res.Excluded[d] = a.reason()
+			if a.unready > 0 {
+				res.Unready = append(res.Unready, d)
+			}
 		}
 	}
+	SortDomains(res.Unready)
 
 	for d, a := range agg {
 		if a.eligible > 0 {
@@ -304,9 +322,19 @@ func nodeUsable(n NodeView, opts EligibilityOptions) (string, bool) {
 	return "", true
 }
 
+// nodeReachable is the subject's half of nodeUsable: the node passes every
+// check about this subject, and fails, if at all, only on its own health.
+func nodeReachable(n NodeView, opts EligibilityOptions) bool {
+	if opts.Policies.NodeAffinityPolicy == v1.NodeInclusionPolicyHonor && !n.MatchesSelector {
+		return false
+	}
+	return opts.Policies.NodeTaintsPolicy != v1.NodeInclusionPolicyHonor || n.Tolerated
+}
+
 type domainAgg struct {
 	seen     int64
 	eligible int64
+	unready  int64
 	cpu      float64
 	memory   float64
 	reasons  []string
