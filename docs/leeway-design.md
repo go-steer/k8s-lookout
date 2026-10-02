@@ -3780,6 +3780,35 @@ pipeline is for.
 > ready-count fall and therefore a shortfall, and an operator's cordon is
 > `taint_exclusion`.
 >
+> **Amended 2026-10-02: the cordon has to be in effect when the drift begins.**
+> The latch surviving an uncordon is §7.6's need, and it was carried into
+> this row unscoped: any cordon in an under-filled domain within the
+> two-hour attribution window counted, even if the node had been back in
+> service for most of that time. The false-positive soak, which drains a
+> node every 30–90 minutes, showed what that costs. `hard-8` (12 replicas,
+> zone `maxSkew` 1, `DoNotSchedule`) was scaled down to nine at 22:40Z.
+> The ReplicaSet controller chooses victims without regard to spread,
+> which left it at [4 1 4], a real Tier A breach. It was attributed to
+> `taint_exclusion` because a zone-b worker had been drained and
+> uncordoned more than an hour earlier. The kind control plane was not
+> involved: its NoSchedule taint is not a cordon, and with no zone value
+> it is not in the spread. The table's own wording, "within the drift
+> window", already excludes this case. The inventory now also records
+> when it watched each node being uncordoned. The taint row counts a
+> cordon only if the node is still cordoned, or was uncordoned no earlier
+> than §7.6's drain settle window before the episode's `firstSeenAt`. That
+> is the same window in which §7.6 holds that a drain's evicted pods may
+> still be landing, so a drain that did cause a drift still gets the
+> blame. An uncordon this process never watched counts as ended, so after
+> a restart the row under-reports rather than guesses. §7.6's drain
+> relaxation is unchanged. The cause set is unchanged too. No row names a
+> scale-down, because a scale-down is not a mechanism that malfunctioned:
+> Kubernetes does not promise that spread survives pod removal. A
+> scale-down drift therefore falls through to `rollout_bias` if a
+> rollout settled inside the window, and otherwise to `unknown`. The
+> numbers are still reported, and that is a better answer than a wrong
+> mechanism.
+>
 > It is stored as a **per-domain latch**, not a log of removals, because that is
 > the shape of the question — an autoscaler packing forty nodes out of a zone is
 > one answer, not forty — and because it bounds the memory by the cluster's

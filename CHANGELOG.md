@@ -87,6 +87,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `contract_violated`, within it is quiet. `ScheduleAnyway` constraints
   are preferences and are still judged on drift. Found by the leeway
   false-positive soak.
+- leeway: a node that was cordoned and then uncordoned well before a
+  drift began is no longer blamed for it. The attribution kept every
+  cordon in its two-hour window, even after the node was back in
+  service. Under churn that drained a node every 30 to 90 minutes,
+  almost any drift was attributed to `taint_exclusion`. One example was
+  a `DoNotSchedule` workload left at 4/1/4 by a scale-down an hour after
+  a zone-b drain ended. A cordon now counts only if it was still in
+  effect, or ended within the 10-minute drain settle window, when the
+  drift began. Otherwise attribution falls through the ladder, usually
+  to `unknown`, since no cause covers a scale-down. Found by the leeway
+  false-positive soak.
 
 ## [0.29.0] - 2026-10-01
 

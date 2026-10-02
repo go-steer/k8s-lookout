@@ -52,7 +52,13 @@ import (
 // stays bounded either way: the cause simply cannot win, and attribution falls
 // through to the one below it on the ladder — never to a wrong one, because
 // every rule needs positive evidence.
-func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, now time.Time) leeway.Evidence {
+//
+// driftSince is when the drift being explained began — the §8.2 episode's
+// FirstSeenAt — and scopes the taint row: a cordon counts only if it was still
+// in effect within §7.6's drain settle window of that moment, because a node
+// back in service before the drift began cannot have produced it. The zero
+// time means "now", for a caller with no episode to point at.
+func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, driftSince, now time.Time) leeway.Evidence {
 	ev := leeway.Evidence{
 		Domains:        make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
 		RolloutEndedAt: s.rolloutEndedAt(sub),
@@ -64,7 +70,10 @@ func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, elig
 	s.pendingEvidence(&ev, sub)
 
 	stats := s.inv.Stats(key)
-	drains := s.inv.DrainTimes(key, eligible.Domains)
+	if driftSince.IsZero() {
+		driftSince = now
+	}
+	drains := s.inv.DrainTimes(key, eligible.Domains, driftSince.Add(-s.cfg.Transient.DrainSettleWindow))
 	packed := s.inv.ConsolidationTimes(key, eligible.Domains)
 	cutoff := now.Add(-s.cfg.Cause.Window)
 
