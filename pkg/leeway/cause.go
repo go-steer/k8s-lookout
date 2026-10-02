@@ -79,7 +79,10 @@ type DomainFacts struct {
 	// with the domain already down — and the census is the only evidence left.
 	NotReadyNodes int64
 
-	// TaintedAt is when a taint made this domain ineligible, if one did.
+	// TaintedAt is when a taint made this domain ineligible, if one did. The
+	// caller sets it only for a cordon still in effect, or only just ended,
+	// when the drift began: a node back in service before then cannot have
+	// produced the drift, however recently inside the window it was cordoned.
 	TaintedAt time.Time
 
 	// ConsolidatedAt is when an autoscaler consolidation removed a node here.

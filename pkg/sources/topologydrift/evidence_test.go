@@ -15,9 +15,11 @@
 package topologydrift
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -35,7 +37,7 @@ func TestInventory_DrainTimesAnswersEveryDomainInOnePass(t *testing.T) {
 	inv.Upsert(node("n-c1", "us-central1-c"))
 
 	domains := []leeway.Domain{"us-central1-a", "us-central1-b", "us-central1-c"}
-	got := inv.DrainTimes(zoneKey, domains)
+	got := inv.DrainTimes(zoneKey, domains, time.Time{})
 
 	// Per domain, the most recent drain — and c, which was never drained, is
 	// absent rather than present at the zero time, so a caller reading the map
@@ -64,10 +66,10 @@ func TestInventory_DrainTimesRefusesAnUnknownAxisOrAnEmptySet(t *testing.T) {
 	inv := fixedInventory(&now, zoneKey)
 	inv.Upsert(node("n-1", "us-central1-a", cordonedAtTaint(t0)))
 
-	if got := inv.DrainTimes("nope/key", []leeway.Domain{"us-central1-a"}); got != nil {
+	if got := inv.DrainTimes("nope/key", []leeway.Domain{"us-central1-a"}, time.Time{}); got != nil {
 		t.Errorf("DrainTimes on an untracked axis = %v, want nil", got)
 	}
-	if got := inv.DrainTimes(zoneKey, nil); got != nil {
+	if got := inv.DrainTimes(zoneKey, nil, time.Time{}); got != nil {
 		t.Errorf("DrainTimes over no domains = %v, want nil", got)
 	}
 }
@@ -163,7 +165,7 @@ func TestSource_EvidenceFor(t *testing.T) {
 		"us-central1-b": {Running: 1, Pinned: 1},
 	}}
 
-	ev := s.evidenceFor(webSubject, zoneKey, eligible, dist, now)
+	ev := s.evidenceFor(webSubject, zoneKey, eligible, dist, time.Time{}, now)
 
 	if len(ev.Domains) != 3 {
 		t.Fatalf("evidence covers %d domains, want one per eligible domain", len(ev.Domains))
@@ -231,7 +233,7 @@ func TestSource_EvidenceForCarriesTheConsolidationStamp(t *testing.T) {
 	s.inv.Remove("n-b1")
 
 	eligible := evenlyEligible("us-central1-a", "us-central1-b")
-	ev := s.evidenceFor(webSubject, zoneKey, eligible, nil, now)
+	ev := s.evidenceFor(webSubject, zoneKey, eligible, nil, time.Time{}, now)
 
 	if got := ev.Domains["us-central1-b"].ConsolidatedAt; !got.Equal(packedAt) {
 		t.Errorf("zone b ConsolidatedAt = %v, want the autoscaler's stamp %v", got, packedAt)
@@ -283,7 +285,7 @@ func TestSource_EvidenceForReadsTheCapacityOracle(t *testing.T) {
 		}
 	})
 
-	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0)
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, time.Time{}, t0)
 
 	if ev.InsufficientResource != 2 {
 		t.Errorf("InsufficientResource = %d, want the 2 of this subject's pods refused for room", ev.InsufficientResource)
@@ -308,23 +310,23 @@ func TestSource_EvidenceForReadsTheRolloutEndOracle(t *testing.T) {
 
 	// Read from the last cluster sample, not from the oracle directly: the
 	// answer is cluster-wide and a pass covers every subject.
-	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0); !got.RolloutEndedAt.IsZero() {
+	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, time.Time{}, t0); !got.RolloutEndedAt.IsZero() {
 		t.Errorf("RolloutEndedAt = %v before the first sample, want the zero value", got.RolloutEndedAt)
 	}
-	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0); got.Unavailable.RolloutCompletion {
+	if got := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, time.Time{}, t0); got.Unavailable.RolloutCompletion {
 		t.Error("an oracle is wired and the evidence reports rollout completion unavailable")
 	}
 
 	s.sampleCluster(t0)
 
-	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, t0)
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a"), nil, time.Time{}, t0)
 	if !ev.RolloutEndedAt.Equal(ended) {
 		t.Errorf("RolloutEndedAt = %v, want this subject's stamp %v", ev.RolloutEndedAt, ended)
 	}
 
 	// Another subject's rollout is not this subject's.
 	untouched := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "default", Name: "cache"}
-	if got := s.evidenceFor(untouched, zoneKey, evenlyEligible("us-central1-a"), nil, t0); !got.RolloutEndedAt.IsZero() {
+	if got := s.evidenceFor(untouched, zoneKey, evenlyEligible("us-central1-a"), nil, time.Time{}, t0); !got.RolloutEndedAt.IsZero() {
 		t.Errorf("RolloutEndedAt = %v for a subject with no stamp, want the zero value", got.RolloutEndedAt)
 	}
 }
@@ -336,7 +338,7 @@ func TestSource_EvidenceForToleratesAnAbsentDistribution(t *testing.T) {
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
 	s.inv.Upsert(node("n-a1", "us-central1-a"))
 
-	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a", "us-central1-b"), nil, t0)
+	ev := s.evidenceFor(webSubject, zoneKey, evenlyEligible("us-central1-a", "us-central1-b"), nil, time.Time{}, t0)
 	if got := ev.Domains["us-central1-a"].ReadyNodes; got != 1 {
 		t.Errorf("zone a ready = %d, want 1", got)
 	}
@@ -348,5 +350,127 @@ func TestSource_EvidenceForToleratesAnAbsentDistribution(t *testing.T) {
 	// eligible".
 	if _, ok := ev.Domains["us-central1-b"]; !ok {
 		t.Error("an eligible domain with no nodes got no row")
+	}
+}
+
+// soakScaleDown is the leeway-fp soak finding of 2026-10-01 on hard-8: twelve
+// replicas under a zone spread of maxSkew 1 / DoNotSchedule, scaled down to
+// nine at 22:40:45Z. The ReplicaSet controller picks its victims without
+// regard to spread, so the survivors sit [4 1 4] — a real Tier A breach whose
+// cause is the scale-down, not anything a node did.
+//
+// The cluster is kind's: three zones of two workers, plus a control plane
+// with no zone label and the NoSchedule control-plane taint. Churn had
+// drained one zone-b worker at 21:30 and uncordoned it at 21:35, more than an
+// hour before the drift began; no node was touched after that.
+//
+// heldUntil is when the zone-b worker was uncordoned; the zero time leaves it
+// cordoned.
+func soakScaleDown(t *testing.T, heldUntil time.Time) (cause leeway.SuspectedCause, eligible []leeway.Domain) {
+	t.Helper()
+	day := func(h, m, s int) time.Time { return time.Date(2026, 10, 1, h, m, s, 0, time.UTC) }
+
+	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
+	now := day(20, 0, 0)
+	s.inv.now = func() time.Time { return now }
+
+	s.inv.Upsert(node("kind-control-plane", "",
+		withTaint("node-role.kubernetes.io/control-plane", "", corev1.TaintEffectNoSchedule)))
+	for _, z := range []string{"zone-a", "zone-b", "zone-c"} {
+		for i := range 2 {
+			s.inv.Upsert(node(fmt.Sprintf("%s-%d", z, i), z))
+		}
+	}
+
+	now = day(21, 30, 0)
+	s.inv.Upsert(node("zone-b-0", "zone-b", cordonedAtTaint(now)))
+	if !heldUntil.IsZero() {
+		now = heldUntil
+		s.inv.Upsert(node("zone-b-0", "zone-b"))
+	}
+
+	now = day(22, 51, 45)
+	rep := tscPod(zoneSpread(1, corev1.DoNotSchedule))
+	pods := replicas(rep,
+		"zone-a-0", "zone-a-0", "zone-a-1", "zone-a-1",
+		"zone-b-1",
+		"zone-c-0", "zone-c-0", "zone-c-1", "zone-c-1")
+	res := Resolve(rep, s.inv, ResolveConfig{})
+	dist := leeway.NewDistribution()
+	for _, p := range pods {
+		dist.Add(domainOf(s.inv, zoneKey, p.Spec.NodeName), leeway.StateRunning, false)
+	}
+	ev := ScoreAxis(zoneKey, res.Intents[zoneKey], res.Eligible[zoneKey], dist, leeway.DefaultThresholds(), leeway.Suppression{})
+	if !ev.Verdict.Breached || ev.Verdict.Tier != leeway.TierA {
+		t.Fatalf("[4 1 4] against maxSkew 1 / DoNotSchedule = %+v, want a Tier A breach — the fixture is not the soak's", ev.Verdict)
+	}
+
+	st := leeway.AlertState{FirstSeenAt: day(22, 41, 15)}
+	f, _ := s.findingFor(webSubject, &ev, st, dist, now)
+	return f.SuspectedCause, ev.Eligible.Domains
+}
+
+func TestAttribution_ScaleDownLongAfterAnUncordonIsNotATaint(t *testing.T) {
+	cause, eligible := soakScaleDown(t, time.Date(2026, 10, 1, 21, 35, 0, 0, time.UTC))
+
+	// The tainted control plane is not in play: it has no zone value, and the
+	// scheduler leaves a node without the key out of the spread entirely.
+	for _, d := range eligible {
+		if d == leeway.DomainUnknown {
+			t.Fatalf("eligible domains %v include %s — the unlabelled control plane is in the spread", eligible, d)
+		}
+	}
+	// A cordon that ended an hour before the drift began cannot explain it.
+	// Nothing on the ladder has positive evidence for a scale-down, so the
+	// honest answer is unknown, not the last thing that happened to a node.
+	if cause != leeway.CauseUnknown {
+		t.Errorf("suspected cause = %q, want %q: a zone-b worker uncordoned at 21:35 was blamed for a scale-down at 22:40",
+			cause, leeway.CauseUnknown)
+	}
+}
+
+func TestAttribution_ACordonInEffectWhenTheDriftBeganIsATaint(t *testing.T) {
+	// Still cordoned: zone-b is short a node it could otherwise use.
+	if cause, _ := soakScaleDown(t, time.Time{}); cause != leeway.CauseTaintExclusion {
+		t.Errorf("still cordoned: suspected cause = %q, want %q", cause, leeway.CauseTaintExclusion)
+	}
+	// Uncordoned inside §7.6's drain settle window before the drift began:
+	// the drain's evicted pods are still landing, which is why cordonedAt
+	// survives an uncordon at all.
+	if cause, _ := soakScaleDown(t, time.Date(2026, 10, 1, 22, 35, 0, 0, time.UTC)); cause != leeway.CauseTaintExclusion {
+		t.Errorf("uncordoned 6m before the drift: suspected cause = %q, want %q", cause, leeway.CauseTaintExclusion)
+	}
+}
+
+func TestInventory_DrainTimesSkipsACordonThatEndedBeforeSince(t *testing.T) {
+	now := t0.Add(-time.Hour)
+	inv := fixedInventory(&now, zoneKey)
+	zones := map[string]leeway.Domain{"n-a": "us-central1-a", "n-b": "us-central1-b", "n-c": "us-central1-c"}
+	for n, z := range zones {
+		inv.Upsert(node(n, string(z)))
+	}
+	for n, z := range zones {
+		inv.Upsert(node(n, string(z), cordonedAtTaint(now)))
+	}
+	now = t0.Add(-50 * time.Minute)
+	inv.Upsert(node("n-a", "us-central1-a")) // handed back long before since
+	now = t0.Add(-5 * time.Minute)
+	inv.Upsert(node("n-b", "us-central1-b")) // handed back after since
+	// n-c is still cordoned.
+
+	domains := []leeway.Domain{"us-central1-a", "us-central1-b", "us-central1-c"}
+	got := inv.DrainTimes(zoneKey, domains, t0.Add(-10*time.Minute))
+	if _, ok := got["us-central1-a"]; ok {
+		t.Errorf("zone a counted a cordon that ended 40m before since: %v", got)
+	}
+	if _, ok := got["us-central1-b"]; !ok {
+		t.Errorf("zone b dropped a cordon still in effect at since: %v", got)
+	}
+	if _, ok := got["us-central1-c"]; !ok {
+		t.Errorf("zone c dropped a cordon still in effect now: %v", got)
+	}
+	// LastDrainIn keeps the latch through the uncordon: §7.6 still wants it.
+	if inv.LastDrainIn(zoneKey, []leeway.Domain{"us-central1-a"}).IsZero() {
+		t.Error("LastDrainIn forgot zone a's drain; §7.6's settle relaxation reads it")
 	}
 }

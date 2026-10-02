@@ -101,6 +101,14 @@ type nodeFacts struct {
 	// some minutes after the node is handed back.
 	cordonedAt time.Time
 
+	// uncordonedAt is when this node was last watched becoming schedulable
+	// again, or the zero time while it is still cordoned or if no uncordon was
+	// ever watched. §8.5 reads it beside cordonedAt: a cordon explains a drift
+	// only if it was still in effect, or had just ended, when the drift began,
+	// and cordonedAt alone survives the uncordon for as long as the attribution
+	// window — two hours in which a drain and its node are long forgotten.
+	uncordonedAt time.Time
+
 	// disruptedAt is when an autoscaler claimed this node for removal, or the
 	// zero time if none has. It is read once, at Remove: the node leaving is
 	// what makes it a consolidation rather than an intention, and a claim the
@@ -238,6 +246,7 @@ func (inv *Inventory) Upsert(node *corev1.Node) Change {
 	prev, known := inv.nodes[next.name]
 	if !known {
 		next.cordonedAt = cordonTime(nil, next, inv.now())
+		next.uncordonedAt = uncordonTime(nil, next, inv.now())
 		next.disruptedAt = disruptionTime(nil, next, inv.now())
 		inv.nodes[next.name] = next
 		inv.addStats(next, +1)
@@ -246,6 +255,7 @@ func (inv *Inventory) Upsert(node *corev1.Node) Change {
 	}
 
 	next.cordonedAt = cordonTime(prev, next, inv.now())
+	next.uncordonedAt = uncordonTime(prev, next, inv.now())
 	next.disruptedAt = disruptionTime(prev, next, inv.now())
 
 	var ch Change
@@ -476,7 +486,16 @@ func (inv *Inventory) LastDrainIn(key leeway.TopologyKey, domains []leeway.Domai
 // One pass over the nodes for the whole set rather than one call per domain,
 // because §8.5's attribution asks the question of every domain a subject is
 // eligible for and repeating LastDrainIn would walk the node map once per zone.
-func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain) map[leeway.Domain]time.Time {
+//
+// Unlike LastDrainIn it skips a cordon that had already ended before since: a
+// node still cordoned counts, and so does one watched being uncordoned at or
+// after since, but one handed back earlier does not. §7.6 asks whether a drain
+// is recent enough that its evicted pods may still be landing, and the latch
+// surviving the uncordon is right for that; §8.5 asks whether a drain can have
+// produced a drift that began at a given moment, and a node that was back in
+// service well before then cannot have (2026-10-02, the hard-8 soak finding).
+// The zero since skips nothing.
+func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain, since time.Time) map[leeway.Domain]time.Time {
 	ordinal, ok := inv.Ordinal(key)
 	if !ok || len(domains) == 0 {
 		return nil
@@ -492,6 +511,9 @@ func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain
 	for _, n := range inv.nodes {
 		d := n.domain(ordinal)
 		if n.cordonedAt.IsZero() || !want[d] {
+			continue
+		}
+		if n.schedulable && !since.IsZero() && n.uncordonedAt.Before(since) {
 			continue
 		}
 		if n.cordonedAt.After(out[d]) {
@@ -550,6 +572,22 @@ func cordonTime(prev, next *nodeFacts, now time.Time) time.Time {
 		return prior
 	default:
 		return now
+	}
+}
+
+// uncordonTime dates the end of a node's cordon: the moment we watched it
+// become schedulable again. There is no API-server record to prefer, as there
+// is for the cordon itself — uncordoning deletes the taint that carried the
+// TimeAdded — so a node first seen schedulable gets the zero time, which reads
+// as "no cordon of ours ended", and so does a node that is still cordoned.
+func uncordonTime(prev, next *nodeFacts, now time.Time) time.Time {
+	switch {
+	case !next.schedulable, prev == nil:
+		return time.Time{}
+	case !prev.schedulable:
+		return now
+	default:
+		return prev.uncordonedAt
 	}
 }
 
