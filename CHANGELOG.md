@@ -99,6 +99,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift began. Otherwise attribution falls through the ladder, usually
   to `unknown`, since no cause covers a scale-down. Found by the leeway
   false-positive soak.
+- compute-class: rank metrics now count only pods that asked for the
+  class by `nodeSelector`. Previously every pod on a class node counted,
+  including the GKE DaemonSet and static pods every node runs. In the
+  compute-class drill, a class with one workload pod read
+  `lookout_leeway_preference_pods` 10, and `pod_time` accrued about 11×
+  wall time. Each node was weighted by its DaemonSet count rather than
+  its workload, which skewed the rank-0 and last-rank shares that
+  `leeway.rank_degraded` judges. Node-level transitions are unchanged.
 
 ## [0.29.0] - 2026-10-01
 

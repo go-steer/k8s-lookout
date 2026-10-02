@@ -345,7 +345,7 @@ func TestRunAlertPass_PersistsBeforeItEmits(t *testing.T) {
 // judging layer nothing calls is a source that exports its counters and never
 // says anything.
 func TestRun_DrivesTheAlertLoop(t *testing.T) {
-	client := servedClient(pod("stuck", "", corev1.PodPending))
+	client := servedClient(pod("stuck", "", "", corev1.PodPending))
 	dyn := dynClient(classObject(t, "locked", `{
 	  "priorities": [{"machineFamily": "n4"}, {"machineFamily": "c3"}],
 	  "whenUnsatisfiable": "DoNotScaleUp"
@@ -404,7 +404,7 @@ func TestRunAlertPass_WithoutAStoreIsASupportedDeployment(t *testing.T) {
 	}
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("worst", "n4-preferred", "n2", "2"), t0)
-	s.UpsertPod(pod("p", "worst", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "worst", "n4-preferred", corev1.PodRunning), t0)
 
 	s.runAlertPass(context.Background()) // no panic, no store
 	s.loadAlerts(context.Background())   // and nothing to load

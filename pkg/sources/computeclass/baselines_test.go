@@ -173,7 +173,7 @@ func TestJudgeAll_LearnsOnlyFromAFullWindow(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("best", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p", "best", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "best", "n4-preferred", corev1.PodRunning), t0)
 
 	s.judgeAll(at(time.Minute))
 	s.judgeAll(at(2 * time.Minute))
@@ -192,7 +192,7 @@ func TestJudgeAll_HoldsTheBaselineWhileTheClassIsDegraded(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("best", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p", "best", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "best", "n4-preferred", corev1.PodRunning), t0)
 	s.judgeAll(at(time.Minute))
 	s.judgeAll(at(10 * time.Minute))
 
@@ -224,7 +224,7 @@ func TestJudgeAll_ForgetsTheBaselineOfADeletedClass(t *testing.T) {
 	s.WithStore(st, "prod")
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("best", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p", "best", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "best", "n4-preferred", corev1.PodRunning), t0)
 	s.judgeAll(at(time.Minute))
 	s.judgeAll(at(10 * time.Minute))
 	s.flushBaselines(context.Background())
@@ -255,7 +255,7 @@ func TestJudgeAll_TheBaselineRuleSeesAClassWorseThanItsOwnNormal(t *testing.T) {
 	}
 
 	s.UpsertNode(node("mid", "n4-preferred", "c3", "1"), t0)
-	s.UpsertPod(pod("p", "mid", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "mid", "n4-preferred", corev1.PodRunning), t0)
 	s.judgeAll(at(time.Minute))
 	js := s.judgeAll(at(10 * time.Minute))
 

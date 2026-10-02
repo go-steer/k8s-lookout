@@ -61,6 +61,8 @@ const (
 // string that says two different things is worse than one that says nothing.
 const (
 	descPodTime = "Pod-seconds accumulated at each preference rank of a compute class (leeway §7.7.3). " +
+		"Only pods that asked for the class by nodeSelector accrue time; the DaemonSet and static pods every node runs " +
+		"do not, or each node would be weighted by its DaemonSet count rather than by its workload. " +
 		"This is the series the whole source exists for, and it is time-weighted on purpose: a ninety-second burst of " +
 		"rank-3 pods during a scale-up and three weeks parked on a spot fallback look identical to a gauge. " +
 		"`rank` is the derived preference TIER, not the raw ccc_priority_index — on a class that sets priorityScore " +
@@ -74,7 +76,7 @@ const (
 		"first choice, and a number that climbs is capacity quietly draining out from under it. " +
 		"The unknown, unsatisfiable and off-axis buckets are excluded from both halves, because a mean over a bucket " +
 		"whose rank is `unsatisfiable` is not a mean of anything."
-	descPods  = "Pods currently occupying each preference rank. The supporting gauge to pod_time, not a substitute for it."
+	descPods  = "Pods currently occupying each preference rank, counting only pods that asked for the class by nodeSelector — DaemonSet and static pods on a class node are not counted. The supporting gauge to pod_time, not a substitute for it."
 	descNodes = "Nodes currently resolved to each preference rank, by where the rank came from. " +
 		"`source=annotation` is GKE's own ccc_priority_index, `inferred` is k8s-lookout matching the node's attributes " +
 		"against the class's priority rules, and `none` is neither answering. `rule_index` is the raw list position and " +
