@@ -110,7 +110,7 @@ func newPromHarness(t *testing.T) *promHarness {
 	// Pods, so the pod-second counters and the pods gauge have rows, and a
 	// node move so transitions_total does.
 	for _, n := range []string{"at-rank-0", "unfit", "outside", "pending"} {
-		s.UpsertPod(pod("pod-"+n, n, corev1.PodRunning), t0)
+		s.UpsertPod(pod("pod-"+n, n, "n4-preferred", corev1.PodRunning), t0)
 	}
 	now = at(30 * time.Second)
 	s.UpsertNode(node("at-rank-0", "n4-preferred", "c3", "1"), now)

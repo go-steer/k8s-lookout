@@ -102,12 +102,20 @@ func node(name, class, family, annotation string) *corev1.Node {
 	return n
 }
 
-func pod(name, nodeName string, phase corev1.PodPhase) *corev1.Pod {
-	return &corev1.Pod{
+// pod is a workload pod that asked for `class` by nodeSelector — the shape
+// §7.7.6's worked example has, and the only population §7.7.3 charges. An
+// empty class is a pod that asked for none, which is what every DaemonSet and
+// static pod on a class node looks like.
+func pod(name, nodeName, class string, phase corev1.PodPhase) *corev1.Pod {
+	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
 		Spec:       corev1.PodSpec{NodeName: nodeName},
 		Status:     corev1.PodStatus{Phase: phase},
 	}
+	if class != "" {
+		p.Spec.NodeSelector = map[string]string{DefaultConfig().ClassLabel: class}
+	}
+	return p
 }
 
 // wedgedPod is an unscheduled pod that asked for a compute class by name: no
@@ -143,7 +151,7 @@ func TestPodAccruesTimeAtItsNodesRank(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "n4-preferred", "c3", "1"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "n4-preferred", corev1.PodRunning), t0)
 
 	if got := podSeconds(t, s, "n4-preferred", 1, at(100*time.Second)); got != 100 {
 		t.Errorf("rank-1 pod-seconds = %v, want 100", got)
@@ -164,8 +172,8 @@ func TestRankIsTierNotIndex(t *testing.T) {
 	s.UpsertClass("s2", spec(t, s2ScoredSpec), t0)
 	s.UpsertNode(node("best", "s2", "c3", "2"), t0)
 	s.UpsertNode(node("worst", "s2", "n2", "0"), t0)
-	s.UpsertPod(pod("pb", "best", corev1.PodRunning), t0)
-	s.UpsertPod(pod("pw", "worst", corev1.PodRunning), t0)
+	s.UpsertPod(pod("pb", "best", "s2", corev1.PodRunning), t0)
+	s.UpsertPod(pod("pw", "worst", "s2", corev1.PodRunning), t0)
 
 	end := at(10 * time.Second)
 	if got := podSeconds(t, s, "s2", 0, end); got != 10 {
@@ -183,7 +191,7 @@ func TestPeerFallbackIsLateralAndCostsNoRank(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("s2", spec(t, s2ScoredSpec), t0)
 	s.UpsertNode(node("n1", "s2", "n4", "1"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "s2", corev1.PodRunning), t0)
 	s.UpsertNode(node("n1", "s2", "c3", "2"), at(30*time.Second))
 
 	// Sixty seconds, all of it at rank 0, spanning a move GKE's own index says
@@ -208,7 +216,7 @@ func TestRealFallbackMovesTheRank(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "n4-preferred", corev1.PodRunning), t0)
 	s.UpsertNode(node("n1", "n4-preferred", "c3", "1"), at(40*time.Second))
 
 	end := at(100 * time.Second)
@@ -232,7 +240,7 @@ func TestRealFallbackMovesTheRank(t *testing.T) {
 func TestLateClassIsReconciled(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertNode(node("n1", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "n4-preferred", corev1.PodRunning), t0)
 
 	if got := podSeconds(t, s, "n4-preferred", 0, at(10*time.Second)); got != 0 {
 		t.Fatalf("accrued %v pod-seconds against a class that had not arrived", got)
@@ -252,7 +260,7 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "n4-preferred", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "n4-preferred", corev1.PodRunning), t0)
 	for i := 0; i < 5; i++ {
 		s.reconcile(at(time.Duration(i) * time.Second))
 	}
@@ -271,7 +279,7 @@ func TestRescoringResetsTheAxis(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n2", "2"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
 
 	if got := podSeconds(t, s, "c", 2, at(50*time.Second)); got != 50 {
 		t.Fatalf("pre-edit rank-2 pod-seconds = %v, want 50", got)
@@ -299,7 +307,7 @@ func TestEditThatDoesNotChangeTheSpecKeepsTheTime(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), at(30*time.Second))
 
 	if got := podSeconds(t, s, "c", 0, at(60*time.Second)); got != 60 {
@@ -313,7 +321,7 @@ func TestUndecodableClassUnranksItsNodes(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
 
 	s.UpsertClass("c", map[string]any{"priorities": "not a list"}, at(20*time.Second))
 
@@ -352,7 +360,7 @@ func TestClassDeletionUnchargesEverything(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
 	s.DeleteClass("c", at(30*time.Second))
 
 	if got := podSeconds(t, s, "c", 0, at(90*time.Second)); got != 0 {
@@ -371,7 +379,7 @@ func TestNodeDeletionUnchargesItsPods(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
 	s.DeleteNode("n1", at(20*time.Second))
 
 	if got := podSeconds(t, s, "c", 0, at(80*time.Second)); got != 20 {
@@ -391,16 +399,16 @@ func TestOnlyOccupyingPodsAreCounted(t *testing.T) {
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
 
-	s.UpsertPod(pod("unscheduled", "", corev1.PodPending), t0)
-	s.UpsertPod(pod("running", "n1", corev1.PodRunning), t0)
-	s.UpsertPod(pod("binding", "n1", corev1.PodPending), t0)
+	s.UpsertPod(pod("unscheduled", "", "", corev1.PodPending), t0)
+	s.UpsertPod(pod("running", "n1", "c", corev1.PodRunning), t0)
+	s.UpsertPod(pod("binding", "n1", "c", corev1.PodPending), t0)
 
 	if got := podSeconds(t, s, "c", 0, at(10*time.Second)); got != 20 {
 		t.Errorf("rank-0 pod-seconds = %v, want 20 — the bound Pending pod occupies, the unbound one does not", got)
 	}
 
 	// Completion stops the clock without a delete event.
-	s.UpsertPod(pod("running", "n1", corev1.PodSucceeded), at(10*time.Second))
+	s.UpsertPod(pod("running", "n1", "c", corev1.PodSucceeded), at(10*time.Second))
 	if got := podSeconds(t, s, "c", 0, at(20*time.Second)); got != 30 {
 		t.Errorf("rank-0 pod-seconds = %v, want 30 — only the still-Pending pod accrues after the other completed", got)
 	}
@@ -415,9 +423,9 @@ func TestPodDeletionStopsTheClock(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
-	s.DeletePod(pod("p1", "n1", corev1.PodRunning), at(15*time.Second))
-	s.DeletePod(pod("p1", "n1", corev1.PodRunning), at(16*time.Second))
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
+	s.DeletePod(pod("p1", "n1", "c", corev1.PodRunning), at(15*time.Second))
+	s.DeletePod(pod("p1", "n1", "c", corev1.PodRunning), at(16*time.Second))
 
 	if got := podSeconds(t, s, "c", 0, at(60*time.Second)); got != 15 {
 		t.Errorf("rank-0 pod-seconds = %v, want 15", got)
@@ -435,8 +443,8 @@ func TestPodRebindingIsTreatedAsANewPod(t *testing.T) {
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("n1", "c", "n4", "0"), t0)
 	s.UpsertNode(node("n2", "c", "c3", "1"), t0)
-	s.UpsertPod(pod("p1", "n1", corev1.PodRunning), t0)
-	s.UpsertPod(pod("p1", "n2", corev1.PodRunning), at(10*time.Second))
+	s.UpsertPod(pod("p1", "n1", "c", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "n2", "c", corev1.PodRunning), at(10*time.Second))
 
 	end := at(30 * time.Second)
 	if got := podSeconds(t, s, "c", 0, end); got != 10 {
@@ -456,7 +464,7 @@ func TestNodeOutsideEveryClassContributesNothing(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("plain", "", "n4", ""), t0)
-	s.UpsertPod(pod("p1", "plain", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "plain", "", corev1.PodRunning), t0)
 	s.tracker.Flush(at(60 * time.Second))
 	if got := s.tracker.Snapshot().Ranks; len(got) != 0 {
 		t.Errorf("buckets = %v, want none", got)
@@ -471,8 +479,8 @@ func TestSentinelsReadAsRanksNotErrors(t *testing.T) {
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("unfit", "c", "e2", "ccc_no_rule_matching"), t0)
 	s.UpsertNode(node("outside", "c", "e2", "ccc_scale_up_anyway"), t0)
-	s.UpsertPod(pod("pu", "unfit", corev1.PodRunning), t0)
-	s.UpsertPod(pod("po", "outside", corev1.PodRunning), t0)
+	s.UpsertPod(pod("pu", "unfit", "c", corev1.PodRunning), t0)
+	s.UpsertPod(pod("po", "outside", "c", corev1.PodRunning), t0)
 
 	end := at(30 * time.Second)
 	if got := podSeconds(t, s, "c", leeway.RankUnsatisfiable, end); got != 30 {
@@ -498,7 +506,7 @@ func TestAbsentAnnotationIsPendingNotRankZero(t *testing.T) {
 	s.UpsertClass("c", spec(t, n4PreferredSpec), t0)
 	// A machine family no rule names, so inference has no opinion either.
 	s.UpsertNode(node("fresh", "c", "e2", ""), t0)
-	s.UpsertPod(pod("p1", "fresh", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p1", "fresh", "c", corev1.PodRunning), t0)
 
 	end := at(40 * time.Second)
 	if got := podSeconds(t, s, "c", 0, end); got != 0 {
@@ -577,6 +585,33 @@ func TestChangingClassIsNotATransition(t *testing.T) {
 
 	if len(s.transitions) != 0 {
 		t.Errorf("transitions = %v, want none across a class change", s.transitions)
+	}
+}
+
+// TestPodIsChargedOnlyToTheClassItAskedFor. A pod that selected class a, on
+// a node later relabelled to class b, has left a's preference order — it was
+// not placed by b, and charging it there would credit b with a workload it
+// never provisioned for.
+func TestPodIsChargedOnlyToTheClassItAskedFor(t *testing.T) {
+	s := newTestSource(t)
+	s.UpsertClass("a", spec(t, n4PreferredSpec), t0)
+	s.UpsertClass("b", spec(t, n4PreferredSpec), t0)
+	s.UpsertNode(node("n1", "a", "n4", "0"), t0)
+	s.UpsertPod(pod("p1", "n1", "a", corev1.PodRunning), t0)
+	s.UpsertPod(pod("ds", "n1", "", corev1.PodRunning), t0)
+	s.UpsertNode(node("n1", "b", "n4", "0"), at(10*time.Second))
+
+	if got := podSeconds(t, s, "a", 0, at(30*time.Second)); got != 10 {
+		t.Errorf("class a pod-seconds = %v, want 10 — charged until the relabel", got)
+	}
+	if got := podSeconds(t, s, "b", 0, at(30*time.Second)); got != 0 {
+		t.Errorf("class b pod-seconds = %v, want 0 — nothing asked for b", got)
+	}
+	if _, tracked := s.pods[podRef{"default", "ds"}]; tracked {
+		t.Error("a pod that asked for no class is tracked")
+	}
+	if n := underflows(s); n != 0 {
+		t.Errorf("underflows = %d, want 0", n)
 	}
 }
 

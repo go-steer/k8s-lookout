@@ -145,8 +145,8 @@ func TestRunJoinsThreeStreams(t *testing.T) {
 	client := servedClient(
 		node("gke-n4-1", "n4-preferred", "n4", "0"),
 		node("gke-c3-1", "n4-preferred", "c3", "1"),
-		pod("api-a", "gke-n4-1", corev1.PodRunning),
-		pod("api-b", "gke-c3-1", corev1.PodRunning),
+		pod("api-a", "gke-n4-1", "n4-preferred", corev1.PodRunning),
+		pod("api-b", "gke-c3-1", "n4-preferred", corev1.PodRunning),
 	)
 	dyn := dynClient(classObject(t, "n4-preferred", n4PreferredSpec))
 	s := newRunnableSource(t, client, dyn)
@@ -167,6 +167,73 @@ func TestRunJoinsThreeStreams(t *testing.T) {
 	}
 }
 
+// TestRunChargesOnlyPodsThatAskedForTheClass is the 2026-10-02 drill, where
+// the leeway-fallback-probe axis read pods=10 for one workload pod. A class
+// node runs the workload that asked for it plus every DaemonSet GKE schedules
+// on all nodes (kube-proxy, fluentbit, netd, gke-metadata-server, pdcsi, …)
+// and any static pod. None of those asked for the class; they are on the node
+// because it is a node. Charging them weights each node by its DaemonSet count
+// and turns §7.7.3's rank shares into a node census.
+//
+// The workload pod is created after the barrier on purpose: one informer
+// delivers in order, so once it is charged every system pod in the initial
+// LIST has been handled too, and the count below is final rather than early.
+func TestRunChargesOnlyPodsThatAskedForTheClass(t *testing.T) {
+	const class = "leeway-fallback-probe"
+	objs := []runtime.Object{node("gke-probe-1", class, "n2", "1")}
+	for _, ds := range []string{"kube-proxy", "fluentbit-gke", "netd", "gke-metadata-server", "pdcsi-node", "gke-metrics-agent", "image-package-extractor", "konnectivity-agent", "node-local-dns"} {
+		p := pod(ds+"-x7k2p", "gke-probe-1", "", corev1.PodRunning)
+		p.Namespace = "kube-system"
+		p.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "DaemonSet", Name: ds}}
+		// The blanket toleration DaemonSets carry: it admits them to the
+		// class taint without naming the class, so it is not a request for it.
+		p.Spec.Tolerations = []corev1.Toleration{{Operator: corev1.TolerationOpExists}}
+		objs = append(objs, p)
+	}
+	mirror := pod("kube-proxy-gke-probe-1", "gke-probe-1", "", corev1.PodRunning)
+	mirror.Namespace = "kube-system"
+	mirror.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: "static"}
+	mirror.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Node", Name: "gke-probe-1"}}
+	objs = append(objs, mirror)
+
+	client := servedClient(objs...)
+	s := newRunnableSource(t, client, dynClient(classObject(t, class, n4PreferredSpec)))
+	runSource(t, s)
+	awaitRank(t, s, "gke-probe-1", 1)
+
+	workload := pod("probe-6d4f9b-abcde", "gke-probe-1", class, corev1.PodRunning)
+	workload.Spec.Tolerations = []corev1.Toleration{{Key: "cloud.google.com/compute-class", Operator: corev1.TolerationOpEqual, Value: class, Effect: corev1.TaintEffectNoSchedule}}
+	if _, err := client.CoreV1().Pods("default").Create(context.Background(), workload, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	ref := podRef{"default", workload.Name}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		ps := s.pods[ref]
+		charged := ps != nil && ps.counted
+		s.mu.Unlock()
+		if charged {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the workload pod was never charged")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	key := leeway.AxisKey{Provider: leeway.ProviderGKEComputeClass, Name: class}
+	pods := 0
+	for _, r := range s.tracker.Snapshot().Ranks {
+		if r.Axis == key {
+			pods += r.Pods
+		}
+	}
+	if pods != 1 {
+		t.Errorf("pods on %s = %d, want 1 — only the workload asked for the class", class, pods)
+	}
+}
+
 // TestRunReconcilesAClassThatSyncedLast. The three informers sync
 // independently and nothing orders them, so on any given start a node may be
 // handled before the class that ranks it. A stable node has no next event, so
@@ -179,7 +246,7 @@ func TestRunJoinsThreeStreams(t *testing.T) {
 func TestRunReconcilesALateClass(t *testing.T) {
 	client := servedClient(
 		node("gke-n4-1", "n4-preferred", "n4", "0"),
-		pod("api-a", "gke-n4-1", corev1.PodRunning),
+		pod("api-a", "gke-n4-1", "n4-preferred", corev1.PodRunning),
 	)
 	dyn := dynClient()
 	s := newRunnableSource(t, client, dyn)
@@ -201,7 +268,7 @@ func TestRunReconcilesALateClass(t *testing.T) {
 // preferred shape runs out, GKE provisions the next rule down, and nothing
 // about the pod or the Deployment changes.
 func TestRunFollowsANodeDownTheLadder(t *testing.T) {
-	client := servedClient(pod("api-a", "gke-fallback", corev1.PodRunning))
+	client := servedClient(pod("api-a", "gke-fallback", "n4-preferred", corev1.PodRunning))
 	dyn := dynClient(classObject(t, "n4-preferred", n4PreferredSpec))
 	s := newRunnableSource(t, client, dyn)
 	runSource(t, s)
@@ -241,7 +308,7 @@ func TestRunFollowsANodeDownTheLadder(t *testing.T) {
 func TestRunUnchargesADeletedNode(t *testing.T) {
 	client := servedClient(
 		node("gke-n4-1", "n4-preferred", "n4", "0"),
-		pod("api-a", "gke-n4-1", corev1.PodRunning),
+		pod("api-a", "gke-n4-1", "n4-preferred", corev1.PodRunning),
 	)
 	dyn := dynClient(classObject(t, "n4-preferred", n4PreferredSpec))
 	s := newRunnableSource(t, client, dyn)
@@ -318,13 +385,13 @@ func TestTombstonesAreUnwrapped(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.onNode(node("gke-n4-1", "n4-preferred", "n4", "0"))
-	s.onPod(pod("api-a", "gke-n4-1", corev1.PodRunning))
+	s.onPod(pod("api-a", "gke-n4-1", "n4-preferred", corev1.PodRunning))
 	s.onClass(classObject(t, "n4-preferred", n4PreferredSpec))
 	if len(s.nodes) != 1 || len(s.pods) != 1 || len(s.classes) != 1 {
 		t.Fatalf("handlers did not land: %d nodes, %d pods, %d classes", len(s.nodes), len(s.pods), len(s.classes))
 	}
 
-	s.onPodDelete(cache.DeletedFinalStateUnknown{Key: "default/api-a", Obj: pod("api-a", "gke-n4-1", corev1.PodRunning)})
+	s.onPodDelete(cache.DeletedFinalStateUnknown{Key: "default/api-a", Obj: pod("api-a", "gke-n4-1", "n4-preferred", corev1.PodRunning)})
 	s.onNodeDelete(cache.DeletedFinalStateUnknown{Key: "gke-n4-1", Obj: node("gke-n4-1", "n4-preferred", "n4", "0")})
 	s.onClassDelete(cache.DeletedFinalStateUnknown{Key: "n4-preferred", Obj: classObject(t, "n4-preferred", n4PreferredSpec)})
 	if len(s.nodes) != 0 || len(s.pods) != 0 || len(s.classes) != 0 {

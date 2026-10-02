@@ -2751,6 +2751,29 @@ what a workload *achieved*, and is structurally blind to what it *attempted*:
   stream), not a variation of this one. It is out of scope here; noting it as a
   known gap is the honest outcome rather than quietly widening §7.7 to cover it.
 
+> **Amended 2026-10-02: only pods that asked for the class are counted.**
+> §7.7 opens with "a workload asks for the class", and §7.7.2's
+> `podClassSelector` names the `nodeSelector` key that expresses the request.
+> The implementation still charged every bound pod on a class node to the
+> node's rank. The compute-class drill (build a0a7972) showed what that
+> costs. `leeway-fallback-probe` had one workload pod, a one-replica
+> Deployment on a dedicated `n2-standard-2`. The `pods` gauge read 10 and
+> `pod_time` accrued about 11× wall time, because the node's GKE
+> DaemonSets were charged too (kube-proxy, fluentbit, netd,
+> gke-metadata-server, pdcsi and the rest). Charging them weights each node
+> by its DaemonSet count rather than by its workload. Shares at rank 0 and
+> at the last rank then measure nodes, not placement, whenever nodes at
+> different ranks carry different numbers of workload pods. The population
+> is now pods whose `nodeSelector` names the class, on a node of that class.
+> DaemonSet-owned and static (mirror) pods carry no such selector and drop
+> out without a special case. This is the same `nodeSelector`-only test the
+> wedged rule applies to Pending pods. The class toleration is not used: GKE
+> injects it for a selecting pod, so it adds nothing, and a pod that only
+> tolerates the taint was admitted to the node, not placed there by the
+> class. A request expressed as node affinity is missed, which undercounts a
+> workload rather than inventing one. Transitions are unchanged: they stay
+> node-level, a node moving between placements whoever runs on it.
+
 The original question — *is the second priority used more than the first?* — is a
 PromQL one-liner:
 

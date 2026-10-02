@@ -30,11 +30,11 @@ import (
 // Source implements sources.Source for the compute-class row of §7.2.
 //
 // Three caches feed one piece of arithmetic. A ComputeClass gives an axis, a
-// Node gives a rank on that axis, and a Pod inherits its node's rank for as
-// long as it occupies it. Every mutation is a delta on the same three maps
-// under one lock — there is no periodic rebuild, because the thing being
-// accumulated is time, and a rebuild would have to reconstruct when each pod
-// arrived.
+// Node gives a rank on that axis, and a Pod that asked for the class inherits
+// its node's rank for as long as it occupies it. Every mutation is a delta on
+// the same three maps under one lock — there is no periodic rebuild, because
+// the thing being accumulated is time, and a rebuild would have to
+// reconstruct when each pod arrived.
 type Source struct {
 	client kubernetes.Interface
 	dyn    dynamic.Interface
@@ -126,8 +126,11 @@ func (n *nodeState) placed() bool { return n != nil && n.known }
 // podState is where a pod is currently charged.
 type podState struct {
 	node string
-	axis leeway.AxisKey
-	rank leeway.Rank
+	// class is the class the pod asked for by nodeSelector — never empty,
+	// because a pod that asked for none is not tracked (see asksFor).
+	class string
+	axis  leeway.AxisKey
+	rank  leeway.Rank
 	// counted is true while this pod is inside the tracker. A pod on a node
 	// whose class has not synced yet is tracked here but not counted, so that
 	// it can be charged the moment the class arrives rather than waiting for
@@ -325,26 +328,28 @@ func (s *Source) UpsertPod(pod *corev1.Pod, at time.Time) {
 	ref := podRef{pod.Namespace, pod.Name}
 	node := pod.Spec.NodeName
 	wedged := wedgedOn(pod, s.cfg.ClassLabel)
+	asked := asksFor(pod, s.cfg.ClassLabel)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.setWedged(ref, wedged)
 
-	if !occupies(pod) {
+	if !occupies(pod) || asked == "" {
 		s.forgetPod(ref, at)
 		return
 	}
 
 	ps, had := s.pods[ref]
-	if had && ps.node != node {
-		// A pod is bound once and never rebound, so this is a name reused
-		// after a delete we missed. Uncharge the old node before re-indexing.
+	if had && (ps.node != node || ps.class != asked) {
+		// A pod is bound once and never rebound, and its nodeSelector is
+		// immutable, so this is a name reused after a delete we missed.
+		// Uncharge the old node before re-indexing.
 		s.forgetPod(ref, at)
 		had = false
 	}
 	if !had {
-		ps = &podState{node: node}
+		ps = &podState{node: node, class: asked}
 		s.pods[ref] = ps
 		byNode, ok := s.podsByNode[node]
 		if !ok {
@@ -388,6 +393,28 @@ func wedgedOn(pod *corev1.Pod, classLabel string) string {
 	if pod.Spec.NodeName != "" || pod.Status.Phase != corev1.PodPending {
 		return ""
 	}
+	return pod.Spec.NodeSelector[classLabel]
+}
+
+// asksFor reports which class a pod asked for, empty for one that asked for
+// none. Only a pod that asked is charged to a rank (§7.7.3, amended
+// 2026-10-02).
+//
+// A class node also runs every DaemonSet GKE schedules cluster-wide and any
+// static pod. Those are on the node because it is a node, not because the
+// class placed them, and charging them weights every node by its DaemonSet
+// count: the 2026-10-02 drill read pods=10 for a class with one workload pod.
+// Rank shares are a statement about where workloads landed, so the population
+// is the pods that requested the class.
+//
+// nodeSelector only, for the reason wedgedOn gives: it is the form GKE
+// documents and §7.7.2's podClassSelector names. Not the class toleration —
+// GKE injects it for a selector, so it adds nothing for a selecting pod, and a
+// pod tolerating the taint without selecting the class was admitted to the
+// node rather than placed on it by the class. An affinity term expressing the
+// same request is missed, which undercounts a workload rather than inventing
+// one.
+func asksFor(pod *corev1.Pod, classLabel string) string {
 	return pod.Spec.NodeSelector[classLabel]
 }
 
@@ -439,7 +466,11 @@ func (s *Source) retarget(ref podRef, at time.Time) {
 		return
 	}
 	ns := s.nodes[ps.node]
-	place := ns.placed()
+	// A pod is charged to the class it asked for, on a node of that class.
+	// The scheduler enforces the selector at bind time, so the second half
+	// only bites on a node relabelled under a running pod — which has left the
+	// class the pod asked for, not moved within it.
+	place := ns.placed() && ns.class == ps.class
 
 	if ps.counted && (!place || ps.axis != ns.axis || ps.rank != ns.place.Rank) {
 		s.tracker.Leave(ps.axis, ps.rank, at)

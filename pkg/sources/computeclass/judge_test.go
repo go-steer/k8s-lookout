@@ -167,7 +167,7 @@ func TestJudgeAll_WarmsUpBeforeItWillScore(t *testing.T) {
 	s := newTestSource(t)
 	s.UpsertClass("n4-preferred", spec(t, n4PreferredSpec), t0)
 	s.UpsertNode(node("worst", "n4-preferred", "n2", "2"), t0)
-	s.UpsertPod(pod("p", "worst", corev1.PodRunning), t0)
+	s.UpsertPod(pod("p", "worst", "n4-preferred", corev1.PodRunning), t0)
 	s.cfg.LastRankShareCeiling = ptr(0.5)
 
 	js := s.judgeAll(at(time.Second))
