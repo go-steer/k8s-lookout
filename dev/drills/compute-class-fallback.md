@@ -4,10 +4,10 @@ Drives the `compute-class` source (`docs/leeway-design.md` §7.7) from a
 real GKE autoscaler to the wire. The shipped evidence for the source is
 unit and fixture tests plus a counters-only acceptance run on
 `std-simian-test` (§14 Phase 6: rank shares matched a hand audit, all
-SLIs zero). **No rank finding has yet been observed end to end on a
-live cluster.** This runbook is meant to change that, with real
-autoscaler timing: rule skipping, node provisioning, and the
-`ccc_priority_index` stamping lag.
+SLIs zero). This runbook takes rank findings end to end on a live
+cluster, with real autoscaler timing: rule skipping, node
+provisioning, and the `ccc_priority_index` stamping lag. The first
+run is recorded under [Reference run](#reference-run).
 
 It forces two conditions deterministically and without stockout luck:
 
@@ -237,17 +237,18 @@ What each finding should carry on the wire. The payload is `kind`,
 the message (`leeway.RankMessage`):
 
 - **`rank_wedged`:**
-  - `reason=wedged`, `kind_of_object=ComputeClass`,
+  - `reason=wedged`, `kind_of_object=PreferenceAxis`,
     `name=leeway-drill-wedged`;
   - a message ending *"1 pod(s) Pending against a DoNotScaleUp class:
     no priority can be satisfied and the autoscaler will not provision
     outside the list; ordered by …, 2 tier(s)"*.
 - **`rank_degraded`:**
-  - `reason=last-rank`, `name=leeway-fallback-probe`;
-  - a message reading *"… mean achieved rank 1.00 over 10m0s: rank 1
-    100% (machineFamily=n2) — rank 1 share 1.00 is above the ceiling 0.90 …"*. The
-    window is shorter than 10m if the sentinel started less than 10m
-    earlier.
+  - `reason=last-rank`, `kind_of_object=PreferenceAxis`,
+    `name=leeway-fallback-probe`;
+  - it arrives as a `watchboard.digest` entry, and digest entries carry
+    no message. The rank arithmetic (*"… rank 1 share 1.00 is above the
+    ceiling 0.90 …"*) is on the episode, not the wire; read the
+    `alert_state` and share gauges from step 5 instead.
 
 Neither part should produce `rank_no_migration` (rank 0 never came
 back) or `rank_tier_unused` (that needs 30 days of lifetime, and it is
@@ -258,7 +259,10 @@ Tier C, so off the wire by default).
 on a `DoNotScaleUp` class. It cannot tell "no priority fits" apart
 from "rank 1 fits and its node is still booting". The only thing
 separating the two is the dwell outlasting the provisioning wait:
-about 4.5m measured, against a 10m default and this drill's 7m. With
+about 4.5m measured in §7.7 and about 2m in the reference run below,
+against a 10m default and this drill's 7m. A fast provision makes
+this negative easy to pass, so a clean run does not prove the dwell
+covers a slow one (issue #532). With
 a dwell under ~5m, Part B produces a false `rank_wedged` whose message
 is untrue. The same happens in production if a satisfiable rank takes
 longer than the dwell to provision: a slow GPU shape, or a
@@ -273,7 +277,7 @@ grep -n 'leeway\.rank_' /tmp/ccdrill/wire.log
 kubectl --kubeconfig /tmp/ccdrill/kubeconfig -n leeway get pods -o wide
 kubectl --kubeconfig /tmp/ccdrill/kubeconfig -n leeway get events --sort-by=.lastTimestamp
 kubectl --kubeconfig /tmp/ccdrill/kubeconfig get nodes -L cloud.google.com/compute-class \
-    -o custom-columns=NAME:.metadata.name,CLASS:.metadata.labels.cloud\\.google\\.com/compute-class,IDX:.metadata.annotations.cloud\\.google\\.com/ccc_priority_index
+    -o custom-columns=NAME:.metadata.name,CLASS:.metadata.labels.cloud\\.google\\.com/compute-class,IDX:.metadata.annotations.ccc_priority_index
 curl -s 127.0.0.1:9464/metrics | grep -E 'lookout_leeway_preference_(wedged_pods|pods|rank_pending|alert_state|disagreement|unmatched)'
 ```
 
@@ -334,5 +338,31 @@ record.
 
 ## Reference run
 
-Not yet recorded. The first run should replace this paragraph with the
-step-5 timeline, and correct step 4 wherever reality differed.
+2026-10-02 on `std-simian-test` (us-central1), local `--dry-run`
+sentinel built from a0a7972, with the step-2 flags. The sentinel
+started at 15:12:37Z, about 2m45s before T0 = 15:15:22Z.
+
+| T0 + | Observed |
+| --- | --- |
+| 7s | `drill-fallback`: `TriggeredScaleUp` onto a new `nap-n2-standard-2` pool, rank 0 skipped. `drill-wedged`: `NotTriggerScaleUp` |
+| 16s | First judge pass. Both rules Pending: `alert_state{rank_rule="wedged"}` and `{rank_rule="last-rank"}` at phase `pending` |
+| 67s | `n2-standard-2` node created, `compute-class=leeway-fallback-probe` |
+| ~2m | Pod scheduled and running |
+| first scrape | `ccc_priority_index: "1"` already present; `rank_pending` never read 1 |
+| 8m16s | **`leeway.rank_wedged`**, critical, `name=leeway-drill-wedged`, `first_seen` T0+16s |
+| 11m16s | **`leeway.rank_degraded`**, `reason=last-rank`, `name=leeway-fallback-probe`, `first_seen` T0+3m16s |
+| 12m20s | That entry in a `watchboard.digest` |
+
+- **Negative check:** no `rank_wedged` fired for `leeway-fallback-probe`.
+- **Integration counters:** `disagreement` and `unmatched` stayed 0 for both classes.
+- **Other findings:** none, either about the drill or about any other class on the cluster.
+
+Differences from step 4, now corrected above:
+- `kind_of_object` is `PreferenceAxis`, not `ComputeClass`.
+- GKE's annotation key is the bare `ccc_priority_index`.
+- Provisioning took about 2m, not 4.5m.
+- `rank_degraded` reaches the wire as a digest entry with no message.
+
+Two cosmetic oddities, not filed:
+- The `rank_wedged` message reads "mean achieved rank 0.00 … rank 0 0%" for a class that has placed nothing.
+- The `would-fire` log line labels the class `pod=/leeway-drill-wedged`.

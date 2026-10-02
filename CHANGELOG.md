@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It gives the expected timeline from the source and the measured GKE
   timings. It also covers a negative: the wedged rule can't tell a
   class that fits nothing from one whose fallback node is still
-  booting, so the dwell has to outlast provisioning. No reference run
-  is recorded yet.
+  booting, so the dwell has to outlast provisioning. The reference
+  run (2026-10-02, `std-simian-test`) saw `rank_wedged` at T0+8m16s
+  and `rank_degraded` at T0+11m16s, with no false wedge.
 - `dev/soak/leeway-fp` is a soak harness for leeway false positives
   (#416 follow-up). It runs the sentinel at production leeway defaults
   against a seven-node, three-zone kind cluster with 36 workloads, under
