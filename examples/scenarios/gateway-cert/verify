@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify gateway-cert"
+
+gw() {
+  kubectl -n "$DEMO_NS" get gateway frozen-ingress -o jsonpath="$1" 2>/dev/null
+}
+
+# The fault itself, before anything lookout says about it: the Secret
+# the listener needs was never written, and the listener says so.
+_listener_broken() {
+  [[ "$(gw '{.status.listeners[?(@.name=="https")].conditions[?(@.type=="ResolvedRefs")].reason}')" == InvalidCertificateRef ]]
+}
+await 120 "listener https ResolvedRefs=False/InvalidCertificateRef" _listener_broken
+if kubectl -n "$DEMO_NS" get secret frozen-ingress-tls >/dev/null 2>&1; then
+  echo "  ✗ Secret frozen-ingress-tls exists — the Issuer was supposed to be unable to sign" >&2
+  exit 1
+fi
+echo "  ✓ Secret frozen-ingress-tls was never written"
+
+# The negative control. The Gateway as a whole and its plain-HTTP
+# listener are programmed, so a programming failure on the wire can
+# only be the HTTPS listener's. If either reads False, kind is failing
+# the Gateway for some other reason (no address, no data plane) and
+# the scenario is not testing the certificate.
+#
+# inject only applied the fault once the Gateway was programmed, so
+# this holds from T0; it is read once, not awaited.
+top="$(gw '{.status.conditions[?(@.type=="Programmed")].status}')"
+http="$(gw '{.status.listeners[?(@.name=="http")].conditions[?(@.type=="Programmed")].status}')"
+if [[ "$top" != True || "$http" != True ]]; then
+  echo "  ✗ control not programmed: Gateway Programmed=${top:-<none>}, listener http Programmed=${http:-<none>}" >&2
+  gw '{.status}' | cut -c1-600 | sed 's/^/    /' >&2
+  exit 1
+fi
+echo "  ✓ control: Gateway and listener http are Programmed=True"
+
+# expiry, at the next scan (--expiry-interval=2m). A Certificate that
+# reads Ready=False is a FAILED renewal to the expiry source, and a
+# failed renewal is critical whatever the countdown says — so this one
+# opens a session of its own rather than waiting in the digest.
+await_inject gateway-cert 300 'expiry\.warning' 'frozen-ingress-tls' 'renewal=FAILED' 'severity\\":\\"critical'
+
+# gateway, after the 60s --gateway-grace that sentinel/up sets, the
+# next 30s sweep, and up to --watchboard-flush (1m): both kinds are
+# warnings, so they ride the watchboard digest (or a family.member
+# followup, if correlation finds a live ancestor first). One listener
+# with a missing certificateRef is two conditions and two kinds:
+# Programmed=False is programming_failed, ResolvedRefs=False is
+# route_rejected.
+await_inject gateway-cert 300 'gateway\.programming_failed' 'name\\":\\"frozen-ingress\\"'
+await_inject gateway-cert 60 'gateway\.route_rejected' 'name\\":\\"frozen-ingress\\"'
+
+# Read path: the same failure, attributed to the listener. state
+# gateway names WHICH listener; the wire payload does not.
+await_finding 120 'gateway\.listener_invalid .*name=frozen-ingress .*listener=https ' \
+  -- state gateway --namespace "$DEMO_NS"
+out="$(run_lookout state gateway --namespace "$DEMO_NS" 2>/dev/null || true)"
+if grep -E 'name=frozen-ingress ' <<<"$out" | grep -Eq 'listener=http |gateway\.not_programmed'; then
+  echo "  ✗ state gateway blames more than the https listener:" >&2
+  grep -E 'name=frozen-ingress ' <<<"$out" | cut -c1-300 | sed 's/^/    /' >&2
+  exit 1
+fi
+echo "  ✓ state gateway: only listener https, never the Gateway or listener http"

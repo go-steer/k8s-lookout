@@ -35,7 +35,8 @@ examples/
 
 `docker`, `kind`, `kubectl`; `go` 1.26+ **or** a `lookout` binary on
 PATH (set `LOOKOUT_BIN` to override); `openssl` for the cert-expiry
-scenario.
+scenario; network access to github.com for the gateway-cert scenario,
+which installs pinned cert-manager and Envoy Gateway releases.
 
 ## Quickstart
 
@@ -86,6 +87,7 @@ Three surfaces to verify on, weakest to strongest:
 | `node-failure` | worker node dies (kind-only, explicit) | `objectstate.node_notready` + ONE `storm` | `health` nodes, `triage radius` |
 | `placement-drift` | replicas pinned to zone-a by a taint, then zone-b comes back (kind-only, explicit) | `leeway.contract_violated` (DoNotSchedule) + `leeway.placement_drift` (ScheduleAnyway), never `domain_unavailable` | sentinel `lookout_leeway_drift` metric |
 | `zone-unavailable` | zone-b's only node cordoned (kind-only, explicit) | exactly ONE `leeway.domain_unavailable` (`taint_exclusion`), no per-workload finding | sentinel `lookout_leeway_domains_unavailable` metric |
+| `gateway-cert` | Gateway HTTPS listener's cert-manager Certificate never issues (installs cert-manager + Envoy Gateway, explicit) | `expiry.warning` critical (`renewal=FAILED`) + `gateway.programming_failed` / `gateway.route_rejected` in the digest | `state gateway` names `listener=https`; the `http` listener stays programmed |
 
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
@@ -288,7 +290,10 @@ full set plus the leeway placement scenarios (placement-drift,
 zone-unavailable) and node-failure weekly (or on demand via
 workflow_dispatch). The leeway pair runs before node-failure: a stopped
 worker2 leaves zone-b's domain finding open for leeway's 30m resolve
-dwell, and zone-unavailable would then have nothing new to report. Both tiers then run `examples/uat` at T1 against
+dwell, and zone-unavailable would then have nothing new to report.
+The weekly run also includes gateway-cert, after the leeway pair. It
+installs and then uninstalls two controllers, which is too heavy for
+the smoke tier. Both tiers then run `examples/uat` at T1 against
 the same cluster. PR presubmits stay hermetic — a live cluster never
 gates a PR. CI sets `LOOKOUT_E2E_TIMEOUT_SCALE=2` because runners are
 slower than a workstation; set it locally if your machine needs more

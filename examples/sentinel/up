@@ -84,6 +84,13 @@ if ! kubectl top nodes >/dev/null 2>&1; then
   echo "  (examples/kind/up installs metrics-server; on other clusters install it and re-run)" >&2
   sources="k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,topology-drift"
 fi
+# The gateway source is fatal at startup when the Gateway API CRDs are
+# not served, and a bare kind cluster has none. Only the gateway-cert
+# scenario installs them, and it re-runs this script on inject and on
+# revert so the source follows the CRDs in and out.
+if kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
+  sources="$sources,gateway"
+fi
 
 echo "▸ patching watcher: image=$image sources=$sources"
 args=(
@@ -112,6 +119,9 @@ args=(
   "--expiry-interval=2m"
   "--expiry-namespaces=$DEMO_NS"
   "--severity=rollout.stall=critical"
+  # Gateway conditions must hold this long before they fire (default
+  # 5m). Harmless when the gateway source is not enabled.
+  "--gateway-grace=60s"
   # leeway (the topology-drift source): add the examples' own placement
   # axis (see examples/kind/cluster.yaml) to both the scoring and the
   # domain-availability axes, and cut the 10m dwell so a drift is on

@@ -22,7 +22,9 @@ name: E2E (kind)
 #                      (~10 min: reactive events, state edges, rollout
 #                      source, recovery closed loop)
 #   - weekly / manual → the full non-destructive set, the leeway
-#                      placement pair, then node-failure (~50 min)
+#                      placement pair, gateway-cert, then node-failure
+#                      (~50 min). gateway-cert installs and removes
+#                      cert-manager + Envoy Gateway, too heavy for smoke.
 #
 # Both tiers then run the T1 CLI UAT (examples/uat) against the same
 # cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
@@ -47,7 +49,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: 'space-separated scenarios (empty = full set + leeway pair + node-failure)'
+        description: 'space-separated scenarios (empty = full set + leeway pair + gateway-cert + node-failure)'
         required: false
         default: ''
   push:
@@ -115,6 +117,7 @@ jobs:
               else
                 examples/e2e
                 examples/e2e placement-drift zone-unavailable
+                examples/e2e gateway-cert
                 examples/e2e node-failure
               fi
               ;;
@@ -122,9 +125,12 @@ jobs:
               # The leeway pair before node-failure, never after: a
               # stopped worker2 leaves zone-b's domain finding open for
               # the 30m resolve dwell, and zone-unavailable would then
-              # have nothing new to put on the wire.
+              # have nothing new to put on the wire. gateway-cert
+              # restarts the sentinel (on inject and on revert), so it
+              # runs after the leeway pair rather than between them.
               examples/e2e
               examples/e2e placement-drift zone-unavailable
+              examples/e2e gateway-cert
               examples/e2e node-failure
               ;;
           esac

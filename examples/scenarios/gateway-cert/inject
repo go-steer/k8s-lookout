@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+. "$(dirname "$0")/stack.sh"
+
+# Heavier than every other scenario: it installs two controllers. Not
+# in the default examples/e2e set; the weekly CI run names it.
+gateway_cert_stack_up
+sentinel_resync
+
+# Confirm the restart picked up what this scenario needs, rather than
+# letting verify time out on a source that was never running.
+args="$(kubectl -n "$SENTINEL_NS" get deployment lookout-watch \
+  -o jsonpath='{.spec.template.spec.containers[0].args}')"
+if ! grep -qE -- '--sources=[^"]*gateway' <<<"$args"; then
+  echo "ERROR: the sentinel's --sources does not name gateway after sentinel/up:" >&2
+  echo "    $args" >&2
+  exit 1
+fi
+if ! kubectl -n "$SENTINEL_NS" logs deploy/lookout-watch --tail=-1 2>/dev/null | grep -q 'cert-manager detected'; then
+  echo "ERROR: the restarted sentinel did not discover cert-manager:" >&2
+  kubectl -n "$SENTINEL_NS" logs deploy/lookout-watch --tail=40 2>&1 | sed 's/^/    /' >&2
+  exit 1
+fi
+echo "  ✓ sentinel restarted with the gateway source and cert-manager scanning"
+
+# A working Gateway first, so the data plane is serving before anything
+# breaks (gateway.yaml says why).
+echo "▸ applying a working Gateway (plain HTTP) and waiting for its data plane"
+kubectl apply -f "$(dirname "$0")/gateway.yaml" >/dev/null
+kubectl -n "$DEMO_NS" wait --for=condition=Programmed gateway/frozen-ingress --timeout=300s >/dev/null
+echo "  ✓ gateway frozen-ingress Programmed=True"
+
+# Mark AFTER the restart: a fresh sentinel replays every level signal
+# it can see, and none of that belongs to this scenario.
+stub_mark gateway-cert
+echo "▸ adding the HTTPS listener, its Certificate, and an Issuer that cannot sign"
+kubectl apply -f "$(dirname "$0")/fault.yaml" >/dev/null
+echo "T0: $(date -u +%Y-%m-%dT%H:%M:%SZ) — Certificate Ready=False at once; listener failure after the 60s --gateway-grace"
