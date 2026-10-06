@@ -62,8 +62,9 @@ func RadiusCommand(deps Deps) checks.Command {
 			{Name: "depth", Type: emit.FlagInt, Default: strconv.Itoa(defaultRadiusDepth),
 				Help: "graph edges followed per direction from the target's pods"},
 		},
-		Kinds: bundle.RadiusKinds(),
-		Output: []checks.OutputField{
+		Kinds: append(bundle.RadiusKinds(), state.UnreadKind()),
+		Output: append([]checks.OutputField{
+			{Name: "observed", Doc: "unknown on a neighbor whose kind this answer could not observe (a List it was refused, or a kind the sentinel's feed never watched in --at mode): it is referenced, and nothing is claimed about whether it exists"},
 			{Name: "direction", Doc: "neighbor's direction from the target: upstream (routes/owns/governs it), lateral (shares a node/volume/config), downstream (the target points at it)"},
 			{Name: "relation", Doc: "how the neighbor attaches: the edge kind (RoutesTo, Owns, Selects, Governs, RunsOn, Mounts) for upstream/downstream, shared-node|shared-zone|shared-config|shared-secret|shared-pvc for lateral"},
 			{Name: "hop", Doc: "BFS depth from the target at which the neighbor was first reached (1 = direct edge)"},
@@ -72,7 +73,7 @@ func RadiusCommand(deps Deps) checks.Command {
 			{Name: "source", Doc: "summary-line note: live (one-shot List pass) or history (reconstructed from --store)"},
 			{Name: "at", Doc: "summary-line note: the resolved --at instant the history answer is as of, RFC 3339"},
 			{Name: "unrecorded", Doc: "summary-line note, history only: comma-separated kinds the stored topology cannot contain (the sentinel's graph feed never watched them), so their absence is not a finding"},
-		},
+		}, state.UnreadFields()...),
 		Examples: []string{
 			"lookout triage radius Deployment/prod/api",
 			"lookout triage radius payments-api-7d9c4b-x2n8p --namespace=prod",
@@ -124,7 +125,12 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 		if inv.Scope.AllNamespaces {
 			listNS = metav1.NamespaceAll
 		}
-		cluster, err = state.LoadCluster(ctx, client, listNS)
+		// Tolerant (#546): a role that may not list Secrets (the
+		// built-in `view`) still gets the radius. The load tells the
+		// graph which kinds it could not observe, so an unread Secret
+		// neighbor comes back observed=unknown rather than missing,
+		// and the gap itself is one read.unavailable record below.
+		cluster, err = state.LoadCluster(ctx, client, listNS, state.Tolerate())
 		if err != nil {
 			return 0, err
 		}
@@ -139,12 +145,32 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 	if err != nil {
 		return 0, err
 	}
+	if cluster != nil {
+		for _, f := range cluster.UnreadFindings(radiusUnverified) {
+			if err := inv.Out.Emit(f); err != nil {
+				return 0, err
+			}
+		}
+	}
 	for _, nb := range bundle.RadiusNeighbors(snap, id, depth) {
 		if err := inv.Out.Emit(neighborFinding(nb, snap, cluster)); err != nil {
 			return 0, err
 		}
 	}
 	return scanned, nil
+}
+
+// radiusUnverified names what a skipped List costs the blast radius.
+// Radius is a pure topology query, so only requirements whose List
+// feeds the graph matter: the RBAC objects, ServiceAccounts and
+// classes `state edges` reads are no part of a neighborhood, and a
+// record for them would be noise.
+func radiusUnverified(req state.ListRequirement) string {
+	kinds := state.GraphKinds(req)
+	if len(kinds) == 0 {
+		return ""
+	}
+	return kinds[0].String() + " neighbors are identity-only (observed=unknown) where something references them, and absent where nothing does — never claimed missing"
 }
 
 // lateralRelations names the shared-object relation per anchor kind.

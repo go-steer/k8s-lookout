@@ -143,13 +143,13 @@ func EdgesCommand(deps Deps) checks.Command {
 		Name:        "state edges",
 		MCPName:     "k8s_state_edges",
 		MCPProfiles: []string{"triage"},
-		Summary:     "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for.",
+		Summary:     "Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for. Under a role that may not list Secrets or RBAC objects (the built-in view), those edges come back as read.unavailable with the reason and every other edge is still verified.",
 		Flags: []emit.FlagSpec{
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report TLS certificates expiring within this window"},
 		},
-		Kinds: EdgeKinds(),
-		Output: []checks.OutputField{
+		Kinds: append(EdgeKinds(), UnreadKind()),
+		Output: append([]checks.OutputField{
 			{Name: "workload", Doc: "the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side"},
 			{Name: "likely_workload", Doc: "on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess"},
 			{Name: "pods", Doc: "how many of the workload's pods carry the broken reference"},
@@ -174,7 +174,7 @@ func EdgesCommand(deps Deps) checks.Command {
 			{Name: "port", Doc: "Service port (name or number) the Ingress backend asks for"},
 			{Name: "service_account", Doc: "ServiceAccount the RBAC finding is about, or the one contributing an imagePullSecret"},
 			{Name: "role_ref", Doc: "dangling roleRef as <Kind>/<name>"},
-		},
+		}, UnreadFields()...),
 		Examples: []string{
 			"lookout state edges --workload=Deployment/prod/api",
 			"lookout state edges --workload=Pod/prod/api-6d5f8c-x2v9k --format=json",
@@ -213,20 +213,30 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 		listNS = metav1.NamespaceAll
 	}
 	// One List pass + one-shot graph build (§6.3 initial-sync path),
-	// via the same Cluster seam `bundle` composes over.
-	cluster, err := LoadCluster(ctx, client, listNS)
+	// via the same Cluster seam `bundle` composes over. Tolerant
+	// (#546): under a role that may not list Secrets or RBAC objects
+	// (the built-in `view`), the edges that need them are reported as
+	// read.unavailable and every other edge is still verified — the
+	// checks themselves stay silent on an unread kind (#149), so the
+	// record is what keeps that silence from reading as healthy.
+	cluster, err := LoadCluster(ctx, client, listNS, Tolerate())
 	if err != nil {
 		return 0, err
 	}
-	var findings []emit.Finding
+	var verified []emit.Finding
+	affects := edgeUnverified
 	if isWorkload {
-		findings, err = cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+		verified, err = cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
 	} else {
-		findings, err = cluster.ServiceEdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+		affects = serviceEdgeUnverified
+		verified, err = cluster.ServiceEdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
 	}
 	if err != nil {
 		return 0, err
 	}
+	// The gaps lead: a reader should know what was not verified before
+	// reading what was.
+	findings := append(cluster.UnreadFindings(affects, emit.Field{Key: "workload", Value: wl.String()}), verified...)
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
@@ -250,6 +260,9 @@ type index struct {
 	// deselected list drops the step instead of aborting the pass, and
 	// the topology is a documented partial. Empty on a full pass.
 	skipped []ListRequirement
+	// skipWhy says, per skipped requirement, why it was not read — the
+	// raw material of the explicit read.unavailable record (#546).
+	skipWhy map[ListRequirement]skipCause
 
 	pods            map[string]*corev1.Pod       // ns/name
 	configMaps      map[string]*corev1.ConfigMap // ns/name
@@ -587,12 +600,23 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 		}
 	}
 
+	skip := func(req ListRequirement, why skipCause) {
+		ix.skipped = append(ix.skipped, req)
+		if ix.skipWhy == nil {
+			ix.skipWhy = map[ListRequirement]skipCause{}
+		}
+		ix.skipWhy[req] = why
+	}
 	for i, step := range steps {
 		req := reqs[i]
-		if !opts.selects(req) || deniedUpFront[i] {
-			// Deselected via Lists() or denied by the preflight — never
-			// attempted, recorded as a documented gap.
-			ix.skipped = append(ix.skipped, req)
+		if !opts.selects(req) {
+			// Deselected via Lists() — never attempted, recorded as a
+			// documented gap.
+			skip(req, skipNotRequested)
+			continue
+		}
+		if deniedUpFront[i] {
+			skip(req, skipForbidden)
 			continue
 		}
 		if err := step(); err != nil {
@@ -600,7 +624,11 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 				// Least-privilege posture: the caller may list the other
 				// resources but not this one. Drop it, record it, carry
 				// on — the returned topology is a partial bundle.
-				ix.skipped = append(ix.skipped, req)
+				why := skipForbidden
+				if apierrors.IsNotFound(err) {
+					why = skipNotServed
+				}
+				skip(req, why)
 				continue
 			}
 			return nil, err

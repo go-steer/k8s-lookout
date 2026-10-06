@@ -81,6 +81,17 @@ var kindNames = [numNodeKinds]string{
 	KindCronJob:               "CronJob",
 }
 
+// AllKinds returns every supported node kind (KindUnknown excluded),
+// in declaration order — the full set an explicit Options.WatchedKinds
+// starts from when a one-shot List pass could not read some of them.
+func AllKinds() []NodeKind {
+	out := make([]NodeKind, 0, numNodeKinds-1)
+	for k := KindNamespace; k < numNodeKinds; k++ {
+		out = append(out, k)
+	}
+	return out
+}
+
 func (k NodeKind) String() string {
 	if k < numNodeKinds {
 		return kindNames[k]

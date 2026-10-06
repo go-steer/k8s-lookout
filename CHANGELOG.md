@@ -41,6 +41,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expiry source stays skipped, so these kinds are not emitted there.
   The signal schema grows from 57 to 59 kinds, additive only.
 
+### Fixed
+
+- **A forbidden read degrades the answer instead of failing the
+  command** (#546). Under the built-in `view` ClusterRole, which
+  excludes Secrets and every RBAC object, `health`, `state edges
+  --workload=…`, `triage radius` and `triage events --workload=…`
+  exited 1 with no output. Now each reports what it could check and
+  says what it could not, with the reason; this holds on the CLI and
+  over MCP.
+  - `health`: the `certs` category answers `unavailable` with
+    `forbidden: list secrets`. `services` still scores and names its
+    blind spot as `unverified=` on its line. Any category whose own
+    read is refused (webhook configurations, Services, PVCs) answers
+    `unavailable` the same way.
+  - `state edges`: a new `read.unavailable` finding for each refused
+    list (`resource=secrets`, the RBAC kinds), naming the edges it did
+    not verify. Every other edge is verified as before.
+  - `triage radius`: one `read.unavailable` for Secrets. A mounted
+    Secret it could not read is shown as `observed=unknown`, not as
+    `radius.missing`. The bundle's radius section gets the same fix.
+  - `triage events`: the owner tree now reads only pods and workload
+    objects, so it never needed the refused lists. Its output is
+    unchanged.
+
+  Errors other than Forbidden still fail the command. No flags or
+  grants changed.
+
 ## [0.30.0] - 2026-10-06
 
 **This release is leeway, proven against live clusters and corrected

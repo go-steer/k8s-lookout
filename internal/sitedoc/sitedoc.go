@@ -46,6 +46,7 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/watch"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/scan"
+	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/inject/schema"
 )
@@ -470,7 +471,7 @@ func scanCoveragePage(reg *checks.Registry) string {
 		writeCoverageStage(&b, c, "###")
 	}
 
-	if c, ok := reg.Lookup("state edges"); ok {
+	if _, ok := reg.Lookup("state edges"); ok {
 		b.WriteString("## Stage 2 — the dependency-edge drill-down\n\n" +
 			"Every workload stage 1 flagged at warning or above then has its\n" +
 			"dependency edges verified: one cluster List pass and N in-memory\n" +
@@ -478,7 +479,10 @@ func scanCoveragePage(reg *checks.Registry) string {
 			"twenty crashlooping pods of one Deployment are one drill-down rather than\n" +
 			"twenty. `--max-drilldown` bounds it (default 20) and the summary reports\n" +
 			"what it dropped.\n\n")
-		writeKindTable(&b, c.Kinds)
+		// The validity ledger, not the command's: read.unavailable is
+		// the standalone command's record of its own List pass, which
+		// the drill-down never emits.
+		writeKindTable(&b, state.EdgeKinds())
 	}
 
 	fmt.Fprintf(&b, "## What `--include` adds\n\n"+

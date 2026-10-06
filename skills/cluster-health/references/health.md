@@ -2,7 +2,7 @@
 
 # lookout health
 
-"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
+"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (certs under the built-in view role, which cannot list Secrets) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
 MCP tool: `k8s_cluster_health`
 
@@ -90,6 +90,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `status` | category status: healthy\|degraded\|unavailable (the scorecard always answers — healthy is explicit) |
 | `total` | findings in a degraded category |
 | `top` | worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top |
+| `unverified` | on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message |
 | `subject` | TLS certificate subject (CN when set); never key material |
 | `not_after` | TLS certificate NotAfter, RFC 3339 |
 | `days_left` | whole days until NotAfter (negative = expired) |

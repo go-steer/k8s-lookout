@@ -270,7 +270,7 @@ func LoadCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 	if err != nil {
 		return nil, err
 	}
-	g := graph.New(graph.Options{SwapInterval: -1})
+	g := graph.New(graph.Options{SwapInterval: -1, WatchedKinds: watchedKinds(ix.skipped)})
 	if err := g.Writer().FromObjects(slices.Values(ix.graphObjs)); err != nil {
 		return nil, err
 	}

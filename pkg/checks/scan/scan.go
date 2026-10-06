@@ -314,7 +314,10 @@ func kindLedger(reg *checks.Registry) []checks.KindField {
 	}
 	// Stage 2 is `state edges` called in memory, past the registry —
 	// same reason outputGlossary reaches for the constructor directly.
-	add(state.EdgesCommand(state.Deps{}).Kinds)
+	// Its validity ledger only: read.unavailable is the standalone
+	// command's record of its own List pass, which the drill-down
+	// never emits.
+	add(state.EdgeKinds())
 	return out
 }
 

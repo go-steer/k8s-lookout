@@ -16,6 +16,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,11 +24,14 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
@@ -346,6 +350,40 @@ func TestWorkloadTimelineGolden(t *testing.T) {
 	res := checktest.Run(t, testCommand(objs...), "--workload=Deployment/prod/web")
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit = %d, stderr: %s", res.Code, res.Stderr)
+	}
+	checktest.Golden(t, "testdata/events-workload.golden", res.Stdout)
+}
+
+// TestWorkloadTimelineUnderViewRole is #546: under the built-in `view`
+// role Secrets and RBAC objects are forbidden. The owner tree is
+// ownerReferences only, so the timeline never needed them — it must
+// not even ask for them, and its payload must be byte-identical to the
+// full-access golden (nothing degraded, so nothing to report).
+func TestWorkloadTimelineUnderViewRole(t *testing.T) {
+	objs := append(webTree(), webEvents()...)
+	objs = append(objs, hpaFixture("prod", "web-hpa", "h1", "Deployment", "web"))
+	objs = append(objs, oscillation("prod", "web-hpa", "h1")...)
+	client := fake.NewClientset(objs...)
+	var asked []string
+	for _, gr := range []schema.GroupResource{
+		{Resource: "secrets"},
+		{Group: "rbac.authorization.k8s.io", Resource: "rolebindings"},
+		{Group: "rbac.authorization.k8s.io", Resource: "roles"},
+		{Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings"},
+		{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"},
+	} {
+		client.PrependReactor("list", gr.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			asked = append(asked, gr.String())
+			return true, nil, apierrors.NewForbidden(gr, "", errors.New("denied by test"))
+		})
+	}
+	cmd := newCommand(func(context.Context) (kubernetes.Interface, error) { return client, nil }, func() time.Time { return testNow })
+	res := checktest.Run(t, cmd, "--workload=Deployment/prod/web")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	if len(asked) > 0 {
+		t.Errorf("the owner-tree pass listed %v; it needs none of them", asked)
 	}
 	checktest.Golden(t, "testdata/events-workload.golden", res.Stdout)
 }

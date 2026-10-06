@@ -164,6 +164,28 @@ passes and expiry runs, scanning Secrets only in those namespaces.
 Enrichment stays as it was, because `--enrich-lists` still deselects
 both kinds.
 
+## Read-path commands under the `view` role
+
+Many teams give a read-only agent the built-in `view` ClusterRole.
+It deliberately excludes Secrets and every `rbac.authorization.k8s.io`
+object. The read-path commands treat a refused read as information:
+the part of the answer that needed it says so, with the reason, and
+everything else is still checked. The command exits 0 with its usual
+summary line, on the CLI and over MCP alike. Any error other than
+Forbidden still fails the command, because a broken API server is not
+a permission gap.
+
+| Command | Under `view` |
+| --- | --- |
+| `health` | The `certs` category answers `status=unavailable` with `message="forbidden: list secrets — …"`. The `services` category still scores and adds `unverified="Ingress TLS secret references (forbidden: list secrets)"` to its line. Every other category is unchanged. A category whose own read is refused (webhook configurations, Services, PVCs) answers `unavailable` the same way. |
+| `state edges --workload=…` | One `read.unavailable` finding per refused list: `secrets` and the four RBAC kinds, each naming the edges it could not verify. Those edges are not reported as missing. ConfigMap, Service, endpoint, Ingress, StatefulSet and ServiceAccount edges are verified as usual. Entered as `--workload=Service/…`, only the Secret gap is reported, because that mode reads nothing workload-scoped. |
+| `triage radius` | One `read.unavailable` finding for `secrets`. A Secret the target mounts is listed with `observed=unknown` rather than as `radius.missing`. RBAC objects are no part of a blast radius, so their refusal is not reported. |
+| `triage events --workload=…` | Nothing is lost. The owner-reference tree is resolved from pods and workload objects only, so the command never asks for Secrets or RBAC objects. |
+
+`bundle` and the sentinel's enrichment already took this approach,
+with a `skipped=` note on the bundle head. To get the missing checks
+back, grant `list` on `secrets` and on the RBAC kinds.
+
 ## Sources
 
 `--sources` takes a comma-separated list, and nothing requires one

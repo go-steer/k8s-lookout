@@ -32,11 +32,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
@@ -201,6 +204,63 @@ func TestRadius_LiveGolden(t *testing.T) {
 	if strings.Contains(res.Stdout, "isolated") {
 		t.Errorf("pod outside the neighborhood leaked in:\n%s", res.Stdout)
 	}
+}
+
+// TestRadius_DegradesUnderViewRole is #546: under the built-in `view`
+// role Secrets and RBAC objects are forbidden. The radius still
+// answers (exit 0) with every neighbor the live golden has, the
+// Secret gap leads as one read.unavailable record, and the Secret
+// pod web-1 mounts is reported observed=unknown — a permission gap
+// must not be rendered as radius.missing. The RBAC refusals get no
+// record: no RBAC object is part of a neighborhood.
+func TestRadius_DegradesUnderViewRole(t *testing.T) {
+	deps := func() Deps {
+		cs := fake.NewClientset(radiusFixture()...)
+		for _, gr := range []schema.GroupResource{
+			{Resource: "secrets"},
+			{Group: "rbac.authorization.k8s.io", Resource: "rolebindings"},
+			{Group: "rbac.authorization.k8s.io", Resource: "roles"},
+			{Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings"},
+			{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"},
+		} {
+			cs.PrependReactor("list", gr.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(gr, "", errors.New("denied by test"))
+			})
+		}
+		return Deps{
+			Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+			Now:    func() time.Time { return fixedNow },
+		}
+	}
+	res := checktest.Run(t, RadiusCommand(deps()), "Deployment/prod/web")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr %q", res.Code, res.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	if want := `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — Secret neighbors are identity-only (observed=unknown) where something references them, and absent where nothing does — never claimed missing" resource=secrets`; lines[0] != want {
+		t.Errorf("first line:\n got: %s\nwant: %s", lines[0], want)
+	}
+	if strings.Count(res.Stdout, "kind=read.unavailable") != 1 {
+		t.Errorf("want exactly one read.unavailable (secrets; RBAC is not a graph kind):\n%s", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "kind=radius.missing") {
+		t.Errorf("an unread Secret was reported missing:\n%s", res.Stdout)
+	}
+	ghost := `kind=radius.neighbor severity=info namespace=prod kind_of_object=Secret name=ghost direction=downstream relation=Mounts hop=1 observed=unknown`
+	if !slices.Contains(lines, ghost) {
+		t.Errorf("missing %s:\n%s", ghost, res.Stdout)
+	}
+	// Everything else is the full-access answer, line for line.
+	full := checktest.Run(t, RadiusCommand(fakeDeps(radiusFixture()...)), "Deployment/prod/web")
+	for _, l := range strings.Split(strings.TrimSuffix(full.Stdout, "\n"), "\n") {
+		if strings.HasPrefix(l, "scanned=") || strings.Contains(l, "name=ghost") {
+			continue
+		}
+		if !slices.Contains(lines, l) {
+			t.Errorf("full-access neighbor lost under view: %s", l)
+		}
+	}
+	checktest.VerifyContract(t, RadiusCommand(deps()), "Deployment/prod/web")
 }
 
 // TestRadius_DepthLimit: --depth=1 keeps direct neighbors but drops
