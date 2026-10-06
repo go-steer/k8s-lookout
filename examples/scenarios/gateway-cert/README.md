@@ -52,15 +52,17 @@ certificateRef on that listener alone: `ResolvedRefs=False`
 ## What to expect
 
 - **Sentinel (wire):**
-  - `expiry.warning` for Certificate `frozen-ingress-tls` at the next
-    expiry scan (`--expiry-interval=2m`), with `renewal=FAILED`. It is
-    **critical**, so it opens its own session: to the expiry source a
-    Certificate reading `Ready=False` is a failed renewal, and a failed
-    renewal is critical whatever the countdown says. A Certificate that
-    never issued has no `notAfter`, so the source reports epoch as the
-    expiry date ("certificate EXPIRED … ago (notAfter
-    1970-01-01T00:00:00Z)"). That wording is tracked as #552; verify
-    does not assert on it.
+  - `expiry.warning` for Certificate `frozen-ingress-tls`, reading
+    "certificate never issued: DoesNotExist …" with `renewal=FAILED`
+    and no `forecast` (a Certificate that never issued has no
+    `notAfter` to count down from). It is **critical**, so it opens its
+    own session: nothing is serving TLS. A brand-new Certificate gets a
+    first-issuance grace before it counts as failed, timed from its
+    creation, so this lands at the first expiry scan
+    (`--expiry-interval=2m`) after the grace. The grace is
+    `--expiry-acme-grace`, which `examples/sentinel/up` cuts to 60s
+    (default 15m) when cert-manager is installed, so expect it within
+    about 3 minutes of T0.
   - `gateway.programming_failed` and `gateway.route_rejected` for
     Gateway `frozen-ingress`, after the 60s `--gateway-grace` that
     `examples/sentinel/up` sets (default 5m). Both are **warning**, not

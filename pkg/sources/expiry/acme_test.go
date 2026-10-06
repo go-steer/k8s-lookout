@@ -231,6 +231,68 @@ func TestACME_TerminalChallengeFiresOnObservation(t *testing.T) {
 	}
 }
 
+// TestACME_StallEndsTheFirstIssuanceGrace (#552): a terminal Challenge
+// fires on observation, possibly while its Certificate is a minute old
+// and has no lastFailureTime yet — still inside the first-issuance
+// grace. The stall is proof enough: the Certificate's expiry.warning
+// still goes FIRST, so the stall has a session to reattach to, and the
+// next full scan (Certificate still in the grace) does not read the
+// latched Certificate as renewed.
+func TestACME_StallEndsTheFirstIssuanceGrace(t *testing.T) {
+	t.Parallel()
+	cert := pendingCert("cert-1", "shop", "web-cert")
+	cert.SetCreationTimestamp(metav1.NewTime(testNow.Add(-time.Minute)))
+	ch := challengeCR("ch-1", "shop", "c", "o", "web-cert", "shop.example", "invalid",
+		"acme: authorization error for shop.example: 403 urn:ietf:params:acme:error:unauthorized", testNow.Add(-30*time.Second))
+	s, col, _ := newACMESource(t, cert, ch)
+
+	// A normal scan alone: inside the grace, nothing.
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sigs := col.all(); len(sigs) != 0 {
+		t.Fatalf("young Certificate fired before any stall: %v", kindsOf(sigs))
+	}
+
+	s.onACME(ch, "Challenge")
+	s.sweepACME(context.Background(), testNow)
+	sigs := col.all()
+	if got := kindsOf(sigs); len(got) != 2 || got[0] != KindWarning+"/Certificate" || got[1] != KindChallengeStuck+"/Challenge" {
+		t.Fatalf("signals = %v, want the Certificate's expiry.warning then expiry.challenge_stuck", got)
+	}
+	if !strings.HasPrefix(sigs[0].Message, "certificate never issued: ") || sigs[0].Forecast != nil {
+		t.Errorf("Certificate signal = %q forecast=%+v, want the never-issued wording and no forecast", sigs[0].Message, sigs[0].Forecast)
+	}
+
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(col.all()); n != 2 {
+		t.Fatalf("full scan re-fired: %v", kindsOf(col.all()))
+	}
+	if c, ok := s.ClearanceObserver().Clearance(engine.Incident{Key: sigs[0].Key}); !ok || c.Cleared {
+		t.Errorf("Clearance = %+v/%v — the in-grace scan reset the latch of a Certificate a stall fired", c, ok)
+	}
+}
+
+// TestACME_YoungCertificateAndChallengeStayQuiet: a fresh issuance —
+// Certificate and Challenge both inside the grace — says nothing.
+func TestACME_YoungCertificateAndChallengeStayQuiet(t *testing.T) {
+	t.Parallel()
+	cert := pendingCert("cert-1", "shop", "web-cert")
+	cert.SetCreationTimestamp(metav1.NewTime(testNow.Add(-2 * time.Minute)))
+	ch := challengeCR("ch-1", "shop", "c", "o", "web-cert", "shop.example", "pending", "", testNow.Add(-time.Minute))
+	s, col, _ := newACMESource(t, cert, ch)
+	s.onACME(ch, "Challenge")
+	if err := s.scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.sweepACME(context.Background(), testNow)
+	if sigs := col.all(); len(sigs) != 0 {
+		t.Fatalf("fresh issuance fired: %v", kindsOf(sigs))
+	}
+}
+
 // TestACME_ValidResolvesDeletedResolves: the §7.4 closed loop — a
 // Challenge that validated is recovered, one cert-manager cleaned up
 // is object_deleted.

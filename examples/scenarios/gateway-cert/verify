@@ -51,11 +51,12 @@ if [[ "$top" != True || "$http" != True ]]; then
 fi
 echo "  ✓ control: Gateway and listener http are Programmed=True"
 
-# expiry, at the next scan (--expiry-interval=2m). A Certificate that
-# reads Ready=False is a FAILED renewal to the expiry source, and a
-# failed renewal is critical whatever the countdown says — so this one
+# expiry, at the first scan (--expiry-interval=2m) after the
+# first-issuance grace (--expiry-acme-grace, 60s from sentinel/up):
+# at most ~3m after T0. A never-issued Certificate past that grace is
+# a FAILED issuance with nothing serving TLS, so it is critical and
 # opens a session of its own rather than waiting in the digest.
-await_inject gateway-cert 300 'expiry\.warning' 'frozen-ingress-tls' 'renewal=FAILED' 'severity\\":\\"critical'
+await_inject gateway-cert 300 'expiry\.warning' 'frozen-ingress-tls' 'certificate never issued' 'renewal=FAILED' 'severity\\":\\"critical'
 
 # gateway, after the 60s --gateway-grace that sentinel/up sets, the
 # next 30s sweep, and up to --watchboard-flush (1m): both kinds are

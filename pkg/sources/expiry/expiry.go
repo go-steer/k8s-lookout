@@ -37,6 +37,14 @@
 // expired, and — for cert-manager Certificates only, where renewal
 // state is observable — critical whenever the last renewal FAILED,
 // regardless of window (the design's example is exactly this pairing).
+// A Certificate that has NEVER issued (no status.notAfter) has no
+// countdown at all: it is reported as "certificate never issued" with
+// no Forecast — there is no notAfter to give as an ETA — and only
+// once it is past a first-issuance grace (Config.ACMEGrace from its
+// creationTimestamp) while Ready=False reads as still in progress
+// (DoesNotExist / Issuing) with no recorded failure. A recorded
+// failure (lastFailureTime, or Issuing=False reason Failed) fires at
+// once, as does a Certificate an ACME stall names (rejudgeCertificates).
 // Each scan re-checks; an object that stays inside a threshold does
 // not re-fire (the per-object level latch), and a renewed cert
 // (notAfter moved back out of the warn window) resets the latch so a
@@ -143,6 +151,15 @@ type Config struct {
 	// creationTimestamp, before it fires (--expiry-acme-grace).
 	// Default 15m: HTTP-01 validates in seconds, and DNS-01
 	// propagation checks commonly take a few minutes.
+	//
+	// It is also the first-issuance grace for a Certificate that has
+	// never issued (issue #552): the same question — how long may an
+	// issuance stay in progress before it is a stall — and the one
+	// value that keeps the two clocks ordered. A Certificate is
+	// created before any Challenge of its first issuance, so whenever
+	// a Challenge is past this grace its Certificate is too, and the
+	// Certificate's expiry.warning still opens the session the stall
+	// reattaches to.
 	ACMEGrace time.Duration
 	// ACMETick drives the ACME grace sweep. Default 30s.
 	ACMETick time.Duration
@@ -229,6 +246,21 @@ type finding struct {
 	// (cert-manager only — the one target with observable renewal
 	// state).
 	renewalFailed bool
+
+	// The never-issued facts (cert-manager only). neverIssued: no
+	// status.notAfter, so notAfter is zero and there is no countdown.
+	neverIssued bool
+	// firstIssuing: never issued, no failure recorded, and Ready=False
+	// with an in-progress reason — judged only past the first-issuance
+	// grace, timed from created.
+	firstIssuing bool
+	created      time.Time
+	// readyDetail is the Ready condition's "reason message", the
+	// never-issued message's evidence.
+	readyDetail string
+	// stalled: an ACME stall names this Certificate — its first
+	// issuance demonstrably failed, so the grace does not apply.
+	stalled bool
 }
 
 // Source implements sources.Source for the expiry row of §7.2.
@@ -477,7 +509,6 @@ func (s *Source) judgeWith(findings []finding, now time.Time, full bool) {
 	}
 	gen := s.gen
 	for _, f := range findings {
-		lvl := s.levelOf(f, now)
 		st, ok := s.state[f.uid]
 		if !ok {
 			st = &objEntry{}
@@ -486,6 +517,13 @@ func (s *Source) judgeWith(findings []finding, now time.Time, full bool) {
 		st.kind, st.namespace, st.name = f.kind, f.namespace, f.name
 		st.notAfter = f.notAfter
 		st.seenGen = gen
+		if s.inFirstIssuanceGrace(f, now) {
+			// Not judged yet — neither fired nor reset. Resetting
+			// would read a latched Certificate (fired early because a
+			// stall named it) as renewed on the next scan.
+			continue
+		}
+		lvl := s.levelOf(f, now)
 		switch {
 		case lvl > st.fired:
 			st.fired = lvl
@@ -518,6 +556,19 @@ func (s *Source) judgeWith(findings []finding, now time.Time, full bool) {
 	}
 }
 
+// inFirstIssuanceGrace reports whether a never-issued Certificate is
+// still inside its first-issuance grace (Config.ACMEGrace from its
+// creationTimestamp): every new Certificate reads Ready=False /
+// DoesNotExist until its first issuance completes — seconds for a CA
+// issuer, minutes for ACME — and that is issuance, not a failure. A
+// recorded failure (firstIssuing is false then) or an ACME stall
+// naming the Certificate ends the grace early. An unknown
+// creationTimestamp (zero) is never inside it: what cannot be timed
+// is not suppressed.
+func (s *Source) inFirstIssuanceGrace(f finding, now time.Time) bool {
+	return f.firstIssuing && !f.stalled && !f.created.IsZero() && now.Sub(f.created) < s.cfg.ACMEGrace
+}
+
 // levelOf computes a finding's threshold level (the §7.2 countdown
 // classes; see the package comment for the renewal-failed rule).
 func (s *Source) levelOf(f finding, now time.Time) level {
@@ -535,16 +586,18 @@ func (s *Source) levelOf(f finding, now time.Time) level {
 }
 
 // signal composes one expiry.warning Signal with the §8 Forecast: the
-// ETA is the certificate's notAfter — a fact, not a model.
+// ETA is the certificate's notAfter — a fact, not a model. A
+// Certificate that never issued has no notAfter, so it says so and
+// carries no Forecast (and no days_left) rather than inventing one.
 func (s *Source) signal(f finding, lvl level, now time.Time) engine.Signal {
-	daysLeft := int(f.notAfter.Sub(now).Hours() / 24)
 	var b strings.Builder
-	if f.notAfter.Before(now) {
-		fmt.Fprintf(&b, "certificate EXPIRED %s ago (notAfter %s)", now.Sub(f.notAfter).Truncate(time.Hour), f.notAfter.UTC().Format(time.RFC3339))
+	var forecast *engine.Forecast
+	if f.neverIssued {
+		fmt.Fprintf(&b, "certificate never issued: %s", orDefault(f.readyDetail, "no status.notAfter"))
 	} else {
-		fmt.Fprintf(&b, "certificate expires in %s (notAfter %s)", f.notAfter.Sub(now).Truncate(time.Hour), f.notAfter.UTC().Format(time.RFC3339))
+		forecast = &engine.Forecast{ETA: f.notAfter, ConfidenceBasis: ConfidenceBasis}
+		countdown(&b, f, now)
 	}
-	fmt.Fprintf(&b, "; subject=%s issuer=%s days_left=%d", orDash(f.subject), orDash(f.issuer), daysLeft)
 	if f.detail != "" {
 		fmt.Fprintf(&b, "; %s", f.detail)
 	}
@@ -562,13 +615,27 @@ func (s *Source) signal(f finding, lvl level, now time.Time) engine.Signal {
 			LastSeen:     now,
 			Count:        1,
 		},
-		Forecast: &engine.Forecast{ETA: f.notAfter, ConfidenceBasis: ConfidenceBasis},
+		Forecast: forecast,
 	}
 }
 
-func orDash(s string) string {
+// countdown writes an issued certificate's countdown head:
+// expires-in / EXPIRED, notAfter, subject, issuer, days_left.
+func countdown(b *strings.Builder, f finding, now time.Time) {
+	daysLeft := int(f.notAfter.Sub(now).Hours() / 24)
+	if f.notAfter.Before(now) {
+		fmt.Fprintf(b, "certificate EXPIRED %s ago (notAfter %s)", now.Sub(f.notAfter).Truncate(time.Hour), f.notAfter.UTC().Format(time.RFC3339))
+	} else {
+		fmt.Fprintf(b, "certificate expires in %s (notAfter %s)", f.notAfter.Sub(now).Truncate(time.Hour), f.notAfter.UTC().Format(time.RFC3339))
+	}
+	fmt.Fprintf(b, "; subject=%s issuer=%s days_left=%d", orDash(f.subject), orDash(f.issuer), daysLeft)
+}
+
+func orDash(s string) string { return orDefault(s, "-") }
+
+func orDefault(s, def string) string {
 	if s == "" {
-		return "-"
+		return def
 	}
 	return s
 }
@@ -799,14 +866,18 @@ func (s *Source) listCertificates(ctx context.Context, ns string) ([]finding, ma
 }
 
 // certificateFinding extracts one Certificate CR's countdown facts.
-// ok=false when the CR has no usable notAfter yet (never issued and
-// never failed — nothing to count down from).
+// ok=false when the CR has no usable notAfter yet and has not failed
+// (never issued and Ready not False — nothing to count down from or
+// report). A never-issued Certificate that reads Ready=False is a
+// finding with neverIssued set and a zero notAfter; whether it is
+// judged yet is the first-issuance grace's call (inFirstIssuanceGrace).
 func certificateFinding(u *unstructured.Unstructured) (f finding, secretName string, ok bool) {
 	f = finding{
 		kind:      "Certificate",
 		namespace: u.GetNamespace(),
 		name:      u.GetName(),
 		uid:       string(u.GetUID()),
+		created:   u.GetCreationTimestamp().Time,
 	}
 	secretName, _, _ = unstructured.NestedString(u.Object, "spec", "secretName")
 
@@ -815,24 +886,32 @@ func certificateFinding(u *unstructured.Unstructured) (f finding, secretName str
 		f.notAfter = t
 	}
 
-	ready := ""
-	readyDetail := ""
+	ready, readyReason := "", ""
+	issuingFailed := false
 	if conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
 		for _, c := range conds {
 			m, isMap := c.(map[string]any)
 			if !isMap {
 				continue
 			}
-			if t, _ := m["type"].(string); t == "Ready" {
-				ready, _ = m["status"].(string)
-				reason, _ := m["reason"].(string)
+			status, _ := m["status"].(string)
+			reason, _ := m["reason"].(string)
+			switch t, _ := m["type"].(string); t {
+			case "Ready":
+				ready, readyReason = status, reason
 				msg, _ := m["message"].(string)
-				readyDetail = strings.TrimSpace(reason + " " + msg)
+				f.readyDetail = strings.TrimSpace(reason + " " + msg)
+			case "Issuing":
+				issuingFailed = status == "False" && reason == "Failed"
 			}
 		}
 	}
+	readyDetail := f.readyDetail
 	lastFailure, _, _ := unstructured.NestedString(u.Object, "status", "lastFailureTime")
 	f.renewalFailed = lastFailure != "" || ready == "False"
+	f.neverIssued = f.notAfter.IsZero()
+	f.firstIssuing = f.neverIssued && lastFailure == "" && !issuingFailed &&
+		ready == "False" && firstIssuanceReasons[readyReason]
 
 	f.detail = "source=cert-manager renewal="
 	switch {
@@ -853,15 +932,19 @@ func certificateFinding(u *unstructured.Unstructured) (f finding, secretName str
 		f.detail += " secret=" + secretName
 	}
 
-	if f.notAfter.IsZero() && !f.renewalFailed {
+	if f.neverIssued && !f.renewalFailed {
 		return f, secretName, false
 	}
-	if f.notAfter.IsZero() {
-		// Renewal failed with no issued cert: fire on the failure with
-		// the epoch as a degenerate "already due" countdown.
-		f.notAfter = time.Unix(0, 0).UTC()
-	}
 	return f, secretName, true
+}
+
+// firstIssuanceReasons are the Ready=False reasons cert-manager sets on
+// a Certificate whose first issuance is still in progress — the only
+// ones the first-issuance grace covers. Any other reason on a
+// never-issued Certificate is judged at once.
+var firstIssuanceReasons = map[string]bool{
+	"DoesNotExist": true,
+	"Issuing":      true,
 }
 
 // ---- Cert / token parsing (no secret byte survives these) ----

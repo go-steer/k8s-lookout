@@ -131,6 +131,15 @@ args=(
   "--topology-domain-unavailable-keys=topology.kubernetes.io/zone,topology.kubernetes.io/region,$LEEWAY_ZONE_KEY"
   "--topology-dwell=60s"
 )
+# cert-manager's issuance grace (default 15m): how long an ACME
+# Challenge may stay pending AND how long a brand-new Certificate may
+# stay never-issued before expiry calls it failed (#552). Only the
+# gateway-cert scenario installs cert-manager, so the flag is only
+# passed then — images older than the flag (v0.30.0 and earlier) still
+# run every other scenario.
+if kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
+  args+=("--expiry-acme-grace=60s")
+fi
 args_json="$(printf '"%s",' "${args[@]}")"
 args_json="[${args_json%,}]"
 kubectl -n "$SENTINEL_NS" patch deployment lookout-watch --type=json -p "[
