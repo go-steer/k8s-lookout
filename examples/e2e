@@ -44,7 +44,9 @@ require_examples_context
 # resource budget a new scenario has to fit. node-failure is
 # destructive and stays opt-in; hpa-metrics-dead waits out a 15m
 # sustain window that no flag shortens, so it is opt-in too
-# (`examples/e2e hpa-metrics-dead`).
+# (`examples/e2e hpa-metrics-dead`). gateway-cert installs cert-manager
+# and Envoy Gateway and restarts the sentinel twice, so it is opt-in
+# as well (`examples/e2e gateway-cert`).
 #
 # config-storm runs last: it deliberately forms a storm, and
 # storm-member suppression swallows signals a later scenario expects to

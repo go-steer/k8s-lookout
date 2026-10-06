@@ -1,0 +1,77 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The fault: the working Gateway from gateway.yaml gains an HTTPS
+# listener that terminates TLS with a Secret a cert-manager Certificate
+# is supposed to write, from an Issuer that can never sign anything.
+# The Secret never appears, so the listener can never be programmed.
+#
+# Everything namespaced lives in lookout-demo because that is the one
+# namespace examples/sentinel/up points the expiry source at
+# (--expiry-namespaces). The gateway source watches cluster-wide.
+
+# A CA Issuer whose CA key pair does not exist, and never will. Chosen
+# over an ACME issuer because it fails the same way every time with no
+# network at all: no account registration to time out, no DNS lookup,
+# nothing a CI runner's egress can change. The Certificate goes
+# Ready=False the moment cert-manager sees it, and the target Secret is
+# never written.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: lookout-examples-ca
+  namespace: lookout-demo
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  ca:
+    secretName: lookout-examples-ca-keypair-never-created
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: frozen-ingress-tls
+  namespace: lookout-demo
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  secretName: frozen-ingress-tls
+  dnsNames: [frozen.lookout-examples.invalid]
+  issuerRef:
+    kind: Issuer
+    name: lookout-examples-ca
+---
+# `http` stays as the negative control: same Gateway, same data plane,
+# no certificate, so it must stay programmed. If verify sees it fail,
+# something other than the certificate is broken and the scenario is
+# not testing what it claims to.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: frozen-ingress
+  namespace: lookout-demo
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  gatewayClassName: lookout-examples
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: frozen.lookout-examples.invalid
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: frozen-ingress-tls

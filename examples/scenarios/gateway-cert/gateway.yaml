@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The healthy half: a working Gateway with one plain-HTTP listener.
+# inject applies this first and waits for it to be programmed, then
+# applies fault.yaml, which adds the HTTPS listener and the Certificate
+# behind it — someone adding TLS to an ingress that already works.
+#
+# Why two steps: until its Envoy pod is up, Envoy Gateway reports the
+# whole Gateway Programmed=False, and on a cold node (image pull) that
+# can outlast the 60s --gateway-grace. gateway.programming_failed is
+# one incident per Gateway, so it would fire for the data plane
+# starting and the certificate would only be folded into it. With the
+# data plane already serving, the HTTPS listener is the only thing on
+# the Gateway that can fail.
+
+# kind has no load balancer, so a LoadBalancer Service never gets an
+# address and Envoy Gateway reports the whole Gateway
+# Programmed=False/AddressNotAssigned, forever. A ClusterIP Service
+# gets an address at once.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: lookout-examples
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+      envoyDeployment:
+        replicas: 1
+        container:
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: lookout-examples
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: lookout-examples
+    namespace: envoy-gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: frozen-ingress
+  namespace: lookout-demo
+  labels: { app.kubernetes.io/part-of: lookout-examples }
+spec:
+  gatewayClassName: lookout-examples
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80

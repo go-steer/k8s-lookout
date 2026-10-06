@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expiry source stays skipped, so these kinds are not emitted there.
   The signal schema grows from 57 to 59 kinds, additive only.
 
+- A `gateway-cert` kind scenario: a Gateway's HTTPS listener waits on
+  a cert-manager Certificate that never issues. It is the first
+  scenario for the `gateway` source and the expiry source's
+  cert-manager handling. It asserts a critical `expiry.warning`
+  (`renewal=FAILED`) for the Certificate, `gateway.programming_failed`
+  and `gateway.route_rejected` for the Gateway, and that
+  `state gateway` blames only the HTTPS listener. It installs pinned
+  cert-manager and Envoy Gateway releases, so it runs in the weekly
+  E2E rather than the post-merge smoke subset. `examples/sentinel/up`
+  now enables the gateway source when the Gateway API CRDs are served,
+  and sets `--gateway-grace=60s` (#541).
+
 ### Fixed
 
 - **A forbidden read degrades the answer instead of failing the
