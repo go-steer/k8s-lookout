@@ -260,11 +260,14 @@ func (s *Source) judgeAll(now time.Time) []rankJudgement {
 
 // conditionsFor assembles the non-window inputs. Caller holds s.mu.
 func (s *Source) conditionsFor(class *leeway.ComputeClass, h *axisHistory, lifetime map[leeway.Rank]float64, now time.Time) leeway.RankConditions {
+	provisioning, declined := s.scaleUpSplit(class.Axis.Key.Name)
 	c := leeway.RankConditions{
-		PendingPods:     len(s.pendingByClass[class.Axis.Key.Name]),
-		Rank0Restored:   h.restored,
-		Lifetime:        now.Sub(h.epoch),
-		LifetimeSeconds: lifetime,
+		PendingPods:         len(s.pendingByClass[class.Axis.Key.Name]),
+		PendingProvisioning: provisioning,
+		PendingDeclined:     declined,
+		Rank0Restored:       h.restored,
+		Lifetime:            now.Sub(h.epoch),
+		LifetimeSeconds:     lifetime,
 	}
 	if h.restored {
 		c.SinceRestore = now.Sub(h.restoredAt)

@@ -177,7 +177,7 @@ constants land with their sources in phases 3 and 7; this table is the commitmen
 | `leeway.placement_drift` | `topology-drift` | B | Inferred intent deviation — `ρ` over threshold (§7.3) |
 | `leeway.baseline_breach` | `topology-drift` | C | Deviation from the subject's own history (§7.5) |
 | `leeway.domain_unavailable` | `topology-drift` | B | A domain the cluster has, or recently had, now has no *usable* node |
-| `leeway.rank_wedged` | `compute-class` | A | Pods Pending against a `DoNotScaleUp` class (§7.7.4) |
+| `leeway.rank_wedged` | `compute-class` | A | Pods Pending against a `DoNotScaleUp` class that the autoscaler is not provisioning for (§7.7.4) |
 | `leeway.rank_degraded` | `compute-class` | B/C | Rank-0 share below threshold, sustained time at the last rank, or mean achieved rank rising against its own baseline |
 | `leeway.rank_no_migration` | `compute-class` | B | No `from_rank > to_rank` transitions after capacity returns |
 | `leeway.rank_tier_unused` | `compute-class` | info | An entire preference tier unused in 30 d |
@@ -2805,7 +2805,7 @@ only the score differs.
 | An entire **tier** unused in 30d | Dead preference level — or a reservation being paid for and never used | info (cost) | `leeway.rank_tier_unused` |
 | A single rule unused, siblings in its tier busy | Weak signal: an equal-score sibling absorbed demand, which is the design intent of grouping | info, off by default | — |
 | No `from_rank > to_rank` transitions after capacity returns | Active migration back to preferred capacity is not happening | B | `leeway.rank_no_migration` |
-| Pods Pending against a `DoNotScaleUp` class | No priority can be satisfied and GKE will not scale up — the class is wedged, and the pods are the only symptom | A | `leeway.rank_wedged` |
+| Pods Pending against a `DoNotScaleUp` class, except those the autoscaler is provisioning for (amended 2026-10-06) | The autoscaler declined to scale up, or gave no verdict, and GKE will not provision outside the list — the class is wedged, and the pods are the only symptom | A | `leeway.rank_wedged` |
 | Unmatched / ambiguous / disagreement rates | **Our integration is broken**, not the cluster | tool SLI | metrics only, never a Signal |
 
 The last row is deliberately not a finding. Reporting a cluster finding derived from
@@ -2840,6 +2840,56 @@ counting indexes:
 - `whenUnsatisfiable` — `DoNotScaleUp` means pods stay Pending rather than falling
   further, so on those classes Pending pods are the fallback signal and rank
   distribution alone will not show the problem.
+
+> **Amended 2026-10-06: a pod the autoscaler is provisioning for is not
+> wedged (#532).** The wedged row fired on *any* Pending pod on a
+> `DoNotScaleUp` class. It could not tell "no priority fits" from "a
+> satisfiable fallback's node is still provisioning", because on GKE a
+> fallback is a new node in a new NAP pool, minutes away, and its pod is
+> Pending for the whole wait. Only the dwell outlasting the provision kept
+> it quiet. A dwell under about 5m, a slow shape (GPU, large machines) or a
+> stockout-and-retry that eventually succeeds produced a critical finding
+> whose message, "no priority can be satisfied", was false. The
+> compute-class drill (2026-10-02, `dev/drills/compute-class-fallback.md`)
+> showed the distinguishing evidence. Both pods got a cluster-autoscaler
+> Event on the Pod at about 7s: `NotTriggerScaleUp` on the wedged class's
+> pod and `TriggeredScaleUp` on the fallback's. A later `NotTriggerScaleUp`
+> landed on the fallback pod after it had already scheduled, so ordering
+> matters.
+>
+> The rule now reads each Pending pod's **most recent autoscaler verdict
+> since the pod was created**: `TriggeredScaleUp`, `NotTriggerScaleUp` or
+> `FailedScaleUp`, ordered by the Event's latest timestamp, scoped by the
+> pod's UID and creation time. A pod whose latest verdict is
+> `TriggeredScaleUp` is *provisioning* and does not count. A later
+> `FailedScaleUp` or `NotTriggerScaleUp` brings it back. A same-second tie
+> goes to the trigger, the reading that fires less. **A pod with no verdict
+> still counts.** Exoneration needs evidence, and the commonest reason for
+> having none is a process that cannot read Events. That must not switch a
+> Tier A rule off for good. Where Events are readable the autoscaler answers
+> within one loop (about 10s), far inside the dwell. An expired
+> `TriggeredScaleUp` (the API server's event TTL, an hour by default) also
+> drops the pod back to "no verdict", so a scale-up that never lands cannot
+> excuse a pod forever. The message now says only what was observed: how
+> many pods the autoscaler *declined to scale up* for, how many have *no
+> verdict observed*, and how many are waiting on a triggered scale-up. It
+> no longer asserts that no priority can be satisfied.
+>
+> The alternatives in the issue were weighed. The `PodScheduled` condition
+> says the scheduler found no node, which is true of both cases. Reading
+> the cluster-autoscaler status ConfigMap reports per node group, not per
+> class or per pod, and GKE does not reliably expose it. Rewording the
+> message alone would leave the false positive in place. Events are the one
+> per-pod verdict, and the source reads them on the process's shared Event
+> stream (the one `k8s-events`, `capacity` and `ingress` already watch), so
+> the change costs no new LIST+WATCH and no new grant. The Event informer is
+> deliberately outside the source's sync barrier: verdicts only ever
+> exonerate, so a process without Events falls back to the pre-amendment
+> rule instead of blocking the source. The verdict fold is pure
+> (`leeway.LatestScaleUp`), and the source only gathers the Events. This
+> does not widen §7.7.2's known gap: "unmet preference" is still a separate
+> detector. The wedged rule reads verdicts only to decide whether a Pending
+> pod is waiting for a node it is getting.
 
 > **Naming collision, worth guarding in review.** `ComputeClass.spec.whenUnsatisfiable`
 > (`DoNotScaleUp`) and `topologySpreadConstraint.whenUnsatisfiable` (`DoNotSchedule` /

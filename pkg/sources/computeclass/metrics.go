@@ -149,8 +149,10 @@ const (
 		"Only rules with an open episode are present — a healthy class has no rows rather than zeroes. " +
 		"A resolving episode still reads 2, because its finding is still outstanding."
 	descWedgedPods = "Unscheduled pods that named a compute class by nodeSelector and did not get one. " +
-		"The only symptom a wedged class has: on a DoNotScaleUp class no priority can be satisfied and the autoscaler " +
-		"will not provision outside the list, so the pods stay Pending and nothing in the rank distribution moves at all. " +
+		"The only symptom a wedged class has: on a DoNotScaleUp class the autoscaler will not provision outside the " +
+		"priority list, so the pods stay Pending and nothing in the rank distribution moves at all. " +
+		"Counts every such pod, including one whose fallback node is still provisioning; the §7.7.4 finding excludes " +
+		"pods whose latest autoscaler verdict is TriggeredScaleUp, and this gauge does not. " +
 		"Non-zero on a scale-up-anyway class is a different story — those pods are waiting on something else, which is " +
 		"why the §7.7.4 finding is gated on whenUnsatisfiable being DECLARED and this gauge is not."
 )

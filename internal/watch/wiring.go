@@ -1132,7 +1132,10 @@ func (r *runner) run(ctx context.Context) error {
 		// Pods and nodes, both already on these factories — the §7.7
 		// pod-seconds are a join over two streams this process watches
 		// anyway, and the only watch the source adds for itself is the
-		// handful of ComputeClass objects, on its own dynamic factory.
+		// handful of ComputeClass objects, on its own dynamic factory. Its
+		// Event handler (the autoscaler verdicts behind the wedged rule,
+		// #532) shares this factory's one Event stream with k8s-events,
+		// capacity and ingress.
 		bs.compClass.WithFactory(sharedFactory)
 		bs.compClass.WithNodeFactory(factories.Cluster)
 		bs.compClass.WithMeter(r.meter(computeclass.MeterName))

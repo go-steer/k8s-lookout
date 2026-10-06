@@ -67,6 +67,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Errors other than Forbidden still fail the command. No flags or
   grants changed.
+- leeway: `leeway.rank_wedged` no longer fires for a pod whose fallback
+  node is still provisioning (#532). The rule counted every Pending pod
+  on a `DoNotScaleUp` compute class. It could not tell a class with no
+  satisfiable priority from one whose fallback node was a few minutes
+  away. With a dwell under about 5 minutes, or a slow shape such as a
+  GPU or a stockout-and-retry, it raised a critical finding claiming
+  "no priority can be satisfied". The `compute-class` source now reads
+  each Pending pod's latest cluster-autoscaler verdict Event. A pod
+  whose latest verdict is `TriggeredScaleUp` is provisioning and does
+  not count; a later `FailedScaleUp` or `NotTriggerScaleUp` makes it
+  count again. A pod with no verdict still counts, so a sentinel that
+  cannot read Events keeps the previous behaviour instead of going
+  silent. The message now says only what was observed: how many pods
+  the autoscaler declined to scale up for, and how many have no
+  verdict. It uses the Event stream the sentinel already watches, so
+  there is no new watch and no new RBAC.
 
 ## [0.30.0] - 2026-10-06
 
