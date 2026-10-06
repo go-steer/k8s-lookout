@@ -101,6 +101,21 @@ type Objects struct {
 // scorecard categories here. Returns the scanned count for the
 // caller's summary line and the findings, sorted critical-first.
 func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (int, []emit.Finding, error) {
+	scanned, findings, _, err := scanCluster(ctx, client, ns, now, cfg, false, classes)
+	return scanned, findings, err
+}
+
+// ScanClusterPartial is ScanCluster for a least-privilege credential
+// (#546): a part whose List the API server refuses (Forbidden) is
+// dropped instead of failing the pass, and returned in unavailable as
+// part (PartPods, PartWorkloads, PartNodes, …) → reason ("forbidden:
+// list nodes"). Under the built-in `view` role, which grants no Nodes,
+// the nodes part is the one that drops. Any other error still fails.
+func ScanClusterPartial(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (scanned int, findings []emit.Finding, unavailable map[string]string, err error) {
+	return scanCluster(ctx, client, ns, now, cfg, true, classes)
+}
+
+func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, tolerate bool, classes []string) (int, []emit.Finding, map[string]string, error) {
 	sel := map[string]bool{}
 	if len(classes) == 0 {
 		classes = allClasses
@@ -111,17 +126,17 @@ func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 	}
 	for _, c := range classes {
 		if !known[c] {
-			return 0, nil, fmt.Errorf("unknown delta class %q", c)
+			return 0, nil, nil, fmt.Errorf("unknown delta class %q", c)
 		}
 		sel[c] = true
 	}
-	s := &scanner{client: client, ns: ns, now: now, th: cfg.thresholds(), classes: sel}
+	s := &scanner{client: client, ns: ns, now: now, th: cfg.thresholds(), classes: sel, tolerate: tolerate}
 	scanned, findings, err := s.scan(ctx)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	sortFindings(findings)
-	return scanned, findings, nil
+	return scanned, findings, s.unavailable, nil
 }
 
 // ScanObjects derives the delta findings from objs at time now,

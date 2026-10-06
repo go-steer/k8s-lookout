@@ -143,7 +143,7 @@ func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "health",
 		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (certs under the built-in view role, which cannot list Secrets) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
+		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},
@@ -334,7 +334,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// Delta-backed categories: nodes, crashloops, pending, rollouts,
 	// addons, quota, disruption — one delta pass, findings bucketed by
 	// kind.
-	dScanned, dFindings, err := delta.ScanCluster(ctx, client, ns, now, delta.Config{},
+	// Tolerant (#546): a part whose List RBAC refuses drops out alone
+	// and its categories answer unavailable with the reason — under the
+	// built-in `view` role that is nodes, which `view` never grants.
+	dScanned, dFindings, dUnavailable, err := delta.ScanClusterPartial(ctx, client, ns, now, delta.Config{},
 		"pods", "nodes", "pdb", "system", "quota")
 	if err != nil {
 		return 0, err
@@ -347,6 +350,17 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		card.unavailable["nodes"] = "Nodes are cluster-scoped; run without --namespace"
 		if ns != metav1.NamespaceSystem {
 			card.unavailable["addons"] = "system add-ons live in kube-system; run without --namespace"
+		}
+	}
+	for _, part := range deltaParts {
+		reason, ok := dUnavailable[part.name]
+		if !ok {
+			continue
+		}
+		for _, cat := range part.categories {
+			if _, already := card.unavailable[cat]; !already {
+				card.unavailable[cat] = reason + " — " + part.needs
+			}
 		}
 	}
 
@@ -410,31 +424,36 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 	// services: the edge sweep `lookout scan` runs as its stage 2,
 	// over only the objects it reads. Tolerant per list, strict per
-	// category: a sweep that could not list Services (or the pods,
-	// Ingresses and classes it judges them by) would score healthy,
-	// and that is silence, so any of those refused makes the category
-	// unavailable. Secrets are the exception — the sweep needs them
-	// only to tell whether an Ingress's TLS Secret exists, the checks
-	// stay silent on an unread kind (#149), and the routing verdict
-	// stands on its own; the gap is named on the scorecard line as
-	// unverified= instead.
+	// category: a sweep that could not list Services or the pods their
+	// selectors match would score healthy, and that is silence, so
+	// either refused makes the category unavailable. The other three
+	// lists only feed the Ingress half — whether a backend, a class
+	// (cluster-scoped: the built-in `view` role does not grant
+	// IngressClasses) or a TLS Secret exists — and those checks stay
+	// silent on an unread kind (#149), so the routing verdict stands
+	// and the gap is named on the scorecard line as unverified=.
 	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists), state.Tolerate())
 	if err != nil {
 		return 0, err
 	}
-	var gaps []string
+	var gaps, blind []string
 	for _, req := range serviceLists {
-		if why := cluster.SkipReason(req); why != "" && req.Resource != "secrets" {
+		why := cluster.SkipReason(req)
+		switch {
+		case why == "":
+		case req.Resource == "pods" || req.Resource == "services":
 			gaps = append(gaps, why)
+		default:
+			blind = append(blind, serviceBlindSpot(req.Resource)+" ("+why+")")
 		}
 	}
 	scanned += cluster.Scanned()
 	var sweep []emit.Finding
 	if len(gaps) > 0 {
-		card.unavailable["services"] = strings.Join(gaps, "; ") + " — Service routing is judged from Services, the pods their selectors match, and the Ingresses and classes in front of them"
+		card.unavailable["services"] = strings.Join(gaps, "; ") + " — Service routing is judged from Services and the pods their selectors match"
 	} else {
-		if why := cluster.SkipReason(state.ListRequirement{Resource: "secrets"}); why != "" {
-			card.unverified["services"] = "Ingress TLS secret references (" + why + ")"
+		if len(blind) > 0 {
+			card.unverified["services"] = strings.Join(blind, "; ")
 		}
 		sweep = cluster.EdgeSweepFindings(certWarn, now)
 	}
@@ -535,6 +554,9 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 	}
 	for _, cat := range categoryOrder {
+		if _, ok := card.unavailable[cat]; ok {
+			continue // a category that could not be read in full reports no partial details
+		}
 		for _, f := range card.findings[cat] {
 			f.Details = append([]emit.Field{{Key: "category", Value: cat}}, f.Details...)
 			// §8 push/pull dedup key (docs/signal-schema-v1.md): a
@@ -565,6 +587,37 @@ var serviceLists = []state.ListRequirement{
 	{Group: "networking.k8s.io", Resource: "ingresses"},
 	{Group: "networking.k8s.io", Resource: "ingressclasses"},
 	{Group: "", Resource: "secrets"},
+}
+
+// serviceBlindSpot names what the services category cannot check
+// without each of its non-core lists.
+func serviceBlindSpot(resource string) string {
+	switch resource {
+	case "ingresses":
+		return "Ingress backends and classes"
+	case "ingressclasses":
+		return "Ingress class references"
+	case "secrets":
+		return "Ingress TLS secret references"
+	}
+	return resource
+}
+
+// deltaParts maps each part of the delta pass to the scorecard
+// categories it feeds, in a fixed order so the reasons render
+// deterministically. needs says what the category is read from, after
+// the forbidden reason.
+var deltaParts = []struct {
+	name       string
+	categories []string
+	needs      string
+}{
+	{delta.PartPods, []string{"crashloops", "pending"}, "crash loops and aged Pending are read from the Pods in scope"},
+	{delta.PartWorkloads, []string{"rollouts"}, "rollouts are read from the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs in scope"},
+	{delta.PartNodes, []string{"nodes"}, "node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant"},
+	{delta.PartSystem, []string{"addons"}, "add-on health is read from the kube-system Deployments and DaemonSets"},
+	{delta.PartPDB, []string{"disruption"}, "disruption readiness is read from the PodDisruptionBudgets in scope"},
+	{delta.PartQuota, []string{"quota"}, "quota pressure is read from the ResourceQuotas in scope"},
 }
 
 // deltaCategory buckets a delta finding kind into its scorecard

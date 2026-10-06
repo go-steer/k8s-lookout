@@ -545,6 +545,41 @@ func TestScan_MaxDrilldownZeroDisablesTheSweepToo(t *testing.T) {
 // TestScan_ContractInBothFormats runs the full §13 round-trip: every
 // key scan emits, including the stamped check= and its own summary
 // notes, must be declared in its glossary.
+// TestScan_DrilldownNamesWhatViewRefused is the #546 follow-up for
+// scan: under exactly the built-in `view` role the drill-down still
+// runs, and the lists its pass was refused go out as the
+// drilldown_skipped= summary note — scan's existing form for a
+// coverage gap — rather than leaving a quiet drill-down to read as a
+// clean one. A full-access scan carries no such note.
+func TestScan_DrilldownNamesWhatViewRefused(t *testing.T) {
+	stages := []checks.Command{stage("triage delta", emits(crashloop("prod", "api-rs-0")))}
+	reg := checks.NewRegistry()
+	for _, s := range stages {
+		reg.Register(s)
+	}
+	client := fake.NewClientset(ownedPods("prod", "api", 1)...)
+	checktest.ViewRole(client)
+	c := scan.New(scan.Deps{
+		Registry: reg,
+		Client:   func(context.Context) (kubernetes.Interface, error) { return client, nil },
+		Now:      func() time.Time { return testClock },
+	})
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	want := "drilldown=1 drilldown_skipped=nodes,ingressclasses.networking.k8s.io,secrets,rolebindings.rbac.authorization.k8s.io,roles.rbac.authorization.k8s.io,clusterrolebindings.rbac.authorization.k8s.io,clusterroles.rbac.authorization.k8s.io,storageclasses.storage.k8s.io"
+	if !strings.Contains(res.Stdout, want) {
+		t.Errorf("summary missing %q:\n%s", want, res.Stdout)
+	}
+	checktest.VerifyContract(t, c)
+
+	full := checktest.Run(t, newScan(t, ownedPods("prod", "api", 1), stages[0]))
+	if strings.Contains(full.Stdout, "drilldown_skipped=") {
+		t.Errorf("a full-access scan named a skipped list:\n%s", full.Stdout)
+	}
+}
+
 func TestScan_ContractInBothFormats(t *testing.T) {
 	c := newScan(t, ownedPods("prod", "api", 1),
 		stage("triage delta", emits(crashloop("prod", "api-rs-0"))),

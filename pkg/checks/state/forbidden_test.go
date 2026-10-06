@@ -144,3 +144,34 @@ func TestListForbidden(t *testing.T) {
 		})
 	}
 }
+
+// TestEdgesUnderExactViewRole pins the records under exactly the
+// built-in `view` role (checktest.ViewRole, an allow list transcribed
+// from the upstream bootstrap policy): one per refused list that
+// touches an edge, none for Nodes, which edge validity never reads.
+func TestEdgesUnderExactViewRole(t *testing.T) {
+	cs := fake.NewClientset(healthy(t).objects()...)
+	checktest.ViewRole(cs)
+	cmd := state.EdgesCommand(state.Deps{
+		Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+		Now:    func() time.Time { return fixedNow },
+	})
+	res := checktest.Run(t, cmd, "--workload="+wl)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	var resources []string
+	for _, line := range strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n") {
+		if !strings.HasPrefix(line, "kind=read.unavailable ") {
+			if !strings.HasPrefix(line, "scanned=") {
+				t.Errorf("a healthy workload reported an edge under view: %s", line)
+			}
+			continue
+		}
+		resources = append(resources, line[strings.LastIndex(line, "resource=")+len("resource="):])
+	}
+	want := "ingressclasses.networking.k8s.io,secrets,rolebindings.rbac.authorization.k8s.io,roles.rbac.authorization.k8s.io,clusterrolebindings.rbac.authorization.k8s.io,clusterroles.rbac.authorization.k8s.io,storageclasses.storage.k8s.io"
+	if got := strings.Join(resources, ","); got != want {
+		t.Errorf("read.unavailable resources = %s\nwant %s", got, want)
+	}
+}

@@ -2,7 +2,7 @@
 
 # lookout health
 
-"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (certs under the built-in view role, which cannot list Secrets) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
+"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
 MCP tool: `k8s_cluster_health`
 

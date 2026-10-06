@@ -31,6 +31,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
@@ -367,6 +369,75 @@ func TestChanges_Contract(t *testing.T) {
 	path := seedChangeLog(t)
 	checktest.VerifyContract(t, ChangesCommand(Deps{Now: func() time.Time { return fixedNow }}),
 		"Deployment/prod/web", "--at=2026-07-25T10:30:00Z", "--store="+path)
+}
+
+// viewDeps is fakeDeps under a credential bound to exactly the
+// built-in `view` ClusterRole (checktest.ViewRole).
+func viewDeps(objs ...runtime.Object) Deps {
+	cs := fake.NewClientset(objs...)
+	checktest.ViewRole(cs)
+	return Deps{
+		Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+		Now:    func() time.Time { return fixedNow },
+	}
+}
+
+// changesNodesGap is the one gap `view` opens in a changes answer:
+// Nodes are refused, and zones are read from Node labels. The Secret
+// and RBAC refusals get no record — they remove nothing from the
+// neighborhood.
+const changesNodesGap = `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list nodes — zones are read from Node labels, so neighbors reached only through a shared zone, and their changes, are out of scope" resource=nodes`
+
+// TestChanges_LiveUnderViewRole is the #546 follow-up for changes: in
+// pure live mode under `view` the command exits 0, leads with the one
+// gap that narrows its scope, and reports every change the
+// full-access golden does.
+func TestChanges_LiveUnderViewRole(t *testing.T) {
+	res := checktest.Run(t, ChangesCommand(viewDeps(liveApproxObjects()...)), "Deployment/prod/web")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr %q", res.Code, res.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	if lines[0] != changesNodesGap {
+		t.Errorf("first line:\n got: %s\nwant: %s", lines[0], changesNodesGap)
+	}
+	if n := strings.Count(res.Stdout, "kind=read.unavailable"); n != 1 {
+		t.Errorf("want exactly one read.unavailable, got %d:\n%s", n, res.Stdout)
+	}
+	full := checktest.Run(t, ChangesCommand(fakeDeps(liveApproxObjects()...)), "Deployment/prod/web")
+	for _, l := range strings.Split(strings.TrimSuffix(full.Stdout, "\n"), "\n") {
+		if strings.HasPrefix(l, "scanned=") {
+			continue
+		}
+		if !slices.Contains(lines, l) {
+			t.Errorf("change lost under view: %s", l)
+		}
+	}
+	checktest.VerifyContract(t, ChangesCommand(viewDeps(liveApproxObjects()...)), "Deployment/prod/web")
+}
+
+// TestChanges_StoreLiveUnderViewRole: with --store and no --at the
+// neighborhood still comes from the live List pass, so the same gap
+// leads; the delta-log answer itself is unchanged.
+func TestChanges_StoreLiveUnderViewRole(t *testing.T) {
+	path := seedChangeLog(t)
+	view := checktest.Run(t, ChangesCommand(viewDeps(liveObjects()...)), "Deployment/prod/web", "--store="+path)
+	if view.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr %q", view.Code, view.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(view.Stdout, "\n"), "\n")
+	if lines[0] != changesNodesGap {
+		t.Errorf("first line:\n got: %s\nwant: %s", lines[0], changesNodesGap)
+	}
+	full := checktest.Run(t, ChangesCommand(fakeDeps(liveObjects()...)), "Deployment/prod/web", "--store="+path)
+	for _, l := range strings.Split(strings.TrimSuffix(full.Stdout, "\n"), "\n") {
+		if strings.HasPrefix(l, "scanned=") {
+			continue
+		}
+		if !slices.Contains(lines, l) {
+			t.Errorf("change lost under view: %s", l)
+		}
+	}
 }
 
 // TestChangesRegistered: default-registry presence + MCP name.
