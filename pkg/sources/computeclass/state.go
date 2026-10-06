@@ -70,7 +70,13 @@ type Source struct {
 	// indexed separately from `pods` because they occupy nothing: charging them
 	// to a rank would put a pod that got no hardware at all into the same
 	// bucket as one that got its first choice.
-	pendingByClass map[string]map[podRef]struct{}
+	pendingByClass map[string]map[podRef]pendingPod
+	// scaleUps holds the cluster autoscaler's verdict Events, per pod and
+	// then per Event name (#532). It mirrors the Event cache — an Event's
+	// delete removes it — rather than pruning on the pod, so it is bounded by
+	// the API server's own event TTL, and a verdict that arrives before its
+	// pod is not lost. Only the three verdict reasons are kept.
+	scaleUps map[podRef]map[string]leeway.AutoscalerEvent
 	// history is the per-axis sample ring the §7.7.4 windows are diffed from.
 	history map[leeway.AxisKey]*axisHistory
 	// baselines is each axis's learned normal for mean achieved rank (#463).
@@ -122,6 +128,14 @@ type nodeState struct {
 
 // placed reports whether this node contributes a rank pods can be charged to.
 func (n *nodeState) placed() bool { return n != nil && n.known }
+
+// pendingPod is what the wedged rule needs about one Pending pod to scope the
+// autoscaler's Events to it: the UID and the creation time, so an Event about
+// an earlier pod of the same name is not read as a verdict on this one.
+type pendingPod struct {
+	uid     string
+	created time.Time
+}
 
 // podState is where a pod is currently charged.
 type podState struct {
@@ -333,7 +347,7 @@ func (s *Source) UpsertPod(pod *corev1.Pod, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.setWedged(ref, wedged)
+	s.setWedged(ref, wedged, pendingPod{uid: string(pod.UID), created: pod.CreationTimestamp.Time})
 
 	if !occupies(pod) || asked == "" {
 		s.forgetPod(ref, at)
@@ -366,7 +380,7 @@ func (s *Source) DeletePod(pod *corev1.Pod, at time.Time) {
 	ref := podRef{pod.Namespace, pod.Name}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setWedged(ref, "")
+	s.setWedged(ref, "", pendingPod{})
 	s.forgetPod(ref, at)
 }
 
@@ -419,7 +433,7 @@ func asksFor(pod *corev1.Pod, classLabel string) string {
 }
 
 // setWedged moves one pod into or out of the pending index. Caller holds s.mu.
-func (s *Source) setWedged(ref podRef, class string) {
+func (s *Source) setWedged(ref podRef, class string, p pendingPod) {
 	for name, byClass := range s.pendingByClass {
 		if name == class {
 			continue
@@ -434,10 +448,93 @@ func (s *Source) setWedged(ref podRef, class string) {
 	}
 	byClass, ok := s.pendingByClass[class]
 	if !ok {
-		byClass = map[podRef]struct{}{}
+		byClass = map[podRef]pendingPod{}
 		s.pendingByClass[class] = byClass
 	}
-	byClass[ref] = struct{}{}
+	byClass[ref] = p
+}
+
+// UpsertEvent records one cluster autoscaler verdict Event about a pod, and
+// ignores every other Event. Exported for the same reason UpsertClass is.
+//
+// Matched on the reason alone, not on the reporting component: the three
+// reasons are the autoscaler's own vocabulary, and the component name is not
+// something GKE documents.
+func (s *Source) UpsertEvent(ev *corev1.Event) {
+	if ev.InvolvedObject.Kind != "Pod" || !leeway.IsScaleUpReason(ev.Reason) {
+		return
+	}
+	ref := podRef{ev.InvolvedObject.Namespace, ev.InvolvedObject.Name}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byName, ok := s.scaleUps[ref]
+	if !ok {
+		byName = map[string]leeway.AutoscalerEvent{}
+		s.scaleUps[ref] = byName
+	}
+	byName[ev.Namespace+"/"+ev.Name] = leeway.AutoscalerEvent{
+		Reason: ev.Reason,
+		At:     eventTime(ev),
+		PodUID: string(ev.InvolvedObject.UID),
+	}
+}
+
+// DeleteEvent forgets one Event, which is how the scaleUps map stays bounded.
+func (s *Source) DeleteEvent(ev *corev1.Event) {
+	ref := podRef{ev.InvolvedObject.Namespace, ev.InvolvedObject.Name}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byName, ok := s.scaleUps[ref]
+	if !ok {
+		return
+	}
+	delete(byName, ev.Namespace+"/"+ev.Name)
+	if len(byName) == 0 {
+		delete(s.scaleUps, ref)
+	}
+}
+
+// eventTime is the latest instant an Event says it was observed.
+//
+// The latest, because the autoscaler repeats NotTriggerScaleUp on every loop
+// a pod stays unhelpable and the recorder folds the repeats into one Event by
+// bumping its count and last timestamp; the first timestamp would make a
+// decline that is still being repeated look older than a trigger it in fact
+// superseded. Every timestamp an Event can carry is considered, because which
+// are set depends on which recorder API emitted it.
+func eventTime(ev *corev1.Event) time.Time {
+	at := ev.CreationTimestamp.Time
+	for _, t := range []time.Time{ev.FirstTimestamp.Time, ev.LastTimestamp.Time, ev.EventTime.Time} {
+		if t.After(at) {
+			at = t
+		}
+	}
+	if ev.Series != nil && ev.Series.LastObservedTime.After(at) {
+		at = ev.Series.LastObservedTime.Time
+	}
+	return at
+}
+
+// scaleUpSplit counts one class's Pending pods by the autoscaler's latest
+// verdict on each. Caller holds s.mu.
+func (s *Source) scaleUpSplit(class string) (provisioning, declined int) {
+	for ref, p := range s.pendingByClass[class] {
+		byName := s.scaleUps[ref]
+		if len(byName) == 0 {
+			continue
+		}
+		events := make([]leeway.AutoscalerEvent, 0, len(byName))
+		for _, ev := range byName {
+			events = append(events, ev)
+		}
+		switch leeway.LatestScaleUp(events, p.uid, p.created) {
+		case leeway.ScaleUpProvisioning:
+			provisioning++
+		case leeway.ScaleUpDeclined:
+			declined++
+		}
+	}
+	return provisioning, declined
 }
 
 // forgetPod uncharges and de-indexes one pod. Caller holds s.mu.

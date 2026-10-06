@@ -226,8 +226,8 @@ a minute of slack to every row.
 | T0 + | Part A (`drill-wedged`) | Part B (`drill-fallback`) |
 | --- | --- | --- |
 | 0 | Pod Pending, `wedged_pods{class=leeway-drill-wedged}` = 1, wedged verdict breaches → §8.2 Pending | Same: pod Pending on a `DoNotScaleUp` class, wedged verdict breaches → Pending |
-| ~7s | `NotTriggerScaleUp` on the pod (no rule can fit) | `TriggeredScaleUp`: rank 0 skipped instantly, an `n2` NAP pool created |
-| ~4.5m | — | Node Ready, pod bound. The wedged verdict stops breaching, and the Pending episode is **discarded unemitted** because it was younger than the dwell. |
+| ~7s | `NotTriggerScaleUp` on the pod (no rule can fit); the wedged verdict keeps breaching, now as "the autoscaler declined" | `TriggeredScaleUp`: rank 0 skipped instantly, an `n2` NAP pool created. From the next judge pass the wedged verdict stops breaching (the pod is provisioning, #532), and the Pending episode is **discarded unemitted** |
+| ~4.5m | — | Node Ready, pod bound. `wedged_pods` drops to 0; the wedged verdict was already quiet. |
 | ~5.2m | — | `ccc_priority_index: "1"` stamped, 33–44s after the node registered. Until then the pod sits at rank *unknown* (`rank_pending` gauge = 1) and accrues no tier time. After it, all of the axis's tier time is at rank 1, so last-rank share = 1.00 > 0.9 and the verdict breaches. |
 | ~7–8m | **`leeway.rank_wedged`**, critical: session create + inject | — |
 | ~12–13m | — | **`leeway.rank_degraded`**, reason `last-rank`, warning: one watchboard digest entry within the 1m flush |
@@ -239,9 +239,13 @@ the message (`leeway.RankMessage`):
 - **`rank_wedged`:**
   - `reason=wedged`, `kind_of_object=PreferenceAxis`,
     `name=leeway-drill-wedged`;
-  - a message ending *"1 pod(s) Pending against a DoNotScaleUp class:
-    no priority can be satisfied and the autoscaler will not provision
-    outside the list; ordered by …, 2 tier(s)"*.
+  - a message ending *"1 pod(s) Pending against a DoNotScaleUp class;
+    the autoscaler declined to scale up for 1 (NotTriggerScaleUp or
+    FailedScaleUp is its latest verdict). The class will not let the
+    autoscaler provision outside its priority list; ordered by …, 2
+    tier(s)"*. If it says *"1 have no autoscaler verdict observed"*
+    instead, the sentinel is not seeing the pod's Events; check the
+    events grant.
 - **`rank_degraded`:**
   - `reason=last-rank`, `kind_of_object=PreferenceAxis`,
     `name=leeway-fallback-probe`;
@@ -255,20 +259,25 @@ back) or `rank_tier_unused` (that needs 30 days of lifetime, and it is
 Tier C, so off the wire by default).
 
 **The negative to watch for: no `rank_wedged` for
-`leeway-fallback-probe`.** The wedged rule counts *any* Pending pod
-on a `DoNotScaleUp` class. It cannot tell "no priority fits" apart
-from "rank 1 fits and its node is still booting". The only thing
-separating the two is the dwell outlasting the provisioning wait:
-about 4.5m measured in §7.7 and about 2m in the reference run below,
-against a 10m default and this drill's 7m. A fast provision makes
-this negative easy to pass, so a clean run does not prove the dwell
-covers a slow one (issue #532). With
-a dwell under ~5m, Part B produces a false `rank_wedged` whose message
-is untrue. The same happens in production if a satisfiable rank takes
-longer than the dwell to provision: a slow GPU shape, or a
-stockout-and-retry. If you see it at 7m, record the provisioning time
-from the pod's events. That is a finding about the rule, not the
-drill.
+`leeway-fallback-probe`.** Since #532 (§7.7.4, amended 2026-10-06)
+the wedged rule reads the cluster autoscaler's latest verdict Event
+on each Pending pod. A pod whose latest verdict is `TriggeredScaleUp`
+is provisioning and does not count. So Part B's pod stops counting
+at about 7s, when its `TriggeredScaleUp` lands, and the wedged
+episode for `leeway-fallback-probe` is discarded at the next judge
+pass. That holds however long the `n2` node takes and whatever the
+dwell is. The negative no longer depends on the dwell outlasting the
+provision, so a short `--compute-class-dwell` is a stronger test of
+it, not a weaker one. Two things would still produce a `rank_wedged`
+for Part B, and each is a real observation, not a false one. One is a
+later `FailedScaleUp` or `NotTriggerScaleUp` on the still-Pending pod,
+such as a stockout; the message then says the autoscaler declined.
+The other is no autoscaler Event reaching the sentinel at all; the
+message then says no verdict was observed. If you see either, record
+the pod's events (`kubectl get events --field-selector
+involvedObject.name=<pod>`) with the drill. A `rank_wedged` for Part
+B whose pod's latest verdict *is* `TriggeredScaleUp` is a bug in the
+rule.
 
 ## 5. Observe
 
@@ -353,7 +362,7 @@ started at 15:12:37Z, about 2m45s before T0 = 15:15:22Z.
 | 11m16s | **`leeway.rank_degraded`**, `reason=last-rank`, `name=leeway-fallback-probe`, `first_seen` T0+3m16s |
 | 12m20s | That entry in a `watchboard.digest` |
 
-- **Negative check:** no `rank_wedged` fired for `leeway-fallback-probe`.
+- **Negative check:** no `rank_wedged` fired for `leeway-fallback-probe`. On this build (pre-#532) that was the dwell outlasting a 2m provision; from #532 on, the 7s `TriggeredScaleUp` excuses the pod outright.
 - **Integration counters:** `disagreement` and `unmatched` stayed 0 for both classes.
 - **Other findings:** none, either about the drill or about any other class on the cluster.
 

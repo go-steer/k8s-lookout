@@ -224,6 +224,14 @@ type RankConditions struct {
 	// that got nothing in the same bucket as one that got its first choice.
 	PendingPods int
 
+	// PendingProvisioning and PendingDeclined split PendingPods by the
+	// cluster autoscaler's latest verdict on each pod (see LatestScaleUp).
+	// The remainder had no verdict observed. Only a provisioning pod is
+	// exonerated: it is waiting for a node a satisfiable priority is getting,
+	// which is not a wedge (#532).
+	PendingProvisioning int
+	PendingDeclined     int
+
 	// Rank0Restored reports that the most preferred tier is occupied now and
 	// was not at the previous observation. It is the closest observable thing
 	// to "capacity returned", and the no-migration rule is gated on it rather
@@ -343,10 +351,14 @@ type RankObservation struct {
 	LastRankShare float64 `json:"lastRankShare"`
 	MeanRank      float64 `json:"meanRank"`
 	PendingPods   int     `json:"pendingPods"`
-	DegradedPods  int     `json:"degradedPods"`
-	Improving     int64   `json:"improving"`
-	Worsening     int64   `json:"worsening"`
-	Lateral       int64   `json:"lateral"`
+	// PendingProvisioning and PendingDeclined are RankConditions' split of
+	// PendingPods, carried so a wedged finding shows what the autoscaler said.
+	PendingProvisioning int   `json:"pendingProvisioning"`
+	PendingDeclined     int   `json:"pendingDeclined"`
+	DegradedPods        int   `json:"degradedPods"`
+	Improving           int64 `json:"improving"`
+	Worsening           int64 `json:"worsening"`
+	Lateral             int64 `json:"lateral"`
 
 	// Baseline is the axis's learned normal for MeanRank, absent until one
 	// has matured. Carried on every verdict for the reason the rest of this
@@ -463,10 +475,13 @@ func observe(in RankInput, axis *PreferenceAxis) RankObservation {
 		MeanRank:      w.MeanRank(),
 		PendingPods:   in.Conditions.PendingPods,
 		DegradedPods:  w.DegradedPods(),
-		Improving:     w.Improving,
-		Worsening:     w.Worsening,
-		Lateral:       w.Lateral,
-		Baseline:      in.Baseline,
+
+		PendingProvisioning: in.Conditions.PendingProvisioning,
+		PendingDeclined:     in.Conditions.PendingDeclined,
+		Improving:           w.Improving,
+		Worsening:           w.Worsening,
+		Lateral:             w.Lateral,
+		Baseline:            in.Baseline,
 	}
 }
 
@@ -496,7 +511,25 @@ func verdict(rule RankRule, focus Rank, breached bool, obs RankObservation, reas
 // would misattribute. §7.7.5 also records that every class on the inspected
 // cluster carried DoNotScaleUp without anybody choosing it, which is a reason
 // to be careful about what we say, not a reason to treat unset as set.
+//
+// A Pending pod whose latest autoscaler verdict is TriggeredScaleUp does not
+// count (amended 2026-10-06, #532). On GKE a fallback priority is a new node in
+// a new pool, minutes away, and its pod is Pending on a DoNotScaleUp class for
+// the whole wait; a dwell shorter than the provision, or a slow shape, used to
+// page "no priority can be satisfied" about a class that was satisfying one.
+// A pod with no verdict at all still counts. Exoneration needs evidence, and
+// the commonest reason for having none is a process that cannot read Events,
+// which must not turn a Tier A rule permanently off; where Events are readable
+// the autoscaler answers within a loop, so the dwell absorbs the gap.
+//
+// The reason never claims more than was observed. "No priority can be
+// satisfied" is an inference about GKE's internals; "the autoscaler declined
+// to scale up" is what its Event said, and "no verdict observed" is all an
+// unheard pod supports.
 func judgeWedged(in RankInput, obs RankObservation) RankVerdict {
+	provisioning := min(obs.PendingProvisioning, obs.PendingPods)
+	declined := min(obs.PendingDeclined, obs.PendingPods-provisioning)
+	unheard := obs.PendingPods - provisioning - declined
 	switch {
 	case in.Class.ScaleUp != ScaleUpPolicyDoNotScaleUp:
 		return verdict(RankRuleWedged, RankUnknown, false, obs,
@@ -504,9 +537,22 @@ func judgeWedged(in RankInput, obs RankObservation) RankVerdict {
 	case obs.PendingPods == 0:
 		return verdict(RankRuleWedged, RankUnknown, false, obs,
 			"no pods are Pending on this class")
+	case declined+unheard == 0:
+		return verdict(RankRuleWedged, RankUnknown, false, obs,
+			fmt.Sprintf("%d pod(s) Pending, and the autoscaler's latest verdict on each is TriggeredScaleUp: a node for a satisfiable priority is provisioning", provisioning))
+	}
+	reason := fmt.Sprintf("%d pod(s) Pending against a DoNotScaleUp class", obs.PendingPods)
+	if declined > 0 {
+		reason += fmt.Sprintf("; the autoscaler declined to scale up for %d (NotTriggerScaleUp or FailedScaleUp is its latest verdict)", declined)
+	}
+	if unheard > 0 {
+		reason += fmt.Sprintf("; %d have no autoscaler verdict observed", unheard)
+	}
+	if provisioning > 0 {
+		reason += fmt.Sprintf("; %d are waiting on a triggered scale-up", provisioning)
 	}
 	return verdict(RankRuleWedged, RankUnknown, true, obs,
-		fmt.Sprintf("%d pod(s) Pending against a DoNotScaleUp class: no priority can be satisfied and the autoscaler will not provision outside the list", obs.PendingPods))
+		reason+". The class will not let the autoscaler provision outside its priority list")
 }
 
 // judgeRank0Share is the rank-0 time share falling below a configured floor.

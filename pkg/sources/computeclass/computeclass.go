@@ -68,7 +68,10 @@
 // gated on policy fields this source decodes from the class rather than on
 // anything a node says: `whenUnsatisfiable` must DECLARE DoNotScaleUp before a
 // Pending pod counts as wedged, and `activeMigration.optimizeRulePriority` must
-// be set before a failure to migrate back is a failure at all.
+// be set before a failure to migrate back is a failure at all. A Pending pod
+// the cluster autoscaler has answered with TriggeredScaleUp (and nothing later)
+// is provisioning, not wedged, which is the one thing this source reads Events
+// for (#532).
 //
 // The shares they are judged over are windowed, not cumulative. The tracker's
 // counters run for the life of the axis, and a share taken off those totals
@@ -299,7 +302,8 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, cfg Config) (*Sourc
 		nodes:          map[string]*nodeState{},
 		pods:           map[podRef]*podState{},
 		podsByNode:     map[string]map[podRef]struct{}{},
-		pendingByClass: map[string]map[podRef]struct{}{},
+		pendingByClass: map[string]map[podRef]pendingPod{},
+		scaleUps:       map[podRef]map[string]leeway.AutoscalerEvent{},
 		transitions:    map[transitionKey]int64{},
 		history:        map[leeway.AxisKey]*axisHistory{},
 		baselines:      newRankBaselines(),
@@ -482,6 +486,24 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		return fmt.Errorf("%s: register Node handler: %w", Name, err)
 	}
 	synced = append(synced, h.HasSynced)
+
+	// Events, for the cluster autoscaler's per-pod verdicts the wedged rule
+	// reads (#532). On the shared factory this is the Event stream k8s-events,
+	// capacity and ingress already watch, so it costs no new LIST+WATCH, and
+	// the grant is the core events list/watch every deployment carries.
+	//
+	// Deliberately NOT in the sync barrier. The verdicts only ever exonerate a
+	// Pending pod, so a process that cannot read Events — forbidden, or slow
+	// to list — must degrade to the pre-#532 rule rather than block Run and
+	// take every rank metric and finding with it.
+	_, err = factory.Core().V1().Events().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { s.onEvent(obj) },
+		UpdateFunc: func(_, obj any) { s.onEvent(obj) },
+		DeleteFunc: func(obj any) { s.onEventDelete(obj) },
+	})
+	if err != nil {
+		return fmt.Errorf("%s: register Event handler: %w", Name, err)
+	}
 
 	// The CRD watch is its own dynamicinformer factory: different client type,
 	// it cannot merge into the typed one. NFR-5 budgets exactly this — one
@@ -666,6 +688,21 @@ func (s *Source) onPodDelete(obj any) {
 	}
 	if pod, ok := obj.(*corev1.Pod); ok {
 		s.DeletePod(pod, s.clock())
+	}
+}
+
+func (s *Source) onEvent(obj any) {
+	if ev, ok := obj.(*corev1.Event); ok {
+		s.UpsertEvent(ev)
+	}
+}
+
+func (s *Source) onEventDelete(obj any) {
+	if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tomb.Obj
+	}
+	if ev, ok := obj.(*corev1.Event); ok {
+		s.DeleteEvent(ev)
 	}
 }
 
