@@ -143,7 +143,7 @@ func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "health",
 		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
+		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (certs under the built-in view role, which cannot list Secrets) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},
@@ -166,6 +166,7 @@ func New(deps Deps) checks.Command {
 			{Name: "status", Doc: "category status: healthy|degraded|unavailable (the scorecard always answers — healthy is explicit)"},
 			{Name: "total", Doc: "findings in a degraded category"},
 			{Name: "top", Doc: "worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top"},
+			{Name: "unverified", Doc: "on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message"},
 			{Name: "subject", Doc: "TLS certificate subject (CN when set); never key material"},
 			{Name: "not_after", Doc: "TLS certificate NotAfter, RFC 3339"},
 			{Name: "days_left", Doc: "whole days until NotAfter (negative = expired)"},
@@ -212,7 +213,7 @@ var perfFields = map[string]bool{
 func delegatedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"category": true, "status": true, "total": true, "top": true,
-		"subject": true, "not_after": true, "days_left": true,
+		"unverified": true, "subject": true, "not_after": true, "days_left": true,
 		"phase": true, "webhook": true, "service": true,
 		"backend": true, "gates": true, "rules": true,
 		"object_selector": true, "timeout": true,
@@ -296,6 +297,10 @@ func delegatedKinds() []checks.KindField {
 type scorecard struct {
 	findings    map[string][]emit.Finding
 	unavailable map[string]string // category → reason
+	// unverified names, per category that still scored, the part it
+	// could not check and why (#546) — a healthy line with a known
+	// blind spot says so rather than reading as a clean bill.
+	unverified map[string]string
 }
 
 func (s *scorecard) add(category string, f emit.Finding) {
@@ -323,7 +328,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	now := deps.now()
 	ns := inv.Scope.Namespace // "" (default and -A) = whole cluster
 
-	card := &scorecard{findings: map[string][]emit.Finding{}, unavailable: map[string]string{}}
+	card := &scorecard{findings: map[string][]emit.Finding{}, unavailable: map[string]string{}, unverified: map[string]string{}}
 	scanned := 0
 
 	// Delta-backed categories: nodes, crashloops, pending, rollouts,
@@ -345,19 +350,43 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 	}
 
+	// A category whose read is refused on authorization grounds
+	// answers unavailable with the reason (#546): the built-in `view`
+	// role many teams give a read-only agent excludes Secrets, and
+	// that one refusal used to cost the whole scorecard. Only a
+	// Forbidden degrades — any other read error still fails the scan,
+	// because a broken API server is not a permission gap. Findings a
+	// category gathered before the refusal are dropped with it: a
+	// partial category must not score as if it were whole.
+	refused := func(cat, needs string, err error) error {
+		reason, ok := state.ListForbidden(err)
+		if !ok {
+			return err
+		}
+		delete(card.findings, cat)
+		card.unavailable[cat] = reason + " — " + needs
+		return nil
+	}
+
 	// storage: PVCs not Bound.
 	n, err := checkStorage(ctx, client, ns, now, card)
 	if err != nil {
-		return 0, err
+		if err := refused("storage", "PVC health needs the PersistentVolumeClaims in scope", err); err != nil {
+			return 0, err
+		}
+	} else {
+		scanned += n
 	}
-	scanned += n
 
 	// certs: every kubernetes.io/tls Secret in scope.
 	n, err = checkCerts(ctx, client, ns, now, certWarn, card)
 	if err != nil {
-		return 0, err
+		if err := refused("certs", "certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret; grant list on secrets to score it", err); err != nil {
+			return 0, err
+		}
+	} else {
+		scanned += n
 	}
-	scanned += n
 
 	// webhooks: delegated to `state webhooks`' exported core — the
 	// full audit (dead backends × failurePolicy, blast-radius scope,
@@ -366,26 +395,50 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if ns == "" {
 		in, n, err := state.LoadWebhookInputs(ctx, client)
 		if err != nil {
-			return 0, err
-		}
-		scanned += n
-		for _, f := range state.CheckWebhooks(in, certWarn, now) {
-			card.add("webhooks", f)
+			if err := refused("webhooks", "the webhook audit reads the admission webhook configurations and the Services behind them", err); err != nil {
+				return 0, err
+			}
+		} else {
+			scanned += n
+			for _, f := range state.CheckWebhooks(in, certWarn, now) {
+				card.add("webhooks", f)
+			}
 		}
 	} else {
 		card.unavailable["webhooks"] = "webhook configurations are cluster-scoped; run without --namespace"
 	}
 
 	// services: the edge sweep `lookout scan` runs as its stage 2,
-	// over only the objects it reads. Strict like every other category
-	// here: a sweep that could not list Services would score healthy,
-	// and that is silence.
-	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists))
+	// over only the objects it reads. Tolerant per list, strict per
+	// category: a sweep that could not list Services (or the pods,
+	// Ingresses and classes it judges them by) would score healthy,
+	// and that is silence, so any of those refused makes the category
+	// unavailable. Secrets are the exception — the sweep needs them
+	// only to tell whether an Ingress's TLS Secret exists, the checks
+	// stay silent on an unread kind (#149), and the routing verdict
+	// stands on its own; the gap is named on the scorecard line as
+	// unverified= instead.
+	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists), state.Tolerate())
 	if err != nil {
 		return 0, err
 	}
+	var gaps []string
+	for _, req := range serviceLists {
+		if why := cluster.SkipReason(req); why != "" && req.Resource != "secrets" {
+			gaps = append(gaps, why)
+		}
+	}
 	scanned += cluster.Scanned()
-	for _, f := range cluster.EdgeSweepFindings(certWarn, now) {
+	var sweep []emit.Finding
+	if len(gaps) > 0 {
+		card.unavailable["services"] = strings.Join(gaps, "; ") + " — Service routing is judged from Services, the pods their selectors match, and the Ingresses and classes in front of them"
+	} else {
+		if why := cluster.SkipReason(state.ListRequirement{Resource: "secrets"}); why != "" {
+			card.unverified["services"] = "Ingress TLS secret references (" + why + ")"
+		}
+		sweep = cluster.EdgeSweepFindings(certWarn, now)
+	}
+	for _, f := range sweep {
 		// The sweep also judges Ingress TLS certificates. The certs
 		// category already judges every TLS Secret in scope, so here
 		// they would be the same certificate reported twice under two
@@ -560,8 +613,14 @@ func categoryFinding(cat string, card *scorecard, top int) emit.Finding {
 		return f
 	}
 	fs := card.findings[cat]
+	unverified := func() {
+		if u := card.unverified[cat]; u != "" {
+			f.Details = append(f.Details, emit.Field{Key: "unverified", Value: u})
+		}
+	}
 	if len(fs) == 0 {
 		status(statusHealthy)
+		unverified()
 		return f
 	}
 	status(statusDegraded)
@@ -580,6 +639,7 @@ func categoryFinding(cat string, card *scorecard, top int) emit.Finding {
 		names = append(names, name)
 	}
 	f.Details = append(f.Details, emit.Field{Key: "top", Value: strings.Join(names, "; ")})
+	unverified()
 	return f
 }
 

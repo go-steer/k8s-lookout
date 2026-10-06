@@ -2,7 +2,7 @@
 
 # lookout state edges
 
-Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for.
+Verify every dependency edge of one workload — ConfigMap/Secret keys, imagePullSecrets, Service selectors and endpoints, Ingress backends and class, StatefulSet governing Service and volume classes, ServiceAccount/RBAC references, TLS expiry — reporting only the broken ones. --workload also accepts Service/<namespace>/<name> to enter from the service side, which is the direction the evidence arrives from when a service has no endpoints: it reports that service's selector, endpoints, ingresses and certificates, and names the workload the selector was probably meant for. Under a role that may not list Secrets or RBAC objects (the built-in view), those edges come back as read.unavailable with the reason and every other edge is still verified.
 
 MCP tool: `k8s_state_edges` (MCP profile: `triage`)
 
@@ -50,6 +50,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn |
 | `edge.cert_invalid` | warning | tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls |
 | `edge.rbac_dangling` | warning | a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -81,6 +82,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `port` | Service port (name or number) the Ingress backend asks for |
 | `service_account` | ServiceAccount the RBAC finding is about, or the one contributing an imagePullSecret |
 | `role_ref` | dangling roleRef as <Kind>/<name> |
+| `resource` | read.unavailable: the resource the List pass could not read, as resource[.group] |
 
 ## Output contract
 

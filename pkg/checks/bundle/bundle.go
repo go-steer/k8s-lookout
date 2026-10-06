@@ -204,8 +204,10 @@ func composedKinds() []checks.KindField {
 	add := func(kinds []checks.KindField) {
 		for _, k := range kinds {
 			// delta.ScanObjects does not run the hpa class: the
-			// bundle lists no autoscalers.
-			if seen[k.Name] || strings.HasPrefix(k.Name, "hpa.") {
+			// bundle lists no autoscalers. read.unavailable is the
+			// standalone commands' record of their own List pass; the
+			// bundle reports its gaps as the skipped= note on its head.
+			if seen[k.Name] || strings.HasPrefix(k.Name, "hpa.") || k.Name == state.KindReadUnavailable {
 				continue
 			}
 			seen[k.Name] = true
