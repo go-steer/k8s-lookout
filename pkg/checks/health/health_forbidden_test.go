@@ -140,7 +140,15 @@ func TestForbiddenCoreReadMakesCategoryUnavailable(t *testing.T) {
 		{"webhooks", schema.GroupResource{Group: "admissionregistration.k8s.io", Resource: "validatingwebhookconfigurations"},
 			"forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — the webhook audit reads the admission webhook configurations and the Services behind them"},
 		{"services", schema.GroupResource{Resource: "services"},
-			"forbidden: list services — Service routing is judged from Services, the pods their selectors match, and the Ingresses and classes in front of them"},
+			"forbidden: list services — Service routing is judged from Services and the pods their selectors match"},
+		{"nodes", schema.GroupResource{Resource: "nodes"},
+			"forbidden: list nodes — node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant"},
+		{"quota", schema.GroupResource{Resource: "resourcequotas"},
+			"forbidden: list resourcequotas — quota pressure is read from the ResourceQuotas in scope"},
+		{"disruption", schema.GroupResource{Group: "policy", Resource: "poddisruptionbudgets"},
+			"forbidden: list poddisruptionbudgets.policy — disruption readiness is read from the PodDisruptionBudgets in scope"},
+		{"rollouts", schema.GroupResource{Group: "batch", Resource: "cronjobs"},
+			"forbidden: list cronjobs.batch — rollouts are read from the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs in scope"},
 		{"storage", schema.GroupResource{Resource: "persistentvolumeclaims"},
 			"forbidden: list persistentvolumeclaims — PVC health needs the PersistentVolumeClaims in scope"},
 	} {
@@ -170,4 +178,89 @@ func TestNonForbiddenReadErrorStillFails(t *testing.T) {
 			t.Errorf("%s internal error: exit %d, want %d", gr.Resource, res.Code, emit.ExitRuntime)
 		}
 	}
+	for _, gr := range []schema.GroupResource{{Resource: "nodes"}, {Group: "policy", Resource: "poddisruptionbudgets"}} {
+		res := checktest.Run(t, deniedCommand([]schema.GroupResource{gr}, internal, brokenObjects(t)...))
+		if res.Code != emit.ExitRuntime {
+			t.Errorf("%s internal error: exit %d, want %d", gr.Resource, res.Code, emit.ExitRuntime)
+		}
+	}
+}
+
+// viewCommand is testCommand under a credential bound to exactly the
+// built-in `view` ClusterRole (checktest.ViewRole: everything `view`
+// does not grant is refused — nodes, secrets, the RBAC kinds,
+// IngressClasses, webhook configurations, any other cluster-scoped
+// read).
+func viewCommand(objs ...runtime.Object) (checks.Command, func() []schema.GroupResource) {
+	cs := fake.NewClientset(objs...)
+	refused := checktest.ViewRole(cs)
+	return health.New(health.Deps{
+		Client:   func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+		Provider: func(context.Context) (cloud.Provider, error) { return cloud.NoProvider, nil },
+		Now:      func() time.Time { return fixedNow },
+	}), refused
+}
+
+// TestHealthUnderExactViewRole is the #546 follow-up: `lookout health`
+// under nothing but `view` exits 0 with a useful scorecard. The four
+// categories whose reads `view` refuses answer unavailable with the
+// reason (control-plane is unavailable for want of a provider, as on
+// any vanilla build); the other eight score exactly as they do with
+// full access, details included, and services names its blind spots.
+func TestHealthUnderExactViewRole(t *testing.T) {
+	objs := brokenObjects(t)
+	cmd, refused := viewCommand(objs...)
+	view := checktest.Run(t, cmd)
+	if view.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", view.Code, view.Stderr)
+	}
+	full := checktest.Run(t, testCommand(objs...))
+	got, want := categoryLines(t, view.Stdout), categoryLines(t, full.Stdout)
+
+	unavailable := map[string]string{
+		"nodes":    "forbidden: list nodes — node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant",
+		"certs":    "forbidden: list secrets — certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret; grant list on secrets to score it",
+		"webhooks": "forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — the webhook audit reads the admission webhook configurations and the Services behind them",
+	}
+	for cat, reason := range unavailable {
+		rec := parseLine(t, got[cat])
+		if rec["status"] != "unavailable" || rec["message"] != reason {
+			t.Errorf("%s:\n got: %s\nwant: status=unavailable message=%q", cat, got[cat], reason)
+		}
+	}
+	if line := want["services"] + ` unverified="Ingress class references (forbidden: list ingressclasses.networking.k8s.io); Ingress TLS secret references (forbidden: list secrets)"`; got["services"] != line {
+		t.Errorf("services line:\n got: %s\nwant: %s", got["services"], line)
+	}
+	for cat, line := range want {
+		if _, ok := unavailable[cat]; ok || cat == "services" {
+			continue
+		}
+		if got[cat] != line {
+			t.Errorf("%s changed under view:\n got: %s\nwant: %s", cat, got[cat], line)
+		}
+	}
+	viewLines := strings.Split(view.Stdout, "\n")
+	for _, line := range strings.Split(strings.TrimSuffix(full.Stdout, "\n"), "\n") {
+		rec := parseLine(t, line)
+		if rec["kind"] == "health.category" || strings.HasPrefix(line, "scanned=") {
+			continue
+		}
+		if _, ok := unavailable[rec["category"]]; ok {
+			continue
+		}
+		if !slices.Contains(viewLines, line) {
+			t.Errorf("detail lost under view: %s", line)
+		}
+	}
+	// What health still asks for and is refused — pinned, so a new
+	// read `view` does not grant is a reviewed decision.
+	var names []string
+	for _, gr := range refused() {
+		names = append(names, gr.String())
+	}
+	if got, want := strings.Join(names, ","), "nodes,secrets,validatingwebhookconfigurations.admissionregistration.k8s.io,ingressclasses.networking.k8s.io"; got != want {
+		t.Errorf("refused reads = %s\nwant %s", got, want)
+	}
+	cmd, _ = viewCommand(objs...)
+	checktest.VerifyContract(t, cmd)
 }

@@ -81,8 +81,9 @@ func ChangesCommand(deps Deps) checks.Command {
 			checks.Kind(kindNode, "a Node in the neighborhood changed", emit.SeverityInfo),
 			checks.Kind(kindLabel, "only labels changed on a neighborhood object — enough to move it in or out of a selector", emit.SeverityInfo),
 			checks.Kind(kindTopology, "a neighborhood object appeared, disappeared, or changed in a way none of the other classes name", emit.SeverityInfo),
+			state.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "at", Doc: "when the change happened, RFC 3339 (also the summary-line note for the resolved --at instant)"},
 			{Name: "relation", Doc: "the changed object's place in the target's neighborhood: self (the target or its pods), upstream, lateral, downstream"},
 			{Name: "fields", Doc: "changed fields as path=from→to pairs — names, counts, and shortened hashes only, never values (§6.5)"},
@@ -92,7 +93,7 @@ func ChangesCommand(deps Deps) checks.Command {
 			{Name: "window", Doc: "summary-line note: the (from, to] window the answer covers, RFC 3339"},
 			{Name: "source", Doc: "summary-line note: history (delta log from --store) or live-approximation (no store; see the fidelity gap in --help)"},
 			{Name: "unrecorded", Doc: "summary-line note, history only: comma-separated kinds the delta log and its snapshots cannot contain (the sentinel's graph feed never watched them), so a change to one can never be reported"},
-		},
+		}, state.UnreadFields()...),
 		Examples: []string{
 			"lookout triage changes Deployment/prod/api --store=/var/lib/lookout/lookout.db",
 			"lookout triage changes Deployment/prod/api --since=1h --at=2026-07-25T10:00:00Z --store=/var/lib/lookout/lookout.db",
@@ -152,12 +153,30 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		if inv.Scope.AllNamespaces {
 			listNS = metav1.NamespaceAll
 		}
-		cluster, err = state.LoadCluster(ctx, client, listNS)
+		// Tolerant (#546): under the built-in `view` role Nodes,
+		// Secrets and the RBAC kinds are refused. The neighborhood is
+		// built from what was read, and each gap that narrows it is
+		// one read.unavailable record leading the answer.
+		cluster, err = state.LoadCluster(ctx, client, listNS, state.Tolerate())
 		if err != nil {
 			return 0, err
 		}
 		snap = cluster.Snapshot()
 		scanned += cluster.Scanned()
+	}
+	// emitGaps writes the live load's read.unavailable records; called
+	// once the target has resolved, so a lookup failure stays exit 1
+	// with nothing on stdout.
+	emitGaps := func() error {
+		if cluster == nil {
+			return nil
+		}
+		for _, f := range cluster.UnreadFindings(changesUnverified) {
+			if err := inv.Out.Emit(f); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	if inv.Scope.Store != "" {
@@ -184,6 +203,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		}
 		id, err := lookupTarget(snap, wl, inv.Scope.At)
 		if err != nil {
+			return 0, err
+		}
+		if err := emitGaps(); err != nil {
 			return 0, err
 		}
 		hood := neighborhood(snap, id, depth)
@@ -215,6 +237,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		if err != nil {
 			return 0, err
 		}
+		if err := emitGaps(); err != nil {
+			return 0, err
+		}
 		hood := neighborhood(snap, id, depth)
 		entries = append(entries, rolloutEntries(cluster, hood, from, to)...)
 		evs, n, err := eventEntries(ctx, client, wl.Namespace, hood, from, to, true)
@@ -243,6 +268,29 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		}
 	}
 	return scanned, nil
+}
+
+// changesUnverified names what a skipped List costs `triage changes`.
+// The neighborhood is the scope filter, so a gap matters exactly when
+// it removes objects from it. ConfigMaps and Secrets do not: a pod's
+// reference keeps them in the graph identity-only, which is all the
+// scope check needs (and their changes come from the delta log, never
+// from a List). Nodes do, one step removed: pods keep each Node as an
+// identity, but the zone a Node sits in is read from its labels, so
+// shared-zone neighbors drop out. Every other graph kind drops out
+// whole. The RBAC kinds, ServiceAccounts and classes are no part of a
+// neighborhood.
+func changesUnverified(req state.ListRequirement) string {
+	kinds := state.GraphKinds(req)
+	switch {
+	case len(kinds) == 0:
+		return ""
+	case req.Resource == "secrets" || req.Resource == "configmaps":
+		return ""
+	case req.Resource == "nodes":
+		return "zones are read from Node labels, so neighbors reached only through a shared zone, and their changes, are out of scope"
+	}
+	return kinds[0].String() + " objects not referenced from a listed object are missing from the neighborhood, so their changes are out of scope"
 }
 
 // neighborhood maps every object in the target's radius (plus the

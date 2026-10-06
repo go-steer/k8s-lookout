@@ -60,6 +60,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `change.node` | info | a Node in the neighborhood changed |
 | `change.label` | info | only labels changed on a neighborhood object — enough to move it in or out of a selector |
 | `change.topology` | info | a neighborhood object appeared, disappeared, or changed in a way none of the other classes name |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -76,6 +77,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `window` | summary-line note: the (from, to] window the answer covers, RFC 3339 |
 | `source` | summary-line note: history (delta log from --store) or live-approximation (no store; see the fidelity gap in --help) |
 | `unrecorded` | summary-line note, history only: comma-separated kinds the delta log and its snapshots cannot contain (the sentinel's graph feed never watched them), so a change to one can never be reported |
+| `resource` | read.unavailable: the resource the List pass could not read, as resource[.group] |
 
 ## Output contract
 

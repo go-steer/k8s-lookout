@@ -26,10 +26,6 @@ package state
 // for each gap that touches its answer — never silence.
 
 import (
-	"errors"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
@@ -85,28 +81,9 @@ func (c skipCause) describe(req ListRequirement) string {
 	return "forbidden: list " + req.String()
 }
 
-// ListForbidden classifies an error from a read-path List call: when
-// the API server refused it on authorization grounds it reports a
-// short reason naming the refused read ("forbidden: list secrets"),
-// which a composition turns into an explicit unavailable answer
-// instead of failing the whole command. Any other error reports false
-// and stays fatal — a broken API server is not a permission gap.
-func ListForbidden(err error) (string, bool) {
-	if err == nil || !apierrors.IsForbidden(err) {
-		return "", false
-	}
-	resource := ""
-	var status apierrors.APIStatus
-	if errors.As(err, &status) {
-		if d := status.Status().Details; d != nil {
-			resource = ListRequirement{Group: d.Group, Resource: d.Kind}.String()
-		}
-	}
-	if resource == "" {
-		return "forbidden: list", true
-	}
-	return "forbidden: list " + resource, true
-}
+// ListForbidden is checks.ListForbidden, kept here so state callers
+// need not reach past their own package for it.
+func ListForbidden(err error) (string, bool) { return checks.ListForbidden(err) }
 
 // SkipReason says why this load did not read req — e.g. "forbidden:
 // list secrets" — or "" when it was read.

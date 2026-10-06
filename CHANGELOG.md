@@ -56,29 +56,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A forbidden read degrades the answer instead of failing the
-  command** (#546). Under the built-in `view` ClusterRole, which
-  excludes Secrets and every RBAC object, `health`, `state edges
-  --workload=…`, `triage radius` and `triage events --workload=…`
-  exited 1 with no output. Now each reports what it could check and
-  says what it could not, with the reason; this holds on the CLI and
-  over MCP.
-  - `health`: the `certs` category answers `unavailable` with
-    `forbidden: list secrets`. `services` still scores and names its
-    blind spot as `unverified=` on its line. Any category whose own
-    read is refused (webhook configurations, Services, PVCs) answers
-    `unavailable` the same way.
+  command** (#546). The built-in `view` ClusterRole grants no Secrets,
+  no RBAC objects and no cluster-scoped kinds such as Nodes. Under it,
+  `health`, `state edges --workload=…`, `triage radius`, `triage
+  changes` and `triage events --workload=…` exited 1 with no output.
+  Now each reports what it could check and says what it could not,
+  with the reason; this holds on the CLI and over MCP.
+  - `health`: each category degrades on its own. Under `view`,
+    `nodes`, `certs` and `webhooks` answer `unavailable` with the
+    refused read (`forbidden: list nodes`), and the other categories
+    score as usual. `services` still scores and names its blind spots
+    as `unverified=` on its line.
   - `state edges`: a new `read.unavailable` finding for each refused
-    list (`resource=secrets`, the RBAC kinds), naming the edges it did
-    not verify. Every other edge is verified as before.
-  - `triage radius`: one `read.unavailable` for Secrets. A mounted
-    Secret it could not read is shown as `observed=unknown`, not as
-    `radius.missing`. The bundle's radius section gets the same fix.
+    list that affects an edge (`resource=secrets`, the RBAC kinds,
+    `ingressclasses`, `storageclasses`), naming the edges it did not
+    verify. Every other edge is verified as before.
+  - `triage radius`: one `read.unavailable` each for Nodes and
+    Secrets. A mounted Secret it could not read is shown as
+    `observed=unknown`, not as `radius.missing`. The bundle's radius
+    section gets the same fix.
+  - `triage changes`: one `read.unavailable` for Nodes, whose labels
+    give the zone neighbors. Every other change is reported as before.
   - `triage events`: the owner tree now reads only pods and workload
     objects, so it never needed the refused lists. Its output is
     unchanged.
+  - `scan`: the edge drill-down already skipped lists it could not
+    read; the summary line now names them as `drilldown_skipped=`.
 
   Errors other than Forbidden still fail the command. No flags or
-  grants changed.
+  grants changed. Still failing under plain `view`: cluster-wide
+  `triage delta`, `state webhooks`, `state volumes`, `state storage`,
+  `stab drain` and the node view of `triage top`. In `scan` these
+  become `scan.check_failed` findings and the scan carries on.
 - leeway: `leeway.rank_wedged` no longer fires for a pod whose fallback
   node is still provisioning (#532). The rule counted every Pending pod
   on a `DoNotScaleUp` compute class. It could not tell a class with no

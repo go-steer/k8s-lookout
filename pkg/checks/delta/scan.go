@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,6 +39,11 @@ type scanner struct {
 	now     time.Time
 	th      thresholds
 	classes map[string]bool
+
+	// tolerate turns a Forbidden List into a dropped part recorded in
+	// unavailable (part → reason) instead of a failed pass.
+	tolerate    bool
+	unavailable map[string]string
 
 	findings []emit.Finding
 }
@@ -65,100 +71,186 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 	systemOn := s.classes[classSystem] && (s.ns == metav1.NamespaceAll || s.ns == metav1.NamespaceSystem)
 	nodesOn := s.classes[classNodes] && s.ns == metav1.NamespaceAll
 
+	// A refused List is fatal unless the caller asked for a tolerant
+	// pass (ScanClusterPartial), in which case only the parts that
+	// needed it are dropped, each named with the reason (#546).
+	var podsRefused bool
 	var pods []corev1.Pod
 	if s.classes[classPods] || nodesOn {
 		var err error
 		pods, err = listPods(ctx, s.client, s.ns)
 		if err != nil {
-			return 0, nil, err
+			var parts []string
+			if s.classes[classPods] {
+				parts = append(parts, PartPods)
+			}
+			if nodesOn {
+				parts = append(parts, PartNodes)
+			}
+			if !s.refuse(err, parts...) {
+				return 0, nil, err
+			}
+			podsRefused = true
 		}
 	}
 
 	if s.classes[classPods] {
-		scanned += len(pods)
-		s.checkPods(pods)
+		if !podsRefused {
+			scanned += len(pods)
+			s.checkPods(pods)
+		}
 
-		deps, err := listDeployments(ctx, s.client, s.ns)
-		if err != nil {
-			return 0, nil, err
-		}
-		stss, err := listStatefulSets(ctx, s.client, s.ns)
-		if err != nil {
-			return 0, nil, err
-		}
-		dss, err := listDaemonSets(ctx, s.client, s.ns)
-		if err != nil {
-			return 0, nil, err
-		}
-		jobs, err := listJobs(ctx, s.client, s.ns)
-		if err != nil {
-			return 0, nil, err
-		}
-		cjs, err := listCronJobs(ctx, s.client, s.ns)
-		if err != nil {
-			return 0, nil, err
-		}
-		scanned += len(deps) + len(stss) + len(dss) + len(jobs) + len(cjs)
-		s.checkWorkloads(deps, stss, dss, systemOn)
-		s.checkJobs(jobs)
-		s.checkCronJobs(cjs)
-		if systemOn {
-			// checkSystem skips objects outside kube-system.
-			s.checkSystem(deps, dss)
+		var (
+			deps []appsv1.Deployment
+			stss []appsv1.StatefulSet
+			dss  []appsv1.DaemonSet
+			jobs []batchv1.Job
+			cjs  []batchv1.CronJob
+		)
+		err := firstErr(
+			func() (err error) { deps, err = listDeployments(ctx, s.client, s.ns); return },
+			func() (err error) { stss, err = listStatefulSets(ctx, s.client, s.ns); return },
+			func() (err error) { dss, err = listDaemonSets(ctx, s.client, s.ns); return },
+			func() (err error) { jobs, err = listJobs(ctx, s.client, s.ns); return },
+			func() (err error) { cjs, err = listCronJobs(ctx, s.client, s.ns); return },
+		)
+		switch {
+		case err == nil:
+			scanned += len(deps) + len(stss) + len(dss) + len(jobs) + len(cjs)
+			s.checkWorkloads(deps, stss, dss, systemOn)
+			s.checkJobs(jobs)
+			s.checkCronJobs(cjs)
+			if systemOn {
+				// checkSystem skips objects outside kube-system.
+				s.checkSystem(deps, dss)
+			}
+		case systemOn:
+			if !s.refuse(err, PartWorkloads, PartSystem) {
+				return 0, nil, err
+			}
+		default:
+			if !s.refuse(err, PartWorkloads) {
+				return 0, nil, err
+			}
 		}
 	} else if systemOn {
 		// One list per kind still holds: without the pods class
 		// these are the only Deployment/DaemonSet lists issued,
 		// and they are scoped to kube-system.
-		deps, err := listDeployments(ctx, s.client, metav1.NamespaceSystem)
+		var (
+			deps []appsv1.Deployment
+			dss  []appsv1.DaemonSet
+		)
+		err := firstErr(
+			func() (err error) { deps, err = listDeployments(ctx, s.client, metav1.NamespaceSystem); return },
+			func() (err error) { dss, err = listDaemonSets(ctx, s.client, metav1.NamespaceSystem); return },
+		)
 		if err != nil {
-			return 0, nil, err
+			if !s.refuse(err, PartSystem) {
+				return 0, nil, err
+			}
+		} else {
+			scanned += len(deps) + len(dss)
+			s.checkSystem(deps, dss)
 		}
-		dss, err := listDaemonSets(ctx, s.client, metav1.NamespaceSystem)
-		if err != nil {
-			return 0, nil, err
-		}
-		scanned += len(deps) + len(dss)
-		s.checkSystem(deps, dss)
 	}
 
-	if nodesOn {
+	if nodesOn && !podsRefused {
 		nodes, err := listNodes(ctx, s.client)
 		if err != nil {
-			return 0, nil, err
+			if !s.refuse(err, PartNodes) {
+				return 0, nil, err
+			}
+		} else {
+			scanned += len(nodes)
+			s.checkNodes(nodes, pods)
 		}
-		scanned += len(nodes)
-		s.checkNodes(nodes, pods)
 	}
 
 	if s.classes[classPDB] {
 		pdbs, err := listPDBs(ctx, s.client, s.ns)
 		if err != nil {
-			return 0, nil, err
+			if !s.refuse(err, PartPDB) {
+				return 0, nil, err
+			}
+		} else {
+			scanned += len(pdbs)
+			s.checkPDBs(pdbs)
 		}
-		scanned += len(pdbs)
-		s.checkPDBs(pdbs)
 	}
 
 	if s.classes[classQuota] {
 		quotas, err := listQuotas(ctx, s.client, s.ns)
 		if err != nil {
-			return 0, nil, err
+			if !s.refuse(err, PartQuota) {
+				return 0, nil, err
+			}
+		} else {
+			scanned += len(quotas)
+			s.checkQuotas(quotas)
 		}
-		scanned += len(quotas)
-		s.checkQuotas(quotas)
 	}
 
 	if s.classes[classHPA] {
 		hpas, err := listHPAs(ctx, s.client, s.ns)
 		if err != nil {
-			return 0, nil, err
+			if !s.refuse(err, PartHPA) {
+				return 0, nil, err
+			}
+		} else {
+			scanned += len(hpas)
+			s.checkHPAs(hpas)
 		}
-		scanned += len(hpas)
-		s.checkHPAs(hpas)
 	}
 
 	return scanned, s.findings, nil
+}
+
+// The parts of a delta pass a tolerant scan can lose independently.
+// They are the classes, except that the pods class splits in two: its
+// pod derivations need only Pods, its workload, Job and CronJob
+// derivations need the apps and batch Lists.
+const (
+	PartPods      = "pods"      // pod.* findings
+	PartWorkloads = "workloads" // workload.*, job.*, cron.* findings
+	PartNodes     = "nodes"
+	PartSystem    = "system"
+	PartPDB       = "pdb"
+	PartQuota     = "quota"
+	PartHPA       = "hpa"
+)
+
+// refuse records err against parts when the pass is tolerant and err
+// is an authorization refusal, and reports whether it did. Anything
+// else stays fatal.
+func (s *scanner) refuse(err error, parts ...string) bool {
+	if !s.tolerate {
+		return false
+	}
+	reason, ok := checks.ListForbidden(err)
+	if !ok {
+		return false
+	}
+	if s.unavailable == nil {
+		s.unavailable = map[string]string{}
+	}
+	for _, p := range parts {
+		if _, seen := s.unavailable[p]; !seen {
+			s.unavailable[p] = reason
+		}
+	}
+	return true
+}
+
+// firstErr runs fns in order and returns the first error, skipping the
+// rest — the same one-at-a-time List order the strict pass always had.
+func firstErr(fns ...func() error) error {
+	for _, fn := range fns {
+		if err := fn(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // add appends one finding, truncating the message for token density.

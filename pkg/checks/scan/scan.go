@@ -264,6 +264,7 @@ func ownFields() []checks.OutputField {
 		{Name: "skipped", Doc: "summary-line note: opt-in groups this scan did NOT run (switch one on with --include=<group>) — stated so a quiet scan is never mistaken for a complete one"},
 		{Name: "drilldown", Doc: "summary-line note: workloads the stage-2 dependency-edge drill-down covered"},
 		{Name: "truncated", Doc: "summary-line note: drill-down candidates dropped by --max-drilldown"},
+		{Name: "drilldown_skipped", Doc: "summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one"},
 	}
 }
 
@@ -515,9 +516,9 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return scanned, err
 	}
 
-	drilled, truncated, drillScanned := 0, 0, 0
+	drilled, truncated, drillScanned, drillSkipped := 0, 0, 0, ""
 	if len(notRun) == 0 && maxDrill > 0 {
-		drilled, truncated, drillScanned = drilldown(ctx, deps, inv, s, maxDrill, certWarn)
+		drilled, truncated, drillScanned, drillSkipped = drilldown(ctx, deps, inv, s, maxDrill, certWarn)
 		scanned += drillScanned
 	}
 
@@ -534,6 +535,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	if truncated > 0 {
 		if err := inv.Out.Note("truncated", strconv.Itoa(truncated)); err != nil {
+			return scanned, err
+		}
+	}
+	if drillSkipped != "" {
+		if err := inv.Out.Note("drilldown_skipped", drillSkipped); err != nil {
 			return scanned, err
 		}
 	}
@@ -697,7 +703,7 @@ func (s *scanner) flushStageResults(inv emit.Invocation) error {
 // owns. The gap analysis worried about an unbounded fan-out of List
 // calls; there is exactly one, and both halves run over the objects it
 // already returned.
-func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, maxDrill int, certWarn time.Duration) (drilled, truncated, scanned int) {
+func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, maxDrill int, certWarn time.Duration) (drilled, truncated, scanned int, skipped string) {
 	s.stage = "state edges"
 	_ = inv.Out.Stamp("check", "state edges")
 	defer func() {
@@ -717,16 +723,20 @@ func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, 
 	client, err := deps.client(ctx)
 	if err != nil {
 		fail(err)
-		return 0, 0, 0
+		return 0, 0, 0, ""
 	}
 	// Tolerate: a scan under a least-privilege credential drills into
-	// what it can read rather than failing the whole stage.
+	// what it can read rather than failing the whole stage. What it
+	// could not read goes out as the drilldown_skipped= summary note
+	// (#546): the edge checks stay silent on an unread kind (#149), and
+	// that silence must not read as a clean drill-down.
 	cluster, err := state.LoadCluster(ctx, client, inv.Scope.Namespace, state.Tolerate())
 	if err != nil {
 		fail(err)
-		return 0, 0, 0
+		return 0, 0, 0, ""
 	}
 	scanned = cluster.Scanned()
+	skipped = cluster.SkippedNote()
 
 	targets, truncated := resolveTargets(cluster, s.subjects, maxDrill)
 	now := deps.now()
@@ -765,7 +775,7 @@ func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, 
 	}
 
 	if ctx.Err() != nil {
-		return drilled, truncated, scanned
+		return drilled, truncated, scanned, skipped
 	}
 	for _, f := range cluster.EdgeSweepFindings(certWarn, now) {
 		if seen[edgeKey(f)] {
@@ -777,7 +787,7 @@ func drilldown(ctx context.Context, deps Deps, inv emit.Invocation, s *scanner, 
 		seen[edgeKey(f)] = true
 		_ = inv.Out.Emit(f)
 	}
-	return drilled, truncated, scanned
+	return drilled, truncated, scanned, skipped
 }
 
 // resolveTargets turns stage-1 subjects into the workloads to drill

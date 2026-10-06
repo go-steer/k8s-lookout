@@ -167,24 +167,37 @@ both kinds.
 ## Read-path commands under the `view` role
 
 Many teams give a read-only agent the built-in `view` ClusterRole.
-It deliberately excludes Secrets and every `rbac.authorization.k8s.io`
-object. The read-path commands treat a refused read as information:
-the part of the answer that needed it says so, with the reason, and
-everything else is still checked. The command exits 0 with its usual
-summary line, on the CLI and over MCP alike. Any error other than
-Forbidden still fails the command, because a broken API server is not
-a permission gap.
+It grants read access to the namespaced workload, networking and
+configuration objects. It grants no Secrets, no
+`rbac.authorization.k8s.io` objects, and none of the cluster-scoped
+kinds: Nodes, PersistentVolumes, StorageClasses, IngressClasses and
+admission webhook configurations. The read-path commands treat a
+refused read as information: the part of the answer that needed it
+says so, with the reason, and everything else is still checked. The
+command exits 0 with its usual summary line, on the CLI and over MCP
+alike. Any error other than Forbidden still fails the command, because
+a broken API server is not a permission gap.
 
 | Command | Under `view` |
 | --- | --- |
-| `health` | The `certs` category answers `status=unavailable` with `message="forbidden: list secrets — …"`. The `services` category still scores and adds `unverified="Ingress TLS secret references (forbidden: list secrets)"` to its line. Every other category is unchanged. A category whose own read is refused (webhook configurations, Services, PVCs) answers `unavailable` the same way. |
-| `state edges --workload=…` | One `read.unavailable` finding per refused list: `secrets` and the four RBAC kinds, each naming the edges it could not verify. Those edges are not reported as missing. ConfigMap, Service, endpoint, Ingress, StatefulSet and ServiceAccount edges are verified as usual. Entered as `--workload=Service/…`, only the Secret gap is reported, because that mode reads nothing workload-scoped. |
-| `triage radius` | One `read.unavailable` finding for `secrets`. A Secret the target mounts is listed with `observed=unknown` rather than as `radius.missing`. RBAC objects are no part of a blast radius, so their refusal is not reported. |
-| `triage events --workload=…` | Nothing is lost. The owner-reference tree is resolved from pods and workload objects only, so the command never asks for Secrets or RBAC objects. |
+| `health` | `nodes`, `certs` and `webhooks` answer `status=unavailable`, each with the refused read as the message (`forbidden: list nodes — …`). `services` still scores and adds `unverified=` naming the Ingress class and TLS secret references it could not check. The other categories score as usual. `control-plane` needs a cloud provider either way. |
+| `state edges --workload=…` | One `read.unavailable` finding per refused list that affects the answer: `secrets`, the four RBAC kinds, `ingressclasses` and `storageclasses`, each naming the edges it could not verify. Those edges are not reported as missing. Entered as `--workload=Service/…`, only the gaps that mode reads are reported. |
+| `triage radius` | One `read.unavailable` finding each for `nodes` and `secrets`. A Secret the target mounts is listed with `observed=unknown` rather than as `radius.missing`. RBAC objects are no part of a blast radius, so their refusal is not reported. |
+| `triage changes` | One `read.unavailable` finding for `nodes`: zones are read from Node labels, so neighbors reached only through a shared zone are out of scope. Every other change is reported as usual. |
+| `triage events --workload=…` | Nothing is lost. The owner-reference tree is resolved from pods and workload objects only. |
+| `scan` | The edge drill-down still runs. The summary line names the lists it was refused as `drilldown_skipped=`. |
 
 `bundle` and the sentinel's enrichment already took this approach,
 with a `skipped=` note on the bundle head. To get the missing checks
-back, grant `list` on `secrets` and on the RBAC kinds.
+back, grant `list` on the kinds named in the messages.
+
+Not yet degrading under `view`: `triage delta` across the whole
+cluster fails on its `nodes` list (scope it with `--namespace`, which
+drops the node class). So do `state webhooks`, `state volumes`,
+`state storage`, `stab drain` and the node view of `triage top`, which
+read cluster-scoped kinds `view` does not grant. In `scan` each of
+those stages becomes a `scan.check_failed` finding and the scan
+carries on.
 
 ## Sources
 
