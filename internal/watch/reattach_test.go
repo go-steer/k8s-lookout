@@ -351,3 +351,110 @@ func TestReattach_LiveTraceCollapsesToOneSession(t *testing.T) {
 		t.Errorf("family.member injects = %d, want 2 (progress_deadline + rollout.stall)", len(familyMembers(t, *injects)))
 	}
 }
+
+// ACME stall reattachment (issue #542). A cert-manager Certificate
+// that cannot be issued fires a critical expiry.warning (Ready=False)
+// and opens its own session; the Challenge stuck behind it fires an
+// expiry.challenge_stuck warning naming the Certificate in
+// ControllerRef. The graph indexes neither object, so the join rides
+// the signal-declared Certificate key — the Challenge must land in
+// the Certificate's session, not in a digest.
+
+func certificateRenewalFailed() engine.Signal {
+	ts := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	return engine.Signal{
+		Kind:     "expiry.warning",
+		Source:   engine.SourceSentinel,
+		Severity: engine.SeverityCritical,
+		TriageEvent: engine.TriageEvent{
+			Key:          engine.EventKey{UID: "cert-uid", Reason: "warning"},
+			Namespace:    "shop",
+			KindOfObject: "Certificate",
+			Name:         "web-cert",
+			Message:      "certificate EXPIRED; renewal=FAILED ready_condition=DoesNotExist",
+			Count:        1,
+			FirstSeen:    ts,
+			LastSeen:     ts,
+		},
+	}
+}
+
+func challengeStuck(cert string) engine.Signal {
+	ts := time.Date(2026, 10, 6, 9, 0, 1, 0, time.UTC)
+	sig := engine.Signal{
+		Kind:     "expiry.challenge_stuck",
+		Source:   engine.SourceSentinel,
+		Severity: engine.SeverityWarning,
+		TriageEvent: engine.TriageEvent{
+			Key:          engine.EventKey{UID: "ch-uid", Reason: "challenge_stuck"},
+			Namespace:    "shop",
+			KindOfObject: "Challenge",
+			Name:         "web-cert-1-123-456",
+			Message:      `ACME Challenge stuck state=pending; dns_name=shop.unowned.example reason="Waiting for DNS-01 challenge propagation"`,
+			Count:        1,
+			FirstSeen:    ts,
+			LastSeen:     ts,
+		},
+	}
+	if cert != "" {
+		sig.ControllerRef = "Certificate/" + cert
+	}
+	return sig
+}
+
+func TestReattach_ACMEChallengeJoinsCertificateIncident(t *testing.T) {
+	t.Parallel()
+	base, injects := newRoutingFakeDaemon(t)
+	d, _ := newBoardDispatcher(t, base, 100, time.Minute, 200)
+	// The topology index knows neither kind — an empty resolver, as
+	// graphfeed.Ancestors returns for a Certificate or Challenge.
+	d.resolver = &scriptedResolver{}
+	d.board.reattach = d.reattachWatchboardEntry
+	ctx := context.Background()
+
+	d.DispatchSignal(ctx, certificateRenewalFailed()) // critical → sess-1
+	d.DispatchSignal(ctx, challengeStuck("web-cert")) // warning → buffered
+	d.board.FlushNow(ctx)
+
+	if got := testutil.ToFloat64(d.metrics.sessionCreates.WithLabelValues("ok")); got != 1 {
+		t.Errorf("session creates = %v, want exactly 1 (the Certificate's)", got)
+	}
+	if got := testutil.ToFloat64(d.metrics.watchboardDigests); got != 0 {
+		t.Errorf("digests = %v, want 0 (the stall reattached)", got)
+	}
+	fm := familyMembers(t, *injects)
+	if len(fm) != 1 {
+		t.Fatalf("family.member injects = %d, want 1", len(fm))
+	}
+	want := engine.Ancestor{Kind: "Certificate", Namespace: "shop", Name: "web-cert"}.Key()
+	if fm[0].SessionID != "sess-1" || fm[0].MemberKind != "expiry.challenge_stuck" || fm[0].Family != want {
+		t.Errorf("family.member = session %q kind %q family %q, want sess-1 / expiry.challenge_stuck / %s",
+			fm[0].SessionID, fm[0].MemberKind, fm[0].Family, want)
+	}
+	if sid, ok := d.dedup.LookupSession(challengeStuck("").Key); !ok || sid != "sess-1" {
+		t.Errorf("stall binding = (%q, %v), want (sess-1, true) so its resolution closes there", sid, ok)
+	}
+}
+
+// TestReattach_ACMEChallengeOtherCertificateDigests: the declared key
+// is exact — a stall for a different Certificate is not this
+// incident's evidence.
+func TestReattach_ACMEChallengeOtherCertificateDigests(t *testing.T) {
+	t.Parallel()
+	base, injects := newRoutingFakeDaemon(t)
+	d, _ := newBoardDispatcher(t, base, 100, time.Minute, 200)
+	d.resolver = &scriptedResolver{}
+	d.board.reattach = d.reattachWatchboardEntry
+	ctx := context.Background()
+
+	d.DispatchSignal(ctx, certificateRenewalFailed())
+	d.DispatchSignal(ctx, challengeStuck("api-cert"))
+	d.board.FlushNow(ctx)
+
+	if got := testutil.ToFloat64(d.metrics.watchboardDigests); got != 1 {
+		t.Errorf("digests = %v, want 1", got)
+	}
+	if len(familyMembers(t, *injects)) != 0 {
+		t.Errorf("a stall for another Certificate reattached")
+	}
+}

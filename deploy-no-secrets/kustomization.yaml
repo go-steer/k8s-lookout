@@ -29,11 +29,12 @@
 #
 # What that costs (docs/site operations/scoping, "Without the Secret
 # grant"): the expiry source — under the default --sources=auto it
-# skips itself at startup with one log line, taking webhook CA and
-# cert-manager expiry with it — and the Secret/ServiceAccount
-# reference checks in enrichment bundles. Everything else runs as in
-# deploy/. Per-namespace Roles granting the two lists, plus
-# --expiry-namespaces, bring expiry back for those namespaces.
+# skips itself at startup with one log line, taking webhook CA,
+# cert-manager expiry and ACME stall detection (#542) with it — and
+# the Secret/ServiceAccount reference checks in enrichment bundles.
+# Everything else runs as in deploy/. Per-namespace Roles granting
+# the two lists, plus --expiry-namespaces, bring expiry back for
+# those namespaces.
 #
 # It lives beside deploy/ rather than under it because kustomize
 # refuses an overlay nested inside the base it builds on.

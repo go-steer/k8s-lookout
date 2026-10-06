@@ -221,7 +221,7 @@ deliberately absent from the wire-kind inventory below. The table here
 exists only to pin the fingerprint INPUTS, which are a cross-cluster
 contract in a way a glossary entry is not.
 
-## Kind inventory (v1: 56 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +3 `leeway.*` topology-drift verdicts #416, +4 `leeway.rank_*` #416 phase 6, additive-only)
+## Kind inventory (v1: 59 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +3 `leeway.*` topology-drift verdicts #416, +4 `leeway.rank_*` #416 phase 6, +1 `leeway.domain_unavailable` #416 phase 7, +2 `expiry.*` ACME stalls #542, additive-only)
 
 The `sentinel.access_revoked` row and the third topology-drift verdict both
 landed without bumping this heading; the count above is the corrected one and
@@ -250,7 +250,12 @@ pdb_gridlocked|restart_burst|node_pressure|eviction_burst`
 job_failed|cron_missed` (added post-M5, #129 — kinds are
 append-only), `autoscaling.hpa_pinned|hpa_metrics_dead` (added
 post-M5, #131), `saturation.forecast`,
-`degradation.capacity|probe_flap`, `expiry.warning`, `capacity.
+`degradation.capacity|probe_flap`, `expiry.
+warning|challenge_stuck|order_failed` (`challenge_stuck`/`order_failed`
+added post-M5, #542 — cert-manager ACME Challenges stuck pending past
+`--expiry-acme-grace` or failed, and failed Orders; `controller_ref`
+is `Certificate/<name>`, the owner whose incident they reattach to),
+`capacity.
 pending|scaleup|scaledown|scaleup_gap|stockout|quota_blocked|
 ip_exhausted|pending-aged|cluster_forecast` (`cluster_forecast`
 added post-M5, #131), `ingress.

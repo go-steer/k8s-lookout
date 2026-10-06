@@ -75,6 +75,7 @@ type flags struct {
 	expiryInterval        time.Duration
 	expiryWarn            time.Duration
 	expiryNamespaces      string
+	expiryACMEGrace       time.Duration
 	capacityPoll          time.Duration
 	pendingAge            time.Duration
 	gatewayGrace          time.Duration
@@ -238,6 +239,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.DurationVar(&f.expiryInterval, "expiry-interval", time.Hour, "Interval between expiry scans (periodic paged LISTs — deliberately no Secret informer). Must be > 0.")
 	fs.DurationVar(&f.expiryWarn, "expiry-warn", 336*time.Hour, "Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h.")
 	fs.StringVar(&f.expiryNamespaces, "expiry-namespaces", "", "Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces. Scopes the sensitive secrets-list grant (§11) — the startup RBAC probe verifies exactly this scope.")
+	fs.DurationVar(&f.expiryACMEGrace, "expiry-acme-grace", 15*time.Minute, "How long a cert-manager ACME Challenge may stay pending (or an Order stay pending with no Challenge), timed from its creationTimestamp, before expiry.challenge_stuck / expiry.order_failed fires; terminal failures (invalid/errored/expired) fire on observation. Discovery-gated on acme.cert-manager.io. Must be > 0.")
 
 	// Capacity source knobs (§7.2 row 7, §10.1). ADDITIVE flags; only
 	// meaningful with --sources=…,capacity. The critical pending-age
@@ -600,6 +602,9 @@ func (f *flags) validate() error {
 	}
 	if f.expiryInterval <= 0 {
 		return errors.New("--expiry-interval must be > 0")
+	}
+	if f.expiryACMEGrace <= 0 {
+		return errors.New("--expiry-acme-grace must be > 0")
 	}
 	if f.expiryWarn < expiry.CriticalWindow {
 		return fmt.Errorf("--expiry-warn must be >= the design-fixed critical threshold (%s)", expiry.CriticalWindow)

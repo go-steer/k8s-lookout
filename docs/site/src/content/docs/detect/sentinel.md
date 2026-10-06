@@ -37,6 +37,7 @@ shipped threshold.
 | Resources trending toward exhaustion | A pod leaking ~1 MiB every 30 s, forecast to hit its 64 Mi memory limit in ~14 minutes; a PVC filling in ~3 h | `saturation` | **Auto** | metrics-server (`metrics.k8s.io`) — absent, auto skips the source with one loud line |
 | Service capacity eroding before the outage | A backend's ready endpoints declining 5/5 → 3/5 across the trend window; a readiness probe that keeps flapping below the reactive threshold | `degradation` | **Auto** | none |
 | Certificates and tokens running out | A TLS certificate 13 days from expiry; a cert-manager `Certificate` whose last renewal failed | `expiry` | **Auto** | none |
+| Certificates that never get issued (cert-manager ACME) | An ACME `Challenge` still pending 15 minutes after creation (`--expiry-acme-grace`), or one that went `invalid`/`errored`/`expired`, reported with the ACME reason and DNS name as `expiry.challenge_stuck`. A failed `Order`, or one pending past the grace with no Challenge because no solver matched the name, is `expiry.order_failed`. Both name the owning Certificate in `controller_ref` and join that Certificate's incident as a followup (needs `--storm`, on under `auto`) instead of opening a second session | `expiry` | **Auto** | cert-manager's `acme.cert-manager.io` CRDs. Without them the dimension skips itself with one log line. The `challenges`/`orders` list+watch grant is optional: without it the source still runs and logs that this detection is off |
 | The autoscaler failing to deliver nodes | A pod Pending and unschedulable past 5 minutes; a nodegroup that asked the cloud for a node and didn't get one for 3 minutes | `capacity` | **Auto** | a running cluster-autoscaler; GCP provider (`-gke` image) for the structured whys — stockout vs quota vs IP exhaustion |
 | Load balancers that never get programmed (Ingress) | An `ingress-gce` Warning `Sync` ("Error syncing to GCP: …") or `Translate` event on an Ingress; a NEG-controller `AttachFailed`/`SyncNetworkEndpointGroupFailed` on a Service — endpoints never reach the load balancer while the Ingress object looks fine | `ingress` | **Auto** | none (nothing fires on clusters without `ingress-gce`/NEG controllers) |
 | Load balancers that never get programmed (Gateway API) | A Gateway or listener holds `Programmed=False` past the 5-minute grace, with `observedGeneration` caught up and the reason not `Pending`; an HTTPRoute parent holds `Accepted=False`/`ResolvedRefs=False` — the route config never became routable | `gateway` | **Auto** | the Gateway API CRDs served — absent, auto skips the source with one loud line (RBAC alone can't tell, so this is a discovery check) |
@@ -52,7 +53,7 @@ grants (the shipped `deploy/` manifests carry all of them) — a miss
 skips the source with a startup line naming the missing grant and the
 fix, never silently.
 
-Every kind these sources can emit — 57 in the frozen schema — is
+Every kind these sources can emit — 59 in the frozen schema — is
 cataloged in the [Signal kinds reference](/reference/signal-kinds/);
 every threshold above is a flag documented in the
 [`lookout watch` reference](/reference/watch/).

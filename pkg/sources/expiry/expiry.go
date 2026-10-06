@@ -30,7 +30,7 @@
 // scan interval, which is negligible against 14-day / 72-hour
 // thresholds.
 //
-// Signal contract: one kind, expiry.warning (§7.3), fired once per
+// Countdown signal contract: expiry.warning (§7.3), fired once per
 // (object, threshold crossing) — warning when notAfter enters
 // --expiry-warn (default 336h/14d), escalated to critical when it
 // enters CriticalWindow (72h, design-fixed) or the object is already
@@ -54,6 +54,14 @@
 // TLS Secrets owned by a cert-manager Certificate are attributed to
 // the Certificate (which carries renewal state) and skipped as plain
 // secrets, so one renewal failure is one incident, not two.
+//
+// ACME issuance stalls (issue #542, acme.go) add two more kinds,
+// expiry.challenge_stuck and expiry.order_failed: the CAUSE behind a
+// Certificate that is not being issued — a Challenge stuck pending
+// past a grace window, or a failed Order — with the ACME reason and
+// DNS names, attached to the Certificate's incident through §7.7
+// reattachment. Discovery-gated on acme.cert-manager.io and
+// grant-optional; see acme.go.
 package expiry
 
 import (
@@ -73,6 +81,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
@@ -87,7 +96,7 @@ const Name = "expiry"
 // kindPrefix namespaces this source's signal kinds (§7.3).
 const kindPrefix = "expiry."
 
-// KindWarning is the one kind this source emits (§7.3
+// KindWarning is the countdown kind this source emits (§7.3
 // `expiry.warning`): an expiry countdown crossed a threshold.
 // Severity carries the which-threshold distinction (warning at
 // --expiry-warn, critical at CriticalWindow / expired /
@@ -129,6 +138,14 @@ type Config struct {
 	Namespaces []string
 	// PageSize bounds each LIST page. Default 200.
 	PageSize int64
+	// ACMEGrace is how long an ACME Challenge may stay pending (or an
+	// Order pending with no Challenge), timed from its
+	// creationTimestamp, before it fires (--expiry-acme-grace).
+	// Default 15m: HTTP-01 validates in seconds, and DNS-01
+	// propagation checks commonly take a few minutes.
+	ACMEGrace time.Duration
+	// ACMETick drives the ACME grace sweep. Default 30s.
+	ACMETick time.Duration
 }
 
 // DefaultConfig returns the shipped thresholds.
@@ -137,6 +154,8 @@ func DefaultConfig() Config {
 		Interval:   time.Hour,
 		WarnWindow: 336 * time.Hour,
 		PageSize:   200,
+		ACMEGrace:  15 * time.Minute,
+		ACMETick:   30 * time.Second,
 	}
 }
 
@@ -151,6 +170,12 @@ func (c Config) normalize() Config {
 	}
 	if c.PageSize <= 0 {
 		c.PageSize = d.PageSize
+	}
+	if c.ACMEGrace <= 0 {
+		c.ACMEGrace = d.ACMEGrace
+	}
+	if c.ACMETick <= 0 {
+		c.ACMETick = d.ACMETick
 	}
 	return c
 }
@@ -225,6 +250,11 @@ type Source struct {
 	// certManager reports whether the Certificate CRD was discovered.
 	certManager bool
 
+	// acme is the ACME Challenge/Order memory (acme.go), keyed by
+	// object UID; acmeArmed flips once its informers have synced.
+	acme      map[types.UID]*acmeEntry
+	acmeArmed bool
+
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
 	// logf overrides log.Printf for testing. nil = log.Printf.
@@ -240,6 +270,7 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, cfg Config) *Source
 		dyn:    dyn,
 		cfg:    cfg.normalize(),
 		state:  make(map[string]*objEntry),
+		acme:   make(map[types.UID]*acmeEntry),
 	}
 }
 
@@ -267,6 +298,12 @@ func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 // fail startup on every cluster without cert-manager. When the CRD
 // exists but the list is forbidden, the scan fails loudly instead
 // (same §11 posture, enforced at first scan).
+//
+// The ACME Challenge/Order grants (issue #542) ARE declared, as
+// Optional: they are inert on clusters without cert-manager, and a
+// deployment still on an older ClusterRole must keep its countdowns —
+// the probe names the missing grant and the source runs with that
+// dimension disabled (startACME re-checks at runtime and says so).
 func (s *Source) RequiredAccess() []sources.Requirement {
 	namespaces := s.cfg.Namespaces
 	if len(namespaces) == 0 {
@@ -282,7 +319,7 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 	for _, res := range []string{"validatingwebhookconfigurations", "mutatingwebhookconfigurations"} {
 		reqs = append(reqs, sources.Requirement{Group: "admissionregistration.k8s.io", Resource: res, Verb: "list"})
 	}
-	return reqs
+	return append(reqs, s.acmeRequirements()...)
 }
 
 // ClearanceObserver returns the §7.4 clearance predicate: an expiry
@@ -319,6 +356,10 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Unlock()
 
 	s.discoverCertManager()
+	acmeOn := s.startACME(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 
 	if err := s.scan(ctx); err != nil {
 		return fmt.Errorf("expiry: initial scan: %w", err)
@@ -326,6 +367,17 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
+	// The ACME grace sweep runs on its own, much shorter tick; a nil
+	// channel (dimension off) never fires.
+	var acmeTick <-chan time.Time
+	if acmeOn {
+		t := time.NewTicker(s.cfg.ACMETick)
+		defer t.Stop()
+		acmeTick = t.C
+		// A stall already past its grace at the initial LIST fires now,
+		// after the initial scan has judged its Certificate.
+		s.sweepACME(ctx, s.clock())
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -334,6 +386,8 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			if err := s.scan(ctx); err != nil {
 				s.logPrintf("expiry: scan failed (will retry in %s): %v", s.cfg.Interval, err)
 			}
+		case <-acmeTick:
+			s.sweepACME(ctx, s.clock())
 		}
 	}
 }
@@ -407,9 +461,20 @@ func (s *Source) scan(ctx context.Context) error {
 // judge applies the threshold latch to every finding, emits the
 // crossings, and retires state for objects gone from this scan.
 func (s *Source) judge(findings []finding, now time.Time) {
+	s.judgeWith(findings, now, true)
+}
+
+// judgeWith is judge with the retirement step optional: a partial
+// re-judge (rejudgeCertificates — one namespace's Certificates, ahead
+// of an ACME stall) must not read every object it did not look at as
+// gone, and does not count as the full scan the clearance observer
+// waits for.
+func (s *Source) judgeWith(findings []finding, now time.Time, full bool) {
 	var out []engine.Signal
 	s.mu.Lock()
-	s.gen++
+	if full {
+		s.gen++
+	}
 	gen := s.gen
 	for _, f := range findings {
 		lvl := s.levelOf(f, now)
@@ -435,12 +500,14 @@ func (s *Source) judge(findings []finding, now time.Time) {
 			}
 		}
 	}
-	for uid, st := range s.state {
-		if st.seenGen != gen {
-			delete(s.state, uid) // object gone — clearance reports object_deleted
+	if full {
+		for uid, st := range s.state {
+			if st.seenGen != gen {
+				delete(s.state, uid) // object gone — clearance reports object_deleted
+			}
 		}
+		s.synced = true
 	}
-	s.synced = true
 	emit := s.emit
 	s.mu.Unlock()
 	if emit == nil {
@@ -685,34 +752,50 @@ func (s *Source) scanCertificates(ctx context.Context) ([]finding, map[string]bo
 	var out []finding
 	managed := map[string]bool{}
 	for _, ns := range s.namespaces() {
-		var ri dynamic.ResourceInterface = s.dyn.Resource(certManagerGVR)
-		if ns != "" {
-			ri = s.dyn.Resource(certManagerGVR).Namespace(ns)
+		fs, m, err := s.listCertificates(ctx, ns)
+		if err != nil {
+			return nil, nil, err
 		}
-		opts := metav1.ListOptions{Limit: s.cfg.PageSize}
-		for {
-			list, err := ri.List(ctx, opts)
-			if err != nil {
-				if apierrors.IsNotFound(err) {
-					return out, managed, nil // CRD deleted between discovery and scan
-				}
-				return nil, nil, fmt.Errorf("list certificates.cert-manager.io (namespace %q): %w", ns, err)
-			}
-			for i := range list.Items {
-				if f, secret, ok := certificateFinding(&list.Items[i]); ok {
-					out = append(out, f)
-					if secret != "" {
-						managed[f.namespace+"/"+secret] = true
-					}
-				}
-			}
-			if list.GetContinue() == "" {
-				break
-			}
-			opts.Continue = list.GetContinue()
+		out = append(out, fs...)
+		for k := range m {
+			managed[k] = true
 		}
 	}
 	return out, managed, nil
+}
+
+// listCertificates pages one namespace's ("" = all) Certificate CRs
+// into findings plus the managed-Secret set. A CRD deleted between
+// discovery and the LIST reads as empty.
+func (s *Source) listCertificates(ctx context.Context, ns string) ([]finding, map[string]bool, error) {
+	var out []finding
+	managed := map[string]bool{}
+	var ri dynamic.ResourceInterface = s.dyn.Resource(certManagerGVR)
+	if ns != "" {
+		ri = s.dyn.Resource(certManagerGVR).Namespace(ns)
+	}
+	opts := metav1.ListOptions{Limit: s.cfg.PageSize}
+	for {
+		list, err := ri.List(ctx, opts)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return out, managed, nil // CRD deleted between discovery and scan
+			}
+			return nil, nil, fmt.Errorf("list certificates.cert-manager.io (namespace %q): %w", ns, err)
+		}
+		for i := range list.Items {
+			if f, secret, ok := certificateFinding(&list.Items[i]); ok {
+				out = append(out, f)
+				if secret != "" {
+					managed[f.namespace+"/"+secret] = true
+				}
+			}
+		}
+		if list.GetContinue() == "" {
+			return out, managed, nil
+		}
+		opts.Continue = list.GetContinue()
+	}
 }
 
 // certificateFinding extracts one Certificate CR's countdown facts.
@@ -854,7 +937,11 @@ func jwtExpiry(token []byte) (time.Time, bool) {
 type clearance struct{ s *Source }
 
 func (c clearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
-	if inc.Key.Reason != reasonOf(KindWarning) {
+	switch inc.Key.Reason {
+	case reasonOf(KindWarning):
+	case reasonOf(KindChallengeStuck), reasonOf(KindOrderFailed):
+		return c.s.acmeClearance(inc)
+	default:
 		return engine.Clearance{}, false
 	}
 	s := c.s

@@ -551,6 +551,11 @@ func TestRequiredAccess_DeclaresTheSensitiveRead(t *testing.T) {
 		"list serviceaccounts cluster-wide": true,
 		"list validatingwebhookconfigurations.admissionregistration.k8s.io cluster-wide": true,
 		"list mutatingwebhookconfigurations.admissionregistration.k8s.io cluster-wide":   true,
+		// Optional (#542) — see TestACME_RequiredAccessOptional.
+		"list challenges.acme.cert-manager.io cluster-wide":  true,
+		"watch challenges.acme.cert-manager.io cluster-wide": true,
+		"list orders.acme.cert-manager.io cluster-wide":      true,
+		"watch orders.acme.cert-manager.io cluster-wide":     true,
 	}
 	got := map[string]bool{}
 	for _, req := range s.RequiredAccess() {
