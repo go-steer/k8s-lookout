@@ -350,6 +350,15 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["list"]
+  # cert-manager ACME Challenges/Orders (expiry source, #542): the
+  # cause behind a Certificate that is not being issued — a Challenge
+  # stuck pending or failed, a failed Order. Discovery-gated and inert
+  # without cert-manager like the rule above; declared OPTIONAL, so a
+  # sentinel without it still starts and logs that ACME stall
+  # detection is off. Status-only reads through an informer.
+  - apiGroups: ["acme.cert-manager.io"]
+    resources: ["challenges", "orders"]
+    verbs: ["list", "watch"]
   # Gateway API (gateway source, #168): the Gateway-API sibling of the
   # ingress source. Discovery-gated at runtime — these rules are inert
   # on clusters without the Gateway API CRDs (RBAC for an absent group

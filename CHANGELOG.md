@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The expiry source now says why a cert-manager Certificate is not
+  being issued (#542). This needs one new ClusterRole grant:
+  `list`/`watch` on `challenges` and `orders` in
+  `acme.cert-manager.io`.** Before this, only the Certificate itself
+  was watched. An issuance stuck on an ACME challenge for a DNS name
+  nobody controls showed up only as `Ready=False`, never with the
+  challenge's own reason. Two new wire kinds are added. Both are
+  warnings and both carry the ACME reason and the DNS names:
+  - `expiry.challenge_stuck` fires for a Challenge still pending
+    past `--expiry-acme-grace` (new flag, default 15m, timed from
+    creation). A Challenge that reached `invalid`, `errored` or
+    `expired` fires as soon as it is seen.
+  - `expiry.order_failed` fires for an Order in one of those failure
+    states. It also fires for an Order still pending past the grace
+    with no Challenge created, which usually means no solver matches
+    the name.
+
+  Each signal names its Certificate in `controller_ref`
+  (`Certificate/<name>`). The stall joins the Certificate's incident
+  as a `family.member` followup and does not open a second session.
+  It also prompts an immediate re-read of the Certificate, so that
+  incident exists without waiting for the next `--expiry-interval`
+  scan. Reattachment needs the graph feed (`--storm`, on under the
+  default `auto` whenever its grants are present). Without
+  cert-manager, the dimension skips itself with one log line. The
+  grant is optional. A sentinel without it, for example one still
+  on an older ClusterRole, starts normally and logs that ACME stall
+  detection is off. The rule ships in `deploy/`, `deploy-no-secrets/`
+  (inherited) and the Helm chart. Under `deploy-no-secrets` the
+  expiry source stays skipped, so these kinds are not emitted there.
+  The signal schema grows from 57 to 59 kinds, additive only.
+
 ## [0.30.0] - 2026-10-06
 
 **This release is leeway, proven against live clusters and corrected

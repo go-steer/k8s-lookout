@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
@@ -72,20 +73,54 @@ var reattachAncestorKinds = map[string]bool{
 	"PersistentVolumeClaim": true,
 }
 
+// declaredAncestorKinds are owner kinds the topology graph does not
+// index but a source can name on the signal itself (issue #542): a
+// cert-manager Certificate is the owner of the ACME Challenge/Order
+// stalls the expiry source reports, and no graph vertex models it.
+//
+// The key reads the SIGNAL, in two shapes that meet on one value:
+//   - a signal ABOUT a Certificate (expiry.warning, or a k8s-event on
+//     it) keys on itself — the incident a stall should join;
+//   - a signal whose ControllerRef names a Certificate
+//     ("Certificate/<name>", same namespace — expiry.challenge_stuck,
+//     expiry.order_failed) keys on that owner.
+//
+// Kept to an explicit allow-list for the same reason the graph kinds
+// above are: a declared key joins incidents, so each kind admitted
+// here must be a real one-root-cause owner, never a shared grouping.
+var declaredAncestorKinds = map[string]bool{
+	"Certificate": true,
+}
+
+// declaredAncestorKeys returns sig's signal-declared ancestor keys:
+// its ControllerRef owner first (nearest), then itself.
+func declaredAncestorKeys(sig engine.Signal) []string {
+	var keys []string
+	if kind, name, ok := strings.Cut(sig.ControllerRef, "/"); ok && declaredAncestorKinds[kind] && name != "" {
+		keys = append(keys, engine.Ancestor{Kind: kind, Namespace: sig.Namespace, Name: name}.Key())
+	}
+	if declaredAncestorKinds[sig.KindOfObject] && sig.Name != "" {
+		keys = append(keys, engine.Ancestor{Kind: sig.KindOfObject, Namespace: sig.Namespace, Name: sig.Name}.Key())
+	}
+	return keys
+}
+
 // ancestorKeysFor resolves sig's object to its reattachment-eligible
-// blast-radius keys, best-priority first (the resolver's own order).
-// Empty when the resolver is absent, the topology index has not
-// synced, or every candidate was a namespace-class key.
+// blast-radius keys, best-priority first: signal-declared owners
+// (declaredAncestorKinds), then the resolver's own order. Empty when
+// the resolver is absent (the stage is inert without it — see the
+// wiring), or when the signal declares nothing, the topology index
+// has not synced, and every candidate was a namespace-class key.
 func (d *dispatcher) ancestorKeysFor(sig engine.Signal) []string {
 	if d.resolver == nil {
 		return nil
 	}
+	keys := declaredAncestorKeys(sig)
 	cands := d.resolver.Ancestors(engine.ObjectRef{
 		Kind:      sig.KindOfObject,
 		Namespace: sig.Namespace,
 		Name:      sig.Name,
 	})
-	keys := make([]string, 0, len(cands))
 	for _, a := range cands {
 		if reattachAncestorKinds[a.Kind] {
 			keys = append(keys, a.Key())

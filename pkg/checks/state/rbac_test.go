@@ -40,6 +40,8 @@ var otherSourceBulkReads = []ListRequirement{
 	{"admissionregistration.k8s.io", "validatingwebhookconfigurations"}, // expiry source (webhook CA bundles)
 	{"admissionregistration.k8s.io", "mutatingwebhookconfigurations"},   // expiry source
 	{"cert-manager.io", "certificates"},                                 // expiry source (discovery-gated)
+	{"acme.cert-manager.io", "challenges"},                              // expiry source ACME stalls (#542, discovery-gated, optional)
+	{"acme.cert-manager.io", "orders"},                                  // expiry source ACME stalls
 	{"gateway.networking.k8s.io", "gateways"},                           // gateway source (discovery-gated)
 	{"gateway.networking.k8s.io", "httproutes"},                         // gateway source
 	// topology-drift source, FR-8 volume pinning: the claim says which volume

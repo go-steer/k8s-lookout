@@ -1584,6 +1584,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Interval = f.expiryInterval
 			cfg.WarnWindow = f.expiryWarn
 			cfg.Namespaces = splitCSV(f.expiryNamespaces)
+			cfg.ACMEGrace = f.expiryACMEGrace
 			bs.expiry = expiry.New(client, dyn, cfg)
 			src = bs.expiry
 		case capacity.Name:

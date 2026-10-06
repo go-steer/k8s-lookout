@@ -128,10 +128,10 @@ two changes:
 
 - **The `expiry` source, entirely.** Under the default
   `--sources=auto` the startup probe finds the `secrets` grant missing
-  and skips the source with one log line. Its requirements are
-  all-or-nothing, so the skip also takes webhook CA bundle expiry and
-  cert-manager renewal state with it, not just TLS-Secret and
-  ServiceAccount-token expiry. If you name `expiry` in an explicit
+  and skips the source with one log line. The `secrets` grant is a
+  required one, so the skip also takes webhook CA bundle expiry,
+  cert-manager renewal state and ACME stall detection with it, not
+  just TLS-Secret and ServiceAccount-token expiry. If you name `expiry` in an explicit
   `--sources` list, startup fails instead, which is the §11 rule for
   named sources.
 - **Secret and ServiceAccount checks in an enrichment bundle's
@@ -203,7 +203,8 @@ objects?
 | `workload` | Jobs, CronJobs |
 | `autoscaling` | HorizontalPodAutoscalers |
 | `gateway` | Gateway API objects (its own factory) |
-| `expiry`, `saturation` | none — polled |
+| `expiry` | ACME Challenges and Orders when cert-manager is installed (its own factory); everything else polled |
+| `saturation` | none — polled |
 | `quota`, `notifications`, `token-burn` | none — provider APIs |
 
 So:

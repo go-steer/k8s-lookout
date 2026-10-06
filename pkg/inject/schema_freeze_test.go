@@ -239,10 +239,11 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 	// (topology-drift's emittable verdict kinds), +4 more in #416
 	// phase 6 (the §7.7.4 preference-rank kinds) and
 	// leeway.domain_unavailable +1 in #416 phase 7, which completes the
-	// set docs/leeway-design.md §2.3 named — additive-only, ledger +
-	// docs updated in the same changes).
-	if len(shippedKinds) != 57 {
-		t.Errorf("shipped kind inventory has %d kinds, want 57 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	// set docs/leeway-design.md §2.3 named, and expiry.challenge_stuck
+	// + expiry.order_failed +2 in #542 — additive-only, ledger + docs
+	// updated in the same changes).
+	if len(shippedKinds) != 59 {
+		t.Errorf("shipped kind inventory has %d kinds, want 59 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
 	}
 }
 
