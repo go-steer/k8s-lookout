@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-06
+
+**This release is leeway, proven against live clusters and corrected
+where it was wrong.** A 72-hour false-positive soak under benign churn,
+two new kind scenarios and the first live compute-class drill found six
+defects, all fixed here. An unlabelled schedulable node such as a kind or
+kubeadm control plane no longer makes every evenly spread workload look
+skewed. A placement within its declared `DoNotSchedule` maxSkew no
+longer raises drift. Pods pinned to one host by required affinity no
+longer get the assumed zone spread. A zone whose nodes all go NotReady is
+now an outage, which holds findings and keeps baselines. A long-finished
+cordon is no longer blamed for later drift. Skew that Kubernetes itself
+leaves behind after a rollout, scale-down or drain still pages at Tier A,
+by design: spread constraints are enforced only when pods are placed. On
+upgrade, compute-class `pods` and `pod_time` drop to count only workload
+pods, which moves rank shares with them. No flags, grants or wire fields
+changed.
+
 ### Added
 
 - Two kind scenarios now show leeway catching real placement problems
@@ -46,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seeded benign churn: rollouts, scaling, pod deletions, node drains and
   node blips. Every leeway finding is listed with the churn that
   preceded it and the placement at the time. It runs on a spare machine
-  or a GCE VM that powers itself off, and is not part of CI.
+  or a GCE VM that powers itself off, and is not part of CI. Its first
+  72-hour run (2026-10-01 to 10-04, 2,295 churn actions) found the
+  false positives fixed below and no others.
 
 ### Fixed
 
@@ -107,6 +127,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wall time. Each node was weighted by its DaemonSet count rather than
   its workload, which skewed the rank-0 and last-rank shares that
   `leeway.rank_degraded` judges. Node-level transitions are unchanged.
+  **Expect `pods` and `pod_time` to step down on upgrade** to the
+  workload pods alone; dashboards and rank shares built on them shift
+  with it.
 
 ## [0.29.0] - 2026-10-01
 
