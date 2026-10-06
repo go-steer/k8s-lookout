@@ -4311,6 +4311,18 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   today, so that whoever turns pinning-based suppression on moves the cluster into the
   corpus rather than deleting the assertion.
 
+  The opposite case is guarded too: a cluster that is *not* fine and must keep
+  reporting (#543, 2026-10-06). A Deployment with a required or preferred pod
+  anti-affinity on `kubernetes.io/hostname`, meant as zone spread, sits at 8/1/1
+  across three zones. The hostname term puts no intent on the zone axis, and the
+  2026-10-01 §5.1 amendment covers required colocation, not anti-affinity. So the
+  assumed zone default applies, and the result is Tier B `leeway.placement_drift`
+  at `warning` with cause `constraint_ignored`, routed to the watchboard. A zone
+  TSC with `DoNotSchedule`, on the pod or as a declared cluster default, makes it
+  Tier A. A LeewayPolicy alone does not, because the shipped schema has no
+  contract field. Fixtures: `TestHostnameAntiAffinityZoneSkew_*` in
+  `pkg/sources/topologydrift/hostnamespread_test.go`.
+
 ### 12.1 The kwok harness
 
 We will not get a 5,000-node cluster to test against, and the NFRs that matter most —
