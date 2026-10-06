@@ -490,6 +490,161 @@ func TestCertManager_ManagedSecretAttribution(t *testing.T) {
 	}
 }
 
+// neverIssuedCert is a Certificate that has never issued: no
+// status.notAfter, Ready=False with readyReason. created zero leaves
+// creationTimestamp unset; lastFailure and issuingFailed record a
+// failed first issuance the way cert-manager does.
+func neverIssuedCert(uid, ns, name string, created time.Time, readyReason, lastFailure string, issuingFailed bool) *unstructured.Unstructured {
+	conds := []any{
+		map[string]any{"type": "Ready", "status": "False", "reason": readyReason, "message": "Issuing certificate as Secret does not exist"},
+	}
+	if issuingFailed {
+		conds = append(conds, map[string]any{"type": "Issuing", "status": "False", "reason": "Failed", "message": "The certificate request has failed to complete and will be retried"})
+	} else {
+		conds = append(conds, map[string]any{"type": "Issuing", "status": "True", "reason": "DoesNotExist", "message": "Issuing certificate as Secret does not exist"})
+	}
+	status := map[string]any{"conditions": conds}
+	if lastFailure != "" {
+		status["lastFailureTime"] = lastFailure
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cert-manager.io/v1",
+		"kind":       "Certificate",
+		"metadata":   map[string]any{"uid": uid, "namespace": ns, "name": name},
+		"spec":       map[string]any{"secretName": name + "-tls"},
+		"status":     status,
+	}}
+	if !created.IsZero() {
+		u.SetCreationTimestamp(metav1.NewTime(created))
+	}
+	return u
+}
+
+// newCertManagerSource is newTestSource with cert-manager discovered
+// over the given Certificates.
+func newCertManagerSource(t *testing.T, certs ...runtime.Object) (*Source, *collector, *time.Time) {
+	t.Helper()
+	client := fake.NewSimpleClientset()
+	s := New(client, nil, Config{})
+	col := &collector{}
+	now := testNow
+	clock := &now
+	s.now = func() time.Time { return *clock }
+	s.emit = col.emit
+	s.logf = t.Logf
+	withCertManager(t, s, client, certs...)
+	return s, col, clock
+}
+
+// assertNeverIssued checks the #552 wording: says never issued, makes
+// up no expiry date, days_left or Forecast, keeps the renewal=FAILED
+// marker distill keys on.
+func assertNeverIssued(t *testing.T, sig engine.Signal) {
+	t.Helper()
+	if sig.Kind != KindWarning || sig.KindOfObject != "Certificate" || sig.Severity != engine.SeverityCritical {
+		t.Fatalf("got %s %s/%s, want expiry.warning critical on the Certificate", sig.Kind, sig.KindOfObject, sig.Severity)
+	}
+	if !strings.HasPrefix(sig.Message, "certificate never issued: ") {
+		t.Errorf("Message %q does not say the Certificate never issued", sig.Message)
+	}
+	for _, bogus := range []string{"EXPIRED", "1970", "days_left", "notAfter"} {
+		if strings.Contains(sig.Message, bogus) {
+			t.Errorf("Message %q carries %q — there is no issued certificate", sig.Message, bogus)
+		}
+	}
+	if !strings.Contains(sig.Message, "renewal=FAILED") {
+		t.Errorf("Message %q lost the renewal=FAILED marker", sig.Message)
+	}
+	if sig.Forecast != nil {
+		t.Errorf("Forecast = %+v, want none (no notAfter to give as an ETA)", sig.Forecast)
+	}
+}
+
+// TestCertManager_NeverIssued_GraceThenTruthfulCritical (#552): a
+// brand-new Certificate mid-first-issuance is not a failure; past the
+// first-issuance grace it is critical, worded as never issued, with
+// no Forecast — and it stays latched.
+func TestCertManager_NeverIssued_GraceThenTruthfulCritical(t *testing.T) {
+	t.Parallel()
+	created := testNow.Add(-time.Minute)
+	s, col, clock := newCertManagerSource(t, neverIssuedCert("cert-1", "prod", "api-cert", created, "DoesNotExist", "", false))
+
+	scan(t, s)
+	if sigs := col.all(); len(sigs) != 0 {
+		t.Fatalf("fired inside the first-issuance grace: %+v", sigs)
+	}
+
+	*clock = created.Add(DefaultConfig().ACMEGrace + time.Second)
+	scan(t, s)
+	sigs := col.all()
+	if len(sigs) != 1 {
+		t.Fatalf("signals = %d past the grace, want 1: %+v", len(sigs), sigs)
+	}
+	assertNeverIssued(t, sigs[0])
+	if !strings.Contains(sigs[0].Message, "never issued: DoesNotExist Issuing certificate as Secret does not exist;") {
+		t.Errorf("Message %q does not carry the Ready reason and message", sigs[0].Message)
+	}
+
+	*clock = clock.Add(time.Hour)
+	scan(t, s)
+	if n := len(col.all()); n != 1 {
+		t.Fatalf("re-fired on the next scan: %d signals", n)
+	}
+	inc := engine.Incident{Key: sigs[0].Key}
+	if c, ok := s.ClearanceObserver().Clearance(inc); !ok || c.Cleared {
+		t.Errorf("Clearance = %+v/%v, want judged and not cleared while still never issued", c, ok)
+	}
+}
+
+// TestCertManager_NeverIssued_FailureFiresAtOnce: the grace is for an
+// issuance in progress only. A recorded failure, a reason that is not
+// in-progress, or an untimeable Certificate fires on the first scan.
+func TestCertManager_NeverIssued_FailureFiresAtOnce(t *testing.T) {
+	t.Parallel()
+	young := testNow.Add(-time.Minute)
+	for _, tc := range []struct {
+		name string
+		cert *unstructured.Unstructured
+	}{
+		{"lastFailureTime", neverIssuedCert("c", "prod", "api-cert", young, "DoesNotExist", "2026-07-24T11:59:30Z", false)},
+		{"Issuing=False/Failed", neverIssuedCert("c", "prod", "api-cert", young, "DoesNotExist", "", true)},
+		{"other Ready reason", neverIssuedCert("c", "prod", "api-cert", young, "InvalidKeyPair", "", false)},
+		{"no creationTimestamp", neverIssuedCert("c", "prod", "api-cert", time.Time{}, "DoesNotExist", "", false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, col, _ := newCertManagerSource(t, tc.cert)
+			scan(t, s)
+			sigs := col.all()
+			if len(sigs) != 1 {
+				t.Fatalf("signals = %d, want 1 on the first scan: %+v", len(sigs), sigs)
+			}
+			assertNeverIssued(t, sigs[0])
+		})
+	}
+}
+
+// TestCertManager_IssuedCountdownUnchanged: an issued Certificate
+// keeps the countdown wording and its notAfter Forecast.
+func TestCertManager_IssuedCountdownUnchanged(t *testing.T) {
+	t.Parallel()
+	notAfter := testNow.Add(10 * 24 * time.Hour)
+	s, col, _ := newCertManagerSource(t, certificateCR("cert-1", "prod", "api-cert", "api-tls", notAfter, true, ""))
+	scan(t, s)
+	sigs := col.all()
+	if len(sigs) != 1 || sigs[0].Severity != engine.SeverityWarning {
+		t.Fatalf("signals = %+v, want one warning", sigs)
+	}
+	for _, want := range []string{"certificate expires in 240h0m0s (notAfter 2026-08-03T12:00:00Z)", "days_left=10", "renewal=ok"} {
+		if !strings.Contains(sigs[0].Message, want) {
+			t.Errorf("Message %q missing %q", sigs[0].Message, want)
+		}
+	}
+	if f := sigs[0].Forecast; f == nil || !f.ETA.Equal(notAfter) || f.ConfidenceBasis != ConfidenceBasis {
+		t.Errorf("Forecast = %+v, want ETA=notAfter basis=%q", f, ConfidenceBasis)
+	}
+}
+
 // TestCertManager_AbsentSkipsWithLogLine: no CRD → one loud startup
 // line, everything else still scanned — never a silent skip, never a
 // crash.

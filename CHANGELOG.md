@@ -55,6 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cert-manager Certificate that never issued is no longer
+  reported as expired in 1970** (#552). With no `status.notAfter`,
+  the expiry source used the Unix epoch as a stand-in, so the
+  `expiry.warning` read `certificate EXPIRED 497590h0m0s ago (notAfter
+  1970-01-01T00:00:00Z)`, `days_left=-20732`, with a 1970
+  `forecast.eta`. It now reads `certificate never issued: <Ready
+  reason and message>`, with no `days_left` and no `forecast`. It is
+  still critical, the `renewal=FAILED` detail is unchanged, and the
+  fingerprint does not move.
+  - A brand-new Certificate is no longer paged as a failed renewal
+    while its first issuance is still running. With no `notAfter`, no
+    `lastFailureTime`, and `Ready=False` reason `DoesNotExist` or
+    `Issuing`, it is held for `--expiry-acme-grace` (default 15m) from
+    its creation. The flag's help now says it covers this too. A
+    recorded failure (`lastFailureTime`, or `Issuing=False` reason
+    `Failed`) still fires at once, as does a Certificate named by an
+    `expiry.challenge_stuck` / `expiry.order_failed`, so the
+    Certificate's session still opens before the stall joins it.
+  - `examples/sentinel/up` passes `--expiry-acme-grace=60s` when
+    cert-manager is installed, and the `gateway-cert` scenario now
+    checks for the `certificate never issued` wording.
+
 - **A forbidden read degrades the answer instead of failing the
   command** (#546). Under the built-in `view` ClusterRole, which
   excludes Secrets and every RBAC object, `health`, `state edges

@@ -371,7 +371,7 @@ func certificateRenewalFailed() engine.Signal {
 			Namespace:    "shop",
 			KindOfObject: "Certificate",
 			Name:         "web-cert",
-			Message:      "certificate EXPIRED; renewal=FAILED ready_condition=DoesNotExist",
+			Message:      "certificate never issued: DoesNotExist; source=cert-manager renewal=FAILED ready_condition=DoesNotExist",
 			Count:        1,
 			FirstSeen:    ts,
 			LastSeen:     ts,

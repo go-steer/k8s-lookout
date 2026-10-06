@@ -521,9 +521,11 @@ func (s *Source) rejudgeCertificates(ctx context.Context, fire []*acmeEntry, now
 		return
 	}
 	namespaces := map[string]bool{}
+	stalled := map[string]bool{} // "ns/name" of each Certificate a stall names
 	for _, e := range fire {
 		if e.certificate != "" {
 			namespaces[e.namespace] = true
+			stalled[e.namespace+"/"+e.certificate] = true
 		}
 	}
 	if len(namespaces) == 0 {
@@ -542,6 +544,19 @@ func (s *Source) rejudgeCertificates(ctx context.Context, fire []*acmeEntry, now
 			continue
 		}
 		findings = append(findings, fs...)
+	}
+	// A stall is proof the first issuance is not just in progress, so
+	// the Certificates it names skip the first-issuance grace. The
+	// grace sits on the same ACMEGrace clock and a Certificate
+	// predates its Challenges, so a pending-past-grace stall needs no
+	// help; a TERMINAL stall fires on observation, possibly before
+	// cert-manager has written lastFailureTime onto a Certificate that
+	// is still inside the grace — without this its session would not
+	// exist when the stall reaches the watchboard.
+	for i := range findings {
+		if stalled[findings[i].namespace+"/"+findings[i].name] {
+			findings[i].stalled = true
+		}
 	}
 	s.judgeWith(findings, now, false)
 }
