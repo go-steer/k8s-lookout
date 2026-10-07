@@ -13,9 +13,13 @@
 // limitations under the License.
 
 // Package axapi holds generated client stubs for the Agent Executor (AX) API,
-// used by the ax sink (pkg/inject/ax.go). AX's own Go module needs a newer Go
+// used by the ax sink (internal/axsink). AX's own Go module needs a newer Go
 // toolchain than lookout and its API is v1alpha1, so lookout carries a pinned
 // copy of ax.proto instead of importing AX.
 package axapi
 
 //go:generate buf generate --template {"version":"v2","plugins":[{"local":"protoc-gen-go","out":".","opt":"paths=source_relative"},{"local":"protoc-gen-go-grpc","out":".","opt":"paths=source_relative"}]} --path ax.proto
+
+// goimports groups the stubs' imports the way dev/tools/verify-go-format
+// checks every Go file in the repo.
+//go:generate goimports -w -local github.com/go-steer/k8s-lookout ax.pb.go ax_grpc.pb.go
