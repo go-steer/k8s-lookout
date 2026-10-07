@@ -64,6 +64,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
 | `reserved_since` | orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable |
 | `reserved_for` | orphan.address: how long ago the address was reserved; "unknown" when undatable |
+| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
+| `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list); omitted when the provider did not name it |
 | `capability` | cloud.unavailable: the provider capability this command needed (orphans) |
 | `provider` | cloud.unavailable: the provider that was asked |
 | `unavailable` | summary-line note: why the cloud read could not be served |

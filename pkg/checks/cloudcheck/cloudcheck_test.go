@@ -91,22 +91,25 @@ type fakeOrphans struct {
 
 	addrs []cloud.OrphanAddress
 
+	// Per-class sweep errors (the command must ignore results on error).
+	disksErr, lbsErr, addrsErr error
+
 	disksCalled, lbsCalled, addrsCalled bool
 }
 
 func (f *fakeOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, error) {
 	f.addrsCalled = true
-	return f.addrs, nil
+	return f.addrs, f.addrsErr
 }
 
 func (f *fakeOrphans) OrphanDisks(context.Context) ([]cloud.OrphanDisk, error) {
 	f.disksCalled = true
-	return f.disks, nil
+	return f.disks, f.disksErr
 }
 
 func (f *fakeOrphans) OrphanLoadBalancers(context.Context) ([]cloud.OrphanLoadBalancer, error) {
 	f.lbsCalled = true
-	return f.lbs, nil
+	return f.lbs, f.lbsErr
 }
 
 type fakeIPSpace struct {

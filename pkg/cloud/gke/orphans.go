@@ -46,6 +46,12 @@ package gke
 // unhealthy — that is an outage (state edges / triage territory),
 // not an orphan. Rules with target kinds outside the three shapes
 // above (SSL/TCP proxies, VPN/IPsec) are skipped, not guessed at.
+//
+// A 403 permission refusal on any call a class makes is wrapped into
+// cloud.ErrPermissionDenied (classifyPermission), naming the
+// permission — from the API's message, else the list permission the
+// class needs — so the command degrades that one class to an
+// explicit unavailable instead of failing the whole sweep.
 
 import (
 	"context"
@@ -102,7 +108,7 @@ func newOrphanAPI(p *Provider) *orphanAPI {
 func (o *orphanAPI) OrphanDisks(ctx context.Context) ([]cloud.OrphanDisk, error) {
 	disks, err := o.gce.ListDisks(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing disks: %w", err)
+		return nil, fmt.Errorf("listing disks: %w", classifyPermission(err, "compute.disks.list"))
 	}
 	var out []cloud.OrphanDisk
 	for _, d := range disks {
@@ -126,7 +132,7 @@ func (o *orphanAPI) OrphanDisks(ctx context.Context) ([]cloud.OrphanDisk, error)
 func (o *orphanAPI) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddress, error) {
 	addrs, err := o.gce.ListAddresses(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing addresses: %w", err)
+		return nil, fmt.Errorf("listing addresses: %w", classifyPermission(err, "compute.addresses.list"))
 	}
 	var out []cloud.OrphanAddress
 	for _, a := range addrs {
@@ -156,7 +162,7 @@ func (o *orphanAPI) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddress,
 func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoadBalancer, error) {
 	rules, err := o.gce.ListForwardingRules(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing forwarding rules: %w", err)
+		return nil, fmt.Errorf("listing forwarding rules: %w", classifyPermission(err, "compute.forwardingRules.list"))
 	}
 	var out []cloud.OrphanLoadBalancer
 	for _, r := range rules {
@@ -165,7 +171,7 @@ func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoad
 		}
 		orphaned, reason, err := o.judgeRule(ctx, r)
 		if err != nil {
-			return nil, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, err)
+			return nil, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, classifyPermission(err, ""))
 		}
 		if orphaned {
 			out = append(out, cloud.OrphanLoadBalancer{

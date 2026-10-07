@@ -15,6 +15,8 @@
 package cloudcheck_test
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -219,4 +221,114 @@ func TestOrphansGolden(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
 	checktest.Golden(t, "testdata/orphans.golden", res.Stdout)
+}
+
+// denied builds the provider's wrapped permission refusal, as the
+// GKE implementation returns it (a 403 classified at the provider
+// seam, then wrapped with the call's context).
+func denied(permission string) error {
+	return fmt.Errorf("listing: %w", &cloud.PermissionDeniedError{
+		Permission: permission,
+		Err:        errors.New("googleapi: Error 403: Required '" + permission + "' permission for 'projects/p', forbidden"),
+	})
+}
+
+// TestOrphansAddressesDenied is the #231 regression: the default
+// --only gained addresses, so an identity that ran the old default
+// fine but lacks compute.addresses.list must still get exit 0, its
+// disk and lb findings, and one explicit unavailable for addresses
+// naming the permission — not exit 1 from the same invocation.
+func TestOrphansAddressesDenied(t *testing.T) {
+	api := orphanFixture()
+	api.addrsErr = denied("compute.addresses.list")
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0 (a refused class degrades, not fails); stderr: %s", res.Code, res.Stderr)
+	}
+	kinds := map[string]int{}
+	var unavail []map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		kinds[r["kind"]]++
+		if r["kind"] == "cloud.unavailable" {
+			unavail = append(unavail, r)
+		}
+	}
+	if kinds["orphan.disk"] != 3 || kinds["orphan.lb"] != 2 || kinds["orphan.address"] != 0 {
+		t.Errorf("kinds = %v, want 3 orphan.disk, 2 orphan.lb, no orphan.address", kinds)
+	}
+	if len(unavail) != 1 {
+		t.Fatalf("cloud.unavailable findings = %v, want exactly one (addresses)", unavail)
+	}
+	u := unavail[0]
+	if u["reason"] != "PermissionDenied" || u["severity"] != emit.SeverityInfo ||
+		u["capability"] != string(cloud.CapabilityOrphans) || u["provider"] != cloud.NoProviderName ||
+		u["class"] != "addresses" || u["permission"] != "compute.addresses.list" ||
+		!strings.Contains(u["message"], "compute.addresses.list") {
+		t.Errorf("unavailable = %v, want PermissionDenied class=addresses permission=compute.addresses.list", u)
+	}
+	sum := summaryLine(t, res.Stdout)
+	// scanned = 4 disks + 2 rules; the refused class examined nothing.
+	if sum["scanned"] != "6" || sum["unavailable"] != "addresses: needs compute.addresses.list" {
+		t.Errorf("summary = %v, want scanned=6 unavailable=\"addresses: needs compute.addresses.list\"", sum)
+	}
+}
+
+// TestOrphansAllDenied: every class refused is still an answer —
+// exit 0, three unavailables, nothing scanned. An unnamed permission
+// is reported as such rather than guessed.
+func TestOrphansAllDenied(t *testing.T) {
+	api := orphanFixture()
+	api.disksErr = denied("compute.disks.list")
+	api.lbsErr = fmt.Errorf("resolving forwarding rule %q: %w", "web-rule", cloud.ErrPermissionDenied)
+	api.addrsErr = denied("compute.addresses.list")
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 3 {
+		t.Fatalf("records = %v, want three cloud.unavailable", recs)
+	}
+	want := []struct{ class, permission string }{
+		{"disks", "compute.disks.list"},
+		{"lbs", ""},
+		{"addresses", "compute.addresses.list"},
+	}
+	for i, r := range recs {
+		if r["kind"] != "cloud.unavailable" || r["reason"] != "PermissionDenied" ||
+			r["class"] != want[i].class || r["permission"] != want[i].permission {
+			t.Errorf("record %d = %v, want cloud.unavailable class=%s permission=%q", i, r, want[i].class, want[i].permission)
+		}
+	}
+	sum := summaryLine(t, res.Stdout)
+	wantNote := "disks: needs compute.disks.list; lbs: permission denied; addresses: needs compute.addresses.list"
+	if sum["scanned"] != "0" || sum["unavailable"] != wantNote {
+		t.Errorf("summary = %v, want scanned=0 unavailable=%q", sum, wantNote)
+	}
+}
+
+// TestOrphansRuntimeErrorFatal: only a permission refusal degrades;
+// any other sweep failure stays a runtime error (exit 1).
+func TestOrphansRuntimeErrorFatal(t *testing.T) {
+	api := orphanFixture()
+	api.addrsErr = errors.New("listing addresses: googleapi: Error 500: Internal Error, backendError")
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitRuntime {
+		t.Fatalf("exit %d, want %d (a 500 is not a refusal); stderr: %s", res.Code, emit.ExitRuntime, res.Stderr)
+	}
+	if !strings.Contains(res.Stderr, "address sweep") || !strings.Contains(res.Stderr, "Error 500") {
+		t.Errorf("stderr = %q, want the address sweep's 500", res.Stderr)
+	}
+}
+
+// TestOrphansDeniedContract: the degraded path's fields (class,
+// permission, the unavailable= note) are in the output glossary.
+func TestOrphansDeniedContract(t *testing.T) {
+	api := orphanFixture()
+	api.addrsErr = denied("compute.addresses.list")
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	checktest.VerifyContract(t, cmd)
 }

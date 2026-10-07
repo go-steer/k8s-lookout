@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cloud.unavailable`, never an all-clear. On GKE it needs
     `compute.addresses.list`, which `roles/compute.viewer` already
     includes alongside the disk and forwarding-rule permissions.
+    Without it, the address class reports `cloud.unavailable` and the
+    other classes are still swept (see Changed).
   - `scaledown.blocked` (warning) from a new command,
     `lookout stab scaledown` (MCP `k8s_scaledown_blockers`). It reports
     a node the cluster autoscaler would remove for being underused but
@@ -104,7 +106,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`cloud orphans` now sweeps addresses by default.** `--only` defaults
   to `disks,lbs,addresses` instead of `disks,lbs`. Pass
-  `--only=disks,lbs` for the previous sweep (#231).
+  `--only=disks,lbs` for the previous sweep (#231). An identity that
+  lacks `compute.addresses.list` still gets exit 0 from the default
+  invocation: its disk and load-balancer findings, plus one
+  `cloud.unavailable` finding (`reason=PermissionDenied`,
+  `class=addresses`, `permission=compute.addresses.list`) and a
+  summary note `unavailable="addresses: needs compute.addresses.list"`.
+  The same applies to every class: a 403 on the disk or forwarding-rule
+  sweep degrades that class alone, and only a non-permission error
+  (a 500, a timeout, a throttled or disabled API) exits 1. Before,
+  any refused sweep failed the whole command. `cloud.unavailable`
+  gains two fields, `class` and `permission`, additive only.
 
 ### Fixed
 

@@ -1,0 +1,14 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the Compute Engine v1 error body for addresses.aggregatedList when the caller lacks compute.addresses.list (google.golang.org/api's googleapi.CheckResponse decodes the 'error' envelope, including the errors[] items whose reason is 'forbidden'). errors.go maps it to cloud.ErrPermissionDenied, naming the permission from the message.",
+  "error": {
+    "code": 403,
+    "message": "Required 'compute.addresses.list' permission for 'projects/lookout-test'",
+    "errors": [
+      {
+        "message": "Required 'compute.addresses.list' permission for 'projects/lookout-test'",
+        "domain": "global",
+        "reason": "forbidden"
+      }
+    ]
+  }
+}
