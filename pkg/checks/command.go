@@ -105,6 +105,16 @@ type Command struct {
 	// field: the zero value (false) keeps every existing read-path
 	// command exactly as it was.
 	Writes bool
+	// Privileged marks a command that changes a workload in the
+	// cluster and is opt-in end to end (DESIGN §5, amendment of
+	// 2026-10-07; docs/in-pod-probe-design.md). Such a command runs
+	// from the CLI like any other, but the MCP server never
+	// advertises it by default: neither the full surface,
+	// `--tools=all` nor any profile includes it, and only an operator
+	// flag on `lookout mcp` adds it. No composition (`scan`, `health`,
+	// `bundle`, the sentinel) runs one. A privileged command must
+	// also declare Writes.
+	Privileged bool
 }
 
 // OutputField documents one Details key a command may emit.
@@ -278,6 +288,9 @@ func MCPProfileSummary(name string) string { return mcpProfileDocs[name] }
 // only in the default surface. It lives here so the skill docs and
 // the site docs cannot phrase it two ways.
 func (c Command) MCPProfileNote() string {
+	if c.Privileged {
+		return " (privileged: never on the default MCP surface or in any profile; the operator enables it with its own `lookout mcp` flag, see `lookout mcp --help`)"
+	}
 	if len(c.MCPProfiles) == 0 {
 		return ""
 	}
@@ -292,6 +305,9 @@ func (c Command) MCPProfileNote() string {
 // profile. ProfileFull matches every command, which is what makes it
 // the default.
 func (c Command) InMCPProfile(profile string) bool {
+	if c.Privileged {
+		return false
+	}
 	if profile == ProfileFull {
 		return true
 	}
@@ -417,6 +433,12 @@ func (c Command) Validate() error {
 	}
 	if c.TimeoutDefault < 0 {
 		return fmt.Errorf("command %q: negative TimeoutDefault %s", c.Name, c.TimeoutDefault)
+	}
+	if c.Privileged && !c.Writes {
+		return fmt.Errorf("command %q: Privileged without Writes — a command that changes a workload must be advertised as a write wherever it is served", c.Name)
+	}
+	if c.Privileged && len(c.MCPProfiles) > 0 {
+		return fmt.Errorf("command %q: a Privileged command cannot join an MCP profile — profiles are client-selectable, and privileged tools are served only when the operator enables them", c.Name)
 	}
 	validateSpecs := emit.ValidateSpecs
 	if c.GraphBacked {

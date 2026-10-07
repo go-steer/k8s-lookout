@@ -183,6 +183,33 @@ A user running lookout under their own kubeconfig needs the same
 the ServiceAccount the overlay binds, so the docs recommend copying it
 for any other identity given the grant.
 
+**Implementation additions (2026-10-07, from the PR 2 security
+review).** Two ways the grant could end up without its policy were
+closed rather than only documented:
+
+- **Re-namespacing.** The policy matches the ServiceAccount by name in
+  any namespace (`username.startsWith('system:serviceaccount:') &&
+  username.endsWith(':lookout-watch')`), not by a full username.
+  Kustomize rewrites the binding's subject namespace when the overlay
+  is wrapped with another `namespace:`, but it cannot rewrite a string
+  inside CEL. Matching by name keeps the policy on the granted identity,
+  and errs towards restricting more. `dev/tools/verify-helm-parity`
+  re-namespaces the overlay and checks the rewritten subject still
+  satisfies the policy's identity condition.
+- **A grant without a policy** (a cluster older than 1.30, where
+  `kubectl apply -k` creates the RBAC and fails only on the policy
+  kinds; a partial apply; a deleted policy). Before patching, the
+  command lists the policy kinds and refuses with `probe.refused
+  reason=PolicyMissing` (exit 0, pod unchanged) unless it finds a policy
+  labeled `k8s-lookout.go-steer.dev/guards=net-probe-from` that fails
+  closed, matches UPDATE on `pods/ephemeralcontainers`, and has match
+  conditions the command can verify cover its own username (from a
+  SelfSubjectReview), plus a binding for it with `Deny` and no
+  `matchResources` or `paramRef` narrowing. This adds `get`/`list` on
+  `validatingadmissionpolicies` and `validatingadmissionpolicybindings`
+  to the probe ClusterRole only. The overlay header warns that `kubectl
+  apply -k` on clusters older than 1.30 is unsupported.
+
 ## MCP exposure
 
 **Not served by default.** `lookout mcp` with no flags does not list
@@ -251,7 +278,7 @@ Reasons:
 
 | Concern | Assessment |
 | --- | --- |
-| Privilege of the grant | `patch pods/ephemeralcontainers` alone is close to exec: it could run any image with the pod's volumes (and Secrets) mounted. **Mitigated** by the admission policy shipped with the grant, which pins the image repository, the command, and forbids mounts and process sharing. Without the policy (clusters older than 1.30, or a grant made by hand) the grant is as strong as exec, and the docs say so. |
+| Privilege of the grant | `patch pods/ephemeralcontainers` alone is close to exec: it could run any image with the pod's volumes (and Secrets) mounted. **Mitigated** by the admission policy shipped with the grant, which pins the image repository, the command, and forbids mounts and process sharing. Without the policy (clusters older than 1.30, or a grant made by hand) the grant is as strong as exec; `net probe-from` then refuses to use it (`reason=PolicyMissing`), though the grant itself still exists for anything else running as that identity, and the docs say to remove it. |
 | Injection through targets | Targets are validated by `net probe`'s parsers and passed as argv, never through a shell; the comma-separated list is one argument per flag, so a target cannot add a flag. The policy also rejects any argument that is not a probe flag. |
 | Image trust | Digest-pinned; tags refused. Over MCP the image is fixed by the operator, not the caller. The policy limits the overlay's identity to the official repository. A mirror needs the policy edited to match. |
 | Secrets | The container mounts nothing, and the probe never reads response bodies. Targets with credentials or query strings are refused because they would be stored in the pod spec. Output passes the sanitizer. |

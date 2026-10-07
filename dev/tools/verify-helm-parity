@@ -198,6 +198,74 @@ else
   exit 1
 fi
 
+# ---- the probe variant: rbac.probeFrom=true == deploy-probe/ -----------
+#
+# The one write grant (#539) and the admission policy that narrows it.
+# Exact diff for the same reason as the no-secrets variant: the policy's
+# CEL is security-relevant, and two copies of it must not drift.
+
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.probeFrom=true >"$tmp/chart-probe.raw.yaml"
+kustomize build deploy-probe/ >"$tmp/kustomize-probe.raw.yaml"
+normalize "$tmp/chart-probe.raw.yaml" "$tmp/chart-probe.yaml"
+normalize "$tmp/kustomize-probe.raw.yaml" "$tmp/kustomize-probe.yaml"
+
+if diff -u "$tmp/kustomize-probe.yaml" "$tmp/chart-probe.yaml" >"$tmp/diff-probe"; then
+  echo "✓ chart with rbac.probeFrom=true matches deploy-probe/"
+else
+  echo "✗ helm template --set rbac.probeFrom=true and deploy-probe/ have diverged." >&2
+  echo "  Left is kustomize build deploy-probe/, right is helm template." >&2
+  echo >&2
+  cat "$tmp/diff-probe" >&2
+  exit 1
+fi
+
+# Re-namespacing deploy-probe/ must not unhook its admission policy from
+# the identity the grant goes to. Kustomize rewrites the binding's
+# subject namespace but cannot rewrite a string inside CEL, so the
+# policy's identity match must not depend on the namespace. Wrap the
+# overlay in a kustomization with another namespace and check that the
+# rewritten subject still satisfies the policy's identity condition.
+mkdir -p "$tmp/renamespaced"
+# kustomize refuses absolute resource paths, so point at the overlay
+# relative to the wrapper.
+probe_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy-probe" "$tmp/renamespaced")"
+cat >"$tmp/renamespaced/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: team-x-lookout
+resources:
+  - $probe_rel
+EOF
+kustomize build "$tmp/renamespaced" >"$tmp/renamespaced.yaml"
+python3 - "$tmp/renamespaced.yaml" <<'PY'
+import re, sys, yaml
+
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+crb = next(d for d in docs if d["kind"] == "ClusterRoleBinding" and d["metadata"]["name"].endswith("probe-from"))
+vap = next(d for d in docs if d["kind"] == "ValidatingAdmissionPolicy")
+cond = next(c["expression"] for c in vap["spec"]["matchConditions"] if c["name"] == "lookout-identity")
+
+def matches(expr, user):
+    # The two identity forms net probe-from's runtime guard recognizes.
+    m = re.fullmatch(r"request\.userInfo\.username\.startsWith\('system:serviceaccount:'\) && request\.userInfo\.username\.endsWith\(':([^']+)'\)", expr)
+    if m:
+        return user.startswith("system:serviceaccount:") and user.endswith(":" + m.group(1))
+    m = re.fullmatch(r"request\.userInfo\.username == '([^']+)'", expr)
+    if m:
+        return user == m.group(1)
+    sys.exit("✗ deploy-probe/'s identity condition is in a form net probe-from cannot verify: " + expr)
+
+for s in crb["subjects"]:
+    if s["kind"] != "ServiceAccount":
+        continue
+    user = "system:serviceaccount:%s:%s" % (s["namespace"], s["name"])
+    if s["namespace"] != "team-x-lookout":
+        sys.exit("✗ re-namespacing did not rewrite the binding subject: " + user)
+    if not matches(cond, user):
+        sys.exit("✗ re-namespaced deploy-probe/ leaves %s UNGUARDED: the policy's identity condition (%s) no longer matches it" % (user, cond))
+print("✓ re-namespaced deploy-probe/ keeps its admission policy on the granted ServiceAccount")
+PY
+
 # ---- the chart must also be valid on its own --------------------------
 
 helm lint "$CHART" --namespace "$NAMESPACE" --quiet

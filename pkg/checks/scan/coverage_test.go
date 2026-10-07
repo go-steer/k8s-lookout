@@ -75,6 +75,32 @@ func TestScanCoversEveryRegisteredCommand(t *testing.T) {
 	}
 }
 
+// TestScanNeverRunsAPrivilegedCommand pins the DESIGN §5 amendment of
+// 2026-10-07: a command that changes a workload (`net probe-from`) is
+// run only when asked for by name. It must sit in the exclusion
+// table, never in stage 1, and no optional group may carry it in.
+func TestScanNeverRunsAPrivilegedCommand(t *testing.T) {
+	reg := checks.Default()
+	found := false
+	for _, c := range reg.All() {
+		if !c.Privileged {
+			continue
+		}
+		found = true
+		if _, ok := scan.Excluded[c.Name]; !ok {
+			t.Errorf("privileged command %q is not in scan's exclusion table", c.Name)
+		}
+		for _, name := range scan.Stage1 {
+			if name == c.Name {
+				t.Errorf("privileged command %q is in scan's stage 1", c.Name)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no privileged command registered; net probe-from should be")
+	}
+}
+
 // TestScanTablesNameRealCommands is the other direction: a renamed or
 // deleted command must not leave a dangling entry behind. A stale
 // stage1 entry is the worse of the two — scan skips names it cannot

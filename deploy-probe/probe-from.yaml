@@ -1,0 +1,146 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The grant and the guard for `lookout net probe-from` — see
+# kustomization.yaml and docs/in-pod-probe-design.md. The Helm chart
+# renders the same four objects from templates/probe-from.yaml when
+# rbac.probeFrom=true.
+#
+# The grant alone would let the ServiceAccount add ANY ephemeral
+# container to any pod: any image, with the pod's volumes (Secrets,
+# its ServiceAccount token) mounted. The policy below is what narrows
+# it to the one inert container `net probe-from` builds. Keep them
+# together; applying the ClusterRole without the policy hands out
+# something close to pods/exec.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lookout-watch-probe-from
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+rules:
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["patch"]
+  # Read-only: `net probe-from` confirms the policy below (and a Deny
+  # binding for it) is installed and covers its own identity before it
+  # adds anything, and refuses with reason=PolicyMissing when not.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lookout-watch-probe-from
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lookout-watch-probe-from
+subjects:
+  - kind: ServiceAccount
+    name: lookout-watch
+    namespace: agent-triage
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: lookout-watch-probe-from
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+    # `net probe-from` looks for this label and refuses to add anything
+    # unless a policy carrying it, and a Deny binding for it, exist and
+    # cover the caller (reason=PolicyMissing otherwise).
+    k8s-lookout.go-steer.dev/guards: net-probe-from
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+  matchConditions:
+    # The ServiceAccount by NAME, in any namespace — deliberately not
+    # 'system:serviceaccount:agent-triage:lookout-watch'. Kustomize
+    # rewrites the binding's subject namespace when this overlay is
+    # re-namespaced, but it cannot rewrite a string inside CEL, so a
+    # namespaced match would silently stop matching and leave the
+    # grant unguarded. Matching every lookout-watch ServiceAccount errs
+    # the safe way: the policy only ever restricts.
+    - name: lookout-identity
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':lookout-watch')"
+    - name: adds-containers
+      expression: "has(object.spec.ephemeralContainers)"
+  variables:
+    - name: imagePrefix
+      expression: "'ghcr.io/go-steer/lookout@sha256:'"
+    - name: added
+      expression: >-
+        object.spec.ephemeralContainers.filter(c, !(has(oldObject.spec.ephemeralContainers)
+        && oldObject.spec.ephemeralContainers.exists(o, o.name == c.name)))
+  validations:
+    - expression: "variables.added.all(c, c.name.startsWith('lookout-probe-'))"
+      message: "lookout may only add ephemeral containers named lookout-probe-*"
+    - expression: >-
+        variables.added.all(c, has(c.image) && c.image.startsWith(variables.imagePrefix)
+        && c.image.substring(size(variables.imagePrefix)).matches('^[a-f0-9]{64}$'))
+      message: "the probe container must run the lookout image pinned by digest"
+    - expression: "variables.added.all(c, has(c.command) && c.command == ['/lookout', 'net', 'probe'])"
+      message: "the probe container must run exactly /lookout net probe"
+    - expression: >-
+        variables.added.all(c, has(c.args) && c.args.all(a,
+        a.matches('^--(format=json|timeout=[0-9a-z.]+|probe-timeout=[0-9a-z.]+|dns=[^ ]+|tcp=[^ ]+|http=[^ ]+)$')))
+      message: "the probe container may take only net probe's target, timeout and format flags"
+    - expression: >-
+        variables.added.all(c, (!has(c.targetContainerName) || c.targetContainerName == '')
+        && (!has(c.volumeMounts) || size(c.volumeMounts) == 0)
+        && (!has(c.volumeDevices) || size(c.volumeDevices) == 0)
+        && (!has(c.envFrom) || size(c.envFrom) == 0)
+        && (!has(c.stdin) || !c.stdin) && (!has(c.tty) || !c.tty))
+      message: "the probe container must not target another container, mount anything, or take stdin or a TTY"
+    - expression: >-
+        variables.added.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom)
+        && e.name in ['LOOKOUT_PROBE_REQUESTED_BY', 'LOOKOUT_PROBE_REQUESTED_AT', 'LOOKOUT_PROBE_CLIENT']))
+      message: "the probe container may carry only the three audit environment entries, as literal values"
+    - expression: >-
+        variables.added.all(c, has(c.securityContext)
+        && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot
+        && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation
+        && (!has(c.securityContext.privileged) || !c.securityContext.privileged)
+        && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop)
+        && 'ALL' in c.securityContext.capabilities.drop
+        && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+        && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault'
+        && !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions)
+        && !has(c.securityContext.appArmorProfile)
+        && (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default'))
+      message: "the probe container must run non-root with all capabilities dropped, no privilege escalation and the runtime-default seccomp profile"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: lookout-watch-probe-from
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+    k8s-lookout.go-steer.dev/guards: net-probe-from
+spec:
+  policyName: lookout-watch-probe-from
+  validationActions: ["Deny"]

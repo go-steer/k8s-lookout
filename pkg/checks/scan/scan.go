@@ -170,7 +170,8 @@ var excluded = map[string]string{
 	"stab drain":     "answers a hypothetical — what WOULD block draining a node — ahead of a planned operation, rather than a fault that exists now",
 	"stab scaledown": "a cost read, not a fault: an underused node the autoscaler cannot remove is billing waste with nothing broken, and the claim presumes a cluster autoscaler that a bare scan cannot confirm is running",
 
-	"net probe": "requires explicit probe targets (--dns/--tcp/--http): there is nothing for a zero-argument scan to probe, and generating active traffic is not a default a scan should take",
+	"net probe":      "requires explicit probe targets (--dns/--tcp/--http): there is nothing for a zero-argument scan to probe, and generating active traffic is not a default a scan should take",
+	"net probe-from": "PRIVILEGED: it adds a container to a named pod, a change that stays in the pod's spec. No composition ever runs it (DESIGN §5, amendment of 2026-10-07); it runs only when someone asks for it by name",
 }
 
 // Stages returns the stage-1 command names — everything a bare

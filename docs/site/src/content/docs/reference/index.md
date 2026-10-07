@@ -59,6 +59,7 @@ run-to-run finding state: diff two scans into transitions (new/ongoing/escalated
 active DNS/TCP/HTTP probes from inside the cluster
 
 - [`lookout net probe`](/reference/net-probe/) — Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever `lookout` runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.
+- [`lookout net probe-from`](/reference/net-probe-from/) — PRIVILEGED, opt-in: run net probe's DNS/TCP/HTTP checks from inside one named pod's network — the caller's vantage, for faults only that pod sees — by adding an ephemeral container that stays in the pod's spec; refused without the deploy-probe/ grant.
 
 ### `lookout perf`
 

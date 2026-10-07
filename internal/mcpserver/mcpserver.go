@@ -38,6 +38,7 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -109,10 +110,18 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 // serves, in registry order. It is exported because the tool list is
 // worth inspecting without standing a server up — `lookout mcp
 // --list-tools` prints it, and the profile tests assert on it.
+//
+// A Privileged command (`net probe-from`, DESIGN §5 amendment of
+// 2026-10-07) is served only when the selection names it explicitly,
+// which only EnablePrivileged does: the nil "everything" selection
+// leaves it out, and ResolveTools never puts it in.
 func Advertised(reg *checks.Registry, tools map[string]bool) []checks.Command {
 	var out []checks.Command
 	for _, c := range reg.All() {
 		if c.Hidden {
+			continue
+		}
+		if c.Privileged && !tools[c.MCPName] {
 			continue
 		}
 		if tools != nil && !tools[c.MCPName] {
@@ -121,6 +130,36 @@ func Advertised(reg *checks.Registry, tools map[string]bool) []checks.Command {
 		out = append(out, c)
 	}
 	return out
+}
+
+// EnablePrivileged adds one Privileged tool to a selection. It is
+// called only for an operator flag on `lookout mcp` (e.g.
+// --probe-from-image); no client-supplied selection reaches it. A nil
+// selection — the full default surface — is first expanded to that
+// surface, so enabling the tool adds it rather than replacing
+// everything else.
+func EnablePrivileged(reg *checks.Registry, tools map[string]bool, mcpName string) (map[string]bool, error) {
+	var found bool
+	for _, c := range reg.All() {
+		if c.MCPName == mcpName && c.Privileged && !c.Hidden {
+			found = true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("%q is not a registered privileged tool", mcpName)
+	}
+	out := map[string]bool{}
+	if tools == nil {
+		for _, c := range Advertised(reg, nil) {
+			out[c.MCPName] = true
+		}
+	} else {
+		for name := range tools {
+			out[name] = true
+		}
+	}
+	out[mcpName] = true
+	return out, nil
 }
 
 // handler adapts one command to an MCP tool handler: map the

@@ -132,7 +132,8 @@ helm template lookout-watch deploy/chart -n agent-triage
 They must match resource for resource and field for field, modulo the
 three provenance labels Helm stamps on everything it renders. The same
 diff holds `--set rbac.secrets=false` to `kustomize build
-deploy-no-secrets/`. So the
+deploy-no-secrets/`, and `--set rbac.probeFrom=true` to `kustomize
+build deploy-probe/`. So the
 manifest table above remains the one place to read about what a rule
 or a flag is for, and a chart that quietly keeps deploying last
 quarter's RBAC is a build failure rather than a discovery you make

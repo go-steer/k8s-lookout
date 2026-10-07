@@ -45,7 +45,7 @@ var SkillCommands = map[string][]string{
 	"k8s-triage": {"scan", "bundle", "triage list", "triage delta", "triage logs", "triage spec",
 		"triage events", "triage radius", "triage changes", "triage status",
 		"state edges", "state webhooks", "state volumes", "state storage", "state gateway", "state keda", "state wi",
-		"net probe"},
+		"net probe", "net probe-from"},
 	"cluster-health": {"scan", "health", "triage delta", "triage list", "state edges", "bundle",
 		"triage radius", "triage changes", "state webhooks", "stab drain",
 		"perf probe", "findings diff", "findings ack"},

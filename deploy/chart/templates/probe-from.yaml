@@ -1,0 +1,122 @@
+{{- if .Values.rbac.probeFrom }}
+# SOURCE OF TRUTH: deploy-probe/probe-from.yaml — held to it by
+# dev/tools/verify-helm-parity (helm template --set rbac.probeFrom=true
+# == kustomize build deploy-probe/).
+#
+# PRIVILEGED and off by default: the one write grant lookout can use,
+# for `lookout net probe-from` (issue #539,
+# docs/in-pod-probe-design.md). The ClusterRole alone would let the
+# ServiceAccount add ANY ephemeral container to any pod; the admission
+# policy narrows it to the one inert probe container. Kubernetes 1.30+
+# (ValidatingAdmissionPolicy v1).
+{{- $name := printf "%s-probe-from" (include "lookout.fullname" .) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["patch"]
+  # Read-only: `net probe-from` confirms the policy below (and a Deny
+  # binding for it) is installed and covers its own identity before it
+  # adds anything, and refuses with reason=PolicyMissing when not.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lookout.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+    k8s-lookout.go-steer.dev/guards: net-probe-from
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+  matchConditions:
+    # The ServiceAccount by name in any namespace, matching
+    # deploy-probe/ (where it must survive re-namespacing).
+    - name: lookout-identity
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:') && request.userInfo.username.endsWith(':{{ include "lookout.serviceAccountName" . }}')"
+    - name: adds-containers
+      expression: "has(object.spec.ephemeralContainers)"
+  variables:
+    - name: imagePrefix
+      expression: "'{{ .Values.image.repository }}@sha256:'"
+    - name: added
+      expression: >-
+        object.spec.ephemeralContainers.filter(c, !(has(oldObject.spec.ephemeralContainers)
+        && oldObject.spec.ephemeralContainers.exists(o, o.name == c.name)))
+  validations:
+    - expression: "variables.added.all(c, c.name.startsWith('lookout-probe-'))"
+      message: "lookout may only add ephemeral containers named lookout-probe-*"
+    - expression: >-
+        variables.added.all(c, has(c.image) && c.image.startsWith(variables.imagePrefix)
+        && c.image.substring(size(variables.imagePrefix)).matches('^[a-f0-9]{64}$'))
+      message: "the probe container must run the lookout image pinned by digest"
+    - expression: "variables.added.all(c, has(c.command) && c.command == ['/lookout', 'net', 'probe'])"
+      message: "the probe container must run exactly /lookout net probe"
+    - expression: >-
+        variables.added.all(c, has(c.args) && c.args.all(a,
+        a.matches('^--(format=json|timeout=[0-9a-z.]+|probe-timeout=[0-9a-z.]+|dns=[^ ]+|tcp=[^ ]+|http=[^ ]+)$')))
+      message: "the probe container may take only net probe's target, timeout and format flags"
+    - expression: >-
+        variables.added.all(c, (!has(c.targetContainerName) || c.targetContainerName == '')
+        && (!has(c.volumeMounts) || size(c.volumeMounts) == 0)
+        && (!has(c.volumeDevices) || size(c.volumeDevices) == 0)
+        && (!has(c.envFrom) || size(c.envFrom) == 0)
+        && (!has(c.stdin) || !c.stdin) && (!has(c.tty) || !c.tty))
+      message: "the probe container must not target another container, mount anything, or take stdin or a TTY"
+    - expression: >-
+        variables.added.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom)
+        && e.name in ['LOOKOUT_PROBE_REQUESTED_BY', 'LOOKOUT_PROBE_REQUESTED_AT', 'LOOKOUT_PROBE_CLIENT']))
+      message: "the probe container may carry only the three audit environment entries, as literal values"
+    - expression: >-
+        variables.added.all(c, has(c.securityContext)
+        && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot
+        && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation
+        && (!has(c.securityContext.privileged) || !c.securityContext.privileged)
+        && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop)
+        && 'ALL' in c.securityContext.capabilities.drop
+        && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+        && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault'
+        && !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions)
+        && !has(c.securityContext.appArmorProfile)
+        && (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default'))
+      message: "the probe container must run non-root with all capabilities dropped, no privilege escalation and the runtime-default seccomp profile"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+    k8s-lookout.go-steer.dev/guards: net-probe-from
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}

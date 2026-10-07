@@ -1,0 +1,63 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The cluster-wide bundle PLUS the one write grant lookout can use:
+# `patch pods/ephemeralcontainers`, for `lookout net probe-from`
+# (issue #539, docs/in-pod-probe-design.md). Use it INSTEAD of
+# deploy/, not on top of it:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-probe?ref=vX.Y.Z"
+#
+# This is a privileged, opt-in deployment. The default deploy/ grants
+# no write verb at all and stays that way.
+#
+# WARNING — Kubernetes 1.30+ ONLY. Applying this overlay with
+# `kubectl apply -k` to an older cluster is UNSUPPORTED: kubectl applies
+# each object on its own, so it creates the ClusterRole and binding,
+# fails only on the ValidatingAdmissionPolicy kinds the cluster does not
+# serve, and leaves an UNGUARDED write grant behind. `net probe-from`
+# refuses to run in that state (probe.refused reason=PolicyMissing),
+# but the grant itself still exists for anything else using the
+# ServiceAccount: delete it (`kubectl delete clusterrolebinding
+# lookout-watch-probe-from`). Helm checks every kind before creating
+# anything and fails cleanly instead.
+#
+# It is deploy/ plus probe-from.yaml:
+#   1. ClusterRole lookout-watch-probe-from: patch on
+#      pods/ephemeralcontainers, plus get/list on the admission policy
+#      kinds so the command can confirm item 3 is in place before it
+#      changes anything (get pods and get pods/log are already in
+#      deploy/12);
+#   2. a ClusterRoleBinding of it to the lookout-watch ServiceAccount;
+#   3. a ValidatingAdmissionPolicy + binding (Kubernetes 1.30+) that
+#      lets any ServiceAccount named lookout-watch — matched by name, not
+#      namespace, so re-namespacing this overlay cannot unhook it (CI
+#      checks this) — add ONLY the lookout probe container:
+#      the official image by digest, `/lookout net probe` with probe
+#      flags only, nothing mounted, no process sharing, a restricted
+#      security context. Without the policy, patch on
+#      pods/ephemeralcontainers is about as strong as pods/exec.
+#
+# To allow probing in some namespaces only, delete the
+# ClusterRoleBinding and bind the same ClusterRole with a RoleBinding
+# in each namespace you want probeable.
+#
+# A mirror registry needs the image prefix in probe-from.yaml's policy
+# edited to match. Helm: rbac.probeFrom=true renders the same objects,
+# and dev/tools/verify-helm-parity diffs the two.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy
+  - probe-from.yaml

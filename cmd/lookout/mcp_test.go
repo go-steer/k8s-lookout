@@ -42,11 +42,12 @@ var commonProperties = []string{
 // named by its MCPName, with a resolvable object schema carrying the
 // common flags, the command's own flags, and target iff positional.
 // Commands merged later are covered automatically — they register,
-// so they are asserted.
+// so they are asserted. Privileged commands are the one exception:
+// they are never on the default surface (TestMCPProbeFrom*).
 func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 	visible := map[string]checks.Command{}
 	for _, c := range checks.All() {
-		if !c.Hidden {
+		if !c.Hidden && !c.Privileged {
 			visible[c.MCPName] = c
 		}
 	}
