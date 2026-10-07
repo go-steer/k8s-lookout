@@ -37,10 +37,12 @@ import (
 // watches Gateway API objects, so an empty watch would be a coverage lie,
 // whereas here inference is the product and a policy is an override.
 //
-// **Only the fields listed below are honoured.** §10.1 also sketches
-// `thresholds`, `baseline` and `exclusions`, which belong to the findings and
-// baseline phases and do nothing yet. They are deliberately absent from the
-// shipped CRD schema rather than accepted and ignored — a structural schema
+// **Only the fields listed below are honoured.** Of §10.1's per-key
+// `thresholds` block, only `severity` ships (2026-10-07): it sets the routing
+// level of the axis's findings, replacing the tier's. The rest of that block,
+// and `baseline` and `exclusions`, do nothing yet. They are deliberately
+// absent from the shipped CRD schema rather than accepted and ignored — a
+// structural schema
 // prunes what it does not declare, so an operator who writes `thresholds:`
 // today sees it vanish from `kubectl get -o yaml` instead of believing a
 // threshold is in force that nothing reads. Adding them later is an additive
@@ -106,6 +108,11 @@ type PolicyKey struct {
 	// ExpectedDistribution is relative weights per domain, nil when the
 	// operator left it to the weighting mode.
 	ExpectedDistribution map[leeway.Domain]float64
+
+	// Severity is `thresholds.severity`: the routing level for every leeway
+	// finding on this subject-axis, whatever its tier or kind. Empty means
+	// the tier decides (§8.1), which is the default.
+	Severity string
 }
 
 // InferenceConfig is spec.inference.
@@ -164,7 +171,16 @@ type policyTopologyKey struct {
 	// a float without the API machinery complaining, and because §10.1's
 	// worked example is three whole numbers. They are weights, not percentages
 	// — nothing requires them to sum to 100.
-	ExpectedDistribution map[string]int64 `json:"expectedDistribution"`
+	ExpectedDistribution map[string]int64  `json:"expectedDistribution"`
+	Thresholds           *policyThresholds `json:"thresholds"`
+}
+
+// policyThresholds is §10.1's per-key `thresholds` block. Only `severity` is
+// declared and decoded; the design's drift, maxDomainShare, for and
+// resolveAfter remain absent from the schema until code honours them, for the
+// reason the package comment gives.
+type policyThresholds struct {
+	Severity string `json:"severity"`
 }
 
 type policyInference struct {
@@ -310,6 +326,18 @@ func decodePolicyKey(in *policyTopologyKey) (PolicyKey, error) {
 	if out.Mode == leeway.ModeIgnore && out.ExpectedDistribution != nil {
 		return out, fmt.Errorf("expectedDistribution set on an Ignore key")
 	}
+	if th := in.Thresholds; th != nil && th.Severity != "" {
+		if !leeway.ValidSeverity(th.Severity) {
+			return out, fmt.Errorf("thresholds.severity: unknown severity %q (want one of %v)", th.Severity, leeway.Severities())
+		}
+		// An Ignore key never breaches, so a severity on it would be a level
+		// for findings that cannot exist — the same accepted-and-ignored shape
+		// expectedDistribution is refused for just above.
+		if out.Mode == leeway.ModeIgnore {
+			return out, fmt.Errorf("thresholds.severity set on an Ignore key")
+		}
+		out.Severity = th.Severity
+	}
 	return out, nil
 }
 
@@ -371,6 +399,7 @@ func (p *Policy) Intents() []leeway.Intent {
 			Confidence:     leeway.ConfidenceDeclared,
 			Weighting:      pk.Weighting,
 			ExplicitShares: pk.ExpectedDistribution,
+			Severity:       pk.Severity,
 		}
 		// No MaxSkew, and therefore no hard contract of its own. A policy is
 		// the operator's description of where objects belong, not a promise
@@ -379,9 +408,13 @@ func (p *Policy) Intents() []leeway.Intent {
 		// being outranked, though — leeway.ResolveIntents carries it onto the
 		// winner, because the scheduler's guarantee is a fact about what
 		// happened rather than an opinion a policy can overrule.
+		detail := p.ref() + " declares " + pk.Mode.String() + " on " + string(pk.Key)
+		if pk.Severity != "" {
+			detail += " with severity " + pk.Severity
+		}
 		in.Evidence = []leeway.EvidenceItem{{
 			Source: leeway.SourcePolicyCRD,
-			Detail: p.ref() + " declares " + pk.Mode.String() + " on " + string(pk.Key),
+			Detail: detail,
 		}}
 		out = append(out, in)
 	}

@@ -55,6 +55,31 @@ curl -s localhost:9090/metrics | grep -E 'lookout_leeway_(drift|alert_state)'
 kubectl -n leeway-drift get pods -o wide
 ```
 
+To give `spread-soft` a session without promoting every
+`placement_drift` in the cluster, install the optional policy CRD,
+restart the watcher so it discovers the CRD, and promote just that
+workload before you run `inject`:
+
+```sh
+kubectl apply -f deploy/crds/leewaypolicies.yaml
+kubectl -n agent-triage rollout restart deploy/lookout-watch
+kubectl apply -f - <<'EOF'
+apiVersion: leeway.lookout.go-steer.io/v1alpha1
+kind: LeewayPolicy
+metadata: { name: spread-soft-pages, namespace: leeway-drift }
+spec:
+  selector: { matchLabels: { app.kubernetes.io/name: spread-soft } }
+  topologyKeys:
+    - key: lookout-examples/zone
+      mode: Spread
+      thresholds: { severity: critical }
+EOF
+```
+
+The finding is still Tier B, now at `critical`, and its message ends
+`severity critical set by policy`. `verify` does not expect this, so
+delete the policy before you run the scenario unattended.
+
 Agent-harness prompt to try:
 > leeway says spread-hard broke its spread contract. Show me where its
 > replicas are, why the scheduler put them there, and what it would

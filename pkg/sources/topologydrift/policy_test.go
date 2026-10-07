@@ -46,8 +46,9 @@ func decode(t *testing.T, doc string, clusterScoped bool) *Policy {
 	return p
 }
 
-// §10.1's worked example, minus the thresholds, baseline and exclusions blocks
-// that belong to later phases and are deliberately not in the shipped schema.
+// §10.1's worked example, minus the baseline and exclusions blocks and every
+// threshold but severity, which belong to later phases and are deliberately
+// not in the shipped schema.
 const fullPolicy = `
 apiVersion: leeway.lookout.go-steer.io/v1alpha1
 kind: LeewayPolicy
@@ -66,6 +67,8 @@ spec:
         us-east-1a: 40
         us-east-1b: 40
         us-east-1c: 20
+      thresholds:
+        severity: warning
   inference:
     enabled: true
     sources: [TopologySpreadConstraint, PodAntiAffinityRequired]
@@ -105,6 +108,9 @@ func TestDecodePolicy_FullDocument(t *testing.T) {
 		if key.ExpectedDistribution[d] != w {
 			t.Errorf("ExpectedDistribution[%s] = %v, want %v", d, key.ExpectedDistribution[d], w)
 		}
+	}
+	if key.Severity != "warning" {
+		t.Errorf("Severity = %q, want warning", key.Severity)
 	}
 
 	if !p.Inference.Enabled {
@@ -340,6 +346,42 @@ spec:
 			want:          "Ignore key",
 		},
 		{
+			name: "unknown severity",
+			doc: `
+metadata: { name: x }
+spec:
+  topologyKeys:
+    - key: zone
+      thresholds: { severity: high }`,
+			clusterScoped: true,
+			want:          "unknown severity",
+		},
+		{
+			// Case matters: §7.7's levels are lower-case on the wire, and a
+			// silent fold would accept a spelling the CRD's enum rejects.
+			name: "capitalised severity",
+			doc: `
+metadata: { name: x }
+spec:
+  topologyKeys:
+    - key: zone
+      thresholds: { severity: Critical }`,
+			clusterScoped: true,
+			want:          "unknown severity",
+		},
+		{
+			name: "severity on an Ignore key",
+			doc: `
+metadata: { name: x }
+spec:
+  topologyKeys:
+    - key: zone
+      mode: Ignore
+      thresholds: { severity: critical }`,
+			clusterScoped: true,
+			want:          "thresholds.severity set on an Ignore key",
+		},
+		{
 			name: "empty subject kind",
 			doc: `
 metadata: { name: x }
@@ -492,5 +534,39 @@ spec:
 `, true)
 	if got := p.Intents(); len(got) != 0 {
 		t.Errorf("Intents() = %v, want none", got)
+	}
+}
+
+func TestPolicy_SeverityDecodesPerKeyOntoTheIntent(t *testing.T) {
+	p := decode(t, `
+metadata: { name: x }
+spec:
+  topologyKeys:
+    - key: zone
+      thresholds: { severity: critical }
+    - key: region
+    - key: rack
+      thresholds: {}
+`, true)
+	if got := p.Keys["zone"].Severity; got != "critical" {
+		t.Errorf("zone severity = %q, want critical", got)
+	}
+	// Per key: an axis the operator did not give a severity keeps the tier's.
+	for _, k := range []leeway.TopologyKey{"region", "rack"} {
+		if got := p.Keys[k].Severity; got != "" {
+			t.Errorf("%s severity = %q, want none", k, got)
+		}
+	}
+	for _, in := range p.Intents() {
+		want := ""
+		if in.TopologyKey == "zone" {
+			want = "critical"
+		}
+		if in.Severity != want {
+			t.Errorf("%s intent severity = %q, want %q", in.TopologyKey, in.Severity, want)
+		}
+		if in.TopologyKey == "zone" && !strings.Contains(in.Evidence[0].Detail, "with severity critical") {
+			t.Errorf("zone evidence %q does not say the policy set a severity", in.Evidence[0].Detail)
+		}
 	}
 }

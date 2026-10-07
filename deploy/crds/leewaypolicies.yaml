@@ -30,9 +30,10 @@
 # to subjects in its own namespace and takes precedence over a
 # ClusterLeewayPolicy that also matches.
 #
-# The schema below is only what the current release honours. The design also
-# sketches `thresholds`, `baseline` and `exclusions`, which belong to later
-# phases; they are absent rather than accepted-and-ignored, so that writing one
+# The schema below is only what the current release honours. Of the design's
+# per-key `thresholds` block only `severity` ships; the rest of it, and
+# `baseline` and `exclusions`, belong to later phases. They are absent rather
+# than accepted-and-ignored, so that writing one
 # today fails visibly (a structural schema prunes what it does not declare)
 # instead of leaving you believing a threshold is in force that nothing reads.
 ---
@@ -147,6 +148,27 @@ spec:
                         additionalProperties:
                           type: integer
                           minimum: 0
+                      thresholds:
+                        description: >-
+                          Per-axis overrides. Only severity is honoured today;
+                          the design's other thresholds are not in the schema,
+                          so writing one is pruned rather than silently
+                          ignored.
+                        type: object
+                        properties:
+                          severity:
+                            description: >-
+                              Routing level for every leeway finding on this
+                              axis for the subjects this policy governs,
+                              replacing the level the tier implies (A critical,
+                              B warning, C info). Promotes or demotes: critical
+                              opens an incident session, warning goes to the
+                              watchboard digest, info is stored only. Omit to
+                              let the tier decide. A lookout watch --severity
+                              override for the same kind still wins. Cannot be
+                              combined with mode Ignore.
+                            type: string
+                            enum: [info, warning, critical]
                   x-kubernetes-list-map-keys: [key]
                   x-kubernetes-list-type: map
                 inference:
@@ -290,6 +312,27 @@ spec:
                         additionalProperties:
                           type: integer
                           minimum: 0
+                      thresholds:
+                        description: >-
+                          Per-axis overrides. Only severity is honoured today;
+                          the design's other thresholds are not in the schema,
+                          so writing one is pruned rather than silently
+                          ignored.
+                        type: object
+                        properties:
+                          severity:
+                            description: >-
+                              Routing level for every leeway finding on this
+                              axis for the subjects this policy governs,
+                              replacing the level the tier implies (A critical,
+                              B warning, C info). Promotes or demotes: critical
+                              opens an incident session, warning goes to the
+                              watchboard digest, info is stored only. Omit to
+                              let the tier decide. A lookout watch --severity
+                              override for the same kind still wins. Cannot be
+                              combined with mode Ignore.
+                            type: string
+                            enum: [info, warning, critical]
                   x-kubernetes-list-map-keys: [key]
                   x-kubernetes-list-type: map
                 inference:

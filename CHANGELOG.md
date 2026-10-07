@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A LeewayPolicy can now set the severity of its subjects' leeway
+  findings (#543).** Before this, the only way to page on one
+  workload's Tier B `leeway.placement_drift` was
+  `lookout watch --severity leeway.placement_drift=critical`, which
+  is per kind and applies to the whole cluster. The new field is
+  `thresholds.severity` on a `topologyKeys[]` entry, as the leeway
+  design (§10.1) specified. It takes `info`, `warning` or
+  `critical`, and replaces the level the tier implies for every
+  finding on that axis, so it can promote or demote. Setting
+  `critical` on a Tier B finding opens an incident session for that
+  policy's workloads only. The tier on the finding stays the same,
+  the payload gains `severityFromPolicy: true`, and the message ends
+  `severity critical set by policy`. A `--severity` override for the
+  same kind still wins, so the sentinel operator can cap what a
+  namespaced policy asks for. A policy severity also counts as the
+  Tier C opt-in for the subjects it covers. Transient-state
+  suppression still silences the finding. Invalid values, and a
+  severity on a `mode: Ignore` key, are rejected by the CRD enum and
+  by the decoder. The change is additive to the optional CRD
+  (`deploy/crds/leewaypolicies.yaml` and the chart copy): re-apply it
+  to use the field. The fingerprint and signal schema v1 are
+  unchanged.
+
 ## [0.31.0] - 2026-10-07
 
 **This release makes lookout useful under a read-only `view` role, sees

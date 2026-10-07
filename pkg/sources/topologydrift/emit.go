@@ -194,6 +194,11 @@ func findingMessage(f leeway.Finding) string {
 			b.WriteString(" with thresholds relaxed")
 		}
 	}
+	if f.SeverityFromPolicy {
+		// The tier is in the headline and the severity in its own field, so a
+		// Tier B at critical needs one clause saying who chose the level.
+		fmt.Fprintf(&b, "; severity %s set by policy", f.Severity)
+	}
 	return b.String()
 }
 
