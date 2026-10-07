@@ -88,11 +88,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/go-steer/k8s-lookout/pkg/certmanager"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
@@ -128,8 +128,8 @@ func reasonOf(kind string) string { return strings.TrimPrefix(kind, kindPrefix) 
 // certManagerGV/certManagerGVR locate the discovery-gated Certificate
 // CRs.
 var (
-	certManagerGV  = schema.GroupVersion{Group: "cert-manager.io", Version: "v1"}
-	certManagerGVR = certManagerGV.WithResource("certificates")
+	certManagerGV  = certmanager.GV
+	certManagerGVR = certmanager.CertificateGVR
 )
 
 // Config are the source's thresholds.
@@ -171,7 +171,7 @@ func DefaultConfig() Config {
 		Interval:   time.Hour,
 		WarnWindow: 336 * time.Hour,
 		PageSize:   200,
-		ACMEGrace:  15 * time.Minute,
+		ACMEGrace:  certmanager.DefaultFirstIssuanceGrace,
 		ACMETick:   30 * time.Second,
 	}
 }
@@ -247,17 +247,14 @@ type finding struct {
 	// state).
 	renewalFailed bool
 
-	// The never-issued facts (cert-manager only). neverIssued: no
-	// status.notAfter, so notAfter is zero and there is no countdown.
+	// cert is the cert-manager Certificate's issuance facts
+	// (cert-manager only; nil for every other target) — the
+	// never-issued and first-issuance-grace judgement shared with
+	// `lookout health` (pkg/certmanager).
+	cert *certmanager.Status
+	// neverIssued: no status.notAfter, so notAfter is zero and there
+	// is no countdown (cert.NeverIssued, kept flat for the judge).
 	neverIssued bool
-	// firstIssuing: never issued, no failure recorded, and Ready=False
-	// with an in-progress reason — judged only past the first-issuance
-	// grace, timed from created.
-	firstIssuing bool
-	created      time.Time
-	// readyDetail is the Ready condition's "reason message", the
-	// never-issued message's evidence.
-	readyDetail string
 	// stalled: an ACME stall names this Certificate — its first
 	// issuance demonstrably failed, so the grace does not apply.
 	stalled bool
@@ -561,12 +558,12 @@ func (s *Source) judgeWith(findings []finding, now time.Time, full bool) {
 // creationTimestamp): every new Certificate reads Ready=False /
 // DoesNotExist until its first issuance completes — seconds for a CA
 // issuer, minutes for ACME — and that is issuance, not a failure. A
-// recorded failure (firstIssuing is false then) or an ACME stall
+// recorded failure (FirstIssuing is false then) or an ACME stall
 // naming the Certificate ends the grace early. An unknown
 // creationTimestamp (zero) is never inside it: what cannot be timed
 // is not suppressed.
 func (s *Source) inFirstIssuanceGrace(f finding, now time.Time) bool {
-	return f.firstIssuing && !f.stalled && !f.created.IsZero() && now.Sub(f.created) < s.cfg.ACMEGrace
+	return f.cert != nil && f.cert.InFirstIssuanceGrace(now, s.cfg.ACMEGrace, f.stalled)
 }
 
 // levelOf computes a finding's threshold level (the §7.2 countdown
@@ -592,8 +589,8 @@ func (s *Source) levelOf(f finding, now time.Time) level {
 func (s *Source) signal(f finding, lvl level, now time.Time) engine.Signal {
 	var b strings.Builder
 	var forecast *engine.Forecast
-	if f.neverIssued {
-		fmt.Fprintf(&b, "certificate never issued: %s", orDefault(f.readyDetail, "no status.notAfter"))
+	if f.neverIssued && f.cert != nil {
+		b.WriteString(f.cert.NeverIssuedMessage())
 	} else {
 		forecast = &engine.Forecast{ETA: f.notAfter, ConfidenceBasis: ConfidenceBasis}
 		countdown(&b, f, now)
@@ -865,65 +862,39 @@ func (s *Source) listCertificates(ctx context.Context, ns string) ([]finding, ma
 	}
 }
 
-// certificateFinding extracts one Certificate CR's countdown facts.
-// ok=false when the CR has no usable notAfter yet and has not failed
-// (never issued and Ready not False — nothing to count down from or
-// report). A never-issued Certificate that reads Ready=False is a
-// finding with neverIssued set and a zero notAfter; whether it is
-// judged yet is the first-issuance grace's call (inFirstIssuanceGrace).
+// certificateFinding extracts one Certificate CR's countdown facts
+// through the shared judgement (pkg/certmanager, which `lookout
+// health` reads too). ok=false when the CR has no usable notAfter yet
+// and has not failed (never issued and Ready not False — nothing to
+// count down from or report). A never-issued Certificate that reads
+// Ready=False is a finding with neverIssued set and a zero notAfter;
+// whether it is judged yet is the first-issuance grace's call
+// (inFirstIssuanceGrace).
 func certificateFinding(u *unstructured.Unstructured) (f finding, secretName string, ok bool) {
+	st := certmanager.Read(u)
 	f = finding{
-		kind:      "Certificate",
-		namespace: u.GetNamespace(),
-		name:      u.GetName(),
-		uid:       string(u.GetUID()),
-		created:   u.GetCreationTimestamp().Time,
+		kind:          "Certificate",
+		namespace:     st.Namespace,
+		name:          st.Name,
+		uid:           st.UID,
+		notAfter:      st.NotAfter,
+		renewalFailed: st.RenewalFailed,
+		neverIssued:   st.NeverIssued,
+		cert:          &st,
 	}
-	secretName, _, _ = unstructured.NestedString(u.Object, "spec", "secretName")
-
-	notAfterStr, _, _ := unstructured.NestedString(u.Object, "status", "notAfter")
-	if t, err := time.Parse(time.RFC3339, notAfterStr); err == nil {
-		f.notAfter = t
-	}
-
-	ready, readyReason := "", ""
-	issuingFailed := false
-	if conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
-		for _, c := range conds {
-			m, isMap := c.(map[string]any)
-			if !isMap {
-				continue
-			}
-			status, _ := m["status"].(string)
-			reason, _ := m["reason"].(string)
-			switch t, _ := m["type"].(string); t {
-			case "Ready":
-				ready, readyReason = status, reason
-				msg, _ := m["message"].(string)
-				f.readyDetail = strings.TrimSpace(reason + " " + msg)
-			case "Issuing":
-				issuingFailed = status == "False" && reason == "Failed"
-			}
-		}
-	}
-	readyDetail := f.readyDetail
-	lastFailure, _, _ := unstructured.NestedString(u.Object, "status", "lastFailureTime")
-	f.renewalFailed = lastFailure != "" || ready == "False"
-	f.neverIssued = f.notAfter.IsZero()
-	f.firstIssuing = f.neverIssued && lastFailure == "" && !issuingFailed &&
-		ready == "False" && firstIssuanceReasons[readyReason]
+	secretName = st.SecretName
 
 	f.detail = "source=cert-manager renewal="
 	switch {
-	case f.renewalFailed:
+	case st.RenewalFailed:
 		f.detail += "FAILED"
-		if lastFailure != "" {
-			f.detail += " last_failure=" + lastFailure
+		if st.LastFailure != "" {
+			f.detail += " last_failure=" + st.LastFailure
 		}
-		if readyDetail != "" {
-			f.detail += " ready_condition=" + strings.ReplaceAll(readyDetail, " ", "_")
+		if st.ReadyDetail != "" {
+			f.detail += " ready_condition=" + strings.ReplaceAll(st.ReadyDetail, " ", "_")
 		}
-	case ready == "True":
+	case st.Ready == "True":
 		f.detail += "ok"
 	default:
 		f.detail += "unknown"
@@ -931,20 +902,7 @@ func certificateFinding(u *unstructured.Unstructured) (f finding, secretName str
 	if secretName != "" {
 		f.detail += " secret=" + secretName
 	}
-
-	if f.neverIssued && !f.renewalFailed {
-		return f, secretName, false
-	}
-	return f, secretName, true
-}
-
-// firstIssuanceReasons are the Ready=False reasons cert-manager sets on
-// a Certificate whose first issuance is still in progress — the only
-// ones the first-issuance grace covers. Any other reason on a
-// never-issued Certificate is judged at once.
-var firstIssuanceReasons = map[string]bool{
-	"DoesNotExist": true,
-	"Issuing":      true,
+	return f, secretName, st.Reportable()
 }
 
 // ---- Cert / token parsing (no secret byte survives these) ----

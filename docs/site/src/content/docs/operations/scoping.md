@@ -205,7 +205,7 @@ In order, the line gives:
 
 | Command | Under `view` |
 | --- | --- |
-| `health` | `nodes`, `certs` and `webhooks` answer `status=unavailable`, with the refusal line as the message. `services` still scores and adds `unverified=` naming the Ingress class and TLS secret references it could not check, each with its refusal line. The other categories score as usual. `control-plane` needs a cloud provider either way. |
+| `health` | `nodes`, `certs` and `webhooks` answer `status=unavailable`, with the refusal line as the message. On a cluster running cert-manager, whose own aggregated roles extend `view` to Certificates, `certs` instead scores from the Certificates and adds `unverified=` naming the TLS Secrets no Certificate manages, with its refusal line. `services` still scores and adds `unverified=` naming the Ingress class and TLS secret references it could not check, each with its refusal line. The other categories score as usual. `control-plane` needs a cloud provider either way. |
 | `triage delta` | Whole cluster: one `read.unavailable` for `nodes` (`node.*` findings not checked). Every other class answers as usual. With `--namespace` the node class is off anyway. |
 | `triage top` | Without `metrics.k8s.io`: one `read.unavailable` for `pods.metrics.k8s.io` and no rows. With it (metrics-server's aggregated role): under `-A`, one `read.unavailable` for `nodes` and the node view drops out. The container rows still answer. `--workload` resolves its pods from the owner tree only. |
 | `triage spec` | A Node or Secret target: one `read.unavailable` for the refused `get`. |

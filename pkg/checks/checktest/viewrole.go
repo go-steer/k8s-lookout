@@ -39,6 +39,17 @@ import (
 // against `view` without anyone updating a deny list (#546).
 var ViewRoleReads = checks.ViewRoleReads
 
+// fakeDiscovery are the synthetic resources client-go's fake discovery
+// client records its calls under (a "get" of "resource" per
+// group-version, of "group" for the group list). Discovery is not a
+// `view` grant — the system:discovery role gives it to every
+// authenticated subject — so a discovery-gated read under `view` must
+// see the real served/not-served answer, not a 403.
+var fakeDiscovery = map[schema.GroupResource]bool{
+	{Resource: "resource"}: true,
+	{Resource: "group"}:    true,
+}
+
 // ViewRole makes cs behave as a credential bound to exactly the
 // built-in `view` ClusterRole: every get/list/watch of a resource
 // outside ViewRoleReads answers 403 the way the API server does. It
@@ -63,7 +74,7 @@ func ViewRoleFake(f *k8stesting.Fake) (refused func() []schema.GroupResource) {
 			return false, nil, nil
 		}
 		gr := action.GetResource().GroupResource()
-		if ViewRoleReads[gr] {
+		if ViewRoleReads[gr] || fakeDiscovery[gr] {
 			return false, nil, nil
 		}
 		mu.Lock()

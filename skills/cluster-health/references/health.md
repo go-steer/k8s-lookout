@@ -2,7 +2,7 @@
 
 # lookout health
 
-"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
+"Any issues with this cluster?" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. certs also reads cert-manager Certificates where the CRD is served — never issued past a 15m first-issuance grace, renewal failed, or expiring from status.notAfter — and judges the TLS Secret a Certificate writes as that Certificate, not twice. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.
 
 MCP tool: `k8s_cluster_health`
 
@@ -15,7 +15,7 @@ MCP tool: `k8s_cluster_health`
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--top` | 3 | how many findings to name inline on a degraded category's scorecard line |
-| `--cert-warn` | 720h | report TLS certificates expiring within this window (certs category) |
+| `--cert-warn` | 720h | report TLS certificates (TLS Secrets and cert-manager Certificates) expiring within this window (certs category) |
 | `--store` | — | path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override |
 | `--store-cluster` | — | read/write the store for THIS cluster, treating --store as the multi-cluster stem the sentinel was given: --store=/var/lib/lookout/lookout.db --store-cluster=prod-us opens /var/lib/lookout/lookout-prod-us.db (issue #410). Set it only against a sentinel running --clusters/--clusters-from; a single-cluster sentinel writes the literal --store path |
 
@@ -42,9 +42,11 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `health.category` | critical, warning, info | one scorecard line: how this category answered — healthy, degraded, or unavailable. The scorecard always answers, so healthy is explicit rather than silent; the line carries the worst severity found inside the category |
 | `pvc.pending` | warning | a PersistentVolumeClaim is not bound; pods mounting it cannot start |
 | `pvc.lost` | critical | a PersistentVolumeClaim's bound volume is lost |
-| `cert.expired` | critical | a TLS secret's certificate has expired |
-| `cert.expiring` | warning | a TLS secret's certificate expires within --cert-warn |
+| `cert.expired` | critical | a TLS secret's certificate, or a cert-manager Certificate's status.notAfter, has expired |
+| `cert.expiring` | warning | a TLS secret's certificate, or a cert-manager Certificate's status.notAfter, expires within --cert-warn |
 | `cert.invalid` | warning | a TLS secret's tls.crt does not contain a parseable X.509 certificate |
+| `cert.never_issued` | critical | a cert-manager Certificate has never been issued (Ready=False, no status.notAfter) past the 15m first-issuance grace, or its first issuance recorded a failure — whatever mounts its Secret has nothing to serve |
+| `cert.renewal_failed` | warning | a cert-manager Certificate's last renewal failed (Ready=False or status.lastFailureTime) while its current certificate is still valid |
 | `pod.crashloop` | critical | a container is crash looping |
 | `pod.imagepull` | critical | a container cannot pull its image |
 | `pod.waiting` | warning | a container is stuck in an error waiting state (CreateContainerConfigError, InvalidImageName, …) |
@@ -92,7 +94,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `top` | worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top |
 | `unverified` | on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message |
 | `subject` | TLS certificate subject (CN when set); never key material |
-| `not_after` | TLS certificate NotAfter, RFC 3339 |
+| `not_after` | TLS certificate NotAfter (a cert-manager Certificate's status.notAfter), RFC 3339 |
+| `secret` | on a cert-manager Certificate finding: the TLS Secret it writes (spec.secretName), which is not judged again as a Secret |
 | `days_left` | whole days until NotAfter (negative = expired) |
 | `phase` | PersistentVolumeClaim phase on storage findings (Pending or Lost) |
 | `webhook` | admission webhook as <configuration>/<webhook name> |

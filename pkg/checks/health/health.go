@@ -52,6 +52,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -84,6 +85,18 @@ type Deps struct {
 	Provider func(ctx context.Context) (cloud.Provider, error)
 	// Now is the scan clock. Nil means time.Now.
 	Now func() time.Time
+	// Dynamic builds the dynamic client the certs category reads
+	// cert-manager Certificates through. Nil means
+	// kube.BuildDynamicClient. It is only called once discovery says
+	// the Certificate CRD is served.
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
+}
+
+func (d Deps) dynamic(ctx context.Context) (dynamic.Interface, error) {
+	if d.Dynamic != nil {
+		return d.Dynamic(ctx)
+	}
+	return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
@@ -143,12 +156,12 @@ func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "health",
 		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
+		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. certs also reads cert-manager Certificates where the CRD is served — never issued past a 15m first-issuance grace, renewal failed, or expiring from status.notAfter — and judges the TLS Secret a Certificate writes as that Certificate, not twice. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
-				Help: "report TLS certificates expiring within this window (certs category)"},
+				Help: "report TLS certificates (TLS Secrets and cert-manager Certificates) expiring within this window (certs category)"},
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to a sentinel's SQLite store (its --store file); merges open §9.4 triage-status records so findings carry triage_* fields and severity reflects the agent's override"},
 			emit.StoreClusterFlag(),
@@ -157,9 +170,11 @@ func New(deps Deps) checks.Command {
 			checks.Kind("health.category", "one scorecard line: how this category answered — healthy, degraded, or unavailable. The scorecard always answers, so healthy is explicit rather than silent; the line carries the worst severity found inside the category", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind("pvc.pending", "a PersistentVolumeClaim is not bound; pods mounting it cannot start", emit.SeverityWarning),
 			checks.Kind("pvc.lost", "a PersistentVolumeClaim's bound volume is lost", emit.SeverityCritical),
-			checks.Kind("cert.expired", "a TLS secret's certificate has expired", emit.SeverityCritical),
-			checks.Kind("cert.expiring", "a TLS secret's certificate expires within --cert-warn", emit.SeverityWarning),
+			checks.Kind("cert.expired", "a TLS secret's certificate, or a cert-manager Certificate's status.notAfter, has expired", emit.SeverityCritical),
+			checks.Kind("cert.expiring", "a TLS secret's certificate, or a cert-manager Certificate's status.notAfter, expires within --cert-warn", emit.SeverityWarning),
 			checks.Kind("cert.invalid", "a TLS secret's tls.crt does not contain a parseable X.509 certificate", emit.SeverityWarning),
+			checks.Kind("cert.never_issued", "a cert-manager Certificate has never been issued (Ready=False, no status.notAfter) past the 15m first-issuance grace, or its first issuance recorded a failure — whatever mounts its Secret has nothing to serve", emit.SeverityCritical),
+			checks.Kind("cert.renewal_failed", "a cert-manager Certificate's last renewal failed (Ready=False or status.lastFailureTime) while its current certificate is still valid", emit.SeverityWarning),
 		}, delegatedKinds()...),
 		Output: append([]checks.OutputField{
 			{Name: "category", Doc: "scorecard category the finding belongs to (on health.category: which category this line scores)"},
@@ -168,7 +183,8 @@ func New(deps Deps) checks.Command {
 			{Name: "top", Doc: "worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top"},
 			{Name: "unverified", Doc: "on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message"},
 			{Name: "subject", Doc: "TLS certificate subject (CN when set); never key material"},
-			{Name: "not_after", Doc: "TLS certificate NotAfter, RFC 3339"},
+			{Name: "not_after", Doc: "TLS certificate NotAfter (a cert-manager Certificate's status.notAfter), RFC 3339"},
+			{Name: "secret", Doc: "on a cert-manager Certificate finding: the TLS Secret it writes (spec.secretName), which is not judged again as a Secret"},
 			{Name: "days_left", Doc: "whole days until NotAfter (negative = expired)"},
 			{Name: "phase", Doc: "PersistentVolumeClaim phase on storage findings (Pending or Lost)"},
 			{Name: "webhook", Doc: "admission webhook as <configuration>/<webhook name>"},
@@ -213,7 +229,7 @@ var perfFields = map[string]bool{
 func delegatedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"category": true, "status": true, "total": true, "top": true,
-		"unverified": true, "subject": true, "not_after": true, "days_left": true,
+		"unverified": true, "subject": true, "not_after": true, "days_left": true, "secret": true,
 		"phase": true, "webhook": true, "service": true,
 		"backend": true, "gates": true, "rules": true,
 		"object_selector": true, "timeout": true,
@@ -265,6 +281,7 @@ func delegatedKinds() []checks.KindField {
 		"health.category": true,
 		"pvc.pending":     true, "pvc.lost": true,
 		"cert.expired": true, "cert.expiring": true, "cert.invalid": true,
+		"cert.never_issued": true, "cert.renewal_failed": true,
 	}
 	var out []checks.KindField
 	for _, name := range []string{"triage delta", "state webhooks", "perf probe"} {
@@ -395,15 +412,15 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		scanned += n
 	}
 
-	// certs: every kubernetes.io/tls Secret in scope.
-	n, err = checkCerts(ctx, client, ns, now, certWarn, card)
+	// certs: cert-manager Certificates when the CRD is served
+	// (certificates.go), then every kubernetes.io/tls Secret in scope
+	// that no Certificate owns. Without the CRD this is the TLS-Secret
+	// check alone, unchanged.
+	n, err = scoreCerts(ctx, deps, client, ns, now, certWarn, card, refused)
 	if err != nil {
-		if err := refused("certs", "certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret", err); err != nil {
-			return 0, err
-		}
-	} else {
-		scanned += n
+		return 0, err
 	}
+	scanned += n
 
 	// webhooks: delegated to `state webhooks`' exported core — the
 	// full audit (dead backends × failurePolicy, blast-radius scope,
@@ -788,7 +805,12 @@ func checkStorage(ctx context.Context, client kubernetes.Interface, ns string, n
 // checkCerts parses tls.crt of every kubernetes.io/tls Secret in
 // scope — expiry and parseability only; no key material is read and
 // none can reach a finding. Only TLS-type secrets count as scanned.
-func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, warn time.Duration, card *scorecard) (int, error) {
+// A Secret in managed ("ns/name") is a cert-manager Certificate's and
+// was judged as that Certificate: it is skipped, not judged twice.
+// Findings are returned rather than scored, so a List refused midway
+// leaves nothing partial behind.
+func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, warn time.Duration, managed map[string]bool) ([]emit.Finding, int, error) {
+	var out []emit.Finding
 	count := 0
 	now = now.UTC()
 	err := listPages("secrets", func(o metav1.ListOptions) ([]corev1.Secret, string, error) {
@@ -798,7 +820,7 @@ func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now
 		}
 		return l.Items, l.Continue, nil
 	}, func(s *corev1.Secret) {
-		if s.Type != corev1.SecretTypeTLS {
+		if s.Type != corev1.SecretTypeTLS || managed[s.Namespace+"/"+s.Name] {
 			return
 		}
 		count++
@@ -818,7 +840,7 @@ func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now
 			f.Severity = emit.SeverityWarning
 			f.Reason = "InvalidCertificate"
 			f.Message = "tls.crt does not contain a parseable X.509 certificate"
-			card.add("certs", f)
+			out = append(out, f)
 			return
 		}
 		subject := cert.Subject.CommonName
@@ -839,7 +861,7 @@ func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now
 			f.Reason = "CertificateExpired"
 			f.Message = fmt.Sprintf("certificate expired %dd ago", -days)
 			f.Details = details
-			card.add("certs", f)
+			out = append(out, f)
 		case cert.NotAfter.Sub(now) <= warn:
 			f := base
 			f.Kind = "cert.expiring"
@@ -847,8 +869,8 @@ func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now
 			f.Reason = "CertificateExpiringSoon"
 			f.Message = fmt.Sprintf("certificate expires in %dd", days)
 			f.Details = details
-			card.add("certs", f)
+			out = append(out, f)
 		}
 	})
-	return count, err
+	return out, count, err
 }

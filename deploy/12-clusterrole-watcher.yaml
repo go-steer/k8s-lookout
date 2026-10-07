@@ -346,7 +346,9 @@ rules:
   # cert-manager Certificates: discovery-gated at runtime — the rule
   # is inert on clusters without the CRD (RBAC rules for absent groups
   # are legal and ignored), and the expiry source logs one startup
-  # line when it skips the target.
+  # line when it skips the target. The same list serves the read
+  # path: `lookout health`'s certs category judges Certificates too
+  # (and degrades to unverified= if this rule is missing).
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["list"]
