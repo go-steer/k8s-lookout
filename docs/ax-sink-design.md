@@ -65,6 +65,16 @@ injected credentials, `http.port`, workspaces. The sink sets
 startup, so a typo fails `lookout watch` immediately rather than on the first
 incident.
 
+### Agents need to know which cluster
+
+The agent in the task reads the cluster through tools that name it in full,
+like the GKE MCP server's `projects/<project>/locations/<location>/clusters/<name>`.
+The payload's `cluster` is only `--cluster-name`, so the sentinel must stamp
+`project` and `region`/`zone` too. The GKE image flavor detects them from
+metadata; the vanilla image needs `--project` and `--region` (or `--zone`). In
+testing without them, the agent guessed project IDs until its budget ran out;
+with them, it built the path and finished the diagnosis.
+
 ### Flags
 
 | Flag | Meaning |
