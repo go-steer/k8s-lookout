@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-07
+
+**This release finishes the read-only `view` story, lets a LeewayPolicy
+page for its own workloads, and teaches `health` about cert-manager.**
+Every read-path command now exits 0 under the built-in `view`
+ClusterRole. Each refused read now says why it was refused and how to
+grant it, for example *forbidden: list nodes — cluster-scoped, not
+granted by the built-in view role; grant list on nodes (core) via a
+ClusterRole*. That wording changes the message text of existing
+`read.unavailable` lines; no kinds or fields change. A LeewayPolicy can
+set `topologyKeys[].thresholds.severity`, for example to promote a
+workload's Tier B drift to critical so it opens a session. The global
+`--severity` flag still wins over a policy. `lookout health` judges
+cert-manager Certificates alongside TLS Secrets, reporting
+`cert.never_issued` and `cert.renewal_failed`. `cloud orphans
+--only=nodepools` reports node pools with nodes but no workload pods, as
+info. It is opt-in and the default sweep is unchanged. No grants or
+flags changed.
+
 ### Added
 
 - **A LeewayPolicy can now set the severity of its subjects' leeway

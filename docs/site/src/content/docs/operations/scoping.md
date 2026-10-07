@@ -100,7 +100,7 @@ hold it, `deploy-no-secrets/`, *instead of* `deploy/` (first shipped
 in v0.29.0):
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.31.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.32.0"
 # or, from a clone
 kubectl apply -k deploy-no-secrets/
 ```
