@@ -111,7 +111,7 @@ func realMain(argv []string) error {
 	// for the webhook receiver (optional — but a NAMED env var must be
 	// non-empty, same loud posture).
 	var token string
-	if !f.dryRun && f.sink == sinkCoreAgent {
+	if !f.dryRun && (f.sink == sinkCoreAgent || f.sink == sinkAX) {
 		token = os.Getenv(f.tokenEnv)
 		if token == "" {
 			return fmt.Errorf("bearer token env var %s is empty", f.tokenEnv)
@@ -145,6 +145,12 @@ func realMain(argv []string) error {
 				return fmt.Errorf("webhook sink: %w", werr)
 			}
 			inj = ws
+		case sinkAX:
+			as, aerr := newAXSink(f, token)
+			if aerr != nil {
+				return fmt.Errorf("ax sink: %w", aerr)
+			}
+			inj = as
 		default:
 			ci, cerr := inject.NewInjector(inject.Config{
 				DaemonURL:      f.daemonURL,
@@ -1307,10 +1313,14 @@ func (r *runner) run(ctx context.Context) error {
 		}
 	}
 
-	if f.sink == sinkWebhook {
+	switch f.sink {
+	case sinkWebhook:
 		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
 			r.clusterName, f.sinkURL)
-	} else {
+	case sinkAX:
+		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, router=%s, template=%s)",
+			r.clusterName, f.axServer, f.axRouterURL, f.axTaskTemplate)
+	default:
 		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 			r.clusterName, f.daemonURL, f.mode, f.owner)
 	}

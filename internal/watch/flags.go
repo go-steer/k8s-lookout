@@ -61,6 +61,9 @@ type flags struct {
 	sink              string
 	sinkURL           string
 	sinkTokenEnv      string
+	axServer          string
+	axTaskTemplate    string
+	axRouterURL       string
 	reasons           string
 	namespaces        string
 	excludeNamespaces string
@@ -199,9 +202,12 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Agent sink (docs/agent-sink-design.md). The default is the
 	// core-agent daemon client the sentinel has always spoken, so
 	// deployments that omit --sink keep behaving identically.
-	fs.StringVar(&f.sink, "sink", sinkCoreAgent, "Agent sink receiving incident payloads: core-agent (default: POST /sessions + /sessions/<sid>/inject against --daemon-url) or webhook (generic receiver: POST <sink-url>/incidents opens an incident with the schema-v1 payload JSON as the body; POST <sink-url>/incidents/<id>/events appends follow-ups).")
+	fs.StringVar(&f.sink, "sink", sinkCoreAgent, "Agent sink receiving incident payloads: core-agent (default: POST /sessions + /sessions/<sid>/inject against --daemon-url) or webhook (generic receiver: POST <sink-url>/incidents opens an incident with the schema-v1 payload JSON as the body; POST <sink-url>/incidents/<id>/events appends follow-ups), or ax (each incident runs in its own Agent Executor task, reached through Agent Substrate's router with the core-agent session calls; see --ax-server).")
 	fs.StringVar(&f.sinkURL, "sink-url", "", "Base URL of the generic webhook receiver (no trailing slash). Required with --sink=webhook. https is STRONGLY recommended: plain http is allowed (remote receivers are the point) but warns loudly at startup — incident payloads and the bearer token ride unencrypted.")
 	fs.StringVar(&f.sinkTokenEnv, "sink-token-env", "", "Env var name holding the bearer token the webhook sink sends as Authorization: Bearer. Optional (unset = unauthenticated POSTs); only valid with --sink=webhook.")
+	fs.StringVar(&f.axServer, "ax-server", "", "Agent Executor (AX) API address (host:port, plaintext gRPC), e.g. ax-server.ax-system.svc:8080. Required with --sink=ax: each incident runs in its own AX task (docs/ax-sink-design.md).")
+	fs.StringVar(&f.axTaskTemplate, "ax-task-template", "", "Path to the AX Task manifest each incident runs as (image, command, egress, http.port); the ax sink sets metadata.name per incident. Required with --sink=ax.")
+	fs.StringVar(&f.axRouterURL, "ax-router-url", defaultAXRouterURL, "Agent Substrate router the ax sink reaches each incident's task through (no trailing slash). Only valid with --sink=ax.")
 
 	// Event filtering.
 	fs.StringVar(&f.reasons, "reason", "", "Comma-separated allow-list of Event.Reason values. Empty = shipped default set.")
@@ -474,7 +480,11 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 const (
 	sinkCoreAgent = "core-agent"
 	sinkWebhook   = "webhook"
+	sinkAX        = "ax"
 )
+
+// defaultAXRouterURL is Agent Substrate's in-cluster router Service.
+const defaultAXRouterURL = "http://atenet-router.ate-system.svc.cluster.local"
 
 // validate checks flag combinations after parse. Called once from
 // main so misconfig fails before any network / API touching.
@@ -483,9 +493,35 @@ func (f *flags) validate() error {
 	// requirements below are sink-conditional. A typo'd sink name is a
 	// config error in every mode, like --sources.
 	switch f.sink {
-	case sinkCoreAgent, sinkWebhook:
+	case sinkCoreAgent, sinkWebhook, sinkAX:
 	default:
-		return fmt.Errorf("--sink must be core-agent or webhook (got %q)", f.sink)
+		return fmt.Errorf("--sink must be core-agent, webhook or ax (got %q)", f.sink)
+	}
+	if f.sink == sinkAX {
+		if !f.dryRun && f.axServer == "" {
+			return errors.New("--ax-server is required with --sink=ax (unless --dry-run)")
+		}
+		if !f.dryRun && f.axTaskTemplate == "" {
+			return errors.New("--ax-task-template is required with --sink=ax (unless --dry-run)")
+		}
+		if !f.dryRun && f.tokenEnv == "" {
+			return errors.New("--token-env is required with --sink=ax: it authenticates to the agent's session API inside each task (unless --dry-run)")
+		}
+		if strings.HasSuffix(f.axRouterURL, "/") {
+			return fmt.Errorf("--ax-router-url must not end with '/' (got %q)", f.axRouterURL)
+		}
+		// Each incident gets its own task, so there is no shared session.
+		if f.mode != "per-incident" {
+			return fmt.Errorf("--sink=ax always runs one task per incident (got --mode=%s)", f.mode)
+		}
+		if f.targetSession != "" {
+			return errors.New("--target-session is not valid with --sink=ax: each incident opens its own session in its own task")
+		}
+		if f.daemonURL != "" {
+			return errors.New("--daemon-url is not valid with --sink=ax: the agent is reached through --ax-router-url")
+		}
+	} else if f.axServer != "" || f.axTaskTemplate != "" || f.axRouterURL != defaultAXRouterURL {
+		return errors.New("--ax-server, --ax-task-template and --ax-router-url are only valid with --sink=ax")
 	}
 	if f.sink == sinkWebhook {
 		if !f.dryRun && f.sinkURL == "" {

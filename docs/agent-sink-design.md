@@ -118,6 +118,12 @@ loudly**: the existing §11-style startup message pattern, naming the
 source and the reason it will emit nothing — never a silent empty
 watch.
 
+### A third sink: ax
+
+`--sink=ax` runs each incident in its own Agent Executor task and speaks
+the core-agent session API to the agent inside it through Agent
+Substrate's router. See [`ax-sink-design.md`](./ax-sink-design.md).
+
 ## Out of scope
 
 - **Per-framework adapters** (a LangChain sink, a CrewAI sink, …).

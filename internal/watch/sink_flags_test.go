@@ -66,7 +66,59 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 		{
 			name:    "unknown sink rejected",
 			args:    []string{"--sink=kafka", "--dry-run"},
-			wantErr: "--sink must be core-agent or webhook",
+			wantErr: "--sink must be core-agent, webhook or ax",
+		},
+		{
+			name: "ax minimal config is valid without daemon flags",
+			args: []string{"--sink=ax", "--ax-server=ax-server.ax-system.svc:8080", "--ax-task-template=/etc/lookout/task.yaml", "--token-env=TOK"},
+		},
+		{
+			name: "ax with owner and a custom router is valid",
+			args: []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml", "--token-env=TOK", "--owner=lookout", "--ax-router-url=http://router.local"},
+		},
+		{
+			name:    "ax requires ax-server",
+			args:    []string{"--sink=ax", "--ax-task-template=t.yaml", "--token-env=TOK"},
+			wantErr: "--ax-server is required",
+		},
+		{
+			name:    "ax requires a task template",
+			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--token-env=TOK"},
+			wantErr: "--ax-task-template is required",
+		},
+		{
+			name:    "ax requires token-env",
+			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml"},
+			wantErr: "--token-env is required with --sink=ax",
+		},
+		{
+			name: "ax without its flags allowed in dry-run",
+			args: []string{"--sink=ax", "--dry-run"},
+		},
+		{
+			name:    "ax rejects shared mode",
+			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml", "--token-env=TOK", "--mode=shared", "--target-session=s"},
+			wantErr: "--sink=ax always runs one task per incident",
+		},
+		{
+			name:    "ax rejects daemon-url",
+			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml", "--token-env=TOK", "--daemon-url=http://daemon.local"},
+			wantErr: "--daemon-url is not valid with --sink=ax",
+		},
+		{
+			name:    "ax router trailing slash rejected",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-url=http://router.local/"},
+			wantErr: "--ax-router-url must not end with '/'",
+		},
+		{
+			name:    "core-agent rejects ax flags",
+			args:    []string{"--ax-server=ax:8080", "--dry-run"},
+			wantErr: "only valid with --sink=ax",
+		},
+		{
+			name:    "webhook rejects ax flags",
+			args:    []string{"--sink=webhook", "--sink-url=https://hooks.example", "--ax-task-template=t.yaml"},
+			wantErr: "only valid with --sink=ax",
 		},
 		{
 			name:    "webhook requires sink-url",
