@@ -175,6 +175,7 @@ func probeRoutingAccess(ctx context.Context, reviewer sources.AccessReviewer) (g
 	for _, kind := range routingKinds {
 		denied := ""
 		for _, req := range routingAccess[kind] {
+			req = sources.Effective(reviewer, req)
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return nil, nil, fmt.Errorf("graph history: capability probe for %q failed: %w", req, err)
@@ -219,6 +220,7 @@ var graphAccess = []sources.Requirement{
 // for correlation and a silently keyless correlator would lie.
 func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) error {
 	for _, req := range graphAccess {
+		req = sources.Effective(reviewer, req)
 		d, err := reviewer.Allowed(ctx, req)
 		if err != nil {
 			return fmt.Errorf("storm: capability probe for %q failed: %w", req, err)

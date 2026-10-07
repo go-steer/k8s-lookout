@@ -246,6 +246,7 @@ func Probe(ctx context.Context, reviewer AccessReviewer, srcs ...Source) ([]stri
 			continue
 		}
 		for _, req := range decl.RequiredAccess() {
+			req = Effective(reviewer, req)
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return notes, fmt.Errorf("source %q: capability probe for %q failed: %w", s.Name(), req, err)

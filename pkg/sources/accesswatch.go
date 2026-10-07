@@ -248,6 +248,7 @@ func (w *AccessWatch) sweep(ctx context.Context, ev AccessEvents) {
 			if ctx.Err() != nil {
 				return
 			}
+			req = Effective(w.reviewer, req)
 			key := s.Name() + "\x00" + req.String()
 			d, err := w.reviewer.Allowed(ctx, req)
 			if err != nil {

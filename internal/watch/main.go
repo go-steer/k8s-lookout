@@ -26,16 +26,21 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
 // Main is the `lookout watch` entry point; argv is the argument list
 // after the subcommand name. It follows the standalone binary's 0/1
 // exit-code convention and prints errors with a "lookout watch:"
-// stderr prefix.
+// stderr prefix. Errors built with emit.UsageErrorf exit 2 (§4.2); the
+// flag errors that predate that convention keep their historical 1.
 func Main(argv []string) int {
 	if err := realMain(argv); err != nil {
 		fmt.Fprintln(os.Stderr, "lookout watch:", err)
+		if emit.IsUsageError(err) {
+			return emit.ExitUsage
+		}
 		return 1
 	}
 	return 0

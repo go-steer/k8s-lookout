@@ -181,6 +181,23 @@ else
   exit 1
 fi
 
+# The namespace-scoped tier (#407): rbac.scope=namespace must render
+# exactly deploy-namespaced/.
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace >"$tmp/chart-scope.raw.yaml"
+kustomize build deploy-namespaced/ >"$tmp/kustomize-scope.raw.yaml"
+normalize "$tmp/chart-scope.raw.yaml" "$tmp/chart-scope.yaml"
+normalize "$tmp/kustomize-scope.raw.yaml" "$tmp/kustomize-scope.yaml"
+
+if diff -u "$tmp/kustomize-scope.yaml" "$tmp/chart-scope.yaml" >"$tmp/diff-scope"; then
+  echo "✓ chart with rbac.scope=namespace matches deploy-namespaced/"
+else
+  echo "✗ helm template --set rbac.scope=namespace and deploy-namespaced/ have diverged." >&2
+  echo "  Left is kustomize build deploy-namespaced/, right is helm template." >&2
+  echo >&2
+  cat "$tmp/diff-scope" >&2
+  exit 1
+fi
+
 # ---- the chart must also be valid on its own --------------------------
 
 helm lint "$CHART" --namespace "$NAMESPACE" --quiet
@@ -204,6 +221,12 @@ render_ok "rbac disabled"           --set rbac.create=false --set rbac.capacity=
 render_ok "serviceAccount external" --set serviceAccount.create=false --set serviceAccount.name=other
 render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
 render_ok "gke flavor"              --set image.flavor=gke
+render_ok "namespace scope, no secrets" --set rbac.scope=namespace --set rbac.secrets=false
+# A typo'd scope must fail the render, not fall back to either tier.
+if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespaced >/dev/null 2>&1; then
+  echo "✗ chart rendered with rbac.scope=namespaced — the guard in _helpers.tpl is not firing" >&2
+  exit 1
+fi
 # A user who already chose an --enrich-lists keeps it; the chart must
 # not append a second one.
 if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.secrets=false \

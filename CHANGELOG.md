@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`lookout watch` can watch a single namespace under a namespaced
+  Role (#407).** `--watch-scope=namespace --namespace=team-a` makes
+  every namespaced informer list and watch `team-a` only, so nothing
+  from other namespaces is loaded and a Role there is all the sentinel
+  needs. The default, `--watch-scope=cluster`, changes nothing.
+  `namespace` needs exactly one `--namespace` value; anything else exits
+  2. Nodes and other cluster-scoped objects cannot be granted by a Role,
+  so `--sources=auto` skips each source that needs one with one log line:
+  `object-state`, `saturation`, `capacity`, `topology-drift`,
+  `compute-class` and `expiry`. `--storm=auto` resolves to off for the
+  same reason. Naming one of them in `--sources`, or `--storm=on`, fails
+  startup as before. In multi-cluster mode the scope applies to every
+  cluster. The new `deploy-namespaced/` overlay (Helm:
+  `rbac.scope=namespace`) ships the Role, the RoleBinding and the flags,
+  and its README lists what this tier loses. `compute-class` now also
+  declares the pod and node grants its informers wait on, so a
+  deployment missing them fails the startup check instead of hanging.
+
 ## [0.32.0] - 2026-10-07
 
 **This release finishes the read-only `view` story, lets a LeewayPolicy

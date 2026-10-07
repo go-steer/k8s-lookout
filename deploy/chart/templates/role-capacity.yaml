@@ -1,4 +1,4 @@
-{{- if .Values.rbac.capacity }}
+{{- if and .Values.rbac.capacity (not (include "lookout.namespaceScope" .)) }}
 # SOURCE OF TRUTH: deploy/14-role-watcher-capacity.yaml and
 # deploy/15-rolebinding-watcher-capacity.yaml — held to it by
 # dev/tools/verify-helm-parity.

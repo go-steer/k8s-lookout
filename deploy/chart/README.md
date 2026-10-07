@@ -111,6 +111,16 @@ sets `--enrich-lists`. That is the same deployment as the
 source and the Secret/ServiceAccount edge checks in enrichment bundles
 (the docs site's *Scoping a sentinel* page has the full list).
 
+**`rbac.scope`.** `cluster` by default. `namespace` watches only the
+release namespace and needs no cluster-scoped grant at all: the chart
+renders a Role and RoleBinding there instead of the ClusterRole, its
+binding and the capacity Role. It adds `--watch-scope=namespace
+--namespace=$(POD_NAMESPACE)` to the watcher and turns `--storm=on` into
+`--storm=auto`. That is the same deployment as the `deploy-namespaced/`
+overlay, and CI diffs the two. It costs every source that reads nodes
+or another cluster-scoped kind, plus storm correlation;
+`deploy-namespaced/README.md` has the full list.
+
 **`networkPolicy.extraIngressFrom`.** The default rule admits scrapers
 in the release namespace. Prometheus in `monitoring/`, or GMP in
 `gmp-system/`, needs a peer added here or it will time out against a

@@ -66,6 +66,17 @@ rbac:
   # skips itself under --sources=auto) and the Secret/ServiceAccount
   # reference checks in enrichment bundles.
   secrets: true
+  # What the sentinel watches: cluster (every namespace, the ClusterRole
+  # above) or namespace (#407) — only the release namespace, under a
+  # Role + RoleBinding there and no cluster-scoped grant at all. namespace
+  # replaces the ClusterRole, its binding and the capacity Role, adds
+  # --watch-scope=namespace --namespace=<release namespace> to the
+  # watcher and turns --storm=on into --storm=auto: the same deployment as
+  # the deploy-namespaced/ overlay. It costs every source that reads
+  # nodes or another cluster-scoped kind (object-state, saturation,
+  # capacity, topology-drift, compute-class, expiry) and storm
+  # correlation; deploy-namespaced/README.md has the full list.
+  scope: cluster
 
 # -- The optional LeewayPolicy / ClusterLeewayPolicy CRDs, which let an
 # operator declare a workload's placement intent instead of letting the

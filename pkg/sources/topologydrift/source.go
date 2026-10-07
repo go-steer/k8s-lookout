@@ -440,6 +440,10 @@ type Source struct {
 	// which is the same observable state as a cluster without the CRDs.
 	dyn dynamic.Interface
 
+	// watchNamespace, when set via WithWatchNamespace, confines the policy
+	// watch to one namespace. Empty means every namespace.
+	watchNamespace string
+
 	// rollouts, when set via WithRolloutOracle, answers §7.6's rollout row.
 	// Nil means the row is unanswered — see RolloutOracle.
 	rollouts RolloutOracle
@@ -628,6 +632,21 @@ func (s *Source) WithDynamic(dyn dynamic.Interface) {
 	if dyn != nil {
 		s.dyn = dyn
 	}
+}
+
+// WithWatchNamespace confines the optional policy watch to one namespace.
+// Call before Run; "" (the default) watches every namespace.
+//
+// The pod, node and ReplicaSet informers need no such call — they come from
+// the caller's factories, which carry the scope themselves. The policy
+// informers are this source's own, so the sentinel's --watch-scope=namespace
+// (#407) has to reach them here: LeewayPolicies are watched in the namespace,
+// and ClusterLeewayPolicies, which have no namespaced form, are not watched
+// at all. Undeclared to the §11 probe (see RequiredAccess), a cluster-wide
+// policy informer under a namespaced grant would retry a 403 forever and
+// hold Run's sync barrier shut.
+func (s *Source) WithWatchNamespace(ns string) {
+	s.watchNamespace = ns
 }
 
 // RolloutOracle answers §7.6's rollout row: which subjects are partway
@@ -973,7 +992,15 @@ func (s *Source) startPolicyWatch(ctx context.Context) ([]cache.InformerSynced, 
 		return nil, nil
 	}
 
-	factory := dynamicinformer.NewDynamicSharedInformerFactory(s.dyn, 0)
+	skipCluster := false
+	if s.watchNamespace != "" && clusterScoped {
+		s.logger()("topologydrift: %s not watched — the watch is scoped to namespace %q and these policies are cluster-scoped; declare intent with namespaced %s instead", clusterPolicyGVR.Resource, s.watchNamespace, policyGVR.Resource)
+		skipCluster = true
+		if !namespaced {
+			return nil, nil
+		}
+	}
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, s.watchNamespace, nil)
 	var synced []cache.InformerSynced
 	for _, w := range []struct {
 		gvr           schema.GroupVersionResource
@@ -983,6 +1010,9 @@ func (s *Source) startPolicyWatch(ctx context.Context) ([]cache.InformerSynced, 
 		{policyGVR, namespaced, false},
 		{clusterPolicyGVR, clusterScoped, true},
 	} {
+		if w.clusterScoped && skipCluster {
+			continue // said so above
+		}
 		if !w.serve {
 			s.logger()("topologydrift: %s not served — %s policies ignored", w.gvr, w.gvr.Resource)
 			continue

@@ -55,7 +55,23 @@ spec:
           # The image ENTRYPOINT is ["/lookout", "watch"], so these
           # bare flags splice in behind `watch`.
           args:
+            {{- if include "lookout.namespaceScope" . }}
+            # rbac.scope=namespace (#407), as deploy-namespaced/ does it:
+            # --storm=on would refuse to start without the node grant a
+            # Role cannot give, so it becomes auto; the watch is scoped to
+            # the pod's own namespace.
+            {{- range .Values.args }}
+            {{- if eq . "--storm=on" }}
+            - --storm=auto
+            {{- else }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - --watch-scope=namespace
+            - --namespace=$(POD_NAMESPACE)
+            {{- else }}
             {{- toYaml .Values.args | nindent 12 }}
+            {{- end }}
             {{- if not .Values.rbac.secrets }}
             {{- $selected := false }}
             {{- range .Values.args }}{{ if hasPrefix "--enrich-lists" . }}{{ $selected = true }}{{ end }}{{ end }}
@@ -85,6 +101,12 @@ spec:
             {{- with .Values.goMemLimit }}
             - name: GOMEMLIMIT
               value: {{ . | quote }}
+            {{- end }}
+            {{- if include "lookout.namespaceScope" . }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

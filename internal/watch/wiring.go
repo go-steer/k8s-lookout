@@ -957,6 +957,10 @@ func (r *runner) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Every capability question below goes through this one reviewer, so
+	// under --watch-scope=namespace each is asked in the scope namespace
+	// (#407) — see newAccessReviewer.
+	reviewer := newAccessReviewer(f, client)
 
 	// Auto defaults (--sources=auto / --storm=auto): resolve BEFORE
 	// any source-conditional client building below — the rest of
@@ -1023,7 +1027,7 @@ func (r *runner) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	registry, objState := bs.registry, bs.objState
+	registry := bs.registry
 
 	// ONE shared informer factory per runner serves every typed
 	// informer in this cluster (§6.3): the sources, the graph feed, and
@@ -1049,48 +1053,21 @@ func (r *runner) run(ctx context.Context) error {
 	// what it deliberately preserves is in transform_registry.go, which
 	// is enforced by a behavioural guard test — read that before
 	// touching trimPod or trimNode.
-	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces))
+	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespace())
 	sharedFactory := factories.Namespaced
-	if factories.Split() {
+	switch {
+	case f.scopeNamespace() != "":
+		// The scope is the one fact an operator most needs to confirm from
+		// the log, since it decides what this process can see at all.
+		log.Printf("watch: --watch-scope=namespace — the namespaced informers list and watch namespace %q only, so nothing outside it enters the cache; cluster-scoped reads (nodes and the like) stay cluster-wide where a source needs them and are probed as such (#407)", f.scopeNamespace())
+	case factories.Split():
 		// Worth a line: this is the one flag whose meaning widened from
 		// "do not report" to "do not watch", and the difference is only
 		// visible in API server audit logs.
 		log.Printf("watch: --exclude-namespace is scoping the watch — the namespaced informers list and watch with field selector %q, so excluded namespaces never enter the cache; nodes are cluster-scoped and unaffected", namespaceExclusionSelector(splitCSV(f.excludeNamespaces)))
 	}
-	if objState != nil {
-		objState.WithFactory(sharedFactory)
-		objState.WithNodeFactory(factories.Cluster)
-	}
-	if bs.rollout != nil {
-		bs.rollout.WithFactory(sharedFactory)
-	}
-	if bs.degradation != nil {
-		bs.degradation.WithFactory(sharedFactory)
-	}
-	if bs.workload != nil {
-		bs.workload.WithFactory(sharedFactory)
-	}
-	if bs.k8sevents != nil {
-		bs.k8sevents.WithFactory(sharedFactory)
-	}
-	if bs.ingress != nil {
-		bs.ingress.WithFactory(sharedFactory)
-	}
-	if bs.autoscaling != nil {
-		bs.autoscaling.WithFactory(sharedFactory)
-	}
-	if bs.capacity != nil {
-		bs.capacity.WithFactory(sharedFactory)
-		bs.capacity.WithNodeFactory(factories.Cluster)
-	}
+	attachSharedFactories(bs, factories)
 	if bs.topoDrift != nil {
-		// Pods, nodes AND replicasets — all three already on this
-		// factory for the graph feed and the workload source, so leeway's
-		// §6.2 indexes cost no new LIST+WATCH stream. That is the whole
-		// argument for a default-on source that watches every pod in the
-		// cluster.
-		bs.topoDrift.WithFactory(sharedFactory)
-		bs.topoDrift.WithNodeFactory(factories.Cluster)
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
 		if bs.rollout != nil {
 			// §7.6's rollout row. leeway relaxes its placement thresholds
@@ -1129,15 +1106,6 @@ func (r *runner) run(ctx context.Context) error {
 		}
 	}
 	if bs.compClass != nil {
-		// Pods and nodes, both already on these factories — the §7.7
-		// pod-seconds are a join over two streams this process watches
-		// anyway, and the only watch the source adds for itself is the
-		// handful of ComputeClass objects, on its own dynamic factory. Its
-		// Event handler (the autoscaler verdicts behind the wedged rule,
-		// #532) shares this factory's one Event stream with k8s-events,
-		// capacity and ingress.
-		bs.compClass.WithFactory(sharedFactory)
-		bs.compClass.WithNodeFactory(factories.Cluster)
 		bs.compClass.WithMeter(r.meter(computeclass.MeterName))
 		if occStore != nil {
 			// The same §9.1 arrangement topologydrift has, and the same
@@ -1177,7 +1145,7 @@ func (r *runner) run(ctx context.Context) error {
 		var routing []graph.NodeKind
 		if occStore != nil {
 			onChange = occStore.RecordGraphChange
-			kinds, lines, err := probeRoutingAccess(ctx, sources.NewAccessReviewer(client))
+			kinds, lines, err := probeRoutingAccess(ctx, reviewer)
 			if err != nil {
 				return err
 			}
@@ -1214,6 +1182,7 @@ func (r *runner) run(ctx context.Context) error {
 			timeout:        f.enrichTimeout,
 			lists:          enrichLists,
 			listsPreflight: f.enrichListsPreflight,
+			podNamespace:   f.scopeNamespace(),
 		}
 		path := "scoped-list"
 		if feed != nil {
@@ -1235,7 +1204,7 @@ func (r *runner) run(ctx context.Context) error {
 	// anything — a deployment whose ServiceAccount can't support a
 	// source fails loudly here, naming the source and the missing
 	// permission, never a silently empty watch.
-	probeNotes, err := sources.Probe(ctx, sources.NewAccessReviewer(client), registry.All()...)
+	probeNotes, err := sources.Probe(ctx, reviewer, registry.All()...)
 	if !f.sourcesAutoResolved {
 		// Optional-requirement denials (#145): the source runs with
 		// one dimension degraded — reported here, never silent.
@@ -1251,7 +1220,7 @@ func (r *runner) run(ctx context.Context) error {
 	if feed != nil {
 		// Same posture for the graph feed's informers: --storm is an
 		// explicit opt-in, so a missing grant fails loudly at startup.
-		if err := probeGraphAccess(ctx, sources.NewAccessReviewer(client)); err != nil {
+		if err := probeGraphAccess(ctx, reviewer); err != nil {
 			return err
 		}
 	}
@@ -1347,7 +1316,7 @@ func (r *runner) run(ctx context.Context) error {
 	// downstream as "cluster healthy". Same question, asked on an
 	// interval, for as long as this runner lives.
 	var recheck accessRecheck
-	recheck.start(ctx, cancel, f.accessRecheck, sources.NewAccessReviewer(client), registry.All(), m, func(sig engine.Signal) {
+	recheck.start(ctx, cancel, f.accessRecheck, reviewer, registry.All(), m, func(sig engine.Signal) {
 		disp.DispatchSignal(ctx, sig)
 	})
 	// Readiness (#285): this cluster is ready once every source with
@@ -1400,6 +1369,63 @@ func (r *runner) run(ctx context.Context) error {
 		err = recheck.failure()
 	}
 	return err
+}
+
+// attachSharedFactories puts every informer-backed source on the runner's
+// factories (§6.3): namespaced informers on factories.Namespaced, the node
+// (and persistent-volume) informers on factories.Cluster. A source left off
+// this list would fall back to a private, cluster-wide factory — under
+// --watch-scope=namespace that is an informer a namespaced Role cannot sync
+// (#407), which is why the namespace-scope tests run startup through this
+// function rather than a copy of it.
+func attachSharedFactories(bs *builtSources, factories sharedFactories) {
+	ns := factories.Namespaced
+	if bs.objState != nil {
+		bs.objState.WithFactory(ns)
+		bs.objState.WithNodeFactory(factories.Cluster)
+	}
+	if bs.rollout != nil {
+		bs.rollout.WithFactory(ns)
+	}
+	if bs.degradation != nil {
+		bs.degradation.WithFactory(ns)
+	}
+	if bs.workload != nil {
+		bs.workload.WithFactory(ns)
+	}
+	if bs.k8sevents != nil {
+		bs.k8sevents.WithFactory(ns)
+	}
+	if bs.ingress != nil {
+		bs.ingress.WithFactory(ns)
+	}
+	if bs.autoscaling != nil {
+		bs.autoscaling.WithFactory(ns)
+	}
+	if bs.capacity != nil {
+		bs.capacity.WithFactory(ns)
+		bs.capacity.WithNodeFactory(factories.Cluster)
+	}
+	if bs.topoDrift != nil {
+		// Pods, nodes AND replicasets — all three already on this
+		// factory for the graph feed and the workload source, so leeway's
+		// §6.2 indexes cost no new LIST+WATCH stream. That is the whole
+		// argument for a default-on source that watches every pod in the
+		// cluster.
+		bs.topoDrift.WithFactory(ns)
+		bs.topoDrift.WithNodeFactory(factories.Cluster)
+	}
+	if bs.compClass != nil {
+		// Pods and nodes, both already on these factories — the §7.7
+		// pod-seconds are a join over two streams this process watches
+		// anyway, and the only watch the source adds for itself is the
+		// handful of ComputeClass objects, on its own dynamic factory. Its
+		// Event handler (the autoscaler verdicts behind the wedged rule,
+		// #532) shares this factory's one Event stream with k8s-events,
+		// capacity and ingress.
+		bs.compClass.WithFactory(ns)
+		bs.compClass.WithNodeFactory(factories.Cluster)
+	}
 }
 
 // recoveryTickInterval is how often the recovery tracker re-evaluates
@@ -1573,7 +1599,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Window = f.saturationWindow
 			cfg.WarnETA = f.saturationWarn
 			bs.saturation = saturation.New(cfg,
-				saturation.NewMetricsPodFetcher(metricsClient, client),
+				saturation.NewScopedMetricsPodFetcher(metricsClient, client, f.scopeNamespace()),
 				saturation.NewKubeletVolumeFetcher(client))
 			src = bs.saturation
 		case degradation.Name:
@@ -1586,7 +1612,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg := expiry.DefaultConfig()
 			cfg.Interval = f.expiryInterval
 			cfg.WarnWindow = f.expiryWarn
-			cfg.Namespaces = splitCSV(f.expiryNamespaces)
+			cfg.Namespaces = f.expiryNamespaceList()
 			cfg.ACMEGrace = f.expiryACMEGrace
 			bs.expiry = expiry.New(client, dyn, cfg)
 			src = bs.expiry
@@ -1618,6 +1644,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			}
 			cfg := gateway.DefaultConfig()
 			cfg.Grace = f.gatewayGrace
+			cfg.Namespace = f.scopeNamespace()
 			bs.gateway = gateway.New(client, dyn, cfg)
 			src = bs.gateway
 		case topologydrift.Name:
@@ -1666,6 +1693,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// no LeewayPolicy watch, which is the same state as a cluster
 			// that never installed the CRD — the common case.
 			bs.topoDrift.WithDynamic(dyn)
+			bs.topoDrift.WithWatchNamespace(f.scopeNamespace())
 			src = bs.topoDrift
 		case computeclass.Name:
 			// The leeway subsystem's preference half (§7.7): which rung of
@@ -1863,9 +1891,10 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		observers = append(observers, bs.objState.ClearanceObserver())
 		log.Printf("recovery: clearance observer backed by the object-state source's pod + node informers")
 	} else {
-		reviewer := sources.NewAccessReviewer(client)
+		reviewer := newAccessReviewer(f, client)
 		podRBAC := true
 		for _, req := range recoveryAccess {
+			req = sources.Effective(reviewer, req)
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
