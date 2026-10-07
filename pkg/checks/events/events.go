@@ -258,15 +258,7 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 // workload kinds and the pods themselves. No Secret, ConfigMap or RBAC
 // object can sit in an owner-reference tree of these, so a role
 // without them (the built-in `view`) loses nothing from the timeline.
-var ownerTreeLists = []state.ListRequirement{
-	{Group: "", Resource: "pods"},
-	{Group: "apps", Resource: "deployments"},
-	{Group: "apps", Resource: "replicasets"},
-	{Group: "apps", Resource: "statefulsets"},
-	{Group: "apps", Resource: "daemonsets"},
-	{Group: "batch", Resource: "jobs"},
-	{Group: "batch", Resource: "cronjobs"},
-}
+var ownerTreeLists = state.OwnerTreeLists
 
 // matchKey keys the owner-tree membership set. Graph kind names
 // (graph.NodeKind.String) are the canonical k8s kind spellings, so

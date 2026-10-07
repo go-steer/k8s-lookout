@@ -24,56 +24,20 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 )
 
 // ViewRoleReads is every (group, resource) the built-in `view`
-// ClusterRole lets a subject list, transcribed from the aggregated
-// rules of system:aggregate-to-view in the upstream bootstrap policy
-// (kubernetes/kubernetes plugin/pkg/auth/authorizer/rbac/
-// bootstrappolicy/testdata/cluster-roles.yaml). It is an ALLOW list on
-// purpose: anything not named here — nodes, secrets, every
+// ClusterRole lets a subject list — checks.ViewRoleReads, the same
+// table the production refusal formatter consults to decide whether a
+// refusal is "not granted by the built-in view role". It is an ALLOW
+// list on purpose: anything not named there — nodes, secrets, every
 // rbac.authorization.k8s.io kind, PersistentVolumes, StorageClasses,
 // IngressClasses, admission webhook configurations, CRDs — is
 // refused, so a read-path command that grows a new read is tested
 // against `view` without anyone updating a deny list (#546).
-//
-// metrics.k8s.io is absent: metrics-server's own aggregate-to-view
-// role adds it on clusters that run metrics-server, but `view` itself
-// does not grant it.
-var ViewRoleReads = map[schema.GroupResource]bool{
-	{Resource: "configmaps"}:                                       true,
-	{Resource: "endpoints"}:                                        true,
-	{Resource: "persistentvolumeclaims"}:                           true,
-	{Resource: "pods"}:                                             true,
-	{Resource: "replicationcontrollers"}:                           true,
-	{Resource: "serviceaccounts"}:                                  true,
-	{Resource: "services"}:                                         true,
-	{Resource: "bindings"}:                                         true,
-	{Resource: "limitranges"}:                                      true,
-	{Resource: "resourcequotas"}:                                   true,
-	{Resource: "namespaces"}:                                       true,
-	{Resource: "events"}:                                           true,
-	{Group: "events.k8s.io", Resource: "events"}:                   true,
-	{Group: "discovery.k8s.io", Resource: "endpointslices"}:        true,
-	{Group: "apps", Resource: "controllerrevisions"}:               true,
-	{Group: "apps", Resource: "daemonsets"}:                        true,
-	{Group: "apps", Resource: "deployments"}:                       true,
-	{Group: "apps", Resource: "replicasets"}:                       true,
-	{Group: "apps", Resource: "statefulsets"}:                      true,
-	{Group: "autoscaling", Resource: "horizontalpodautoscalers"}:   true,
-	{Group: "batch", Resource: "cronjobs"}:                         true,
-	{Group: "batch", Resource: "jobs"}:                             true,
-	{Group: "extensions", Resource: "daemonsets"}:                  true,
-	{Group: "extensions", Resource: "deployments"}:                 true,
-	{Group: "extensions", Resource: "ingresses"}:                   true,
-	{Group: "extensions", Resource: "networkpolicies"}:             true,
-	{Group: "extensions", Resource: "replicasets"}:                 true,
-	{Group: "policy", Resource: "poddisruptionbudgets"}:            true,
-	{Group: "networking.k8s.io", Resource: "ingresses"}:            true,
-	{Group: "networking.k8s.io", Resource: "networkpolicies"}:      true,
-	{Group: "resource.k8s.io", Resource: "resourceclaims"}:         true,
-	{Group: "resource.k8s.io", Resource: "resourceclaimtemplates"}: true,
-}
+var ViewRoleReads = checks.ViewRoleReads
 
 // ViewRole makes cs behave as a credential bound to exactly the
 // built-in `view` ClusterRole: every get/list/watch of a resource
@@ -81,6 +45,14 @@ var ViewRoleReads = map[schema.GroupResource]bool{
 // returns a func reporting the refused resources in the order they
 // were first asked for, so a test can pin what a command still tries.
 func ViewRole(cs *fake.Clientset) (refused func() []schema.GroupResource) {
+	return ViewRoleFake(&cs.Fake)
+}
+
+// ViewRoleFake is ViewRole for any client built on k8stesting.Fake —
+// the dynamic fake client and the metrics fake client included — so a
+// command's CRD and metrics reads face the same `view` role as its
+// typed ones.
+func ViewRoleFake(f *k8stesting.Fake) (refused func() []schema.GroupResource) {
 	var (
 		mu   sync.Mutex
 		seen = map[schema.GroupResource]bool{}
@@ -100,21 +72,26 @@ func ViewRole(cs *fake.Clientset) (refused func() []schema.GroupResource) {
 			out = append(out, gr)
 		}
 		mu.Unlock()
-		return true, nil, apierrors.NewForbidden(gr, "", errors.New(`User "system:serviceaccount:lookout:agent" cannot `+action.GetVerb()+` resource "`+gr.Resource+`" in API group "`+gr.Group+`"`))
+		return true, nil, forbidden(action.GetVerb(), gr)
 	}
 	for _, verb := range []string{"get", "list"} {
-		cs.PrependReactor(verb, "*", deny)
+		f.PrependReactor(verb, "*", deny)
 	}
-	cs.PrependWatchReactor("*", func(action k8stesting.Action) (bool, watch.Interface, error) {
+	f.PrependWatchReactor("*", func(action k8stesting.Action) (bool, watch.Interface, error) {
 		gr := action.GetResource().GroupResource()
 		if ViewRoleReads[gr] {
 			return false, nil, nil
 		}
-		return true, nil, apierrors.NewForbidden(gr, "", errors.New("cannot watch"))
+		return true, nil, forbidden("watch", gr)
 	})
 	return func() []schema.GroupResource {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]schema.GroupResource(nil), out...)
 	}
+}
+
+// forbidden is the 403 the API server answers, worded as it words it.
+func forbidden(verb string, gr schema.GroupResource) error {
+	return apierrors.NewForbidden(gr, "", errors.New(`User "system:serviceaccount:lookout:agent" cannot `+verb+` resource "`+gr.Resource+`" in API group "`+gr.Group+`"`))
 }

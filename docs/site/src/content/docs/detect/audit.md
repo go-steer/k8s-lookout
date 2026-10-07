@@ -72,6 +72,7 @@ RBAC over-permission posture: bindings that grant cluster-admin, or a role whose
 | --- | --- | --- |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## [`lookout audit upgrades`](/reference/audit-upgrades/)
 
@@ -100,6 +101,7 @@ Workload reliability posture for workloads that are healthy right now: no PodDis
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## See also
 

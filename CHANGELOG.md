@@ -32,6 +32,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to use the field. The fingerprint and signal schema v1 are
   unchanged.
 
+### Changed
+
+- **Every forbidden-read line now says why the read was refused and
+  what fixes it** (#546). The `read.unavailable` messages, `health`'s
+  unavailable category reasons and its `unverified=` blind spots all
+  use one shared wording. It names the refused verb and resource with
+  its API group, and whether the resource is cluster-scoped. It says
+  "not granted by the built-in view role" only when the resource
+  really is outside `view` (otherwise "this identity lacks it"). It
+  names the grant that fixes it, adding "as lookout's shipped
+  ClusterRole does" only where that role grants it:
+  `forbidden: list nodes — cluster-scoped, not granted by the built-in
+  view role; grant list on nodes (core) via a ClusterRole, as lookout's
+  shipped ClusterRole does — node.* findings not checked`. The text
+  after the last dash still says what went unchecked. Only message
+  text changes: the kind, `reason` and `resource=` fields are as
+  before. `scan`'s `drilldown_skipped=` note stays a short resource
+  list, and its glossary entry now gives the fix.
+
+### Fixed
+
+- **Every remaining read-path command now answers under the built-in
+  `view` role instead of exiting 1** (#546). Each refused read becomes
+  one `read.unavailable` record, on the CLI and over MCP:
+  - `triage delta` (whole cluster): `nodes`, and only the `node.*`
+    findings drop out;
+  - `triage top`: `pods.metrics.k8s.io` when metrics are not granted,
+    which empties the answer. With metrics granted, `-A` drops just the
+    node view (`nodes`). `--workload` no longer needs Secrets, RBAC or
+    Nodes;
+  - `triage spec`: a Node or Secret target;
+  - `state webhooks`: the webhook configurations, which empties the
+    answer;
+  - `state volumes`: `persistentvolumes`, `volumeattachments` and
+    `nodes`. RWO multi-attach and unconsumed claims still answer, and
+    an attachment whose PV or node was unreadable is not called
+    orphaned;
+  - `state storage`: `storageclasses` and `persistentvolumes`;
+  - `stab drain`: `nodes`. The node set is taken from the pods, so
+    every blocker is still found;
+  - `stab scaledown`: `nodes`, and no node is judged;
+  - `audit rbac`: each RBAC kind, and no judgment;
+  - `audit workloads`: `nodes`. Only `audit.rigid_scheduling` and the
+    `nodes=` note drop out.
+
+  In `scan` these stages now report their gaps instead of failing as
+  `scan.check_failed`. A new hermetic test
+  (`pkg/checks/all/viewrole_test.go`) runs every read-path command
+  against exactly `view` and pins what each one reports as refused.
+  It also fails if a new command is neither run nor excused.
+  Separately, `bundle` now declares the `observed` field its radius
+  section already emitted. Errors other than Forbidden still exit 1.
+  No flags or grants changed.
+
 ## [0.31.0] - 2026-10-07
 
 **This release makes lookout useful under a read-only `view` role, sees

@@ -227,19 +227,43 @@ type volumeIndex struct {
 	// unread lists the workload resources whose List was refused; any
 	// entry suppresses the unconsumed-claim judgment (see the package
 	// comment) and becomes a read.unavailable record.
-	unread []string
+	unread []checks.Refusal
+	// refused is every refused List of the main pass, keyed by
+	// resource (#546). Under the built-in `view` role that is
+	// persistentvolumes, volumeattachments and nodes — all
+	// cluster-scoped — so the checks joining over them are skipped,
+	// each with a read.unavailable record, and the rest still answer.
+	refused map[string]checks.Refusal
 }
 
 // volumeWorkloadResources names the workload Lists the unconsumed-claim
-// judgment depends on, as the read.unavailable `resource` value.
-const (
-	volResDeployments  = "deployments.apps"
-	volResStatefulSets = "statefulsets.apps"
-	volResDaemonSets   = "daemonsets.apps"
-	volResReplicaSets  = "replicasets.apps"
-	volResJobs         = "jobs.batch"
-	volResCronJobs     = "cronjobs.batch"
+// judgment depends on.
+var (
+	volResDeployments  = checks.Refused("list", "apps", "deployments")
+	volResStatefulSets = checks.Refused("list", "apps", "statefulsets")
+	volResDaemonSets   = checks.Refused("list", "apps", "daemonsets")
+	volResReplicaSets  = checks.Refused("list", "apps", "replicasets")
+	volResJobs         = checks.Refused("list", "batch", "jobs")
+	volResCronJobs     = checks.Refused("list", "batch", "cronjobs")
 )
+
+// The main pass's resources, as the refused map keys them.
+const (
+	volPods        = "pods"
+	volPVCs        = "persistentvolumeclaims"
+	volPVs         = "persistentvolumes"
+	volAttachments = "volumeattachments"
+	volNodes       = "nodes"
+)
+
+// volumeMainLists are the main pass's Lists, in order.
+var volumeMainLists = map[string]checks.Refusal{
+	volPods:        checks.Refused("list", "", volPods),
+	volPVCs:        checks.Refused("list", "", volPVCs),
+	volPVs:         checks.Refused("list", "", volPVs),
+	volAttachments: checks.Refused("list", "storage.k8s.io", volAttachments),
+	volNodes:       checks.Refused("list", "", volNodes),
+}
 
 func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string) (*volumeIndex, error) {
 	vix := &volumeIndex{
@@ -248,9 +272,13 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 		nodes:            map[string]*corev1.Node{},
 		templateClaims:   map[string]bool{},
 		stsClaimPrefixes: map[string][]string{},
+		refused:          map[string]checks.Refusal{},
 	}
-	steps := []func() error{
-		func() error {
+	steps := []struct {
+		resource string
+		run      func() error
+	}{
+		{volPods, func() error {
 			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
 				l, err := client.CoreV1().Pods(ns).List(ctx, o)
 				if err != nil {
@@ -258,8 +286,8 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				}
 				return l.Items, l.Continue, nil
 			}, func(p *corev1.Pod) { vix.pods = append(vix.pods, p); vix.scanned++ })
-		},
-		func() error {
+		}},
+		{volPVCs, func() error {
 			return listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
 				l, err := client.CoreV1().PersistentVolumeClaims(ns).List(ctx, o)
 				if err != nil {
@@ -267,8 +295,8 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				}
 				return l.Items, l.Continue, nil
 			}, func(c *corev1.PersistentVolumeClaim) { vix.pvcs[key(c.Namespace, c.Name)] = c; vix.scanned++ })
-		},
-		func() error {
+		}},
+		{volPVs, func() error {
 			return listPages("persistentvolumes", func(o metav1.ListOptions) ([]corev1.PersistentVolume, string, error) {
 				l, err := client.CoreV1().PersistentVolumes().List(ctx, o)
 				if err != nil {
@@ -276,8 +304,8 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				}
 				return l.Items, l.Continue, nil
 			}, func(pv *corev1.PersistentVolume) { vix.pvs[pv.Name] = pv; vix.scanned++ })
-		},
-		func() error {
+		}},
+		{volAttachments, func() error {
 			return listPages("volumeattachments", func(o metav1.ListOptions) ([]storagev1.VolumeAttachment, string, error) {
 				l, err := client.StorageV1().VolumeAttachments().List(ctx, o)
 				if err != nil {
@@ -285,8 +313,8 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				}
 				return l.Items, l.Continue, nil
 			}, func(a *storagev1.VolumeAttachment) { vix.attachments = append(vix.attachments, a); vix.scanned++ })
-		},
-		func() error {
+		}},
+		{volNodes, func() error {
 			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
 				l, err := client.CoreV1().Nodes().List(ctx, o)
 				if err != nil {
@@ -294,12 +322,21 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				}
 				return l.Items, l.Continue, nil
 			}, func(n *corev1.Node) { vix.nodes[n.Name] = n; vix.scanned++ })
-		},
+		}},
 	}
+	// A refused List degrades (#546): the checks that join over it are
+	// skipped with a read.unavailable record (see findings), and the
+	// rest still answer. Any other error stays fatal.
 	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+		err := step.run()
+		if err == nil {
+			continue
 		}
+		if _, forbidden := ListForbidden(err); forbidden {
+			vix.refused[step.resource] = volumeMainLists[step.resource]
+			continue
+		}
+		return nil, err
 	}
 	if err := vix.listWorkloadTemplates(ctx, client, ns); err != nil {
 		return nil, err
@@ -321,7 +358,7 @@ func (vix *volumeIndex) listWorkloadTemplates(ctx context.Context, client kubern
 		}
 	}
 	steps := []struct {
-		resource string
+		resource checks.Refusal
 		run      func() error
 	}{
 		{volResDeployments, func() error {
@@ -399,8 +436,33 @@ func (vix *volumeIndex) listWorkloadTemplates(ctx context.Context, client kubern
 	return nil
 }
 
+// volumeRefusedCost names, per main-pass List, what `state volumes`
+// cannot judge without it.
+var volumeRefusedCost = map[string]string{
+	volPVs:         "zone conflicts not checked and attachments orphaned by a deleted PersistentVolume not reported; unconsumed claims carry no reclaim_policy",
+	volAttachments: "attach/detach errors and orphaned attachments not checked",
+	volNodes:       "zone conflicts not checked and attachments orphaned by a deleted node not reported",
+}
+
 func (vix *volumeIndex) findings(now time.Time) []emit.Finding {
 	var out []emit.Finding
+	// Every check joins pods to the claims they mount: without either
+	// side there is no answer at all, only the reason.
+	_, noPods := vix.refused[volPods]
+	_, noPVCs := vix.refused[volPVCs]
+	if noPods || noPVCs {
+		for _, res := range []string{volPods, volPVCs} {
+			if r, ok := vix.refused[res]; ok {
+				out = append(out, checks.RefusedFinding(r, "no volume check ran: every one joins pods to the claims they mount"))
+			}
+		}
+		return out
+	}
+	for _, res := range []string{volPVs, volAttachments, volNodes} {
+		if r, ok := vix.refused[res]; ok {
+			out = append(out, checks.RefusedFinding(r, volumeRefusedCost[res]))
+		}
+	}
 	out = append(out, vix.multiAttach()...)
 	out = append(out, vix.zoneConflicts()...)
 	out = append(out, vix.attachmentFindings(now)...)
@@ -414,15 +476,9 @@ func (vix *volumeIndex) findings(now time.Time) []emit.Finding {
 func (vix *volumeIndex) unconsumedClaims(now time.Time) []emit.Finding {
 	if len(vix.unread) > 0 {
 		out := make([]emit.Finding, 0, len(vix.unread))
-		for _, res := range vix.unread {
-			out = append(out, emit.Finding{
-				Kind:     KindReadUnavailable,
-				Severity: emit.SeverityInfo,
-				Reason:   skipForbidden.reason(),
-				Message: "forbidden: list " + res +
-					" — unconsumed-claim detection skipped: a claim referenced only by an unread workload template would be misreported as unconsumed",
-				Details: []emit.Field{{Key: "resource", Value: res}},
-			})
+		for _, r := range vix.unread {
+			out = append(out, checks.RefusedFinding(r,
+				"unconsumed-claim detection skipped: a claim referenced only by an unread workload template would be misreported as unconsumed"))
 		}
 		return out
 	}
@@ -777,11 +833,14 @@ func volumeAttachErr(va *storagev1.VolumeAttachment, pvName, verb string, verr *
 func (vix *volumeIndex) volumeOrphaned(va *storagev1.VolumeAttachment, pvName string) (emit.Finding, bool) {
 	var missing []string
 	what := ""
-	if pvName != "" && vix.pvs[pvName] == nil {
+	// A side whose List was refused is unknown, not missing (#546).
+	_, pvsUnread := vix.refused[volPVs]
+	_, nodesUnread := vix.refused[volNodes]
+	if pvName != "" && !pvsUnread && vix.pvs[pvName] == nil {
 		missing = append(missing, "pv missing")
 		what = "PersistentVolume"
 	}
-	if va.Spec.NodeName != "" && vix.nodes[va.Spec.NodeName] == nil {
+	if va.Spec.NodeName != "" && !nodesUnread && vix.nodes[va.Spec.NodeName] == nil {
 		missing = append(missing, "node missing")
 		if what == "" {
 			what = "node"

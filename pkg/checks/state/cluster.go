@@ -140,6 +140,22 @@ func Tolerate() LoadOption { return func(o *loadOptions) { o.tolerate = true } }
 // Tolerate to also catch races and SSAR gaps.
 func Preflight() LoadOption { return func(o *loadOptions) { o.preflight = true } }
 
+// OwnerTreeLists is everything a workload's owner-reference tree can
+// hold: the pod-owning workload kinds and the pods themselves. No
+// Secret, ConfigMap, Node or RBAC object can sit in such a tree, so a
+// pass restricted to these (Lists(OwnerTreeLists)) resolves a
+// workload's member pods identically under the built-in `view` role
+// and under full access (#546).
+var OwnerTreeLists = []ListRequirement{
+	{Group: "", Resource: "pods"},
+	{Group: "apps", Resource: "deployments"},
+	{Group: "apps", Resource: "replicasets"},
+	{Group: "apps", Resource: "statefulsets"},
+	{Group: "apps", Resource: "daemonsets"},
+	{Group: "batch", Resource: "jobs"},
+	{Group: "batch", Resource: "cronjobs"},
+}
+
 // Lists restricts the pass to the given requirements (the resolved
 // value of the --lists flag). Passing every requirement is equivalent
 // to no restriction. An empty/nil slice is a no-op (read everything) —

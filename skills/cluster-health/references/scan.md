@@ -66,6 +66,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 | `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
@@ -76,7 +77,6 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
 | `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
-| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence (§11) |
 | `storage.missing_class` | critical | the claim names a StorageClass that does not exist — it will stay Pending forever |
 | `storage.no_default_class` | critical | the claim names no class and the cluster has no default StorageClass |
 | `storage.no_provisioner` | warning | the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available |
@@ -168,7 +168,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `skipped` | summary-line note: opt-in groups this scan did NOT run (switch one on with --include=<group>) — stated so a quiet scan is never mistaken for a complete one |
 | `drilldown` | summary-line note: workloads the stage-2 dependency-edge drill-down covered |
 | `truncated` | summary-line note: drill-down candidates dropped by --max-drilldown |
-| `drilldown_skipped` | summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one |
+| `drilldown_skipped` | summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one. Kept concise on purpose: each listed resource needs `list` granted via a ClusterRole (lookout's shipped ClusterRole grants every one), and `lookout state edges --workload=<a flagged workload>` prints the full reason per resource — refused verb, scope, whether the built-in view role grants it, and the grant that fixes it — as read.unavailable records |
 | `container` | container the finding is about (init containers prefixed init:) |
 | `image` | image reference that failed to pull |
 | `restarts` | container restart count |

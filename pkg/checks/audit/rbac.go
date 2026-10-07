@@ -132,8 +132,9 @@ func RBACCommand(deps Deps) checks.Command {
 		Kinds: []checks.KindField{
 			checks.Kind(kindClusterAdminBinding, "the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindWildcardRBAC, "the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards", emit.SeverityWarning, emit.SeverityInfo),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "role", Doc: "the role the binding points at, as Kind/name"},
 			{Name: "subjects", Doc: "subjects the binding grants the role to"},
 			{Name: "subject_names", Doc: "those subjects as Kind:name (ServiceAccounts as ServiceAccount:namespace/name), sorted and capped at 8"},
@@ -145,7 +146,7 @@ func RBACCommand(deps Deps) checks.Command {
 			{Name: "bindings", Doc: "RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today"},
 			{Name: "platform_managed", Doc: "summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile)"},
 			{Name: "aggregated_roles", Doc: "summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit rbac -A",
 			"lookout audit rbac --namespace=prod",
@@ -186,21 +187,44 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return 0, err
 	}
 	objs := rbacObjects{clusterScope: inv.Scope.AllNamespaces}
-	if err := state.ListRoleBindings(ctx, client, listNS, func(r *rbacv1.RoleBinding) { objs.roleBindings = append(objs.roleBindings, *r) }); err != nil {
+	// Every claim joins bindings to the rules of the roles they point
+	// at, so a refused List leaves nothing that can be judged honestly:
+	// the answer is one read.unavailable record per refused kind
+	// (#546). The built-in `view` role grants no RBAC kind at all.
+	var refused []checks.Refusal
+	collect := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		if r, ok := checks.ForbiddenRefusal(err); ok {
+			refused = append(refused, r)
+			return nil
+		}
+		return err
+	}
+	if err := collect(state.ListRoleBindings(ctx, client, listNS, func(r *rbacv1.RoleBinding) { objs.roleBindings = append(objs.roleBindings, *r) })); err != nil {
 		return 0, err
 	}
-	if err := state.ListRoles(ctx, client, listNS, func(r *rbacv1.Role) { objs.roles = append(objs.roles, *r) }); err != nil {
+	if err := collect(state.ListRoles(ctx, client, listNS, func(r *rbacv1.Role) { objs.roles = append(objs.roles, *r) })); err != nil {
 		return 0, err
 	}
 	if objs.clusterScope {
-		if err := state.ListClusterRoleBindings(ctx, client, func(r *rbacv1.ClusterRoleBinding) {
+		if err := collect(state.ListClusterRoleBindings(ctx, client, func(r *rbacv1.ClusterRoleBinding) {
 			objs.clusterRoleBindings = append(objs.clusterRoleBindings, *r)
-		}); err != nil {
+		})); err != nil {
 			return 0, err
 		}
 	}
-	if err := state.ListClusterRoles(ctx, client, func(r *rbacv1.ClusterRole) { objs.clusterRoles = append(objs.clusterRoles, *r) }); err != nil {
+	if err := collect(state.ListClusterRoles(ctx, client, func(r *rbacv1.ClusterRole) { objs.clusterRoles = append(objs.clusterRoles, *r) })); err != nil {
 		return 0, err
+	}
+	if len(refused) > 0 {
+		for _, r := range refused {
+			if err := inv.Out.Emit(checks.RefusedFinding(r, "no binding or role was judged: every claim reads a binding against the rules of the role it points at")); err != nil {
+				return 0, err
+			}
+		}
+		return 0, nil
 	}
 
 	findings, tally := judgeRBAC(objs)

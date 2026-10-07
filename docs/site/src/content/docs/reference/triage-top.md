@@ -53,6 +53,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `top.unrequested` | info | how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero |
 | `top.unrequested_container` | info | one container that sets no cpu/memory request (--show-unrequested) |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 

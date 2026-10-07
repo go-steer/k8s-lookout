@@ -79,11 +79,11 @@ func TestEdgesDegradeUnderViewRole(t *testing.T) {
 		t.Errorf("summary = %q, want findings=7", summary)
 	}
 	wantFindings(t, lines[:len(lines)-1], []string{
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — Secret references (env, envFrom and volume keys, imagePullSecrets, Ingress TLS secrets and their certificate expiry) not verified" workload=Deployment/prod/api resource=secrets`,
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list rolebindings.rbac.authorization.k8s.io — RoleBindings naming the workload's ServiceAccount, and their roleRefs, not verified" workload=Deployment/prod/api resource=rolebindings.rbac.authorization.k8s.io`,
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list roles.rbac.authorization.k8s.io — RoleBinding roleRefs to Roles not verified" workload=Deployment/prod/api resource=roles.rbac.authorization.k8s.io`,
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list clusterrolebindings.rbac.authorization.k8s.io — ClusterRoleBindings naming the workload's ServiceAccount, and their roleRefs, not verified" workload=Deployment/prod/api resource=clusterrolebindings.rbac.authorization.k8s.io`,
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list clusterroles.rbac.authorization.k8s.io — roleRefs to ClusterRoles not verified" workload=Deployment/prod/api resource=clusterroles.rbac.authorization.k8s.io`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — Secret references (env, envFrom and volume keys, imagePullSecrets, Ingress TLS secrets and their certificate expiry) not verified" workload=Deployment/prod/api resource=secrets`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list rolebindings.rbac.authorization.k8s.io — namespaced, not granted by the built-in view role; grant list on rolebindings (rbac.authorization.k8s.io) via a ClusterRole or Role, as lookout's shipped ClusterRole does — RoleBindings naming the workload's ServiceAccount, and their roleRefs, not verified" workload=Deployment/prod/api resource=rolebindings.rbac.authorization.k8s.io`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list roles.rbac.authorization.k8s.io — namespaced, not granted by the built-in view role; grant list on roles (rbac.authorization.k8s.io) via a ClusterRole or Role, as lookout's shipped ClusterRole does — RoleBinding roleRefs to Roles not verified" workload=Deployment/prod/api resource=roles.rbac.authorization.k8s.io`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list clusterrolebindings.rbac.authorization.k8s.io — cluster-scoped, not granted by the built-in view role; grant list on clusterrolebindings (rbac.authorization.k8s.io) via a ClusterRole, as lookout's shipped ClusterRole does — ClusterRoleBindings naming the workload's ServiceAccount, and their roleRefs, not verified" workload=Deployment/prod/api resource=clusterrolebindings.rbac.authorization.k8s.io`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list clusterroles.rbac.authorization.k8s.io — cluster-scoped, not granted by the built-in view role; grant list on clusterroles (rbac.authorization.k8s.io) via a ClusterRole, as lookout's shipped ClusterRole does — roleRefs to ClusterRoles not verified" workload=Deployment/prod/api resource=clusterroles.rbac.authorization.k8s.io`,
 		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=ConfigMap name=app-config reason=CreateContainerConfigError message="configmap app-config not found (env LOG_LEVEL in container api)" workload=Deployment/prod/api container=api env=LOG_LEVEL key=log.level pods=2`,
 		`kind=edge.missing_ref severity=critical namespace=prod kind_of_object=ConfigMap name=app-config reason=FailedMount message="configmap app-config not found (volume config)" workload=Deployment/prod/api volume=config key=config.yaml pods=2`,
 	})
@@ -102,7 +102,7 @@ func TestEdgesServiceEntryUnderViewRole(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
 	wantFindings(t, lines[:len(lines)-1], []string{
-		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — Ingress TLS secret references and their certificate expiry not verified" workload=Service/prod/api resource=secrets`,
+		`kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — Ingress TLS secret references and their certificate expiry not verified" workload=Service/prod/api resource=secrets`,
 	})
 }
 
@@ -130,9 +130,9 @@ func TestListForbidden(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"core", apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("x")), "forbidden: list secrets", true},
-		{"grouped", apierrors.NewForbidden(schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "rolebindings"}, "", errors.New("x")), "forbidden: list rolebindings.rbac.authorization.k8s.io", true},
-		{"wrapped", errors.Join(errors.New("listing secrets"), apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("x"))), "forbidden: list secrets", true},
+		{"core", apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("x")), "forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does", true},
+		{"grouped", apierrors.NewForbidden(schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "rolebindings"}, "", errors.New("x")), "forbidden: list rolebindings.rbac.authorization.k8s.io — namespaced, not granted by the built-in view role; grant list on rolebindings (rbac.authorization.k8s.io) via a ClusterRole or Role, as lookout's shipped ClusterRole does", true},
+		{"wrapped", errors.Join(errors.New("listing secrets"), apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("x"))), "forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does", true},
 		{"internal", apierrors.NewInternalError(errors.New("x")), "", false},
 		{"nil", nil, "", false},
 	} {

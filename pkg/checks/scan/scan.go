@@ -265,7 +265,7 @@ func ownFields() []checks.OutputField {
 		{Name: "skipped", Doc: "summary-line note: opt-in groups this scan did NOT run (switch one on with --include=<group>) — stated so a quiet scan is never mistaken for a complete one"},
 		{Name: "drilldown", Doc: "summary-line note: workloads the stage-2 dependency-edge drill-down covered"},
 		{Name: "truncated", Doc: "summary-line note: drill-down candidates dropped by --max-drilldown"},
-		{Name: "drilldown_skipped", Doc: "summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one"},
+		{Name: "drilldown_skipped", Doc: "summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one. Kept concise on purpose: each listed resource needs `list` granted via a ClusterRole (lookout's shipped ClusterRole grants every one), and `lookout state edges --workload=<a flagged workload>` prints the full reason per resource — refused verb, scope, whether the built-in view role grants it, and the grant that fixes it — as read.unavailable records"},
 	}
 }
 

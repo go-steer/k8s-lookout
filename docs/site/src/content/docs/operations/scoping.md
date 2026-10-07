@@ -171,33 +171,64 @@ It grants read access to the namespaced workload, networking and
 configuration objects. It grants no Secrets, no
 `rbac.authorization.k8s.io` objects, and none of the cluster-scoped
 kinds: Nodes, PersistentVolumes, StorageClasses, IngressClasses and
-admission webhook configurations. The read-path commands treat a
-refused read as information: the part of the answer that needed it
-says so, with the reason, and everything else is still checked. The
-command exits 0 with its usual summary line, on the CLI and over MCP
-alike. Any error other than Forbidden still fails the command, because
-a broken API server is not a permission gap.
+admission webhook configurations. Nor does it grant `metrics.k8s.io`,
+although metrics-server's own aggregated role adds that to `view` on
+clusters that run metrics-server.
+
+Every read-path command treats a refused read as information. The
+part of the answer that needed it says so and everything else is still
+checked. The command exits 0 with its usual summary line, on the CLI
+and over MCP alike. Where the whole answer depends on the refused
+kind, the answer is that one record and nothing else. Any error other
+than Forbidden still fails the command, because a broken API server is
+not a permission gap.
+
+Every such line says why the read was refused and what fixes it, in
+one shared wording:
+
+```
+forbidden: list nodes — cluster-scoped, not granted by the built-in view role; grant list on nodes (core) via a ClusterRole, as lookout's shipped ClusterRole does — node.* findings not checked
+```
+
+In order, the line gives:
+
+- the refused verb and resource, with its API group;
+- whether the resource is cluster-scoped (only a ClusterRole can grant
+  it) or namespaced (a ClusterRole or a per-namespace Role);
+- the cause. "Not granted by the built-in view role" appears only when
+  the resource really is outside `view`. When `view` does grant it, the
+  line says "this identity lacks it", because a custom role is to
+  blame;
+- the fix: the grant, plus "as lookout's shipped ClusterRole does"
+  when `deploy/12-clusterrole-watcher.yaml` (and the chart) grants it;
+- after the last dash, what the command could not judge without it.
 
 | Command | Under `view` |
 | --- | --- |
-| `health` | `nodes`, `certs` and `webhooks` answer `status=unavailable`, each with the refused read as the message (`forbidden: list nodes — …`). `services` still scores and adds `unverified=` naming the Ingress class and TLS secret references it could not check. The other categories score as usual. `control-plane` needs a cloud provider either way. |
+| `health` | `nodes`, `certs` and `webhooks` answer `status=unavailable`, with the refusal line as the message. `services` still scores and adds `unverified=` naming the Ingress class and TLS secret references it could not check, each with its refusal line. The other categories score as usual. `control-plane` needs a cloud provider either way. |
+| `triage delta` | Whole cluster: one `read.unavailable` for `nodes` (`node.*` findings not checked). Every other class answers as usual. With `--namespace` the node class is off anyway. |
+| `triage top` | Without `metrics.k8s.io`: one `read.unavailable` for `pods.metrics.k8s.io` and no rows. With it (metrics-server's aggregated role): under `-A`, one `read.unavailable` for `nodes` and the node view drops out. The container rows still answer. `--workload` resolves its pods from the owner tree only. |
+| `triage spec` | A Node or Secret target: one `read.unavailable` for the refused `get`. |
 | `state edges --workload=…` | One `read.unavailable` finding per refused list that affects the answer: `secrets`, the four RBAC kinds, `ingressclasses` and `storageclasses`, each naming the edges it could not verify. Those edges are not reported as missing. Entered as `--workload=Service/…`, only the gaps that mode reads are reported. |
+| `state webhooks` | One `read.unavailable` for the webhook configurations, and no other output: every check starts from them. |
+| `state volumes` | One `read.unavailable` each for `persistentvolumes`, `volumeattachments` and `nodes`. Zone conflicts and attachment errors go unchecked. RWO multi-attach and unconsumed claims still answer. An attachment whose PV or node could not be read is not called orphaned. |
+| `state storage` | One `read.unavailable` each for `storageclasses` and `persistentvolumes`. Every claim judgment needs both, so nothing else is reported. |
+| `stab drain` | One `read.unavailable` for `nodes`. Nodes are taken from the pods bound to them, so every blocker is still found. A node with no pods is left out of `nodes=`, since it has nothing to block a drain. |
+| `stab scaledown` | One `read.unavailable` for `nodes` and no node judged: utilization is requests over each Node's allocatable. |
+| `audit rbac` | One `read.unavailable` per RBAC kind, and no judgment: every claim reads a binding against its role's rules. |
+| `audit workloads` | One `read.unavailable` for `nodes`. `audit.rigid_scheduling` is not judged and the `nodes=` note is left out. Every other claim answers. |
 | `triage radius` | One `read.unavailable` finding each for `nodes` and `secrets`. A Secret the target mounts is listed with `observed=unknown` rather than as `radius.missing`. RBAC objects are no part of a blast radius, so their refusal is not reported. |
 | `triage changes` | One `read.unavailable` finding for `nodes`: zones are read from Node labels, so neighbors reached only through a shared zone are out of scope. Every other change is reported as usual. |
 | `triage events --workload=…` | Nothing is lost. The owner-reference tree is resolved from pods and workload objects only. |
-| `scan` | The edge drill-down still runs. The summary line names the lists it was refused as `drilldown_skipped=`. |
+| `scan` | Each stage reports its own gaps as above, as `read.unavailable` records, instead of failing as `scan.check_failed`, and the summary line's `unavailable=` names those stages. The edge drill-down still runs and names the lists it was refused in a short `drilldown_skipped=` note. `state edges --workload=…` on a flagged workload prints the full refusal line for each. |
 
-`bundle` and the sentinel's enrichment already took this approach,
-with a `skipped=` note on the bundle head. To get the missing checks
-back, grant `list` on the kinds named in the messages.
-
-Not yet degrading under `view`: `triage delta` across the whole
-cluster fails on its `nodes` list (scope it with `--namespace`, which
-drops the node class). So do `state webhooks`, `state volumes`,
-`state storage`, `stab drain` and the node view of `triage top`, which
-read cluster-scoped kinds `view` does not grant. In `scan` each of
-those stages becomes a `scan.check_failed` finding and the scan
-carries on.
+`bundle` and `triage list` report the same gaps in their existing
+`skipped=` notes. `triage events`, `triage logs`, `stab drift`,
+`state wi` and the other `audit` commands read nothing `view` refuses.
+To get a missing check back, grant the verb and resource the line
+names. A hermetic test, `pkg/checks/all/viewrole_test.go`, runs every
+read-path command against exactly `view` and fails if any of them
+exits non-zero.
 
 ## Sources
 

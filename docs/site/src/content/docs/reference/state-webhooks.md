@@ -46,6 +46,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
 | `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
 | `webhook.ca_expiring` | warning | the webhook's caBundle expires within --cert-warn |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -63,6 +64,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `subject` | CA-bundle certificate subject (CN when set); never key material |
 | `not_after` | CA-bundle certificate NotAfter, RFC 3339 |
 | `days_left` | whole days until NotAfter (negative = expired) |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

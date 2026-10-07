@@ -95,10 +95,10 @@ func TestViewRoleDegradesCertsOnly(t *testing.T) {
 	if len(got) != 12 {
 		t.Fatalf("want 12 scorecard lines, got %d:\n%s", len(got), view.Stdout)
 	}
-	if line := `kind=health.category severity=info reason=Unavailable message="forbidden: list secrets — certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret; grant list on secrets to score it" category=certs status=unavailable`; got["certs"] != line {
+	if line := `kind=health.category severity=info reason=Unavailable message="forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret" category=certs status=unavailable`; got["certs"] != line {
 		t.Errorf("certs line:\n got: %s\nwant: %s", got["certs"], line)
 	}
-	if line := want["services"] + ` unverified="Ingress TLS secret references (forbidden: list secrets)"`; got["services"] != line {
+	if line := want["services"] + ` unverified="Ingress TLS secret references (forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does)"`; got["services"] != line {
 		t.Errorf("services line:\n got: %s\nwant: %s", got["services"], line)
 	}
 	for cat, line := range want {
@@ -138,19 +138,19 @@ func TestForbiddenCoreReadMakesCategoryUnavailable(t *testing.T) {
 		want string
 	}{
 		{"webhooks", schema.GroupResource{Group: "admissionregistration.k8s.io", Resource: "validatingwebhookconfigurations"},
-			"forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — the webhook audit reads the admission webhook configurations and the Services behind them"},
+			"forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — cluster-scoped, not granted by the built-in view role; grant list on validatingwebhookconfigurations (admissionregistration.k8s.io) via a ClusterRole, as lookout's shipped ClusterRole does — the webhook audit reads the admission webhook configurations and the Services behind them"},
 		{"services", schema.GroupResource{Resource: "services"},
-			"forbidden: list services — Service routing is judged from Services and the pods their selectors match"},
+			"forbidden: list services — namespaced, this identity lacks it; grant list on services (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — Service routing is judged from Services and the pods their selectors match"},
 		{"nodes", schema.GroupResource{Resource: "nodes"},
-			"forbidden: list nodes — node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant"},
+			"forbidden: list nodes — cluster-scoped, not granted by the built-in view role; grant list on nodes (core) via a ClusterRole, as lookout's shipped ClusterRole does — node conditions are read from the Node objects"},
 		{"quota", schema.GroupResource{Resource: "resourcequotas"},
-			"forbidden: list resourcequotas — quota pressure is read from the ResourceQuotas in scope"},
+			"forbidden: list resourcequotas — namespaced, this identity lacks it; grant list on resourcequotas (core) via a ClusterRole or Role — quota pressure is read from the ResourceQuotas in scope"},
 		{"disruption", schema.GroupResource{Group: "policy", Resource: "poddisruptionbudgets"},
-			"forbidden: list poddisruptionbudgets.policy — disruption readiness is read from the PodDisruptionBudgets in scope"},
+			"forbidden: list poddisruptionbudgets.policy — namespaced, this identity lacks it; grant list on poddisruptionbudgets (policy) via a ClusterRole or Role, as lookout's shipped ClusterRole does — disruption readiness is read from the PodDisruptionBudgets in scope"},
 		{"rollouts", schema.GroupResource{Group: "batch", Resource: "cronjobs"},
-			"forbidden: list cronjobs.batch — rollouts are read from the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs in scope"},
+			"forbidden: list cronjobs.batch — namespaced, this identity lacks it; grant list on cronjobs (batch) via a ClusterRole or Role, as lookout's shipped ClusterRole does — rollouts are read from the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs in scope"},
 		{"storage", schema.GroupResource{Resource: "persistentvolumeclaims"},
-			"forbidden: list persistentvolumeclaims — PVC health needs the PersistentVolumeClaims in scope"},
+			"forbidden: list persistentvolumeclaims — namespaced, this identity lacks it; grant list on persistentvolumeclaims (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — PVC health needs the PersistentVolumeClaims in scope"},
 	} {
 		t.Run(tc.cat, func(t *testing.T) {
 			status, kinds, reasons := statusesAndKinds(t, deniedCommand([]schema.GroupResource{tc.deny}, forbidden, brokenObjects(t)...))
@@ -218,9 +218,9 @@ func TestHealthUnderExactViewRole(t *testing.T) {
 	got, want := categoryLines(t, view.Stdout), categoryLines(t, full.Stdout)
 
 	unavailable := map[string]string{
-		"nodes":    "forbidden: list nodes — node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant",
-		"certs":    "forbidden: list secrets — certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret; grant list on secrets to score it",
-		"webhooks": "forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — the webhook audit reads the admission webhook configurations and the Services behind them",
+		"nodes":    "forbidden: list nodes — cluster-scoped, not granted by the built-in view role; grant list on nodes (core) via a ClusterRole, as lookout's shipped ClusterRole does — node conditions are read from the Node objects",
+		"certs":    "forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret",
+		"webhooks": "forbidden: list validatingwebhookconfigurations.admissionregistration.k8s.io — cluster-scoped, not granted by the built-in view role; grant list on validatingwebhookconfigurations (admissionregistration.k8s.io) via a ClusterRole, as lookout's shipped ClusterRole does — the webhook audit reads the admission webhook configurations and the Services behind them",
 	}
 	for cat, reason := range unavailable {
 		rec := parseLine(t, got[cat])
@@ -228,7 +228,7 @@ func TestHealthUnderExactViewRole(t *testing.T) {
 			t.Errorf("%s:\n got: %s\nwant: status=unavailable message=%q", cat, got[cat], reason)
 		}
 	}
-	if line := want["services"] + ` unverified="Ingress class references (forbidden: list ingressclasses.networking.k8s.io); Ingress TLS secret references (forbidden: list secrets)"`; got["services"] != line {
+	if line := want["services"] + ` unverified="Ingress class references (forbidden: list ingressclasses.networking.k8s.io — cluster-scoped, not granted by the built-in view role; grant list on ingressclasses (networking.k8s.io) via a ClusterRole, as lookout's shipped ClusterRole does); Ingress TLS secret references (forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does)"`; got["services"] != line {
 		t.Errorf("services line:\n got: %s\nwant: %s", got["services"], line)
 	}
 	for cat, line := range want {

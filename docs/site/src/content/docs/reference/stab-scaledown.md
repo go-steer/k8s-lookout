@@ -42,6 +42,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | Kind | Severity | Claim |
 | --- | --- | --- |
 | `scaledown.blocked` | warning | the node is requested below --utilization, so the autoscaler would remove it, but a pod on it cannot be moved — a zero-disruption PDB, a pod with no controller, or a pod annotated safe-to-evict=false — so it keeps billing at low utilization |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -61,6 +62,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `nodes` | summary note: nodes listed |
 | `excluded` | summary note: nodes the autoscaler never removes and so were not judged — control-plane, annotated scale-down-disabled, or already tainted for deletion |
 | `underused` | summary note: judged nodes below --utilization, blocked or not |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

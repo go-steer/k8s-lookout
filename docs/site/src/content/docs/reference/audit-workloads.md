@@ -51,6 +51,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -79,9 +80,10 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `missed_runs` | activations skipped since then; ≥N when the walk was capped, unknown when the schedule does not parse |
 | `pdbs` | summary note: PodDisruptionBudgets seen in scope |
 | `hpas` | summary note: HorizontalPodAutoscalers seen in scope |
-| `nodes` | summary note: nodes in the cluster — the denominator every placement claim is resolved against |
+| `nodes` | summary note: nodes in the cluster — the denominator every placement claim is resolved against; omitted when the node List was refused (a read.unavailable record says so, and no placement claim is made) |
 | `workloads` | summary note: workloads examined, broken down as deployments/statefulsets/daemonsets/cronjobs |
 | `jobs` | summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads` |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

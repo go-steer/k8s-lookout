@@ -191,8 +191,9 @@ func SpecCommand(deps SpecDeps) Command {
 			Kind("spec.resource", "the object itself: metadata, owner, and the kind-specific highlights (one per target)", emit.SeverityInfo),
 			Kind("spec.container", "one container of the target: image, resources, ports, probes, env (one per container)", emit.SeverityInfo),
 			Kind("spec.condition", "a status condition of the target that is not in its nominal state", emit.SeverityWarning),
+			UnreadKind(),
 		},
-		Output: []OutputField{
+		Output: append([]OutputField{
 			{Name: "labels", Doc: "resource labels as sorted k=v pairs"},
 			{Name: "owner", Doc: "controlling owner as Kind/name"},
 			{Name: "phase", Doc: "status.phase, only when abnormal for the kind (zero nominal state)"},
@@ -223,7 +224,7 @@ func SpecCommand(deps SpecDeps) Command {
 			{Name: "runtime", Doc: "Node: container runtime version"},
 			{Name: "allocatable", Doc: "Node: allocatable cpu, memory and pods as name:quantity pairs"},
 			{Name: "capacity", Doc: "Node: capacity cpu, memory and pods as name:quantity pairs"},
-		},
+		}, UnreadFields()...),
 		Examples: []string{
 			"lookout triage spec Deployment/prod/api",
 			"lookout triage spec po/payments-api-7d9c4b-x2n8p --namespace=prod",
@@ -274,6 +275,12 @@ func runSpec(ctx context.Context, deps SpecDeps, inv emit.Invocation) (int, erro
 	}
 	kind, u, err := fetchSpecObject(ctx, deps, &target)
 	if err != nil {
+		// The one object IS the answer: a refused get is one
+		// read.unavailable record, not a failed command (#546) —
+		// under the built-in `view` role, any Node or Secret.
+		if ok, emitErr := RefusedAnswer(inv.Out, err, "the spec of "+target.kindToken+" "+target.qualifiedName()+" was not read"); ok {
+			return 0, emitErr
+		}
 		return 0, err
 	}
 	sanitized := emit.SanitizeUnstructured(u)

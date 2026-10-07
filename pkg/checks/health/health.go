@@ -276,8 +276,11 @@ func delegatedKinds() []checks.KindField {
 			if seen[k.Name] || (name == "perf probe" && !perfKinds[k.Name]) {
 				continue
 			}
-			// The delta pass below does not run the hpa class.
-			if name == "triage delta" && strings.HasPrefix(k.Name, "hpa.") {
+			// The delta pass below does not run the hpa class. And
+			// read.unavailable is the standalone commands' record of a
+			// refused read; health reports the same gap as an
+			// unavailable category with the refusal as its message.
+			if name == "triage delta" && strings.HasPrefix(k.Name, "hpa.") || k.Name == checks.KindReadUnavailable {
 				continue
 			}
 			seen[k.Name] = true
@@ -395,7 +398,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// certs: every kubernetes.io/tls Secret in scope.
 	n, err = checkCerts(ctx, client, ns, now, certWarn, card)
 	if err != nil {
-		if err := refused("certs", "certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret; grant list on secrets to score it", err); err != nil {
+		if err := refused("certs", "certificate expiry is read from the tls.crt of each kubernetes.io/tls Secret", err); err != nil {
 			return 0, err
 		}
 	} else {
@@ -614,7 +617,7 @@ var deltaParts = []struct {
 }{
 	{delta.PartPods, []string{"crashloops", "pending"}, "crash loops and aged Pending are read from the Pods in scope"},
 	{delta.PartWorkloads, []string{"rollouts"}, "rollouts are read from the Deployments, StatefulSets, DaemonSets, Jobs and CronJobs in scope"},
-	{delta.PartNodes, []string{"nodes"}, "node conditions are read from the cluster-scoped Node objects, which the built-in view role does not grant"},
+	{delta.PartNodes, []string{"nodes"}, "node conditions are read from the Node objects"},
 	{delta.PartSystem, []string{"addons"}, "add-on health is read from the kube-system Deployments and DaemonSets"},
 	{delta.PartPDB, []string{"disruption"}, "disruption readiness is read from the PodDisruptionBudgets in scope"},
 	{delta.PartQuota, []string{"quota"}, "quota pressure is read from the ResourceQuotas in scope"},

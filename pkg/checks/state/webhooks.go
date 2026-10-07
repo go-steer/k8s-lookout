@@ -81,8 +81,9 @@ func WebhooksCommand(deps Deps) checks.Command {
 			checks.Kind("webhook.slow_risk", "the webhook's timeout is long enough to slow every gated write if the backend degrades", emit.SeverityInfo),
 			checks.Kind("webhook.ca_expired", "the webhook's caBundle has expired: the API server cannot verify it", emit.SeverityCritical),
 			checks.Kind("webhook.ca_expiring", "the webhook's caBundle expires within --cert-warn", emit.SeverityWarning),
+			UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "webhook", Doc: "admission webhook as <configuration>/<webhook name>"},
 			{Name: "service", Doc: "service backend the webhook points at, as <namespace>/<name>"},
 			{Name: "backend", Doc: "why the backend is dead: service missing, no ready endpoints, or port <p> not on service"},
@@ -93,7 +94,7 @@ func WebhooksCommand(deps Deps) checks.Command {
 			{Name: "subject", Doc: "CA-bundle certificate subject (CN when set); never key material"},
 			{Name: "not_after", Doc: "CA-bundle certificate NotAfter, RFC 3339"},
 			{Name: "days_left", Doc: "whole days until NotAfter (negative = expired)"},
-		},
+		}, UnreadFields()...),
 		Examples: []string{
 			"lookout state webhooks",
 			"lookout state webhooks --format=json --cert-warn=336h",
@@ -117,7 +118,15 @@ func runWebhooks(ctx context.Context, deps Deps, inv emit.Invocation) (int, erro
 	}
 	in, scanned, err := LoadWebhookInputs(ctx, client)
 	if err != nil {
-		return 0, err
+		// Every webhook check starts from the configurations, so a
+		// refused read is the whole answer: one read.unavailable
+		// record (#546) — under the built-in `view` role, which grants
+		// no admissionregistration.k8s.io kind.
+		if _, err := checks.RefusedAnswer(inv.Out, err,
+			"no admission webhook was audited: the audit reads the validating and mutating webhook configurations, then the Services, EndpointSlices and Namespaces behind them"); err != nil {
+			return 0, err
+		}
+		return 0, nil
 	}
 	for _, f := range CheckWebhooks(in, inv.Flags.Duration("cert-warn"), deps.now()) {
 		if err := inv.Out.Emit(f); err != nil {

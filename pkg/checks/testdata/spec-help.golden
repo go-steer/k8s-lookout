@@ -50,6 +50,7 @@ Output fields (beyond the shared envelope fields kind, severity, namespace, kind
   runtime           Node: container runtime version
   allocatable       Node: allocatable cpu, memory and pods as name:quantity pairs
   capacity          Node: capacity cpu, memory and pods as name:quantity pairs
+  resource          read.unavailable: the resource that could not be read, as resource[.group]
 
 Output: one finding per line (logfmt; --format=json for one JSON object
 per line), keys in fixed order; healthy resources emit nothing. The final

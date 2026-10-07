@@ -386,7 +386,7 @@ func viewDeps(objs ...runtime.Object) Deps {
 // Nodes are refused, and zones are read from Node labels. The Secret
 // and RBAC refusals get no record — they remove nothing from the
 // neighborhood.
-const changesNodesGap = `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list nodes — zones are read from Node labels, so neighbors reached only through a shared zone, and their changes, are out of scope" resource=nodes`
+const changesNodesGap = `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list nodes — cluster-scoped, not granted by the built-in view role; grant list on nodes (core) via a ClusterRole, as lookout's shipped ClusterRole does — zones are read from Node labels, so neighbors reached only through a shared zone, and their changes, are out of scope" resource=nodes`
 
 // TestChanges_LiveUnderViewRole is the #546 follow-up for changes: in
 // pure live mode under `view` the command exits 0, leads with the one

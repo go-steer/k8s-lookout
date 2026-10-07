@@ -33,24 +33,14 @@ import (
 
 // KindReadUnavailable is the degradation record for one resource a
 // command's List pass could not read.
-const KindReadUnavailable = "read.unavailable"
+const KindReadUnavailable = checks.KindReadUnavailable
 
-// UnreadKind is the ledger entry for KindReadUnavailable. Every command
-// that emits it declares it from here, so the one claim reads the same
-// wherever it is rendered.
-func UnreadKind() checks.KindField {
-	return checks.Kind(KindReadUnavailable,
-		"a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence (§11)",
-		emit.SeverityInfo)
-}
+// UnreadKind is checks.UnreadKind, the ledger entry for
+// KindReadUnavailable.
+func UnreadKind() checks.KindField { return checks.UnreadKind() }
 
-// UnreadFields are the output-glossary entries for the read.unavailable
-// record.
-func UnreadFields() []checks.OutputField {
-	return []checks.OutputField{
-		{Name: "resource", Doc: "read.unavailable: the resource the List pass could not read, as resource[.group]"},
-	}
-}
+// UnreadFields is checks.UnreadFields.
+func UnreadFields() []checks.OutputField { return checks.UnreadFields() }
 
 // skipCause is why one requirement was not read.
 type skipCause int
@@ -78,7 +68,7 @@ func (c skipCause) describe(req ListRequirement) string {
 	case skipNotRequested:
 		return "not requested: list " + req.String()
 	}
-	return "forbidden: list " + req.String()
+	return checks.Refused("list", req.Group, req.Resource).String()
 }
 
 // ListForbidden is checks.ListForbidden, kept here so state callers
