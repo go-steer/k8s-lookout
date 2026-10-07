@@ -76,7 +76,7 @@ scanned=15 findings=24 elapsed=100ms
 | addons | `lookout triage delta --only=system` |
 | quota | `lookout triage delta --only=quota` |
 | storage | `lookout triage spec pvc/prod/data-claim` for the named PVC |
-| certs | `lookout state edges --workload=Deployment/prod/api --cert-warn=720h` for the workload behind the cert, or `lookout triage spec Secret/prod/old-tls` (keys and expiry only — values never render) |
+| certs | `lookout state edges --workload=Deployment/prod/api --cert-warn=720h` for the workload behind the cert, or `lookout triage spec Secret/prod/old-tls` (keys and expiry only — values never render). On `kind_of_object=Certificate` (`cert.never_issued`, `cert.renewal_failed`) the message carries cert-manager's Ready reason; the ACME cause, when there is one, is on the sentinel's `expiry.challenge_stuck` / `expiry.order_failed` signals |
 | webhooks | `lookout state webhooks` — the full audit: dead backends × failurePolicy, namespace/rule blast radius, timeout stall risk, CA-bundle expiry (health's webhooks category delegates to the same check) |
 | services | `lookout state edges --workload=Service/prod/web` — enters from the Service, and names the workload it was probably meant to select (`likely_workload=`) |
 | disruption | `lookout stab drain -A` — every drain blocker, gridlocked budgets included, with the pods behind each |

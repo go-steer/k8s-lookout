@@ -58,6 +58,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cloud.unavailable` naming that permission. A forbidden Node or Pod
     List gives a `read.unavailable` record instead of a guess.
 
+- **`lookout health`'s `certs` category now reads cert-manager
+  Certificates.** Before, it judged TLS Secrets only, so a
+  Certificate that never issued had no Secret to judge and scored
+  `healthy`. On a cluster where `cert-manager.io/v1` Certificates are
+  served, each one is judged with the expiry source's own logic, now
+  shared through a small `pkg/certmanager` package, so the scan and
+  the sentinel agree on what a Certificate's status means. Grading
+  follows how the category already grades a Secret: broken now is
+  critical, at risk is a warning.
+  - `cert.never_issued` (new, critical): `Ready=False` with no
+    `status.notAfter`, past the 15m first-issuance grace (the
+    `--expiry-acme-grace` default), or with a recorded failure. The
+    message uses the expiry source's wording, `certificate never
+    issued: <Ready reason>`. A Certificate inside the grace does not
+    count against health.
+  - `cert.renewal_failed` (new, warning): the last issuance failed
+    while the current certificate is still valid.
+  - `cert.expired` / `cert.expiring` now also cover a Certificate's
+    `status.notAfter`, with the same `--cert-warn` window.
+
+  The Secret a Certificate writes is judged as that Certificate and
+  not again as a Secret, so one problem gives one finding. Without the
+  CRD nothing changes. The ClusterRole already grants `list` on
+  `certificates` for the expiry source. If that list is refused,
+  Secrets are still judged and the line carries `unverified=`. If
+  Secrets are refused but Certificates are readable, the category
+  scores from the Certificates and `unverified=` names the unmanaged
+  Secrets. Only when both are refused does it answer `unavailable`.
+  Every refusal is worded by the shared refusal formatter.
+
 ### Changed
 
 - **Every forbidden-read line now says why the read was refused and
