@@ -522,3 +522,76 @@ func TestRoute_ARelaxedBreachRoutesNormally(t *testing.T) {
 		t.Errorf("Route = %+v, want a plain warning signal", got)
 	}
 }
+
+// TestJudge_APolicySeverityReplacesTheTiersLevelInEitherDirection is §10.1's
+// `thresholds.severity` (amended 2026-10-07): the level the operator wrote
+// replaces the one the tier implies — up or down — and the tier stays.
+func TestJudge_APolicySeverityReplacesTheTiersLevelInEitherDirection(t *testing.T) {
+	th := DefaultThresholds()
+	policy := func(sev string) *Intent {
+		in := spreadIntent()
+		in.Source = SourcePolicyCRD
+		in.Confidence = ConfidenceDeclared
+		in.Severity = sev
+		return in
+	}
+
+	// Promote: Tier B drift to critical.
+	b := judgeEqual([]int64{20, 0, 0}, nil, policy(severityCritical), th)
+	if b.Tier != TierB || b.Kind != BreachDrift {
+		t.Fatalf("verdict = %+v, want Tier B drift — the policy must not move the tier", b)
+	}
+	if b.Severity != severityCritical || !b.SeverityFromPolicy {
+		t.Errorf("severity = %q (from policy %v), want critical from policy", b.Severity, b.SeverityFromPolicy)
+	}
+	if d := b.Route(false); !d.Signal || d.Severity != severityCritical {
+		t.Errorf("Route = %+v, want a critical signal", d)
+	}
+
+	// Demote: a carried DoNotSchedule contract is Tier A, and the operator
+	// has accepted it.
+	a := policy(severityInfo)
+	a.MaxSkew = ptr(int32(1))
+	a.WhenUnsatisfiable = v1.DoNotSchedule
+	got := judgeEqual([]int64{5, 3, 3}, a.MaxSkew, a, th)
+	if got.Tier != TierA || got.Severity != severityInfo || !got.SeverityFromPolicy {
+		t.Errorf("verdict = tier %v at %q, want Tier A demoted to info", got.Tier, got.Severity)
+	}
+
+	// Unset is the tier's level, unmarked.
+	plain := judgeEqual([]int64{20, 0, 0}, nil, policy(""), th)
+	if plain.Severity != severityWarning || plain.SeverityFromPolicy {
+		t.Errorf("no policy severity = %q (from policy %v), want warning from the tier", plain.Severity, plain.SeverityFromPolicy)
+	}
+
+	// An unbreached subject carries no severity at all, policy or not.
+	if v := judgeEqual([]int64{4, 3, 3}, nil, policy(severityCritical), th); v.Breached || v.Severity != "" || v.SeverityFromPolicy {
+		t.Errorf("unbreached verdict = %+v, want no severity", v)
+	}
+}
+
+// TestRoute_APolicySeverityIsTheTierCOptIn: §8.3 names a per-policy opt-in for
+// Tier C, and a severity a policy wrote is that opt-in. Suppression still wins.
+func TestRoute_APolicySeverityIsTheTierCOptIn(t *testing.T) {
+	v := Verdict{Breached: true, Tier: TierC, Severity: severityCritical, SeverityFromPolicy: true}
+	if got := v.Route(false); !got.Signal || got.Severity != severityCritical {
+		t.Errorf("Route = %+v, want a critical signal with Tier C signals off", got)
+	}
+	v.Suppressed, v.Reason = true, "domain-outage"
+	if got := v.Route(true); got.Signal {
+		t.Errorf("Route = %+v, want suppression to silence a policy severity too", got)
+	}
+}
+
+func TestValidSeverity(t *testing.T) {
+	for _, s := range Severities() {
+		if !ValidSeverity(s) {
+			t.Errorf("ValidSeverity(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "Critical", "error", "high"} {
+		if ValidSeverity(s) {
+			t.Errorf("ValidSeverity(%q) = true", s)
+		}
+	}
+}

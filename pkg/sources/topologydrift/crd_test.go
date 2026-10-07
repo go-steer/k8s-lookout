@@ -170,6 +170,18 @@ func TestCRD_EnumsMatchTheDecoder(t *testing.T) {
 		}
 	})
 
+	t.Run("thresholds.severity", func(t *testing.T) {
+		got := crdEnum(t, schema, append(slices.Clone(keyProps), "thresholds", "properties", "severity")...)
+		if want := leeway.Severities(); !slices.Equal(got, want) {
+			t.Errorf("CRD severity enum = %v, want %v", got, want)
+		}
+		for _, s := range got {
+			if !leeway.ValidSeverity(s) {
+				t.Errorf("the CRD accepts severity %q and the decoder rejects it", s)
+			}
+		}
+	})
+
 	t.Run("inference sources", func(t *testing.T) {
 		got := crdEnum(t, schema,
 			"properties", "spec", "properties", "inference", "properties", "sources", "items")
@@ -251,6 +263,20 @@ func TestCRD_OmitsTheFieldsNoReleaseHonoursYet(t *testing.T) {
 	want := []string{"inference", "selector", "subjectKinds", "topologyKeys"}
 	if !slices.Equal(got, want) {
 		t.Errorf("spec properties = %v, want %v", got, want)
+	}
+
+	// §10.1's per-key thresholds block ships with severity only (2026-10-07).
+	// drift, maxDomainShare, for and resolveAfter stay out until something
+	// reads them, for the same reason as the spec-level fields above.
+	th, _, _ := unstructured.NestedMap(schema,
+		"properties", "spec", "properties", "topologyKeys", "items", "properties", "thresholds", "properties")
+	var thGot []string
+	for k := range th {
+		thGot = append(thGot, k)
+	}
+	slices.Sort(thGot)
+	if want := []string{"severity"}; !slices.Equal(thGot, want) {
+		t.Errorf("topologyKeys[].thresholds properties = %v, want %v", thGot, want)
 	}
 }
 

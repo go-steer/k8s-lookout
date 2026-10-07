@@ -61,6 +61,54 @@ waking anybody. Turn them on once the metrics have convinced you the
 baselines are sane on your cluster — which usually takes a few days,
 because a baseline needs history before it means anything.
 
+### Per-workload severity with a LeewayPolicy
+
+The tier sets a finding's severity, and the severity sets its route:
+`critical` opens an incident session, `warning` goes to the watchboard
+digest, and `info` is only stored. To change that for some workloads
+and not others, set `thresholds.severity` on a topology key in a
+`LeewayPolicy` (namespaced) or `ClusterLeewayPolicy`. The CRDs are
+optional. Install them with `kubectl apply -f
+deploy/crds/leewaypolicies.yaml` or `--set leewayPolicyCRD.install=true`,
+then restart the watcher, which only looks for them at startup.
+
+```yaml
+apiVersion: leeway.lookout.go-steer.io/v1alpha1
+kind: LeewayPolicy
+metadata: { name: api-zone-spread, namespace: payments }
+spec:
+  selector: { matchLabels: { app: api } }   # matched against pod labels
+  topologyKeys:
+    - key: topology.kubernetes.io/zone
+      mode: Spread
+      thresholds:
+        severity: critical   # info | warning | critical
+```
+
+With this policy, a zone-axis `leeway.placement_drift` on `app=api` in
+`payments` is routed at `critical`, so it opens a session. The same
+finding on every other workload stays a Tier B `warning`.
+
+- **The tier does not change.** The finding still says `tier B`. It
+  carries `severityFromPolicy: true`, and its message ends `severity
+  critical set by policy`.
+- **It works in both directions.** `info` on a known Tier A violation
+  stores it rather than paging on it.
+- **It is per key.** It covers every leeway finding on that axis for
+  the policy's subjects. An axis without a `severity` keeps the tier's
+  level, and a `mode: Ignore` key cannot have one.
+- **`lookout watch --severity` wins.** A per-kind flag such as
+  `--severity leeway.placement_drift=warning` is applied after the
+  policy, so the operator running the sentinel can always cap what a
+  namespace's policy asks for.
+- **It counts as the Tier C opt-in** for the subjects it covers, but
+  transient-state suppression (during a zone outage, for instance)
+  still silences the finding.
+
+The rest of the design's `thresholds` block (`drift`,
+`maxDomainShare`, `for`, `resolveAfter`) is not in the schema yet. If
+you write one of those fields, the API server prunes it.
+
 ## Which flag moves which tier
 
 Nothing here changes what is measured. Every flag below changes what is

@@ -3210,6 +3210,11 @@ enabling leeway by default defensible.
 > The opt-in is `--topology-tier-c-signals`, off by default. The severity on the
 > wire is the verdict's, so the routing the table describes happens downstream in
 > §7.7 exactly as this section argues it should.
+>
+> **2026-10-07: the per-policy row ships as §10.1's `thresholds.severity`.** A
+> policy-set severity replaces the tier's on the verdict. It counts as the Tier C
+> opt-in, and it loses to `lookout watch --severity` for the same kind. See the
+> §10.1 amendment.
 
 ### 8.4 Metrics and the export pipeline
 
@@ -4161,6 +4166,58 @@ Per-workload annotation overrides remain the lightest-weight path:
 > is matched against the **pod's** labels, since the source resolves subjects from
 > pods and never reads the owning workload object.
 
+> **Amended 2026-10-07: `thresholds.severity` ships** (#543), as the one field of
+> the per-key `thresholds` block above. The rest of the block (`drift`,
+> `maxDomainShare`, `for`, `resolveAfter`) stays out of the schema for the reason
+> already given. #543 showed why this field came first: a policy could change a
+> subject's expectation but not how loudly its findings were routed, so the only
+> way to get one Tier B workload a session was `lookout watch --severity`, which
+> is per kind and cluster-wide. The example's shape is followed exactly. Where it
+> was silent, these decisions were taken:
+>
+> - **Per policy key, not per tier and not per kind.** The field sits in a
+>   `topologyKeys[]` entry, so it applies to every leeway finding on that axis for
+>   the subjects the policy governs, whatever the kind (`contract_violated`,
+>   `placement_drift`). An axis the policy does not set keeps the tier's level.
+>   Nothing more granular was asked for, and a per-kind map would duplicate the
+>   global flag's job.
+> - **Promote and demote.** The value replaces the level §8.1 derives, in either
+>   direction. `info` on an accepted Tier A violation is a legitimate thing to
+>   write down, and a promote-only rule would make it a value the CRD accepts and
+>   the code ignores. The **tier does not move**: a Tier B finding promoted to
+>   `critical` is still `tier B` on the wire and in the payload. The tier says
+>   where the expectation came from, and a routing level doesn't change that. The
+>   finding carries `severityFromPolicy: true` and its message ends
+>   `severity critical set by policy`, so the mismatch explains itself.
+> - **Tier C: a policy severity is §8.3's "opt-in per policy".** `Route` treats a
+>   policy-set severity as permission to emit even with `--topology-tier-c-signals`
+>   off. §7.6 suppression still wins at every tier. In practice the case doesn't
+>   arise through the shipped resolver: a key the policy declares carries the
+>   policy's intent, which outranks the learned baseline (§5.1), so the axis is
+>   judged at A or B. The rule is stated in `Route` so that it holds if that
+>   changes.
+> - **The global `--severity` flag wins.** The policy's level is stamped by the
+>   source, and the dispatcher's `RoutingPolicy.Classify` applies the per-kind
+>   flag afterwards, as it does for every source. That ordering is also the right
+>   one: the flag belongs to whoever runs the sentinel, while a `LeewayPolicy` is
+>   namespaced and a namespace tenant can write one. Letting it outrank the flag
+>   would let any tenant open agent sessions that the operator had turned down
+>   cluster-wide.
+> - **Validation.** The value must be one of `info`, `warning` or `critical`, in
+>   lower case. The CRD's enum and the decoder both enforce that, and
+>   `crd_test.go` holds them equal. Setting it on a `mode: Ignore` key is
+>   rejected for the same reason `expectedDistribution` is: such a key never
+>   breaches.
+> - **Frozen contracts are unaffected.** Severity already rides the signal, and
+>   it is not a fingerprint input (`Fingerprint(kind, reasonClass, objectClass,
+>   zone)`), so a promoted episode keeps its identity and nothing in signal schema
+>   v1 changes. `severityFromPolicy` is an additive, omit-when-false field on the
+>   §8.5 payload, which is not part of the wire schema.
+>
+> Code: `PolicyKey.Severity` → `leeway.Intent.Severity` → `Judge` (applied last,
+> after escalation) → `Verdict.SeverityFromPolicy` → `Route`. Tests:
+> `pkg/sources/topologydrift/policyseverity_test.go`.
+
 See the FR-10 note in §4 for the precedence, ambiguity and discovery decisions, and
 `deploy/crds/leewaypolicies.yaml` for the shipped schema — the two duplicated
 `openAPIV3Schema` blocks, the enums and the defaults are all held to this package's
@@ -4370,7 +4427,8 @@ Following lookout's conventions (DESIGN §13): presubmits are hermetic.
   at `warning` with cause `constraint_ignored`, routed to the watchboard. A zone
   TSC with `DoNotSchedule`, on the pod or as a declared cluster default, makes it
   Tier A. A LeewayPolicy alone does not, because the shipped schema has no
-  contract field. Fixtures: `TestHostnameAntiAffinityZoneSkew_*` in
+  contract field. Since 2026-10-07 a policy can still promote the Tier B finding
+  to `critical` with `thresholds.severity` (§10.1); the tier stays B. Fixtures: `TestHostnameAntiAffinityZoneSkew_*` in
   `pkg/sources/topologydrift/hostnamespread_test.go`.
 
 ### 12.1 The kwok harness

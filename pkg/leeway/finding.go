@@ -168,6 +168,11 @@ type Finding struct {
 	// Relaxed reports that §7.6 multiplied the thresholds before judging, so
 	// the numbers below cleared a bar this payload does not otherwise state.
 	Relaxed bool `json:"relaxed,omitempty"`
+
+	// SeverityFromPolicy reports that Severity was set by a LeewayPolicy's
+	// `thresholds.severity` rather than derived from Tier (§10.1). Without it
+	// a Tier B at `critical` reads as a bug.
+	SeverityFromPolicy bool `json:"severityFromPolicy,omitempty"`
 }
 
 // FindingInput is everything NewFinding assembles. A struct rather than eight
@@ -208,6 +213,7 @@ func NewFinding(in FindingInput) Finding {
 		FirstSeenAt:         in.State.FirstSeenAt.UTC(),
 		Transient:           in.Verdict.Transient.String(),
 		Relaxed:             in.Verdict.Relaxed,
+		SeverityFromPolicy:  in.Verdict.SeverityFromPolicy,
 	}
 	if f.SuspectedCause == "" {
 		f.SuspectedCause = CauseUnknown

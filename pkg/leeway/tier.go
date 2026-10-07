@@ -62,6 +62,18 @@ const (
 	severityCritical = "critical"
 )
 
+// ValidSeverity reports whether s is one of the three DESIGN §7.7 levels —
+// the only values §10.1's `thresholds.severity` may take.
+func ValidSeverity(s string) bool {
+	return s == severityInfo || s == severityWarning || s == severityCritical
+}
+
+// Severities lists the levels ValidSeverity accepts, least severe first. The
+// CRD's enum is held to it.
+func Severities() []string {
+	return []string{severityInfo, severityWarning, severityCritical}
+}
+
 // Severity is the routing level §8.3 assigns the tier.
 //
 // Tier C's `info` is the floor, not the answer: §8.1 escalates it to `warning`
@@ -155,6 +167,13 @@ type Verdict struct {
 	// Relaxed reports that the thresholds were multiplied by §7.6's transient
 	// multiplier before judging.
 	Relaxed bool
+
+	// SeverityFromPolicy reports that Severity is a LeewayPolicy's
+	// `thresholds.severity` rather than the tier's own level (§10.1, amended
+	// 2026-10-07). Route reads it as the per-policy opt-in §8.3 names for
+	// Tier C, and the finding carries it so that a Tier B at `critical`
+	// explains itself.
+	SeverityFromPolicy bool
 }
 
 // Judge applies the §7.3/§7.4 breach rules and the §8.1 tier table.
@@ -182,6 +201,18 @@ func (s *Scores) Judge(intent *Intent, t Thresholds) Verdict {
 	}
 	if v.Escalated && v.Tier == TierC {
 		v.Severity = severityWarning
+	}
+
+	// §10.1's per-policy override, last, so it replaces whatever the tier and
+	// the escalation arrived at — in either direction. An operator who wrote a
+	// severity down meant that severity; promoting only would make `info` on a
+	// known, accepted Tier A contract violation a value the CRD accepts and
+	// the code ignores. The tier is left alone: it is a statement about where
+	// the expectation came from, and a policy changing how loudly a finding is
+	// routed does not change that.
+	if intent != nil && ValidSeverity(intent.Severity) {
+		v.Severity = intent.Severity
+		v.SeverityFromPolicy = true
 	}
 	return v
 }
@@ -230,13 +261,21 @@ type Delivery struct {
 // Tier A. That is the zone-outage case in §14's exit criteria: four hundred
 // workloads all "violating" their spread contract because a zone went away is
 // one fact about the cluster, not four hundred findings about the workloads.
+//
+// A severity a policy set is §8.3's "opt-in per policy" for Tier C: an
+// operator who wrote a level down for these subjects has asked for them to be
+// routed at it, and dropping the finding before routing would make the field
+// a value the CRD accepts and nothing honours. Suppression still wins over it.
+// (Through the shipped resolver the case does not arise — a key a policy
+// declares carries the policy's intent, which outranks the learned baseline,
+// so it is judged at A or B — but the rule is stated where it would bite.)
 func (v Verdict) Route(tierCSignals bool) Delivery {
 	switch {
 	case v.Suppressed:
 		return Delivery{Reason: v.Reason}
 	case !v.Breached:
 		return Delivery{Reason: "no breach"}
-	case v.Tier == TierC && !tierCSignals:
+	case v.Tier == TierC && !tierCSignals && !v.SeverityFromPolicy:
 		return Delivery{Reason: "tier C is metrics-only unless enabled by policy"}
 	}
 	return Delivery{Signal: true, Severity: v.Severity}

@@ -298,6 +298,18 @@ type Intent struct {
 	// not "Ignore". Read them through EligibilityPolicies, never directly.
 	Policies NodeInclusionPolicies
 
+	// Severity is §10.1's `thresholds.severity`: the routing level an operator
+	// set for findings on this axis, replacing the one §8.1 derives from the
+	// tier. Empty — the normal case — means the tier decides. Only a policy can
+	// express it, so every other source leaves it empty; and it lives on the
+	// intent rather than being looked up again at emission because the intent
+	// is what survives from resolution to judgement, and the policy that won
+	// the axis is exactly the one whose severity should apply. Judge reads it.
+	//
+	// It changes the severity and nothing else: not the tier, not the kind,
+	// and not the fingerprint, whose recipe has no severity input.
+	Severity string
+
 	Confidence Confidence
 	Evidence   []EvidenceItem
 }
