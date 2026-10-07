@@ -65,6 +65,7 @@ uat_build_invocations() {
     ["perf probe"]="--pack=apiserver"
     # Cluster-scoped objects; -A is meaningless and refused.
     ["state webhooks"]=""
+    ["stab scaledown"]=""
     # Probes from where lookout runs, so it is not cluster-scoped
     # either. localhost always resolves, including on a CI runner.
     ["net probe"]="--dns=localhost --probe-timeout=3s"
@@ -142,6 +143,7 @@ UAT_SCOPE_REJECTERS=(
   "cloud stockout"
   "perf probe"      # reads control-plane metrics
   "state webhooks"  # webhook configurations are cluster-scoped
+  "stab scaledown"  # judges whole nodes, which are cluster-scoped
   "net probe"       # probes from where lookout runs
 )
 

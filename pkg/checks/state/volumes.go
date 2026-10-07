@@ -28,8 +28,50 @@ package state
 //	volume.attach_error        warn/critical VolumeAttachment attach/detach error (critical once it has aged)
 //	volume.zone_conflict       critical      pod scheduled outside every zone the PV's node affinity allows
 //	volume.orphaned_attachment info          VolumeAttachment referencing a deleted PV and/or node
+//	volume.unconsumed_pvc      info          Bound claim that no pod mounts and no workload template references
 //
 // Healthy volumes are silent (§4.2 zero nominal state).
+//
+// # volume.unconsumed_pvc (#231, the fleet-audit `unconsumed-pvc` slug)
+//
+// A Bound claim holds a provisioned volume — and, on a cloud, a billed
+// disk — whether or not anything mounts it. The claim is reported only
+// when the API says nothing can be using it, and every look-alike that
+// is a normal intermediate or intentionally parked state is excluded,
+// because a cost finding that fires on a healthy cluster trains people
+// to ignore the check:
+//
+//   - Any pod referencing the claim counts as a consumer, in ANY phase
+//     and scheduled or not: a pod that is Pending, unschedulable, or
+//     Completed still names the claim and will (or did) mount it.
+//     Generic ephemeral volumes count too (claim <pod>-<volume>).
+//   - Any workload pod TEMPLATE referencing the claim counts —
+//     Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, CronJob. This
+//     is what keeps a Deployment scaled to zero, or a CronJob between
+//     runs, from reading as waste: the claim is parked, not orphaned.
+//   - A claim matching a live StatefulSet's volumeClaimTemplates
+//     (<template>-<statefulset>-<ordinal>) is excluded, at any ordinal.
+//     A StatefulSet scaled down — or to zero — keeps the claims of its
+//     removed ordinals on purpose (persistentVolumeClaimRetentionPolicy
+//     whenScaled=Retain, the default) so that scaling back up gets the
+//     same data. The claims of a StatefulSet that no longer exists ARE
+//     reported: nothing will ever re-adopt them.
+//   - A claim owned by a Pod (an ephemeral volume) or a StatefulSet (a
+//     retention policy of Delete) is excluded: its lifecycle is the
+//     owner's, and the garbage collector removes it.
+//   - A claim younger than volumeUnconsumedGrace is excluded — the race
+//     between creating a claim and creating the pod that mounts it.
+//   - A claim being deleted is excluded.
+//
+// What the check cannot see, and says so in the ledger: a consumer that
+// is not a pod or a built-in workload (a KubeVirt VirtualMachine, a CI
+// workspace, a backup tool, a claim kept as a clone source). Those read
+// as unconsumed, which is why the severity is info and why an exemption
+// is the reviewed way to say "parked on purpose". The workload Lists
+// are what make the exclusions above possible, so when any of them is
+// refused the whole claim judgment is skipped with an explicit
+// read.unavailable record — guessing without them would report every
+// claim a scaled-to-zero workload owns.
 
 import (
 	"context"
@@ -39,6 +81,8 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -66,6 +110,15 @@ const volumeErrMsgCap = 200
 // ends with "+K more".
 const volumePodListCap = 6
 
+// volumeUnconsumedGrace is how old a Bound claim must be before
+// volume.unconsumed_pvc may report it. It is a race guard, not a
+// waste threshold: the claim and the pod that mounts it are created by
+// separate calls (an operator, a StatefulSet controller, a Helm
+// install), and a claim caught between the two is not orphaned. An
+// hour is far longer than that window and far shorter than any
+// interval at which waste is worth reporting.
+const volumeUnconsumedGrace = time.Hour
+
 // The zone topology labels, stable and legacy-beta (older clusters
 // and some CSI drivers still stamp only the beta key).
 const (
@@ -78,14 +131,16 @@ func VolumesCommand(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "state volumes",
 		MCPName: "k8s_volume_conflicts",
-		Summary: "When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume events — join VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO claims wanted on two nodes, attachments stuck in error, cross-zone PV locks, orphaned attachments.",
+		Summary: "When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume events — join VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO claims wanted on two nodes, attachments stuck in error, cross-zone PV locks, orphaned attachments; also names Bound claims nothing mounts or references (provisioned storage billing for nobody).",
 		Kinds: []checks.KindField{
 			checks.Kind("volume.multi_attach", "an RWO claim is wanted by pods on more than one node — the second pod never starts", emit.SeverityCritical),
 			checks.Kind("volume.zone_conflict", "the PV is locked to a zone the pod's node is not in", emit.SeverityCritical),
 			checks.Kind("volume.attach_error", "the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow", emit.SeverityCritical, emit.SeverityWarning),
 			checks.Kind("volume.orphaned_attachment", "a VolumeAttachment survives its PV or its node", emit.SeverityInfo),
+			checks.Kind("volume.unconsumed_pvc", "a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict", emit.SeverityInfo),
+			UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "pods", Doc: "scheduled pods referencing the conflicted claim, sorted (list capped, then +K more)"},
 			{Name: "nodes", Doc: "distinct nodes those pods are scheduled on, sorted"},
 			{Name: "access_modes", Doc: "the claim's declared access modes"},
@@ -99,7 +154,11 @@ func VolumesCommand(deps Deps) checks.Command {
 			{Name: "pv_zones", Doc: "zones the PV's node affinity allows, sorted"},
 			{Name: "node_zone", Doc: "zone label of the node the pod is scheduled on"},
 			{Name: "orphan", Doc: "which referenced side is gone: \"pv missing\", \"node missing\", or both"},
-		},
+			{Name: "capacity", Doc: "volume.unconsumed_pvc: the claim's bound capacity (status.capacity.storage); omitted when unreported"},
+			{Name: "storage_class", Doc: "volume.unconsumed_pvc: the claim's StorageClass; omitted when it names none"},
+			{Name: "reclaim_policy", Doc: "volume.unconsumed_pvc: the bound PV's reclaim policy — Delete means deleting the claim frees the disk, Retain means the PV must be deleted too; omitted when the PV is not visible"},
+			{Name: "claim_age", Doc: "volume.unconsumed_pvc: how long ago the claim was created, truncated to minutes"},
+		}, UnreadFields()...),
 		Examples: []string{
 			"lookout state volumes",
 			"lookout state volumes --namespace=prod",
@@ -158,13 +217,37 @@ type volumeIndex struct {
 	pvs         map[string]*corev1.PersistentVolume      // name
 	nodes       map[string]*corev1.Node                  // name
 	attachments []*storagev1.VolumeAttachment
+
+	// templateClaims are the claims a workload pod template names
+	// (ns/claim), and stsClaimPrefixes the "<template>-<sts>-" name
+	// prefixes of every live StatefulSet's volumeClaimTemplates, keyed
+	// by namespace — the two halves of "parked, not orphaned".
+	templateClaims   map[string]bool
+	stsClaimPrefixes map[string][]string
+	// unread lists the workload resources whose List was refused; any
+	// entry suppresses the unconsumed-claim judgment (see the package
+	// comment) and becomes a read.unavailable record.
+	unread []string
 }
+
+// volumeWorkloadResources names the workload Lists the unconsumed-claim
+// judgment depends on, as the read.unavailable `resource` value.
+const (
+	volResDeployments  = "deployments.apps"
+	volResStatefulSets = "statefulsets.apps"
+	volResDaemonSets   = "daemonsets.apps"
+	volResReplicaSets  = "replicasets.apps"
+	volResJobs         = "jobs.batch"
+	volResCronJobs     = "cronjobs.batch"
+)
 
 func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string) (*volumeIndex, error) {
 	vix := &volumeIndex{
-		pvcs:  map[string]*corev1.PersistentVolumeClaim{},
-		pvs:   map[string]*corev1.PersistentVolume{},
-		nodes: map[string]*corev1.Node{},
+		pvcs:             map[string]*corev1.PersistentVolumeClaim{},
+		pvs:              map[string]*corev1.PersistentVolume{},
+		nodes:            map[string]*corev1.Node{},
+		templateClaims:   map[string]bool{},
+		stsClaimPrefixes: map[string][]string{},
 	}
 	steps := []func() error{
 		func() error {
@@ -218,7 +301,102 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 			return nil, err
 		}
 	}
+	if err := vix.listWorkloadTemplates(ctx, client, ns); err != nil {
+		return nil, err
+	}
 	return vix, nil
+}
+
+// listWorkloadTemplates pages through the workload kinds whose pod
+// templates (and StatefulSet claim templates) can reference a claim.
+// Unlike the Lists above, a refused one degrades rather than fails
+// (#546): it costs only the unconsumed-claim judgment, so every other
+// volume check still answers. Any other error stays fatal.
+func (vix *volumeIndex) listWorkloadTemplates(ctx context.Context, client kubernetes.Interface, ns string) error {
+	addSpec := func(namespace string, spec *corev1.PodSpec) {
+		for _, v := range spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				vix.templateClaims[key(namespace, v.PersistentVolumeClaim.ClaimName)] = true
+			}
+		}
+	}
+	steps := []struct {
+		resource string
+		run      func() error
+	}{
+		{volResDeployments, func() error {
+			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
+				l, err := client.AppsV1().Deployments(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(d *appsv1.Deployment) { addSpec(d.Namespace, &d.Spec.Template.Spec); vix.scanned++ })
+		}},
+		{volResStatefulSets, func() error {
+			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
+				l, err := client.AppsV1().StatefulSets(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(s *appsv1.StatefulSet) {
+				addSpec(s.Namespace, &s.Spec.Template.Spec)
+				for _, vct := range s.Spec.VolumeClaimTemplates {
+					vix.stsClaimPrefixes[s.Namespace] = append(vix.stsClaimPrefixes[s.Namespace], vct.Name+"-"+s.Name+"-")
+				}
+				vix.scanned++
+			})
+		}},
+		{volResDaemonSets, func() error {
+			return listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
+				l, err := client.AppsV1().DaemonSets(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(d *appsv1.DaemonSet) { addSpec(d.Namespace, &d.Spec.Template.Spec); vix.scanned++ })
+		}},
+		{volResReplicaSets, func() error {
+			return listPages("replicasets", func(o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
+				l, err := client.AppsV1().ReplicaSets(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(r *appsv1.ReplicaSet) { addSpec(r.Namespace, &r.Spec.Template.Spec); vix.scanned++ })
+		}},
+		{volResJobs, func() error {
+			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
+				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(j *batchv1.Job) { addSpec(j.Namespace, &j.Spec.Template.Spec); vix.scanned++ })
+		}},
+		{volResCronJobs, func() error {
+			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
+				l, err := client.BatchV1().CronJobs(ns).List(ctx, o)
+				if err != nil {
+					return nil, "", err
+				}
+				return l.Items, l.Continue, nil
+			}, func(c *batchv1.CronJob) { addSpec(c.Namespace, &c.Spec.JobTemplate.Spec.Template.Spec); vix.scanned++ })
+		}},
+	}
+	for _, step := range steps {
+		err := step.run()
+		if err == nil {
+			continue
+		}
+		if _, forbidden := ListForbidden(err); forbidden {
+			vix.unread = append(vix.unread, step.resource)
+			continue
+		}
+		return err
+	}
+	return nil
 }
 
 func (vix *volumeIndex) findings(now time.Time) []emit.Finding {
@@ -226,7 +404,132 @@ func (vix *volumeIndex) findings(now time.Time) []emit.Finding {
 	out = append(out, vix.multiAttach()...)
 	out = append(out, vix.zoneConflicts()...)
 	out = append(out, vix.attachmentFindings(now)...)
+	out = append(out, vix.unconsumedClaims(now)...)
 	return out
+}
+
+// unconsumedClaims reports Bound claims nothing can be using — every
+// exclusion is listed, with its reason, in the package comment. When a
+// workload List was refused it reports nothing and says why instead.
+func (vix *volumeIndex) unconsumedClaims(now time.Time) []emit.Finding {
+	if len(vix.unread) > 0 {
+		out := make([]emit.Finding, 0, len(vix.unread))
+		for _, res := range vix.unread {
+			out = append(out, emit.Finding{
+				Kind:     KindReadUnavailable,
+				Severity: emit.SeverityInfo,
+				Reason:   skipForbidden.reason(),
+				Message: "forbidden: list " + res +
+					" — unconsumed-claim detection skipped: a claim referenced only by an unread workload template would be misreported as unconsumed",
+				Details: []emit.Field{{Key: "resource", Value: res}},
+			})
+		}
+		return out
+	}
+
+	consumed := map[string]bool{}
+	for _, p := range vix.pods {
+		for _, v := range p.Spec.Volumes {
+			switch {
+			case v.PersistentVolumeClaim != nil:
+				consumed[key(p.Namespace, v.PersistentVolumeClaim.ClaimName)] = true
+			case v.Ephemeral != nil:
+				// A generic ephemeral volume's claim is named
+				// <pod>-<volume> by the ephemeral-volume controller.
+				consumed[key(p.Namespace, p.Name+"-"+v.Name)] = true
+			}
+		}
+	}
+
+	var out []emit.Finding
+	for k, pvc := range vix.pvcs {
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.DeletionTimestamp != nil {
+			continue
+		}
+		if consumed[k] || vix.templateClaims[k] || volumeOwnedByLifecycle(pvc) {
+			continue
+		}
+		if volumeMatchesClaimTemplate(pvc.Name, vix.stsClaimPrefixes[pvc.Namespace]) {
+			continue
+		}
+		age := now.Sub(pvc.CreationTimestamp.Time)
+		if !pvc.CreationTimestamp.IsZero() && age < volumeUnconsumedGrace {
+			continue
+		}
+		out = append(out, vix.unconsumedFinding(pvc, age))
+	}
+	return out
+}
+
+func (vix *volumeIndex) unconsumedFinding(pvc *corev1.PersistentVolumeClaim, age time.Duration) emit.Finding {
+	capacity := ""
+	if q, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+		capacity = q.String()
+	}
+	what := "its volume"
+	if pvc.Spec.VolumeName != "" {
+		what = "volume " + pvc.Spec.VolumeName
+	}
+	if capacity != "" {
+		what += " (" + capacity + ")"
+	}
+	details := []emit.Field{{Key: "pv", Value: pvc.Spec.VolumeName}}
+	if capacity != "" {
+		details = append(details, emit.Field{Key: "capacity", Value: capacity})
+	}
+	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+		details = append(details, emit.Field{Key: "storage_class", Value: *pvc.Spec.StorageClassName})
+	}
+	remedy := "delete the claim if the data is no longer needed"
+	if pv := vix.pvs[pvc.Spec.VolumeName]; pv != nil && pv.Spec.PersistentVolumeReclaimPolicy != "" {
+		details = append(details, emit.Field{Key: "reclaim_policy", Value: string(pv.Spec.PersistentVolumeReclaimPolicy)})
+		if pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimRetain {
+			remedy = "the volume is Retain, so deleting the claim leaves the disk behind as a Released PV — delete both if the data is no longer needed"
+		}
+	}
+	details = append(details, emit.Field{Key: "access_modes", Value: volumeAccessModes(pvc.Spec.AccessModes)})
+	if !pvc.CreationTimestamp.IsZero() {
+		details = append(details, emit.Field{Key: "claim_age", Value: age.Truncate(time.Minute).String()})
+	}
+	return emit.Finding{
+		Kind:         "volume.unconsumed_pvc",
+		Severity:     emit.SeverityInfo,
+		Namespace:    pvc.Namespace,
+		KindOfObject: "PersistentVolumeClaim",
+		Name:         pvc.Name,
+		Reason:       "NoConsumer",
+		Message: fmt.Sprintf("claim is Bound to %s but no pod mounts it and no workload template references it — the storage is provisioned and billed for nothing; %s",
+			what, remedy),
+		Details: details,
+	}
+}
+
+// volumeOwnedByLifecycle reports whether a claim's lifetime belongs to
+// an owner the garbage collector tracks: a Pod (generic ephemeral
+// volume) or a StatefulSet (retention policy Delete).
+func volumeOwnedByLifecycle(pvc *corev1.PersistentVolumeClaim) bool {
+	for _, o := range pvc.OwnerReferences {
+		if o.Kind == "Pod" || o.Kind == "StatefulSet" {
+			return true
+		}
+	}
+	return false
+}
+
+// volumeMatchesClaimTemplate reports whether name is
+// <template>-<statefulset>-<ordinal> for one of the live StatefulSet
+// claim-template prefixes in its namespace.
+func volumeMatchesClaimTemplate(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		rest, ok := strings.CutPrefix(name, p)
+		if !ok || rest == "" {
+			continue
+		}
+		if _, err := strconv.ParseUint(rest, 10, 32); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // volumeClaimUse aggregates the scheduled pods referencing one PVC.

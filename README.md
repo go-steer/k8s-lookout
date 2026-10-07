@@ -145,15 +145,16 @@ testing the CLI through agent harnesses via skills or MCP.
 | `state edges` | dependency-graph verification: config/secret keys, selectors, endpoints, TLS expiry |
 | `state webhooks` | admission webhooks failing closed with dead backends |
 | `state wi` † | GKE Workload Identity KSA↔GSA binding verification |
-| `state volumes` | RWO multi-attach / cross-zone PV locks |
+| `state volumes` | RWO multi-attach / cross-zone PV locks, plus Bound claims nothing mounts or references |
 | `state storage` | why a PersistentVolumeClaim will never bind: missing StorageClass, no cluster default, static-only class, stranded volumes |
 | `state gateway` ‡ | the Gateway API path end to end: GatewayClass → Gateway → listener → HTTPRoute → Service, and every hop that is rejected, unprogrammed, or points at nothing |
 | `state keda` ‡ | KEDA scalers that have stopped scaling: a ScaledObject whose target Deployment/StatefulSet is gone, a trigger whose TriggerAuthentication does not exist, or a scaler KEDA reports not Ready |
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
+| `stab scaledown` | underused nodes the cluster autoscaler cannot remove, and the PDBs and pods pinning them |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |
 | `cloud stockout` † | zonal GCE capacity stockouts, with event-derived reroute candidates — the cloud-side why behind pods stuck Pending |
-| `cloud orphans` † | billing-active leftovers: unattached disks, forwarding rules routing to zero endpoints |
+| `cloud orphans` † | billing-active leftovers: unattached disks, reserved-but-unused external IPs, forwarding rules routing to zero endpoints |
 | `cloud ipspace` † | pod/service/node CIDR utilization per subnet — IP space is incompressible |
 | `cloud quota` † | per-project quota usage vs limit, ranked nearest-to-exhaustion |
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |

@@ -82,13 +82,65 @@ same signal:
 | ----------------- | ---------------------------------------- |
 | `unattached-disk` | `cloud orphans` → `orphan.disk`          |
 | `orphan-lb`       | `cloud orphans` → `orphan.lb`            |
-| `idle-address`    | partial — `cloud orphans` family         |
-| `scaledown-blocked` | partial — `stab drain` blockers        |
+| `idle-address`    | `cloud orphans` → `orphan.address` (#231) |
+| `scaledown-blocked` | `stab scaledown` → `scaledown.blocked` (#231) |
+| `orphan-pv`       | `state storage` → `storage.pv_released` / `storage.pv_failed` (#296; confirmed as the slug's answer in #231) |
+| `unconsumed-pvc`  | `state volumes` → `volume.unconsumed_pvc` (#231) |
+| `idle-nodepool`   | not yet — needs an agreed idle threshold (#557) |
 | `overrequest`     | partial — `triage top` → `top.saturation` |
 
-The remainder of the cost stream (`orphan-pv`, `unconsumed-pvc`,
-`idle-nodepool`, `idle-namespace`, `terminal-pods`) is net-new but small. The
-mapping table above is the starting point, not the finished audit.
+`idle-namespace` and `terminal-pods` stay out: DESIGN.md §5 rejects both (see
+#231 for why each fails the bar the others clear).
+
+#### As built (#231): the cost stream
+
+Each cost slug went into the check that already held its data, not into
+`audit`. The cost stream is waste that exists now, so it falls under the
+incident charter, and Decision 1's posture/incident split does not apply.
+Four decisions are worth recording:
+
+- **`orphan-pv` was already shipped.** `state storage` (#296, which landed
+  after this table was written) reports `storage.pv_failed` and
+  `storage.pv_released`, with `reclaim_policy` on both. A second kind for
+  the same PV would make a consumer count it twice. The one gap was the
+  wording: a Released volume under `Delete` was described as "retained".
+  It is now described as a delete that is pending or stuck.
+- **`unconsumed-pvc` excludes what is parked, not only what is busy.**
+  A claim is reported only when it is Bound, older than an hour, and
+  nothing refers to it. "Refers to" means: a pod in any phase (Pending and
+  Completed pods count, as do generic ephemeral volumes); a workload pod
+  template of any built-in kind, which covers a Deployment scaled to zero
+  and a CronJob between runs; a live StatefulSet's `volumeClaimTemplates`
+  at any ordinal, which covers claims a scale-down keeps by design; or an
+  owner reference to a Pod or StatefulSet. Claims of a *deleted*
+  StatefulSet are reported, because nothing will adopt them again. The
+  workload Lists are what make these exclusions possible. So if one is
+  refused, the judgment is skipped with a `read.unavailable` record, not
+  guessed. Consumers that are not pods (a VM operator, a CI workspace) are
+  invisible, which is why the kind is info and an exemption is the opt-out.
+- **`scaledown-blocked` is its own command, `stab scaledown`, reading the
+  drain index.** It reuses `stab drain`'s blocker classification instead
+  of re-deriving it, so the two cannot disagree about what a gridlocked
+  PDB is. It adds two things: the autoscaler's own utilization measure
+  (requests over allocatable, the larger of CPU and memory, or GPU alone
+  on GPU nodes, with DaemonSet pods counted) and the
+  autoscaler-only `safe-to-evict` annotation. The threshold
+  (`--utilization`, default 50) is the autoscaler's
+  `--scale-down-utilization-threshold` default, not a lookout heuristic.
+  emptyDir is deliberately not counted as a blocker: whether it blocks
+  depends on an autoscaler flag that the API does not show. A new
+  command was chosen over a `stab drain` flag because the question is
+  different ("what is this node costing me", not "what will a drain
+  break"). That difference is what a model reads in the MCP tool
+  description when choosing between the two.
+- **`idle-address` is external addresses only.** An internal static IP is
+  not billed while idle, so reporting it would be hygiene, not cost. The
+  bare `cloud orphans` default sweep now includes addresses; the old
+  sweep is still available as `--only=disks,lbs`.
+
+None of these kinds are in `signal-schema-v1.md`'s wire-kind inventory.
+They are check-local labels with no inject payload, documented in each
+command's ledger (see that doc's § "Scan-source mapping").
 
 #### As built (#190): the first posture detectors
 

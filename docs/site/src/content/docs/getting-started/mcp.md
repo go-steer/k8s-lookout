@@ -206,6 +206,7 @@ The current surface:
 | `k8s_keda_scalers` | [`state keda`](/reference/state-keda/) |
 | `k8s_gitops_drift` | [`stab drift`](/reference/stab-drift/) |
 | `k8s_drain_blockers` | [`stab drain`](/reference/stab-drain/) |
+| `k8s_scaledown_blockers` | [`stab scaledown`](/reference/stab-scaledown/) |
 | `k8s_perf_probe` | [`perf probe`](/reference/perf-probe/) |
 | `k8s_cloud_stockout` | [`cloud stockout`](/reference/cloud-stockout/) |
 | `k8s_cloud_orphans` | [`cloud orphans`](/reference/cloud-orphans/) |

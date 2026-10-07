@@ -89,7 +89,14 @@ type fakeOrphans struct {
 	disks []cloud.OrphanDisk
 	lbs   []cloud.OrphanLoadBalancer
 
-	disksCalled, lbsCalled bool
+	addrs []cloud.OrphanAddress
+
+	disksCalled, lbsCalled, addrsCalled bool
+}
+
+func (f *fakeOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, error) {
+	f.addrsCalled = true
+	return f.addrs, nil
 }
 
 func (f *fakeOrphans) OrphanDisks(context.Context) ([]cloud.OrphanDisk, error) {

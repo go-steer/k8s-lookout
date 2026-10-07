@@ -351,7 +351,8 @@ func TestVolumesWorkloadIsUsageError(t *testing.T) {
 // volMixed hits every finding class at once: a multi-attach on the
 // shared claim, a zone conflict on the zonal claim, one fresh and one
 // aged attach error, a failing detach, and a fully orphaned
-// attachment. The golden pins full-output ordering and formatting.
+// attachment, plus a Bound claim nothing mounts (volume.unconsumed_pvc).
+// The golden pins full-output ordering and formatting.
 func volMixed() []runtime.Object {
 	fresh := volVA("va-fresh", "pv-shared", "node-a", false)
 	fresh.Status.AttachError = volErr("rpc error: attach failed", 2*time.Minute)
@@ -369,6 +370,8 @@ func volMixed() []runtime.Object {
 		volPV("pv-zonal", "us-east1-b"),
 		fresh, stuck, detach,
 		volVA("va-ghost", "pv-ghost", "node-ghost", false),
+		volBoundPVC(ns, "orphaned-claim", "pv-orphan", 96*time.Hour),
+		volReclaimPV("pv-orphan", corev1.PersistentVolumeReclaimDelete),
 		volNode("node-a", "us-east1-b"),
 		volNode("node-b", "us-east1-b"),
 		volNode("node-c", "us-east1-c"),

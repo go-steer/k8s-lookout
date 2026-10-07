@@ -71,7 +71,7 @@ When creates/updates hang or fail cluster-wide with "failed calling webhook", or
 
 ### [`lookout state volumes`](/reference/state-volumes/)
 
-When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume events — join VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO claims wanted on two nodes, attachments stuck in error, cross-zone PV locks, orphaned attachments.
+When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume events — join VolumeAttachment + PV/PVC + pods to name the exact conflict: RWO claims wanted on two nodes, attachments stuck in error, cross-zone PV locks, orphaned attachments; also names Bound claims nothing mounts or references (provisioned storage billing for nobody).
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
@@ -79,6 +79,8 @@ When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume even
 | `volume.zone_conflict` | critical | the PV is locked to a zone the pod's node is not in |
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
+| `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence |
 
 ### [`lookout state storage`](/reference/state-storage/)
 
@@ -193,12 +195,13 @@ Pod/Service/node CIDR utilization per subnet, judged: warning at 80%, critical a
 
 #### [`lookout cloud orphans`](/reference/cloud-orphans/)
 
-Billing-active cloud leftovers: unattached GCE disks older than --min-age and forwarding rules/LBs routing to zero endpoints — cost and hygiene sweep, not an incident read.
+Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints — cost and hygiene sweep, not an incident read.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
+| `orphan.address` | warning | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
 
 #### [`lookout cloud quota`](/reference/cloud-quota/)
