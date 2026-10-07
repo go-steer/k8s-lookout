@@ -77,6 +77,16 @@ rbac:
   # capacity, topology-drift, compute-class, expiry) and storm
   # correlation; deploy-namespaced/README.md has the full list.
   scope: cluster
+  # PRIVILEGED, off by default: the one write grant lookout can use,
+  # `patch pods/ephemeralcontainers`, for `lookout net probe-from`
+  # (issue #539, docs/in-pod-probe-design.md), plus the
+  # ValidatingAdmissionPolicy (Kubernetes 1.30+) that limits the grant
+  # to adding the digest-pinned lookout probe container — image from
+  # image.repository, nothing mounted, restricted security context.
+  # true is the same deployment as the deploy-probe/ overlay. Each probe
+  # leaves its ephemeral container in the probed pod's spec for that
+  # pod's lifetime.
+  probeFrom: false
 
 # -- The optional LeewayPolicy / ClusterLeewayPolicy CRDs, which let an
 # operator declare a workload's placement intent instead of letting the

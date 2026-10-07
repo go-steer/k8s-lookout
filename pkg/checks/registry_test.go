@@ -146,6 +146,10 @@ func TestCommandValidate(t *testing.T) {
 		{"hidden command in a profile", func(c *Command) {
 			c.Hidden, c.MCPProfiles = true, []string{"triage"}
 		}},
+		{"privileged without writes", func(c *Command) { c.Privileged = true }},
+		{"privileged command in a profile", func(c *Command) {
+			c.Privileged, c.Writes, c.MCPProfiles = true, true, []string{"triage"}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

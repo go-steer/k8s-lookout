@@ -66,8 +66,14 @@ func ResolveTools(reg *checks.Registry, profile, tools string) (map[string]bool,
 	}
 
 	advertisable := map[string]checks.Command{}
+	privileged := map[string]bool{}
 	for _, c := range reg.All() {
-		if !c.Hidden {
+		switch {
+		case c.Hidden:
+		case c.Privileged:
+			// Never client-selectable: see Advertised.
+			privileged[c.MCPName] = true
+		default:
 			advertisable[c.MCPName] = c
 		}
 	}
@@ -81,6 +87,9 @@ func ResolveTools(reg *checks.Registry, profile, tools string) (map[string]bool,
 		remove := false
 		if strings.HasPrefix(tok, "-") {
 			remove, tok = true, strings.TrimSpace(tok[1:])
+		}
+		if privileged[tok] {
+			return nil, fmt.Errorf("%q changes a workload and is never selected by --profile/--tools; the operator enables it with its own `lookout mcp` flag (see `lookout mcp --help`)", tok)
 		}
 		names, err := expand(tok, advertisable)
 		if err != nil {

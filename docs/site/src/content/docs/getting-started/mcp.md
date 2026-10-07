@@ -213,6 +213,7 @@ The current surface:
 | `k8s_cloud_ipspace` | [`cloud ipspace`](/reference/cloud-ipspace/) |
 | `k8s_cloud_quota` | [`cloud quota`](/reference/cloud-quota/) |
 | `k8s_net_probe` | [`net probe`](/reference/net-probe/) |
+| `k8s_net_probe_from` | [`net probe-from`](/reference/net-probe-from/): **not served by default**, see below |
 | `k8s_audit_workloads` | [`audit workloads`](/reference/audit-workloads/) |
 | `k8s_audit_hardening` | [`audit hardening`](/reference/audit-hardening/) |
 | `k8s_audit_netpol` | [`audit netpol`](/reference/audit-netpol/) |
@@ -220,6 +221,32 @@ The current surface:
 | `k8s_audit_cluster` | [`audit cluster`](/reference/audit-cluster/) |
 | `k8s_audit_upgrades` | [`audit upgrades`](/reference/audit-upgrades/) |
 | `k8s_audit_exemptions` | [`audit exemptions`](/reference/audit-exemptions/) |
+
+### The one privileged tool
+
+`k8s_net_probe_from` runs `net probe` from inside a named pod by adding
+an ephemeral container to it, a change that stays in the pod's spec
+until the pod is replaced. A tool that changes a workload is a
+different risk class from the read surface, so the server never offers
+it unless the operator starts it with an image:
+
+```sh
+lookout mcp --probe-from-image=ghcr.io/go-steer/lookout@sha256:<digest>
+```
+
+Neither `--tools=all` nor any profile adds it, and naming it in
+`--tools` is a usage error. The flag fixes the image the probe
+container runs (digest-pinned; tags are refused), so the tool has no
+image argument and a model cannot choose what runs in the pod. When
+served it is marked `readOnlyHint: false`. The identity the server runs
+as also needs the `deploy-probe/` grant; without it every call answers
+with a `probe.refused` record and changes nothing. See
+[`net probe-from`](/reference/net-probe-from/) and
+`docs/in-pod-probe-design.md`.
+
+Clients that refuse to start when a server advertises an unclassified
+write tool (k8s-sre-agent's read-only guard does) are unaffected by a
+plain `lookout mcp`, which never lists it.
 
 Commands added later become tools with no extra wiring — the list the
 server serves, its schemas and its descriptions are generated from the

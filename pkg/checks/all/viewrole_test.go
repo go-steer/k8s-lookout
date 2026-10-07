@@ -50,6 +50,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/health"
 	"github.com/go-steer/k8s-lookout/pkg/checks/inventory"
 	"github.com/go-steer/k8s-lookout/pkg/checks/logs"
+	"github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
 	"github.com/go-steer/k8s-lookout/pkg/checks/scan"
 	"github.com/go-steer/k8s-lookout/pkg/checks/stab"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
@@ -348,6 +349,11 @@ func viewCases() []viewCase {
 		{"audit rbac", []string{"-A"}, func(v *viewClients) checks.Command { return audit.RBACCommand(auditDeps(v)) }},
 		{"audit upgrades", nil, func(v *viewClients) checks.Command { return audit.UpgradesCommand(auditDeps(v)) }},
 		{"audit workloads", []string{"-A"}, func(v *viewClients) checks.Command { return audit.WorkloadsCommand(auditDeps(v)) }},
+		// The one privileged command: under `view` it must change
+		// nothing and answer with the shared refusal (#539).
+		{"net probe-from", []string{"--pod=prod/api-6d4f-aaaaa", "--image=ghcr.io/go-steer/lookout@sha256:" + strings.Repeat("ab", 32), "--tcp=db.prod.svc:5432"}, func(v *viewClients) checks.Command {
+			return netprobe.NewFrom(netprobe.FromDeps{Client: v.client(), Now: viewClock}, netprobe.FromConfig{})
+		}},
 		{"scan", nil, scanCmd},
 	}
 }

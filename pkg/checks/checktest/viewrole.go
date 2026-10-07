@@ -50,9 +50,18 @@ var fakeDiscovery = map[schema.GroupResource]bool{
 	{Resource: "group"}:    true,
 }
 
+// selfReviews are the reviews system:basic-user lets every
+// authenticated subject create, `view` or not.
+var selfReviews = map[schema.GroupResource]bool{
+	{Group: "authorization.k8s.io", Resource: "selfsubjectaccessreviews"}: true,
+	{Group: "authorization.k8s.io", Resource: "selfsubjectrulesreviews"}:  true,
+	{Group: "authentication.k8s.io", Resource: "selfsubjectreviews"}:      true,
+}
+
 // ViewRole makes cs behave as a credential bound to exactly the
 // built-in `view` ClusterRole: every get/list/watch of a resource
-// outside ViewRoleReads answers 403 the way the API server does. It
+// outside ViewRoleReads, and every write but the self-reviews,
+// answers 403 the way the API server does. It
 // returns a func reporting the refused resources in the order they
 // were first asked for, so a test can pin what a command still tries.
 func ViewRole(cs *fake.Clientset) (refused func() []schema.GroupResource) {
@@ -87,6 +96,23 @@ func ViewRoleFake(f *k8stesting.Fake) (refused func() []schema.GroupResource) {
 	}
 	for _, verb := range []string{"get", "list"} {
 		f.PrependReactor(verb, "*", deny)
+	}
+	// `view` grants no write at all — subresources included, which is
+	// where `net probe-from`'s pods/ephemeralcontainers patch lands.
+	// The self-reviews are the exception: system:basic-user lets every
+	// authenticated subject create them, so they keep answering.
+	denyWrite := func(action k8stesting.Action) (bool, runtime.Object, error) {
+		gr := action.GetResource().GroupResource()
+		if selfReviews[gr] {
+			return false, nil, nil
+		}
+		if sub := action.GetSubresource(); sub != "" {
+			gr.Resource += "/" + sub
+		}
+		return true, nil, forbidden(action.GetVerb(), gr)
+	}
+	for _, verb := range []string{"create", "update", "patch", "delete", "delete-collection"} {
+		f.PrependReactor(verb, "*", denyWrite)
 	}
 	f.PrependWatchReactor("*", func(action k8stesting.Action) (bool, watch.Interface, error) {
 		gr := action.GetResource().GroupResource()

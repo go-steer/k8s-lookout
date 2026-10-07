@@ -24,6 +24,7 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
 	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
 )
 
 // lookout mcp registers in the multicall root like watch — it is a
@@ -32,6 +33,10 @@ import (
 // MCP tool automatically (§4.3); commands added later appear here
 // with no changes to this file.
 func init() {
+	// Every probe container `net probe-from` adds records the release
+	// that added it (LOOKOUT_PROBE_CLIENT); pkg/ cannot read
+	// internal/version, so the binary hands it over.
+	netprobe.ClientVersion = "lookout/" + version.Semver()
 	register(command{
 		name:    "mcp",
 		summary: "serve the read-path checks as MCP tools (stdio, or --listen for localhost HTTP)",
@@ -76,6 +81,18 @@ Flags:
   --list-tools          print the tools this selection would
                         advertise, with the JSON schema bytes each
                         costs on every model call, and exit.
+  --probe-from-image=<repo>@sha256:<digest>
+                        serve k8s_net_probe_from (lookout net
+                        probe-from), the one tool that CHANGES a
+                        workload: it adds an ephemeral probe
+                        container to a named pod, which stays in the
+                        pod's spec. Never served without this flag;
+                        --tools and profiles cannot add it. The value
+                        fixes the image the probe container runs
+                        (digest-pinned; tags refused), so the tool
+                        takes no image argument. The identity also
+                        needs the deploy-probe/ grant
+                        (docs/in-pod-probe-design.md).
   --access-log=<path>   append one logfmt line per tool call:
                         ts, tool, exit code, duration, response
                         bytes. Created if absent, appended if not,
@@ -96,6 +113,31 @@ transport a daemon uses when it spawns "lookout mcp" as a child
 process. Diagnostics go to stderr only.
 `
 
+// enableProbeFrom swaps the CLI build of `net probe-from` (which
+// takes --image) for one with the operator's image fixed and no
+// image argument in its schema, and adds the tool to the selection.
+// The image is the operator's decision, made where the server is
+// configured; a model calling the tool cannot choose what runs in the
+// pod (docs/in-pod-probe-design.md, "MCP exposure").
+func enableProbeFrom(base *checks.Registry, selected map[string]bool, image string) (*checks.Registry, map[string]bool, error) {
+	if err := netprobe.ValidImage(image); err != nil {
+		return nil, nil, err
+	}
+	served := netprobe.NewFrom(netprobe.FromDeps{}, netprobe.FromConfig{Image: image})
+	reg := checks.NewRegistry()
+	for _, c := range base.All() {
+		if c.Name == served.Name {
+			c = served
+		}
+		reg.Register(c)
+	}
+	sel, err := mcpserver.EnablePrivileged(reg, selected, served.MCPName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reg, sel, nil
+}
+
 func runMCP(ctx context.Context, args []string) int {
 	return mcpMain(ctx, args, os.Stdout, os.Stderr)
 }
@@ -112,6 +154,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	accessLog := fs.String("access-log", "", "append one line per tool call to this path")
 	allowNonLoopback := fs.Bool("allow-non-loopback", false, "permit a routable --listen address (requires --auth-token-file and --access-log)")
 	authTokenFile := fs.String("auth-token-file", "", "require this bearer token on every HTTP request")
+	probeFromImage := fs.String("probe-from-image", "", "serve the privileged k8s_net_probe_from tool, running this digest-pinned image")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -156,6 +199,13 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
 		return 2
+	}
+	if *probeFromImage != "" {
+		reg, selected, err = enableProbeFrom(reg, selected, *probeFromImage)
+		if err != nil {
+			fmt.Fprintf(stderr, "lookout mcp: --probe-from-image: %v\n", err)
+			return 2
+		}
 	}
 	if *listTools {
 		fmt.Fprint(stdout, mcpserver.ToolListing(reg, selected))

@@ -249,16 +249,22 @@ lookout net probe --http=https://api.prod.svc/healthz
 ```
 
 ```lookout-golden
-kind=probe.dns severity=info name=api.prod.svc.cluster.local message="resolved to 2 address(es)" ips=10.8.0.12,10.8.0.7 latency=100ms
-kind=probe.dns severity=critical name=missing.prod.svc message="lookup missing.prod.svc: no such host" error_class=nxdomain latency=100ms
+kind=probe.dns severity=info name=api.prod.svc.cluster.local message="resolved to 2 address(es)" vantage=local ips=10.8.0.12,10.8.0.7 latency=100ms
+kind=probe.dns severity=critical name=missing.prod.svc message="lookup missing.prod.svc: no such host" vantage=local error_class=nxdomain latency=100ms
 …
 scanned=3 findings=3 elapsed=100ms
 ```
 
-- Vantage matters: probes originate wherever lookout runs. In a pod you
-  get the in-cluster view (cluster DNS, Service VIPs, NetworkPolicies as
-  that pod experiences them); on a laptop, the laptop's network. No pod
-  is ever spawned; zero cluster mutation.
+- Vantage matters: probes originate wherever lookout runs, and every
+  result says so (`vantage=local`). In a pod you get the in-cluster view
+  (cluster DNS, Service VIPs, NetworkPolicies as that pod experiences
+  them); on a laptop, the laptop's network. No pod is ever spawned;
+  zero cluster mutation.
+- A healthy result from here is NOT evidence that the caller can reach
+  its callee. A one-way partition from the caller, or a DNS failure only
+  the caller sees, looks healthy from every other pod. If the symptom is
+  on the caller's side and `net probe` says all is well, that is the
+  case for `net probe-from` (below), if your deployment offers it.
 - Failures carry a machine-matchable `error_class`. Definitive negatives
   (`nxdomain`, `refused`, `unreachable`, `reset`, `cert`, `http_5xx`)
   are critical; indeterminate outcomes (`timeout` — could be policy,
@@ -266,6 +272,34 @@ scanned=3 findings=3 elapsed=100ms
   warning.
 - Targets are not Kubernetes objects, so `--workload`/`--namespace`/
   `--since` are rejected here.
+
+### From the caller's own vantage (`net probe-from`, privileged)
+
+`net probe-from --pod=<namespace>/<name>` runs the same probes from
+inside one named pod's network. It is the one lookout command that
+changes a workload: it adds an ephemeral container to that pod, and the
+container stays in the pod's spec until the pod is replaced. Use it
+only to test a specific caller-side hypothesis, on one pod, once.
+
+```
+lookout net probe-from --pod=shop/frontend-7d9 --image=ghcr.io/go-steer/lookout@sha256:<digest> --tcp=cart.shop.svc:7070 --dns=cart.shop.svc.cluster.local
+```
+
+- Results have the same kinds and fields as `net probe`, with
+  `vantage=pod:<ns>/<name>` and `probe_container=`. Put the two side by
+  side: healthy from `local` but failing from the pod points at the
+  caller's path.
+- It is opt-in. Without the `deploy-probe/` grant it answers one
+  `probe.refused` record and changes nothing; do not retry, and do not
+  treat it as a lookout failure. Over MCP the tool
+  (`k8s_net_probe_from`) exists only if the operator enabled it.
+- It also refuses `hostNetwork` pods, pods that are not Running, and
+  pods already holding ten probe containers (`reason=` says which),
+  and refuses with `reason=PolicyMissing` when the admission policy that
+  guards its grant is absent. That one is for the operator to fix; tell
+  them, do not retry.
+- URLs with credentials or a query string are refused: targets are
+  stored in the pod's spec.
 
 ## Post-hoc: the state at onset (`--at` + `--store`)
 

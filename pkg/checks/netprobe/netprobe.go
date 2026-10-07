@@ -26,7 +26,15 @@
 // laptop's network, which is a different — sometimes exactly wanted,
 // sometimes misleading — vantage. No pod is ever spawned to probe
 // from; if the in-cluster view is needed, run lookout in-cluster
-// (the MCP surface of a deployed sentinel is the usual route).
+// (the MCP surface of a deployed sentinel is the usual route). Every
+// result carries vantage=local to say so.
+//
+// The one exception is a separate command in this package, `net
+// probe-from` (probefrom.go): opt-in and privileged, it runs these
+// same probes from inside one named pod's network namespace by adding
+// an ephemeral container to it (DESIGN §5, amendment of 2026-10-07;
+// docs/in-pod-probe-design.md). `net probe` itself never touches the
+// Kubernetes API.
 //
 // Because a probe target is not a Kubernetes object, the §4.2
 // scoping flags are meaningless here and are REJECTED as usage
@@ -107,34 +115,54 @@ func (d Deps) now() time.Time {
 	return time.Now()
 }
 
+// probeFlags are the target flags `net probe` and `net probe-from`
+// share, so the two take exactly the same target syntax.
+func probeFlags() []emit.FlagSpec {
+	return []emit.FlagSpec{
+		{Name: "dns", Type: emit.FlagString, Default: "",
+			Help: "comma-separated names to resolve (e.g. api.prod.svc.cluster.local,db.example.com)"},
+		{Name: "tcp", Type: emit.FlagString, Default: "",
+			Help: "comma-separated host:port endpoints to connect to (e.g. api.prod.svc:8080,10.0.0.5:5432)"},
+		{Name: "http", Type: emit.FlagString, Default: "",
+			Help: "comma-separated http(s) URLs to GET; redirects are reported (3xx), not followed, and response bodies are never read into findings"},
+		{Name: "probe-timeout", Type: emit.FlagDuration, Default: "5s",
+			Help: "per-probe timeout; raise --timeout too when probing many slow targets (it caps the whole invocation)"},
+	}
+}
+
+// probeKinds are the result kinds both commands emit.
+func probeKinds() []checks.KindField {
+	return []checks.KindField{
+		checks.Kind("probe.dns", "the result of one DNS resolution: info when it resolved, warning on timeout, critical otherwise — a probe result is always emitted, success included, because the answer to \"can this be reached\" is the point of the command", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+		checks.Kind("probe.tcp", "the result of one TCP connect: info when it connected, warning on timeout, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+		checks.Kind("probe.http", "the result of one HTTP GET (redirects reported, not followed): info on success, warning on timeout or 4xx, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+	}
+}
+
+// probeOutput is the result glossary both commands share, in the
+// order a result carries the keys. `net probe-from` forwards exactly
+// these keys from its probe container and drops anything else.
+func probeOutput() []checks.OutputField {
+	return []checks.OutputField{
+		{Name: "ips", Doc: "probe.dns: resolved addresses, sorted, comma-separated"},
+		{Name: "latency", Doc: "how long the probe took: DNS resolution / TCP connect / full HTTP exchange"},
+		{Name: "status", Doc: "probe.http: HTTP status code of the (unfollowed) response"},
+		{Name: "content_length", Doc: "probe.http: Content-Length the server declared (body is discarded unread; omitted when unknown)"},
+		{Name: "error_class", Doc: "failed probes: nxdomain|timeout|refused|unreachable|reset|cert|http_4xx|http_5xx|error"},
+	}
+}
+
 // New builds the `net probe` command around deps.
 func New(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "net probe",
 		MCPName: "k8s_net_probe",
 		Summary: "Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever lookout runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.",
-		Flags: []emit.FlagSpec{
-			{Name: "dns", Type: emit.FlagString, Default: "",
-				Help: "comma-separated names to resolve (e.g. api.prod.svc.cluster.local,db.example.com)"},
-			{Name: "tcp", Type: emit.FlagString, Default: "",
-				Help: "comma-separated host:port endpoints to connect to (e.g. api.prod.svc:8080,10.0.0.5:5432)"},
-			{Name: "http", Type: emit.FlagString, Default: "",
-				Help: "comma-separated http(s) URLs to GET; redirects are reported (3xx), not followed, and response bodies are never read into findings"},
-			{Name: "probe-timeout", Type: emit.FlagDuration, Default: "5s",
-				Help: "per-probe timeout; raise --timeout too when probing many slow targets (it caps the whole invocation)"},
-		},
-		Kinds: []checks.KindField{
-			checks.Kind("probe.dns", "the result of one DNS resolution: info when it resolved, warning on timeout, critical otherwise — a probe result is always emitted, success included, because the answer to \"can this be reached\" is the point of the command", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
-			checks.Kind("probe.tcp", "the result of one TCP connect: info when it connected, warning on timeout, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
-			checks.Kind("probe.http", "the result of one HTTP GET (redirects reported, not followed): info on success, warning on timeout or 4xx, critical otherwise", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
-		},
-		Output: []checks.OutputField{
-			{Name: "ips", Doc: "probe.dns: resolved addresses, sorted, comma-separated"},
-			{Name: "latency", Doc: "how long the probe took: DNS resolution / TCP connect / full HTTP exchange"},
-			{Name: "status", Doc: "probe.http: HTTP status code of the (unfollowed) response"},
-			{Name: "content_length", Doc: "probe.http: Content-Length the server declared (body is discarded unread; omitted when unknown)"},
-			{Name: "error_class", Doc: "failed probes: nxdomain|timeout|refused|unreachable|reset|cert|http_4xx|http_5xx|error"},
-		},
+		Flags:   probeFlags(),
+		Kinds:   probeKinds(),
+		Output: append([]checks.OutputField{
+			{Name: "vantage", Doc: "where the probe ran from: always local here (wherever this lookout process runs); `net probe-from` results say pod:<namespace>/<name>"},
+		}, probeOutput()...),
 		Examples: []string{
 			"lookout net probe --dns=api.prod.svc.cluster.local",
 			"lookout net probe --tcp=db.prod.svc:5432 --probe-timeout=2s",
@@ -150,53 +178,118 @@ func New(deps Deps) checks.Command {
 func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// The §4.2 scoping flags do not apply to an active probe — see
 	// the package comment. Rejecting beats ignoring.
-	switch {
-	case !inv.Scope.Workload.IsZero():
-		return 0, emit.UsageErrorf("--workload does not apply: net probe probes network targets from where lookout runs, not Kubernetes objects (resolve the workload's Service and pass --dns/--tcp/--http)")
-	case inv.Scope.Namespace != "" || inv.Scope.AllNamespaces:
-		return 0, emit.UsageErrorf("--namespace/-A do not apply: net probe is not namespace-scoped — the vantage point is wherever lookout runs")
-	case inv.Scope.Since != 0:
-		return 0, emit.UsageErrorf("--since does not apply: net probe measures now, not a window")
+	if err := rejectScope(inv.Scope, "net probe probes network targets from where lookout runs", "the vantage point is wherever lookout runs"); err != nil {
+		return 0, err
 	}
-	dns := splitTargets(inv.Flags.String("dns"))
-	tcp := splitTargets(inv.Flags.String("tcp"))
-	httpTargets := splitTargets(inv.Flags.String("http"))
-	if len(dns)+len(tcp)+len(httpTargets) == 0 {
-		return 0, emit.UsageErrorf("nothing to probe: pass at least one of --dns=<name,...>, --tcp=<host:port,...>, --http=<url,...>")
+	t, err := parseTargets(inv.Flags, false)
+	if err != nil {
+		return 0, err
 	}
-	for _, t := range tcp {
-		if _, _, err := net.SplitHostPort(t); err != nil {
-			return 0, emit.UsageErrorf("--tcp target %q is not host:port: %v", t, err)
-		}
+	// Every result says where it was measured from, so a local
+	// result can never be mistaken for one `net probe-from` took
+	// inside a pod (docs/in-pod-probe-design.md).
+	if err := inv.Out.Stamp("vantage", vantageLocal); err != nil {
+		return 0, err
 	}
-	for _, t := range httpTargets {
-		u, err := url.Parse(t)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return 0, emit.UsageErrorf("--http target %q is not an absolute http(s) URL", t)
-		}
-	}
-	timeout := inv.Flags.Duration("probe-timeout")
-	if timeout <= 0 {
-		return 0, emit.UsageErrorf("--probe-timeout must be positive, got %s", timeout)
-	}
+	return t.probe(ctx, deps, inv.Out)
+}
 
+// vantageLocal is the vantage of every `net probe` result: wherever
+// this lookout process runs.
+const vantageLocal = "local"
+
+// rejectScope refuses the §4.2 scoping flags, which no probe honors.
+// what completes "--workload does not apply: <what>, not Kubernetes
+// objects"; where completes the --namespace refusal.
+func rejectScope(s emit.Scope, what, where string) error {
+	switch {
+	case !s.Workload.IsZero():
+		return emit.UsageErrorf("--workload does not apply: %s, not Kubernetes objects (resolve the workload's Service and pass --dns/--tcp/--http)", what)
+	case s.Namespace != "" || s.AllNamespaces:
+		return emit.UsageErrorf("--namespace/-A do not apply: a probe is not namespace-scoped — %s", where)
+	case s.Since != 0:
+		return emit.UsageErrorf("--since does not apply: a probe measures now, not a window")
+	}
+	return nil
+}
+
+// targets are one invocation's validated probe targets.
+type targets struct {
+	dns, tcp, http []string
+	timeout        time.Duration
+}
+
+func (t targets) count() int { return len(t.dns) + len(t.tcp) + len(t.http) }
+
+// parseTargets reads and validates --dns/--tcp/--http/--probe-timeout.
+// strict adds the rules `net probe-from` needs because its targets
+// are written into a pod's spec for the pod's lifetime: no
+// credentials, query or fragment in a URL, nothing but a host name in
+// --dns, and no whitespace or control characters anywhere.
+func parseTargets(flags emit.FlagValues, strict bool) (targets, error) {
+	t := targets{
+		dns:  splitTargets(flags.String("dns")),
+		tcp:  splitTargets(flags.String("tcp")),
+		http: splitTargets(flags.String("http")),
+	}
+	if t.count() == 0 {
+		return t, emit.UsageErrorf("nothing to probe: pass at least one of --dns=<name,...>, --tcp=<host:port,...>, --http=<url,...>")
+	}
+	if strict {
+		for _, list := range [][]string{t.dns, t.tcp, t.http} {
+			for _, s := range list {
+				if strings.IndexFunc(s, func(r rune) bool { return r < 0x21 || r == 0x7f }) >= 0 {
+					return t, emit.UsageErrorf("probe target %q contains whitespace or a control character", s)
+				}
+			}
+		}
+		for _, d := range t.dns {
+			if strings.ContainsAny(d, "/:@?#") {
+				return t, emit.UsageErrorf("--dns target %q is not a host name", d)
+			}
+		}
+	}
+	for _, a := range t.tcp {
+		if _, _, err := net.SplitHostPort(a); err != nil {
+			return t, emit.UsageErrorf("--tcp target %q is not host:port: %v", a, err)
+		}
+	}
+	for _, h := range t.http {
+		u, err := url.Parse(h)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return t, emit.UsageErrorf("--http target %q is not an absolute http(s) URL", h)
+		}
+		if strict && (u.User != nil || strings.ContainsAny(h, "?#")) {
+			return t, emit.UsageErrorf("--http target %q carries credentials, a query or a fragment: net probe-from writes its targets into the pod's spec, where they stay for the pod's lifetime, so pass a plain scheme://host[:port]/path", h)
+		}
+	}
+	t.timeout = flags.Duration("probe-timeout")
+	if t.timeout <= 0 {
+		return t, emit.UsageErrorf("--probe-timeout must be positive, got %s", t.timeout)
+	}
+	return t, nil
+}
+
+// probe runs every target in a fixed order (DNS, TCP, HTTP) and
+// emits one result per target.
+func (t targets) probe(ctx context.Context, deps Deps, out *emit.Writer) (int, error) {
 	scanned := 0
 	emitOne := func(f emit.Finding) error {
 		scanned++
-		return inv.Out.Emit(f)
+		return out.Emit(f)
 	}
-	for _, name := range dns {
-		if err := emitOne(probeDNS(ctx, deps, name, timeout)); err != nil {
+	for _, name := range t.dns {
+		if err := emitOne(probeDNS(ctx, deps, name, t.timeout)); err != nil {
 			return scanned, err
 		}
 	}
-	for _, addr := range tcp {
-		if err := emitOne(probeTCP(ctx, deps, addr, timeout)); err != nil {
+	for _, addr := range t.tcp {
+		if err := emitOne(probeTCP(ctx, deps, addr, t.timeout)); err != nil {
 			return scanned, err
 		}
 	}
-	for _, target := range httpTargets {
-		if err := emitOne(probeHTTP(ctx, deps, target, timeout)); err != nil {
+	for _, target := range t.http {
+		if err := emitOne(probeHTTP(ctx, deps, target, t.timeout)); err != nil {
 			return scanned, err
 		}
 	}

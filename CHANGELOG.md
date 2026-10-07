@@ -26,6 +26,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and its README lists what this tier loses. `compute-class` now also
   declares the pod and node grants its informers wait on, so a
   deployment missing them fails the startup check instead of hanging.
+- **`lookout net probe-from`: an opt-in, PRIVILEGED probe from inside a
+  named pod (#539).** `net probe` only probes from wherever lookout
+  runs, so a fault on one caller's path (a one-way partition from it,
+  a DNS failure only it sees) looks healthy. `lookout net probe-from
+  --pod=<ns>/<name> --image=<repo>@sha256:<digest> --dns/--tcp/--http`
+  runs the same probes from inside that pod's network by adding an
+  ephemeral container to it. **This changes the pod: the container
+  stays in its spec until the pod is replaced** (at most ten per pod).
+  Results use `net probe`'s kinds and fields plus
+  `vantage=pod:<ns>/<name>` and `probe_container=`. It is off unless
+  you turn it on:
+  - it needs `patch pods/ephemeralcontainers`, which only the new
+    `deploy-probe/` overlay (Helm `rbac.probeFrom=true`, default
+    `false`) grants, together with a ValidatingAdmissionPolicy
+    (Kubernetes 1.30+) that lets lookout's ServiceAccount add only the
+    digest-pinned lookout probe container. `deploy/` and the chart's
+    defaults are unchanged and grant no write;
+  - without the grant it changes nothing and answers one
+    `probe.refused` record in the shared refusal wording, exit 0;
+  - it also refuses (`reason=PolicyMissing`, pod unchanged) unless the
+    admission policy that guards the grant, and a `Deny` binding for
+    it, are installed and cover its own identity, so a grant left
+    unguarded (for example by `kubectl apply -k` on a cluster older than
+    1.30, which is unsupported) is never used. The policy matches the
+    ServiceAccount by name, so re-namespacing the overlay keeps it in
+    force. Once enabled, a probe can reach whatever the probed pod can;
+    narrow it with RoleBindings;
+  - it is not on the MCP surface unless `lookout mcp` is started with
+    `--probe-from-image=<repo>@sha256:<digest>`, which also fixes the
+    image (the tool has no image argument). A plain `lookout mcp`, and
+    k8s-sre-agent's read-only guard, see no change;
+  - `scan`, `health`, `bundle` and the sentinel never run it.
+
+  Design, mechanism choice and security review:
+  `docs/in-pod-probe-design.md`; DESIGN §5 amendment of 2026-10-07.
+- `net probe` results now carry `vantage=local`, so they can be told
+  apart from `net probe-from` results. Additive; nothing else changes.
 
 ## [0.32.0] - 2026-10-07
 

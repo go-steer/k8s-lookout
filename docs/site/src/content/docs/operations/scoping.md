@@ -273,6 +273,89 @@ names. A hermetic test, `pkg/checks/all/viewrole_test.go`, runs every
 read-path command against exactly `view` and fails if any of them
 exits non-zero.
 
+`net probe-from` is not a read-path command, but the same guard holds
+it to the same rule: under `view` it changes nothing and answers with
+one `probe.refused` record in the shared wording, exit 0 (see below).
+
+## The opt-in probe grant (`deploy-probe/`)
+
+Every deployment above is read-only. One command, `lookout net
+probe-from --pod=<namespace>/<name>`, needs a write: it runs `net probe`
+from inside the named pod by adding an ephemeral container to it, so it
+can see faults only that pod sees (a one-way partition from it, a DNS
+failure only it gets). The container stays in the pod's spec until the
+pod is replaced; the command refuses once a pod holds ten of them.
+
+`deploy-probe/` is `deploy/` plus that grant. Use it instead of
+`deploy/`:
+
+```sh
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-probe?ref=vX.Y.Z"
+```
+
+With the chart, set `rbac.probeFrom=true`. Either way you get:
+
+- ClusterRole `lookout-watch-probe-from`: `patch` on
+  `pods/ephemeralcontainers`, plus `get`/`list` on the two admission
+  policy kinds, bound to the `lookout-watch` ServiceAccount.
+- A ValidatingAdmissionPolicy (Kubernetes 1.30+) that lets any
+  ServiceAccount named `lookout-watch` add only the lookout probe
+  container: the `ghcr.io/go-steer/lookout` image pinned by digest,
+  `/lookout net probe` with probe flags only, no volume mounts, no
+  `targetContainerName`, the three `LOOKOUT_PROBE_*` audit variables and
+  nothing else, and a restricted security context. It matches the
+  ServiceAccount by name, not namespace, so wrapping the overlay in a
+  kustomization with another `namespace:` keeps it in force.
+
+:::caution[Kubernetes 1.30+ only]
+`kubectl apply -k` of `deploy-probe/` on an older cluster is
+unsupported. kubectl creates the ClusterRole and binding, fails only on
+the policy kinds the cluster does not serve, and leaves an unguarded
+write grant. Delete the `lookout-watch-probe-from` ClusterRoleBinding if
+that happened. Helm checks every kind first and fails cleanly.
+:::
+
+The policy matters. On its own, `patch pods/ephemeralcontainers` lets
+the holder run any image in any pod with that pod's volumes, including
+its Secrets and ServiceAccount token, mounted: about as strong as
+`pods/exec`. Do not grant it without the policy.
+
+`net probe-from` checks this itself. Before it changes anything it
+looks for a policy labeled `k8s-lookout.go-steer.dev/guards=net-probe-from`
+that fails closed, applies to adding ephemeral containers and covers
+its own identity, and a binding that enforces it (`Deny`, not narrowed).
+If it finds none it refuses with `probe.refused reason=PolicyMissing`,
+says the grant is unguarded, and adds nothing. If you give the grant
+to another identity (a person's own kubeconfig, say), copy the policy
+and set its identity condition to `request.userInfo.username ==
+'<that user>'`, a form the check understands. A mirror registry needs
+the policy's image prefix changed to match.
+
+What the policy cannot narrow: once enabled, a probe can reach whatever
+the probed pod can reach, including endpoints a NetworkPolicy opens only
+to that pod. It sends DNS lookups, TCP connects and `GET`s whose bodies
+are never read, but a `GET` with side effects on such an endpoint is
+possible. That reach is the point of the feature. Narrow it with
+RoleBindings to the namespaces you want probeable.
+
+To make only some namespaces probeable, delete the ClusterRoleBinding
+and bind the same ClusterRole with a RoleBinding in each of them.
+
+Without the grant, the command adds nothing and answers:
+
+```
+kind=probe.refused severity=info namespace=shop kind_of_object=Pod name=frontend-7d9 reason=Forbidden message="forbidden: patch pods/ephemeralcontainers — namespaced, not granted by the built-in view role; grant patch on pods/ephemeralcontainers (core) via a ClusterRole or Role (the deploy-probe/ overlay, or Helm rbac.probeFrom=true, grants it to lookout's ServiceAccount) — no probe ran and the pod was not changed" vantage=pod:shop/frontend-7d9
+scanned=0 findings=1 elapsed=41ms
+```
+
+Each probe container is its own audit record: the `lookout-probe-<id>`
+name, the image digest, the targets in its arguments, and
+`LOOKOUT_PROBE_REQUESTED_BY` (the caller's username),
+`LOOKOUT_PROBE_REQUESTED_AT` and `LOOKOUT_PROBE_CLIENT` in its
+environment. The API server's audit log records the patch with the
+caller's identity. Design and security review:
+`docs/in-pod-probe-design.md`.
+
 ## Sources
 
 `--sources` takes a comma-separated list, and nothing requires one

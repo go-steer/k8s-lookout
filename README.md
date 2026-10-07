@@ -158,6 +158,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `cloud ipspace` † | pod/service/node CIDR utilization per subnet — IP space is incompressible |
 | `cloud quota` † | per-project quota usage vs limit, ranked nearest-to-exhaustion |
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |
+| `net probe-from` § | the same checks from inside one named pod's network, for faults only that pod sees; adds an ephemeral container to the pod |
 | `audit workloads` | healthy workloads with no safety net: no PDB, single replica, no probes, no spread, autoscalers that structurally cannot scale |
 | `audit hardening` | workload security posture: privileged containers, host namespaces, hostPath mounts, used default-SA tokens, namespaces with no PSA |
 | `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |
@@ -175,6 +176,15 @@ a scheduled sweep rather than an incident.
 where the CRDs are installed, and on a cluster without them emits one
 `crd.unavailable` finding and exits 0 rather than reporting a clean bill
 of health it did not earn.
+
+§ **privileged and opt-in**: the one command that changes a workload.
+It adds an ephemeral probe container to the pod you name, and that
+container stays in the pod's spec until the pod is replaced. It needs a
+grant that only the optional [`deploy-probe/`](./deploy-probe/) overlay
+(Helm `rbac.probeFrom=true`) adds, is not on the default MCP surface,
+and is never run by `scan`, `health`, `bundle` or the sentinel. Without
+the grant it changes nothing and answers with a `probe.refused` record.
+See [`docs/in-pod-probe-design.md`](./docs/in-pod-probe-design.md).
 
 † needs a cloud provider (the `-gke` image / `-tags gke` build). ~80%
 of the suite is pure client-go and runs on any conformant cluster; the

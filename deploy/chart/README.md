@@ -81,6 +81,7 @@ run. For anything beyond a value or two, write a values file.
 | ServiceAccount | `serviceAccount.create` | Turn off to bring your own — a Workload-Identity-annotated one, say |
 | ClusterRole + binding | `rbac.create` | Read-only, cluster-wide. Pinned to what the code actually reads by `pkg/checks/state/rbac_test.go` |
 | Role + binding in `kube-system` | `rbac.capacity` | Reads the one `cluster-autoscaler-status` ConfigMap. Independent because it is the grant a cluster admin may reasonably refuse |
+| ClusterRole + binding + ValidatingAdmissionPolicy (`-probe-from`) | `rbac.probeFrom` | **Off by default; privileged.** The one write grant: `patch pods/ephemeralcontainers` for `lookout net probe-from`, with an admission policy (Kubernetes 1.30+) that limits it to the digest-pinned lookout probe container. Same objects as `deploy-probe/` |
 | Deployment | always | `replicas: 1`, `strategy: Recreate` |
 | Service (`-metrics`) | `service.create` | ClusterIP on `:9090` |
 | NetworkPolicy | `networkPolicy.create` | Ingress to the metrics port from the release namespace only |
@@ -120,6 +121,21 @@ binding and the capacity Role. It adds `--watch-scope=namespace
 overlay, and CI diffs the two. It costs every source that reads nodes
 or another cluster-scoped kind, plus storm correlation;
 `deploy-namespaced/README.md` has the full list.
+**`rbac.probeFrom`.** Off by default, and the only value that gives
+lookout a write verb. `true` grants the ServiceAccount `patch` on
+`pods/ephemeralcontainers` so `lookout net probe-from` can run net probe
+from inside a named pod (issue #539), and installs a
+ValidatingAdmissionPolicy that lets that ServiceAccount add only the
+lookout probe container: `image.repository` pinned by digest,
+`/lookout net probe` with probe flags only, nothing mounted, a
+restricted security context. Needs Kubernetes 1.30+; without the
+policy the grant is about as strong as `pods/exec`, so do not render
+the ClusterRole without it. The command checks for the policy (and a
+`Deny` binding covering its own identity) before every probe and
+refuses with `reason=PolicyMissing` when it is absent; the ClusterRole
+also grants read on the two policy kinds for that check. Every probe leaves its ephemeral container
+in the probed pod's spec until the pod is replaced. Same deployment as
+`deploy-probe/`, and CI diffs the two.
 
 **`networkPolicy.extraIngressFrom`.** The default rule admits scrapers
 in the release namespace. Prometheus in `monitoring/`, or GMP in
