@@ -38,6 +38,21 @@ package cloudcheck
 //     ago from a two-year-old reservation is reported, and one
 //     reserved an hour ago for a load balancer about to be created is
 //     not. The same undatable rule as disks: reported, age unknown.
+//   - nodepools (#557, the fleet-audit `idle-nodepool` slug): node
+//     pools with at least one node and no workload pod on any of them.
+//     OPT-IN — not in the default --only — because unlike the three
+//     classes above it is judged on one observation rather than on a
+//     terminal provider state, so a batch pool between runs reads as
+//     idle. It needs the cluster-config capability rather than the
+//     orphans one, plus a Node and a Pod List; the claim, its
+//     exclusions and its degradations are spelled out in nodepools.go.
+//
+// Each class needs one provider capability (orphans for disks, lbs and
+// addresses; cluster-config for nodepools). When NO selected class can
+// run, the command degrades exactly as every cloud command does: one
+// cloud.unavailable per missing capability and the unavailable= note.
+// When only some can, the missing capability is reported the same way
+// and the rest are still swept.
 //
 // A class the provider refuses (cloud.ErrPermissionDenied — on GKE a
 // 403, e.g. no compute.addresses.list) degrades alone: one
@@ -48,6 +63,7 @@ package cloudcheck
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,10 +84,10 @@ func OrphansCommand(deps Deps) checks.Command {
 	return checks.Command{
 		Name:    "cloud orphans",
 		MCPName: "k8s_cloud_orphans",
-		Summary: "Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints — cost and hygiene sweep, not an incident read.",
+		Summary: "Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints; opt-in --only=nodepools adds node pools with nodes but no workload pods — cost and hygiene sweep, not an incident read.",
 		Flags: []emit.FlagSpec{
 			{Name: "only", Type: emit.FlagString, Default: "disks,lbs,addresses",
-				Help: "resource classes to sweep, comma-separated: disks, lbs, addresses"},
+				Help: "resource classes to sweep, comma-separated: disks, lbs, addresses, nodepools (nodepools is opt-in: never in the default, judged on one observation, and reads cluster Nodes and Pods)"},
 			{Name: "min-age", Type: emit.FlagDuration, Default: defaultOrphanMinAge.String(),
 				Help: "report a disk only when unattached at least this long (age from last detach, else creation), and an address only when reserved at least this long; disks and addresses with no datable age are always reported"},
 		},
@@ -79,7 +95,9 @@ func OrphansCommand(deps Deps) checks.Command {
 			checks.Kind("orphan.disk", "a GCE disk has been unattached for at least --min-age and is still billing", emit.SeverityWarning),
 			checks.Kind("orphan.lb", "a forwarding rule or load balancer routes to zero endpoints and is still billing", emit.SeverityWarning),
 			checks.Kind("orphan.address", "an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing", emit.SeverityWarning),
+			checks.Kind(kindIdleNodePool, "--only=nodepools: a node pool has at least one node and no workload pod scheduled on any of them (DaemonSet-owned and mirror/static pods do not count), judged on this one observation — info, because a batch pool between runs looks the same; the reason names the autoscaler case and so the remedy", emit.SeverityInfo),
 			checks.CloudUnavailableKind(),
+			checks.UnreadKind(),
 		},
 		Output: append([]checks.OutputField{
 			{Name: "zone", Doc: "orphan.disk: the disk's zone"},
@@ -93,14 +111,28 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "network_tier", Doc: "orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none"},
 			{Name: "reserved_since", Doc: "orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable"},
 			{Name: "reserved_for", Doc: "orphan.address: how long ago the address was reserved; \"unknown\" when undatable"},
-			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission"},
-			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list); omitted when the provider did not name it"},
-		}, unavailableFields(cloud.CapabilityOrphans)...),
+			{Name: "node_count", Doc: "orphan.nodepool: the pool's current nodes, counted from the cluster's Nodes by their cloud.google.com/gke-nodepool label (the provider record carries no live count); never 0 — a pool at zero nodes costs nothing and is not reported"},
+			{Name: "excluded_pods", Doc: "orphan.nodepool: running DaemonSet-owned and mirror (static) pods on the pool's nodes — present, but not workload; 0 when the nodes run nothing at all"},
+			{Name: "machine_type", Doc: "orphan.nodepool: the pool's machine type, what each idle node bills as; omitted when the provider record names none"},
+			{Name: "autoscaling", Doc: "orphan.nodepool: enabled or disabled — whether the autoscaler can shrink the pool at all"},
+			{Name: "min_node_count", Doc: "orphan.nodepool: the autoscaler's per-zone minimum; a non-zero floor is what keeps an idle autoscaled pool up (reason IdleMinNodeCount). Omitted when autoscaling is disabled or the pool uses total limits"},
+			{Name: "max_node_count", Doc: "orphan.nodepool: the autoscaler's per-zone maximum; omitted when autoscaling is disabled or the pool uses total limits"},
+			{Name: "total_min_node_count", Doc: "orphan.nodepool: the autoscaler's pool-wide minimum, reported instead of min_node_count when the pool sets total limits"},
+			{Name: "total_max_node_count", Doc: "orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits"},
+			{Name: "autoprovisioned", Doc: "orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise"},
+			{Name: "nodepools_skipped", Doc: "summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod)"},
+			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission"},
+			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
+			{Name: "capability", Doc: "cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools)"},
+			{Name: "provider", Doc: "cloud.unavailable: the provider that was asked"},
+			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, or a forbidden Node/Pod List for nodepools)"},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout cloud orphans",
 			"lookout cloud orphans --only=disks --min-age=72h",
 			"lookout cloud orphans --only=lbs --format=json",
 			"lookout cloud orphans --only=addresses",
+			"lookout cloud orphans --only=nodepools",
 		},
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
 			return runOrphans(ctx, deps, inv)
@@ -125,28 +157,77 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	if err != nil {
 		return 0, err
 	}
-	api, ok := provider.Orphans()
-	if !ok {
-		return emitUnavailable(inv, provider, cloud.CapabilityOrphans, "cloud orphans")
-	}
+	api, hasOrphans := provider.Orphans()
+	cc, hasConfig := provider.ClusterConfig()
 
 	now := deps.now()
+	plain := func(fn func() (int, error)) func() (int, string, error) {
+		return func() (int, string, error) {
+			n, err := fn()
+			return n, "", err
+		}
+	}
 	sweeps := []struct {
 		class, label string
 		on           bool
-		run          func() (int, error)
+		capability   cloud.Capability
+		available    bool
+		run          func() (int, string, error)
 	}{
-		{"disks", "disk sweep", want.disks, func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) }},
-		{"lbs", "load-balancer sweep", want.lbs, func() (int, error) { return sweepLBs(ctx, api, inv) }},
-		{"addresses", "address sweep", want.addresses, func() (int, error) { return sweepAddresses(ctx, api, inv, now, minAge) }},
+		{"disks", "disk sweep", want.disks, cloud.CapabilityOrphans, hasOrphans,
+			plain(func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) })},
+		{"lbs", "load-balancer sweep", want.lbs, cloud.CapabilityOrphans, hasOrphans,
+			plain(func() (int, error) { return sweepLBs(ctx, api, inv) })},
+		{"addresses", "address sweep", want.addresses, cloud.CapabilityOrphans, hasOrphans,
+			plain(func() (int, error) { return sweepAddresses(ctx, api, inv, now, minAge) })},
+		{"nodepools", "node-pool sweep", want.nodepools, cloud.CapabilityClusterConfig, hasConfig,
+			func() (int, string, error) { return sweepNodePools(ctx, cc, deps, inv) }},
 	}
+
+	// Missing capabilities first: one cloud.unavailable per capability,
+	// however many selected classes needed it.
+	var missing []cloud.Capability
+	runnable := 0
+	for _, s := range sweeps {
+		switch {
+		case !s.on:
+		case s.available:
+			runnable++
+		case !slices.Contains(missing, s.capability):
+			missing = append(missing, s.capability)
+		}
+	}
+	var refused, reasons []string
+	for _, c := range missing {
+		reason, err := emitCapabilityUnavailable(inv, provider, c, "cloud orphans")
+		if err != nil {
+			return 0, err
+		}
+		if !slices.Contains(reasons, reason) {
+			reasons = append(reasons, reason)
+		}
+	}
+	if runnable == 0 {
+		// Nothing selected could run: the standard §2 record.
+		if err := inv.Out.Note("unavailable", strings.Join(reasons, "; ")); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
 	scanned := 0
-	var refused []string
 	for _, s := range sweeps {
 		if !s.on {
 			continue
 		}
-		n, err := s.run()
+		if !s.available {
+			refused = append(refused, s.class+": "+cloud.Unavailable(provider, s.capability).Reason)
+			continue
+		}
+		n, degraded, err := s.run()
+		if degraded != "" {
+			refused = append(refused, degraded)
+		}
 		if permission, denied := cloud.PermissionDenied(err); denied {
 			// A refused class degrades alone (#231, the #546 rule:
 			// a forbidden read is reported, not fatal) — the default
@@ -278,7 +359,7 @@ func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocatio
 
 // orphanClasses is the parsed --only selection.
 type orphanClasses struct {
-	disks, lbs, addresses bool
+	disks, lbs, addresses, nodepools bool
 }
 
 // parseOnly validates the --only class list.
@@ -292,13 +373,15 @@ func parseOnly(only string) (orphanClasses, error) {
 			want.lbs = true
 		case "addresses":
 			want.addresses = true
+		case "nodepools":
+			want.nodepools = true
 		case "":
 		default:
-			return orphanClasses{}, emit.UsageErrorf("--only accepts disks,lbs,addresses — unknown class %q", strings.TrimSpace(c))
+			return orphanClasses{}, emit.UsageErrorf("--only accepts disks,lbs,addresses,nodepools — unknown class %q", strings.TrimSpace(c))
 		}
 	}
-	if !want.disks && !want.lbs && !want.addresses {
-		return orphanClasses{}, emit.UsageErrorf("--only selected nothing: pass one or more of disks, lbs, addresses")
+	if !want.disks && !want.lbs && !want.addresses && !want.nodepools {
+		return orphanClasses{}, emit.UsageErrorf("--only selected nothing: pass one or more of disks, lbs, addresses, nodepools")
 	}
 	return want, nil
 }

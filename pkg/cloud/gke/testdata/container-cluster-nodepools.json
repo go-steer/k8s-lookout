@@ -1,0 +1,54 @@
+{
+  "//": "Recorded-shape fixture: container.googleapis.com/v1 projects.locations.clusters.get response for a Standard cluster whose node pools exercise every autoscaling shape `cloud orphans --only=nodepools` (#557) reads: per-zone bounds with a non-zero floor, per-zone bounds with a zero floor, pool-wide total bounds, an auto-provisioned pool, a fixed-size pool with no autoscaling block, and an autoscaling block that is present but disabled. Authored from the GKE Cluster / NodePool resource API reference — not captured from a live project (§13).",
+  "name": "batch",
+  "location": "us-central1",
+  "currentMasterVersion": "1.31.4-gke.1183000",
+  "nodePools": [
+    {
+      "name": "default-pool",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "initialNodeCount": 1,
+      "config": { "machineType": "e2-standard-4", "imageType": "COS_CONTAINERD" },
+      "autoscaling": { "enabled": true, "minNodeCount": 1, "maxNodeCount": 5, "locationPolicy": "BALANCED" }
+    },
+    {
+      "name": "batch-pool",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "initialNodeCount": 0,
+      "config": { "machineType": "n2-standard-16", "imageType": "COS_CONTAINERD" },
+      "autoscaling": { "enabled": true, "maxNodeCount": 20, "locationPolicy": "ANY" }
+    },
+    {
+      "name": "gpu-pool",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "initialNodeCount": 1,
+      "config": { "machineType": "g2-standard-8", "imageType": "COS_CONTAINERD" },
+      "autoscaling": { "enabled": true, "totalMinNodeCount": 2, "totalMaxNodeCount": 6, "locationPolicy": "ANY" }
+    },
+    {
+      "name": "nap-e2-standard-2-abc123",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "config": { "machineType": "e2-standard-2", "imageType": "COS_CONTAINERD" },
+      "autoscaling": { "enabled": true, "maxNodeCount": 1000, "autoprovisioned": true, "locationPolicy": "BALANCED" }
+    },
+    {
+      "name": "fixed-pool",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "initialNodeCount": 3,
+      "config": { "machineType": "n2-standard-8", "imageType": "COS_CONTAINERD" }
+    },
+    {
+      "name": "paused-pool",
+      "status": "RUNNING",
+      "version": "1.31.4-gke.1183000",
+      "initialNodeCount": 2,
+      "config": { "machineType": "e2-standard-8", "imageType": "COS_CONTAINERD" },
+      "autoscaling": { "enabled": false, "minNodeCount": 1, "maxNodeCount": 4 }
+    }
+  ]
+}

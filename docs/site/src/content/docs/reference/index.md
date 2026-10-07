@@ -43,7 +43,7 @@ best-practice posture: the absence of a safety net around a workload or cluster 
 GCP-side reads: stockouts, orphaned resources, IP space, quota
 
 - [`lookout cloud ipspace`](/reference/cloud-ipspace/) — Pod/Service/node CIDR utilization per subnet, judged: warning at 80%, critical at 95% — IP space is incompressible, an exhausted range fails the next node or pod block outright. Consumption rate/ETA lives in the sentinel's capacity source.
-- [`lookout cloud orphans`](/reference/cloud-orphans/) — Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints — cost and hygiene sweep, not an incident read.
+- [`lookout cloud orphans`](/reference/cloud-orphans/) — Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints; opt-in --only=nodepools adds node pools with nodes but no workload pods — cost and hygiene sweep, not an incident read.
 - [`lookout cloud quota`](/reference/cloud-quota/) — Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings from --quota-warn (default 80%), critical at 95% — quota is incompressible (scale-ups fail at the limit) and increases need lead time. Trend/ETA lives in the quota source.
 - [`lookout cloud stockout`](/reference/cloud-stockout/) — GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.
 

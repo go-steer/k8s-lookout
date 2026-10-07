@@ -1,0 +1,8 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the GKE (container.googleapis.com/v1) error body for projects.locations.clusters.get when the caller lacks container.clusters.get. The Container API names the permission in DOUBLE quotes, which the Compute-style message pattern does not match, so errors.go falls back to the call's documented permission hint.",
+  "error": {
+    "code": 403,
+    "message": "Required \"container.clusters.get\" permission(s) for \"projects/lookout-test/locations/us-central1/clusters/batch\".",
+    "status": "PERMISSION_DENIED"
+  }
+}

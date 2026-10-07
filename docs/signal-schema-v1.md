@@ -85,8 +85,8 @@ and the generated reference page — and adding one is additive there,
 not here.
 
 The fleet-audit cost kinds (#231) are an example: `volume.unconsumed_pvc`
-(`state volumes`), `orphan.address` (`cloud orphans`) and
-`scaledown.blocked` (`stab scaledown`). None of them carries an
+(`state volumes`), `orphan.address` and the opt-in `orphan.nodepool`
+(#557) (`cloud orphans`), and `scaledown.blocked` (`stab scaledown`). None of them carries an
 inject payload or a fingerprint, so the inventory below does not change
 for them. Their ledger is the emitting command's `Kinds` declaration,
 which `pkg/checks/all/kinds_test.go` and `checktest.Verify` enforce.

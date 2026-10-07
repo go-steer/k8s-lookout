@@ -385,7 +385,7 @@ var notKubeReadPath = map[string]string{
 	"net probe":        "active DNS/TCP/HTTP probes, no API reads",
 	"perf probe":       "Cloud Monitoring through cloud.Provider",
 	"cloud stockout":   "GCP through cloud.Provider",
-	"cloud orphans":    "GCP through cloud.Provider",
+	"cloud orphans":    "GCP through cloud.Provider (--only=nodepools also Lists nodes/pods; a refusal degrades to read.unavailable, pinned in cloudcheck TestOrphansNodePoolsListForbidden)",
 	"cloud ipspace":    "GCP through cloud.Provider",
 	"cloud quota":      "GCP through cloud.Provider",
 }
