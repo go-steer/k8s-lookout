@@ -206,7 +206,7 @@ graph worth looking at.
 additionally apply the ServiceMonitor:
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=v0.31.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/prometheus-operator?ref=v0.32.0"
 ```
 
 It ships outside the base bundle because `ServiceMonitor` is a CRD and
@@ -222,7 +222,7 @@ whether either is being measured correctly. Import the JSON, or apply
 the ConfigMap wrapper for the Grafana sidecar:
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.31.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy/dashboards?ref=v0.32.0"
 ```
 
 It is the only dashboard that ships with the sentinel, because it is the
