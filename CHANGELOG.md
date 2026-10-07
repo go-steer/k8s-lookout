@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-07
+
+**This release makes lookout useful under a read-only `view` role, sees
+cert-manager issuance stalls, and adds cost and waste checks. It adds
+optional grants and changes one default.** Under the built-in `view`
+ClusterRole, `health`, `state edges`, `triage radius`, `triage events`,
+`triage changes` and `scan` now answer what they can and name each read
+they were refused, rather than exiting 1. The sentinel reports cert-manager
+ACME Challenges and Orders that stall or fail, as
+`expiry.challenge_stuck` and `expiry.order_failed`, inside the owning
+Certificate's session. For that it gains optional `list`/`watch` grants
+on `acme.cert-manager.io` `challenges` and `orders`. A Certificate that
+never issued is now reported as never issued, after a first-issuance
+grace, not as expired in 1970. New checks report claims nothing mounts
+(`volume.unconsumed_pvc`), reserved external IPs nothing uses
+(`orphan.address`) and nodes the autoscaler cannot remove
+(`lookout stab scaledown`). **`cloud orphans` now sweeps addresses by
+default**, which needs `compute.addresses.list`. Without it, that class
+reports `unavailable` and the other classes are still swept;
+`--only=disks,lbs` restores the old sweep. `leeway.rank_wedged` no longer
+fires while a fallback node is still provisioning.
+
 ### Added
 
 - **The expiry source now says why a cert-manager Certificate is not
