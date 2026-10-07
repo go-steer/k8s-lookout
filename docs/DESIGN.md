@@ -59,7 +59,11 @@ driving, the rationale changes and so does what we build:
    SQLite file directly, with `--store` access control as its sole authorization
    until core-agent's memory surface ships the gate
    (docs/triage-status-write-design.md, "Out of scope"). It cannot change the
-   cluster, but it can steer the sentinel's own routing — see §7.8.
+   cluster, but it can steer the sentinel's own routing — see §7.8. A
+   fourth, opt-in and cluster-facing, is `lookout net probe-from`, which
+   adds an ephemeral probe container to one named pod; it is outside the
+   default deployment and the default MCP surface (§5, amendment of
+   2026-10-07).
 7. **Closed loops.** An agent that acts must learn from the world whether the
    action worked. The sentinel that watched a symptom appear also watches it
    clear and injects the resolution (§7.4). Every incident therefore produces a
@@ -404,6 +408,27 @@ assumed), 2 cut, 7 added.
   no `core/v1` Event with `Subresource == "exec"`; that's Cloud Audit Log
   territory. Also security-detection scope creep. If ever wanted, it's an
   audit-log query pack, not a tool. Deferred indefinitely.
+
+**Amendment (2026-10-07): one opt-in, privileged probe (issue #539).**
+The matrix above is read-only, and `net probe` runs from wherever
+lookout runs: it never execs into a pod and never spawns one. That
+stays true of every command in the table and of the default
+deployment. One command is admitted beside it as a deliberate
+exception: `lookout net probe-from --pod=<ns>/<name>` runs the same
+DNS/TCP/HTTP checks from inside one named pod's network namespace,
+because two caller-path faults (a one-way partition, a caller-only DNS
+failure) cannot be seen from anywhere else. It works by adding an
+ephemeral debug container (`patch pods/ephemeralcontainers`), not by
+exec, and that container stays in the pod's spec for the pod's
+lifetime. It is never run by `scan`, `health`, `bundle` or the
+sentinel; it is not on the default MCP surface; it needs a grant that
+only the optional `deploy-probe/` overlay (Helm `rbac.probeFrom=true`)
+adds, together with an admission policy that limits what that grant
+can add; and without the grant it answers with an explicit refusal and
+changes nothing. Mechanism choice, image pinning, output parity,
+authorization, MCP exposure, safety rails and the security review are
+in [`in-pod-probe-design.md`](./in-pod-probe-design.md). No other
+mutation is admitted by this amendment.
 
 ---
 
