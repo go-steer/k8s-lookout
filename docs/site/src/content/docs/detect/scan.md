@@ -198,14 +198,16 @@ Pod/Service/node CIDR utilization per subnet, judged: warning at 80%, critical a
 
 #### [`lookout cloud orphans`](/reference/cloud-orphans/)
 
-Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints — cost and hygiene sweep, not an incident read.
+Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints; opt-in --only=nodepools adds node pools with nodes but no workload pods — cost and hygiene sweep, not an incident read.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
 | `orphan.address` | warning | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing |
+| `orphan.nodepool` | info | --only=nodepools: a node pool has at least one node and no workload pod scheduled on any of them (DaemonSet-owned and mirror/static pods do not count), judged on this one observation — info, because a batch pool between runs looks the same; the reason names the autoscaler case and so the remedy |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 #### [`lookout cloud quota`](/reference/cloud-quota/)
 

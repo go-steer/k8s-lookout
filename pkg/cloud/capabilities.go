@@ -471,6 +471,37 @@ type NodePoolConfig struct {
 	// stops reporting healthy — the thing that keeps a half-finished
 	// upgrade from leaving a broken node in the pool.
 	AutoRepair Toggle
+	// MachineType is the provider's name for the pool's node shape
+	// (GKE: "n2-standard-8"), carried verbatim so a cost finding can
+	// say what an idle node bills as. Empty when the record names none.
+	MachineType string
+	// Autoscaling is the pool's autoscaler configuration — the floor
+	// that decides whether an idle pool CAN shrink on its own (`cloud
+	// orphans --only=nodepools`, #557). The record carries no current
+	// node count: a pool's live size comes from the cluster's own Node
+	// objects, not from this config read.
+	Autoscaling NodePoolAutoscaling
+}
+
+// NodePoolAutoscaling is a node pool's autoscaler bounds as
+// configured. GKE states two styles of limit: per-zone (MinNodeCount /
+// MaxNodeCount) and pool-wide totals (TotalMinNodeCount /
+// TotalMaxNodeCount); a pool uses one style or the other, and the
+// unused style reads as zero.
+type NodePoolAutoscaling struct {
+	// Enabled reports whether the autoscaler manages the pool's size at
+	// all. False means the pool stays at whatever size it was last set
+	// to, idle or not.
+	Enabled bool
+	// MinNodeCount and MaxNodeCount are the per-zone bounds.
+	MinNodeCount int64
+	MaxNodeCount int64
+	// TotalMinNodeCount and TotalMaxNodeCount are the pool-wide bounds.
+	TotalMinNodeCount int64
+	TotalMaxNodeCount int64
+	// Autoprovisioned reports that the provider created the pool itself
+	// (GKE node auto-provisioning) and will delete it once empty.
+	Autoprovisioned bool
 }
 
 // ExclusionScope* are the values of MaintenanceExclusion.Scope: how
@@ -584,6 +615,11 @@ type ClusterConfig struct {
 	// AuthorizedNetworks is what may reach PublicEndpoint. Meaningless
 	// when PublicEndpoint is empty.
 	AuthorizedNetworks AuthorizedNetworks
+
+	// Autopilot reports a cluster whose nodes the provider manages and
+	// bills per pod rather than per node (GKE Autopilot): its node pools
+	// are not the operator's to size, so no node-pool cost claim applies.
+	Autopilot bool
 
 	// NodePools are the cluster's node pools in the provider's order.
 	NodePools []NodePoolConfig

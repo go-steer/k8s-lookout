@@ -35,9 +35,12 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 func init() {
@@ -55,8 +58,21 @@ type Deps struct {
 	// default detection (the NoProvider sentinel on vanilla builds —
 	// every command then reports unavailable, never silence, §2).
 	Provider func(ctx context.Context) (cloud.Provider, error)
+	// Client builds the Kubernetes client. Nil means kube.BuildClient
+	// with default resolution. Only `cloud orphans --only=nodepools`
+	// reads cluster objects (Nodes and Pods, to join the provider's
+	// pools to what is scheduled on them); every other cloud read is
+	// the project alone, and never builds one.
+	Client func(ctx context.Context) (kubernetes.Interface, error)
 	// Now anchors --since windows and age math. Nil means time.Now.
 	Now func() time.Time
+}
+
+func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
+	if d.Client != nil {
+		return d.Client(ctx)
+	}
+	return kube.BuildClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) provider(ctx context.Context) (cloud.Provider, error) {
@@ -88,6 +104,21 @@ func rejectClusterScope(inv emit.Invocation, name string) error {
 // marker, exit 0 with scanned=0 (nothing was examined — and that is
 // reported, not implied).
 func emitUnavailable(inv emit.Invocation, p cloud.Provider, c cloud.Capability, what string) (int, error) {
+	reason, err := emitCapabilityUnavailable(inv, p, c, what)
+	if err != nil {
+		return 0, err
+	}
+	if err := inv.Out.Note("unavailable", reason); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
+// emitCapabilityUnavailable emits the cloud.unavailable finding alone
+// and returns the reason for the caller's summary note — the half of
+// emitUnavailable a command that needs more than one capability
+// (`cloud orphans`) composes per capability.
+func emitCapabilityUnavailable(inv emit.Invocation, p cloud.Provider, c cloud.Capability, what string) (string, error) {
 	u := cloud.Unavailable(p, c)
 	if err := inv.Out.Emit(emit.Finding{
 		Kind:     "cloud.unavailable",
@@ -99,12 +130,9 @@ func emitUnavailable(inv emit.Invocation, p cloud.Provider, c cloud.Capability, 
 			{Key: "provider", Value: u.Provider},
 		},
 	}); err != nil {
-		return 0, err
+		return "", err
 	}
-	if err := inv.Out.Note("unavailable", u.Reason); err != nil {
-		return 0, err
-	}
-	return 0, nil
+	return u.Reason, nil
 }
 
 // unavailableFields are the output-glossary entries every cloud

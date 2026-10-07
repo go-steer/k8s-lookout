@@ -132,6 +132,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
 | `orphan.address` | warning | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing |
+| `orphan.nodepool` | info | --only=nodepools: a node pool has at least one node and no workload pod scheduled on any of them (DaemonSet-owned and mirror/static pods do not count), judged on this one observation — info, because a batch pool between runs looks the same; the reason names the autoscaler case and so the remedy |
 | `quota.pressure` | critical, warning, info | a cloud quota is at or above --quota-warn percent of its limit; critical from 95%, info for an --all row below the line |
 | `stockout.zone` | warning | the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending |
 | `perf.apiserver_p99` | critical, warning | apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s |
@@ -345,12 +346,21 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
 | `reserved_since` | orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable |
 | `reserved_for` | orphan.address: how long ago the address was reserved; "unknown" when undatable |
-| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
-| `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list); omitted when the provider did not name it |
+| `node_count` | orphan.nodepool: the pool's current nodes, counted from the cluster's Nodes by their cloud.google.com/gke-nodepool label (the provider record carries no live count); never 0 — a pool at zero nodes costs nothing and is not reported |
+| `excluded_pods` | orphan.nodepool: running DaemonSet-owned and mirror (static) pods on the pool's nodes — present, but not workload; 0 when the nodes run nothing at all |
+| `machine_type` | orphan.nodepool: the pool's machine type, what each idle node bills as; omitted when the provider record names none |
+| `autoscaling` | orphan.nodepool: enabled or disabled — whether the autoscaler can shrink the pool at all |
+| `min_node_count` | orphan.nodepool: the autoscaler's per-zone minimum; a non-zero floor is what keeps an idle autoscaled pool up (reason IdleMinNodeCount). Omitted when autoscaling is disabled or the pool uses total limits |
+| `max_node_count` | orphan.nodepool: the autoscaler's per-zone maximum; omitted when autoscaling is disabled or the pool uses total limits |
+| `total_min_node_count` | orphan.nodepool: the autoscaler's pool-wide minimum, reported instead of min_node_count when the pool sets total limits |
+| `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
+| `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
+| `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
+| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
+| `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
 | `usage` | current usage in the quota's own unit |
 | `limit` | the quota limit |
 | `unit` | the quota's unit, when the provider names one |
-| `machine_type` | the exhausted machine type (omitted when the log record does not name one) |
 | `events` | stockout events for this zone/machine-type pair in the window |
 | `first_seen` | earliest event in the window (RFC3339) |
 | `last_seen` | latest event in the window (RFC3339) |

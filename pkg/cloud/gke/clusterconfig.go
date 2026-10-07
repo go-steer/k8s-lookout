@@ -111,7 +111,10 @@ func newClusterConfigAPI(p *Provider) *clusterConfigAPI {
 func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, error) {
 	c, err := a.clusters.GetCluster(ctx)
 	if err != nil {
-		return cloud.ClusterConfig{}, fmt.Errorf("reading cluster record: %w", err)
+		// A 403 becomes cloud.ErrPermissionDenied so a caller that can
+		// degrade (`cloud orphans --only=nodepools`, #557) can name the
+		// grant; every other caller still sees an error.
+		return cloud.ClusterConfig{}, fmt.Errorf("reading cluster record: %w", classifyPermission(err, "container.clusters.get"))
 	}
 
 	out := cloud.ClusterConfig{
@@ -128,6 +131,7 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 
 	out.PublicEndpoint = publicEndpoint(c)
 	out.AuthorizedNetworks = authorizedNetworks(c)
+	out.Autopilot = c.Autopilot != nil && c.Autopilot.Enabled
 
 	for _, np := range c.NodePools {
 		if np == nil {
@@ -142,6 +146,8 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 			LegacyEndpoints:    legacyEndpoints(np),
 			AutoUpgrade:        nodeManagement(np, func(m *container.NodeManagement) bool { return m.AutoUpgrade }),
 			AutoRepair:         nodeManagement(np, func(m *container.NodeManagement) bool { return m.AutoRepair }),
+			MachineType:        machineType(np),
+			Autoscaling:        poolAutoscaling(np),
 		})
 	}
 	return out, nil
@@ -278,6 +284,31 @@ func nodeManagement(np *container.NodePool, get func(*container.NodeManagement) 
 		return cloud.ToggleEnabled
 	}
 	return cloud.ToggleDisabled
+}
+
+func machineType(np *container.NodePool) string {
+	if np.Config == nil {
+		return ""
+	}
+	return np.Config.MachineType
+}
+
+// poolAutoscaling projects the pool's autoscaler block. An absent block
+// is the autoscaler off — GKE's own default for a pool created without
+// one — so unlike the management toggles there is no third state.
+func poolAutoscaling(np *container.NodePool) cloud.NodePoolAutoscaling {
+	a := np.Autoscaling
+	if a == nil {
+		return cloud.NodePoolAutoscaling{}
+	}
+	return cloud.NodePoolAutoscaling{
+		Enabled:           a.Enabled,
+		MinNodeCount:      a.MinNodeCount,
+		MaxNodeCount:      a.MaxNodeCount,
+		TotalMinNodeCount: a.TotalMinNodeCount,
+		TotalMaxNodeCount: a.TotalMaxNodeCount,
+		Autoprovisioned:   a.Autoprovisioned,
+	}
 }
 
 func imageType(np *container.NodePool) string {

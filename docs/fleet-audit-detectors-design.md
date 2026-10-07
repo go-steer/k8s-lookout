@@ -86,7 +86,7 @@ same signal:
 | `scaledown-blocked` | `stab scaledown` → `scaledown.blocked` (#231) |
 | `orphan-pv`       | `state storage` → `storage.pv_released` / `storage.pv_failed` (#296; confirmed as the slug's answer in #231) |
 | `unconsumed-pvc`  | `state volumes` → `volume.unconsumed_pvc` (#231) |
-| `idle-nodepool`   | not yet — needs an agreed idle threshold (#557) |
+| `idle-nodepool`   | `cloud orphans --only=nodepools` → `orphan.nodepool` (opt-in, #557) |
 | `overrequest`     | partial — `triage top` → `top.saturation` |
 
 `idle-namespace` and `terminal-pods` stay out: DESIGN.md §5 rejects both (see
@@ -97,7 +97,7 @@ same signal:
 Each cost slug went into the check that already held its data, not into
 `audit`. The cost stream is waste that exists now, so it falls under the
 incident charter, and Decision 1's posture/incident split does not apply.
-Four decisions are worth recording:
+Five decisions are worth recording:
 
 - **`orphan-pv` was already shipped.** `state storage` (#296, which landed
   after this table was written) reports `storage.pv_failed` and
@@ -137,6 +137,54 @@ Four decisions are worth recording:
   not billed while idle, so reporting it would be hygiene, not cost. The
   bare `cloud orphans` default sweep now includes addresses; the old
   sweep is still available as `--only=disks,lbs`.
+- **`idle-nodepool` shipped later, opt-in (#557).** It was split off
+  because "idle" is not a terminal API state, and it took a maintainer
+  decision (2026-10-07) on the threshold. The decision follows the
+  issue's recommendation:
+  - **Idle** means a node pool with at least one node and no workload
+    pod on any of its nodes. DaemonSet-owned pods and mirror (static)
+    pods don't count as workload. Everything else does, including
+    kube-system Deployments. Terminated pods are not counted.
+  - It is judged on **one observation**, with no history window. A
+    one-shot read cannot measure how long a pool has been idle.
+  - Severity is **info**.
+  - A pool at **zero nodes** stays silent.
+  - **Intentional headroom** is handled by the `--exemptions` file
+    (`kind: orphan.nodepool`, `name: <pool>`). That entry marks the
+    finding as reviewed but still emits it, as with every exemption.
+
+  The class is `cloud orphans --only=nodepools`, and it is not in the
+  default `--only`. Every other class there rests on a terminal state.
+  This one gives up that bar, so a batch pool between runs reads as
+  idle.
+
+  Pools and their autoscaler bounds come from the `cluster-config`
+  capability. `cloud.NodePoolConfig` gained `MachineType` and
+  `Autoscaling` (per-zone and total bounds, plus `Autoprovisioned`), and
+  `ClusterConfig` gained `Autopilot`. The provider record has no live
+  node count. So pools are joined to the cluster's Nodes through the
+  `cloud.google.com/gke-nodepool` label, and to Pods through
+  `spec.nodeName`.
+
+  The reason tells you which autoscaler case keeps the nodes billing,
+  and so which remedy applies:
+  - `IdleNotAutoscaled`: nothing will shrink the pool.
+  - `IdleMinNodeCount`: a non-zero `min_node_count` or
+    `total_min_node_count` holds it up.
+  - `IdleAwaitingScaleDown`: the floor is zero, so the pool should
+    shrink on its own. If it does not, `stab scaledown` shows why.
+
+  An Autopilot cluster is not swept, and a `nodepools_skipped` note says
+  so: the provider manages its pools and bills per pod.
+
+  Failures degrade under the existing rules:
+  - A 403 on `clusters.get` gives the #559 per-class
+    `cloud.unavailable` (reason `PermissionDenied`) naming
+    `container.clusters.get`.
+  - A forbidden Node or Pod List gives a `read.unavailable` record (the
+    #546 rule), not a guess.
+  - A provider without `cluster-config` gives `cloud.unavailable` for
+    that capability. The other selected classes are still swept.
 
 None of these kinds are in `signal-schema-v1.md`'s wire-kind inventory.
 They are check-local labels with no inject payload, documented in each

@@ -409,10 +409,13 @@ need the `-gke` image + credentials at T3.
 ### `lookout cloud orphans` — T3
 - **Provoke:** create then delete a PVC/Deployment so an unattached GCE
   PD or a zero-endpoint forwarding rule lingers past `--min-age`; reserve
-  an external static IP and attach it to nothing.
+  an external static IP and attach it to nothing; for `--only=nodepools`,
+  add a node pool with autoscaling min 1 and schedule nothing on it.
 - **Assert:** the billing-active leftover is listed (the address as
-  `orphan.address`; an internal reservation never is);
-  `--only=disks|lbs|addresses` filters; recently-created resources under
+  `orphan.address`; an internal reservation never is; the empty pool as
+  info `orphan.nodepool reason=IdleMinNodeCount min_node_count=1`, and
+  never under the default `--only`);
+  `--only=disks|lbs|addresses|nodepools` filters; recently-created resources under
   `--min-age` are excluded.
 
 ### `lookout cloud quota` — T3

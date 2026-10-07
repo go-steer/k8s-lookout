@@ -154,7 +154,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `stab scaledown` | underused nodes the cluster autoscaler cannot remove, and the PDBs and pods pinning them |
 | `perf probe` † | control-plane metric packs: `apiserver`, `apf`, `etcd`, `startup` |
 | `cloud stockout` † | zonal GCE capacity stockouts, with event-derived reroute candidates — the cloud-side why behind pods stuck Pending |
-| `cloud orphans` † | billing-active leftovers: unattached disks, reserved-but-unused external IPs, forwarding rules routing to zero endpoints |
+| `cloud orphans` † | billing-active leftovers: unattached disks, reserved-but-unused external IPs, forwarding rules routing to zero endpoints; opt-in `--only=nodepools` for node pools with nodes but no workload pods |
 | `cloud ipspace` † | pod/service/node CIDR utilization per subnet — IP space is incompressible |
 | `cloud quota` † | per-project quota usage vs limit, ranked nearest-to-exhaustion |
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |

@@ -32,6 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to use the field. The fingerprint and signal schema v1 are
   unchanged.
 
+- **`cloud orphans --only=nodepools` reports idle node pools (#557).**
+  This is opt-in: the default `--only` stays `disks,lbs,addresses`. A
+  pool is idle when it has at least one node and no workload pod on any
+  of them. DaemonSet-owned and mirror (static) pods don't count as
+  workload. The check is judged on one observation, so a batch pool
+  between runs also looks idle, and the new `orphan.nodepool` kind is
+  info.
+  - Each finding carries `node_count`, `excluded_pods`, `machine_type`
+    and `autoscaling`. It also carries the autoscaler bounds:
+    `min_node_count`/`max_node_count`, or the `total_*` pair for pools
+    that set total limits.
+  - The reason names the remedy. `IdleNotAutoscaled` means nothing will
+    shrink the pool. `IdleMinNodeCount` means a non-zero minimum holds
+    it up. `IdleAwaitingScaleDown` means the floor is zero, and
+    `stab scaledown` shows what blocks the scale-down.
+  - A pool at zero nodes stays silent. An Autopilot cluster is not
+    swept, and a `nodepools_skipped` note says so.
+  - To mark a pool you keep warm on purpose as reviewed, add an
+    `--exemptions` entry (`kind: orphan.nodepool`, `name: <pool>`). The
+    finding is still emitted.
+  - The class reads the GKE cluster record plus a Node and a Pod List.
+    The default ClusterRole already grants both Lists. A 403 on
+    `container.clusters.get` degrades the class alone, with a
+    `cloud.unavailable` naming that permission. A forbidden Node or Pod
+    List gives a `read.unavailable` record instead of a guess.
+
 ### Changed
 
 - **Every forbidden-read line now says why the read was refused and

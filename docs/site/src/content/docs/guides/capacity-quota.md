@@ -105,7 +105,19 @@ scanned=4 findings=4 elapsed=100ms
 
 Rounding out the group, [`cloud orphans`](/reference/cloud-orphans/) sweeps
 for billing-active leftovers: unattached disks, reserved external IPs
-attached to nothing, and load balancers targeting zero pods.
+attached to nothing, and load balancers targeting zero pods. Pass
+`--only=nodepools` to also sweep node pools that have nodes but no workload
+pods. DaemonSet and static pods don't count as workload. This class is
+opt-in because it rests on a single observation, so a batch pool between
+runs also looks idle. Findings are info, and each one carries the pool's
+autoscaling state and `min_node_count`, which is usually what keeps an idle
+pool up. A pool at zero nodes is never reported. For a pool you keep warm on
+purpose, add an `--exemptions` entry (`kind: orphan.nodepool`,
+`name: <pool>`). The finding is still emitted, but it is marked as reviewed:
+
+```txt
+kind=orphan.nodepool severity=info kind_of_object=NodePool name=idle-min-pool reason=IdleMinNodeCount message="node pool runs 1 node (e2-standard-8) and no workload pod is scheduled on them (DaemonSet and static pods aside) — billed while idle; autoscaling is on but min_node_count=1 keeps nodes up: lower it to 0 so the autoscaler can remove them" node_count=1 excluded_pods=2 machine_type=e2-standard-8 autoscaling=enabled min_node_count=1 max_node_count=3
+```
 
 The capacity you already pay for has two in-cluster waste checks.
 [`stab scaledown`](/reference/stab-scaledown/) names underused nodes that the

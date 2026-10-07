@@ -19,6 +19,7 @@ package gke
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -101,6 +102,7 @@ func TestClusterConfigFromRecordedCluster(t *testing.T) {
 			MetadataServerMode: cloud.MetadataModeProviderServer,
 			LegacyEndpoints:    cloud.ToggleDisabled,
 			AutoUpgrade:        cloud.ToggleEnabled, AutoRepair: cloud.ToggleEnabled,
+			MachineType: "e2-standard-4",
 		},
 		{
 			Name: "legacy-pool", Version: "1.27.11-gke.1062000",
@@ -108,12 +110,14 @@ func TestClusterConfigFromRecordedCluster(t *testing.T) {
 			MetadataServerMode: cloud.MetadataModeNodeIdentity,
 			LegacyEndpoints:    cloud.ToggleEnabled,
 			AutoUpgrade:        cloud.ToggleDisabled, AutoRepair: cloud.ToggleDisabled,
+			MachineType: "n1-standard-8",
 		},
 		{
 			Name: "unconfigured-pool", NodeRuntime: cloud.NodeRuntimeUnset,
 			MetadataServerMode: cloud.MetadataModeUnset,
 			LegacyEndpoints:    cloud.ToggleUnset,
 			AutoUpgrade:        cloud.ToggleUnset, AutoRepair: cloud.ToggleUnset,
+			MachineType: "e2-standard-2",
 		},
 	}
 	if !reflect.DeepEqual(got.NodePools, wantPools) {
@@ -473,5 +477,81 @@ func TestLegacyEndpointsValues(t *testing.T) {
 	}
 	if got := legacyEndpoints(&container.NodePool{Config: &container.NodeConfig{}}); got != cloud.ToggleUnset {
 		t.Errorf("a pool with no metadata key = %q, want unset", got)
+	}
+}
+
+// TestNodePoolAutoscalingFromRecordedCluster (#557): every autoscaling
+// shape `cloud orphans --only=nodepools` reads arrives as configured —
+// per-zone and pool-wide bounds kept apart, a zero floor kept as zero,
+// and a pool with no autoscaling block read as the autoscaler off.
+func TestNodePoolAutoscalingFromRecordedCluster(t *testing.T) {
+	got := configFrom(t, "container-cluster-nodepools.json")
+	if got.Autopilot {
+		t.Errorf("Autopilot = true, want false: the record carries no autopilot block")
+	}
+	want := map[string]struct {
+		machine string
+		scaling cloud.NodePoolAutoscaling
+	}{
+		"default-pool":             {"e2-standard-4", cloud.NodePoolAutoscaling{Enabled: true, MinNodeCount: 1, MaxNodeCount: 5}},
+		"batch-pool":               {"n2-standard-16", cloud.NodePoolAutoscaling{Enabled: true, MaxNodeCount: 20}},
+		"gpu-pool":                 {"g2-standard-8", cloud.NodePoolAutoscaling{Enabled: true, TotalMinNodeCount: 2, TotalMaxNodeCount: 6}},
+		"nap-e2-standard-2-abc123": {"e2-standard-2", cloud.NodePoolAutoscaling{Enabled: true, MaxNodeCount: 1000, Autoprovisioned: true}},
+		"fixed-pool":               {"n2-standard-8", cloud.NodePoolAutoscaling{}},
+		"paused-pool":              {"e2-standard-8", cloud.NodePoolAutoscaling{MinNodeCount: 1, MaxNodeCount: 4}},
+	}
+	if len(got.NodePools) != len(want) {
+		t.Fatalf("NodePools = %+v, want %d pools", got.NodePools, len(want))
+	}
+	for _, np := range got.NodePools {
+		w, ok := want[np.Name]
+		if !ok {
+			t.Errorf("unexpected pool %q", np.Name)
+			continue
+		}
+		if np.MachineType != w.machine || np.Autoscaling != w.scaling {
+			t.Errorf("pool %q = machine %q autoscaling %+v, want %q %+v", np.Name, np.MachineType, np.Autoscaling, w.machine, w.scaling)
+		}
+	}
+}
+
+func TestClusterConfigAutopilot(t *testing.T) {
+	api := &clusterConfigAPI{clusters: stubCluster{c: &container.Cluster{
+		Name: "ap", Autopilot: &container.Autopilot{Enabled: true},
+	}}}
+	got, err := api.Config(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Autopilot {
+		t.Errorf("Autopilot = false, want true from autopilot.enabled")
+	}
+}
+
+// stubCluster serves a fixed cluster record or a fixed error.
+type stubCluster struct {
+	c   *container.Cluster
+	err error
+}
+
+func (s stubCluster) GetCluster(context.Context) (*container.Cluster, error) { return s.c, s.err }
+
+// TestClusterConfig403IsPermissionDenied (#557): the recorded 403 on
+// clusters.get becomes cloud.ErrPermissionDenied naming
+// container.clusters.get — the Container API quotes the permission in
+// a form the message pattern does not read, so the hint names it.
+func TestClusterConfig403IsPermissionDenied(t *testing.T) {
+	refused := decodedAPIError(t, http.StatusForbidden, readFixture(t, "container-cluster-403.json"))
+	api := &clusterConfigAPI{clusters: stubCluster{err: refused}}
+	_, err := api.Config(context.Background())
+	perm, denied := cloud.PermissionDenied(err)
+	if !denied || perm != "container.clusters.get" {
+		t.Fatalf("Config err = %v (denied=%v perm=%q), want cloud.ErrPermissionDenied needing container.clusters.get", err, denied, perm)
+	}
+
+	// Anything but a 403 stays an ordinary error.
+	api = &clusterConfigAPI{clusters: stubCluster{err: errors.New("boom")}}
+	if _, err := api.Config(context.Background()); err == nil || errors.Is(err, cloud.ErrPermissionDenied) {
+		t.Errorf("Config err = %v, want a plain error", err)
 	}
 }
