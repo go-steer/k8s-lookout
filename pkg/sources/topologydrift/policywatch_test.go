@@ -167,7 +167,7 @@ func TestPolicyWatch_DeliversPoliciesIntoTheStore(t *testing.T) {
 func TestPolicyWatch_NamespaceScopeListsInTheNamespaceOnly(t *testing.T) {
 	obj := policyObj(t, nsPolicy("api"))
 	s, logs := sourceWithPolicies(t, []string{policyGVR.Resource, clusterPolicyGVR.Resource}, obj)
-	s.WithWatchNamespace("payments")
+	s.WithWatchNamespaces([]string{"payments"})
 	dyn := s.dyn.(*dynamicfake.FakeDynamicClient)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

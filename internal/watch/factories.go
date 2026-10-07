@@ -110,14 +110,26 @@ func (sf sharedFactories) Start(stopCh <-chan struct{}) {
 // namespace at all, so the node watch would be correct on either factory;
 // it keeps its own for the same reason as above — one rule for where nodes
 // come from — and for the same zero cost.
-func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string, scopeNamespace string) sharedFactories {
-	if scopeNamespace != "" {
-		return sharedFactories{
-			Namespaced: informers.NewSharedInformerFactoryWithOptions(client, 0,
+//
+// With several scope namespaces each gets its own such factory — a read
+// shard — and Namespaced is the union view over them (union.go), so every
+// source still sees one factory and the process still runs one instance of
+// each source. The node factory is shared by all shards.
+func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string, scopeNamespaces []string) sharedFactories {
+	if len(scopeNamespaces) > 0 {
+		cluster := kube.NewTransformingFactory(client)
+		shards := make([]informers.SharedInformerFactory, len(scopeNamespaces))
+		for i, ns := range scopeNamespaces {
+			shards[i] = informers.NewSharedInformerFactoryWithOptions(client, 0,
 				informers.WithTransform(kube.Transform),
-				informers.WithNamespace(scopeNamespace)),
-			Cluster: kube.NewTransformingFactory(client),
+				informers.WithNamespace(ns))
 		}
+		if len(shards) == 1 {
+			// One namespace needs no union: the shard IS the factory, the
+			// shape #571 shipped.
+			return sharedFactories{Namespaced: shards[0], Cluster: cluster}
+		}
+		return sharedFactories{Namespaced: newUnionFactory(shards, cluster), Cluster: cluster}
 	}
 	selector := namespaceExclusionSelector(excludeNamespaces)
 	if selector == "" {

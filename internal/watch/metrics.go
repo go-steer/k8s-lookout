@@ -120,6 +120,7 @@ type metrics struct {
 	runnerRestarts       prometheus.Counter
 	runnerTerminal       *prometheus.GaugeVec
 	sourceDenied         *prometheus.GaugeVec
+	namespaceErrors      *prometheus.CounterVec
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -350,6 +351,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_source_denied",
 			Help: "1 when a permission this source held at STARTUP is denied now, confirmed over consecutive SelfSubjectAccessReview sweeps (--access-recheck, issue #385); back to 0 when the grant returns. required=true means the source cannot run at all and this cluster's runner is stopping for it; required=false is one degraded dimension on a source that keeps going. The alert to write: any series at 1 means the sentinel has lost coverage it used to have — the silence from that source no longer means the cluster is healthy.",
 		}, []string{"source", "resource", "required"}),
+		namespaceErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_namespace_errors_total",
+			Help: "Total times a --watch-scope=namespace namespace was skipped at runner start, by namespace and cause (access_denied: the Event list/watch grant there was refused, so the namespace is not watched while the others are; issue #407). A skipped namespace is a coverage gap, and this counter is what keeps its silence from reading as health — the alert to write is any increase. Absent unless --watch-scope=namespace.",
+		}, []string{"namespace", "cause"}),
 	}
 	reg.MustRegister(
 		m.eventsSeen,
@@ -394,6 +399,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.runnerRestarts,
 		m.runnerTerminal,
 		m.sourceDenied,
+		m.namespaceErrors,
 	)
 	return m
 }

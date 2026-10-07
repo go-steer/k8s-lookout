@@ -53,18 +53,22 @@ import (
 // to the components. All fields match --flag-name in the design
 // doc's "Sidecar CLI" section.
 type flags struct {
-	daemonURL             string
-	tokenEnv              string
-	mode                  string
-	targetSession         string
-	owner                 string
-	sink                  string
-	sinkURL               string
-	sinkTokenEnv          string
-	reasons               string
-	namespaces            string
-	excludeNamespaces     string
-	watchScope            string
+	daemonURL         string
+	tokenEnv          string
+	mode              string
+	targetSession     string
+	owner             string
+	sink              string
+	sinkURL           string
+	sinkTokenEnv      string
+	reasons           string
+	namespaces        string
+	excludeNamespaces string
+	watchScope        string
+	// admittedNamespaces is the run-scoped subset of the --watch-scope
+	// namespaces whose grants passed admitNamespaces; nil until a run sets
+	// it. See scopeNamespaces.
+	admittedNamespaces    []string
 	sources               string
 	accessRecheck         time.Duration
 	rolloutObserve        time.Duration
@@ -201,9 +205,9 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 
 	// Event filtering.
 	fs.StringVar(&f.reasons, "reason", "", "Comma-separated allow-list of Event.Reason values. Empty = shipped default set.")
-	fs.StringVar(&f.namespaces, "namespace", "", "Comma-separated allow-list of namespaces. Empty = all namespaces. A post-watch output filter, NOT a watch scope or a security boundary: every namespace is still listed, watched and cached. Use --exclude-namespace to shrink what is watched, or --watch-scope=namespace to make a single namespace named here the watch scope.")
-	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces. Scopes the watch: the informers list and watch with a metadata.namespace!= field selector, so these namespaces never enter the cache. Cluster-scoped objects (nodes) are unaffected.")
-	fs.StringVar(&f.watchScope, "watch-scope", watchScopeCluster, "What the informers list and watch: cluster (the default — every namespace) or namespace (exactly one namespace, the single value of --namespace, which is then a real watch scope and needs only a namespaced Role there). In namespace scope cluster-scoped objects are still read cluster-wide where a source needs them (nodes, persistent volumes, webhook configurations, compute classes), so under a Role-only grant those sources are skipped by --sources=auto, fail startup when named, and --storm=auto resolves off — one log line each. Applies to every cluster in multi-cluster mode.")
+	fs.StringVar(&f.namespaces, "namespace", "", "Comma-separated allow-list of namespaces. Empty = all namespaces. A post-watch output filter, NOT a watch scope or a security boundary: every namespace is still listed, watched and cached. Use --exclude-namespace to shrink what is watched, or --watch-scope=namespace to make the namespaces named here the watch scope (and a security boundary).")
+	fs.StringVar(&f.excludeNamespaces, "exclude-namespace", "", "Comma-separated deny-list of namespaces. Scopes the watch: the informers list and watch with a metadata.namespace!= field selector, so these namespaces never enter the cache. Cluster-scoped objects (nodes) are unaffected. Under --watch-scope=namespace there is nothing left to exclude: only the listed namespaces are watched, and naming one of them here is a usage error.")
+	fs.StringVar(&f.watchScope, "watch-scope", watchScopeCluster, "What the informers list and watch: cluster (the default — every namespace) or namespace (only the namespaces listed in --namespace, comma-separated; --namespace is then a real watch scope and a security boundary, and each listed namespace needs only a namespaced Role). In namespace scope cluster-scoped objects are still read cluster-wide where a source needs them (nodes, persistent volumes, webhook configurations, compute classes): with a node-read ClusterRole beside the Roles, node-dependent sources and storm correlation keep working; under Roles alone --sources=auto skips them, a named one fails startup, and --storm=auto resolves off — one log line each. A listed namespace whose Event grant is refused is skipped loudly (lookout_namespace_errors_total), not fatal, unless every one is. Applies to every cluster in multi-cluster mode.")
 
 	// Signal sources (§7.2: sources are individually enabled).
 	// DEFAULT CHANGED to auto (2026-07-27, zero-deployed-users policy;
@@ -240,7 +244,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// is design-fixed, not a flag.
 	fs.DurationVar(&f.expiryInterval, "expiry-interval", time.Hour, "Interval between expiry scans (periodic paged LISTs — deliberately no Secret informer). Must be > 0.")
 	fs.DurationVar(&f.expiryWarn, "expiry-warn", 336*time.Hour, "Warning threshold for expiry.warning: certificates with notAfter inside this window fire at warning severity (critical at the design-fixed 72h). Must be >= 72h.")
-	fs.StringVar(&f.expiryNamespaces, "expiry-namespaces", "", "Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces (the --watch-scope namespace under --watch-scope=namespace). Scopes the sensitive secrets-list grant (§11) — the startup RBAC probe verifies exactly this scope.")
+	fs.StringVar(&f.expiryNamespaces, "expiry-namespaces", "", "Comma-separated namespaces the expiry scan LISTs secrets/serviceaccounts/Certificates in. Empty = all namespaces (the --watch-scope namespaces under --watch-scope=namespace). Scopes the sensitive secrets-list grant (§11) — the startup RBAC probe verifies exactly this scope.")
 	fs.DurationVar(&f.expiryACMEGrace, "expiry-acme-grace", 15*time.Minute, "How long a cert-manager ACME Challenge may stay pending (or an Order stay pending with no Challenge), timed from its creationTimestamp, before expiry.challenge_stuck / expiry.order_failed fires; terminal failures (invalid/errored/expired) fire on observation. Discovery-gated on acme.cert-manager.io. Also the first-issuance grace for a cert-manager Certificate that has never issued: still Ready=False (DoesNotExist/Issuing) with no recorded failure, it is not reported until this long after its creationTimestamp. Must be > 0.")
 
 	// Capacity source knobs (§7.2 row 7, §10.1). ADDITIVE flags; only

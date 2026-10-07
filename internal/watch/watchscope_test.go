@@ -17,6 +17,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +53,19 @@ const scopeNS = "team-a"
 // are namespaced, an authorizer that grants scopeNS only, and a 403 on every
 // cluster-wide read.
 func roleOnlyClient(objs ...runtime.Object) *fake.Clientset {
+	return scopedClient([]string{scopeNS}, nil, objs...)
+}
+
+// scopedClient is the general fixture: Roles in allowNS, plus cluster-wide
+// read of the resources in clusterAllow (the hybrid tier grants nodes and
+// persistentvolumes). Everything else is refused, list and watch included.
+func scopedClient(allowNS, clusterAllow []string, objs ...runtime.Object) *fake.Clientset {
+	permitted := func(ns, resource string) bool {
+		if ns == "" {
+			return slices.Contains(clusterAllow, resource)
+		}
+		return slices.Contains(allowNS, ns)
+	}
 	client := fake.NewSimpleClientset(objs...)
 	client.Resources = []*metav1.APIResourceList{
 		{GroupVersion: "v1", APIResources: []metav1.APIResource{
@@ -89,22 +103,23 @@ func roleOnlyClient(objs ...runtime.Object) *fake.Clientset {
 	}
 	client.PrependReactor("create", "selfsubjectaccessreviews", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		review := a.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
-		allowed := review.Spec.ResourceAttributes != nil && review.Spec.ResourceAttributes.Namespace == scopeNS
+		attrs := review.Spec.ResourceAttributes
+		allowed := attrs != nil && permitted(attrs.Namespace, attrs.Resource)
 		review.Status = authorizationv1.SubjectAccessReviewStatus{Allowed: allowed}
 		return true, review, nil
 	})
 	forbidden := func(a k8stesting.Action) error {
 		return apierrors.NewForbidden(schema.GroupResource{Group: a.GetResource().Group, Resource: a.GetResource().Resource}, "",
-			errors.New("the fixture grants namespace "+scopeNS+" only"))
+			errors.New("the fixture does not grant this"))
 	}
 	client.PrependReactor("list", "*", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		if a.GetNamespace() != scopeNS {
+		if !permitted(a.GetNamespace(), a.GetResource().Resource) {
 			return true, nil, forbidden(a)
 		}
 		return false, nil, nil
 	})
 	client.PrependWatchReactor("*", func(a k8stesting.Action) (bool, watch.Interface, error) {
-		if a.GetNamespace() != scopeNS {
+		if !permitted(a.GetNamespace(), a.GetResource().Resource) {
 			return true, nil, forbidden(a)
 		}
 		return false, nil, nil
@@ -182,7 +197,7 @@ func TestWatchScopeNamespace_RoleOnlyStartsSyncsAndStaysInside(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	attachSharedFactories(bs, newSharedFactories(client, nil, f.scopeNamespace()))
+	attachSharedFactories(bs, newSharedFactories(client, nil, f.scopeNamespaces()))
 	if _, err := sources.Probe(ctx, newAccessReviewer(f, client), bs.registry.All()...); err != nil {
 		t.Fatalf("§11 probe refused the resolved set under a Role it fits: %v", err)
 	}
@@ -253,7 +268,7 @@ func TestWatchScopeNamespace_FixtureHasTeeth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSources: %v", err)
 	}
-	attachSharedFactories(bs, newSharedFactories(client, nil, ""))
+	attachSharedFactories(bs, newSharedFactories(client, nil, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	go func() { _ = sources.RunAll(ctx, bs.registry.All(), func(engine.Signal) {}) }()
@@ -302,7 +317,7 @@ func TestWatchScopeNamespace_StormOnFailsLoudly(t *testing.T) {
 // informers list in the scope namespace, the node informer cluster-wide.
 func TestNewSharedFactories_NamespaceScope(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	sf := newSharedFactories(client, []string{"kube-system"}, scopeNS)
+	sf := newSharedFactories(client, []string{"kube-system"}, []string{scopeNS})
 	if !sf.Split() {
 		t.Error("namespace scope shares one factory between namespaced and node informers")
 	}
@@ -346,14 +361,14 @@ func TestWatchScope_DefaultChangesNothing(t *testing.T) {
 	if f.watchScope != watchScopeCluster {
 		t.Errorf("default --watch-scope = %q, want cluster", f.watchScope)
 	}
-	if ns := f.scopeNamespace(); ns != "" {
+	if ns := f.scopeNamespaces(); ns != nil {
 		t.Errorf("cluster scope reports scope namespace %q; --namespace must stay an output filter", ns)
 	}
 	client := fake.NewSimpleClientset()
 	if _, scoped := newAccessReviewer(f, client).(sources.RequirementScoper); scoped {
 		t.Error("cluster scope wraps the reviewer; requirements must be asked exactly as declared")
 	}
-	if sf := newSharedFactories(client, nil, f.scopeNamespace()); sf.Split() {
+	if sf := newSharedFactories(client, nil, f.scopeNamespaces()); sf.Split() {
 		t.Error("cluster scope split the factories")
 	}
 }
@@ -369,7 +384,9 @@ func TestWatchScope_Validate(t *testing.T) {
 		{"cluster with a namespace filter", []string{"--watch-scope=cluster", "--namespace=a,b"}, true},
 		{"namespace with one namespace", []string{"--watch-scope=namespace", "--namespace=a"}, true},
 		{"namespace without --namespace", []string{"--watch-scope=namespace"}, false},
-		{"namespace with two namespaces", []string{"--watch-scope=namespace", "--namespace=a,b"}, false},
+		{"namespace with two namespaces", []string{"--watch-scope=namespace", "--namespace=a,b"}, true},
+		{"namespace named twice is one", []string{"--watch-scope=namespace", "--namespace=a,a"}, true},
+		{"a listed namespace that excludes itself", []string{"--watch-scope=namespace", "--namespace=a,b", "--exclude-namespace=b"}, false},
 		{"namespace that excludes itself", []string{"--watch-scope=namespace", "--namespace=a", "--exclude-namespace=a"}, false},
 		{"unknown scope", []string{"--watch-scope=namespaces", "--namespace=a"}, false},
 	}

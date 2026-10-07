@@ -1,0 +1,73 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The strictly namespaced tier (#407): deploy-namespaced/ with NO
+# cluster-scoped grant at all — for a tenant on a shared platform cluster
+# who will never be given a ClusterRole. Use it INSTEAD of deploy/ or
+# deploy-namespaced/:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced-strict?ref=vX.Y.Z"
+#
+# It is deploy-namespaced/ with these changes:
+#   1. no node-read ClusterRole or binding, and no kube-system capacity Role;
+#   2. --storm=on becomes --storm=auto: the topology graph needs nodes, and
+#      an explicit --storm=on would refuse to start without them.
+#
+# What that costs, against deploy-namespaced/: object-state, saturation,
+# capacity, topology-drift and storm correlation are skipped at startup,
+# one log line each. deploy-namespaced/README.md has the table for both
+# tiers.
+#
+# Helm: rbac.scope=namespace with rbac.nodes=false.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy-namespaced
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: lookout-watch-nodes
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: lookout-watch-nodes
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: lookout-watch-capacity
+        namespace: kube-system
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: lookout-watch-capacity
+        namespace: kube-system
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/args/9
+        value: --storm=on
+      - op: replace
+        path: /spec/template/spec/containers/0/args/9
+        value: --storm=auto

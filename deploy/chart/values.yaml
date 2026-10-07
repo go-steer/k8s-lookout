@@ -67,15 +67,13 @@ rbac:
   # reference checks in enrichment bundles.
   secrets: true
   # What the sentinel watches: cluster (every namespace, the ClusterRole
-  # above) or namespace (#407) — only the release namespace, under a
-  # Role + RoleBinding there and no cluster-scoped grant at all. namespace
-  # replaces the ClusterRole, its binding and the capacity Role, adds
-  # --watch-scope=namespace --namespace=<release namespace> to the
-  # watcher and turns --storm=on into --storm=auto: the same deployment as
-  # the deploy-namespaced/ overlay. It costs every source that reads
-  # nodes or another cluster-scoped kind (object-state, saturation,
-  # capacity, topology-drift, compute-class, expiry) and storm
-  # correlation; deploy-namespaced/README.md has the full list.
+  # above) or namespace (#407) — only the namespaces in `namespaces`
+  # below. namespace replaces the cluster-wide ClusterRole and its binding
+  # with a Role + RoleBinding in each watched namespace and adds
+  # --watch-scope=namespace --namespace=<those namespaces> to the watcher:
+  # the same deployment as the deploy-namespaced/ overlay. It costs the
+  # expiry and compute-class sources; deploy-namespaced/README.md has the
+  # table.
   scope: cluster
   # PRIVILEGED, off by default: the one write grant lookout can use,
   # `patch pods/ephemeralcontainers`, for `lookout net probe-from`
@@ -87,6 +85,18 @@ rbac:
   # leaves its ephemeral container in the probed pod's spec for that
   # pod's lifetime.
   probeFrom: false
+  # With scope=namespace: the namespaces to watch. Empty means the release
+  # namespace. Each gets its own Role + RoleBinding, so the chart's user
+  # needs rights to create them there.
+  namespaces: []
+  # With scope=namespace: the one cluster-wide grant of the namespace tier,
+  # read access to Nodes and PersistentVolumes. On by default — it keeps
+  # object-state, saturation, capacity, topology-drift and storm
+  # correlation working, and nodes carry no tenant data. false is the
+  # strictly namespaced tier (deploy-namespaced-strict/): no ClusterRole
+  # at all, the capacity Role dropped too, and --storm=on becomes
+  # --storm=auto; those five are then skipped at startup.
+  nodes: true
 
 # -- The optional LeewayPolicy / ClusterLeewayPolicy CRDs, which let an
 # operator declare a workload's placement intent instead of letting the

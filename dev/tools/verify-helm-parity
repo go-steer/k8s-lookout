@@ -266,6 +266,22 @@ for s in crb["subjects"]:
 print("✓ re-namespaced deploy-probe/ keeps its admission policy on the granted ServiceAccount")
 PY
 
+# rbac.scope=namespace's strictly namespaced variant (#407): no ClusterRole at all.
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace --set rbac.nodes=false >"$tmp/chart-strict.raw.yaml"
+kustomize build deploy-namespaced-strict/ >"$tmp/kustomize-strict.raw.yaml"
+normalize "$tmp/chart-strict.raw.yaml" "$tmp/chart-strict.yaml"
+normalize "$tmp/kustomize-strict.raw.yaml" "$tmp/kustomize-strict.yaml"
+
+if diff -u "$tmp/kustomize-strict.yaml" "$tmp/chart-strict.yaml" >"$tmp/diff-strict"; then
+  echo "✓ chart with rbac.scope=namespace rbac.nodes=false matches deploy-namespaced-strict/"
+else
+  echo "✗ helm template --set rbac.scope=namespace --set rbac.nodes=false and deploy-namespaced-strict/ have diverged." >&2
+  echo "  Left is kustomize build deploy-namespaced-strict/, right is helm template." >&2
+  echo >&2
+  cat "$tmp/diff-strict" >&2
+  exit 1
+fi
+
 # ---- the chart must also be valid on its own --------------------------
 
 helm lint "$CHART" --namespace "$NAMESPACE" --quiet
@@ -290,6 +306,14 @@ render_ok "serviceAccount external" --set serviceAccount.create=false --set serv
 render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
 render_ok "gke flavor"              --set image.flavor=gke
 render_ok "namespace scope, no secrets" --set rbac.scope=namespace --set rbac.secrets=false
+# A namespace list renders one Role + RoleBinding per namespace and names
+# every one of them in --namespace.
+listed="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace \
+  --set-json 'rbac.namespaces=["team-a","team-b"]')"
+if [[ "$(grep -c '^  namespace: team-' <<<"$listed")" != 4 ]] || ! grep -q -- '--namespace=team-a,team-b' <<<"$listed"; then
+  echo "✗ rbac.namespaces=[team-a,team-b] did not render a Role per namespace and --namespace=team-a,team-b" >&2
+  exit 1
+fi
 # A typo'd scope must fail the render, not fall back to either tier.
 if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespaced >/dev/null 2>&1; then
   echo "✗ chart rendered with rbac.scope=namespaced — the guard in _helpers.tpl is not firing" >&2

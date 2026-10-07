@@ -31,7 +31,7 @@ import (
 // TestRun_NamespaceScopesTheDynamicInformers pins the #407 half of this
 // source: its Gateway/HTTPRoute informers live on its own dynamic factory, not
 // the sentinel's shared one, so --watch-scope=namespace has to reach them
-// through Config.Namespace. Every LIST and WATCH must name the namespace — a
+// through Config.Namespaces, one informer pair per namespace. Every LIST and WATCH must name one of them — a
 // cluster-wide one would be a 403 under a namespaced Role, and an informer
 // retrying a 403 never syncs.
 func TestRun_NamespaceScopesTheDynamicInformers(t *testing.T) {
@@ -45,7 +45,7 @@ func TestRun_NamespaceScopesTheDynamicInformers(t *testing.T) {
 		httprouteGVR: "HTTPRouteList",
 	})
 	cfg := DefaultConfig()
-	cfg.Namespace = "team-a"
+	cfg.Namespaces = []string{"team-a", "team-b"}
 	s := New(client, dyn, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -70,8 +70,8 @@ func TestRun_NamespaceScopesTheDynamicInformers(t *testing.T) {
 			continue
 		}
 		seen++
-		if a.GetNamespace() != "team-a" {
-			t.Errorf("%s %s in namespace %q, want team-a", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
+		if ns := a.GetNamespace(); ns != "team-a" && ns != "team-b" {
+			t.Errorf("%s %s in namespace %q, want team-a or team-b", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
 		}
 	}
 	if seen == 0 {
