@@ -7,8 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-07
+
+**This release lets the sentinel run for chosen namespaces only, adds an
+opt-in way to probe the network from inside a pod, and adds a sink that
+runs each incident in its own Agent Executor task.** `lookout watch
+--watch-scope=namespace --namespace=a,b,c` watches only the listed
+namespaces, under a Role in each. The default `deploy-namespaced/` tier
+adds a small ClusterRole for nodes and PersistentVolumes, which keeps
+topology-drift, capacity and storm correlation working.
+`deploy-namespaced-strict/` drops even that ClusterRole. Only under
+`--watch-scope=namespace` is `--namespace` a watch scope and a security
+boundary; without it, `--namespace` is still just an output filter.
+`lookout net probe-from --pod ns/name` runs `net probe` from inside a
+named pod through an ephemeral container. It is **privileged and off
+unless deployed**: the permission comes only from the `deploy-probe/`
+overlay or Helm `rbac.probeFrom=true`, and an admission policy limits it
+to lookout's own probe container. The command refuses to run if that
+policy is missing. `--sink=ax` delivers each incident to its own Agent
+Executor task on Agent Substrate. The default deploy and every existing
+default are unchanged.
+
 ### Added
 
+- **`--sink=ax`: each incident runs in its own Agent Executor (AX) task
+  (#567).** The ax sink creates, or reuses, one AX task per incident from
+  an operator-provided template (`--ax-task-template`). It reaches the
+  agent inside the task through Agent Substrate's router
+  (`--ax-router-url`), speaking the same core-agent session calls, so the
+  payloads are unchanged. `--ax-server` names the AX API (plaintext
+  gRPC). A quiet task is suspended and woken by the next request, so an
+  open incident with nothing happening costs storage, not compute.
+  Design: `docs/ax-sink-design.md`. `google.golang.org/grpc`, already an
+  indirect dependency, becomes a direct one.
 - **`lookout net probe-from`: an opt-in, PRIVILEGED probe from inside a
   named pod (#539).** `net probe` only probes from wherever lookout
   runs, so a fault on one caller's path (a one-way partition from it,
