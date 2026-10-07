@@ -41,6 +41,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `drain.local_storage` | warning | a pod on this node has emptyDir volumes: the drain needs --delete-emptydir-data and the data is lost |
 | `drain.singleton` | warning | a pod on this node is the only replica of its controller — evicting it is an outage |
 | `drain.node` | critical, warning | the -A roll-up: this node is not cleanly drainable, with the blocker classes counted; critical when a PDB gridlock is among them |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -65,6 +66,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `drainable` | summary note (--node mode): yes when the node has no blockers, else no |
 | `nodes` | summary note (-A mode): nodes examined |
 | `blocked` | summary note (-A mode): nodes with at least one blocker |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

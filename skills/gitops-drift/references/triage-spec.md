@@ -41,6 +41,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `spec.resource` | info | the object itself: metadata, owner, and the kind-specific highlights (one per target) |
 | `spec.container` | info | one container of the target: image, resources, ports, probes, env (one per container) |
 | `spec.condition` | warning | a status condition of the target that is not in its nominal state |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -78,6 +79,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `runtime` | Node: container runtime version |
 | `allocatable` | Node: allocatable cpu, memory and pods as name:quantity pairs |
 | `capacity` | Node: capacity cpu, memory and pods as name:quantity pairs |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

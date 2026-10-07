@@ -69,7 +69,7 @@ const maxConstraintKeys = 8
 // alternative is reimplementing the taint/toleration matcher to make a
 // posture claim marginally sharper.
 func (ix *workloadIndex) placement(w workload) []emit.Finding {
-	if w.kind == "DaemonSet" {
+	if w.kind == "DaemonSet" || ix.nodesRefused != nil {
 		return nil
 	}
 	want, via := ix.replicaFloor(w)

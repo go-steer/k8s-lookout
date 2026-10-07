@@ -57,8 +57,9 @@ func DrainCommand(deps Deps) checks.Command {
 			checks.Kind("drain.local_storage", "a pod on this node has emptyDir volumes: the drain needs --delete-emptydir-data and the data is lost", emit.SeverityWarning),
 			checks.Kind("drain.singleton", "a pod on this node is the only replica of its controller — evicting it is an outage", emit.SeverityWarning),
 			checks.Kind("drain.node", "the -A roll-up: this node is not cleanly drainable, with the blocker classes counted; critical when a PDB gridlock is among them", emit.SeverityCritical, emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "node", Doc: "the node the blocker sits on (stamped on every --node-mode finding)"},
 			{Name: "pods", Doc: "pods on the node covered by the gridlocked PDB"},
 			{Name: "pod_names", Doc: "names of the covered pods, capped at 8 with a +N more tail"},
@@ -76,7 +77,7 @@ func DrainCommand(deps Deps) checks.Command {
 			{Name: "drainable", Doc: "summary note (--node mode): yes when the node has no blockers, else no"},
 			{Name: "nodes", Doc: "summary note (-A mode): nodes examined"},
 			{Name: "blocked", Doc: "summary note (-A mode): nodes with at least one blocker"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout stab drain --node=gke-prod-pool-a-x1z2",
 			"lookout stab drain -A",
@@ -111,8 +112,17 @@ func runDrain(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	if ix.nodesRefused != nil {
+		what := "nodes are taken from the pods bound to them, so a node running no pods is absent from nodes= — it has nothing to block a drain"
+		if node != "" {
+			what = "--node is not checked against the node list; the blockers below are the pods bound to it"
+		}
+		if err := inv.Out.Emit(checks.RefusedFinding(*ix.nodesRefused, what)); err != nil {
+			return 0, err
+		}
+	}
 	if node != "" {
-		if !ix.nodes[node] {
+		if !ix.nodes[node] && ix.nodesRefused == nil {
 			return 0, fmt.Errorf("node %q not found (%d nodes in the cluster)", node, len(ix.nodes))
 		}
 		blockers := ix.nodeBlockers(node)
@@ -183,6 +193,10 @@ type drainIndex struct {
 	replicaSet map[string]*appsv1.ReplicaSet  // ns/name
 	deployment map[string]*appsv1.Deployment  // ns/name
 	statefulSt map[string]*appsv1.StatefulSet // ns/name
+	// nodesRefused is set when RBAC refused the node List; nodes then
+	// holds the nodes the listed pods are bound to, and nodeObjs is
+	// empty.
+	nodesRefused *checks.Refusal
 }
 
 // listDrainIndex lists nodes, pods, PDBs, and the singleton-check
@@ -266,9 +280,29 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 			}, func(s *appsv1.StatefulSet) { ix.statefulSt[s.Namespace+"/"+s.Name] = s })
 		},
 	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+	for i, step := range steps {
+		err := step()
+		if err == nil {
+			continue
+		}
+		// Nodes are cluster-scoped and the built-in `view` role does
+		// not grant them (#546). The drain analysis itself is pods,
+		// PDBs and controllers, so a refused node List degrades: the
+		// node set is taken from the pods bound to each node instead.
+		if r, ok := checks.ForbiddenRefusal(err); ok && i == 0 {
+			ix.nodesRefused = &r
+			continue
+		}
+		return nil, err
+	}
+	if ix.nodesRefused != nil {
+		for n := range ix.requested {
+			ix.nodes[n] = true
+		}
+		for n := range ix.podsByNode {
+			if n != "" {
+				ix.nodes[n] = true
+			}
 		}
 	}
 	for _, pods := range ix.podsByNode {

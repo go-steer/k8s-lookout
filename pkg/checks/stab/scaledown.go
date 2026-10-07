@@ -117,8 +117,9 @@ func ScaledownCommand(deps Deps) checks.Command {
 		},
 		Kinds: []checks.KindField{
 			checks.Kind(kindScaledownBlocked, "the node is requested below --utilization, so the autoscaler would remove it, but a pod on it cannot be moved — a zero-disruption PDB, a pod with no controller, or a pod annotated safe-to-evict=false — so it keeps billing at low utilization", emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "utilization", Doc: "the node's requested share of allocatable on the deciding resource, whole percent, rounded down"},
 			{Name: "basis", Doc: "the deciding resource: cpu or memory (whichever is higher), or gpu on a node that offers GPUs"},
 			{Name: "threshold", Doc: "the --utilization the node was judged against, in percent"},
@@ -131,7 +132,7 @@ func ScaledownCommand(deps Deps) checks.Command {
 			{Name: "nodes", Doc: "summary note: nodes listed"},
 			{Name: "excluded", Doc: "summary note: nodes the autoscaler never removes and so were not judged — control-plane, annotated scale-down-disabled, or already tainted for deletion"},
 			{Name: "underused", Doc: "summary note: judged nodes below --utilization, blocked or not"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout stab scaledown",
 			"lookout stab scaledown --utilization=65",
@@ -162,6 +163,16 @@ func runScaledown(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	ix, err := listDrainIndex(ctx, client)
 	if err != nil {
 		return 0, err
+	}
+	// Utilization is requests over each Node's allocatable: without
+	// the node List (the built-in `view` role grants none, #546) there
+	// is no node to judge, so the answer is the one record and an
+	// empty node set.
+	if ix.nodesRefused != nil {
+		if err := inv.Out.Emit(checks.RefusedFinding(*ix.nodesRefused,
+			"no node was judged: utilization is requests over each Node's allocatable")); err != nil {
+			return 0, err
+		}
 	}
 
 	names := make([]string, 0, len(ix.nodeObjs))

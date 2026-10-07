@@ -103,6 +103,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `skipped` | on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
 | `hop` | radius neighbor's BFS depth from the target (1 = direct edge) |
+| `observed` | unknown on a radius neighbor whose kind the bundle's List pass could not read (skipped= names it): it is referenced, and nothing is claimed about whether it exists |
 | `triage_status` | triage state from the matched §9.4 record (investigating\|triaged\|actioned\|escalated) — present only with --store on merged findings |
 | `triage_root_cause` | the incident agent's root-cause hypothesis, from the matched triage-status record |
 | `triage_action` | the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record |

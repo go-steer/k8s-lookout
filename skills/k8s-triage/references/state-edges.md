@@ -50,7 +50,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `edge.cert_expiring` | warning | a TLS certificate expires within --cert-warn |
 | `edge.cert_invalid` | warning | tls.crt is missing or unparseable, or the secret is not kubernetes.io/tls |
 | `edge.rbac_dangling` | warning | a (Cluster)RoleBinding for the workload's ServiceAccount points at a missing (Cluster)Role |
-| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence (§11) |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -82,7 +82,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `port` | Service port (name or number) the Ingress backend asks for |
 | `service_account` | ServiceAccount the RBAC finding is about, or the one contributing an imagePullSecret |
 | `role_ref` | dangling roleRef as <Kind>/<name> |
-| `resource` | read.unavailable: the resource the List pass could not read, as resource[.group] |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

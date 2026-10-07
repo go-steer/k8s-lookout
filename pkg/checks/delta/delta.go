@@ -118,6 +118,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("quota.exhausted", "a ResourceQuota resource is at its hard limit: the next create is rejected", emit.SeverityCritical),
 			checks.Kind("hpa.scale_failed", "an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale", emit.SeverityWarning),
 			checks.Kind("hpa.scaling_inactive", "an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count", emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
 		Output: []checks.OutputField{
 			{Name: "container", Doc: "container the finding is about (init containers prefixed init:)"},
@@ -216,10 +217,19 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		ns = metav1.NamespaceAll
 	}
 
-	s := &scanner{client: client, ns: ns, now: d.now(), th: th, classes: classes}
+	// Tolerant (#546): a part whose List RBAC refuses drops out alone,
+	// named by one read.unavailable record leading the answer — under
+	// the built-in `view` role that is the nodes class, which `view`
+	// never grants. Every other class still answers.
+	s := &scanner{client: client, ns: ns, now: d.now(), th: th, classes: classes, tolerate: true}
 	scanned, findings, err := s.scan(ctx)
 	if err != nil {
 		return 0, err
+	}
+	for _, f := range s.unreadFindings() {
+		if err := inv.Out.Emit(f); err != nil {
+			return 0, err
+		}
 	}
 
 	sortFindings(findings)

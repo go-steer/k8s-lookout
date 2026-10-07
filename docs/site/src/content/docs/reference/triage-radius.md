@@ -55,7 +55,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | --- | --- | --- |
 | `radius.neighbor` | info | one object in the target's neighborhood, with its direction, relation, and hop distance — an enumeration of impact, not a defect |
 | `radius.missing` | warning | a neighbor the graph references but never observed, in a kind the snapshot does watch: the reference is dangling |
-| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -72,7 +72,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `source` | summary-line note: live (one-shot List pass) or history (reconstructed from --store) |
 | `at` | summary-line note: the resolved --at instant the history answer is as of, RFC 3339 |
 | `unrecorded` | summary-line note, history only: comma-separated kinds the stored topology cannot contain (the sentinel's graph feed never watched them), so their absence is not a finding |
-| `resource` | read.unavailable: the resource the List pass could not read, as resource[.group] |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

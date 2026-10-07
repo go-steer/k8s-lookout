@@ -37,6 +37,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | --- | --- | --- |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -55,6 +56,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `bindings` | RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today |
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

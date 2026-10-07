@@ -237,7 +237,7 @@ func TestRadius_DegradesUnderViewRole(t *testing.T) {
 		t.Fatalf("exit %d, want 0; stderr %q", res.Code, res.Stderr)
 	}
 	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
-	if want := `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — Secret neighbors are identity-only (observed=unknown) where something references them, and absent where nothing does — never claimed missing" resource=secrets`; lines[0] != want {
+	if want := `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — Secret neighbors are identity-only (observed=unknown) where something references them, and absent where nothing does — never claimed missing" resource=secrets`; lines[0] != want {
 		t.Errorf("first line:\n got: %s\nwant: %s", lines[0], want)
 	}
 	if strings.Count(res.Stdout, "kind=read.unavailable") != 1 {

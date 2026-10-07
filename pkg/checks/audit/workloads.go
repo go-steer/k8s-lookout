@@ -97,8 +97,9 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by", emit.SeverityWarning),
 			checks.Kind(kindSuspendedCron, "a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that", emit.SeverityWarning),
 			checks.Kind(kindSuspendedJob, "a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening", emit.SeverityInfo),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "replicas", Doc: "the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count"},
 			{Name: "autoscaler", Doc: "the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load"},
 			{Name: "namespace_pdbs", Doc: "PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed"},
@@ -120,10 +121,10 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "missed_runs", Doc: "activations skipped since then; ≥N when the walk was capped, unknown when the schedule does not parse"},
 			{Name: "pdbs", Doc: "summary note: PodDisruptionBudgets seen in scope"},
 			{Name: "hpas", Doc: "summary note: HorizontalPodAutoscalers seen in scope"},
-			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against"},
+			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against; omitted when the node List was refused (a read.unavailable record says so, and no placement claim is made)"},
 			{Name: "workloads", Doc: "summary note: workloads examined, broken down as deployments/statefulsets/daemonsets/cronjobs"},
 			{Name: "jobs", Doc: "summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads`"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit workloads -A",
 			"lookout audit workloads --namespace=prod",
@@ -257,6 +258,12 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	}
 
 	sortFindings(findings)
+	if ix.nodesRefused != nil {
+		if err := inv.Out.Emit(checks.RefusedFinding(*ix.nodesRefused,
+			"audit.rigid_scheduling not judged: a placement constraint is resolved against the Node objects")); err != nil {
+			return 0, err
+		}
+	}
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
@@ -268,6 +275,9 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		{"nodes", itoa(len(ix.nodes))},
 		{"workloads", fmt.Sprintf("%d/%d/%d/%d", counts[0], counts[1], counts[2], counts[3])},
 		{"jobs", itoa(jobs)},
+	}
+	if ix.nodesRefused != nil {
+		notes = append(notes[:2], notes[3:]...)
 	}
 	for _, n := range notes {
 		if err := inv.Out.Note(n[0], n[1]); err != nil {
@@ -344,6 +354,10 @@ type workloadIndex struct {
 	// under --namespace: a placement constraint does not stop at a
 	// namespace boundary.
 	nodes []*corev1.Node
+	// nodesRefused is set when RBAC refused the node List; the
+	// placement claim is then skipped rather than resolved against an
+	// empty node set (#546).
+	nodesRefused *checks.Refusal
 	// pdbsByNS counts PDBs per namespace, so a no-PDB finding can say
 	// whether the namespace uses PDBs at all.
 	pdbsByNS map[string]int
@@ -451,10 +465,20 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 			})
 		},
 	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+	for i, step := range steps {
+		err := step()
+		if err == nil {
+			continue
 		}
+		// Nodes feed only the placement claim, and the built-in `view`
+		// role does not grant them (#546): a refused node List skips
+		// that one claim, named by a read.unavailable record, and
+		// every other claim still answers.
+		if r, ok := checks.ForbiddenRefusal(err); ok && i == len(steps)-1 {
+			ix.nodesRefused = &r
+			continue
+		}
+		return nil, err
 	}
 	sort.Slice(ix.workloads, func(i, j int) bool {
 		a, b := ix.workloads[i], ix.workloads[j]

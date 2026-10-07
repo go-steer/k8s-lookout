@@ -104,8 +104,9 @@ func StorageCommand(deps Deps) checks.Command {
 			checks.Kind("storage.multiple_defaults", "more than one StorageClass is annotated as the cluster default; which one wins is not defined", emit.SeverityWarning),
 			checks.Kind("storage.pv_failed", "a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused", emit.SeverityWarning),
 			checks.Kind("storage.pv_released", "a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared", emit.SeverityInfo),
+			UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "storage_class", Doc: "StorageClass the claim names, or the class the finding is about"},
 			{Name: "classes", Doc: "StorageClasses the cluster does have, sorted (empty when there are none)"},
 			{Name: "defaults", Doc: "StorageClasses annotated as the cluster default, sorted"},
@@ -116,7 +117,7 @@ func StorageCommand(deps Deps) checks.Command {
 			{Name: "reclaim_policy", Doc: "the volume's spec.persistentVolumeReclaimPolicy"},
 			{Name: "claim", Doc: "the claim the volume was bound to, as namespace/name"},
 			{Name: "binding_mode", Doc: "the class's volumeBindingMode (Immediate when unset)"},
-		},
+		}, UnreadFields()...),
 		Examples: []string{
 			"lookout state storage",
 			"lookout state storage --namespace=prod",
@@ -179,6 +180,11 @@ type storageIndex struct {
 	// their spec.storageClassName ("" for classless). A claim waiting
 	// on a class with a free volume is mid-bind, not stuck.
 	availableByClass map[string]int
+
+	// refused are the Lists RBAC refused, in list order (#546). Under
+	// the built-in `view` role: storageclasses and persistentvolumes,
+	// both cluster-scoped.
+	refused []checks.Refusal
 }
 
 func listStorageIndex(ctx context.Context, client kubernetes.Interface, ns string) (*storageIndex, error) {
@@ -186,8 +192,11 @@ func listStorageIndex(ctx context.Context, client kubernetes.Interface, ns strin
 		classes:          map[string]*storagev1.StorageClass{},
 		availableByClass: map[string]int{},
 	}
-	steps := []func() error{
-		func() error {
+	steps := []struct {
+		refusal checks.Refusal
+		run     func() error
+	}{
+		{storageClassesList, func() error {
 			return listPages("storageclasses", func(o metav1.ListOptions) ([]storagev1.StorageClass, string, error) {
 				l, err := client.StorageV1().StorageClasses().List(ctx, o)
 				if err != nil {
@@ -201,8 +210,8 @@ func listStorageIndex(ctx context.Context, client kubernetes.Interface, ns strin
 				}
 				six.scanned++
 			})
-		},
-		func() error {
+		}},
+		{storagePVsList, func() error {
 			return listPages("persistentvolumes", func(o metav1.ListOptions) ([]corev1.PersistentVolume, string, error) {
 				l, err := client.CoreV1().PersistentVolumes().List(ctx, o)
 				if err != nil {
@@ -216,8 +225,8 @@ func listStorageIndex(ctx context.Context, client kubernetes.Interface, ns strin
 				}
 				six.scanned++
 			})
-		},
-		func() error {
+		}},
+		{storagePVCsList, func() error {
 			return listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
 				l, err := client.CoreV1().PersistentVolumeClaims(ns).List(ctx, o)
 				if err != nil {
@@ -225,15 +234,47 @@ func listStorageIndex(ctx context.Context, client kubernetes.Interface, ns strin
 				}
 				return l.Items, l.Continue, nil
 			}, func(c *corev1.PersistentVolumeClaim) { six.pvcs = append(six.pvcs, c); six.scanned++ })
-		},
+		}},
 	}
+	// A refused List degrades (#546): the checks that need it are
+	// skipped, each refusal named by a read.unavailable record, and
+	// the rest still answer. Any other error stays fatal.
 	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+		err := step.run()
+		if err == nil {
+			continue
 		}
+		if _, forbidden := ListForbidden(err); forbidden {
+			six.refused = append(six.refused, step.refusal)
+			continue
+		}
+		return nil, err
 	}
 	sort.Strings(six.defaults)
 	return six, nil
+}
+
+// The three Lists `state storage` joins over, as Refusals.
+var (
+	storageClassesList = checks.Refused("list", "storage.k8s.io", "storageclasses")
+	storagePVsList     = checks.Refused("list", "", "persistentvolumes")
+	storagePVCsList    = checks.Refused("list", "", "persistentvolumeclaims")
+)
+
+// storageRefusedCost names what each refused List costs the answer.
+var storageRefusedCost = map[string]string{
+	"storageclasses":         "Pending-claim diagnosis (missing class, no default class, static-only class) and the multiple-default check skipped: every one is judged against the StorageClasses",
+	"persistentvolumes":      "Pending-claim diagnosis skipped (a free pre-provisioned volume means a claim is mid-bind, not stuck) and Failed/Released volumes not reported",
+	"persistentvolumeclaims": "Pending-claim diagnosis skipped",
+}
+
+func (six *storageIndex) refusedRes(resource string) bool {
+	for _, r := range six.refused {
+		if r.Resource == resource {
+			return true
+		}
+	}
+	return false
 }
 
 // storageIsDefault reports whether the class carries either spelling
@@ -245,9 +286,20 @@ func storageIsDefault(sc *storagev1.StorageClass) bool {
 
 func (six *storageIndex) findings() []emit.Finding {
 	var out []emit.Finding
-	out = append(out, six.multipleDefaults()...)
-	out = append(out, six.claimFindings()...)
-	out = append(out, six.volumeFindings()...)
+	for _, r := range six.refused {
+		out = append(out, checks.RefusedFinding(r, storageRefusedCost[r.Resource]))
+	}
+	noClasses := six.refusedRes("storageclasses")
+	noPVs := six.refusedRes("persistentvolumes")
+	if !noClasses {
+		out = append(out, six.multipleDefaults()...)
+	}
+	if !noClasses && !noPVs && !six.refusedRes("persistentvolumeclaims") {
+		out = append(out, six.claimFindings()...)
+	}
+	if !noPVs {
+		out = append(out, six.volumeFindings()...)
+	}
 	return out
 }
 

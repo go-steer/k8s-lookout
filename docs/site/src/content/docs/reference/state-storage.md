@@ -41,6 +41,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `storage.multiple_defaults` | warning | more than one StorageClass is annotated as the cluster default; which one wins is not defined |
 | `storage.pv_failed` | warning | a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused |
 | `storage.pv_released` | info | a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
 
@@ -58,6 +59,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `reclaim_policy` | the volume's spec.persistentVolumeReclaimPolicy |
 | `claim` | the claim the volume was bound to, as namespace/name |
 | `binding_mode` | the class's volumeBindingMode (Immediate when unset) |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

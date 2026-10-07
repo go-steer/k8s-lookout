@@ -207,6 +207,7 @@ func New(deps Deps) checks.Command {
 			checks.Kind("top.unrequested", "how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero", emit.SeverityInfo),
 			checks.Kind("top.unrequested_container", "one container that sets no cpu/memory request (--show-unrequested)", emit.SeverityInfo),
 			checks.CloudUnavailableKind(),
+			checks.UnreadKind(),
 		},
 		Output: []checks.OutputField{
 			{Name: "resource", Doc: "the judged dimension: cpu or memory"},
@@ -336,7 +337,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// traversal — no name-prefix guessing).
 	var podSet map[string]bool
 	if !wl.IsZero() {
-		cluster, err := state.LoadCluster(ctx, client, listNS)
+		// Only the owner tree is needed — pods and the workload kinds —
+		// so a role without Secrets, RBAC or Nodes (the built-in
+		// `view`) resolves the member set exactly as full access does
+		// (#546).
+		cluster, err := state.LoadCluster(ctx, client, listNS, state.Lists(state.OwnerTreeLists))
 		if err != nil {
 			return 0, err
 		}
@@ -356,6 +361,15 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	fetcher := saturation.NewScopedMetricsPodFetcher(metrics, client, listNS)
 	samples, err := fetcher.FetchPodUsage(ctx)
 	if err != nil {
+		// Every row is usage over a limit or allocatable, so a refused
+		// metrics read is the whole answer: one read.unavailable record
+		// (#546). The built-in `view` role does not grant
+		// metrics.k8s.io itself; metrics-server's aggregated role adds
+		// it to view on clusters that run metrics-server.
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, err,
+			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
+			return scanned, emitErr
+		}
 		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", err)
 	}
 
@@ -420,10 +434,20 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// Node view (-A only): usage vs allocatable, the node-pressure
 	// precursor. Point-in-time only, same asymmetry.
 	var nodeRows []emit.Finding
+	var nodeGap *emit.Finding
 	if inv.Scope.AllNamespaces {
 		nodes, examined, err := fetchNodeUsage(ctx, metrics, client)
 		if err != nil {
-			return 0, err
+			// Nodes are cluster-scoped and the built-in `view` role
+			// does not grant them (#546): the node view drops out,
+			// named by one read.unavailable record, and the container
+			// rows still answer.
+			r, ok := checks.ForbiddenRefusal(err)
+			if !ok {
+				return 0, err
+			}
+			f := checks.RefusedFinding(r, "node view (usage vs allocatable) skipped; container rows are unaffected")
+			nodeGap = &f
 		}
 		scanned += examined
 		sort.Slice(nodes, func(i, j int) bool { return nodeLess(nodes[i], nodes[j]) })
@@ -480,6 +504,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// then the no-limits census.
 	if unavailable != nil {
 		if err := inv.Out.Emit(*unavailable); err != nil {
+			return 0, err
+		}
+	}
+	if nodeGap != nil {
+		if err := inv.Out.Emit(*nodeGap); err != nil {
 			return 0, err
 		}
 	}

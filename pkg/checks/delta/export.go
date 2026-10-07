@@ -108,8 +108,9 @@ func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 // ScanClusterPartial is ScanCluster for a least-privilege credential
 // (#546): a part whose List the API server refuses (Forbidden) is
 // dropped instead of failing the pass, and returned in unavailable as
-// part (PartPods, PartWorkloads, PartNodes, …) → reason ("forbidden:
-// list nodes"). Under the built-in `view` role, which grants no Nodes,
+// part (PartPods, PartWorkloads, PartNodes, …) → reason, the shared
+// checks.Refusal wording ("forbidden: list nodes — cluster-scoped, not
+// granted by the built-in view role; grant list on nodes …"). Under the built-in `view` role, which grants no Nodes,
 // the nodes part is the one that drops. Any other error still fails.
 func ScanClusterPartial(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (scanned int, findings []emit.Finding, unavailable map[string]string, err error) {
 	return scanCluster(ctx, client, ns, now, cfg, true, classes)

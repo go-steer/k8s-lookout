@@ -140,6 +140,7 @@ func New(deps Deps) checks.Command {
 			{Name: "skipped", Doc: "on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
 			{Name: "hop", Doc: "radius neighbor's BFS depth from the target (1 = direct edge)"},
+			{Name: "observed", Doc: "unknown on a radius neighbor whose kind the bundle's List pass could not read (skipped= names it): it is referenced, and nothing is claimed about whether it exists"},
 			{Name: memory.DetailTriageStatus, Doc: "triage state from the matched §9.4 record (investigating|triaged|actioned|escalated) — present only with --store on merged findings"},
 			{Name: memory.DetailTriageRootCause, Doc: "the incident agent's root-cause hypothesis, from the matched triage-status record"},
 			{Name: memory.DetailTriageAction, Doc: "the incident agent's paper trail (PRs opened, escalations), from the matched triage-status record"},
@@ -179,7 +180,10 @@ func composedOutput() []checks.OutputField {
 			continue
 		}
 		for _, f := range c.Output {
-			if seen[f.Name] {
+			// The read.unavailable glossary entries describe a record
+			// the bundle never emits (its gaps are the skipped= note),
+			// so they must not claim a key another section owns.
+			if seen[f.Name] || slices.Contains(checks.UnreadFields(), f) {
 				continue
 			}
 			seen[f.Name] = true

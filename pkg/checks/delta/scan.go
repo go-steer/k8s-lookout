@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -44,6 +45,9 @@ type scanner struct {
 	// unavailable (part → reason) instead of a failed pass.
 	tolerate    bool
 	unavailable map[string]string
+	// refusals is the same per part, as the structured Refusal the
+	// standalone command renders into read.unavailable records.
+	refusals map[string]checks.Refusal
 
 	findings []emit.Finding
 }
@@ -220,6 +224,48 @@ const (
 	PartHPA       = "hpa"
 )
 
+// partOrder and partCost name, per part, what a refused List cost the
+// answer — the tail of its read.unavailable record.
+var (
+	partOrder = []string{PartPods, PartWorkloads, PartNodes, PartSystem, PartPDB, PartQuota, PartHPA}
+	partCost  = map[string]string{
+		PartPods:      "pod.* findings not checked",
+		PartWorkloads: "workload.*, job.* and cron.* findings not checked",
+		PartNodes:     "node.* findings not checked",
+		PartSystem:    "addon.* findings not checked",
+		PartPDB:       "pdb.* findings not checked",
+		PartQuota:     "quota.* findings not checked",
+		PartHPA:       "hpa.* findings not checked",
+	}
+)
+
+// unreadFindings renders one read.unavailable record per refused
+// resource, naming every part it cost, in part order.
+func (s *scanner) unreadFindings() []emit.Finding {
+	var (
+		order []string
+		byRes = map[string]checks.Refusal{}
+		costs = map[string][]string{}
+	)
+	for _, p := range partOrder {
+		r, ok := s.refusals[p]
+		if !ok {
+			continue
+		}
+		t := r.Target()
+		if _, seen := byRes[t]; !seen {
+			order = append(order, t)
+			byRes[t] = r
+		}
+		costs[t] = append(costs[t], partCost[p])
+	}
+	out := make([]emit.Finding, 0, len(order))
+	for _, t := range order {
+		out = append(out, checks.RefusedFinding(byRes[t], strings.Join(costs[t], "; ")))
+	}
+	return out
+}
+
 // refuse records err against parts when the pass is tolerant and err
 // is an authorization refusal, and reports whether it did. Anything
 // else stays fatal.
@@ -227,16 +273,18 @@ func (s *scanner) refuse(err error, parts ...string) bool {
 	if !s.tolerate {
 		return false
 	}
-	reason, ok := checks.ListForbidden(err)
+	r, ok := checks.ForbiddenRefusal(err)
 	if !ok {
 		return false
 	}
 	if s.unavailable == nil {
 		s.unavailable = map[string]string{}
+		s.refusals = map[string]checks.Refusal{}
 	}
 	for _, p := range parts {
 		if _, seen := s.unavailable[p]; !seen {
-			s.unavailable[p] = reason
+			s.unavailable[p] = r.String()
+			s.refusals[p] = r
 		}
 	}
 	return true

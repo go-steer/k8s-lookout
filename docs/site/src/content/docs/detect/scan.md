@@ -56,6 +56,7 @@ Every abnormal object in one scan — the first call for "anything wrong in this
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ### [`lookout state webhooks`](/reference/state-webhooks/)
 
@@ -68,6 +69,7 @@ When creates/updates hang or fail cluster-wide with "failed calling webhook", or
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
 | `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
 | `webhook.ca_expiring` | warning | the webhook's caBundle expires within --cert-warn |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ### [`lookout state volumes`](/reference/state-volumes/)
 
@@ -80,7 +82,7 @@ When pods hang in ContainerCreating with Multi-Attach or FailedAttachVolume even
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
 | `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
-| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ### [`lookout state storage`](/reference/state-storage/)
 
@@ -94,6 +96,7 @@ When a PersistentVolumeClaim sits Pending and the pod behind it will not schedul
 | `storage.multiple_defaults` | warning | more than one StorageClass is annotated as the cluster default; which one wins is not defined |
 | `storage.pv_failed` | warning | a PersistentVolume is Failed: its reclaim did not complete, so the backing disk stays allocated and the volume cannot be reused |
 | `storage.pv_released` | info | a PersistentVolume is Released — retained on purpose, but its capacity is unusable until spec.claimRef is cleared |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ### [`lookout state gateway`](/reference/state-gateway/)
 
@@ -178,7 +181,7 @@ property of the whole group. `--include=all` takes every one; `-` subtracts
 
 Best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group
 
-Its 28 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
+Its 29 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
 
 ### `--include=cloud`
 
