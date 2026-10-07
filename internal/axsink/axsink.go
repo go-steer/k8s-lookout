@@ -31,8 +31,6 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
@@ -172,8 +170,13 @@ func (s *Sink) startTask(ctx context.Context, task string) error {
 	if t.Kind == "" {
 		t.Kind = "Task"
 	}
-	if _, err := s.cfg.Client.CreateTask(ctx, &axapi.CreateTaskRequest{Task: t}); err != nil && status.Code(err) != codes.AlreadyExists {
-		return fmt.Errorf("ax sink: creating task %s/%s: %w", s.atespace, task, err)
+	if _, err := s.cfg.Client.CreateTask(ctx, &axapi.CreateTaskRequest{Task: t}); err != nil {
+		// AX refuses a second task with the same name (FailedPrecondition:
+		// tasks are immutable). That's the reopen case: use the task. Ask
+		// rather than match the error, so any other failure still surfaces.
+		if _, gerr := s.cfg.Client.GetTask(ctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task}); gerr != nil {
+			return fmt.Errorf("ax sink: creating task %s/%s: %w", s.atespace, task, err)
+		}
 	}
 	if _, err := s.cfg.Client.ResumeTask(ctx, &axapi.ResumeTaskRequest{Atespace: s.atespace, Name: task}); err != nil {
 		return fmt.Errorf("ax sink: resuming task %s/%s: %w", s.atespace, task, err)

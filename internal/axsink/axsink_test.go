@@ -49,10 +49,20 @@ func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*a
 	defer f.mu.Unlock()
 	name := req.GetTask().GetMetadata().GetName()
 	if _, ok := f.created[name]; ok {
-		return nil, status.Errorf(codes.AlreadyExists, "task %q exists", name)
+		// What AX actually returns for an existing name.
+		return nil, status.Errorf(codes.FailedPrecondition, "task %s already exists and is immutable", name)
 	}
 	f.created[name] = req.GetTask()
 	return req.GetTask(), nil
+}
+
+func (f *fakeAX) GetTask(_ context.Context, req *axapi.GetTaskRequest) (*axapi.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.created[req.GetName()]; ok {
+		return t, nil
+	}
+	return nil, status.Errorf(codes.NotFound, "task %q not found", req.GetName())
 }
 
 func (f *fakeAX) ResumeTask(_ context.Context, req *axapi.ResumeTaskRequest) (*axapi.Task, error) {
