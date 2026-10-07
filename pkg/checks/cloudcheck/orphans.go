@@ -38,6 +38,12 @@ package cloudcheck
 //     ago from a two-year-old reservation is reported, and one
 //     reserved an hour ago for a load balancer about to be created is
 //     not. The same undatable rule as disks: reported, age unknown.
+//
+// A class the provider refuses (cloud.ErrPermissionDenied — on GKE a
+// 403, e.g. no compute.addresses.list) degrades alone: one
+// cloud.unavailable finding naming the class and permission, an
+// unavailable= summary note, and the other classes still swept, exit
+// 0. Any other sweep error stays a runtime error (exit 1).
 
 import (
 	"context"
@@ -87,6 +93,8 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "network_tier", Doc: "orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none"},
 			{Name: "reserved_since", Doc: "orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable"},
 			{Name: "reserved_for", Doc: "orphan.address: how long ago the address was reserved; \"unknown\" when undatable"},
+			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission"},
+			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list); omitted when the provider did not name it"},
 		}, unavailableFields(cloud.CapabilityOrphans)...),
 		Examples: []string{
 			"lookout cloud orphans",
@@ -122,75 +130,150 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		return emitUnavailable(inv, provider, cloud.CapabilityOrphans, "cloud orphans")
 	}
 
+	now := deps.now()
+	sweeps := []struct {
+		class, label string
+		on           bool
+		run          func() (int, error)
+	}{
+		{"disks", "disk sweep", want.disks, func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) }},
+		{"lbs", "load-balancer sweep", want.lbs, func() (int, error) { return sweepLBs(ctx, api, inv) }},
+		{"addresses", "address sweep", want.addresses, func() (int, error) { return sweepAddresses(ctx, api, inv, now, minAge) }},
+	}
 	scanned := 0
-	if want.disks {
-		disks, err := api.OrphanDisks(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("disk sweep: %w", err)
+	var refused []string
+	for _, s := range sweeps {
+		if !s.on {
+			continue
 		}
-		scanned += len(disks)
-		now := deps.now()
-		var old []cloud.OrphanDisk
-		for _, d := range disks {
-			// Zero UnusedSince = undatable — always reported (see
-			// package comment); otherwise apply --min-age.
-			if d.UnusedSince.IsZero() || now.Sub(d.UnusedSince) >= minAge {
-				old = append(old, d)
-			}
-		}
-		sort.Slice(old, func(i, j int) bool {
-			if old[i].SizeGB != old[j].SizeGB {
-				return old[i].SizeGB > old[j].SizeGB // biggest bill first
-			}
-			return old[i].Name < old[j].Name
-		})
-		for _, d := range old {
-			if err := inv.Out.Emit(diskFinding(d, now)); err != nil {
+		n, err := s.run()
+		if permission, denied := cloud.PermissionDenied(err); denied {
+			// A refused class degrades alone (#231, the #546 rule:
+			// a forbidden read is reported, not fatal) — the default
+			// --only gained addresses, and an identity without
+			// compute.addresses.list must keep getting its disk and
+			// lb answer from the same invocation.
+			note, err := emitClassDenied(inv, provider, s.class, permission)
+			if err != nil {
 				return 0, err
 			}
+			refused = append(refused, note)
+			continue
 		}
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", s.label, err)
+		}
+		scanned += n
 	}
-	if want.lbs {
-		lbs, err := api.OrphanLoadBalancers(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("load-balancer sweep: %w", err)
-		}
-		scanned += len(lbs)
-		sort.Slice(lbs, func(i, j int) bool { return lbs[i].Name < lbs[j].Name })
-		for _, lb := range lbs {
-			if err := inv.Out.Emit(lbFinding(lb)); err != nil {
-				return 0, err
-			}
-		}
-	}
-	if want.addresses {
-		addrs, err := api.OrphanAddresses(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("address sweep: %w", err)
-		}
-		scanned += len(addrs)
-		now := deps.now()
-		var old []cloud.OrphanAddress
-		for _, a := range addrs {
-			// Zero ReservedSince = undatable — always reported, as
-			// for disks; otherwise apply --min-age.
-			if a.ReservedSince.IsZero() || now.Sub(a.ReservedSince) >= minAge {
-				old = append(old, a)
-			}
-		}
-		sort.Slice(old, func(i, j int) bool {
-			if old[i].Region != old[j].Region {
-				return old[i].Region < old[j].Region
-			}
-			return old[i].Name < old[j].Name
-		})
-		for _, a := range old {
-			if err := inv.Out.Emit(addressFinding(a, now)); err != nil {
-				return 0, err
-			}
+	if len(refused) > 0 {
+		if err := inv.Out.Note("unavailable", strings.Join(refused, "; ")); err != nil {
+			return 0, err
 		}
 	}
 	return scanned, nil
+}
+
+// emitClassDenied is the per-class twin of emitUnavailable: one
+// cloud.unavailable finding naming the refused class and, when the
+// provider knows it, the permission to grant. It returns the
+// summary-note fragment for the class.
+func emitClassDenied(inv emit.Invocation, p cloud.Provider, class, permission string) (string, error) {
+	need := "permission denied"
+	if permission != "" {
+		need = "needs " + permission
+	}
+	details := []emit.Field{
+		{Key: "capability", Value: string(cloud.CapabilityOrphans)},
+		{Key: "provider", Value: p.Name()},
+		{Key: "class", Value: class},
+	}
+	if permission != "" {
+		details = append(details, emit.Field{Key: "permission", Value: permission})
+	}
+	if err := inv.Out.Emit(emit.Finding{
+		Kind:     "cloud.unavailable",
+		Severity: emit.SeverityInfo,
+		Reason:   "PermissionDenied",
+		Message:  fmt.Sprintf("cloud orphans could not sweep %s: the cloud identity was refused (%s) — no %s were examined; the other selected classes were still swept", class, need, class),
+		Details:  details,
+	}); err != nil {
+		return "", err
+	}
+	return class + ": " + need, nil
+}
+
+// sweepDisks reports unattached disks at least minAge idle; it
+// returns how many unattached disks it examined.
+func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
+	disks, err := api.OrphanDisks(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var old []cloud.OrphanDisk
+	for _, d := range disks {
+		// Zero UnusedSince = undatable — always reported (see
+		// package comment); otherwise apply --min-age.
+		if d.UnusedSince.IsZero() || now.Sub(d.UnusedSince) >= minAge {
+			old = append(old, d)
+		}
+	}
+	sort.Slice(old, func(i, j int) bool {
+		if old[i].SizeGB != old[j].SizeGB {
+			return old[i].SizeGB > old[j].SizeGB // biggest bill first
+		}
+		return old[i].Name < old[j].Name
+	})
+	for _, d := range old {
+		if err := inv.Out.Emit(diskFinding(d, now)); err != nil {
+			return 0, err
+		}
+	}
+	return len(disks), nil
+}
+
+// sweepLBs reports forwarding rules routing to zero endpoints; it
+// returns how many orphaned rules the provider judged.
+func sweepLBs(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation) (int, error) {
+	lbs, err := api.OrphanLoadBalancers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	sort.Slice(lbs, func(i, j int) bool { return lbs[i].Name < lbs[j].Name })
+	for _, lb := range lbs {
+		if err := inv.Out.Emit(lbFinding(lb)); err != nil {
+			return 0, err
+		}
+	}
+	return len(lbs), nil
+}
+
+// sweepAddresses reports idle external static IPs reserved at least
+// minAge; it returns how many idle addresses it examined.
+func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
+	addrs, err := api.OrphanAddresses(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var old []cloud.OrphanAddress
+	for _, a := range addrs {
+		// Zero ReservedSince = undatable — always reported, as for
+		// disks; otherwise apply --min-age.
+		if a.ReservedSince.IsZero() || now.Sub(a.ReservedSince) >= minAge {
+			old = append(old, a)
+		}
+	}
+	sort.Slice(old, func(i, j int) bool {
+		if old[i].Region != old[j].Region {
+			return old[i].Region < old[j].Region
+		}
+		return old[i].Name < old[j].Name
+	})
+	for _, a := range old {
+		if err := inv.Out.Emit(addressFinding(a, now)); err != nil {
+			return 0, err
+		}
+	}
+	return len(addrs), nil
 }
 
 // orphanClasses is the parsed --only selection.
