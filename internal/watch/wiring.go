@@ -111,7 +111,7 @@ func realMain(argv []string) error {
 	// for the webhook receiver (optional — but a NAMED env var must be
 	// non-empty, same loud posture).
 	var token string
-	if !f.dryRun && f.sink == sinkCoreAgent {
+	if !f.dryRun && (f.sink == sinkCoreAgent || f.sink == sinkAX) {
 		token = os.Getenv(f.tokenEnv)
 		if token == "" {
 			return fmt.Errorf("bearer token env var %s is empty", f.tokenEnv)
@@ -145,6 +145,12 @@ func realMain(argv []string) error {
 				return fmt.Errorf("webhook sink: %w", werr)
 			}
 			inj = ws
+		case sinkAX:
+			as, aerr := newAXSink(f, token)
+			if aerr != nil {
+				return fmt.Errorf("ax sink: %w", aerr)
+			}
+			inj = as
 		default:
 			ci, cerr := inject.NewInjector(inject.Config{
 				DaemonURL:      f.daemonURL,

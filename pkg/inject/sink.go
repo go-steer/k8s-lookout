@@ -84,3 +84,8 @@ func newSinkHTTPClient() *http.Client {
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 }
+
+// NewSinkHTTPClient returns the shared sink transport for sinks that live
+// outside this package (internal/axsink), so every sink keeps the same
+// timeout and trace propagation.
+func NewSinkHTTPClient() *http.Client { return newSinkHTTPClient() }
