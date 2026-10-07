@@ -159,6 +159,45 @@ func TestPolicyWatch_DeliversPoliciesIntoTheStore(t *testing.T) {
 	}
 }
 
+// TestPolicyWatch_NamespaceScopeListsInTheNamespaceOnly pins the #407 half of
+// the policy watch: under the sentinel's --watch-scope=namespace the policy
+// informers are this source's own, so they must carry the scope themselves.
+// A cluster-wide LIST here would be a 403 under a namespaced Role, and an
+// informer that retries a 403 never syncs.
+func TestPolicyWatch_NamespaceScopeListsInTheNamespaceOnly(t *testing.T) {
+	obj := policyObj(t, nsPolicy("api"))
+	s, logs := sourceWithPolicies(t, []string{policyGVR.Resource, clusterPolicyGVR.Resource}, obj)
+	s.WithWatchNamespace("payments")
+	dyn := s.dyn.(*dynamicfake.FakeDynamicClient)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	synced, err := s.startPolicyWatch(ctx)
+	if err != nil {
+		t.Fatalf("startPolicyWatch() = %v", err)
+	}
+	if len(synced) != 1 {
+		t.Fatalf("registered %d barriers, want 1: the cluster-scoped kind has no namespaced form", len(synced))
+	}
+	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
+		t.Fatal("policy cache never synced")
+	}
+	for _, a := range dyn.Actions() {
+		if a.GetVerb() != "list" && a.GetVerb() != "watch" {
+			continue
+		}
+		if a.GetNamespace() != "payments" || a.GetResource().Resource != policyGVR.Resource {
+			t.Errorf("%s %s in namespace %q, want only %s in payments", a.GetVerb(), a.GetResource().Resource, a.GetNamespace(), policyGVR.Resource)
+		}
+	}
+	if !strings.Contains(logs.all(), clusterPolicyGVR.Resource+" not watched") {
+		t.Errorf("the skipped cluster-scoped kind was not announced: %q", logs.all())
+	}
+	if s.policies.Len() != 1 {
+		t.Errorf("store holds %d policies, want the one in the namespace", s.policies.Len())
+	}
+}
+
 func TestPolicyWatch_AnUndecodablePolicyKeepsThePreviousOne(t *testing.T) {
 	// Replacing a policy with nothing on a decode failure means a typo in one
 	// field silently reverts a subject to inferred intent, and the operator

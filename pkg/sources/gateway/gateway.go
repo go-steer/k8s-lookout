@@ -172,6 +172,12 @@ type Config struct {
 	// any informer activity within this window are dropped (safety net
 	// behind DeleteFunc). Default 24h.
 	StateTTL time.Duration
+	// Namespace confines the Gateway/HTTPRoute informers to one
+	// namespace; empty (the default) watches every namespace. The
+	// sentinel sets it under --watch-scope=namespace (#407), where the
+	// probe verified the grants in that namespace only — a cluster-wide
+	// informer there would retry a 403 forever and never sync.
+	Namespace string
 }
 
 // DefaultConfig returns the shipped thresholds.
@@ -399,7 +405,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		s.logPrintf("gateway: %s not served — watching HTTPRoutes only (Gateway programming signals disabled)", gatewayGVR)
 	}
 
-	factory := dynamicinformer.NewDynamicSharedInformerFactory(s.dyn, 0)
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, s.cfg.Namespace, nil)
 	var synced []cache.InformerSynced
 	if s.watchGateways {
 		inf := factory.ForResource(gatewayGVR).Informer()

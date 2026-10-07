@@ -47,6 +47,12 @@ no watch, no get, no informer cache of secret material. Scope it with
 [Without the Secret grant](/operations/scoping/#without-the-secret-grant)
 for exactly what that costs.
 
+If you cannot be given a ClusterRole at all, `deploy-namespaced/` (Helm:
+`rbac.scope=namespace`) runs a sentinel that watches only its own
+namespace under a Role there. It is much thinner, since it cannot see
+nodes. See
+[One namespace, under a Role](/operations/scoping/#one-namespace-under-a-role).
+
 ### Narrowing the role — partial bundles, not errors
 
 `list` on `secrets` returns the full value of every Secret at the API

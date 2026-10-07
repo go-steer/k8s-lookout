@@ -98,7 +98,27 @@ func (sf sharedFactories) Start(stopCh <-chan struct{}) {
 // Verified against every namespaced type the factory serves (Events,
 // EndpointSlices, Deployments, ReplicaSets, StatefulSets, Jobs, CronJobs, PDBs,
 // HorizontalPodAutoscalers): all accept the selector, only Nodes rejects it.
-func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string) sharedFactories {
+//
+// # The namespace scope
+//
+// With scopeNamespace set (--watch-scope=namespace, issue #407) the
+// namespaced factory is built with informers.WithNamespace instead, so every
+// LIST and WATCH it issues is a namespaced request a namespaced Role can
+// satisfy. The deny list plays no part in the factory then: it is a
+// post-filter over one namespace, and validate refuses the one combination
+// that would leave nothing to watch. Cluster-scoped informers do not take a
+// namespace at all, so the node watch would be correct on either factory;
+// it keeps its own for the same reason as above — one rule for where nodes
+// come from — and for the same zero cost.
+func newSharedFactories(client kubernetes.Interface, excludeNamespaces []string, scopeNamespace string) sharedFactories {
+	if scopeNamespace != "" {
+		return sharedFactories{
+			Namespaced: informers.NewSharedInformerFactoryWithOptions(client, 0,
+				informers.WithTransform(kube.Transform),
+				informers.WithNamespace(scopeNamespace)),
+			Cluster: kube.NewTransformingFactory(client),
+		}
+	}
 	selector := namespaceExclusionSelector(excludeNamespaces)
 	if selector == "" {
 		// One factory, used for both roles. Deliberately the same object and

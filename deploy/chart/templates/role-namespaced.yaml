@@ -1,0 +1,94 @@
+{{- if and .Values.rbac.create (include "lookout.namespaceScope" .) }}
+# ---------------------------------------------------------------------
+# SOURCE OF TRUTH: deploy-namespaced/role-watcher.yaml and
+# rolebinding-watcher.yaml (#407). Rendered only with
+# rbac.scope=namespace, in place of the ClusterRole, its binding and the
+# kube-system capacity Role. `dev/tools/verify-helm-parity` diffs this
+# chart rendered with rbac.scope=namespace against
+# `kustomize build deploy-namespaced/`; edit the manifests, not this copy.
+# deploy-namespaced/README.md lists what this tier cannot see.
+# ---------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["leeway.lookout.go-steer.io"]
+    resources: ["leewaypolicies"]
+    verbs: ["list", "watch"]
+  {{- if .Values.rbac.secrets }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["list"]
+  {{- end }}
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lookout.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lookout.fullname" . }}
+{{- end }}

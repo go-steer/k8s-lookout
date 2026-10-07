@@ -1730,7 +1730,8 @@ is the same on a cluster with 12 namespaces and one with 1,200:
   `10M + 1` — 51 at M=5, 201 at M=20 — against a flat 11 for cluster-wide. The
   memory win exists only when the *M* namespaces are a real subset of the cluster;
   above roughly a tenth of it, scoping costs more than it saves. Tracked as
-  [#407](https://github.com/go-steer/k8s-lookout/issues/407), deliberately unbuilt.
+  [#407](https://github.com/go-steer/k8s-lookout/issues/407); the one-namespace case
+  (M=1, one factory) shipped as `--watch-scope=namespace`, and M>1 stays unbuilt.
 
 Neither of those crosses over at a namespace count, which is what makes the
 measurement uninformative: no value S6 could have returned would have changed the
@@ -4928,7 +4929,8 @@ cluster-scoped resources — against a live API server.
 
 Both halves are now built or filed rather than pending: `--exclude-namespace` became
 a real watch scope in [#431](https://github.com/go-steer/k8s-lookout/pull/431), and
-the include-list is [#407](https://github.com/go-steer/k8s-lookout/issues/407), held
+the include-list is [#407](https://github.com/go-steer/k8s-lookout/issues/407), whose
+one-namespace case shipped as `--watch-scope=namespace`; several namespaces stay held
 until someone is blocked by its absence. §6.7 carries the reasoning; the operator
 guidance is in `operations/scoping.md`.
 

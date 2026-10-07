@@ -100,7 +100,7 @@ const metricsAPIGroupVersion = "metrics.k8s.io/v1beta1"
 // precisely what an enabled source would read.
 func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sources.Requirement {
 	expiryCfg := expiry.DefaultConfig()
-	expiryCfg.Namespaces = splitCSV(f.expiryNamespaces)
+	expiryCfg.Namespaces = f.expiryNamespaceList()
 	return map[string][]sources.Requirement{
 		k8sevents.Name:     k8sevents.New(client, 0).RequiredAccess(),
 		objectstate.Name:   objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
@@ -179,6 +179,7 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 		var missingWhy sources.Decision
 		var degraded []string
 		for _, req := range access[name] {
+			req = sources.Effective(reviewer, req)
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return nil, fmt.Errorf("sources: auto: capability probe for %q (source %q) failed: %w", req, name, err)
@@ -255,6 +256,7 @@ func resolveStormAuto(ctx context.Context, f *flags, reviewer sources.AccessRevi
 		return false, "storm: auto — off (--storm-window=0 disables correlation)", nil
 	}
 	for _, req := range graphAccess {
+		req = sources.Effective(reviewer, req)
 		d, aerr := reviewer.Allowed(ctx, req)
 		if aerr != nil {
 			return false, "", fmt.Errorf("storm: auto: capability probe for %q failed: %w", req, aerr)
@@ -280,7 +282,7 @@ func resolveAutoDefaults(ctx context.Context, f *flags, client kubernetes.Interf
 	if !f.sourcesAuto() && f.storm != stormAuto {
 		return nil
 	}
-	reviewer := sources.NewAccessReviewer(client)
+	reviewer := newAccessReviewer(f, client)
 	if f.sourcesAuto() {
 		res, err := resolveSourcesAuto(ctx, f, client, reviewer, availabilityChecks{
 			Metrics: func() error {

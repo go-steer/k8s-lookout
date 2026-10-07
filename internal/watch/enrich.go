@@ -145,6 +145,12 @@ type enricher struct {
 	// failure (§7.6 least-privilege).
 	lists          []state.ListRequirement
 	listsPreflight bool
+
+	// podNamespace bounds the one cross-namespace read enrichment makes —
+	// the pods on an incident's node, on the scoped fallback path — to the
+	// --watch-scope namespace (#407). Empty (metav1.NamespaceAll) is the
+	// cluster scope.
+	podNamespace string
 }
 
 // enabledFor reports whether the policy enriches sev.
@@ -568,7 +574,7 @@ func (e *enricher) nodeTopology(ctx context.Context, name string, node *corev1.N
 			}
 		}
 	}
-	l, err := e.client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+	l, err := e.client.CoreV1().Pods(e.podNamespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", name).String(),
 	})
 	if err != nil {

@@ -438,15 +438,21 @@ func TestSourceContract(t *testing.T) {
 	for _, want := range []string{
 		"cloud.google.com/computeclasses/list",
 		"cloud.google.com/computeclasses/watch",
+		// Every informer in Run's sync barrier is declared, so a grant
+		// missing one fails the probe instead of hanging Run (#407).
+		"/pods/list", "/pods/watch",
+		"/nodes/list", "/nodes/watch",
 	} {
 		if !seen[want] {
 			t.Errorf("missing required-access declaration %q (have %v)", want, seen)
 		}
 	}
-	// Nodes and pods are deliberately NOT re-declared: they are granted for
-	// every cluster-tier source already, and a second declaration would make
-	// the startup probe's failure message name the wrong source.
-	if len(s.RequiredAccess()) != 2 {
-		t.Errorf("RequiredAccess declares %d requirements, want exactly the two CRD verbs", len(s.RequiredAccess()))
+	// Events are deliberately NOT declared: they sit outside the barrier,
+	// and a process that cannot read them degrades the wedged rule only.
+	if seen["/events/list"] || seen["/events/watch"] {
+		t.Error("events declared; they are outside Run's sync barrier and must not gate startup")
+	}
+	if len(s.RequiredAccess()) != 6 {
+		t.Errorf("RequiredAccess declares %d requirements, want the two CRD verbs plus pods and nodes list/watch", len(s.RequiredAccess()))
 	}
 }

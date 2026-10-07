@@ -1,4 +1,4 @@
-{{- if .Values.rbac.create }}
+{{- if and .Values.rbac.create (not (include "lookout.namespaceScope" .)) }}
 # ---------------------------------------------------------------------
 # SOURCE OF TRUTH: deploy/12-clusterrole-watcher.yaml.
 #

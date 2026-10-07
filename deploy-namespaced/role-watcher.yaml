@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The namespaced half of deploy/12-clusterrole-watcher.yaml, as a Role in
+# the one namespace the sentinel watches (--watch-scope=namespace, #407).
+#
+# Every rule here is a rule from deploy/12 on a namespaced resource, with
+# the same verbs; read deploy/12 for why each one exists. What is left out,
+# and why:
+#   - cluster-scoped kinds (nodes, nodes/proxy, persistentvolumes,
+#     storageclasses, ingressclasses, clusterroles, clusterrolebindings,
+#     webhook configurations, ComputeClasses, ClusterLeewayPolicies): a
+#     Role cannot grant them. The sources that need them are skipped at
+#     startup, one log line each — see README.md;
+#   - cert-manager Certificates and ACME Challenges/Orders: only the expiry
+#     source reads them, and expiry cannot run here anyway, because its
+#     webhook CA check needs the cluster-scoped webhook configurations.
+#
+# The `secrets: list` and `serviceaccounts: list` rules are kept, confined
+# to this namespace. Their only reader in this tier is enrichment's
+# reference checks (a pod naming a Secret or key that does not exist).
+# Drop both and add --enrich-lists=all,-secrets,-serviceaccounts to the
+# watcher if you would rather the sentinel not hold them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lookout-watch
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["leeway.lookout.go-steer.io"]
+    resources: ["leewaypolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["list"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["list", "watch"]

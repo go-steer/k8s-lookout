@@ -1,0 +1,103 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A sentinel that watches ONE namespace — its own — and holds no
+# cluster-scoped grant at all (#407). Use it INSTEAD of deploy/:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=vX.Y.Z"
+#
+# To run it in a namespace other than agent-triage, build it from your own
+# kustomization with `namespace: <yours>` — the watched namespace follows
+# the pod's own through the downward API, so there is nothing else to edit.
+#
+# It is deploy/ with these changes:
+#   1. no ClusterRole or ClusterRoleBinding, and no kube-system capacity
+#      Role: a namespace tenant can create none of them;
+#   2. a Role + RoleBinding in the sentinel's namespace carrying the
+#      namespaced rules of deploy/12 (role-watcher.yaml says which);
+#   3. the watcher gets --watch-scope=namespace and
+#      --namespace=$(POD_NAMESPACE), so every informer lists and watches
+#      that one namespace;
+#   4. --storm=on becomes --storm=auto: the topology graph needs nodes,
+#      which a Role cannot grant, and an explicit --storm=on would refuse
+#      to start.
+#
+# What that costs is in README.md, beside this file. In short: everything
+# that reads nodes or another cluster-scoped kind — object-state,
+# saturation, capacity, topology-drift, compute-class, expiry and storm
+# correlation — is skipped at startup with one log line each.
+#
+# It lives beside deploy/ rather than under it because kustomize refuses an
+# overlay nested inside the base it builds on. The `test` ops pin each
+# patched position, so a reordered base fails the build instead of
+# patching the wrong flag. Helm: rbac.scope=namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy
+  - role-watcher.yaml
+  - rolebinding-watcher.yaml
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: lookout-watch
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: lookout-watch
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: lookout-watch-capacity
+        namespace: kube-system
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: lookout-watch-capacity
+        namespace: kube-system
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: watcher
+      - op: test
+        path: /spec/template/spec/containers/0/args/9
+        value: --storm=on
+      - op: replace
+        path: /spec/template/spec/containers/0/args/9
+        value: --storm=auto
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --watch-scope=namespace
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --namespace=$(POD_NAMESPACE)
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace

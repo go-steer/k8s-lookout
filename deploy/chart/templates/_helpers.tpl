@@ -91,3 +91,16 @@ with the chart.
 {{- end -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
+
+{{/*
+"true" when rbac.scope is namespace (#407), "" for cluster; anything else
+fails the render rather than silently choosing one.
+*/}}
+{{- define "lookout.namespaceScope" -}}
+{{- $scope := default "cluster" .Values.rbac.scope -}}
+{{- if eq $scope "namespace" -}}
+true
+{{- else if ne $scope "cluster" -}}
+{{- fail (printf "rbac.scope must be cluster or namespace (got %q)" $scope) -}}
+{{- end -}}
+{{- end -}}

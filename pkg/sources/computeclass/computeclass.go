@@ -354,13 +354,20 @@ func (s *Source) Name() string { return Name }
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
 
 // RequiredAccess implements sources.AccessDeclarer (§11): list+watch on
-// ComputeClasses. Nodes and pods are already granted for every cluster-tier
-// source and are not re-declared here.
+// ComputeClasses, and on the pods and nodes the Run sync barrier waits for.
 //
-// Like the gateway source's Gateway-API rules, this grant is inert on a
-// cluster without the CRD — RBAC naming an absent group is legal and ignored —
-// so the SSAR probe passes wherever the ClusterRole is applied, and the
-// CRD-presence gate in auto.go is what actually decides auto-enable.
+// Pods and nodes were once left undeclared on the grounds that every
+// cluster-tier source holds them. That stopped being safe once a sentinel
+// could run under a namespaced Role (--watch-scope=namespace, #407): a grant
+// carrying ComputeClasses but not nodes would start a node informer that
+// retries a 403 forever, and Run would wait on its sync barrier for good. The
+// probe has to see every informer the barrier waits on. Events are still not
+// declared, because they are deliberately outside the barrier (see Run).
+//
+// Like the gateway source's Gateway-API rules, the ComputeClass grant is inert
+// on a cluster without the CRD — RBAC naming an absent group is legal and
+// ignored — so the SSAR probe passes wherever the ClusterRole is applied, and
+// the CRD-presence gate in auto.go is what actually decides auto-enable.
 func (s *Source) RequiredAccess() []sources.Requirement { return RequiredAccess() }
 
 // RequiredAccess is the same declaration without a Source. New can fail (a bad
@@ -372,6 +379,10 @@ func RequiredAccess() []sources.Requirement {
 	return []sources.Requirement{
 		{Group: computeClassGV.Group, Resource: computeClassGVR.Resource, Verb: "list"},
 		{Group: computeClassGV.Group, Resource: computeClassGVR.Resource, Verb: "watch"},
+		{Resource: "pods", Verb: "list"},
+		{Resource: "pods", Verb: "watch"},
+		{Resource: "nodes", Verb: "list"},
+		{Resource: "nodes", Verb: "watch"},
 	}
 }
 
