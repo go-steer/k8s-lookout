@@ -434,6 +434,12 @@ func (six *storageIndex) volumeFindings() []emit.Finding {
 		case corev1.VolumeReleased:
 			kind, severity, reason = "storage.pv_released", emit.SeverityInfo, "VolumeReleased"
 			message = "volume is Released — its claim is gone but the volume was retained; the capacity stays unusable until spec.claimRef is cleared or the volume is deleted"
+			if pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimDelete {
+				// Not retained: the provisioner is due to delete it.
+				// Seen once that is a delete in flight; seen again,
+				// a delete that is not happening.
+				message = "volume is Released under reclaimPolicy Delete — its claim is gone and the provisioner has not deleted it yet; if it is still here on the next look, the delete is stuck and the backing disk is still allocated"
+			}
 		default:
 			continue
 		}

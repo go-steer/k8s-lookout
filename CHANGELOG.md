@@ -53,6 +53,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now enables the gateway source when the Gateway API CRDs are served,
   and sets `--gateway-grace=60s` (#541).
 
+- **Fleet-audit cost and waste checks (#231).** Three new finding kinds
+  cover the cost/waste stream of the fleet audit. Each one turns on a
+  state the API reports, not on a guess about intent:
+  - `volume.unconsumed_pvc` (info) in `state volumes`: a Bound claim
+    that no pod mounts and nothing references. Several look-alikes are
+    left out: a claim used by a pod in any phase, scheduled or not; a
+    claim named by a workload template, such as a Deployment scaled to
+    zero or a CronJob between runs; a claim kept by a live
+    StatefulSet's claim templates at any ordinal, including after a
+    scale-down; a claim owned by a Pod or StatefulSet; and a claim
+    younger than an hour. Claims left behind by a deleted StatefulSet
+    are reported. Consumers outside the built-in workload kinds, such
+    as a VM operator, are not visible, so the kind is info. To support
+    this, `state volumes` now also lists Deployments, StatefulSets,
+    DaemonSets, ReplicaSets, Jobs and CronJobs, which the shipped
+    ClusterRole already grants. If one of those lists is refused, only
+    this judgment is skipped and a `read.unavailable` record says why.
+    The other volume checks still run.
+  - `orphan.address` (warning) in `cloud orphans`: an external static
+    IP that is reserved, has no users and has been held longer than
+    `--min-age`. Internal addresses are not billed while idle, so they
+    are never reported. The check goes through the existing `orphans`
+    provider capability. On a build without a provider it reports
+    `cloud.unavailable`, never an all-clear. On GKE it needs
+    `compute.addresses.list`, which `roles/compute.viewer` already
+    includes alongside the disk and forwarding-rule permissions.
+  - `scaledown.blocked` (warning) from a new command,
+    `lookout stab scaledown` (MCP `k8s_scaledown_blockers`). It reports
+    a node the cluster autoscaler would remove for being underused but
+    cannot. "Underused" uses the autoscaler's own measure: requests
+    over allocatable, compared with `--utilization` (default 50, the
+    autoscaler's default threshold). "Cannot" reuses the `stab drain`
+    blockers the autoscaler also respects (a zero-disruption PDB, a
+    pod with no controller unless it is annotated `safe-to-evict=true`)
+    and adds pods annotated `safe-to-evict=false`. Control-plane
+    nodes, nodes annotated `scale-down-disabled` and nodes already
+    being deleted are not judged. A bare `lookout scan` does not run
+    it.
+
+  The issue's `orphan-pv` slug was already covered by
+  `storage.pv_released` / `storage.pv_failed` in `state storage`,
+  which carry `reclaim_policy`. A Released volume under
+  `reclaimPolicy: Delete` no longer claims it "was retained". Its
+  message now says the delete is pending, or stuck if the volume is
+  still there later. `idle-nodepool` is split off to #557
+  because it needs an agreed idle threshold.
+
+### Changed
+
+- **`cloud orphans` now sweeps addresses by default.** `--only` defaults
+  to `disks,lbs,addresses` instead of `disks,lbs`. Pass
+  `--only=disks,lbs` for the previous sweep (#231).
+
 ### Fixed
 
 - **A cert-manager Certificate that never issued is no longer

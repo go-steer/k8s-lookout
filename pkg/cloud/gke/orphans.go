@@ -22,6 +22,15 @@ package gke
 // the age policy is the command's (--min-age), so this side only
 // dates the idleness (lastDetachTimestamp, else creationTimestamp).
 //
+// Addresses: every static address that is RESERVED (reserved, not in
+// use), has no users, and is EXTERNAL — an unused external static IP
+// is billed by the hour, while an internal one is not billed idle and
+// so is not waste. An empty addressType is the API default, EXTERNAL.
+// Like disks, the age policy is the command's; this side dates the
+// reservation from creationTimestamp, since the API records no "last
+// released" time. The aggregated list carries global addresses under
+// its "global" scope key alongside the regional ones.
+//
 // Load balancers: a forwarding rule is orphaned when every backend
 // it routes to resolves to zero endpoints. Resolution follows the
 // rule's shape:
@@ -60,6 +69,9 @@ type orphanComputeAPI interface {
 	// ListForwardingRules returns every forwarding rule in the
 	// project (flattened aggregated list).
 	ListForwardingRules(ctx context.Context) ([]*compute.ForwardingRule, error)
+	// ListAddresses returns every static address in the project,
+	// regional and global (flattened aggregated list).
+	ListAddresses(ctx context.Context) ([]*compute.Address, error)
 	// GetBackendService fetches a backend service; scope is a
 	// region name or "" for global.
 	GetBackendService(ctx context.Context, scope, name string) (*compute.BackendService, error)
@@ -103,6 +115,37 @@ func (o *orphanAPI) OrphanDisks(ctx context.Context) ([]cloud.OrphanDisk, error)
 			SizeGB:      d.SizeGb,
 			Type:        resourceTail(d.Type),
 			UnusedSince: parseGCPTime(d.LastDetachTimestamp, d.CreationTimestamp),
+		})
+	}
+	return out, nil
+}
+
+// OrphanAddresses implements cloud.OrphanAPI: reserved, unused,
+// external static addresses, dated from their reservation. Age
+// filtering is the caller's policy (see cloud.OrphanAPI).
+func (o *orphanAPI) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddress, error) {
+	addrs, err := o.gce.ListAddresses(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing addresses: %w", err)
+	}
+	var out []cloud.OrphanAddress
+	for _, a := range addrs {
+		if a == nil || a.Status != "RESERVED" || len(a.Users) > 0 {
+			continue
+		}
+		if a.AddressType != "" && a.AddressType != "EXTERNAL" {
+			continue // internal statics are not billed idle
+		}
+		region := "global"
+		if a.Region != "" {
+			region = resourceTail(a.Region)
+		}
+		out = append(out, cloud.OrphanAddress{
+			Name:          a.Name,
+			Region:        region,
+			Address:       a.Address,
+			Tier:          a.NetworkTier,
+			ReservedSince: parseGCPTime(a.CreationTimestamp),
 		})
 	}
 	return out, nil
@@ -294,6 +337,27 @@ func (c *gceOrphanClient) ListForwardingRules(ctx context.Context) ([]*compute.F
 		return nil
 	})
 	return out, err
+}
+
+func (c *gceOrphanClient) ListAddresses(ctx context.Context) ([]*compute.Address, error) {
+	svc, err := c.svc(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []*compute.Address
+	err = svc.Addresses.AggregatedList(c.project).Pages(ctx, func(page *compute.AddressAggregatedList) error {
+		out = append(out, flattenAddressAggregate(page)...)
+		return nil
+	})
+	return out, err
+}
+
+func flattenAddressAggregate(page *compute.AddressAggregatedList) []*compute.Address {
+	var out []*compute.Address
+	for _, scope := range sortedKeys(page.Items) {
+		out = append(out, page.Items[scope].Addresses...)
+	}
+	return out
 }
 
 // flattenDiskAggregate / flattenRuleAggregate turn one aggregated

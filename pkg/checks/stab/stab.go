@@ -18,7 +18,9 @@
 // default; `--identity` resolves them to audited principals through
 // the §2 provider boundary (the §5 identity query pack, issue #128).
 // `stab drain` reports everything that will block, or be destroyed
-// by, a node drain — a gridlocked PDB IS a drain blocker.
+// by, a node drain — a gridlocked PDB IS a drain blocker. `stab
+// scaledown` is the cost-framed read of the same index: underused
+// nodes the cluster autoscaler cannot remove (#231).
 package stab
 
 import (
@@ -81,6 +83,7 @@ func (d Deps) now() time.Time {
 func init() {
 	checks.Register(DriftCommand(Deps{}))
 	checks.Register(DrainCommand(Deps{}))
+	checks.Register(ScaledownCommand(Deps{}))
 }
 
 // maxListItems caps rendered name/path lists inside a single detail

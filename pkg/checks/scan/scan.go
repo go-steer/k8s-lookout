@@ -167,7 +167,8 @@ var excluded = map[string]string{
 
 	"state edges": "workload-targeted, and stage 2 already runs exactly these checks in memory for every workload stage 1 flagged; standalone it would need a target scan does not have",
 
-	"stab drain": "answers a hypothetical — what WOULD block draining a node — ahead of a planned operation, rather than a fault that exists now",
+	"stab drain":     "answers a hypothetical — what WOULD block draining a node — ahead of a planned operation, rather than a fault that exists now",
+	"stab scaledown": "a cost read, not a fault: an underused node the autoscaler cannot remove is billing waste with nothing broken, and the claim presumes a cluster autoscaler that a bare scan cannot confirm is running",
 
 	"net probe": "requires explicit probe targets (--dns/--tcp/--http): there is nothing for a zero-argument scan to probe, and generating active traffic is not a default a scan should take",
 }

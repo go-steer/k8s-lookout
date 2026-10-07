@@ -60,7 +60,7 @@ every read-path "check" mounts from `pkg/checks`.
 | **Top-level checks** | `bundle`, `health` |
 | **`triage`** (incident reads) | `delta`, `events`, `logs`, `top`, `spec`, `status` (writes), `radius` (graph), `changes` (graph) |
 | **`state`** (dependency/config) | `edges`, `webhooks`, `wi`, `volumes` |
-| **`stab`** (stability) | `drift`, `drain` |
+| **`stab`** (stability) | `drift`, `drain`, `scaledown` |
 | **`perf`** (control-plane perf) | `probe` |
 | **`cloud`** (GCP-side) | `orphans`, `quota`, `ipspace`, `stockout` |
 | **`net`** (active probes) | `probe` |
@@ -84,7 +84,7 @@ message instead).
 
 | Tier | Environment | Unlocks |
 | --- | --- | --- |
-| **T0** | kind, no cloud | `version`, `bundle`, `health`, `triage delta/events/logs/spec/status/radius/changes`, `state edges/webhooks/volumes*`, `stab drift/drain`, `net probe`, `mcp`; graceful-degradation of the cloud/GKE commands |
+| **T0** | kind, no cloud | `version`, `bundle`, `health`, `triage delta/events/logs/spec/status/radius/changes`, `state edges/webhooks/volumes*`, `stab drift/drain/scaledown`, `net probe`, `mcp`; graceful-degradation of the cloud/GKE commands |
 | **T1** | kind **+ metrics-server** (`examples/kind/up` installs it) | `triage top`, saturation ramps |
 | **T2** | GKE staging cluster | `state wi`, `state volumes` (cross-node Multi-Attach), `perf probe` real packs, `triage top --history`, `ingress`/`gateway` signals, `stab drift --identity` |
 | **T3** | GKE **+ cloud APIs + `-gke` image** | `cloud orphans/quota/ipspace/stockout`, quota/capacity-decision/notifications signals |
@@ -378,6 +378,18 @@ Everything that will block or be destroyed by a node drain.
   single-replica evictions are each listed for `--node <name>`; exactly
   one of `--node`/`-A` is required (both/neither → usage error).
 
+### `lookout stab scaledown` — T0
+Underused nodes the cluster autoscaler cannot remove (a cost read of
+the drain index).
+- **Provoke:** on a multi-node kind cluster, put a bare pod with small
+  requests on an otherwise idle worker (kind runs no autoscaler, but
+  the claim is about requests and blockers, which kind has).
+- **Assert:** that worker is reported as `scaledown.blocked` with
+  `bare_pods=1` and a `utilization` below 50; the control-plane node is
+  counted in `excluded=`, never judged; annotating the pod
+  `cluster-autoscaler.kubernetes.io/safe-to-evict=true` silences it;
+  `--namespace`/`-A`/`--workload` and `--utilization=0` → usage error.
+
 ## `perf` group
 
 ### `lookout perf probe` — T0 (unavailable) / T2 (real)
@@ -396,9 +408,12 @@ need the `-gke` image + credentials at T3.
 
 ### `lookout cloud orphans` — T3
 - **Provoke:** create then delete a PVC/Deployment so an unattached GCE
-  PD or a zero-endpoint forwarding rule lingers past `--min-age`.
-- **Assert:** the billing-active leftover is listed; `--only=disks|lbs`
-  filters; recently-created resources under `--min-age` are excluded.
+  PD or a zero-endpoint forwarding rule lingers past `--min-age`; reserve
+  an external static IP and attach it to nothing.
+- **Assert:** the billing-active leftover is listed (the address as
+  `orphan.address`; an internal reservation never is);
+  `--only=disks|lbs|addresses` filters; recently-created resources under
+  `--min-age` are excluded.
 
 ### `lookout cloud quota` — T3
 - **Provoke:** a project near a compute quota limit.
@@ -878,6 +893,7 @@ these ticks are for the command's *own* behaviour.
 - [ ] `state volumes` (clean + Multi-Attach)
 - [x] `stab drift` (+ `--manager`, the no-GitOps path; `--identity` degradation still open)
 - [x] `stab drain` (+ `--node`, `-A` roll-up)
+- [ ] `stab scaledown` (+ `safe-to-evict`, control-plane exclusion)
 - [ ] `perf probe` (unavailable + real packs)
 - [ ] `cloud orphans` / `quota` / `ipspace` / `stockout` (+ GCP-free refusal)
 - [x] `net probe` (reachable + unreachable, no mutation)

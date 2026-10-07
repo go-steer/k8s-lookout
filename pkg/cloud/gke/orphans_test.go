@@ -64,6 +64,12 @@ func (f *fixtureGCE) ListForwardingRules(context.Context) ([]*compute.Forwarding
 	return flattenRuleAggregate(&page), nil
 }
 
+func (f *fixtureGCE) ListAddresses(context.Context) ([]*compute.Address, error) {
+	var page compute.AddressAggregatedList
+	loadJSON(f.t, "compute-addresses-aggregated.json", &page)
+	return flattenAddressAggregate(&page), nil
+}
+
 func (f *fixtureGCE) GetBackendService(_ context.Context, _, name string) (*compute.BackendService, error) {
 	if bs := f.lbs.BackendServices[name]; bs != nil {
 		return bs, nil
@@ -131,6 +137,32 @@ func TestOrphanDisksFromRecordedAggregate(t *testing.T) {
 	// too: the fixture uses the -07:00 form the API emits).
 	if !never.UnusedSince.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("never-attached UnusedSince = %v, want its creationTimestamp", never.UnusedSince)
+	}
+}
+
+func TestOrphanAddressesFromRecordedAggregate(t *testing.T) {
+	api := &orphanAPI{gce: newFixtureGCE(t)}
+	got, err := api.OrphanAddresses(context.Background())
+	if err != nil {
+		t.Fatalf("OrphanAddresses: %v", err)
+	}
+	// live-ingress-ip is IN_USE, ilb-vip is INTERNAL (not billed
+	// idle), being-reserved is still RESERVING; the us-west1 scope is
+	// an empty-page warning. Two idle external addresses remain, in
+	// scope-key order (global sorts before regions/…).
+	if len(got) != 2 {
+		t.Fatalf("addresses = %+v, want old-ingress-ip and spare-egress-ip", got)
+	}
+	global := got[0]
+	if global.Name != "old-ingress-ip" || global.Region != "global" || global.Address != "34.120.10.20" || global.Tier != "PREMIUM" {
+		t.Errorf("address 0 = %+v, want old-ingress-ip global 34.120.10.20 PREMIUM (empty addressType is EXTERNAL)", global)
+	}
+	if !global.ReservedSince.Equal(time.Date(2026, 3, 1, 17, 0, 0, 0, time.UTC)) {
+		t.Errorf("old-ingress-ip ReservedSince = %v, want its creationTimestamp", global.ReservedSince)
+	}
+	regional := got[1]
+	if regional.Name != "spare-egress-ip" || regional.Region != "us-east1" || regional.Tier != "STANDARD" {
+		t.Errorf("address 1 = %+v, want spare-egress-ip in us-east1 (URL tail resolved)", regional)
 	}
 }
 

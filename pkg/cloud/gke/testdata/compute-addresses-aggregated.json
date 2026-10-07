@@ -1,0 +1,71 @@
+{
+  "//": "Recorded-shape fixture: compute.googleapis.com/compute/v1 addresses aggregatedList response (one page). Authored from the Compute Engine Addresses:aggregatedList API reference — not captured from a live project (§13).",
+  "kind": "compute#addressAggregatedList",
+  "id": "projects/proj-1/aggregated/addresses",
+  "items": {
+    "global": {
+      "addresses": [
+        {
+          "kind": "compute#address",
+          "name": "old-ingress-ip",
+          "address": "34.120.10.20",
+          "status": "RESERVED",
+          "networkTier": "PREMIUM",
+          "creationTimestamp": "2026-03-01T09:00:00.000-08:00"
+        },
+        {
+          "kind": "compute#address",
+          "name": "live-ingress-ip",
+          "address": "34.120.10.21",
+          "addressType": "EXTERNAL",
+          "status": "IN_USE",
+          "networkTier": "PREMIUM",
+          "creationTimestamp": "2026-03-01T09:00:00.000-08:00",
+          "users": [
+            "https://www.googleapis.com/compute/v1/projects/proj-1/global/forwardingRules/k8s2-fr-web"
+          ]
+        }
+      ]
+    },
+    "regions/us-east1": {
+      "addresses": [
+        {
+          "kind": "compute#address",
+          "name": "spare-egress-ip",
+          "address": "35.196.1.2",
+          "addressType": "EXTERNAL",
+          "status": "RESERVED",
+          "networkTier": "STANDARD",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "creationTimestamp": "2026-07-01T00:00:00.000Z"
+        },
+        {
+          "kind": "compute#address",
+          "name": "ilb-vip",
+          "address": "10.128.0.50",
+          "addressType": "INTERNAL",
+          "purpose": "GCE_ENDPOINT",
+          "status": "RESERVED",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "subnetwork": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/subnetworks/default",
+          "creationTimestamp": "2026-06-01T00:00:00.000Z"
+        },
+        {
+          "kind": "compute#address",
+          "name": "being-reserved",
+          "address": "35.196.1.3",
+          "addressType": "EXTERNAL",
+          "status": "RESERVING",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "creationTimestamp": "2026-07-25T11:59:00.000Z"
+        }
+      ]
+    },
+    "regions/us-west1": {
+      "warning": {
+        "code": "NO_RESULTS_ON_PAGE",
+        "message": "There are no results for scope 'regions/us-west1' on this page."
+      }
+    }
+  }
+}

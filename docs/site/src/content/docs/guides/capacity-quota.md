@@ -104,7 +104,19 @@ scanned=4 findings=4 elapsed=100ms
 ```
 
 Rounding out the group, [`cloud orphans`](/reference/cloud-orphans/) sweeps
-for unattached billing-active disks and load balancers targeting zero pods.
+for billing-active leftovers: unattached disks, reserved external IPs
+attached to nothing, and load balancers targeting zero pods.
+
+The capacity you already pay for has two in-cluster waste checks.
+[`stab scaledown`](/reference/stab-scaledown/) names underused nodes that the
+cluster autoscaler would remove but cannot, and the PDB or pod pinning each
+one. [`state volumes`](/reference/state-volumes/) reports Bound claims as
+`volume.unconsumed_pvc` when no pod mounts them and no workload references
+them:
+
+```txt
+kind=scaledown.blocked severity=warning kind_of_object=Node name=n-pinned reason=ScaleDownBlocked message="node's cpu is 30% requested, under the 50% scale-down threshold, but the autoscaler cannot remove it: 1 zero-disruption PDB(s), 1 pod(s) with no controller — it keeps billing at low utilization" utilization=30 basis=cpu threshold=50 blockers=2 pdb_gridlock=1 bare_pods=1 blocked_by=Pod/prod/one-off,PodDisruptionBudget/prod/web-pdb
+```
 
 Why the stockout/quota distinction matters: the remedies are disjoint.
 Stockout → reroute the node pool to a clean zone (the `reroute=` field and

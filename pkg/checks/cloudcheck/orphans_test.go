@@ -27,9 +27,17 @@ import (
 
 // orphanFixture: one big 3-day-idle pd-ssd, one small week-idle
 // pd-standard, one FRESH detach (2h — below the 24h default), one
-// undatable disk, and two orphaned forwarding rules.
+// undatable disk, two orphaned forwarding rules, and three idle
+// addresses: one reserved months ago, one reserved an hour ago (below
+// the 24h default — a load balancer about to claim it), and one the
+// provider cannot date.
 func orphanFixture() *fakeOrphans {
 	return &fakeOrphans{
+		addrs: []cloud.OrphanAddress{
+			{Name: "spare-egress-ip", Region: "us-east1", Address: "35.196.1.2", Tier: "STANDARD", ReservedSince: fixedNow.Add(-30 * 24 * time.Hour)},
+			{Name: "just-reserved", Region: "us-east1", Address: "35.196.1.9", Tier: "PREMIUM", ReservedSince: fixedNow.Add(-1 * time.Hour)},
+			{Name: "old-ingress-ip", Region: "global", Address: "34.120.10.20"},
+		},
 		disks: []cloud.OrphanDisk{
 			{Name: "small-old", Zone: "us-east1-b", SizeGB: 10, Type: "pd-standard", UnusedSince: fixedNow.Add(-7 * 24 * time.Hour)},
 			{Name: "big-idle", Zone: "us-east1-c", SizeGB: 500, Type: "pd-ssd", UnusedSince: fixedNow.Add(-72 * time.Hour)},
@@ -51,13 +59,15 @@ func TestOrphansSweep(t *testing.T) {
 	}
 	recs := findingLines(t, res.Stdout)
 
-	var disks, lbs []map[string]string
+	var disks, lbs, addrs []map[string]string
 	for _, r := range recs {
 		switch r["kind"] {
 		case "orphan.disk":
 			disks = append(disks, r)
 		case "orphan.lb":
 			lbs = append(lbs, r)
+		case "orphan.address":
+			addrs = append(addrs, r)
 		default:
 			t.Errorf("unexpected kind %q: %v", r["kind"], r)
 		}
@@ -93,9 +103,26 @@ func TestOrphansSweep(t *testing.T) {
 		t.Errorf("api-rule = %v, want warning NoBackendEndpoints global with the provider judgment in why", lbs[0])
 	}
 
-	// scanned = 4 disks examined + 2 orphaned rules.
-	if sum := summaryLine(t, res.Stdout); sum["scanned"] != "6" {
-		t.Errorf("scanned = %s, want 6", sum["scanned"])
+	// just-reserved (1h < 24h min-age) is filtered; the undatable
+	// global address is reported with its age unknown. Region, then
+	// name order.
+	if len(addrs) != 2 || addrs[0]["name"] != "old-ingress-ip" || addrs[1]["name"] != "spare-egress-ip" {
+		t.Fatalf("address findings = %v, want old-ingress-ip,spare-egress-ip (fresh reservation filtered)", addrs)
+	}
+	spare := addrs[1]
+	if spare["severity"] != emit.SeverityWarning || spare["reason"] != "ReservedUnusedAddress" ||
+		spare["kind_of_object"] != "Address" || spare["region"] != "us-east1" || spare["address"] != "35.196.1.2" ||
+		spare["network_tier"] != "STANDARD" || spare["reserved_for"] != "720h0m0s" || spare["reserved_since"] != "2026-06-25T12:00:00Z" {
+		t.Errorf("spare-egress-ip = %v, want warning ReservedUnusedAddress us-east1 STANDARD reserved 720h", spare)
+	}
+	if und := addrs[0]; und["reserved_for"] != "unknown" || und["reserved_since"] != "" || und["network_tier"] != "" {
+		t.Errorf("old-ingress-ip = %v, want reserved_for=unknown, no reserved_since, no network_tier", und)
+	}
+
+	// scanned = 4 disks examined + 2 orphaned rules + 3 idle
+	// addresses examined.
+	if sum := summaryLine(t, res.Stdout); sum["scanned"] != "9" {
+		t.Errorf("scanned = %s, want 9", sum["scanned"])
 	}
 }
 
@@ -106,8 +133,8 @@ func TestOrphansOnlyToggles(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	if !api.disksCalled || api.lbsCalled {
-		t.Errorf("--only=disks called disks=%v lbs=%v, want the lb sweep skipped entirely", api.disksCalled, api.lbsCalled)
+	if !api.disksCalled || api.lbsCalled || api.addrsCalled {
+		t.Errorf("--only=disks called disks=%v lbs=%v addresses=%v, want the lb and address sweeps skipped entirely", api.disksCalled, api.lbsCalled, api.addrsCalled)
 	}
 	for _, r := range findingLines(t, res.Stdout) {
 		if r["kind"] == "orphan.lb" {
@@ -124,8 +151,34 @@ func TestOrphansOnlyToggles(t *testing.T) {
 	if res.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
 	}
-	if api.disksCalled || !api.lbsCalled {
-		t.Errorf("--only=lbs called disks=%v lbs=%v, want the disk sweep skipped", api.disksCalled, api.lbsCalled)
+	if api.disksCalled || !api.lbsCalled || api.addrsCalled {
+		t.Errorf("--only=lbs called disks=%v lbs=%v addresses=%v, want the disk and address sweeps skipped", api.disksCalled, api.lbsCalled, api.addrsCalled)
+	}
+
+	// --only=addresses sweeps addresses alone; scanned counts the
+	// three idle addresses examined, the filtered fresh one included.
+	api = orphanFixture()
+	cmd = cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res = checktest.Run(t, cmd, "--only=addresses")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if api.disksCalled || api.lbsCalled || !api.addrsCalled {
+		t.Errorf("--only=addresses called disks=%v lbs=%v addresses=%v, want only the address sweep", api.disksCalled, api.lbsCalled, api.addrsCalled)
+	}
+	if sum := summaryLine(t, res.Stdout); sum["scanned"] != "3" {
+		t.Errorf("scanned = %s, want 3 (addresses only)", sum["scanned"])
+	}
+
+	// The pre-#231 default stays reachable by naming it.
+	api = orphanFixture()
+	cmd = cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res = checktest.Run(t, cmd, "--only=disks,lbs")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if !api.disksCalled || !api.lbsCalled || api.addrsCalled {
+		t.Errorf("--only=disks,lbs called disks=%v lbs=%v addresses=%v, want the address sweep skipped", api.disksCalled, api.lbsCalled, api.addrsCalled)
 	}
 
 	res = checktest.Run(t, cmd, "--only=vms")

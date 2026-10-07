@@ -315,6 +315,19 @@ func TestStorageVolumePhases(t *testing.T) {
 	})
 }
 
+// A Released volume under Delete was not retained by anyone: the
+// message must not say it was (#231 — the orphan-pv slug notes the
+// reclaim policy because it changes what the finding means).
+func TestStorageReleasedUnderDeleteIsAPendingDelete(t *testing.T) {
+	released := stgPV("pv-deleting", "standard", corev1.VolumeReleased)
+	released.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+	released.Spec.ClaimRef = &corev1.ObjectReference{Namespace: ns, Name: "gone"}
+	objs := []runtime.Object{stgDefault(stgClass("standard")), released}
+	wantFindings(t, stgFindings(t, objs), []string{
+		`kind=storage.pv_released severity=info kind_of_object=PersistentVolume name=pv-deleting reason=VolumeReleased message="volume is Released under reclaimPolicy Delete — its claim is gone and the provisioner has not deleted it yet; if it is still here on the next look, the delete is stuck and the backing disk is still allocated" phase=Released storage_class=standard reclaim_policy=Delete capacity=10Gi claim=prod/gone`,
+	})
+}
+
 // Available and Bound are the two working phases and neither is worth
 // a line — including Available, which is the whole point of a
 // statically provisioned pool.

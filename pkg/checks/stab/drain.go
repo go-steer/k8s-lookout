@@ -171,7 +171,14 @@ func runDrain(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 // drainIndex holds the listed objects a drain analysis needs.
 type drainIndex struct {
 	nodes      map[string]bool
+	nodeObjs   map[string]*corev1.Node  // name → node (allocatable, labels; `stab scaledown`)
 	podsByNode map[string][]*corev1.Pod // examined pods only, name-sorted
+	// requested sums the effective requests of EVERY non-terminal pod
+	// bound to each node — DaemonSet and mirror pods included, unlike
+	// podsByNode — because that is the population the cluster
+	// autoscaler's utilization figure is computed over (`stab
+	// scaledown`).
+	requested  map[string]corev1.ResourceList
 	pdbs       []*policyv1.PodDisruptionBudget
 	replicaSet map[string]*appsv1.ReplicaSet  // ns/name
 	deployment map[string]*appsv1.Deployment  // ns/name
@@ -187,7 +194,9 @@ type drainIndex struct {
 func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainIndex, error) {
 	ix := &drainIndex{
 		nodes:      map[string]bool{},
+		nodeObjs:   map[string]*corev1.Node{},
 		podsByNode: map[string][]*corev1.Pod{},
+		requested:  map[string]corev1.ResourceList{},
 		replicaSet: map[string]*appsv1.ReplicaSet{},
 		deployment: map[string]*appsv1.Deployment{},
 		statefulSt: map[string]*appsv1.StatefulSet{},
@@ -201,7 +210,7 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(n *corev1.Node) { ix.nodes[n.Name] = true })
+			}, func(n *corev1.Node) { ix.nodes[n.Name] = true; ix.nodeObjs[n.Name] = n })
 		},
 		func() error {
 			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
@@ -211,6 +220,9 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 				}
 				return l.Items, l.Continue, nil
 			}, func(p *corev1.Pod) {
+				if p.Spec.NodeName != "" && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+					addRequests(ix.requested, p.Spec.NodeName, podRequests(p))
+				}
 				if drainSkips(p) {
 					return
 				}

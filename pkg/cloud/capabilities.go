@@ -183,16 +183,41 @@ type OrphanLoadBalancer struct {
 	Reason string
 }
 
+// OrphanAddress is a reserved static IP address that nothing uses and
+// that bills while idle: an EXTERNAL address in the RESERVED state
+// with no users. Internal static addresses are never returned — they
+// are not billed idle, so they are not waste.
+type OrphanAddress struct {
+	Name string
+	// Region is the address's region short name, "global" for a
+	// global address.
+	Region string
+	// Address is the IP itself.
+	Address string
+	// Tier is the network tier (e.g. "PREMIUM", "STANDARD"); empty
+	// when the provider does not record one.
+	Tier string
+	// ReservedSince is when the address was reserved (its creation
+	// time). The provider does not record when an address last
+	// stopped being used, so this is an upper bound on how long it
+	// has been idle. Zero when the provider cannot date it — callers
+	// report the age as unknown and must not silently drop it.
+	ReservedSince time.Time
+}
+
 // OrphanAPI sweeps for orphaned cloud resources (`cloud orphans`).
 //
 // OrphanDisks returns EVERY unattached billing-active disk with its
 // UnusedSince timestamp; age thresholds are the caller's policy
 // (`cloud orphans --min-age`), so the command's summary line can
-// honestly count what was examined. OrphanLoadBalancers returns only
-// the rules the provider already judged orphaned.
+// honestly count what was examined. OrphanAddresses follows the same
+// rule: every idle billable address, dated, with the age threshold
+// left to the caller. OrphanLoadBalancers returns only the rules the
+// provider already judged orphaned.
 type OrphanAPI interface {
 	OrphanDisks(ctx context.Context) ([]OrphanDisk, error)
 	OrphanLoadBalancers(ctx context.Context) ([]OrphanLoadBalancer, error)
+	OrphanAddresses(ctx context.Context) ([]OrphanAddress, error)
 }
 
 // SubnetUtilization is IP usage for one subnet range (`cloud ipspace`).

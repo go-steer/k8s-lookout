@@ -75,6 +75,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `volume.zone_conflict` | critical | the PV is locked to a zone the pod's node is not in |
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
+| `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified — an explicit degradation record, never silence (§11) |
 | `storage.missing_class` | critical | the claim names a StorageClass that does not exist — it will stay Pending forever |
 | `storage.no_default_class` | critical | the claim names no class and the cluster has no default StorageClass |
 | `storage.no_provisioner` | warning | the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available |
@@ -129,6 +131,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
+| `orphan.address` | warning | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing |
 | `quota.pressure` | critical, warning, info | a cloud quota is at or above --quota-warn percent of its limit; critical from 95%, info for an --all row below the line |
 | `stockout.zone` | warning | the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending |
 | `perf.apiserver_p99` | critical, warning | apiserver request latency p99 crossed the pack threshold for a verb/resource — warning from 1s, critical from 4s |
@@ -218,14 +221,15 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pv_zones` | zones the PV's node affinity allows, sorted |
 | `node_zone` | zone label of the node the pod is scheduled on |
 | `orphan` | which referenced side is gone: "pv missing", "node missing", or both |
-| `storage_class` | StorageClass the claim names, or the class the finding is about |
+| `capacity` | volume.unconsumed_pvc: the claim's bound capacity (status.capacity.storage); omitted when unreported |
+| `storage_class` | volume.unconsumed_pvc: the claim's StorageClass; omitted when it names none |
+| `reclaim_policy` | volume.unconsumed_pvc: the bound PV's reclaim policy — Delete means deleting the claim frees the disk, Retain means the PV must be deleted too; omitted when the PV is not visible |
+| `claim_age` | volume.unconsumed_pvc: how long ago the claim was created, truncated to minutes |
 | `classes` | StorageClasses the cluster does have, sorted (empty when there are none) |
 | `defaults` | StorageClasses annotated as the cluster default, sorted |
 | `provisioner` | the class's spec.provisioner |
 | `phase` | the claim's or volume's status.phase at scan time |
 | `requested` | storage the claim requests (spec.resources.requests.storage) |
-| `capacity` | the volume's spec.capacity.storage |
-| `reclaim_policy` | the volume's spec.persistentVolumeReclaimPolicy |
 | `claim` | the claim the volume was bound to, as namespace/name |
 | `binding_mode` | the class's volumeBindingMode (Immediate when unset) |
 | `gateway_class` | GatewayClass the Gateway names |
@@ -335,8 +339,12 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `disk_type` | orphan.disk: disk type short name (pd-ssd bills ~4x pd-standard idle) |
 | `unused_since` | orphan.disk: last detach (or creation, if never attached), RFC3339; omitted when the provider cannot date it |
 | `unused_for` | orphan.disk: how long the disk has been unattached; "unknown" when undatable |
-| `region` | orphan.lb: the forwarding rule's region ("global" for global rules) |
+| `region` | orphan.lb, orphan.address: the forwarding rule's or address's region ("global" for global ones) |
 | `why` | orphan.lb: the provider's orphan judgment (e.g. which backend resolved empty) |
+| `address` | orphan.address: the reserved IP |
+| `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
+| `reserved_since` | orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable |
+| `reserved_for` | orphan.address: how long ago the address was reserved; "unknown" when undatable |
 | `usage` | current usage in the quota's own unit |
 | `limit` | the quota limit |
 | `unit` | the quota's unit, when the provider names one |
