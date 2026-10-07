@@ -46,7 +46,7 @@ func testNamespaced(group, resource string) (bool, bool) {
 }
 
 func TestNamespaceScopedReviewer_StampsNamespacedResourcesOnly(t *testing.T) {
-	r := NewNamespaceScopedReviewer(&recordingReviewer{}, "team-a", testNamespaced)
+	r := NewNamespaceScopedReviewer(&recordingReviewer{}, []string{"team-a"}, testNamespaced)
 	tests := []struct {
 		name string
 		in   Requirement
@@ -60,8 +60,8 @@ func TestNamespaceScopedReviewer_StampsNamespacedResourcesOnly(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Effective(r, tc.in).Namespace; got != tc.want {
-				t.Errorf("Effective(%v).Namespace = %q, want %q", tc.in, got, tc.want)
+			if got := Expand(r, tc.in)[0].Namespace; got != tc.want {
+				t.Errorf("Expand(%v)[0].Namespace = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -73,7 +73,7 @@ func TestNamespaceScopedReviewer_StampsNamespacedResourcesOnly(t *testing.T) {
 // really asked rather than the unscoped declaration.
 func TestProbe_NamespaceScope(t *testing.T) {
 	inner := &recordingReviewer{allowNS: "team-a"}
-	r := NewNamespaceScopedReviewer(inner, "team-a", testNamespaced)
+	r := NewNamespaceScopedReviewer(inner, []string{"team-a"}, testNamespaced)
 
 	podsOnly := &fakeDeclarer{name: "pods-only", reqs: []Requirement{{Resource: "pods", Verb: "list"}, {Resource: "pods", Verb: "watch"}}}
 	if _, err := Probe(context.Background(), r, podsOnly); err != nil {
@@ -109,3 +109,32 @@ func (f *fakeDeclarer) Name() string                            { return f.name 
 func (f *fakeDeclarer) Scope() Scope                            { return ScopeCluster }
 func (f *fakeDeclarer) Run(context.Context, func(Signal)) error { return nil }
 func (f *fakeDeclarer) RequiredAccess() []Requirement           { return f.reqs }
+
+// TestNamespaceScopedReviewer_FansOutPerNamespace: with a namespace list a
+// namespaced requirement is asked once per namespace, every copy must pass,
+// and the refusal names the namespace that refused (#407's list form).
+func TestNamespaceScopedReviewer_FansOutPerNamespace(t *testing.T) {
+	inner := &recordingReviewer{allowNS: "team-a"}
+	r := NewNamespaceScopedReviewer(inner, []string{"team-a", "team-b"}, testNamespaced)
+
+	got := Expand(r, Requirement{Resource: "pods", Verb: "list"})
+	if len(got) != 2 || got[0].Namespace != "team-a" || got[1].Namespace != "team-b" {
+		t.Fatalf("Expand(pods) = %v, want one copy in team-a and one in team-b", got)
+	}
+	if nodes := Expand(r, Requirement{Resource: "nodes", Verb: "list"}); len(nodes) != 1 || nodes[0].Namespace != "" {
+		t.Errorf("Expand(nodes) = %v, want the one cluster-wide requirement", nodes)
+	}
+
+	src := &fakeDeclarer{name: "pods-only", reqs: []Requirement{{Resource: "pods", Verb: "list"}}}
+	_, err := Probe(context.Background(), r, src)
+	var denied *DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("Probe = %v, want a denial for team-b", err)
+	}
+	if denied.Requirement.Namespace != "team-b" || !strings.Contains(err.Error(), "in namespace team-b") {
+		t.Errorf("refusal %v does not name team-b", err)
+	}
+	if d, _ := r.Allowed(context.Background(), Requirement{Resource: "pods", Verb: "list"}); d.Allowed {
+		t.Error("Allowed passed with one namespace refusing")
+	}
+}

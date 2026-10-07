@@ -49,12 +49,13 @@ func TestNewSharedFactories_BothHalvesTrim(t *testing.T) {
 		// list keeps, or the split case would pass by the pod being absent
 		// rather than by it being trimmed.
 		namespace string
-		// scope is --watch-scope=namespace's namespace, "" for the cluster scope.
-		scope string
+		// scope is the --watch-scope=namespace namespaces, nil for the cluster scope.
+		scope []string
 	}{
 		{name: "one factory", namespace: "prod"},
 		{name: "split by a deny list", exclude: []string{"kube-system"}, namespace: "prod"},
-		{name: "split by a namespace scope (#407)", namespace: "prod", scope: "prod"},
+		{name: "split by a namespace scope (#407)", namespace: "prod", scope: []string{"prod"}},
+		{name: "union of namespace shards (#407)", namespace: "prod", scope: []string{"other", "prod"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{
@@ -82,7 +83,7 @@ func TestNewSharedFactories_BothHalvesTrim(t *testing.T) {
 
 			client := fake.NewSimpleClientset(pod, node)
 			factories := newSharedFactories(client, tc.exclude, tc.scope)
-			if got := factories.Split(); got != (len(tc.exclude) > 0 || tc.scope != "") {
+			if got := factories.Split(); got != (len(tc.exclude) > 0 || len(tc.scope) > 0) {
 				t.Fatalf("Split() = %v with exclude=%v", got, tc.exclude)
 			}
 			podLister := factories.Namespaced.Core().V1().Pods().Lister()

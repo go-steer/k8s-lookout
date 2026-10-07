@@ -57,18 +57,24 @@ spec:
           args:
             {{- if include "lookout.namespaceScope" . }}
             # rbac.scope=namespace (#407), as deploy-namespaced/ does it:
-            # --storm=on would refuse to start without the node grant a
-            # Role cannot give, so it becomes auto; the watch is scoped to
-            # the pod's own namespace.
+            # the watch is scoped to rbac.namespaces, or the pod's own
+            # namespace when that is empty. Without the node grant
+            # (rbac.nodes=false, deploy-namespaced-strict/) --storm=on
+            # would refuse to start, so it becomes auto.
+            {{- $strict := not .Values.rbac.nodes }}
             {{- range .Values.args }}
-            {{- if eq . "--storm=on" }}
+            {{- if and $strict (eq . "--storm=on") }}
             - --storm=auto
             {{- else }}
             - {{ . | quote }}
             {{- end }}
             {{- end }}
             - --watch-scope=namespace
+            {{- if .Values.rbac.namespaces }}
+            - --namespace={{ join "," .Values.rbac.namespaces }}
+            {{- else }}
             - --namespace=$(POD_NAMESPACE)
+            {{- end }}
             {{- else }}
             {{- toYaml .Values.args | nindent 12 }}
             {{- end }}

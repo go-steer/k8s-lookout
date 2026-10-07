@@ -1,9 +1,15 @@
 {{- if and .Values.rbac.create (include "lookout.namespaceScope" .) }}
+{{- $namespaces := .Values.rbac.namespaces | default (list .Release.Namespace) }}
+{{- range $i, $ns := $namespaces }}
+{{- if $i }}
+---
+{{- end }}
 # ---------------------------------------------------------------------
 # SOURCE OF TRUTH: deploy-namespaced/role-watcher.yaml and
-# rolebinding-watcher.yaml (#407). Rendered only with
-# rbac.scope=namespace, in place of the ClusterRole, its binding and the
-# kube-system capacity Role. `dev/tools/verify-helm-parity` diffs this
+# rolebinding-watcher.yaml (#407), one pair per watched namespace
+# (rbac.namespaces; the release namespace when empty). Rendered only with
+# rbac.scope=namespace, in place of the cluster-wide ClusterRole and its
+# binding. `dev/tools/verify-helm-parity` diffs this
 # chart rendered with rbac.scope=namespace against
 # `kustomize build deploy-namespaced/`; edit the manifests, not this copy.
 # deploy-namespaced/README.md lists what this tier cannot see.
@@ -11,10 +17,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "lookout.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ include "lookout.fullname" $ }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "lookout.labels" . | nindent 4 }}
+    {{- include "lookout.labels" $ | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["events"]
@@ -64,7 +70,7 @@ rules:
   - apiGroups: ["leeway.lookout.go-steer.io"]
     resources: ["leewaypolicies"]
     verbs: ["list", "watch"]
-  {{- if .Values.rbac.secrets }}
+  {{- if $.Values.rbac.secrets }}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]
@@ -79,16 +85,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "lookout.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ include "lookout.fullname" $ }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "lookout.labels" . | nindent 4 }}
+    {{- include "lookout.labels" $ | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "lookout.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    name: {{ include "lookout.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "lookout.fullname" . }}
+  name: {{ include "lookout.fullname" $ }}
+{{- end }}
 {{- end }}

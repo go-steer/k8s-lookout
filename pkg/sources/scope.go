@@ -18,20 +18,25 @@ import "context"
 
 // Namespace-scoped watching (issue #407).
 //
-// A sentinel run with a single-namespace watch scope builds its namespaced
-// informers with informers.WithNamespace, so every LIST and WATCH they issue
-// is a namespaced request. The requirements sources declare do not know
-// that: they were written for the cluster tier and leave Namespace empty,
-// which the probe reads as "cluster-wide". Asked as written, every
-// requirement would be denied to a namespaced Role, and the probe would
-// refuse a deployment that would in fact run.
+// A sentinel run with a namespace watch scope builds its namespaced
+// informers with informers.WithNamespace, one factory per scope namespace,
+// so every LIST and WATCH they issue is a namespaced request. The
+// requirements sources declare do not know that: they were written for the
+// cluster tier and leave Namespace empty, which the probe reads as
+// "cluster-wide". Asked as written, every requirement would be denied to a
+// namespaced Role, and the probe would refuse a deployment that would in
+// fact run.
 //
-// Rather than thread the namespace through every source's configuration,
+// Rather than thread the namespaces through every source's configuration,
 // the scope is applied to the requirements here, at the probe seam, by
 // wrapping the reviewer every probe asks. That is one transform in one
 // place, and it covers every caller that asks the same question: the §11
 // startup probe, auto resolution, the storm and routing probes, the
 // recovery fallback and the periodic access re-check.
+//
+// With several scope namespaces a requirement fans out: one copy per
+// namespace, every one of which must be allowed, because the sentinel
+// watches every one of them.
 //
 // Only resources that have a namespaced form are stamped. Nodes,
 // PersistentVolumes, webhook configurations, ComputeClasses and the like
@@ -45,56 +50,83 @@ import "context"
 // an unknown resource is left as declared.
 type NamespacedFunc func(group, resource string) (namespaced, known bool)
 
-// RequirementScoper is implemented by an AccessReviewer that narrows a
-// requirement before asking about it. Callers that print a requirement
-// next to the answer use Effective so that the line names what was
-// actually asked.
+// RequirementScoper is implemented by an AccessReviewer that rewrites a
+// requirement before asking about it — possibly into several. Callers that
+// print a requirement next to the answer iterate Expand so that every line
+// names what was actually asked.
 type RequirementScoper interface {
-	ScopeRequirement(Requirement) Requirement
+	ScopeRequirement(Requirement) []Requirement
 }
 
-// Effective returns req as reviewer will ask it: scoped when reviewer is a
-// RequirementScoper, unchanged otherwise. Asking Allowed with the result is
-// the same question as asking with req, since scoping is idempotent.
-func Effective(reviewer AccessReviewer, req Requirement) Requirement {
+// Expand returns the requirements reviewer will actually ask for req: the
+// per-namespace copies when reviewer is a RequirementScoper, req alone
+// otherwise. Each result is already scoped, so asking Allowed with it asks
+// exactly that one question again.
+func Expand(reviewer AccessReviewer, req Requirement) []Requirement {
 	if s, ok := reviewer.(RequirementScoper); ok {
 		return s.ScopeRequirement(req)
 	}
-	return req
+	return []Requirement{req}
 }
 
 // NewNamespaceScopedReviewer wraps inner so that every requirement on a
 // namespaced resource that does not name a namespace of its own is asked in
-// namespace. Requirements that already carry a namespace (the capacity
-// source's kube-system ConfigMap, explicit --expiry-namespaces) are left
-// alone: the source declared exactly what it reads.
+// each of namespaces. Requirements that already carry a namespace (the
+// capacity source's kube-system ConfigMap, explicit --expiry-namespaces)
+// are left alone: the source declared exactly what it reads.
 //
 // namespaced is consulted per requirement; a resource it does not know is
 // left cluster-wide. That errs toward a denial, never toward an informer
 // that cannot sync.
-func NewNamespaceScopedReviewer(inner AccessReviewer, namespace string, namespaced NamespacedFunc) AccessReviewer {
-	return namespaceScopedReviewer{inner: inner, namespace: namespace, namespaced: namespaced}
+func NewNamespaceScopedReviewer(inner AccessReviewer, namespaces []string, namespaced NamespacedFunc) AccessReviewer {
+	return namespaceScopedReviewer{inner: inner, namespaces: namespaces, namespaced: namespaced}
 }
 
 type namespaceScopedReviewer struct {
 	inner      AccessReviewer
-	namespace  string
+	namespaces []string
 	namespaced NamespacedFunc
 }
 
 // ScopeRequirement implements RequirementScoper. A subresource
 // ("pods/log", "nodes/proxy") is scoped by its parent resource.
-func (r namespaceScopedReviewer) ScopeRequirement(req Requirement) Requirement {
-	if req.Namespace != "" || r.namespace == "" {
-		return req
+func (r namespaceScopedReviewer) ScopeRequirement(req Requirement) []Requirement {
+	if req.Namespace != "" || len(r.namespaces) == 0 {
+		return []Requirement{req}
 	}
-	if ns, known := r.namespaced(req.Group, req.Resource); known && ns {
-		req.Namespace = r.namespace
+	if ns, known := r.namespaced(req.Group, req.Resource); !known || !ns {
+		return []Requirement{req}
 	}
-	return req
+	out := make([]Requirement, 0, len(r.namespaces))
+	for _, ns := range r.namespaces {
+		scoped := req
+		scoped.Namespace = ns
+		out = append(out, scoped)
+	}
+	return out
 }
 
-// Allowed implements AccessReviewer.
+// Allowed implements AccessReviewer: allowed only when every expansion is.
+// The first refusal is returned as is; a caller that needs to know WHICH
+// namespace refused iterates Expand and asks each copy itself.
 func (r namespaceScopedReviewer) Allowed(ctx context.Context, req Requirement) (Decision, error) {
-	return r.inner.Allowed(ctx, r.ScopeRequirement(req))
+	var d Decision
+	for _, scoped := range r.ScopeRequirement(req) {
+		var err error
+		if d, err = r.inner.Allowed(ctx, scoped); err != nil || !d.Allowed {
+			return d, err
+		}
+	}
+	return d, nil
+}
+
+// ExpandAll is Expand over a requirement list, in order: what a probe loop
+// iterates so that each question it asks — and each line it prints — names
+// the namespace it was asked in.
+func ExpandAll(reviewer AccessReviewer, reqs []Requirement) []Requirement {
+	out := make([]Requirement, 0, len(reqs))
+	for _, req := range reqs {
+		out = append(out, Expand(reviewer, req)...)
+	}
+	return out
 }

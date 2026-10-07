@@ -297,7 +297,7 @@ func TestSharedFactories_SplitEveryNodeReaderStartsIt(t *testing.T) {
 			t.Parallel()
 
 			client := fake.NewSimpleClientset()
-			factories := newSharedFactories(client, []string{"kube-system"}, "")
+			factories := newSharedFactories(client, []string{"kube-system"}, nil)
 			if !factories.Split() {
 				t.Fatal("test precondition: a deny list must split the factories")
 			}
@@ -336,7 +336,7 @@ func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
 	counter := &watchCounter{}
 	counter.install(client, "pods", "nodes", "events")
 
-	factories := newSharedFactories(client, []string{"kube-system"}, "")
+	factories := newSharedFactories(client, []string{"kube-system"}, nil)
 	if !factories.Split() {
 		t.Fatal("test precondition: a deny list must split the factories")
 	}

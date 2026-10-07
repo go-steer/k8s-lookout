@@ -13,15 +13,18 @@
 # limitations under the License.
 
 # The namespaced half of deploy/12-clusterrole-watcher.yaml, as a Role in
-# the one namespace the sentinel watches (--watch-scope=namespace, #407).
+# each namespace the sentinel watches (--watch-scope=namespace, #407). This
+# file is the one for the sentinel's own namespace; watching more means one
+# copy per namespace (README.md shows how).
 #
 # Every rule here is a rule from deploy/12 on a namespaced resource, with
 # the same verbs; read deploy/12 for why each one exists. What is left out,
 # and why:
-#   - cluster-scoped kinds (nodes, nodes/proxy, persistentvolumes,
+#   - cluster-scoped kinds (nodes and persistentvolumes come from
+#     clusterrole-watcher-nodes.yaml instead; nodes/proxy,
 #     storageclasses, ingressclasses, clusterroles, clusterrolebindings,
 #     webhook configurations, ComputeClasses, ClusterLeewayPolicies): a
-#     Role cannot grant them. The sources that need them are skipped at
+#     Role cannot grant them. The sources that need the rest are skipped at
 #     startup, one log line each — see README.md;
 #   - cert-manager Certificates and ACME Challenges/Orders: only the expiry
 #     source reads them, and expiry cannot run here anyway, because its

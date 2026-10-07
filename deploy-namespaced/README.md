@@ -1,33 +1,71 @@
-# deploy-namespaced: a sentinel for one namespace
+# deploy-namespaced: a sentinel for a list of namespaces
 
-This runs `lookout watch` for a single namespace, using only a `Role` and
-a `RoleBinding` in that namespace. It needs no cluster-wide permission.
-It is meant for a team that owns a namespace on a shared cluster and
-will not be given a `ClusterRole`.
+This runs `lookout watch` for chosen namespaces instead of the whole
+cluster. It watches only those namespaces, so nothing from any other
+namespace is ever loaded into memory. Each namespace needs a `Role`.
 
-You get a much thinner sentinel than the standard one. It watches the
-Events, Deployments, Jobs, HPAs and other objects in that namespace and
-opens incidents for them. It cannot see nodes, so it loses everything
-that depends on them: node health, storm grouping, capacity forecasting
-and topology drift. The full list is [below](#what-you-lose).
+There are two tiers, depending on whether your cluster admin will grant
+one small `ClusterRole`:
 
-Use it *instead of* `deploy/`, not on top of it:
+- **`deploy-namespaced/` (the default).** Roles in your namespaces, plus
+  a ClusterRole that can only read nodes and persistent volumes. Almost
+  everything keeps working, including grouping a node failure into one
+  incident.
+- **`deploy-namespaced-strict/`.** Roles only, no cluster-wide grant at
+  all. This is for a team on a shared cluster that will never be given a
+  ClusterRole. It is much thinner: anything that needs to see nodes is
+  turned off.
+
+The [table below](#what-each-tier-keeps) says exactly which parts survive
+each tier.
 
 ```sh
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=vX.Y.Z"
-# or, from a clone
-kubectl apply -k deploy-namespaced/
+# or, with no cluster-wide grant at all
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced-strict?ref=vX.Y.Z"
 ```
 
-With the Helm chart, set `rbac.scope=namespace`. Both produce the same
+Use one of them *instead of* `deploy/`, not on top of it. With the Helm
+chart, set `rbac.scope=namespace` for the default tier, and add
+`rbac.nodes=false` for the strict one. Each pair produces the same
 objects (CI diffs them).
 
-## Which namespace it watches
+## What each tier keeps
 
-It watches the namespace it runs in. The watched namespace comes from
-the pod's own namespace (the downward API sets `POD_NAMESPACE`), so to
-deploy it somewhere other than `agent-triage` you only change the
-namespace:
+| | `deploy/` (cluster) | `deploy-namespaced/` | `deploy-namespaced-strict/` |
+| --- | --- | --- | --- |
+| `k8s-events`, `rollout`, `workload`, `autoscaling`, `degradation`, `ingress` | yes | yes | yes |
+| `gateway` (if the Gateway API CRDs are installed) | yes | yes | yes |
+| `object-state`: pod, node, Deployment, EndpointSlice and PDB state | yes | yes | no: needs nodes |
+| `saturation`: CPU and memory forecasts | yes | yes [^disk] | no: lists nodes |
+| `capacity`: pending pods and autoscaler state | yes | yes | no: needs nodes and the `kube-system` Role |
+| `topology-drift`: placement drift across zones and node groups | yes | yes | no: needs nodes and PersistentVolumes |
+| storm correlation: one incident for many failures with one cause | yes | yes | no: the topology graph needs nodes |
+| watchboard reattachment, graph history and `--at` queries | yes | yes | no: they need the storm topology graph |
+| `compute-class`: GKE compute-class rank drift | yes | no [^cc] | no |
+| `expiry`: certificate, token and webhook CA expiry | yes | no: reads cluster-scoped webhook configurations | no |
+| `ClusterLeewayPolicy` overrides (namespaced `LeewayPolicy` always works) | yes | no | no |
+| incident sessions, dedup, routing, the store, recovery | yes | yes | yes |
+| enrichment bundles | full | namespaced parts; storage and ingress classes and cluster roles are reported as skipped | same, and no node details |
+
+[^disk]: The disk dimension also needs `get` on `nodes/proxy`. Without
+it, saturation runs with that one dimension off and says so at startup.
+[^cc]: Add `list`/`watch` on `computeclasses.cloud.google.com` to the
+nodes ClusterRole to bring it back.
+
+At startup, the default `--sources=auto` skips each source a tier cannot
+run and logs one line naming the missing permission. `--storm=auto` turns
+off the same way. If you name a skipped source in an explicit `--sources`
+list, or set `--storm=on`, the sentinel refuses to start instead. That is
+the same rule as for any other missing grant. `quota`, `notifications` and
+`token-burn` are not affected by either tier. They never read the cluster
+and are never auto-enabled.
+
+## Which namespaces it watches
+
+Out of the box it watches the namespace it runs in. The watched namespace
+comes from the pod's own namespace (the downward API sets `POD_NAMESPACE`).
+To deploy it somewhere other than `agent-triage`, change the namespace:
 
 ```yaml
 # your kustomization.yaml
@@ -36,112 +74,78 @@ resources:
   - github.com/go-steer/k8s-lookout/deploy-namespaced?ref=vX.Y.Z
 ```
 
-The prerequisites are the same as for `deploy/`: the namespace and the
-`lookout-watch-token` Secret must already exist. You will still want to
-edit `--daemon-url`, `--cluster-name` and `--owner`.
+To watch more namespaces, give each one the same Role and RoleBinding, and
+list them all in `--namespace`. With the chart this is one value:
+
+```sh
+helm install lookout-watch oci://ghcr.io/go-steer/charts/lookout \
+  --namespace agent-triage --set rbac.scope=namespace \
+  --set-json 'rbac.namespaces=["team-a","team-b","team-c"]'
+```
+
+With kustomize, copy `role-watcher.yaml` and `rolebinding-watcher.yaml` once
+per extra namespace, changing `metadata.namespace` but not the subject.
+Then replace the last `--namespace` argument:
+
+```yaml
+patches:
+  - target: {kind: Deployment, name: lookout-watch}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args/12
+        value: --namespace=team-a,team-b,team-c
+```
+
+If one listed namespace is missing its Role, the sentinel skips that
+namespace and watches the rest. It logs one line naming the namespace and
+the missing permission, and counts it on `lookout_namespace_errors_total`.
+Alert on that counter, because a skipped namespace is a gap that otherwise
+looks like a quiet one. If every listed namespace is refused, the sentinel
+does not start.
+
+The prerequisites are the same as for `deploy/`: the sentinel's namespace
+and the `lookout-watch-token` Secret must already exist. You will still want
+to edit `--daemon-url`, `--cluster-name` and `--owner`.
 
 ## What changes compared to `deploy/`
 
-- The `ClusterRole`, its `ClusterRoleBinding` and the `kube-system`
-  capacity `Role` are gone.
-- A `Role` and `RoleBinding` in the sentinel's namespace carry the
-  namespaced rules of `deploy/12-clusterrole-watcher.yaml`.
-  `role-watcher.yaml` says what was left out and why.
+- The cluster-wide `ClusterRole` and its binding are gone. In their place:
+  - a `Role` and `RoleBinding` in each watched namespace, carrying the
+    namespaced rules of `deploy/12-clusterrole-watcher.yaml`
+    (`role-watcher.yaml` says what was left out and why);
+  - in the default tier, `lookout-watch-nodes`, a ClusterRole that can only
+    read nodes and persistent volumes.
 - The watcher gets `--watch-scope=namespace --namespace=$(POD_NAMESPACE)`.
-  Every informer then lists and watches that one namespace, so nothing
-  from other namespaces is ever loaded into memory.
-- `--storm=on` becomes `--storm=auto`. Storm correlation needs nodes, and
-  an explicit `--storm=on` would refuse to start without them.
+- The strict tier also drops the `kube-system` capacity Role and changes
+  `--storm=on` to `--storm=auto`.
 
-## What still works
+## `--namespace` is a watch scope only with `--watch-scope=namespace`
 
-- These sources: `k8s-events`, `rollout`, `workload`, `autoscaling`,
-  `degradation` and `ingress`. `gateway` also works if the Gateway API
-  CRDs are installed.
-- Incident sessions, deduplication, severity routing, the watchboard and
-  the occurrence store (`--store`).
-- Recovery: incidents in the namespace are followed to resolution.
-- Enrichment bundles for incidents in the namespace. Parts that need
-  cluster-scoped objects (the node, storage classes, ingress classes,
-  cluster roles) are reported as skipped in the bundle head instead.
+Two different things share the `--namespace` flag:
 
-## What you lose
+- **With `--watch-scope=namespace`, it is the watch scope.** Only the
+  listed namespaces are listed, watched and cached. This is a security
+  boundary: the process cannot see other namespaces' objects, and RBAC
+  backs that up.
+- **Without it, it is only an output filter.** Every namespace is still
+  watched and held in memory. Only reporting is limited. Names, labels,
+  images, owner chains and node placement for the whole cluster stay
+  resident in the process. Nobody should rely on that for isolation.
 
-At startup, `--sources=auto` skips each source that needs a cluster-wide
-grant and logs one line naming the missing permission. `--storm=auto`
-resolves to off the same way. If you name one of these sources in an
-explicit `--sources` list, or set `--storm=on`, the sentinel refuses to
-start. That is the same rule as for any other missing grant.
-
-| Lost | Why |
-| --- | --- |
-| `object-state`: pod, node, Deployment, EndpointSlice and PDB state signals | watches nodes |
-| storm correlation: one session for many failures with a common cause | the topology graph needs nodes |
-| watchboard ancestor reattachment, graph history and `--at` queries | ride the storm topology graph |
-| `capacity`: pending-pod and autoscaler forecasting | watches nodes, reads `kube-system` |
-| `saturation`: CPU, memory and disk exhaustion forecasts | lists nodes |
-| `topology-drift`: placement drift across zones and node groups | needs nodes and PersistentVolumes |
-| `compute-class`: GKE compute-class rank drift | ComputeClasses and nodes are cluster-scoped |
-| `expiry`: certificate, token and webhook CA expiry | reads cluster-scoped webhook configurations |
-| `ClusterLeewayPolicy` overrides | cluster-scoped; namespaced `LeewayPolicy` still works |
-| node details in enrichment bundles | nodes are cluster-scoped |
-
-`quota`, `notifications` and `token-burn` are unaffected. They never
-read the cluster and are never auto-enabled.
-
-## Getting some of it back with one ClusterRole
-
-If your cluster admin will grant read access to nodes, which hold no
-tenant data, most of the losses come back:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: lookout-watch-nodes
-rules:
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: lookout-watch-nodes
-subjects:
-  - kind: ServiceAccount
-    name: lookout-watch
-    namespace: team-a
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: lookout-watch-nodes
-```
-
-With it, `object-state` and storm correlation come back, and
-`--storm=auto` turns on. `saturation` also comes back; its disk
-dimension additionally needs `get` on `nodes/proxy`. `capacity` also
-needs `deploy/14` and `deploy/15` (a `Role` in `kube-system`), and
-`topology-drift` also needs `list`/`watch` on `persistentvolumes`.
-Pods are still watched in your namespace only. Node signals are not
-tied to a namespace, so you also get condition signals for every node
-in the cluster. Restart the sentinel after granting: the checks run at
-startup.
+`--exclude-namespace` has nothing to remove under `--watch-scope=namespace`,
+since only the listed namespaces are watched. Naming a listed namespace in
+it is rejected.
 
 ## Things to know
 
-- **`--namespace` on its own is not this.** Without
-  `--watch-scope=namespace`, `--namespace` only filters what is reported.
-  Every namespace is still watched and held in memory. Only
-  `--watch-scope=namespace` limits what is watched.
-- **One namespace per sentinel.** To cover several namespaces, run one
-  sentinel in each.
-- **`--exclude-namespace`** has nothing to exclude here, since only one
-  namespace is watched. Naming the watched namespace is rejected.
+- **One process, many namespaces.** Each namespace gets its own watch
+  connection, but there is one copy of everything else: one deduplication
+  cache, one store, one topology graph. A node failure that hits pods in
+  three of your namespaces is still one incident.
 - **Multi-cluster mode** (`--clusters` / `--clusters-from`) applies the
-  scope to every cluster: each one is watched in a namespace with the
-  same name.
+  scope to every cluster: each one is watched in namespaces with the same
+  names.
+- **Restart after changing grants.** Permissions are checked at startup.
 
 The operations guide's [Scoping a sentinel](../docs/site/src/content/docs/operations/scoping.md)
-page covers the same ground alongside the other ways to narrow a
-sentinel.
+page covers the same ground alongside the other ways to narrow a sentinel.

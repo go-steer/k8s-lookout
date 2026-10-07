@@ -1,0 +1,38 @@
+{{- if and .Values.rbac.create (include "lookout.namespaceScope" .) .Values.rbac.nodes }}
+# ---------------------------------------------------------------------
+# SOURCE OF TRUTH: deploy-namespaced/clusterrole-watcher-nodes.yaml and
+# clusterrolebinding-watcher-nodes.yaml (#407). The namespace tier's one
+# cluster-wide grant — read access to Nodes and PersistentVolumes — which
+# keeps object-state, saturation, capacity, topology-drift and storm
+# correlation working. rbac.nodes=false drops it: the strictly namespaced
+# tier, deploy-namespaced-strict/. The manifest says why each rule exists.
+# ---------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lookout.fullname" . }}-nodes
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lookout.fullname" . }}-nodes
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lookout.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lookout.fullname" . }}-nodes
+{{- end }}

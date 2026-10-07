@@ -112,15 +112,6 @@ sets `--enrich-lists`. That is the same deployment as the
 source and the Secret/ServiceAccount edge checks in enrichment bundles
 (the docs site's *Scoping a sentinel* page has the full list).
 
-**`rbac.scope`.** `cluster` by default. `namespace` watches only the
-release namespace and needs no cluster-scoped grant at all: the chart
-renders a Role and RoleBinding there instead of the ClusterRole, its
-binding and the capacity Role. It adds `--watch-scope=namespace
---namespace=$(POD_NAMESPACE)` to the watcher and turns `--storm=on` into
-`--storm=auto`. That is the same deployment as the `deploy-namespaced/`
-overlay, and CI diffs the two. It costs every source that reads nodes
-or another cluster-scoped kind, plus storm correlation;
-`deploy-namespaced/README.md` has the full list.
 **`rbac.probeFrom`.** Off by default, and the only value that gives
 lookout a write verb. `true` grants the ServiceAccount `patch` on
 `pods/ephemeralcontainers` so `lookout net probe-from` can run net probe
@@ -136,6 +127,21 @@ refuses with `reason=PolicyMissing` when it is absent; the ClusterRole
 also grants read on the two policy kinds for that check. Every probe leaves its ephemeral container
 in the probed pod's spec until the pod is replaced. Same deployment as
 `deploy-probe/`, and CI diffs the two.
+
+**`rbac.scope`, `rbac.namespaces`, `rbac.nodes`.** `scope` is `cluster`
+by default. `namespace` watches only the namespaces in `rbac.namespaces`
+(the release namespace when that list is empty). The chart then renders
+a Role and RoleBinding in each of them instead of the cluster-wide
+ClusterRole and its binding. It also adds `--watch-scope=namespace
+--namespace=<the list>` to the watcher. `rbac.nodes` (on by default)
+keeps one small ClusterRole that can only read nodes and persistent
+volumes, so everything except the expiry and compute-class sources keeps
+working. `rbac.nodes=false` is the strictly namespaced tier. It has no
+ClusterRole at all, drops the capacity Role, and turns `--storm=on` into
+`--storm=auto`. The two tiers are the same deployments as the
+`deploy-namespaced/` and `deploy-namespaced-strict/` overlays, and CI
+diffs each pair. `deploy-namespaced/README.md` has the table of which
+sources survive each tier.
 
 **`networkPolicy.extraIngressFrom`.** The default rule admits scrapers
 in the release namespace. Prometheus in `monitoring/`, or GMP in

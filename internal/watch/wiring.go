@@ -957,6 +957,12 @@ func (r *runner) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// --watch-scope=namespace (#407): decide which listed namespaces this
+	// run watches before anything else reads the list — a namespace whose
+	// Role is missing is skipped loudly, not fatal (admitNamespaces).
+	if err := admitNamespaces(ctx, f, client, m); err != nil {
+		return err
+	}
 	// Every capability question below goes through this one reviewer, so
 	// under --watch-scope=namespace each is asked in the scope namespace
 	// (#407) — see newAccessReviewer.
@@ -1053,13 +1059,13 @@ func (r *runner) run(ctx context.Context) error {
 	// what it deliberately preserves is in transform_registry.go, which
 	// is enforced by a behavioural guard test — read that before
 	// touching trimPod or trimNode.
-	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespace())
+	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespaces())
 	sharedFactory := factories.Namespaced
 	switch {
-	case f.scopeNamespace() != "":
+	case len(f.scopeNamespaces()) > 0:
 		// The scope is the one fact an operator most needs to confirm from
 		// the log, since it decides what this process can see at all.
-		log.Printf("watch: --watch-scope=namespace — the namespaced informers list and watch namespace %q only, so nothing outside it enters the cache; cluster-scoped reads (nodes and the like) stay cluster-wide where a source needs them and are probed as such (#407)", f.scopeNamespace())
+		log.Printf("watch: --watch-scope=namespace — one read shard per namespace (%s): each lists and watches its own namespace only, so nothing outside them enters the cache, and every source, the dispatcher, dedup, store and storm graph see their union; cluster-scoped reads (nodes and the like) stay cluster-wide on one shared factory where a source needs them and are probed as such (#407)", strings.Join(f.scopeNamespaces(), ", "))
 	case factories.Split():
 		// Worth a line: this is the one flag whose meaning widened from
 		// "do not report" to "do not watch", and the difference is only
@@ -1182,7 +1188,7 @@ func (r *runner) run(ctx context.Context) error {
 			timeout:        f.enrichTimeout,
 			lists:          enrichLists,
 			listsPreflight: f.enrichListsPreflight,
-			podNamespace:   f.scopeNamespace(),
+			podNamespaces:  f.scopeNamespaces(),
 		}
 		path := "scoped-list"
 		if feed != nil {
@@ -1599,7 +1605,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Window = f.saturationWindow
 			cfg.WarnETA = f.saturationWarn
 			bs.saturation = saturation.New(cfg,
-				saturation.NewScopedMetricsPodFetcher(metricsClient, client, f.scopeNamespace()),
+				scopedPodFetcher(metricsClient, client, f.scopeNamespaces()),
 				saturation.NewKubeletVolumeFetcher(client))
 			src = bs.saturation
 		case degradation.Name:
@@ -1644,7 +1650,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			}
 			cfg := gateway.DefaultConfig()
 			cfg.Grace = f.gatewayGrace
-			cfg.Namespace = f.scopeNamespace()
+			cfg.Namespaces = f.scopeNamespaces()
 			bs.gateway = gateway.New(client, dyn, cfg)
 			src = bs.gateway
 		case topologydrift.Name:
@@ -1693,7 +1699,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			// no LeewayPolicy watch, which is the same state as a cluster
 			// that never installed the CRD — the common case.
 			bs.topoDrift.WithDynamic(dyn)
-			bs.topoDrift.WithWatchNamespace(f.scopeNamespace())
+			bs.topoDrift.WithWatchNamespaces(f.scopeNamespaces())
 			src = bs.topoDrift
 		case computeclass.Name:
 			// The leeway subsystem's preference half (§7.7): which rung of
@@ -1893,8 +1899,7 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 	} else {
 		reviewer := newAccessReviewer(f, client)
 		podRBAC := true
-		for _, req := range recoveryAccess {
-			req = sources.Effective(reviewer, req)
+		for _, req := range sources.ExpandAll(reviewer, recoveryAccess) {
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)

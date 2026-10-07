@@ -1,0 +1,48 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The one cluster-wide grant of the namespace-scoped tier (#407): read
+# access to Nodes, plus the PersistentVolumes topology-drift pairs with
+# them. Everything namespaced comes from the per-namespace Roles.
+#
+# Why this is the default even for a namespace-scoped sentinel: nodes carry
+# no tenant data, and node count is close to free to cache — a 50k-node
+# cluster's node cache is not what anyone shrinks a sentinel for. With it,
+# object-state, saturation, capacity (with the kube-system Role),
+# topology-drift and storm correlation keep working. Without it they are
+# skipped at startup; deploy-namespaced-strict/ is that tier.
+#
+# PersistentVolumes are here because topology-drift's FR-8 rule (a pod pinned
+# to a zone by its volume) needs each claim's volume node affinity, and the
+# source refuses to run without it rather than guess. A PV holds no data and
+# no credentials; its claimRef names one claim. Drop the rule if you would
+# rather lose topology-drift than grant it.
+#
+# What the sentinel never gets here: anything namespaced across the cluster.
+# Pods, Events and every other namespaced kind stay confined to the listed
+# namespaces by the Roles and by --watch-scope=namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lookout-watch-nodes
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["list", "watch"]

@@ -103,6 +103,7 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -172,12 +173,13 @@ type Config struct {
 	// any informer activity within this window are dropped (safety net
 	// behind DeleteFunc). Default 24h.
 	StateTTL time.Duration
-	// Namespace confines the Gateway/HTTPRoute informers to one
-	// namespace; empty (the default) watches every namespace. The
-	// sentinel sets it under --watch-scope=namespace (#407), where the
-	// probe verified the grants in that namespace only — a cluster-wide
-	// informer there would retry a 403 forever and never sync.
-	Namespace string
+	// Namespaces confines the Gateway/HTTPRoute informers to these
+	// namespaces, one informer pair each; empty (the default) watches
+	// every namespace. The sentinel sets it under --watch-scope=namespace
+	// (#407), where the probe verified the grants in those namespaces only
+	// — a cluster-wide informer there would retry a 403 forever and never
+	// sync.
+	Namespaces []string
 }
 
 // DefaultConfig returns the shipped thresholds.
@@ -405,35 +407,45 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		s.logPrintf("gateway: %s not served — watching HTTPRoutes only (Gateway programming signals disabled)", gatewayGVR)
 	}
 
-	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, s.cfg.Namespace, nil)
+	// One dynamic factory per watched namespace — a single one with
+	// namespace "" (every namespace) by default. Several only under
+	// --watch-scope=namespace with a namespace list (#407): a namespaced
+	// Role is honoured only by namespaced requests, and the handlers below
+	// take s.mu, so delivery from several factories is safe.
+	namespaces := s.cfg.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{metav1.NamespaceAll}
+	}
 	var synced []cache.InformerSynced
-	if s.watchGateways {
-		inf := factory.ForResource(gatewayGVR).Informer()
-		h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj any) { s.onObject(obj, "Gateway") },
-			UpdateFunc: func(_, obj any) { s.onObject(obj, "Gateway") },
-			DeleteFunc: func(obj any) { s.onDelete(obj) },
-		})
-		if err != nil {
-			return fmt.Errorf("gateway: register Gateway handler: %w", err)
+	for _, ns := range namespaces {
+		factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, ns, nil)
+		if s.watchGateways {
+			inf := factory.ForResource(gatewayGVR).Informer()
+			h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+				AddFunc:    func(obj any) { s.onObject(obj, "Gateway") },
+				UpdateFunc: func(_, obj any) { s.onObject(obj, "Gateway") },
+				DeleteFunc: func(obj any) { s.onDelete(obj) },
+			})
+			if err != nil {
+				return fmt.Errorf("gateway: register Gateway handler: %w", err)
+			}
+			synced = append(synced, h.HasSynced)
 		}
-		synced = append(synced, h.HasSynced)
-	}
-	if s.watchRoutes {
-		inf := factory.ForResource(httprouteGVR).Informer()
-		h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj any) { s.onObject(obj, "HTTPRoute") },
-			UpdateFunc: func(_, obj any) { s.onObject(obj, "HTTPRoute") },
-			DeleteFunc: func(obj any) { s.onDelete(obj) },
-		})
-		if err != nil {
-			return fmt.Errorf("gateway: register HTTPRoute handler: %w", err)
+		if s.watchRoutes {
+			inf := factory.ForResource(httprouteGVR).Informer()
+			h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+				AddFunc:    func(obj any) { s.onObject(obj, "HTTPRoute") },
+				UpdateFunc: func(_, obj any) { s.onObject(obj, "HTTPRoute") },
+				DeleteFunc: func(obj any) { s.onDelete(obj) },
+			})
+			if err != nil {
+				return fmt.Errorf("gateway: register HTTPRoute handler: %w", err)
+			}
+			synced = append(synced, h.HasSynced)
 		}
-		synced = append(synced, h.HasSynced)
+		factory.Start(ctx.Done())
+		defer factory.Shutdown()
 	}
-
-	factory.Start(ctx.Done())
-	defer factory.Shutdown()
 
 	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
 		return fmt.Errorf("gateway: cache sync failed (informer stopped before initial list completed)")

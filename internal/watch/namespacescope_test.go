@@ -74,7 +74,7 @@ func TestNamespaceExclusionSelector(t *testing.T) {
 // and the cheapest way to guarantee that is for both roles to be the SAME
 // object rather than two equivalent ones.
 func TestNewSharedFactories_UnsetIsOneFactory(t *testing.T) {
-	f := newSharedFactories(fake.NewSimpleClientset(), nil, "")
+	f := newSharedFactories(fake.NewSimpleClientset(), nil, nil)
 	if f.Namespaced != f.Cluster {
 		t.Error("unset deny list built two factories; the node watch is now a second stream for nothing")
 	}
@@ -84,7 +84,7 @@ func TestNewSharedFactories_UnsetIsOneFactory(t *testing.T) {
 }
 
 func TestNewSharedFactories_DenyListSplits(t *testing.T) {
-	f := newSharedFactories(fake.NewSimpleClientset(), []string{"kube-system"}, "")
+	f := newSharedFactories(fake.NewSimpleClientset(), []string{"kube-system"}, nil)
 	if f.Namespaced == f.Cluster {
 		t.Fatal("deny list did not split the factories; the node LIST would carry metadata.namespace and be rejected")
 	}
@@ -104,7 +104,7 @@ func TestNewSharedFactories_SelectorReachesNamespacedListsOnly(t *testing.T) {
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "prod"}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
 	)
-	f := newSharedFactories(client, []string{"kube-system", "gmp-system"}, "")
+	f := newSharedFactories(client, []string{"kube-system", "gmp-system"}, nil)
 
 	// Registering the informers is what makes the factory list them.
 	podInf := f.Namespaced.Core().V1().Pods().Informer()

@@ -174,8 +174,7 @@ var routingAccess = map[graph.NodeKind][]sources.Requirement{
 func probeRoutingAccess(ctx context.Context, reviewer sources.AccessReviewer) (granted []graph.NodeKind, lines []string, err error) {
 	for _, kind := range routingKinds {
 		denied := ""
-		for _, req := range routingAccess[kind] {
-			req = sources.Effective(reviewer, req)
+		for _, req := range sources.ExpandAll(reviewer, routingAccess[kind]) {
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return nil, nil, fmt.Errorf("graph history: capability probe for %q failed: %w", req, err)
@@ -219,8 +218,7 @@ var graphAccess = []sources.Requirement{
 // missing grant is a hard startup error naming it: the operator asked
 // for correlation and a silently keyless correlator would lie.
 func probeGraphAccess(ctx context.Context, reviewer sources.AccessReviewer) error {
-	for _, req := range graphAccess {
-		req = sources.Effective(reviewer, req)
+	for _, req := range sources.ExpandAll(reviewer, graphAccess) {
 		d, err := reviewer.Allowed(ctx, req)
 		if err != nil {
 			return fmt.Errorf("storm: capability probe for %q failed: %w", req, err)

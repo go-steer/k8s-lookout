@@ -178,8 +178,7 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 		var missing *sources.Requirement
 		var missingWhy sources.Decision
 		var degraded []string
-		for _, req := range access[name] {
-			req = sources.Effective(reviewer, req)
+		for _, req := range sources.ExpandAll(reviewer, access[name]) {
 			d, err := reviewer.Allowed(ctx, req)
 			if err != nil {
 				return nil, fmt.Errorf("sources: auto: capability probe for %q (source %q) failed: %w", req, name, err)
@@ -255,8 +254,7 @@ func resolveStormAuto(ctx context.Context, f *flags, reviewer sources.AccessRevi
 	if f.stormWindow <= 0 {
 		return false, "storm: auto — off (--storm-window=0 disables correlation)", nil
 	}
-	for _, req := range graphAccess {
-		req = sources.Effective(reviewer, req)
+	for _, req := range sources.ExpandAll(reviewer, graphAccess) {
 		d, aerr := reviewer.Allowed(ctx, req)
 		if aerr != nil {
 			return false, "", fmt.Errorf("storm: auto: capability probe for %q failed: %w", req, aerr)

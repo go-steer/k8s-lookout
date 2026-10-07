@@ -9,23 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`lookout watch` can watch a single namespace under a namespaced
-  Role (#407).** `--watch-scope=namespace --namespace=team-a` makes
-  every namespaced informer list and watch `team-a` only, so nothing
-  from other namespaces is loaded and a Role there is all the sentinel
-  needs. The default, `--watch-scope=cluster`, changes nothing.
-  `namespace` needs exactly one `--namespace` value; anything else exits
-  2. Nodes and other cluster-scoped objects cannot be granted by a Role,
-  so `--sources=auto` skips each source that needs one with one log line:
-  `object-state`, `saturation`, `capacity`, `topology-drift`,
-  `compute-class` and `expiry`. `--storm=auto` resolves to off for the
-  same reason. Naming one of them in `--sources`, or `--storm=on`, fails
-  startup as before. In multi-cluster mode the scope applies to every
-  cluster. The new `deploy-namespaced/` overlay (Helm:
-  `rbac.scope=namespace`) ships the Role, the RoleBinding and the flags,
-  and its README lists what this tier loses. `compute-class` now also
-  declares the pod and node grants its informers wait on, so a
-  deployment missing them fails the startup check instead of hanging.
 - **`lookout net probe-from`: an opt-in, PRIVILEGED probe from inside a
   named pod (#539).** `net probe` only probes from wherever lookout
   runs, so a fault on one caller's path (a one-way partition from it,
@@ -63,6 +46,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/in-pod-probe-design.md`; DESIGN §5 amendment of 2026-10-07.
 - `net probe` results now carry `vantage=local`, so they can be told
   apart from `net probe-from` results. Additive; nothing else changes.
+- **`lookout watch` can watch a list of namespaces instead of the
+  whole cluster (#407).** `--watch-scope=namespace
+  --namespace=team-a,team-b` watches exactly those namespaces, so
+  nothing from any other namespace is loaded. With this flag,
+  `--namespace` is a real watch scope and a security boundary; without
+  it, it is still only an output filter. The default,
+  `--watch-scope=cluster`, changes nothing.
+  - **How it runs:** each listed namespace gets its own watch, but
+    there is still one copy of each source, one dedup cache, one store
+    and one topology graph. A node failure across several listed
+    namespaces is one storm incident.
+  - **Errors:** `namespace` without a `--namespace` value exits 2. A
+    listed namespace whose Role is missing is skipped with one log line
+    and counted on the new `lookout_namespace_errors_total` metric; if
+    every namespace is refused, startup fails. In multi-cluster mode the
+    scope applies to every cluster.
+  - **Manifests:** two tiers ship. `deploy-namespaced/` (Helm:
+    `rbac.scope=namespace`, with `rbac.namespaces` for the list) is the
+    documented default. It adds a Role per namespace and one ClusterRole
+    that can only read nodes and persistent volumes. Everything except
+    the `expiry` and `compute-class` sources keeps working.
+    `deploy-namespaced-strict/` (Helm: add `rbac.nodes=false`) has no
+    cluster-wide grant at all. There `--sources=auto` also skips
+    `object-state`, `saturation`, `capacity` and `topology-drift`, and
+    `--storm=auto` turns off, with one log line each. The README beside
+    the overlays has the full table.
+  - **Startup checks:** `compute-class` now also declares the pod and
+    node grants its informers wait on, so a deployment missing them
+    fails the startup check instead of hanging.
 
 ## [0.32.0] - 2026-10-07
 

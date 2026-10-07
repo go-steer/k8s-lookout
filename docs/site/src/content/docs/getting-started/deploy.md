@@ -47,11 +47,13 @@ no watch, no get, no informer cache of secret material. Scope it with
 [Without the Secret grant](/operations/scoping/#without-the-secret-grant)
 for exactly what that costs.
 
-If you cannot be given a ClusterRole at all, `deploy-namespaced/` (Helm:
-`rbac.scope=namespace`) runs a sentinel that watches only its own
-namespace under a Role there. It is much thinner, since it cannot see
-nodes. See
-[One namespace, under a Role](/operations/scoping/#one-namespace-under-a-role).
+To watch only chosen namespaces, deploy `deploy-namespaced/` (Helm:
+`rbac.scope=namespace`). It uses a Role in each namespace plus a
+ClusterRole that can only read nodes and persistent volumes. If you
+cannot be given any ClusterRole, `deploy-namespaced-strict/` (Helm: add
+`rbac.nodes=false`) uses Roles only. It is much thinner, because it
+cannot see nodes. See
+[Watching a list of namespaces](/operations/scoping/#watching-a-list-of-namespaces).
 
 ### Narrowing the role — partial bundles, not errors
 

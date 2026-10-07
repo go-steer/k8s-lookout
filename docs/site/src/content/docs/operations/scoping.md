@@ -21,9 +21,9 @@ Three flag forms look alike and are not.
 
 | Flag | What it does |
 | --- | --- |
-| `--namespace=a,b` | Allow-list applied to **output**. Every namespace is still listed, watched, decoded and cached; signals from namespaces outside the list are dropped before they are emitted. |
+| `--namespace=a,b` | Allow-list applied to **output** only. Every namespace is still listed, watched, decoded and cached; signals from namespaces outside the list are dropped before they are emitted. Not a security boundary. |
 | `--exclude-namespace=x,y` | Deny-list applied to **the watch**. The namespaced informers carry a `metadata.namespace!=` field selector, so `x` and `y` are never listed and never enter the cache. |
-| `--watch-scope=namespace --namespace=a` | **The watch** is one namespace. Every namespaced informer lists and watches `a` only, so nothing else enters the cache, and a `Role` in `a` is all the sentinel needs. See [One namespace, under a Role](#one-namespace-under-a-role). |
+| `--watch-scope=namespace --namespace=a,b` | **The watch** is exactly `a` and `b`. Each listed namespace gets its own namespaced watch, nothing else enters the cache, and a `Role` in each is enough for everything namespaced. This one *is* a security boundary. See [Watching a list of namespaces](#watching-a-list-of-namespaces). |
 
 ### `--namespace` is not a security boundary
 
@@ -36,6 +36,12 @@ way into the cache for every namespace, watched or not.) If the
 requirement is "this process must not be able to see namespace `x`",
 `--namespace` alone does not meet it and never did. `--exclude-namespace`
 and `--watch-scope=namespace` do, and RBAC does it better still.
+
+The same flag means two different things depending on
+`--watch-scope`. With `--watch-scope=namespace`, `--namespace` is the
+watch scope and a security boundary. Without it, `--namespace` is an
+output filter and nothing more. Check which one a deployment uses before
+relying on it.
 
 ### `--exclude-namespace` shrinks the process
 
@@ -71,13 +77,16 @@ Three things to know:
   blast radius will not include pods in an excluded namespace. That is
   usually what you want — you excluded them — but it means an excluded
   namespace cannot appear as collateral damage either.
-- **An allow-list of several namespaces is not available.** Field
-  selectors have no `OR`, so watching *M* namespaces needs *M* informer
-  factories — 12 namespaced streams each. One namespace is available, as
-  `--watch-scope=namespace` (below). Several are not built; run one
-  sentinel per namespace instead. An exclusion of any length is one
-  selector on one stream, which is why that direction is cheap and the
-  other is not.
+- **An allow-list costs a watch per namespace.** Field selectors have
+  no `OR`, so watching *M* namespaces needs *M* namespaced watches of
+  each object type. That is what `--watch-scope=namespace` does (below).
+  It is the right shape when the listed namespaces are a small part of
+  the cluster. An exclusion of any length is one selector on one stream,
+  which is why that direction is the cheap one for trimming a few
+  namespaces out of a whole cluster.
+- **Under `--watch-scope=namespace` there is nothing left to exclude.**
+  Only the listed namespaces are watched, and naming one of them in
+  `--exclude-namespace` is a usage error.
 
 ### Or use RBAC
 
@@ -89,48 +98,59 @@ an empty cache. `--exclude-namespace` is the right tool when you hold a
 cluster-wide grant and want to spend less; RBAC is the right tool when
 the grant itself is the problem.
 
-## One namespace, under a Role
+## Watching a list of namespaces
 
-For a team that owns one namespace on a shared cluster and will not be
-given a ClusterRole, the sentinel can watch just that namespace with
-just a Role there:
+The sentinel can watch chosen namespaces instead of the whole cluster:
 
 ```
-lookout watch --watch-scope=namespace --namespace=team-a
+lookout watch --watch-scope=namespace --namespace=team-a,team-b
 ```
 
-Every namespaced informer then lists and watches `team-a` only, so
-nothing from other namespaces is loaded. The startup permission check
-asks for each grant in `team-a`, so a Role there passes it.
+Each listed namespace gets its own namespaced watch, so nothing from any
+other namespace is loaded. The startup permission check asks for each
+namespaced grant in every listed namespace, so a Role in each passes it.
+Everything after the watch stays single: one copy of each source, one
+deduplication cache, one store, one topology graph. A node failure that
+hits pods in several listed namespaces is still one storm incident. One
+namespace is just a list of one.
 
-What you lose is everything that needs nodes or another cluster-scoped
-object. A Role cannot grant those. Under the default `--sources=auto`,
-each source that needs one is skipped with one log line naming the
-missing permission. That covers `object-state`, `saturation`, `capacity`,
-`topology-drift`, `compute-class` and `expiry`, and `--storm=auto`
-resolves to off for the same reason. What still runs is `k8s-events`,
-`rollout`, `workload`, `autoscaling`, `degradation`, `ingress` and,
-with the CRDs installed, `gateway`. Naming a lost source in `--sources`,
-or setting `--storm=on`, makes startup fail instead.
+Some sources need nodes or another cluster-scoped object, which a Role
+cannot grant. So there are two supported tiers:
 
-Deploy it from `deploy-namespaced/` instead of `deploy/`, or with the
-chart's `rbac.scope=namespace` (both first ship in v0.33.0):
+| Tier | Grants | What runs |
+| --- | --- | --- |
+| **Default** (`deploy-namespaced/`, chart `rbac.scope=namespace`) | a Role per namespace, plus a ClusterRole that can only read nodes and PersistentVolumes | everything except `compute-class` and `expiry` |
+| **Strict** (`deploy-namespaced-strict/`, plus chart `rbac.nodes=false`) | Roles only | `k8s-events`, `rollout`, `workload`, `autoscaling`, `degradation`, `ingress`, and `gateway` if its CRDs are installed |
+
+The strict tier also loses `object-state`, `saturation`, `capacity`,
+`topology-drift` and storm correlation. Under the default
+`--sources=auto`, each source a tier cannot run is skipped with one log
+line naming the missing permission, and `--storm=auto` resolves to off
+the same way. Naming a skipped source in `--sources`, or setting
+`--storm=on`, makes startup fail instead. The
+[deploy-namespaced README](https://github.com/go-steer/k8s-lookout/tree/main/deploy-namespaced)
+has the source-by-source table.
+
+Both overlays first ship in v0.33.0. Use one instead of `deploy/`:
 
 ```sh
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=v0.32.0"
 ```
 
-That overlay watches the namespace the sentinel runs in.
-[Its README](https://github.com/go-steer/k8s-lookout/tree/main/deploy-namespaced)
-has the full list of what is lost. It also shows the one extra
-ClusterRole, read access to nodes, that brings most of it back.
+They watch the namespace the sentinel runs in. With the chart, list
+more namespaces in `rbac.namespaces`; each gets its own Role and
+RoleBinding.
 
-- `--watch-scope=namespace` needs exactly one `--namespace` value.
-  Anything else is a usage error (exit 2).
+- `--watch-scope=namespace` needs at least one `--namespace` value.
+  Without one it is a usage error (exit 2).
+- A listed namespace whose Role is missing is skipped, not fatal. The
+  sentinel logs one line naming it and counts it on
+  `lookout_namespace_errors_total{namespace,cause}`. Alert on that
+  counter: a skipped namespace is a coverage gap that otherwise looks
+  quiet. If every listed namespace is refused, startup fails.
 - In multi-cluster mode the scope applies to every cluster: each one is
-  watched in a namespace of the same name.
-- `--exclude-namespace` naming the watched namespace is rejected. Any
-  other value has nothing to exclude.
+  watched in namespaces with the same names.
+- Naming a listed namespace in `--exclude-namespace` is rejected.
 
 ## Without the Secret grant
 

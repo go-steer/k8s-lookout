@@ -440,9 +440,9 @@ type Source struct {
 	// which is the same observable state as a cluster without the CRDs.
 	dyn dynamic.Interface
 
-	// watchNamespace, when set via WithWatchNamespace, confines the policy
-	// watch to one namespace. Empty means every namespace.
-	watchNamespace string
+	// watchNamespaces, when set via WithWatchNamespaces, confines the policy
+	// watch to these namespaces. Empty means every namespace.
+	watchNamespaces []string
 
 	// rollouts, when set via WithRolloutOracle, answers §7.6's rollout row.
 	// Nil means the row is unanswered — see RolloutOracle.
@@ -634,8 +634,9 @@ func (s *Source) WithDynamic(dyn dynamic.Interface) {
 	}
 }
 
-// WithWatchNamespace confines the optional policy watch to one namespace.
-// Call before Run; "" (the default) watches every namespace.
+// WithWatchNamespaces confines the optional policy watch to these
+// namespaces, one LeewayPolicy informer each. Call before Run; empty (the
+// default) watches every namespace.
 //
 // The pod, node and ReplicaSet informers need no such call — they come from
 // the caller's factories, which carry the scope themselves. The policy
@@ -645,8 +646,8 @@ func (s *Source) WithDynamic(dyn dynamic.Interface) {
 // at all. Undeclared to the §11 probe (see RequiredAccess), a cluster-wide
 // policy informer under a namespaced grant would retry a 403 forever and
 // hold Run's sync barrier shut.
-func (s *Source) WithWatchNamespace(ns string) {
-	s.watchNamespace = ns
+func (s *Source) WithWatchNamespaces(nss []string) {
+	s.watchNamespaces = nss
 }
 
 // RolloutOracle answers §7.6's rollout row: which subjects are partway
@@ -993,14 +994,29 @@ func (s *Source) startPolicyWatch(ctx context.Context) ([]cache.InformerSynced, 
 	}
 
 	skipCluster := false
-	if s.watchNamespace != "" && clusterScoped {
-		s.logger()("topologydrift: %s not watched — the watch is scoped to namespace %q and these policies are cluster-scoped; declare intent with namespaced %s instead", clusterPolicyGVR.Resource, s.watchNamespace, policyGVR.Resource)
+	if len(s.watchNamespaces) > 0 && clusterScoped {
+		s.logger()("topologydrift: %s not watched — the watch is scoped to namespaces %q and these policies are cluster-scoped; declare intent with namespaced %s instead", clusterPolicyGVR.Resource, s.watchNamespaces, policyGVR.Resource)
 		skipCluster = true
 		if !namespaced {
 			return nil, nil
 		}
 	}
-	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, s.watchNamespace, nil)
+	// One factory per watched namespace for the namespaced kind (a single
+	// unscoped one by default); the cluster-scoped kind only ever on the
+	// unscoped one, which exists only when the watch is not scoped.
+	nsList := s.watchNamespaces
+	if len(nsList) == 0 {
+		nsList = []string{metav1.NamespaceAll}
+	}
+	factories := map[string]dynamicinformer.DynamicSharedInformerFactory{}
+	factoryFor := func(ns string) dynamicinformer.DynamicSharedInformerFactory {
+		if f, ok := factories[ns]; ok {
+			return f
+		}
+		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(s.dyn, 0, ns, nil)
+		factories[ns] = f
+		return f
+	}
 	var synced []cache.InformerSynced
 	for _, w := range []struct {
 		gvr           schema.GroupVersionResource
@@ -1017,19 +1033,27 @@ func (s *Source) startPolicyWatch(ctx context.Context) ([]cache.InformerSynced, 
 			s.logger()("topologydrift: %s not served — %s policies ignored", w.gvr, w.gvr.Resource)
 			continue
 		}
-		scoped := w.clusterScoped
-		inf := factory.ForResource(w.gvr).Informer()
-		h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj any) { s.onPolicy(obj, scoped) },
-			UpdateFunc: func(_, obj any) { s.onPolicy(obj, scoped) },
-			DeleteFunc: func(obj any) { s.onPolicyDelete(obj) },
-		})
-		if err != nil {
-			return nil, fmt.Errorf("topologydrift: register %s handler: %w", w.gvr.Resource, err)
+		in := nsList
+		if w.clusterScoped {
+			in = []string{metav1.NamespaceAll}
 		}
-		synced = append(synced, h.HasSynced)
+		scoped := w.clusterScoped
+		for _, ns := range in {
+			inf := factoryFor(ns).ForResource(w.gvr).Informer()
+			h, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+				AddFunc:    func(obj any) { s.onPolicy(obj, scoped) },
+				UpdateFunc: func(_, obj any) { s.onPolicy(obj, scoped) },
+				DeleteFunc: func(obj any) { s.onPolicyDelete(obj) },
+			})
+			if err != nil {
+				return nil, fmt.Errorf("topologydrift: register %s handler: %w", w.gvr.Resource, err)
+			}
+			synced = append(synced, h.HasSynced)
+		}
 	}
-	factory.Start(ctx.Done())
+	for _, f := range factories {
+		f.Start(ctx.Done())
+	}
 	return synced, nil
 }
 

@@ -146,11 +146,11 @@ type enricher struct {
 	lists          []state.ListRequirement
 	listsPreflight bool
 
-	// podNamespace bounds the one cross-namespace read enrichment makes —
+	// podNamespaces bounds the one cross-namespace read enrichment makes —
 	// the pods on an incident's node, on the scoped fallback path — to the
-	// --watch-scope namespace (#407). Empty (metav1.NamespaceAll) is the
+	// --watch-scope namespaces (#407), one List each. Empty is the
 	// cluster scope.
-	podNamespace string
+	podNamespaces []string
 }
 
 // enabledFor reports whether the policy enriches sev.
@@ -574,19 +574,27 @@ func (e *enricher) nodeTopology(ctx context.Context, name string, node *corev1.N
 			}
 		}
 	}
-	l, err := e.client.CoreV1().Pods(e.podNamespace).List(ctx, metav1.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", name).String(),
-	})
-	if err != nil {
-		return nil, 0, nil, err
+	listNS := e.podNamespaces
+	if len(listNS) == 0 {
+		listNS = []string{metav1.NamespaceAll}
+	}
+	var items []corev1.Pod
+	for _, ns := range listNS {
+		l, err := e.client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", name).String(),
+		})
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		items = append(items, l.Items...)
 	}
 	var pods []*corev1.Pod
-	objs := make([]any, 0, len(l.Items)+1)
+	objs := make([]any, 0, len(items)+1)
 	if node != nil {
 		objs = append(objs, node)
 	}
-	for i := range l.Items {
-		if p := &l.Items[i]; p.Spec.NodeName == name {
+	for i := range items {
+		if p := &items[i]; p.Spec.NodeName == name {
 			pods = append(pods, p)
 			objs = append(objs, p)
 		}

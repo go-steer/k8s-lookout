@@ -107,6 +107,7 @@ func MetricsInventory() []MetricDoc {
 		{m.runnerRestarts, "counter", nil},
 		{m.runnerTerminal, "gauge", []string{"reason"}},
 		{m.sourceDenied, "gauge", []string{"source", "resource", "required"}},
+		{m.namespaceErrors, "counter", []string{"namespace", "cause"}},
 		{fm.clusterResolveErrors, "counter", []string{"cluster", "cause"}},
 	}
 	out := make([]MetricDoc, 0, len(rows)+len(topologydrift.MetricDocs())+len(computeclass.MetricDocs()))
