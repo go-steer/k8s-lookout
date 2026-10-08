@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   struct: `reason`, every other field and every fingerprint are
   unchanged.
 
+### Fixed
+
+- ax sink: a payload with no fingerprint now names its AX task from
+  `reason_class` rather than the raw reason. An image-pull problem that
+  kubelet reports as both `Failed` and `BackOff` therefore stays in one
+  task. `--sink=ax` also logs a startup `WARNING` when no project or
+  location is known: the agent in each task needs both to address the
+  cluster, and without them it guessed project IDs in the #569 test
+  run.
+
 ## [0.33.0] - 2026-10-07
 
 **This release lets the sentinel run for chosen namespaces only, adds an

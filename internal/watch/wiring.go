@@ -823,6 +823,13 @@ func (r *runner) run(ctx context.Context) error {
 	if project != "" || region != "" || zone != "" {
 		log.Printf("identity: stamping project=%q region=%q zone=%q (precedence: explicit flag > provider metadata > empty; a regional cluster has no zone, and the failure domain — zone else region — participates in the §8 fingerprint hash)", project, region, zone)
 	}
+	if f.sink == sinkAX && (project == "" || (region == "" && zone == "")) {
+		// The agent in each AX task has only the payload to go on, and
+		// GKE tooling addresses a cluster as projects/…/locations/…/
+		// clusters/…. Without both, it guesses (seen in the #569 test
+		// run, where it spent its budget trying project IDs).
+		log.Printf("WARNING: --sink=ax with project=%q region=%q zone=%q — payloads will not tell the agent where the cluster is; pass --project and --region (or --zone), or run a build with the GKE provider so they resolve from metadata", project, region, zone)
+	}
 
 	disp := &dispatcher{
 		filter:    filter,

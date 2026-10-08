@@ -73,7 +73,13 @@ The payload's `cluster` is only `--cluster-name`, so the sentinel must stamp
 `project` and `region`/`zone` too. The GKE image flavor detects them from
 metadata; the vanilla image needs `--project` and `--region` (or `--zone`). In
 testing without them, the agent guessed project IDs until its budget ran out;
-with them, it built the path and finished the diagnosis.
+with them, it built the path and finished the diagnosis. The sentinel logs a
+`WARNING` at startup when `--sink=ax` runs without them.
+
+A payload with no `fingerprint` names its task from the `uid` plus
+`reason_class`, falling back to `reason` only where no class is set. kubelet
+reports one image-pull problem as both `Failed` and `BackOff`, and the raw
+reason would have split that incident across two tasks.
 
 ### Flags
 

@@ -256,11 +256,19 @@ func taskNameFor(payload any) string {
 		Fingerprint string `json:"fingerprint"`
 		UID         string `json:"uid"`
 		Reason      string `json:"reason"`
+		ReasonClass string `json:"reason_class"`
 	}
 	_ = json.Unmarshal(b, &fields)
 	key := fields.Fingerprint
 	if key == "" && fields.UID != "" {
-		key = fields.UID + "/" + fields.Reason
+		// The class, not the raw reason: kubelet reports one pull problem
+		// as both Failed and BackOff, and naming by the raw reason would
+		// split that incident across two tasks (#574).
+		reason := fields.ReasonClass
+		if reason == "" {
+			reason = fields.Reason
+		}
+		key = fields.UID + "/" + reason
 	}
 	if key == "" {
 		key = string(b)

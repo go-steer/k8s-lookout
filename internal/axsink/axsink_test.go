@@ -231,4 +231,16 @@ func TestTaskNameFor(t *testing.T) {
 	if len(a) > 63 || !strings.HasPrefix(a, "lookout-") {
 		t.Errorf("task name %q is not a valid short name", a)
 	}
+
+	// Without a fingerprint, one pull problem reported as Failed and then
+	// BackOff is one incident: the class names the task, not the raw reason.
+	failed := taskNameFor(inject.Payload{UID: "1", Reason: "Failed", ReasonClass: "ImagePullBackOff"})
+	backoff := taskNameFor(inject.Payload{UID: "1", Reason: "BackOff", ReasonClass: "ImagePullBackOff"})
+	if failed != backoff {
+		t.Errorf("same reason class should give the same task: %s vs %s", failed, backoff)
+	}
+	crash := taskNameFor(inject.Payload{UID: "1", Reason: "BackOff", ReasonClass: "CrashLoopBackOff"})
+	if crash == backoff {
+		t.Errorf("different reason classes should not share a task")
+	}
 }
