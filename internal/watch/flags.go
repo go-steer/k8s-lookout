@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
@@ -65,6 +66,8 @@ type flags struct {
 	axTaskTemplate    string
 	axRouterURL       string
 	axTaskScope       string
+	axServerTLS       bool
+	axCAFile          string
 	reasons           string
 	namespaces        string
 	excludeNamespaces string
@@ -206,7 +209,9 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.sink, "sink", sinkCoreAgent, "Agent sink receiving incident payloads: core-agent (default: POST /sessions + /sessions/<sid>/inject against --daemon-url) or webhook (generic receiver: POST <sink-url>/incidents opens an incident with the schema-v1 payload JSON as the body; POST <sink-url>/incidents/<id>/events appends follow-ups), or ax (incidents run in Agent Executor tasks, one per incident or one per cluster, reached through Agent Substrate's router with the core-agent session calls; see --ax-server and --ax-task-scope).")
 	fs.StringVar(&f.sinkURL, "sink-url", "", "Base URL of the generic webhook receiver (no trailing slash). Required with --sink=webhook. https is STRONGLY recommended: plain http is allowed (remote receivers are the point) but warns loudly at startup — incident payloads and the bearer token ride unencrypted.")
 	fs.StringVar(&f.sinkTokenEnv, "sink-token-env", "", "Env var name holding the bearer token the webhook sink sends as Authorization: Bearer. Optional (unset = unauthenticated POSTs); only valid with --sink=webhook.")
-	fs.StringVar(&f.axServer, "ax-server", "", "Agent Executor (AX) API address (host:port, plaintext gRPC), e.g. ax-server.ax-system.svc:8080. Required with --sink=ax: incidents run in AX tasks (docs/ax-sink-design.md).")
+	fs.StringVar(&f.axServer, "ax-server", "", "Agent Executor (AX) API address (host:port; plaintext gRPC unless --ax-server-tls), e.g. ax-server.ax-system.svc:8080. Required with --sink=ax: incidents run in AX tasks (docs/ax-sink-design.md).")
+	fs.BoolVar(&f.axServerTLS, "ax-server-tls", false, "Dial --ax-server over TLS, verifying its certificate against the system roots (or --ax-ca-file) and the host name in --ax-server. Off by default: AX itself serves plaintext gRPC, so TLS needs a front that terminates it (a load balancer, gateway or mesh), which is the shape for an AX in another cluster. Only valid with --sink=ax.")
+	fs.StringVar(&f.axCAFile, "ax-ca-file", "", "PEM file of CA certificates to verify the --ax-server TLS certificate with, INSTEAD of the system roots (for a front with a private CA). Requires --ax-server-tls. Applies to the AX API only: an https --ax-router-url verifies against the system roots, which SSL_CERT_FILE extends.")
 	fs.StringVar(&f.axTaskTemplate, "ax-task-template", "", "Path to the AX Task manifest every task runs as (image, command, egress, http.port); the ax sink sets metadata.name per task (see --ax-task-scope). Required with --sink=ax.")
 	fs.StringVar(&f.axRouterURL, "ax-router-url", defaultAXRouterURL, "Agent Substrate router the ax sink reaches its tasks through (no trailing slash). Only valid with --sink=ax.")
 	fs.StringVar(&f.axTaskScope, "ax-task-scope", axScopeIncident, "How the ax sink maps incidents onto AX tasks: incident (default: each incident and each storm runs in its own task, named from lookout's incident identity, plus one watchboard task per cluster) or cluster (one long-lived task per cluster, named from the cluster name; every incident gets its own session in it, which uses far fewer Substrate workers). Either way, an incident that comes back reopens into its earlier session; with --store that survives a restart. Only valid with --sink=ax.")
@@ -518,6 +523,11 @@ func (f *flags) validate() error {
 		if f.axTaskScope != axScopeIncident && f.axTaskScope != axScopeCluster {
 			return fmt.Errorf("--ax-task-scope must be incident or cluster (got %q)", f.axTaskScope)
 		}
+		// A CA file without TLS would be silently ignored; reject it, as
+		// every other flag that only means something in a mode is.
+		if f.axCAFile != "" && !f.axServerTLS {
+			return emit.UsageErrorf("--ax-ca-file needs --ax-server-tls: the CA verifies the AX API's TLS certificate")
+		}
 		// Each incident gets its own session, so there is no shared one.
 		if f.mode != "per-incident" {
 			return fmt.Errorf("--sink=ax always opens a session per incident (got --mode=%s)", f.mode)
@@ -530,6 +540,8 @@ func (f *flags) validate() error {
 		}
 	} else if f.axServer != "" || f.axTaskTemplate != "" || f.axRouterURL != defaultAXRouterURL || f.axTaskScope != axScopeIncident {
 		return errors.New("--ax-server, --ax-task-template, --ax-router-url and --ax-task-scope are only valid with --sink=ax")
+	} else if f.axServerTLS || f.axCAFile != "" {
+		return emit.UsageErrorf("--ax-server-tls and --ax-ca-file are only valid with --sink=ax")
 	}
 	if f.sink == sinkWebhook {
 		if !f.dryRun && f.sinkURL == "" {

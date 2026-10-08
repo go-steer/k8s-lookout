@@ -7,7 +7,7 @@ a third, `--sink=ax`, which runs incidents in
 [Agent Executor (AX)](https://github.com/google/ax) tasks on Agent Substrate:
 by default one task per incident, or one long-lived task per cluster.
 Tracking issues: #567 (the sink), #590 (task identity, task scope, session
-reuse).
+reuse), #580 (TLS for an AX in another cluster).
 
 **Decision: the ax sink creates (or finds) an AX task for each incident (or
 one per cluster), named from lookout's own incident identity, and speaks the
@@ -171,7 +171,9 @@ with them, it built the path and finished the diagnosis. The sentinel logs a
 | Flag | Meaning |
 |---|---|
 | `--sink=ax` | Select this sink. |
-| `--ax-server` | AX API address (plaintext gRPC), e.g. `ax-server.ax-system.svc:8080`. Required. |
+| `--ax-server` | AX API address, e.g. `ax-server.ax-system.svc:8080`. Plaintext gRPC unless `--ax-server-tls`. Required. |
+| `--ax-server-tls` | Dial the AX API over TLS, verified against the system roots (or `--ax-ca-file`). Default off; see Cross-cluster. |
+| `--ax-ca-file` | PEM CA bundle that replaces the system roots for the AX API's certificate. Requires `--ax-server-tls`. |
 | `--ax-task-template` | Path to the Task manifest. Required. |
 | `--ax-router-url` | Substrate router, default `http://atenet-router.ate-system.svc.cluster.local`. |
 | `--ax-task-scope` | `incident` (default) or `cluster`; see Task scope. |
@@ -179,6 +181,65 @@ with them, it built the path and finished the diagnosis. The sentinel logs a
 
 `--mode=shared`, `--target-session` and `--daemon-url` are rejected with this
 sink. The `ax-*` flags are rejected with the other sinks.
+
+### Cross-cluster
+
+lookout and AX don't have to share a cluster. The ax sink makes two
+connections, and each can cross a network:
+
+| Connection | Flag | Carries | Protection |
+|---|---|---|---|
+| AX API (gRPC) | `--ax-server` | task create, get, resume; the task template | `--ax-server-tls`, `--ax-ca-file` |
+| Substrate router (HTTP) | `--ax-router-url` | the session calls: payloads, and the `--token-env` bearer token | an `https://` URL |
+
+Pointing both at another cluster's endpoints, for example internal load
+balancers in a shared VPC, already worked; what was missing was encryption
+(#580).
+
+**The AX API.** AX serves plaintext gRPC itself (`ax-server` listens with
+unencrypted HTTP/2 and no TLS options), so TLS needs a front that terminates
+it: a load balancer, a Gateway, or a mesh. `--ax-server-tls` dials the front
+over TLS and verifies its certificate against the system roots and the host
+name in `--ax-server`; `--ax-ca-file` replaces the system roots with a PEM
+bundle, for a front whose certificate comes from a private CA. TLS is off by
+default, so an in-cluster deployment that dials `ax-server.ax-system.svc:8080`
+keeps working unchanged. A CA file without `--ax-server-tls` is a usage error
+(exit 2) rather than implying TLS, the same way every other flag that only
+means something in one mode is rejected outside it. A bad CA file fails at
+startup; an untrusted certificate fails on the first RPC, as that incident's
+open error naming the certificate problem, because gRPC connects lazily.
+
+**The router.** An `https://` `--ax-router-url` works as is: the session calls
+go through the shared sink transport, which verifies against the system roots
+(`SSL_CERT_FILE` or `SSL_CERT_DIR` add a private CA; `--ax-ca-file` applies to
+the AX API only). Over plain http the bearer token crosses the network in the
+clear, so lookout logs a `WARNING` at startup when the router URL is `http://`
+and its host is not cluster-local. The URL in that line, and in the startup
+line, has any userinfo password masked; the token is never logged.
+
+**What counts as cluster-local:** loopback (`localhost`, `*.localhost`,
+`127.0.0.0/8`, `::1`) and fully qualified Service names (`*.svc`,
+`*.svc.cluster.local`). Not private IPs: the cross-cluster case is exactly an
+internal load balancer with a private IP, and nothing in an address tells a
+VPC IP from a ClusterIP. Not short names (`atenet-router.ate-system`) either:
+they resolve through the pod's DNS search path, which can end in the
+corporate domain as well as the cluster's. Spell the Service name out in full
+to keep an in-cluster router quiet.
+
+**Per-RPC credentials: not implemented.** AX authenticates nothing: its gRPC
+server has no interceptors and reads no metadata, and its own CLI dials it
+with insecure credentials (checked against google/ax `main` and the
+`mastersingh24/ax` fork the vendored proto comes from). So there is no
+credential AX itself expects. A front could demand one (an identity-aware
+proxy or Cloud Run expecting a Google ID token, a mesh expecting a JWT), but
+AX needs in-cluster Redis and the Substrate API, so it doesn't run behind
+Cloud Run, and none of the fronts it does run behind has a settled shape.
+Rather than guess a credential mode, this is a follow-up: add one (for
+example a Google ID token for a configured audience, through
+`google.golang.org/api/idtoken`, which is already in the module graph) once a
+deployment names the front and what it validates. Until then, restrict the AX
+API at the network (an internal load balancer, firewall rules, or the mesh's
+mTLS and authorization policy).
 
 ### AX API: a pinned copy, not an import
 
@@ -223,6 +284,8 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   expires.
 - **`cluster` scope shares one sandbox.** Every incident in the cluster runs in
   the same agent process with the same credentials and egress.
+- **No credentials on the AX API.** TLS protects it in transit, but anyone
+  who can reach it can create tasks; see Cross-cluster.
 - **A storm reopens by ancestor.** A later storm on the same Node or workload
   goes into the earlier storm's session, by design; a different ancestor is a
   different task.
@@ -236,6 +299,14 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   task names are valid DNS labels and differ by cluster, ancestor and incident.
   Against a fake AX gRPC server and a fake router that checks the
   `ate-target-actor` header and 404s unknown sessions.
+- `internal/axsink`: an `https://` router (`httptest.NewTLSServer`) carries
+  readiness, open, inject and append over TLS with the bearer token.
+- `internal/watch`: the AX API dialled over TLS with the CA file succeeds,
+  over TLS without it fails on the self-signed certificate, and plaintext still
+  works (a real local listener and a certificate generated in the test); bad
+  CA files fail; the cluster-local table; the plain-http warning is logged for
+  a remote router, not for the in-cluster default, and carries neither the
+  token nor a URL password.
 - `internal/watch`: the dispatcher opens a `KeyedOpener` with the canonical
   key, storms by ancestor and the watchboard by cluster; flag validation
   matrix and template decoding.

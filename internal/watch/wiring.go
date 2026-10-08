@@ -1340,8 +1340,8 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
 			r.clusterName, f.sinkURL)
 	case sinkAX:
-		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, router=%s, template=%s)",
-			r.clusterName, f.axServer, f.axRouterURL, f.axTaskTemplate)
+		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, server-tls=%t, router=%s, template=%s)",
+			r.clusterName, f.axServer, f.axServerTLS, redactedURL(f.axRouterURL), f.axTaskTemplate)
 	default:
 		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
 			r.clusterName, f.daemonURL, f.mode, f.owner)
