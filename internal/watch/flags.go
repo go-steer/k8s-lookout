@@ -518,7 +518,7 @@ func (f *flags) validate() error {
 			return errors.New("--token-env is required with --sink=ax: it authenticates to the agent's session API inside each task (unless --dry-run)")
 		}
 		if strings.HasSuffix(f.axRouterURL, "/") {
-			return fmt.Errorf("--ax-router-url must not end with '/' (got %q)", f.axRouterURL)
+			return fmt.Errorf("--ax-router-url must not end with '/' (got %q)", redactedURL(f.axRouterURL))
 		}
 		if f.axTaskScope != axScopeIncident && f.axTaskScope != axScopeCluster {
 			return fmt.Errorf("--ax-task-scope must be incident or cluster (got %q)", f.axTaskScope)
@@ -548,7 +548,7 @@ func (f *flags) validate() error {
 			return errors.New("--sink-url is required with --sink=webhook (unless --dry-run)")
 		}
 		if strings.HasSuffix(f.sinkURL, "/") {
-			return fmt.Errorf("--sink-url must not end with '/' (got %q)", f.sinkURL)
+			return fmt.Errorf("--sink-url must not end with '/' (got %q)", redactedURL(f.sinkURL))
 		}
 		// core-agent session concepts make no sense against a generic
 		// receiver: reject loudly instead of silently ignoring them.

@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
 	"github.com/go-steer/k8s-lookout/internal/axsink"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
 // newAXSink builds the ax sink from flags (docs/ax-sink-design.md). The AX
@@ -112,12 +113,15 @@ func axRouterPlainHTTPWarning(routerURL string) (string, bool) {
 }
 
 // redactedURL is raw with any userinfo password masked, for log lines.
-func redactedURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "(unparseable URL)"
+func redactedURL(raw string) string { return inject.RedactedURL(raw) }
+
+// webhookPlainHTTPWarning returns the startup warning for a plain-http
+// --sink-url, with any password in the URL masked.
+func webhookPlainHTTPWarning(sinkURL string) (string, bool) {
+	if !strings.HasPrefix(sinkURL, "http://") {
+		return "", false
 	}
-	return u.Redacted()
+	return fmt.Sprintf("sink: webhook receiver %s uses plain http — incident payloads and the bearer token ride unencrypted; use https for anything beyond a trusted network", redactedURL(sinkURL)), true
 }
 
 // clusterLocalHost reports whether traffic to host stays inside the pod's

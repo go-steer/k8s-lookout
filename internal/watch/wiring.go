@@ -135,8 +135,8 @@ func realMain(argv []string) error {
 	if !f.dryRun {
 		switch f.sink {
 		case sinkWebhook:
-			if strings.HasPrefix(f.sinkURL, "http://") {
-				log.Printf("sink: webhook receiver %s uses plain http — incident payloads and the bearer token ride unencrypted; use https for anything beyond a trusted network", f.sinkURL)
+			if warning, ok := webhookPlainHTTPWarning(f.sinkURL); ok {
+				log.Print(warning)
 			}
 			ws, werr := inject.NewWebhookSink(inject.WebhookConfig{
 				URL:         f.sinkURL,
@@ -1338,7 +1338,7 @@ func (r *runner) run(ctx context.Context) error {
 	switch f.sink {
 	case sinkWebhook:
 		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
-			r.clusterName, f.sinkURL)
+			r.clusterName, redactedURL(f.sinkURL))
 	case sinkAX:
 		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, server-tls=%t, router=%s, template=%s)",
 			r.clusterName, f.axServer, f.axServerTLS, redactedURL(f.axRouterURL), f.axTaskTemplate)

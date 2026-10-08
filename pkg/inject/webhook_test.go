@@ -267,6 +267,11 @@ func TestNewWebhookSink_ConfigValidation(t *testing.T) {
 	if _, err := NewWebhookSink(WebhookConfig{URL: "http://hooks.internal:9099"}); err != nil {
 		t.Errorf("plain http must be allowed (with a startup warning): %v", err)
 	}
+	// A rejected URL is echoed with its password masked.
+	_, err := NewWebhookSink(WebhookConfig{URL: "https://u:hunter2-must-not-leak@hooks.example/"})
+	if err == nil || strings.Contains(err.Error(), "hunter2-must-not-leak") {
+		t.Errorf("trailing-slash error must reject and mask the password, got %v", err)
+	}
 }
 
 // TestWebhookSink_AppendEscapesID: exotic receiver ids ride the

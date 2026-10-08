@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -141,6 +142,17 @@ func newSinkHTTPClient() *http.Client {
 		Timeout:   10 * time.Second,
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
+}
+
+// RedactedURL is raw with any userinfo password masked, for log lines and
+// errors: a sink URL may carry credentials (http://user:pass@host), and
+// those must never reach a log.
+func RedactedURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(unparseable URL)"
+	}
+	return u.Redacted()
 }
 
 // NewSinkHTTPClient returns the shared sink transport for sinks that live

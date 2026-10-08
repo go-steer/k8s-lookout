@@ -249,3 +249,39 @@ func TestRedactedURL(t *testing.T) {
 		t.Errorf("redactedURL = %q", got)
 	}
 }
+
+// The webhook plain-http warning masks a password embedded in --sink-url.
+func TestWebhookPlainHTTPWarningMasksPassword(t *testing.T) {
+	const password = "hunter2-must-not-leak"
+	warning, ok := webhookPlainHTTPWarning("http://lookout:" + password + "@hooks.example.com")
+	if !ok || !strings.Contains(warning, "hooks.example.com") {
+		t.Fatalf("no plain-http warning naming the receiver: %q", warning)
+	}
+	if strings.Contains(warning, password) {
+		t.Errorf("the warning leaked the URL password: %q", warning)
+	}
+	if _, ok := webhookPlainHTTPWarning("https://lookout:" + password + "@hooks.example.com"); ok {
+		t.Error("warned about an https receiver")
+	}
+}
+
+// Flag errors that echo --sink-url or --ax-router-url mask the password too.
+func TestURLFlagErrorsMaskPassword(t *testing.T) {
+	const password = "hunter2-must-not-leak"
+	for _, args := range [][]string{
+		{"--sink=webhook", "--dry-run", "--sink-url=https://u:" + password + "@hooks.example.com/"},
+		{"--sink=ax", "--dry-run", "--ax-router-url=https://u:" + password + "@router.example.com/"},
+	} {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		err = f.validate()
+		if err == nil {
+			t.Fatalf("validate(%v) accepted a trailing slash", args)
+		}
+		if strings.Contains(err.Error(), password) {
+			t.Errorf("validate(%v) leaked the URL password: %v", args, err)
+		}
+	}
+}

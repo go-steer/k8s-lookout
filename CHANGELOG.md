@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The webhook plain-http warning no longer prints a password embedded in
+  `--sink-url` (#580).** The same masking now applies to the webhook and ax
+  startup lines and to the flag errors that echo `--sink-url` or
+  `--ax-router-url`.
 - **ax sink: tasks are named from the incident, not its class (#590).**
   The task name used to hash the payload's `fingerprint`, which is the
   incident class. A later, unrelated storm of the same class in the same
