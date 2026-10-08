@@ -1,7 +1,7 @@
-// Vendored from github.com/mastersingh24/ax (branch task-egress-credentials, b52d147),
-// a fork of github.com/google/ax adding TaskSpec.egress and TaskSpec.http.
+// Vendored from github.com/mastersingh24/ax (branch task-idle-suspend, 11844ef),
+// a fork of github.com/google/ax adding TaskSpec.egress, TaskSpec.http,
+// TaskSpec.idle and TaskSpec.on_completion.
 // AX's API is v1alpha1; re-copy and regenerate (go generate ./internal/axapi)
-// when it changes. Only go_package differs from the original.
 
 // Copyright 2026 Google LLC
 //
