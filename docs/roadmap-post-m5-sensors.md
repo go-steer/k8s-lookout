@@ -68,8 +68,8 @@ shipped; this note records *why* each item was wanted.
    hash `zone=""` today (self-consistent, but wrong the moment two
    clusters share a store); M5.md calls the cluster-metadata wiring
    "future flag surface." Prerequisite for trustworthy fleet rollup.
-5. **○ open** (AGENTS.md still lists the `GraphAt` restart-replay fix
-   among the key open items).
+5. **✅ shipped** (#55 — all five closed; re-verified for #586,
+   guardian tests named in docs/milestones/M3.md).
    **The five M3 graph-history observations** (docs/milestones/M3.md):
    `GraphAt` restart replay, `Snapshot.Watches` round-trip,
    Deployment-targeted history, `rollout_stall` corpus fields,
