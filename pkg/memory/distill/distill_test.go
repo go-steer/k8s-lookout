@@ -273,8 +273,8 @@ func TestCrashloop_Fires(t *testing.T) {
 		t.Fatalf("crashloop facts = %d (%+v), want 1", len(facts), w.facts)
 	}
 	f := facts[0]
-	if f.Scope[memory.ScopeWorkload] != "ReplicaSet/payment-7d5b9c6f4" {
-		t.Errorf("workload scope = %q, want the ControllerRef", f.Scope[memory.ScopeWorkload])
+	if f.Scope[memory.ScopeWorkload] != "payment" {
+		t.Errorf("workload scope = %q, want payment — a workload ControllerRef does not change the key (TestCrashloop_WorkloadKeyStableAcrossControllerRef)", f.Scope[memory.ScopeWorkload])
 	}
 	if f.Scope[memory.ScopeReason] != "CrashLoopBackOff" || f.Scope[memory.ScopeNamespace] != "prod" {
 		t.Errorf("scope = %v", f.Scope)
@@ -282,7 +282,7 @@ func TestCrashloop_Fires(t *testing.T) {
 	if f.Occurrences != 5 || f.DistinctObjects != 2 {
 		t.Errorf("evidence: occurrences=%d distinct=%d, want 5/2", f.Occurrences, f.DistinctObjects)
 	}
-	want := "prod/ReplicaSet/payment-7d5b9c6f4: 2 fresh incidents, 5 CrashLoopBackOff occurrences across 2 pods in 7d"
+	want := "prod/payment: 2 fresh incidents, 5 CrashLoopBackOff occurrences across 2 pods in 7d"
 	if f.Statement != want {
 		t.Errorf("statement:\n got %q\nwant %q", f.Statement, want)
 	}
@@ -360,6 +360,49 @@ func TestCrashloop_FallbackWorkloadKey(t *testing.T) {
 	}
 	if got := facts[0].Scope[memory.ScopeWorkload]; got != "payment" {
 		t.Errorf("fallback workload key = %q, want %q", got, "payment")
+	}
+}
+
+// TestCrashloop_WorkloadKeyStableAcrossControllerRef (#583): the same
+// Deployment's pods reach the store with ControllerRef empty (pod not
+// cached, or a pre-#583 build), Deployment/<name>, or
+// ReplicaSet/<name>-<hash> (no ReplicaSet grant). All three must key
+// as the pre-#583 builds did, so one workload stays one fact; a
+// non-workload owner (expiry's Certificate) still keys on itself.
+func TestCrashloop_WorkloadKeyStableAcrossControllerRef(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []string{"", "Deployment/payment", "ReplicaSet/payment-7d5b9c6f4", "StatefulSet/payment"} {
+		occ := store.Occurrence{KindOfObject: "Pod", Name: "payment-7d5b9c6f4-x2k9q"}
+		occ.Raw = []byte(`{"ControllerRef":"` + ref + `"}`)
+		if got := workloadKey(occ); got != "payment" {
+			t.Errorf("ControllerRef %q: workloadKey = %q, want payment", ref, got)
+		}
+	}
+	occ := store.Occurrence{KindOfObject: "Challenge", Name: "web-tls-1-2345"}
+	occ.Raw = []byte(`{"ControllerRef":"Certificate/web-tls"}`)
+	if got := workloadKey(occ); got != "Certificate/web-tls" {
+		t.Errorf("Certificate ControllerRef: workloadKey = %q, want Certificate/web-tls", got)
+	}
+
+	// End to end: one workload's incidents recorded with mixed refs
+	// distill into ONE fact.
+	s, c, record := seededStore(t)
+	refs := []string{"", "Deployment/payment", "ReplicaSet/payment-7d5b9c6f4"}
+	for i, ref := range refs {
+		uid := []string{"uid-a", "uid-b", "uid-c"}[i]
+		pod := []string{"payment-7d5b9c6f4-x2k9q", "payment-7d5b9c6f4-m8t2z", "payment-7d5b9c6f4-q4w7r"}[i]
+		record(crashSignal(uid, pod, ref), store.Outcome{Route: store.RouteInjected, SessionID: "sid-" + uid})
+		c.Advance(time.Minute)
+		record(crashSignal(uid, pod, ref), store.Outcome{Route: store.RouteSuppressed})
+		c.Advance(time.Hour)
+	}
+	w := &fakeWriter{}
+	if _, err := Run(context.Background(), s, w, passConfig()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	facts := w.byClass(ClassCrashloop)
+	if len(facts) != 1 || facts[0].Scope[memory.ScopeWorkload] != "payment" {
+		t.Errorf("crashloop facts = %+v, want one scoped to payment", facts)
 	}
 }
 

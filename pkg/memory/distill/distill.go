@@ -378,7 +378,17 @@ func crashloopStatement(g *group, window time.Duration) string {
 // workloadKey derives the "per workload" grouping key for a
 // crash-grade occurrence, best-signal first:
 //
-//  1. the Signal's ControllerRef when a source populated it;
+//  1. the Signal's ControllerRef when a source populated it with a
+//     NON-workload owner (the expiry source's Certificate/<name>).
+//     A workload ControllerRef (Deployment, ReplicaSet, StatefulSet,
+//     DaemonSet, Job, CronJob) is skipped on purpose: the k8s-events
+//     source fills it only since #583, and only when its caches could
+//     prove it — Deployment/web for one pod, ReplicaSet/web-<hash>
+//     without the ReplicaSet grant, empty when the pod was not cached.
+//     Keying on it would split one workload's occurrences three ways
+//     and move every distilled fact's scope across the upgrade; the
+//     steps below give the same key whether or not it is filled, and
+//     the key pre-#583 builds produced;
 //  2. the app.kubernetes.io/name or app label from the stored
 //     labels;
 //  3. the object name with generated pod suffixes stripped
@@ -387,7 +397,7 @@ func crashloopStatement(g *group, window time.Duration) string {
 //  4. the object name verbatim.
 func workloadKey(occ store.Occurrence) string {
 	rc := parseRaw(occ)
-	if rc.ControllerRef != "" {
+	if rc.ControllerRef != "" && !isWorkloadRef(rc.ControllerRef) {
 		return rc.ControllerRef
 	}
 	if v := rc.Labels["app.kubernetes.io/name"]; v != "" {
@@ -400,6 +410,22 @@ func workloadKey(occ store.Occurrence) string {
 		return stripPodSuffix(occ.Name)
 	}
 	return occ.Name
+}
+
+// workloadRefKinds are the ControllerRef kinds workloadKey skips (see
+// step 1 there).
+var workloadRefKinds = map[string]bool{
+	"Deployment":  true,
+	"ReplicaSet":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+	"Job":         true,
+	"CronJob":     true,
+}
+
+func isWorkloadRef(ref string) bool {
+	kind, _, ok := strings.Cut(ref, "/")
+	return ok && workloadRefKinds[kind]
 }
 
 var (

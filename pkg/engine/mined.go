@@ -96,10 +96,12 @@ const DefaultMinedMin = 5
 //
 // Not shipped, and why:
 //
-//   - owner / ControllerRef: the k8s-events source leaves it empty
-//     (populating it needs a Pod GET it does not have in hand), so a
-//     dimension over it would never fire. It becomes worth adding the
-//     day that field is populated.
+//   - owner / ControllerRef: long left empty by the k8s-events
+//     source, so a dimension over it could never fire. Since #583 it
+//     is filled on pod events from the informer caches (the
+//     workload owner, Deployment over ReplicaSet), so an owner
+//     dimension is now possible; not added yet — the graph's declared
+//     owner keys cover it whenever --storm runs.
 //   - labels: the highest-value dimension here in principle
 //     (app.kubernetes.io/part-of groups a whole application) and the
 //     riskiest — arbitrary operator-chosen keys, unbounded
