@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-08
+
+**This release tells agents what kind of failure an event is, and keeps
+one fault in one session.** kubelet reports a crash loop as `BackOff`,
+the same reason it uses for image-pull retries. Event payloads now carry
+`reason_class` next to the untouched `reason`, holding the class lookout
+already worked out, for example `CrashLoopBackOff`. Agents can route on
+it directly instead of repeating lookout's message matching. When a
+rolling restart leaves both the old and the new pod crash-looping, the
+second pod's failure now joins the first incident's session instead of
+opening a second one. This needs storm correlation, which is on by
+default where its grants exist. The ax sink names a fingerprint-less
+task by `reason_class`, and warns at startup when it can't tell the
+agent which project and location the cluster is in. No flags, grants or
+existing fields changed.
+
 ### Added
 
 - **`reason_class` on event payloads: a crash loop now says so
