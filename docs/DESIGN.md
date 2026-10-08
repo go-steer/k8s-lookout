@@ -745,12 +745,16 @@ names (#583). So the fold also works with `--storm=off`. Where the
 caches cannot prove the Deployment (ReplicaSet not cached, ReplicaSets
 not grantable) the ref names the ReplicaSet and pods of different
 ReplicaSets stay separate; where the pod is not cached it names nothing
-and the pair stays two incidents. §7.4 pod clearance reads the same
-ref for an incident restored across a restart: a Deployment ref is
-matched through the Deployment's ReplicaSets (their own
-ownerReferences, from the ReplicaSet cache), so a Ready pod under a
-newer ReplicaSet clears it as recovered; a ReplicaSet ref keeps its
-direct-controller meaning. The fingerprint recipe and the payload
+and the pair stays two incidents. §7.4 pod clearance judges a gone
+pod by the same owner: a pod deleted while the sentinel runs (its
+ReplicaSet walked to the Deployment through the ReplicaSet cache, or
+the incident's Deployment ref when that ReplicaSet is gone) and an
+incident restored with a Deployment ref are both matched against all
+of the Deployment's ReplicaSets, so a Ready pod under a rollout's new
+ReplicaSet clears it as recovered and `object_deleted` means the
+Deployment has no pods. A restored ReplicaSet ref keeps its
+direct-controller meaning; without the ReplicaSet cache, clearance
+behaves as before. The fingerprint recipe and the payload
 field sets are unchanged.
 
 ### 7.8 Untrusted input: the prompt-injection boundary

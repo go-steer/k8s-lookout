@@ -1529,10 +1529,12 @@ func enableEventOwners(ctx context.Context, src *k8sevents.Source, reviewer sour
 }
 
 // recoveryReplicaSetOwners is the pod clearance's ReplicaSet →
-// Deployment lookup (#583): an incident restored across a restart
-// carries the ControllerRef the k8s-events source resolved, which for
-// a ReplicaSet pod is the Deployment, while live pods are indexed by
-// their ReplicaSet. Rides the shared factory's ReplicaSet informer
+// Deployment lookup (#583): a gone pod is judged against its
+// Deployment — a rollout puts its replacement under a new ReplicaSet —
+// whether the pod was deleted while the sentinel ran (its ReplicaSet
+// walked up) or its incident was restored with the Deployment
+// ControllerRef the k8s-events source resolved, while live pods are
+// indexed by their ReplicaSet. Rides the shared factory's ReplicaSet informer
 // (rollout, topology-drift, the storm graph and k8s-events owner
 // resolution use the same one). Nil, with one line, when replicasets
 // list/watch is denied: those incidents are judged as before.
@@ -1544,7 +1546,7 @@ func recoveryReplicaSetOwners(ctx context.Context, f *flags, client kubernetes.I
 			return nil, fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
 		}
 		if !d.Allowed {
-			log.Printf("recovery: %q denied (%s) — an incident restored with a Deployment controller_ref is judged without its ReplicaSets, so a gone pod reads as object_deleted even when a Ready replacement exists", req, sources.DenialDetail(d))
+			log.Printf("recovery: %q denied (%s) — a gone pod is judged by its own ReplicaSet only, so after a rollout it reads as object_deleted even when a Ready replacement exists under the new ReplicaSet", req, sources.DenialDetail(d))
 			return nil, nil
 		}
 	}

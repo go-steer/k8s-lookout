@@ -55,6 +55,14 @@ func webRS(name, apiVersion, deployment string) *appsv1.ReplicaSet {
 // pod and the ReplicaSet caches.
 func startRSObserver(t *testing.T, objs ...runtime.Object) *podClearanceObserver {
 	t.Helper()
+	obs, _ := startRSObserverClient(t, objs...)
+	return obs
+}
+
+// startRSObserverClient is startRSObserver that also hands back the
+// fake clientset, for the live-path tests that delete a pod.
+func startRSObserverClient(t *testing.T, objs ...runtime.Object) (*podClearanceObserver, *fake.Clientset) {
+	t.Helper()
 	client := fake.NewClientset(objs...)
 	factory := informers.NewSharedInformerFactory(client, 0)
 	obs := newPodClearanceObserver(client, factory)
@@ -66,7 +74,7 @@ func startRSObserver(t *testing.T, objs ...runtime.Object) *podClearanceObserver
 		t.Fatalf("observer Start: %v", err)
 	}
 	waitFor(t, "ReplicaSet cache sync", owners.HasSynced)
-	return obs
+	return obs, client
 }
 
 // (a) The old ReplicaSet's crashed pod is gone; the Deployment's new
@@ -155,6 +163,92 @@ func TestPodObserver_RestoredReplicaSetRefUnchanged(t *testing.T) {
 	verdict, ok = obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", "ReplicaSet/web-old"))
 	if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionObjectDeleted {
 		t.Errorf("ReplicaSet/web-old with pods only under web-new: want cleared/object_deleted (direct controller, as before), got (%+v, %v)", verdict, ok)
+	}
+}
+
+// The live path: the sentinel sees the old ReplicaSet's pod deleted
+// (a tombstone naming ReplicaSet web-old), and the rollout's Ready
+// replacement sits under web-new. The tombstone's ReplicaSet is
+// walked to its Deployment, so the incident recovers — it used to
+// read as object_deleted because web-old has no pods left.
+func TestPodObserver_LiveRolloutDeletedPodReadyReplacement(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	obs, client := startRSObserverClient(t,
+		webRS("web-old", "apps/v1", "web"),
+		webRS("web-new", "apps/v1", "web"),
+		podFixture{uid: "u-old", namespace: "ns", name: "web-old-aaaa", owner: "ReplicaSet/web-old"}.build(),
+		podFixture{uid: "u-new", namespace: "ns", name: "web-new-bbbb", owner: "ReplicaSet/web-new", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+	)
+	if err := client.CoreV1().Pods("ns").Delete(context.Background(), "web-old-aaaa", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-old") })
+
+	// Both controller_ref shapes the incident can carry: the
+	// Deployment (owner resolution on) and none at all (off) — the
+	// tombstone's ReplicaSet is enough either way.
+	for _, ref := range []string{"Deployment/web", ""} {
+		verdict, ok := obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", ref))
+		if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionRecovered {
+			t.Errorf("ref %q: deleted old-ReplicaSet pod with a Ready pod under the new one: want cleared/recovered, got (%+v, %v)", ref, verdict, ok)
+		}
+		if !verdict.StableSince.Equal(readyAt) {
+			t.Errorf("ref %q: StableSince = %v, want the replacement's %v", ref, verdict.StableSince, readyAt)
+		}
+	}
+}
+
+// The old ReplicaSet is already gone from the cache when its pod's
+// incident is judged: the incident's Deployment controller_ref (from
+// the ownerReferences when the event arrived) still finds the new
+// ReplicaSet's Ready pod.
+func TestPodObserver_LiveRolloutOldReplicaSetGoneUsesControllerRef(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	obs, client := startRSObserverClient(t,
+		webRS("web-new", "apps/v1", "web"),
+		podFixture{uid: "u-old", namespace: "ns", name: "web-old-aaaa", owner: "ReplicaSet/web-old"}.build(),
+		podFixture{uid: "u-new", namespace: "ns", name: "web-new-bbbb", owner: "ReplicaSet/web-new", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+	)
+	if err := client.CoreV1().Pods("ns").Delete(context.Background(), "web-old-aaaa", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-old") })
+
+	verdict, ok := obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", "Deployment/web"))
+	if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionRecovered {
+		t.Errorf("want cleared/recovered via the Deployment controller_ref, got (%+v, %v)", verdict, ok)
+	}
+	// Without a Deployment ref nothing proves the old ReplicaSet's
+	// owner: judged on web-old alone, as before.
+	verdict, ok = obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", ""))
+	if !ok || verdict.Resolution != engine.ResolutionObjectDeleted {
+		t.Errorf("no ref, old ReplicaSet uncached: want object_deleted as before, got (%+v, %v)", verdict, ok)
+	}
+}
+
+// The live no-pods case: the deleted pod's Deployment has no pods
+// left under any ReplicaSet (a Ready pod of another Deployment does
+// not count) — object_deleted.
+func TestPodObserver_LiveDeletedPodDeploymentHasNoPods(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	obs, client := startRSObserverClient(t,
+		webRS("web-old", "apps/v1", "web"),
+		webRS("web-new", "apps/v1", "web"),
+		webRS("api-1", "apps/v1", "api"),
+		podFixture{uid: "u-old", namespace: "ns", name: "web-old-aaaa", owner: "ReplicaSet/web-old"}.build(),
+		podFixture{uid: "u-api", namespace: "ns", name: "api-1-cccc", owner: "ReplicaSet/api-1", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+	)
+	if err := client.CoreV1().Pods("ns").Delete(context.Background(), "web-old-aaaa", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-old") })
+
+	verdict, ok := obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", "Deployment/web"))
+	if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionObjectDeleted {
+		t.Errorf("Deployment with no pods left: want cleared/object_deleted, got (%+v, %v)", verdict, ok)
 	}
 }
 
