@@ -1528,6 +1528,29 @@ func enableEventOwners(ctx context.Context, src *k8sevents.Source, reviewer sour
 	return nil
 }
 
+// recoveryReplicaSetOwners is the pod clearance's ReplicaSet →
+// Deployment lookup (#583): an incident restored across a restart
+// carries the ControllerRef the k8s-events source resolved, which for
+// a ReplicaSet pod is the Deployment, while live pods are indexed by
+// their ReplicaSet. Rides the shared factory's ReplicaSet informer
+// (rollout, topology-drift, the storm graph and k8s-events owner
+// resolution use the same one). Nil, with one line, when replicasets
+// list/watch is denied: those incidents are judged as before.
+func recoveryReplicaSetOwners(ctx context.Context, f *flags, client kubernetes.Interface, factory informers.SharedInformerFactory) (objectstate.ReplicaSetOwners, error) {
+	reviewer := newAccessReviewer(f, client)
+	for _, req := range sources.ExpandAll(reviewer, eventOwnerRSAccess) {
+		d, err := reviewer.Allowed(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+		}
+		if !d.Allowed {
+			log.Printf("recovery: %q denied (%s) — an incident restored with a Deployment controller_ref is judged without its ReplicaSets, so a gone pod reads as object_deleted even when a Ready replacement exists", req, sources.DenialDetail(d))
+			return nil, nil
+		}
+	}
+	return objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets()), nil
+}
+
 // recoveryTickInterval is how often the recovery tracker re-evaluates
 // clearance predicates. Deliberately not a flag: any value well below
 // --recovery-stable-for behaves identically, and 15s keeps worst-case
@@ -1988,6 +2011,11 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		log.Printf("recovery: compute-class clearance observer registered (§7.7.4 rank episode resolved / class gone → cleared)")
 	}
 	if bs.objState != nil {
+		rsOwners, err := recoveryReplicaSetOwners(ctx, f, client, factory)
+		if err != nil {
+			return err
+		}
+		bs.objState.WithReplicaSetOwners(rsOwners)
 		observers = append(observers, bs.objState.ClearanceObserver())
 		log.Printf("recovery: clearance observer backed by the object-state source's pod + node informers")
 	} else {
@@ -2014,6 +2042,13 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		}
 		if podRBAC {
 			obs := newPodClearanceObserver(client, factory)
+			rsOwners, err := recoveryReplicaSetOwners(ctx, f, client, factory)
+			if err != nil {
+				return err
+			}
+			if rsOwners != nil {
+				obs.state.SetReplicaSetOwners(rsOwners)
+			}
 			if err := obs.Start(ctx); err != nil {
 				return err
 			}

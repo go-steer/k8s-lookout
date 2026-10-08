@@ -25,9 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   informers the sentinel already runs (the Deployment for a
   ReplicaSet's pod; the StatefulSet, DaemonSet or Job otherwise), and
   the fold uses it when there is no graph. Payloads for pod events
-  carry that `controller_ref` where it used to be empty. No new
-  permissions: it uses the existing pods and ReplicaSets list/watch
-  grants, and logs at startup if either is missing.
+  carry that `controller_ref` where it used to be empty. Recovery
+  understands it too: an incident restored after a restart whose
+  `controller_ref` names a Deployment is checked against the pods of
+  all of that Deployment's ReplicaSets, so a Ready replacement under a
+  newer ReplicaSet resolves it as recovered instead of
+  `object_deleted`. No new permissions: it uses the existing pods and
+  ReplicaSets list/watch grants, and logs at startup if either is
+  missing.
 - **ax sink: tasks are named from the incident, not its class (#590).**
   The task name used to hash the payload's `fingerprint`, which is the
   incident class. A later, unrelated storm of the same class in the same

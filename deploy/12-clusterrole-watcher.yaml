@@ -84,10 +84,13 @@
 #                       Deployment in controller_ref, which keeps a
 #                       rollout's pods one incident even with
 #                       --storm=off (#583); without the grant it names
-#                       the ReplicaSet. --storm=auto (the default)
-#                       resolves ON when this grant is present and
-#                       off (loudly) when it is not; --storm=on makes
-#                       the gap a fatal startup error instead.
+#                       the ReplicaSet. §7.4 recovery reads it too, to
+#                       match a restored incident's Deployment to the
+#                       pods of its newer ReplicaSets.
+#                       --storm=auto (the default) resolves ON when
+#                       this grant is present and off (loudly) when
+#                       it is not; --storm=on makes the gap a fatal
+#                       startup error instead.
 #   - list/watch services, ingresses, networkpolicies (+ the
 #     endpointslices grant below) — graph history (§6.6, #507): with
 #                       --store the topology graph also records the

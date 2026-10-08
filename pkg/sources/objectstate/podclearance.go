@@ -37,7 +37,9 @@ import (
 //     at every tick (restart-count stability, §7.4).
 //   - deleted pod, controller has a Ready replacement: cleared with
 //     resolution=recovered (owner-based — the incident is about the
-//     workload, and the workload is healthy again).
+//     workload, and the workload is healthy again). A restored
+//     incident whose ControllerRef names a Deployment is matched
+//     through that Deployment's ReplicaSets (SetReplicaSetOwners).
 //   - deleted pod, controller gone too (no pods left under the
 //     owner): cleared with resolution=object_deleted — the incident
 //     closes, explicitly distinguishable from a fix (§9.3).
@@ -68,6 +70,12 @@ type PodClearance struct {
 	// time) so gone-pod incidents can be judged owner-based. TTL-
 	// swept; see tombstoneTTL.
 	tombstones map[types.UID]*podTombstone
+	// rsOwners walks a ReplicaSet up to its Deployment, so an incident
+	// restored with a Deployment ControllerRef can be judged against
+	// the pods of every ReplicaSet that Deployment controls. nil when
+	// the ReplicaSet cache is not available: those incidents then
+	// behave as they always did.
+	rsOwners ReplicaSetOwners
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
@@ -112,6 +120,29 @@ type podTombstone struct {
 // no-tombstone path (owner unknown), which still closes it. Generous
 // relative to any sane --recovery-stable-for.
 const tombstoneTTL = 2 * time.Hour
+
+// ReplicaSetOwners answers which Deployment controls a ReplicaSet, from
+// the ReplicaSet's own controller ownerReference in an informer cache
+// (NewReplicaSetOwners). PodClearance uses it for incidents whose
+// ControllerRef names a Deployment — the k8s-events source reports a
+// ReplicaSet pod's Deployment there (#583), and live pods are indexed
+// by their direct controller, the ReplicaSet.
+type ReplicaSetOwners interface {
+	// HasSynced reports whether the cache finished its initial list;
+	// until then a Deployment-owned incident is not judged.
+	HasSynced() bool
+	// DeploymentOf returns the Deployment controlling ReplicaSet
+	// namespace/name, ok=false when it is not cached or has none.
+	DeploymentOf(namespace, name string) (string, bool)
+}
+
+// SetReplicaSetOwners installs the ReplicaSet → Deployment lookup.
+// Optional; call before the tracker starts judging.
+func (o *PodClearance) SetReplicaSetOwners(r ReplicaSetOwners) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.rsOwners = r
+}
 
 // NewPodClearance returns an empty clearance state machine. Callers
 // wire an informer to Upsert/Delete and hand its HasSynced to
@@ -273,7 +304,18 @@ func (o *PodClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 	}
 
 	if owner != nil {
-		if set, ok := o.byOwner[*owner]; ok && len(set) > 0 {
+		set := o.byOwner[*owner]
+		if owner.kind == "Deployment" && o.rsOwners != nil {
+			// A restored incident whose ControllerRef names the
+			// Deployment (#583): its live pods are indexed under
+			// their ReplicaSets, old and new. Without the cache
+			// synced, "no pods" would read as "workload gone".
+			if !o.rsOwners.HasSynced() {
+				return engine.Clearance{}, false
+			}
+			set = o.podsUnderDeployment(owner.namespace, owner.name)
+		}
+		if len(set) > 0 {
 			// Replacement pods exist under the same controller: the
 			// incident clears only if one is Ready — a crash-looping
 			// replacement IS the symptom persisting.
@@ -327,6 +369,25 @@ func (o *PodClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 		StableSince: deletedAt,
 		Resolution:  engine.ResolutionObjectDeleted,
 	}, true
+}
+
+// podsUnderDeployment collects the live pods of every ReplicaSet in
+// namespace whose controller is Deployment name, by the ReplicaSet's
+// own ownerReference — never by name prefix. Called under lock.
+func (o *PodClearance) podsUnderDeployment(namespace, name string) map[types.UID]struct{} {
+	out := map[types.UID]struct{}{}
+	for k, set := range o.byOwner {
+		if k.namespace != namespace || k.kind != "ReplicaSet" {
+			continue
+		}
+		if dep, ok := o.rsOwners.DeploymentOf(namespace, k.name); !ok || dep != name {
+			continue
+		}
+		for uid := range set {
+			out[uid] = struct{}{}
+		}
+	}
+	return out
 }
 
 // podReadiness returns whether the PodReady condition is True and its
