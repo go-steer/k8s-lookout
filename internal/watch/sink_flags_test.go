@@ -98,7 +98,7 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 		{
 			name:    "ax rejects shared mode",
 			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml", "--token-env=TOK", "--mode=shared", "--target-session=s"},
-			wantErr: "--sink=ax always runs one task per incident",
+			wantErr: "--sink=ax always opens a session per incident",
 		},
 		{
 			name:    "ax rejects daemon-url",
@@ -109,6 +109,24 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 			name:    "ax router trailing slash rejected",
 			args:    []string{"--sink=ax", "--dry-run", "--ax-router-url=http://router.local/"},
 			wantErr: "--ax-router-url must not end with '/'",
+		},
+		{
+			name: "ax cluster task scope is valid",
+			args: []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=t.yaml", "--token-env=TOK", "--ax-task-scope=cluster"},
+		},
+		{
+			name: "ax incident task scope is valid",
+			args: []string{"--sink=ax", "--dry-run", "--ax-task-scope=incident"},
+		},
+		{
+			name:    "ax rejects an unknown task scope",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-task-scope=namespace"},
+			wantErr: "--ax-task-scope must be incident or cluster",
+		},
+		{
+			name:    "core-agent rejects ax-task-scope",
+			args:    []string{"--ax-task-scope=cluster", "--dry-run"},
+			wantErr: "only valid with --sink=ax",
 		},
 		{
 			name:    "core-agent rejects ax flags",

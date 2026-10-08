@@ -277,7 +277,7 @@ func (i *Injector) injectJSON(ctx context.Context, sessionID string, payload any
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("injector: POST inject: status %d: %s", resp.StatusCode, string(respBody))
+		return &StatusError{Op: "injector: POST inject", Code: resp.StatusCode, Body: string(respBody)}
 	}
 	return nil
 }

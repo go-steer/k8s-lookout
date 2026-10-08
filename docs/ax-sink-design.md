@@ -1,15 +1,17 @@
-# ax sink — one Agent Executor task per incident
+# ax sink — incidents in Agent Executor tasks
 
 [`agent-sink-design.md`](./agent-sink-design.md) reduced the watch path to
 two verbs, open an incident and append to it, and gave lookout two `Sink`
 implementations: the core-agent daemon and a generic webhook. This note adds
-a third, `--sink=ax`, which runs each incident in its own
-[Agent Executor (AX)](https://github.com/google/ax) task on Agent Substrate.
-Tracking issue: #567.
+a third, `--sink=ax`, which runs incidents in
+[Agent Executor (AX)](https://github.com/google/ax) tasks on Agent Substrate:
+by default one task per incident, or one long-lived task per cluster.
+Tracking issues: #567 (the sink), #590 (task identity, task scope, session
+reuse).
 
-**Decision: the ax sink creates (or finds) an AX task for each incident and
-speaks the core-agent session API to the agent inside it, through Substrate's
-router.** Nothing about the payloads changes; like the webhook sink, this is
+**Decision: the ax sink creates (or finds) an AX task for each incident (or
+one per cluster), named from lookout's own incident identity, and speaks the
+core-agent session API to the agent inside it, through Substrate's router.** Nothing about the payloads changes; like the webhook sink, this is
 only about where they're delivered.
 
 ## Why a task per incident
@@ -30,23 +32,111 @@ severity routing), so the mapping is direct.
 
 | Verb | ax sink |
 |---|---|
-| `OpenIncident(payload)` | Create the task from the template (an existing task with that name is reused), `ResumeTask`, wait for the task to be ready, then `POST /sessions` and `POST /sessions/<sid>/inject` with the payload as the message. Returns `<task>/<sid>`. |
+| `OpenIncidentKeyed(key, payload)` | Create the key's task from the template (an existing task with that name is reused), `ResumeTask`, wait for the task to be ready. If this incident was opened before and its session is known, `POST /sessions/<sid>/inject` into that session; otherwise `POST /sessions` and `POST /sessions/<sid>/inject` with the payload as the message. Returns `<task>/<sid>`. |
 | `Append(id, payload)` | `POST /sessions/<sid>/inject`, routed to `<task>`. A suspended task is resumed by the router before the request is forwarded. |
-| `CreateSession()` (`SessionOpener`) | Create and resume a fresh task, then `POST /sessions`. Keeps the watchboard rotation's frozen wire order. |
+| `CreateSessionKeyed(key)` | Start the cluster's watchboard task, then `POST /sessions`. Keeps the watchboard rotation's frozen wire order (empty session first). |
+| `OpenIncident` / `CreateSession` | The plain `Sink` and `SessionOpener` verbs, for callers that don't pass a key. The key is rebuilt from the payload (see below); lookout's own dispatcher never uses them with this sink. |
 
 The session calls are made by the existing core-agent `Injector`, given an
 HTTP client whose transport adds `ate-target-actor: <atespace>/<task>`. The
 bodies and headers are therefore byte-identical to the core-agent sink; only
 the URL (the router) and that header differ.
 
-### Task names come from the incident
+### Task names come from lookout's incident identity
 
-The task name is `lookout-` plus the first 16 hex digits of the SHA-256 of the
-payload's `fingerprint` (falling back to `uid/reason`, then the whole
-payload). A retried open, or the same incident firing again after the dedup
-cooldown, reaches the same task, because AX rejects a second task with the
-same name and the sink treats that as "use it". Follow-ups always reach the
-agent that already has the context.
+The first version named a task by hashing the payload's `fingerprint`. That
+was wrong: lookout's fingerprint is the incident *class* (signal kind, reason
+class, object kind, zone), deliberately not the object. A k8s-event payload
+has no fingerprint, so its task fell back to `uid` + reason; a storm payload
+has one, so an unrelated storm of the same class in the same zone, days later
+or in another cluster, landed in the old storm's task; a watchboard digest has
+neither, so every digest made a new task and held another Substrate worker
+(#590).
+
+The dispatcher already knows what "the same incident" means, so it hands that
+to the sink instead of the sink guessing from the payload. `pkg/inject` has an
+optional capability next to `SessionOpener`:
+
+```go
+type KeyedOpener interface {
+	OpenIncidentKeyed(ctx context.Context, key IncidentKey, payload any) (id string, err error)
+	CreateSessionKeyed(ctx context.Context, key IncidentKey) (string, error)
+}
+```
+
+When the sink has it, the dispatcher's one open helper (`openSession`) and the
+watchboard use it; the core-agent and webhook sinks don't implement it and see
+exactly the calls they always have. An optional interface rather than a value
+on the context, because the key is required for this sink to work properly
+and a type assertion makes that visible at the call site. The types live in
+`pkg/inject`, so `pkg/` still never imports `internal/`
+(`TestLayering_TheImportGraphMatchesTheDesign`).
+
+| Incident | `IncidentKey` |
+|---|---|
+| Per-incident open (and the deferred retry) | cluster + the canonical dedup key, `TriageEvent.CanonicalKey()`: UID + canonical reason, the key the incident is bound and tracked by. kubelet's `Failed`/`BackOff` for one pull problem is one key. |
+| Storm (formation and the session-less retry) | cluster + the storm's ancestor, `Kind/namespace/name`. |
+| Watchboard (first session and every rotation) | cluster only: one watchboard per cluster. |
+
+The task name is derived from the key and the task scope. AX task names are
+DNS labels (63 characters of `[a-z0-9-]`):
+
+| Scope | Key | Task |
+|---|---|---|
+| `incident` | incident or storm | `lookout-` + first 16 hex digits of SHA-256(cluster, kind, id) |
+| `incident` | watchboard | `lookout-wb-<cluster slug>-<8 hex of the cluster name>` |
+| `cluster` | any | `lookout-<cluster slug>-<8 hex of the cluster name>` |
+
+The slug keeps the cluster readable in `ax get tasks`; the hash of the exact
+name keeps two clusters that slug alike apart. A retried open, or the same
+incident firing again after the dedup cooldown, reaches the same task, because
+AX rejects a second task with the same name and the sink treats that as "use
+it".
+
+A caller that uses the plain `OpenIncident` (an embedder, not lookout) gets a
+key rebuilt from the payload: `uid` + `reason_class` (else `reason`) for an
+incident, the `ancestor_*` fields for a storm, otherwise the cluster's
+watchboard. Never the fingerprint.
+
+### Task scope
+
+`--ax-task-scope=incident` (the default) runs each incident and each storm in
+its own task, plus one watchboard task per cluster. Each incident gets its own
+sandbox, egress policy and blast radius.
+
+`--ax-task-scope=cluster` runs one long-lived task per cluster. Every incident,
+storm and watchboard digest gets its own session inside it. Substrate runs one
+actor per worker and workers are scarce, so this is the shape for clusters that
+see many incidents; the trade-off is that every incident shares the one agent
+process, its credentials and its egress policy.
+
+The incident id is `<task>/<session>` in both scopes, so `Append` doesn't care.
+
+### Reopening reuses the session
+
+When an incident comes back after the dedup cooldown, it reaches the same task
+and, if its earlier session is known, the payload is injected into that
+session instead of a new one, so the agent picks up its own earlier diagnosis.
+The sink remembers `IncidentKey -> <task>/<session>`:
+
+- **In memory**, always (bounded at 4096 incidents; past that an arbitrary
+  entry is forgotten).
+- **In the store**, when `--store` is set: table `sink_sessions` (store
+  migration v9), keyed by cluster and the key's text form, written on every
+  open. This is what makes reuse survive a lookout restart. The sink is
+  process-wide but each cluster runner has its own store, so each runner hands
+  its store to the sink at start (`UseSessionStore`). Rows follow the store's
+  TTL (30 days by default): an incident that hasn't come back in that long
+  gets a new session.
+
+If the agent answers the inject with 404 (the task was recreated, or the
+agent lost its state), the sink opens a new session and remembers that one.
+Any other failure keeps the incident bound to the remembered session and
+reports the error, the same way a partial open is reported. A remembered
+session in a different task (the scope changed between runs) is ignored.
+
+Watchboard sessions are never reused: the first session and every rotation
+open a new session in the watchboard task, which is what rotation is for.
 
 ### Waiting for the agent
 
@@ -60,7 +150,7 @@ once the agent's server accepts connections.
 
 `--ax-task-template` is an AX `Task` manifest: image, command, egress rules,
 injected credentials, `http.port`, workspaces. The sink sets
-`metadata.name` per incident and never changes anything else.
+`metadata.name` per task and never changes anything else.
 `metadata.atespace` defaults to `default`. The template is decoded strictly at
 startup, so a typo fails `lookout watch` immediately rather than on the first
 incident.
@@ -76,11 +166,6 @@ testing without them, the agent guessed project IDs until its budget ran out;
 with them, it built the path and finished the diagnosis. The sentinel logs a
 `WARNING` at startup when `--sink=ax` runs without them.
 
-A payload with no `fingerprint` names its task from the `uid` plus
-`reason_class`, falling back to `reason` only where no class is set. kubelet
-reports one image-pull problem as both `Failed` and `BackOff`, and the raw
-reason would have split that incident across two tasks.
-
 ### Flags
 
 | Flag | Meaning |
@@ -89,6 +174,7 @@ reason would have split that incident across two tasks.
 | `--ax-server` | AX API address (plaintext gRPC), e.g. `ax-server.ax-system.svc:8080`. Required. |
 | `--ax-task-template` | Path to the Task manifest. Required. |
 | `--ax-router-url` | Substrate router, default `http://atenet-router.ate-system.svc.cluster.local`. |
+| `--ax-task-scope` | `incident` (default) or `cluster`; see Task scope. |
 | `--token-env`, `--owner` | Same meaning as for the core-agent sink, applied to the agent's session API inside each task. |
 
 `--mode=shared`, `--target-session` and `--daemon-url` are rejected with this
@@ -125,15 +211,36 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
 - **token-burn.** Stays core-agent-only, as for the webhook sink.
 - **Reading results back.** lookout stays fire-and-forget; the agent reports
   through its own channels (switchboard).
-- **One long-lived task per cluster.** Possible later for the warning-level
-  watchboard; per-incident tasks are the starting point.
+
+## Limitations
+
+- **Without `--store`, session reuse ends at a restart.** The incident still
+  reaches its task, but a new session in it, so the agent starts that
+  conversation cold (its earlier session is still in the task).
+- **Session reuse relies on the agent answering 404 for an unknown session.**
+  core-agent does. An agent that answers something else for a session it no
+  longer has would keep failing that incident's reopen until the store row
+  expires.
+- **`cluster` scope shares one sandbox.** Every incident in the cluster runs in
+  the same agent process with the same credentials and egress.
+- **A storm reopens by ancestor.** A later storm on the same Node or workload
+  goes into the earlier storm's session, by design; a different ancestor is a
+  different task.
 
 ## How it was tested
 
-- `internal/axsink`: open, append, reopen-reuses-task, readiness wait and id
-  parsing, against a fake AX gRPC server and a fake router that checks the
-  `ate-target-actor` header.
-- `internal/watch`: flag validation matrix and template decoding.
+- `internal/axsink`: open, append, readiness wait and id parsing; reopen
+  reuses the task and the session; a 404 opens a new session; a reopen after a
+  restart reaches the old session through a real store and doesn't without
+  one; cluster scope shares one task; watchboard rotation stays in one task;
+  task names are valid DNS labels and differ by cluster, ancestor and incident.
+  Against a fake AX gRPC server and a fake router that checks the
+  `ate-target-actor` header and 404s unknown sessions.
+- `internal/watch`: the dispatcher opens a `KeyedOpener` with the canonical
+  key, storms by ancestor and the watchboard by cluster; flag validation
+  matrix and template decoding.
+- `pkg/store`: `sink_sessions` round trip, per-cluster isolation, nil store,
+  TTL prune.
 - End to end on a GKE cluster with Agent Substrate v0.3.0 and the AX fork:
   mast's `gke-triage` workload in a task, reached through the router with
   exactly these calls, diagnosed a crash-looping Deployment, and a request to

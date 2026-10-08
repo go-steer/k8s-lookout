@@ -237,7 +237,7 @@ func (b *watchboard) flushLocked(ctx context.Context) {
 			b.generation = 1
 		}
 	} else if b.sid == "" || b.injects >= b.rotateAfter {
-		opener, ok := b.injector.(inject.SessionOpener)
+		opener, ok := b.sessionOpener()
 		if !ok {
 			// Stateless sink: the successor incident opens WITH the
 			// digest as its payload — the whole flush happens there.
@@ -266,15 +266,31 @@ func (b *watchboard) flushLocked(ctx context.Context) {
 	b.finishFlushLocked()
 }
 
+// sessionOpener returns how this board opens an empty session, if its
+// sink can: CreateSessionKeyed for a sink that places incidents by
+// lookout's identity (the ax sink: one stable watchboard task per
+// cluster), else the plain SessionOpener capability (core-agent).
+// ok=false is a stateless sink (webhook).
+func (b *watchboard) sessionOpener() (func(context.Context) (string, error), bool) {
+	if ko, ok := b.injector.(inject.KeyedOpener); ok {
+		key := inject.IncidentKey{Cluster: b.cluster, Kind: inject.IncidentKeyWatchboard}
+		return func(ctx context.Context) (string, error) { return ko.CreateSessionKeyed(ctx, key) }, true
+	}
+	if so, ok := b.injector.(inject.SessionOpener); ok {
+		return so.CreateSession, true
+	}
+	return nil, false
+}
+
 // openSessionLocked creates (or rotates onto) the watchboard session
 // through the core-agent sink's SessionOpener capability, keeping the
 // frozen §15 Q2 wire order: empty successor first, kind=
 // watchboard.rotated into the closed session, digest afterwards (the
 // caller's flush). Returns false when the flush must stop (no session
 // to flush into — buffer already dropped). Caller holds b.mu.
-func (b *watchboard) openSessionLocked(ctx context.Context, opener inject.SessionOpener, now time.Time) bool {
+func (b *watchboard) openSessionLocked(ctx context.Context, opener func(context.Context) (string, error), now time.Time) bool {
 	rotating := b.sid != ""
-	newSid, err := opener.CreateSession(ctx)
+	newSid, err := opener(ctx)
 	if err != nil {
 		b.metrics.sessionCreates.WithLabelValues("error").Inc()
 		if rotating {

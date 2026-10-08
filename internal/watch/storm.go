@@ -75,7 +75,7 @@ func (d *dispatcher) stormFormed(ctx context.Context, sig engine.Signal, v engin
 	// pre-Sink inject error, never fatal to member bookkeeping.
 	var openErr error
 	if d.mode == "per-incident" && !d.dryRun {
-		newSid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+		newSid, err, ok := d.openSession(ctx, d.stormKey(info.Ancestor), payload, sig.Key.Reason)
 		if !ok {
 			log.Printf("storm: create storm session for %s: %v", v.Storm.Ancestor.Display(), err)
 			// §9.1 (issue #104 req 3): every signal that survives the
@@ -219,7 +219,7 @@ func (d *dispatcher) retryStormOpen(ctx context.Context, sig engine.Signal, info
 			payload.Enrichment = &inject.PayloadEnrichment{Bundle: bundleStr}
 		}
 	}
-	sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+	sid, err, ok := d.openSession(ctx, d.stormKey(info.Ancestor), payload, sig.Key.Reason)
 	if !ok {
 		log.Printf("storm: retry storm session for %s: %v", info.Ancestor.Display(), err)
 		return ""
