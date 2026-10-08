@@ -553,8 +553,13 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 // bytes.
 func incidentPayload(sig engine.Signal, result engine.DedupResult) inject.Payload {
 	payload := inject.Payload{
-		Kind:         sig.Kind,
-		Reason:       sig.Key.Reason,
+		Kind:   sig.Kind,
+		Reason: sig.Key.Reason,
+		// The class the pipeline keyed this signal on (issue #574),
+		// beside the untouched wire Reason. Computed from the RAW
+		// message, before masking, exactly as CanonicalKey does — the
+		// value is a fixed reason-family name, never message text.
+		ReasonClass:  engine.ReasonClass(sig.Kind, sig.Key.Reason, sig.Message),
 		Namespace:    sig.Namespace,
 		KindOfObject: sig.KindOfObject,
 		Name:         sig.Name,
@@ -714,6 +719,7 @@ func (d *dispatcher) injectTriageRegressed(ctx context.Context, sig engine.Signa
 	payload := inject.TriageRegressedPayload{
 		Kind:             inject.KindTriageRegressed,
 		Reason:           sig.Key.Reason,
+		ReasonClass:      engine.ReasonClass(sig.Kind, sig.Key.Reason, sig.Message),
 		Namespace:        sig.Namespace,
 		KindOfObject:     sig.KindOfObject,
 		Name:             sig.Name,

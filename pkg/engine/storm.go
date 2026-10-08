@@ -94,6 +94,10 @@ type StormMember struct {
 	KindOfObject string
 	Name         string
 	Reason       string
+	// ReasonClass is the member's wire reason_class (ReasonClass —
+	// issue #574), stamped at Observe because the message it reads is
+	// not kept on the member.
+	ReasonClass string
 	// SessionID is the member's per-incident session when it fired
 	// before the storm formed (§7.5: the first incidents of a burst
 	// inherently may). Empty for members suppressed by the storm.
@@ -466,6 +470,7 @@ func (c *StormCorrelator) Observe(sig Signal) StormVerdict {
 		KindOfObject: sig.KindOfObject,
 		Name:         sig.Name,
 		Reason:       sig.Key.Reason,
+		ReasonClass:  ReasonClass(sig.Kind, sig.Key.Reason, sig.Message),
 		FirstSeen:    sig.FirstSeen,
 	}
 	if member.FirstSeen.IsZero() {

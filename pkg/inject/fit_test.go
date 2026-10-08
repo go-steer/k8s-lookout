@@ -31,7 +31,8 @@ import (
 func samplePayload(message, bundle string) Payload {
 	p := Payload{
 		Kind:         KindEvent,
-		Reason:       "CrashLoopBackOff",
+		Reason:       "BackOff",
+		ReasonClass:  "CrashLoopBackOff",
 		Namespace:    "kube-system",
 		KindOfObject: "Pod",
 		Name:         "metrics-server-v1.35.1-578bff4857-qt6v4",
@@ -156,7 +157,9 @@ func TestPayloadFitTo_PreservesIdentity(t *testing.T) {
 	p := orig
 	p.FitTo(MaxInjectBytes)
 
-	if p.Reason != orig.Reason || p.UID != orig.UID || p.Fingerprint != orig.Fingerprint ||
+	// reason_class (issue #574) is routing identity like reason: a
+	// consumer routes on it alone, so no fit step may shed it.
+	if p.Reason != orig.Reason || p.ReasonClass != orig.ReasonClass || p.UID != orig.UID || p.Fingerprint != orig.Fingerprint ||
 		p.Cluster != orig.Cluster || p.Namespace != orig.Namespace || p.Name != orig.Name ||
 		p.Container != orig.Container || p.Count != orig.Count ||
 		p.Context.ControllerRef != orig.Context.ControllerRef || p.Context.Node != orig.Context.Node {
@@ -298,6 +301,7 @@ func digestWith(n int) WatchboardDigestPayload {
 			Kind:         "objectstate.pod_pending",
 			Fingerprint:  fmt.Sprintf("%016x", i),
 			Reason:       "Unschedulable",
+			ReasonClass:  "Unschedulable", // survivors must keep it (slices.Equal below)
 			Namespace:    "lookout-examples",
 			KindOfObject: "Pod",
 			Name:         fmt.Sprintf("fleet-svc-6d4b9c8f7a-%05d", i),

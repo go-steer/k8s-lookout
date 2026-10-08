@@ -89,11 +89,23 @@ var frozenFields = map[string][]string{
 	// started stamping the identity block on the frozen k8s-event
 	// pair; that changes no TAG, so it shows up in the wire-shape
 	// pins rather than here.
+	//
+	// "reason_class" landed 2026-10-08 (issue #574), additive +
+	// omitempty and APPENDED — the amendment window that let
+	// pull_cause go mid-struct closed when the first external consumer
+	// deployed, so this follows §Evolution's end-of-struct rule. It is
+	// the reason family lookout keyed the signal on
+	// (engine.ReasonClass), so a consumer routes a kubelet `BackOff` as
+	// CrashLoopBackOff vs ImagePullBackOff without redoing the message
+	// match; "reason" itself is unchanged. The same field joined
+	// TriageRegressedPayload, StormIncidentRef and WatchboardEntry,
+	// the other structs that carry a raw wire reason.
 	"Payload": {"kind", "reason", "namespace", "kind_of_object", "name",
 		"container", "uid", "message", "count", "first_seen", "last_seen",
 		"cluster", "project", "region", "zone", "pull_cause", "source",
 		"severity", "fingerprint",
-		"context", "type", "enrichment", "forecast", "quota_increase_draft"},
+		"context", "type", "enrichment", "forecast", "quota_increase_draft",
+		"reason_class"},
 	"ResolvedPayload": {"kind", "reason", "namespace", "kind_of_object",
 		"name", "container", "uid", "fingerprint", "cluster", "first_seen",
 		"resolved_at", "cleared_after", "observed_stable_for", "resolution",
@@ -132,7 +144,7 @@ var frozenFields = map[string][]string{
 		"kind_of_object", "name", "container", "uid", "fingerprint",
 		"cluster", "triage_status", "severity_override", "triage_session",
 		"baseline_count", "count", "factor", "first_seen", "last_seen",
-		"message", "context"},
+		"message", "context", "reason_class"},
 	"FamilyMemberPayload": {"kind", "member_kind", "reason", "severity",
 		"namespace", "kind_of_object", "name", "uid", "fingerprint",
 		"family", "opened_by", "cluster", "session_id", "message",
@@ -144,9 +156,10 @@ var frozenFields = map[string][]string{
 	"PayloadQuotaDraft": {"quota_id", "region", "unit", "current_usage",
 		"current_limit", "suggested_limit", "slope_per_day", "justification"},
 	"StormIncidentRef": {"fingerprint", "reason", "namespace",
-		"kind_of_object", "name", "uid", "session_id"},
+		"kind_of_object", "name", "uid", "session_id", "reason_class"},
 	"WatchboardEntry": {"kind", "fingerprint", "reason", "namespace",
-		"kind_of_object", "name", "uid", "count", "first_seen", "last_seen"},
+		"kind_of_object", "name", "uid", "count", "first_seen", "last_seen",
+		"reason_class"},
 }
 
 // jsonFields returns a struct type's json field names in declaration
@@ -256,7 +269,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 	ts := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	payloads := []any{
 		inject.Payload{
-			Kind: capacity.KindStockout, Reason: "stockout", Namespace: "",
+			Kind: capacity.KindStockout, Reason: "stockout", ReasonClass: "stockout", Namespace: "",
 			KindOfObject: "NodeGroup", Name: "pool-a", Container: "", UID: "nodegroup:pool-a",
 			Message: "autoscaler noScaleUp decision", Count: 1, FirstSeen: ts, LastSeen: ts,
 			Cluster: "prod-east", Project: "acme-prod", Zone: "us-east1-b",
@@ -285,7 +298,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			AncestorName: "node-1", Reason: "NodeNotReady", Message: "storm",
 			AffectedCount: 3, NamespacesCount: 2, FirstSeen: ts, LastSeen: ts,
 			Representatives: []inject.StormIncidentRef{{
-				Fingerprint: "sha256:cc", Reason: "BackOff", Namespace: "prod",
+				Fingerprint: "sha256:cc", Reason: "BackOff", ReasonClass: "CrashLoopBackOff", Namespace: "prod",
 				KindOfObject: "Pod", Name: "p1", UID: "u2", SessionID: "sess-1",
 			}},
 			MemberFingerprints: []string{"sha256:cc"},
@@ -296,7 +309,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			Kind: inject.KindStormMemberSuperseded, StormFingerprint: "sha256:bb",
 			StormSessionID: "sess-9", AncestorKind: "Node", AncestorName: "node-1",
 			Cluster: "prod-east", Message: "superseded",
-			Incident: inject.StormIncidentRef{Fingerprint: "sha256:cc", Reason: "BackOff",
+			Incident: inject.StormIncidentRef{Fingerprint: "sha256:cc", Reason: "BackOff", ReasonClass: "CrashLoopBackOff",
 				KindOfObject: "Pod", Name: "p1", UID: "u2"},
 		},
 		inject.StormUpdatePayload{
@@ -308,7 +321,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			Kind: inject.KindWatchboardDigest, Cluster: "prod-east",
 			BoardGeneration: 1, Sequence: 2, WindowStart: ts, WindowEnd: ts.Add(time.Minute),
 			Entries: []inject.WatchboardEntry{{
-				Kind: rollout.KindStall, Fingerprint: "sha256:dd", Reason: "rollout_stall",
+				Kind: rollout.KindStall, Fingerprint: "sha256:dd", Reason: "rollout_stall", ReasonClass: "rollout_stall",
 				Namespace: "prod", KindOfObject: "Deployment", Name: "web", UID: "u3",
 				Count: 2, FirstSeen: ts, LastSeen: ts,
 			}},
@@ -318,7 +331,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			BoardGeneration: 1, SuccessorSessionID: "sess-2", InjectsCount: 200, RotatedAt: ts,
 		},
 		inject.TriageRegressedPayload{
-			Kind: inject.KindTriageRegressed, Reason: "CrashLoopBackOff", Namespace: "prod",
+			Kind: inject.KindTriageRegressed, Reason: "CrashLoopBackOff", ReasonClass: "CrashLoopBackOff", Namespace: "prod",
 			KindOfObject: "Pod", Name: "api-0", Container: "app", UID: "u1",
 			Fingerprint: "sha256:aa", Cluster: "prod-east", TriageStatus: "triaged",
 			SeverityOverride: "warning", TriageSession: "sess-1", BaselineCount: 3,

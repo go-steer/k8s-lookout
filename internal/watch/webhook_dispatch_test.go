@@ -119,7 +119,7 @@ func TestWebhookDispatch_ExactOpenWireShape(t *testing.T) {
 	if got.Auth != "Bearer tok_hook" {
 		t.Errorf("Authorization = %q, want Bearer tok_hook (--sink-token-env)", got.Auth)
 	}
-	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"},"type":"Warning"}`
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"},"type":"Warning","reason_class":"CrashLoopBackOff"}`
 	if got.Body != want {
 		t.Errorf("webhook open body drifted from the frozen wire shape:\n got: %s\nwant: %s", got.Body, want)
 	}
@@ -190,11 +190,11 @@ func TestWebhookDispatch_ExactStormOpenWireShape(t *testing.T) {
 	if got := (*hits)[2].Path; got != "/incidents" {
 		t.Errorf("storm open path = %q, want /incidents", got)
 	}
-	wantStorm := `{"kind":"storm","fingerprint":"` + stormFP + `","severity":"critical","cluster":"prod-us-central1","ancestor_kind":"Node","ancestor_name":"gke-a","reason":"CrashLoopBackOff","message":"Node gke-a: 3 incidents across 3 namespace(s) share this blast-radius key; 3 representative incident(s) attached; member sessions are suppressed and route here","affected_count":3,"namespaces_count":3,"first_seen":"2026-07-24T10:00:01Z","last_seen":"2026-07-24T10:00:03Z","representative_incidents":[{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"shop","kind_of_object":"Pod","name":"pay-1","uid":"uid-1","session_id":"inc-1"},{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"web","kind_of_object":"Pod","name":"pay-2","uid":"uid-2","session_id":"inc-2"},{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"api","kind_of_object":"Pod","name":"pay-3","uid":"uid-3"}],"member_fingerprints":["` + memberFP + `","` + memberFP + `","` + memberFP + `"],"context":{"node":"gke-a"}}`
+	wantStorm := `{"kind":"storm","fingerprint":"` + stormFP + `","severity":"critical","cluster":"prod-us-central1","ancestor_kind":"Node","ancestor_name":"gke-a","reason":"CrashLoopBackOff","message":"Node gke-a: 3 incidents across 3 namespace(s) share this blast-radius key; 3 representative incident(s) attached; member sessions are suppressed and route here","affected_count":3,"namespaces_count":3,"first_seen":"2026-07-24T10:00:01Z","last_seen":"2026-07-24T10:00:03Z","representative_incidents":[{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"shop","kind_of_object":"Pod","name":"pay-1","uid":"uid-1","session_id":"inc-1","reason_class":"CrashLoopBackOff"},{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"web","kind_of_object":"Pod","name":"pay-2","uid":"uid-2","session_id":"inc-2","reason_class":"CrashLoopBackOff"},{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"api","kind_of_object":"Pod","name":"pay-3","uid":"uid-3","reason_class":"CrashLoopBackOff"}],"member_fingerprints":["` + memberFP + `","` + memberFP + `","` + memberFP + `"],"context":{"node":"gke-a"}}`
 	if got := (*hits)[2].Body; got != wantStorm {
 		t.Errorf("webhook storm open drifted from the frozen wire shape:\n got: %s\nwant: %s", got, wantStorm)
 	}
-	wantSuperseded := `{"kind":"storm.member_superseded","storm_fingerprint":"` + stormFP + `","storm_session_id":"inc-3","ancestor_kind":"Node","ancestor_name":"gke-a","cluster":"prod-us-central1","message":"this incident was folded into the Node gke-a storm (3 incidents); further followups and the outcome record route to the storm session","incident":{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"shop","kind_of_object":"Pod","name":"pay-1","uid":"uid-1","session_id":"inc-1"}}`
+	wantSuperseded := `{"kind":"storm.member_superseded","storm_fingerprint":"` + stormFP + `","storm_session_id":"inc-3","ancestor_kind":"Node","ancestor_name":"gke-a","cluster":"prod-us-central1","message":"this incident was folded into the Node gke-a storm (3 incidents); further followups and the outcome record route to the storm session","incident":{"fingerprint":"` + memberFP + `","reason":"CrashLoopBackOff","namespace":"shop","kind_of_object":"Pod","name":"pay-1","uid":"uid-1","session_id":"inc-1","reason_class":"CrashLoopBackOff"}}`
 	if got := (*hits)[3]; got.Path != "/incidents/inc-1/events" || got.Body != wantSuperseded {
 		t.Errorf("webhook supersede append drifted:\npath: %s (want /incidents/inc-1/events)\n got: %s\nwant: %s", got.Path, got.Body, wantSuperseded)
 	}
@@ -240,8 +240,8 @@ func TestWebhookDispatch_ExactWatchboardDigestWireShape(t *testing.T) {
 	}
 	const fp = "sha256:e869fa95d9251a5a36fcceaa7e081d48faac44c90e719df563b2d784f723db70" // Fingerprint(objectstate.restart_burst, restart_burst, Pod, "")
 	want := `{"kind":"watchboard.digest","cluster":"prod-us-central1","board_generation":1,"sequence":1,"window_start":"2026-07-24T11:30:00Z","window_end":"2026-07-24T11:30:00Z","entries":[` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z"},` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z"}]}`
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z","reason_class":"CrashLoopBackOff"},` +
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z","reason_class":"CrashLoopBackOff"}]}`
 	if got := (*hits)[0].Body; got != want {
 		t.Errorf("webhook digest open drifted from the frozen wire shape:\n got: %s\nwant: %s", got, want)
 	}

@@ -732,6 +732,32 @@ func TestCanonicalReasonForEvent(t *testing.T) {
 	}
 }
 
+// TestReasonClass pins the wire reason_class rule (issue #574):
+// event-shaped kinds always carry the message-aware class, equal to
+// reason or not; other kinds carry it only when a canonical mapping
+// applies.
+func TestReasonClass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		kind, reason, message, want string
+	}{
+		{KindK8sEvent, "BackOff", "Back-off restarting failed container app in pod p_ns(u)", "CrashLoopBackOff"},
+		{KindK8sEvent, "BackOff", `Back-off pulling image "gcr.io/x/y:v1"`, "ImagePullBackOff"},
+		{KindK8sEvent, "Failed", `Failed to pull image "gcr.io/x/y:v1": manifest unknown`, "ImagePullBackOff"},
+		{KindK8sEvent, "Failed", "Error: failed to start container", "Failed"},
+		{KindK8sEvent, "FailedScheduling", "0/3 nodes are available", "FailedScheduling"},
+		{KindK8sEventFollowup, "ErrImagePull", "rpc error", "ImagePullBackOff"},
+		{"capacity.pending", "pending", "", "FailedScheduling"},
+		{"objectstate.restart_burst", "restart_burst", "", "CrashLoopBackOff"},
+		{"rollout.stall", "rollout_stall", "", ""},
+	}
+	for _, tc := range cases {
+		if got := ReasonClass(tc.kind, tc.reason, tc.message); got != tc.want {
+			t.Errorf("ReasonClass(%q, %q, %q) = %q, want %q", tc.kind, tc.reason, tc.message, got, tc.want)
+		}
+	}
+}
+
 // TestCanonicalKey_MessageAware pins TriageEvent.CanonicalKey — the
 // dispatcher's ONE canonical pipeline key — as the message-aware
 // composition: reason class from CanonicalReasonForEvent, UID kept,

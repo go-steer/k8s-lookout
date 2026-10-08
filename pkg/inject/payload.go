@@ -101,6 +101,25 @@ type Payload struct {
 	// Enrichment/Forecast: omitempty keeps every other payload
 	// byte-identical.
 	QuotaIncreaseDraft *PayloadQuotaDraft `json:"quota_increase_draft,omitempty"`
+	// ReasonClass is the reason family lookout filed this signal under
+	// (issue #574). kubelet emits `BackOff` for a crash loop AND for an
+	// image-pull retry, and `Failed` for a pull failure; lookout
+	// already reads the message to tell them apart
+	// (engine.CanonicalReasonForEvent) and keys dedup, fingerprints and
+	// the store's canonical_reason on the answer, but before this field
+	// the answer never left the process, so a consumer routing on
+	// `reason` sent a crash loop to its generic BackOff handler. Reason
+	// is untouched: it stays exactly what the cluster said.
+	//
+	// Always set on the k8s-event / k8s-event-followup pair, even when
+	// it equals Reason, so a consumer can route on reason_class alone.
+	// On source-namespaced kinds it is set only when a canonical
+	// mapping applies (capacity.pending's `pending` →
+	// `FailedScheduling`) and omitted otherwise; engine.ReasonClass
+	// owns the rule. ADDITIVE, so it is the LAST field (the v1
+	// evolution rule — docs/signal-schema-v1.md §Evolution): every
+	// existing field keeps its position.
+	ReasonClass string `json:"reason_class,omitempty"`
 }
 
 // PayloadForecast mirrors DESIGN.md §8's forecast object: ETA is the
@@ -205,6 +224,9 @@ type StormIncidentRef struct {
 	Name         string `json:"name"`
 	UID          string `json:"uid"`
 	SessionID    string `json:"session_id,omitempty"`
+	// ReasonClass is the member's reason family beside its wire
+	// Reason, on the same rule as Payload.ReasonClass (issue #574).
+	ReasonClass string `json:"reason_class,omitempty"`
 }
 
 // StormPayload is the JSON body injected for kind=storm (DESIGN.md
@@ -324,7 +346,8 @@ const KindTriageRegressed = "triage.regressed"
 // the §9.3 corpus harvester parse it structurally.
 //
 // Identity fields repeat the ORIGINAL incident's identity (reason is
-// the wire reason of the triggering signal; fingerprint the §8
+// the wire reason of the triggering signal, reason_class its family;
+// fingerprint the §8
 // class hash the triage-status record matched on). BaselineCount is
 // the dedup-window count when the downgrade first applied; Count the
 // window count when the factor threshold was crossed. TriageStatus /
@@ -351,6 +374,9 @@ type TriageRegressedPayload struct {
 	LastSeen         time.Time      `json:"last_seen"`
 	Message          string         `json:"message"`
 	Context          PayloadContext `json:"context"`
+	// ReasonClass is the triggering signal's reason family beside the
+	// wire Reason, on the same rule as Payload.ReasonClass (issue #574).
+	ReasonClass string `json:"reason_class,omitempty"`
 }
 
 // KindFamilyMember is the cross-source join followup: a dedup-window
@@ -430,6 +456,10 @@ type WatchboardEntry struct {
 	Count        int       `json:"count"`
 	FirstSeen    time.Time `json:"first_seen"`
 	LastSeen     time.Time `json:"last_seen"`
+	// ReasonClass is the entry's reason family beside its wire Reason,
+	// on the same rule as Payload.ReasonClass (issue #574), so a board
+	// reader groups entries without redoing the classification.
+	ReasonClass string `json:"reason_class,omitempty"`
 }
 
 // WatchboardDigestPayload is the JSON body injected for

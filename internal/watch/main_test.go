@@ -209,7 +209,7 @@ func TestDispatcher_ExactInjectPayloadWireShape(t *testing.T) {
 	if err := json.Unmarshal([]byte((*injects)[0]), &envelope); err != nil {
 		t.Fatalf("captured body isn't the inject envelope: %v (body=%q)", err, (*injects)[0])
 	}
-	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}},"type":"Warning"}`
+	want := `{"kind":"k8s-event","reason":"CrashLoopBackOff","namespace":"checkout","kind_of_object":"Pod","name":"checkout-svc-7b9d-x4kzq","container":"spec.containers{server}","uid":"abc-123","message":"Back-off restarting failed container","count":1,"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:05:00Z","cluster":"prod-us-central1","context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d","node":"node-1","labels":{"team":"checkout"}},"type":"Warning","reason_class":"CrashLoopBackOff"}`
 	if envelope.Message != want {
 		t.Errorf("inject payload wire shape drifted:\n got: %s\nwant: %s", envelope.Message, want)
 	}
