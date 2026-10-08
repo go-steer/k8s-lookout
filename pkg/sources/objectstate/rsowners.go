@@ -15,7 +15,11 @@
 package objectstate
 
 import (
+	"strconv"
+
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	appsv1informers "k8s.io/client-go/informers/apps/v1"
 	appsv1listers "k8s.io/client-go/listers/apps/v1"
@@ -43,6 +47,47 @@ func (l listerRSOwners) DeploymentOf(namespace, name string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	return deploymentOfRS(rs)
+}
+
+// revisionAnnotation is the Deployment controller's revision stamp on
+// each ReplicaSet it owns; the highest is the current template.
+const revisionAnnotation = "deployment.kubernetes.io/revision"
+
+// CurrentReplicaSet picks the Deployment's ReplicaSet with the highest
+// revision annotation. Any controlled ReplicaSet with a missing or
+// unparseable revision, or a tie at the top, means "unknown": a guess
+// here would let the wrong ReplicaSet's Ready pods vouch.
+func (l listerRSOwners) CurrentReplicaSet(namespace, deployment string) (string, bool) {
+	rss, err := l.lister.ReplicaSets(namespace).List(labels.Everything())
+	if err != nil {
+		return "", false
+	}
+	best, bestRev, tie := "", int64(-1), false
+	for _, rs := range rss {
+		if dep, ok := deploymentOfRS(rs); !ok || dep != deployment {
+			continue
+		}
+		rev, err := strconv.ParseInt(rs.Annotations[revisionAnnotation], 10, 64)
+		if err != nil || rev < 0 {
+			return "", false
+		}
+		switch {
+		case rev > bestRev:
+			best, bestRev, tie = rs.Name, rev, false
+		case rev == bestRev:
+			tie = true
+		}
+	}
+	if best == "" || tie {
+		return "", false
+	}
+	return best, true
+}
+
+// deploymentOfRS reads rs's controller ownerReference; only an
+// apps/Deployment counts.
+func deploymentOfRS(rs *appsv1.ReplicaSet) (string, bool) {
 	ref := metav1.GetControllerOf(rs)
 	if ref == nil || ref.Kind != "Deployment" || ref.Name == "" {
 		return "", false

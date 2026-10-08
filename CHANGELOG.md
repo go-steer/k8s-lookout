@@ -32,8 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement under the pod's own ReplicaSet, and a rollout puts the
   replacement under a new one. It now looks across all of the
   Deployment's ReplicaSets, both for a pod deleted while the sentinel
-  runs and for an incident restored after a restart. `object_deleted`
-  now means the Deployment has no pods left. No new permissions: both
+  runs and for an incident restored after a restart. Any of them shows
+  the workload still has pods, so `object_deleted` now means the
+  Deployment has no pods left. Only a Ready pod in the pod's own
+  ReplicaSet or the Deployment's current one (highest revision) counts
+  as recovered, so a stuck rollout whose old pods stay Ready does not
+  clear the new pods' crash loop. An incident restored after a restart
+  with a StatefulSet or DaemonSet `controller_ref` is now judged by any
+  Ready pod of that workload, as a pod deleted while the sentinel runs
+  already was. No new permissions: both
   fixes use the existing pods and ReplicaSets list/watch grants, and
   log at startup if either is missing.
 - **ax sink: tasks are named from the incident, not its class (#590).**

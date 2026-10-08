@@ -750,9 +750,14 @@ pod by the same owner: a pod deleted while the sentinel runs (its
 ReplicaSet walked to the Deployment through the ReplicaSet cache, or
 the incident's Deployment ref when that ReplicaSet is gone) and an
 incident restored with a Deployment ref are both matched against all
-of the Deployment's ReplicaSets, so a Ready pod under a rollout's new
-ReplicaSet clears it as recovered and `object_deleted` means the
-Deployment has no pods. A restored ReplicaSet ref keeps its
+of the Deployment's ReplicaSets for "the workload still has pods", so
+`object_deleted` means the Deployment has no pods. Only the deleted
+pod's own ReplicaSet and the Deployment's current one (highest
+`deployment.kubernetes.io/revision`; unknown if any is missing,
+unparseable or tied) may vouch Ready — a restored Deployment ref, whose
+original ReplicaSet is unknown, only the current one — so a rollout to
+a healthy new ReplicaSet recovers, while a stuck rollout's Ready old
+pods never clear the new pods' incident. A restored ReplicaSet ref keeps its
 direct-controller meaning; without the ReplicaSet cache, clearance
 behaves as before. The fingerprint recipe and the payload
 field sets are unchanged.
