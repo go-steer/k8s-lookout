@@ -76,6 +76,13 @@ type Source struct {
 	// shared informer factory (§6.3: one informer set serves the
 	// sentinel's sources and the graph).
 	factory informers.SharedInformerFactory
+	// resolveOwners / resolveReplicaSets are set by
+	// WithOwnerResolution; Run turns them into owners.
+	resolveOwners      bool
+	resolveReplicaSets bool
+	// owners fills ControllerRef on pod events (owner.go); nil when
+	// owner resolution is off. Set in Run, before the handler can fire.
+	owners *ownerResolver
 
 	mu sync.Mutex
 	// armed flips true once the informer's initial LIST has drained.
@@ -117,6 +124,28 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	}
 }
 
+// WithOwnerResolution makes Run fill ControllerRef on pod events
+// from the pod informer cache — and, when replicaSets is true, walk a
+// ReplicaSet owner up to its Deployment through the ReplicaSet cache
+// (owner.go, issue #583). Call before Run.
+//
+// Off by default and deliberately NOT part of RequiredAccess: the
+// owner is context, not the signal, so a deployment that cannot list
+// pods still runs this source — the composition root probes the
+// grants and enables only what they allow, so no informer is ever
+// started on a denied resource. On the shared factory both informers
+// are ones other consumers (object-state, rollout, the graph feed, the
+// §7.4 pod observer) already run, so this adds no LIST+WATCH stream
+// in the usual configuration.
+//
+// Arming does not wait for these caches: holding the arm gate would
+// drop the Event watch traffic that arrives meanwhile. An event seen
+// before the pod cache syncs just carries no owner.
+func (s *Source) WithOwnerResolution(replicaSets bool) {
+	s.resolveOwners = true
+	s.resolveReplicaSets = replicaSets
+}
+
 // RequiredAccess implements sources.AccessDeclarer (§11): the
 // informer's initial List plus the Watch it maintains. Matches the
 // shipped ClusterRole in deploy/12-clusterrole-watcher.yaml.
@@ -138,6 +167,14 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		factory = informers.NewSharedInformerFactory(s.client, s.resyncPeriod)
 		owned = true
 	}
+	if s.resolveOwners {
+		// Listers register their informers on the factory; Start
+		// below runs them (a no-op for ones already running).
+		s.owners = &ownerResolver{pods: factory.Core().V1().Pods().Lister()}
+		if s.resolveReplicaSets {
+			s.owners.replicaSets = factory.Apps().V1().ReplicaSets().Lister()
+		}
+	}
 	eventInformer := factory.Core().V1().Events().Informer()
 
 	handler, err := eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -152,7 +189,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			if !s.HasSynced() {
 				return
 			}
-			emit(toSignal(ev))
+			emit(s.toSignal(ev))
 		},
 		UpdateFunc: func(_, newObj any) {
 			// Update fires when the k8s API bumps the Event's
@@ -168,7 +205,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			if !s.HasSynced() {
 				return
 			}
-			emit(toSignal(ev))
+			emit(s.toSignal(ev))
 		},
 		// No DeleteFunc — event deletion is not a signal we care
 		// about; the underlying incident may or may not be
@@ -225,13 +262,17 @@ func (s *Source) HasSynced() bool {
 // event. Severity is critical — the §7.7 default for k8s-event, i.e.
 // today's per-incident routing. Cluster/Zone/Fingerprint are left
 // empty for the pipeline to stamp (the source doesn't know the
-// deployment's identity).
-func toSignal(ev *corev1.Event) engine.Signal {
+// deployment's identity). ControllerRef is filled from the informer
+// caches when owner resolution is on (owner.go); it is not a
+// fingerprint input, so the fingerprint is the same either way.
+func (s *Source) toSignal(ev *corev1.Event) engine.Signal {
+	te := toTriageEvent(ev)
+	te.ControllerRef = s.owners.controllerRef(ev)
 	return engine.Signal{
 		Kind:        engine.KindK8sEvent,
 		Source:      engine.SourceSentinel,
 		Severity:    engine.SeverityCritical,
-		TriageEvent: toTriageEvent(ev),
+		TriageEvent: te,
 	}
 }
 
@@ -258,13 +299,6 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 	// InvolvedObject.UID is what we key dedup on.
 	uid := string(ev.InvolvedObject.UID)
 
-	// ControllerRef: for a Pod, the parent ReplicaSet /
-	// Deployment / StatefulSet is on OwnerReferences. Populating
-	// this requires an additional Pod GET which we don't have
-	// in-hand here. Left empty; the recipe includes RBAC for
-	// pod GET so the agent can enrich via MCP if needed.
-	controllerRef := ""
-
 	return engine.TriageEvent{
 		Key: engine.EventKey{
 			UID:    uid,
@@ -277,7 +311,7 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 		Message:       truncateMessage(ev.Message),
 		FirstSeen:     first,
 		LastSeen:      last,
-		ControllerRef: controllerRef,
+		ControllerRef: "", // needs the pod, which the Event does not carry: Source.toSignal fills it (owner.go)
 		Node:          nodeFromSource(ev),
 		Labels:        labelsFromMeta(ev.ObjectMeta),
 		Count:         int(ev.Count),

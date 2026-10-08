@@ -536,6 +536,18 @@ first external consumer deploys.
   generic BackOff handler. The byte pins in `internal/watch` that
   cover these structs gained the trailing field; see §Frozen field
   sets for the rule.
+- **2026-10-08 — `context.controller_ref` filled on k8s-event pod
+  signals (#583):** no field added, moved or retagged — an existing
+  omitempty field that the k8s-events source always left empty now
+  carries the pod's workload owner as `Kind/name` (same namespace),
+  resolved from the pod and ReplicaSet informer caches: the Deployment
+  for a ReplicaSet-owned pod when the ReplicaSet's own ownerReference
+  proves it, else the ReplicaSet; the StatefulSet, DaemonSet or Job
+  otherwise; empty when the pod is not cached or has no controller.
+  Like the expiry source's `Certificate/<name>` (#542) it names the
+  owner the incident belongs to, which may be above the immediate
+  controller. Not a fingerprint input, so no fingerprint changed; the
+  field-set ledger is unchanged.
 
 ## Evolution
 

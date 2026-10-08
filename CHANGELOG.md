@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rollout's crash-looping old and new pods are one incident with
+  `--storm=off` too (#583).** The fold from #579 found the pods'
+  Deployment in the storm topology graph, so with storm off it did
+  nothing and opened two sessions. The k8s-events source now fills
+  `context.controller_ref` on pod events from the pod and ReplicaSet
+  informers the sentinel already runs (the Deployment for a
+  ReplicaSet's pod; the StatefulSet, DaemonSet or Job otherwise), and
+  the fold uses it when there is no graph. Payloads for pod events
+  carry that `controller_ref` where it used to be empty. No new
+  permissions: it uses the existing pods and ReplicaSets list/watch
+  grants, and logs at startup if either is missing.
 - **ax sink: tasks are named from the incident, not its class (#590).**
   The task name used to hash the payload's `fingerprint`, which is the
   incident class. A later, unrelated storm of the same class in the same

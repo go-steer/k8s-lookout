@@ -736,10 +736,17 @@ ReplicaSets differ. Node, shared config and namespace are not owners,
 so two workloads failing alike on one node stay two incidents unless
 §7.5 groups them; a different failure class on the same workload stays
 its own incident; the fold runs after the storm stage, so a burst big
-enough to storm still storms. Like #220 it reads the topology graph,
-which exists only under `--storm` (`auto` resolves on wherever the
-graph grants exist); with storm off, the pair stays two incidents. The
-fingerprint recipe and the payload field sets are unchanged.
+enough to storm still storms. The owner comes from the topology graph
+when it runs (`--storm`), and otherwise from the signal itself: the
+k8s-events source fills `context.controller_ref` on pod events from the
+pod and ReplicaSet informer caches — the pod's controller, walked up to
+the ReplicaSet's Deployment, from real ownerReferences, never from pod
+names (#583). So the fold also works with `--storm=off`. Where the
+caches cannot prove the Deployment (ReplicaSet not cached, ReplicaSets
+not grantable) the ref names the ReplicaSet and pods of different
+ReplicaSets stay separate; where the pod is not cached it names nothing
+and the pair stays two incidents. The fingerprint recipe and the
+payload field sets are unchanged.
 
 ### 7.8 Untrusted input: the prompt-injection boundary
 
