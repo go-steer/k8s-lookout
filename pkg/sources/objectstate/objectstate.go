@@ -445,6 +445,17 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	}
 }
 
+// WithReplicaSetOwners lets the pod clearance judge an incident whose
+// ControllerRef names a Deployment through that Deployment's
+// ReplicaSets (PodClearance.SetReplicaSetOwners, #583). Optional and
+// not a §11 requirement of this source: the composition root probes
+// the replicasets grant and calls this only when it holds.
+func (s *Source) WithReplicaSetOwners(r ReplicaSetOwners) {
+	if r != nil {
+		s.pc.SetReplicaSetOwners(r)
+	}
+}
+
 // WithNodeFactory directs Run to take the Node informer from a
 // different factory than the namespaced ones. Call before Run; nil is
 // ignored, and unset means "the same factory as everything else",

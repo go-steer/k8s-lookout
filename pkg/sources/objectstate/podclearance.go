@@ -37,7 +37,11 @@ import (
 //     at every tick (restart-count stability, §7.4).
 //   - deleted pod, controller has a Ready replacement: cleared with
 //     resolution=recovered (owner-based — the incident is about the
-//     workload, and the workload is healthy again).
+//     workload, and the workload is healthy again). A restored
+//     incident whose ControllerRef names a Deployment, or a deleted
+//     pod whose ReplicaSet a Deployment controls, is matched through
+//     all of that Deployment's ReplicaSets (SetReplicaSetOwners) — a
+//     rollout's replacement sits under the new one.
 //   - deleted pod, controller gone too (no pods left under the
 //     owner): cleared with resolution=object_deleted — the incident
 //     closes, explicitly distinguishable from a fix (§9.3).
@@ -68,6 +72,12 @@ type PodClearance struct {
 	// time) so gone-pod incidents can be judged owner-based. TTL-
 	// swept; see tombstoneTTL.
 	tombstones map[types.UID]*podTombstone
+	// rsOwners walks a ReplicaSet up to its Deployment, so an incident
+	// restored with a Deployment ControllerRef can be judged against
+	// the pods of every ReplicaSet that Deployment controls. nil when
+	// the ReplicaSet cache is not available: those incidents then
+	// behave as they always did.
+	rsOwners ReplicaSetOwners
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
@@ -112,6 +122,36 @@ type podTombstone struct {
 // no-tombstone path (owner unknown), which still closes it. Generous
 // relative to any sane --recovery-stable-for.
 const tombstoneTTL = 2 * time.Hour
+
+// ReplicaSetOwners answers which Deployment controls a ReplicaSet, from
+// the ReplicaSet's own controller ownerReference in an informer cache
+// (NewReplicaSetOwners). PodClearance uses it to judge a gone pod
+// against its Deployment rather than its ReplicaSet (#583): a deleted
+// pod's ReplicaSet is walked up, and a restored incident's ControllerRef
+// already names the Deployment (the k8s-events source reports it).
+// Live pods are indexed by their direct controller, the ReplicaSet.
+type ReplicaSetOwners interface {
+	// HasSynced reports whether the cache finished its initial list;
+	// until then a Deployment-owned incident is not judged.
+	HasSynced() bool
+	// DeploymentOf returns the Deployment controlling ReplicaSet
+	// namespace/name, ok=false when it is not cached or has none.
+	DeploymentOf(namespace, name string) (string, bool)
+	// CurrentReplicaSet returns the Deployment's current ReplicaSet:
+	// the one it controls with the highest
+	// deployment.kubernetes.io/revision annotation. ok=false when that
+	// cannot be proven — no ReplicaSet, any of them without a
+	// parseable revision, or a tie.
+	CurrentReplicaSet(namespace, deployment string) (string, bool)
+}
+
+// SetReplicaSetOwners installs the ReplicaSet → Deployment lookup.
+// Optional; call before the tracker starts judging.
+func (o *PodClearance) SetReplicaSetOwners(r ReplicaSetOwners) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.rsOwners = r
+}
 
 // NewPodClearance returns an empty clearance state machine. Callers
 // wire an informer to Upsert/Delete and hand its HasSynced to
@@ -265,21 +305,52 @@ func (o *PodClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 	// across a sentinel restart.
 	var owner *ownerKey
 	deletedAt := time.Time{}
+	fromTombstone := false
 	if ts, ok := o.tombstones[uid]; ok {
 		owner = ts.owner
 		deletedAt = ts.deletedAt
+		fromTombstone = true
 	} else if k, n, ok := splitControllerRef(inc.Ref.ControllerRef); ok {
 		owner = &ownerKey{namespace: inc.Ref.Namespace, kind: k, name: n}
 	}
 
 	if owner != nil {
-		if set, ok := o.byOwner[*owner]; ok && len(set) > 0 {
-			// Replacement pods exist under the same controller: the
-			// incident clears only if one is Ready — a crash-looping
-			// replacement IS the symptom persisting.
+		// members decides "does the workload still have pods" (else
+		// object_deleted); vouchers are the pods whose Ready state may
+		// clear the incident. For a direct controller they are the
+		// same set.
+		members := o.byOwner[*owner]
+		vouchers := members
+		if o.rsOwners != nil && (owner.kind == "Deployment" || (fromTombstone && owner.kind == "ReplicaSet")) {
+			// The workload is the Deployment (#583), and its live
+			// pods are indexed under its ReplicaSets, old and new:
+			// a rollout swaps the ReplicaSet, so the replacement for
+			// a deleted pod sits under a different one. Without the
+			// cache synced, "no pods" would read as "workload gone".
+			if !o.rsOwners.HasSynced() {
+				return engine.Clearance{}, false
+			}
+			if dep := o.deploymentOf(owner, inc); dep != "" {
+				// Every ReplicaSet's pods count as "a replacement
+				// exists", but only the deleted pod's own ReplicaSet
+				// (unknown for a restored Deployment ref) and the
+				// Deployment's CURRENT ReplicaSet may vouch Ready. A
+				// stuck rollout keeps the old ReplicaSet's pods Ready
+				// beside a crash-looping new one; letting those vouch
+				// would clear the new pod's incident at once.
+				members = o.podsUnderDeployment(owner.namespace, dep, members)
+				if cur, ok := o.rsOwners.CurrentReplicaSet(owner.namespace, dep); ok {
+					vouchers = union(vouchers, o.byOwner[ownerKey{namespace: owner.namespace, kind: "ReplicaSet", name: cur}])
+				}
+			}
+		}
+		if len(members) > 0 {
+			// Replacement pods exist under the same workload: the
+			// incident clears only if one that may vouch is Ready — a
+			// crash-looping replacement IS the symptom persisting.
 			best := time.Time{}
 			anyReady := false
-			for sibUID := range set {
+			for sibUID := range vouchers {
 				sib := o.pods[sibUID]
 				if sib == nil || !sib.ready {
 					continue
@@ -327,6 +398,61 @@ func (o *PodClearance) Clearance(inc engine.Incident) (engine.Clearance, bool) {
 		StableSince: deletedAt,
 		Resolution:  engine.ResolutionObjectDeleted,
 	}, true
+}
+
+// deploymentOf names the Deployment an owner's incident belongs to:
+// the owner itself when it is one (a restored Deployment ref); for a
+// deleted pod's ReplicaSet, the ReplicaSet's own controller from the
+// cache, else the Deployment the incident's ControllerRef recorded
+// (resolved from the same ownerReferences when the event arrived —
+// the old ReplicaSet may be gone by now). "" when neither proves one:
+// the ReplicaSet alone is judged, as before. Called under lock.
+func (o *PodClearance) deploymentOf(owner *ownerKey, inc engine.Incident) string {
+	if owner.kind == "Deployment" {
+		return owner.name
+	}
+	if dep, ok := o.rsOwners.DeploymentOf(owner.namespace, owner.name); ok {
+		return dep
+	}
+	if k, n, ok := splitControllerRef(inc.Ref.ControllerRef); ok && k == "Deployment" && inc.Ref.Namespace == owner.namespace {
+		return n
+	}
+	return ""
+}
+
+// union returns a ∪ b as a fresh set.
+func union(a, b map[types.UID]struct{}) map[types.UID]struct{} {
+	out := make(map[types.UID]struct{}, len(a)+len(b))
+	for uid := range a {
+		out[uid] = struct{}{}
+	}
+	for uid := range b {
+		out[uid] = struct{}{}
+	}
+	return out
+}
+
+// podsUnderDeployment collects the live pods of every ReplicaSet in
+// namespace whose controller is Deployment name, by the ReplicaSet's
+// own ownerReference — never by name prefix — on top of base (the
+// owner's own pods). Called under lock.
+func (o *PodClearance) podsUnderDeployment(namespace, name string, base map[types.UID]struct{}) map[types.UID]struct{} {
+	out := make(map[types.UID]struct{}, len(base))
+	for uid := range base {
+		out[uid] = struct{}{}
+	}
+	for k, set := range o.byOwner {
+		if k.namespace != namespace || k.kind != "ReplicaSet" {
+			continue
+		}
+		if dep, ok := o.rsOwners.DeploymentOf(namespace, k.name); !ok || dep != name {
+			continue
+		}
+		for uid := range set {
+			out[uid] = struct{}{}
+		}
+	}
+	return out
 }
 
 // podReadiness returns whether the PodReady condition is True and its

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -106,33 +107,55 @@ func declaredAncestorKeys(sig engine.Signal) []string {
 	return keys
 }
 
+// workloadOwnerKey is the sibling-fold key a signal declares itself:
+// its ControllerRef, when that names a workload owner kind
+// (siblingOwnerKinds) — the k8s-events source fills it for pod events
+// from the informer caches (issue #583), Deployment over ReplicaSet.
+// It is what makes the fold work without the topology graph
+// (--storm=off). A ControllerRef of any other kind (the expiry
+// source's Certificate) is not a workload and declares nothing here.
+func workloadOwnerKey(sig engine.Signal) (string, bool) {
+	kind, name, ok := strings.Cut(sig.ControllerRef, "/")
+	if !ok || !siblingOwnerKinds[kind] || name == "" || sig.Namespace == "" {
+		return "", false
+	}
+	return engine.Ancestor{Kind: kind, Namespace: sig.Namespace, Name: name}.Key(), true
+}
+
 // ancestorKeysFor resolves sig's object to its reattachment-eligible
 // blast-radius keys, best-priority first: signal-declared owners
-// (declaredAncestorKinds), then the resolver's own order. Empty when
-// the resolver is absent (the stage is inert without it — see the
-// wiring), or when the signal declares nothing, the topology index
-// has not synced, and every candidate was a namespace-class key.
+// (declaredAncestorKinds), then the resolver's own order, then the
+// signal's workload owner (workloadOwnerKey) when the resolver did
+// not already name it — last, so it never outranks a graph key; it is
+// the fallback for a graph that is absent (--storm=off) or has not
+// indexed the object. Empty when the signal declares nothing and the
+// resolver is absent, has not synced, or answered only
+// namespace-class keys.
 func (d *dispatcher) ancestorKeysFor(sig engine.Signal) []string {
-	if d.resolver == nil {
-		return nil
-	}
 	keys := declaredAncestorKeys(sig)
-	cands := d.resolver.Ancestors(engine.ObjectRef{
-		Kind:      sig.KindOfObject,
-		Namespace: sig.Namespace,
-		Name:      sig.Name,
-	})
-	for _, a := range cands {
-		if reattachAncestorKinds[a.Kind] {
-			keys = append(keys, a.Key())
+	if d.resolver != nil {
+		cands := d.resolver.Ancestors(engine.ObjectRef{
+			Kind:      sig.KindOfObject,
+			Namespace: sig.Namespace,
+			Name:      sig.Name,
+		})
+		for _, a := range cands {
+			if reattachAncestorKinds[a.Kind] {
+				keys = append(keys, a.Key())
+			}
 		}
+	}
+	if k, ok := workloadOwnerKey(sig); ok && !slices.Contains(keys, k) {
+		keys = append(keys, k)
 	}
 	return keys
 }
 
 // noteAncestors indexes a freshly bound incident by its blast-radius
 // keys so a later watchboard warning under the same ancestor can find
-// its session. Nil-safe and inert without a resolver.
+// its session, and a later same-class incident on a sibling pod can
+// fold into it (foldSibling). Without a resolver it indexes only what
+// the signal itself declares (its Certificate or workload owner).
 func (d *dispatcher) noteAncestors(key engine.EventKey, sig engine.Signal) {
 	if keys := d.ancestorKeysFor(sig); len(keys) > 0 {
 		d.dedup.NoteAncestors(key, keys)
@@ -171,23 +194,27 @@ var siblingOwnerKinds = map[string]bool{
 // class, not the pod.
 //
 // Runs AFTER the storm stage, so a burst big enough to storm still
-// storms exactly as before. Inert without a resolver (the topology
-// graph is built only under --storm, like #220's reattachment). A
-// failed inject degrades to the incident's own session, never to
-// silence.
+// storms exactly as before. The owner comes from the topology graph
+// when it runs (--storm) and from the signal's own ControllerRef
+// otherwise (workloadOwnerKey, issue #583) — so with --storm=off it
+// works wherever the source could prove the owner, and stays inert
+// for a signal that names none. A failed inject degrades to the
+// incident's own session, never to silence.
 func (d *dispatcher) foldSibling(ctx context.Context, sig engine.Signal, key engine.EventKey, count int) bool {
-	if d.resolver == nil {
-		return false
-	}
 	var cands []string
-	for _, a := range d.resolver.Ancestors(engine.ObjectRef{
-		Kind:      sig.KindOfObject,
-		Namespace: sig.Namespace,
-		Name:      sig.Name,
-	}) {
-		if siblingOwnerKinds[a.Kind] {
-			cands = append(cands, a.Key())
+	if d.resolver != nil {
+		for _, a := range d.resolver.Ancestors(engine.ObjectRef{
+			Kind:      sig.KindOfObject,
+			Namespace: sig.Namespace,
+			Name:      sig.Name,
+		}) {
+			if siblingOwnerKinds[a.Kind] {
+				cands = append(cands, a.Key())
+			}
 		}
+	}
+	if k, ok := workloadOwnerKey(sig); ok && !slices.Contains(cands, k) {
+		cands = append(cands, k)
 	}
 	sid, matched, ok := d.dedup.SessionForSibling(key, sig.Kind, cands)
 	if !ok {

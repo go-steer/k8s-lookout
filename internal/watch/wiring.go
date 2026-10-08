@@ -1101,6 +1101,11 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("watch: --exclude-namespace is scoping the watch — the namespaced informers list and watch with field selector %q, so excluded namespaces never enter the cache; nodes are cluster-scoped and unaffected", namespaceExclusionSelector(splitCSV(f.excludeNamespaces)))
 	}
 	attachSharedFactories(bs, factories)
+	if bs.k8sevents != nil {
+		if err := enableEventOwners(ctx, bs.k8sevents, reviewer); err != nil {
+			return err
+		}
+	}
 	if bs.topoDrift != nil {
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
 		if bs.rollout != nil {
@@ -1464,6 +1469,88 @@ func attachSharedFactories(bs *builtSources, factories sharedFactories) {
 		bs.compClass.WithFactory(ns)
 		bs.compClass.WithNodeFactory(factories.Cluster)
 	}
+}
+
+// eventOwnerAccess is what the k8s-events source's owner resolution
+// reads (issue #583): the pod cache for the pod's controller, and the
+// ReplicaSet cache to walk a ReplicaSet up to its Deployment. Both are
+// in the shipped ClusterRole already, for object-state, rollout, the
+// storm graph and the §7.4 pod observer.
+var (
+	eventOwnerPodAccess = []sources.Requirement{
+		{Resource: "pods", Verb: "list"},
+		{Resource: "pods", Verb: "watch"},
+	}
+	eventOwnerRSAccess = []sources.Requirement{
+		{Group: "apps", Resource: "replicasets", Verb: "list"},
+		{Group: "apps", Resource: "replicasets", Verb: "watch"},
+	}
+)
+
+// enableEventOwners turns on the k8s-events source's owner resolution
+// (ControllerRef on pod events, issue #583) as far as the grants
+// allow. Probed here rather than declared as the source's §11
+// requirements because the owner is context, not the signal: a denied
+// grant costs the owner — and with it the --storm=off sibling fold —
+// never the source. Probing first also means no informer is started
+// on a resource that would answer 403 forever.
+func enableEventOwners(ctx context.Context, src *k8sevents.Source, reviewer sources.AccessReviewer) error {
+	allowed := func(reqs []sources.Requirement) (bool, string, error) {
+		for _, req := range sources.ExpandAll(reviewer, reqs) {
+			d, err := reviewer.Allowed(ctx, req)
+			if err != nil {
+				return false, "", fmt.Errorf("k8s-events: owner-resolution capability probe for %q failed: %w", req, err)
+			}
+			if !d.Allowed {
+				return false, fmt.Sprintf("%q denied (%s)", req, sources.DenialDetail(d)), nil
+			}
+		}
+		return true, "", nil
+	}
+	pods, why, err := allowed(eventOwnerPodAccess)
+	if err != nil {
+		return err
+	}
+	if !pods {
+		log.Printf("k8s-events: owner resolution DISABLED — %s; pod events carry no controller_ref, so with --storm=off a rollout's crash-looping old and new pods stay two incidents (grant pods list/watch, see deploy/12-clusterrole-watcher.yaml)", why)
+		return nil
+	}
+	rs, why, err := allowed(eventOwnerRSAccess)
+	if err != nil {
+		return err
+	}
+	src.WithOwnerResolution(rs)
+	if !rs {
+		log.Printf("k8s-events: owner resolution PARTIAL — %s; a ReplicaSet pod's controller_ref names its ReplicaSet, not its Deployment, so a rollout's old and new pods are not folded without --storm", why)
+		return nil
+	}
+	log.Printf("k8s-events: owner resolution enabled — pod events carry controller_ref from the pod/ReplicaSet caches (Deployment over ReplicaSet), so same-workload incidents fold even with --storm=off (#583)")
+	return nil
+}
+
+// recoveryReplicaSetOwners is the pod clearance's ReplicaSet →
+// Deployment lookup (#583): a gone pod is judged against its
+// Deployment — a rollout puts its replacement under a new ReplicaSet —
+// whether the pod was deleted while the sentinel ran (its ReplicaSet
+// walked up) or its incident was restored with the Deployment
+// ControllerRef the k8s-events source resolved, while live pods are
+// indexed by their ReplicaSet. Rides the shared factory's ReplicaSet informer
+// (rollout, topology-drift, the storm graph and k8s-events owner
+// resolution use the same one). Nil, with one line, when replicasets
+// list/watch is denied: those incidents are judged as before.
+func recoveryReplicaSetOwners(ctx context.Context, f *flags, client kubernetes.Interface, factory informers.SharedInformerFactory) (objectstate.ReplicaSetOwners, error) {
+	reviewer := newAccessReviewer(f, client)
+	for _, req := range sources.ExpandAll(reviewer, eventOwnerRSAccess) {
+		d, err := reviewer.Allowed(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+		}
+		if !d.Allowed {
+			log.Printf("recovery: %q denied (%s) — a gone pod is judged by its own ReplicaSet only, so after a rollout it reads as object_deleted even when a Ready replacement exists under the new ReplicaSet", req, sources.DenialDetail(d))
+			return nil, nil
+		}
+	}
+	return objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets()), nil
 }
 
 // recoveryTickInterval is how often the recovery tracker re-evaluates
@@ -1926,6 +2013,11 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		log.Printf("recovery: compute-class clearance observer registered (§7.7.4 rank episode resolved / class gone → cleared)")
 	}
 	if bs.objState != nil {
+		rsOwners, err := recoveryReplicaSetOwners(ctx, f, client, factory)
+		if err != nil {
+			return err
+		}
+		bs.objState.WithReplicaSetOwners(rsOwners)
 		observers = append(observers, bs.objState.ClearanceObserver())
 		log.Printf("recovery: clearance observer backed by the object-state source's pod + node informers")
 	} else {
@@ -1952,6 +2044,13 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		}
 		if podRBAC {
 			obs := newPodClearanceObserver(client, factory)
+			rsOwners, err := recoveryReplicaSetOwners(ctx, f, client, factory)
+			if err != nil {
+				return err
+			}
+			if rsOwners != nil {
+				obs.state.SetReplicaSetOwners(rsOwners)
+			}
 			if err := obs.Start(ctx); err != nil {
 				return err
 			}

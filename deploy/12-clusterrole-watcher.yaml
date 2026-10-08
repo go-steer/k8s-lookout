@@ -33,6 +33,10 @@
 #                       get a kind=resolved inject. Without this
 #                       grant the sentinel still runs, but recovery
 #                       tracking is disabled (logged loudly).
+#                       The same pod cache (with the replicasets
+#                       grant below) gives k8s-events pod signals
+#                       their context.controller_ref (#583); without
+#                       it they carry none, logged at startup.
 #   - get pods       — status enrichment for inject payloads (owner
 #                       ref, container statuses)
 #   - list/watch nodes, deployments, endpointslices,
@@ -75,11 +79,18 @@
 #                       blast-radius owner chain to the Deployment,
 #                       the ancestor operators recognize. The graph's
 #                       pods/nodes informers ride the grants above
-#                       (one shared informer set). Harmless when
-#                       --storm=off; --storm=auto (the default)
-#                       resolves ON when this grant is present and
-#                       off (loudly) when it is not; --storm=on makes
-#                       the gap a fatal startup error instead.
+#                       (one shared informer set). The k8s-events
+#                       source reads the same cache to name a pod's
+#                       Deployment in controller_ref, which keeps a
+#                       rollout's pods one incident even with
+#                       --storm=off (#583); without the grant it names
+#                       the ReplicaSet. §7.4 recovery reads it too, to
+#                       match a restored incident's Deployment to the
+#                       pods of its newer ReplicaSets.
+#                       --storm=auto (the default) resolves ON when
+#                       this grant is present and off (loudly) when
+#                       it is not; --storm=on makes the gap a fatal
+#                       startup error instead.
 #   - list/watch services, ingresses, networkpolicies (+ the
 #     endpointslices grant below) — graph history (§6.6, #507): with
 #                       --store the topology graph also records the

@@ -117,6 +117,10 @@ func TestDispatch_IncidentPayloadMessageMasked(t *testing.T) {
 		requireMaskedForm(t, tc.planted, tc.masked)
 		sig := crashLoopSignal()
 		sig.Key.UID = "uid-secret-" + tc.name // fresh incident per shape
+		// …on its own workload: same-owner same-class incidents fold
+		// into the first one's session (§7.7, #583), which would put a
+		// followup, not this shape's open, on the wire.
+		sig.ControllerRef = "ReplicaSet/checkout-svc-" + tc.name
 		sig.Message = tc.planted
 		d.DispatchSignal(ctx, sig)
 		if len(*injects) != i+1 {

@@ -138,10 +138,12 @@ func TestSiblingFold_RolloutAcrossReplicaSetsIsOneIncident(t *testing.T) {
 	}
 }
 
-// TestSiblingFold_StormOffKeepsTwoIncidents: the fold reads the owner
-// chain from the topology graph, which is built only under --storm
-// (the #220 precondition — k8s-events signals carry no owner). With
-// storm off, the pair stays two incidents, as before.
+// TestSiblingFold_StormOffKeepsTwoIncidents: with storm off there is
+// no topology graph, so the only owner the fold can key on is the
+// signal's own ControllerRef (#583). Signals that carry none — owner
+// resolution denied its pods grant, or the pod was not in the cache —
+// stay two incidents, as before. The owner-carrying case is
+// rollout_fold_stormoff_dispatch_test.go.
 func TestSiblingFold_StormOffKeepsTwoIncidents(t *testing.T) {
 	t.Parallel()
 	base, injects := newRoutingFakeDaemon(t)
@@ -152,7 +154,7 @@ func TestSiblingFold_StormOffKeepsTwoIncidents(t *testing.T) {
 	d.DispatchSignal(ctx, crashLoopPod("pod-b", podNew, 20))
 
 	if got := sessionCreates(d); got != 2 {
-		t.Errorf("session creates = %v, want 2 (no topology graph, nothing to fold on)", got)
+		t.Errorf("session creates = %v, want 2 (no topology graph and no ControllerRef, nothing to fold on)", got)
 	}
 	if n := len(familyMembers(t, *injects)); n != 0 {
 		t.Errorf("family.member injects = %d, want 0", n)

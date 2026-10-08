@@ -736,10 +736,31 @@ ReplicaSets differ. Node, shared config and namespace are not owners,
 so two workloads failing alike on one node stay two incidents unless
 §7.5 groups them; a different failure class on the same workload stays
 its own incident; the fold runs after the storm stage, so a burst big
-enough to storm still storms. Like #220 it reads the topology graph,
-which exists only under `--storm` (`auto` resolves on wherever the
-graph grants exist); with storm off, the pair stays two incidents. The
-fingerprint recipe and the payload field sets are unchanged.
+enough to storm still storms. The owner comes from the topology graph
+when it runs (`--storm`), and otherwise from the signal itself: the
+k8s-events source fills `context.controller_ref` on pod events from the
+pod and ReplicaSet informer caches — the pod's controller, walked up to
+the ReplicaSet's Deployment, from real ownerReferences, never from pod
+names (#583). So the fold also works with `--storm=off`. Where the
+caches cannot prove the Deployment (ReplicaSet not cached, ReplicaSets
+not grantable) the ref names the ReplicaSet and pods of different
+ReplicaSets stay separate; where the pod is not cached it names nothing
+and the pair stays two incidents. §7.4 pod clearance judges a gone
+pod by the same owner: a pod deleted while the sentinel runs (its
+ReplicaSet walked to the Deployment through the ReplicaSet cache, or
+the incident's Deployment ref when that ReplicaSet is gone) and an
+incident restored with a Deployment ref are both matched against all
+of the Deployment's ReplicaSets for "the workload still has pods", so
+`object_deleted` means the Deployment has no pods. Only the deleted
+pod's own ReplicaSet and the Deployment's current one (highest
+`deployment.kubernetes.io/revision`; unknown if any is missing,
+unparseable or tied) may vouch Ready — a restored Deployment ref, whose
+original ReplicaSet is unknown, only the current one — so a rollout to
+a healthy new ReplicaSet recovers, while a stuck rollout's Ready old
+pods never clear the new pods' incident. A restored ReplicaSet ref keeps its
+direct-controller meaning; without the ReplicaSet cache, clearance
+behaves as before. The fingerprint recipe and the payload
+field sets are unchanged.
 
 ### 7.8 Untrusted input: the prompt-injection boundary
 

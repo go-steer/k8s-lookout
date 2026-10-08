@@ -30,6 +30,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--sink-url` (#580).** The same masking now applies to the webhook and ax
   startup lines and to the flag errors that echo `--sink-url` or
   `--ax-router-url`.
+- **A rollout's crash-looping old and new pods are one incident with
+  `--storm=off` too (#583).** The fold from #579 found the pods'
+  Deployment in the storm topology graph, so with storm off it did
+  nothing and opened two sessions. The k8s-events source now fills
+  `context.controller_ref` on pod events from the pod and ReplicaSet
+  informers the sentinel already runs (the Deployment for a
+  ReplicaSet's pod; the StatefulSet, DaemonSet or Job otherwise), and
+  the fold uses it when there is no graph. Payloads for pod events
+  carry that `controller_ref` where it used to be empty.
+- **A crash-looping pod replaced by a rollout now resolves as
+  recovered, not `object_deleted` (#583).** When a pod's incident was
+  judged after the pod was gone, recovery only looked for a Ready
+  replacement under the pod's own ReplicaSet, and a rollout puts the
+  replacement under a new one. It now looks across all of the
+  Deployment's ReplicaSets, both for a pod deleted while the sentinel
+  runs and for an incident restored after a restart. Any of them shows
+  the workload still has pods, so `object_deleted` now means the
+  Deployment has no pods left. Only a Ready pod in the pod's own
+  ReplicaSet or the Deployment's current one (highest revision) counts
+  as recovered, so a stuck rollout whose old pods stay Ready does not
+  clear the new pods' crash loop. An incident restored after a restart
+  with a StatefulSet or DaemonSet `controller_ref` is now judged by any
+  Ready pod of that workload, as a pod deleted while the sentinel runs
+  already was. No new permissions: both
+  fixes use the existing pods and ReplicaSets list/watch grants, and
+  log at startup if either is missing.
 - **ax sink: tasks are named from the incident, not its class (#590).**
   The task name used to hash the payload's `fingerprint`, which is the
   incident class. A later, unrelated storm of the same class in the same
