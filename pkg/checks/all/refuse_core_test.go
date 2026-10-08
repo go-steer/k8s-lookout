@@ -107,6 +107,15 @@ var drainFatal = map[string]string{
 	"statefulsets.apps":           "resolves the singleton-controller blocker",
 }
 
+// refusedContext pins, for wrapped refusals, the caller's context that
+// must survive ahead of the shared wording on stderr, so a diagnostic
+// still says which read inside the command was refused.
+var refusedContext = map[string]string{
+	"triage logs --workload=Deployment/prod/api|pods":   "lookout triage logs: workload Deployment/prod/api: listing pods: forbidden: list pods — ",
+	"stab drain -A|pods":                                "lookout stab drain: listing pods: forbidden: list pods — ",
+	"audit netpol -A|networkpolicies.networking.k8s.io": "lookout audit netpol: listing networkpolicies: forbidden: list networkpolicies.networking.k8s.io — ",
+}
+
 // refusedIrrelevant is, per guarded invocation, the core reads it asks
 // for but whose absence changes nothing it reports, and why.
 var refusedIrrelevant = map[string]map[string]string{
@@ -178,6 +187,12 @@ func TestEveryReadPathCommandDegradesOrFailsWordedUnderARefusedCoreRead(t *testi
 					if !worded.MatchString(res.Stderr) {
 						t.Errorf("the failure is not in the shared refusal wording:\n%s", res.Stderr)
 					}
+					if want, ok := refusedContext[key+"|"+target]; ok {
+						used["context|"+key+"|"+target] = true
+						if !strings.Contains(res.Stderr, want) {
+							t.Errorf("the caller's context did not survive the rewording\n got: %s\nwant: %s", res.Stderr, want)
+						}
+					}
 					return
 				}
 				if res.Code != emit.ExitData {
@@ -201,6 +216,11 @@ func TestEveryReadPathCommandDegradesOrFailsWordedUnderARefusedCoreRead(t *testi
 		}
 	}
 	// The tables stay honest: an entry no run reaches is stale.
+	for key := range refusedContext {
+		if !used["context|"+key] {
+			t.Errorf("stale refusedContext entry %q: no fatal run reaches it", key)
+		}
+	}
 	for _, table := range []map[string]map[string]string{refusedFatal, refusedIrrelevant} {
 		for key, byTarget := range table {
 			for target := range byTarget {

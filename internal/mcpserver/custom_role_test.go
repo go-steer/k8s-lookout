@@ -80,7 +80,9 @@ func TestCallTool_CustomRoleRefusalMatchesCLI(t *testing.T) {
 	})
 	t.Run("fails worded", func(t *testing.T) {
 		cli := checktest.Run(t, drainCmd, "-A")
-		if cli.Code != 1 || !strings.Contains(cli.Stderr, refusal+" — the command cannot answer without it") {
+		// The caller's context ("listing pods") stays ahead of the
+		// shared wording.
+		if cli.Code != 1 || !strings.Contains(cli.Stderr, "lookout stab drain: listing pods: "+refusal+" — the command cannot answer without it") {
 			t.Fatalf("CLI: exit %d, want 1 in the shared wording\n%s", cli.Code, cli.Stderr)
 		}
 		res, err := callTool(t, session, "k8s_drain_blockers", map[string]any{"all_namespaces": true})

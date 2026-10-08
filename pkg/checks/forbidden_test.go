@@ -121,3 +121,32 @@ func TestShippedRoleGrantsMatchManifest(t *testing.T) {
 		}
 	}
 }
+
+// TestWordRefusalKeepsTheCallersContext: rewording a wrapped Forbidden
+// keeps the wrapper's text ahead of the shared wording, so the
+// diagnostic still says which read was refused, and the result is
+// still a *RefusalError wrapping the API error (#584).
+func TestWordRefusalKeepsTheCallersContext(t *testing.T) {
+	gr := schema.GroupResource{Resource: "pods"}
+	api := apierrors.NewForbidden(gr, "", errors.New(`User "u" cannot list resource "pods" in API group ""`))
+	tail := checks.Refused("list", "", "pods").String() + " — the command cannot answer without it"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"wrapped", fmt.Errorf("workload Deployment/prod/api: listing pods: %w", api), "workload Deployment/prod/api: listing pods: " + tail},
+		{"bare", api, tail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checks.WordRefusal(tc.err)
+			if got.Error() != tc.want {
+				t.Errorf("Error()\n got: %s\nwant: %s", got, tc.want)
+			}
+			var re *checks.RefusalError
+			if !errors.As(got, &re) || !apierrors.IsForbidden(got) {
+				t.Errorf("lost the RefusalError or the API error: %#v", got)
+			}
+		})
+	}
+}

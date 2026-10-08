@@ -234,13 +234,22 @@ type RefusalError struct {
 	// (nil when a List pass recorded the refusal earlier and the
 	// command only now finds it needed the resource).
 	Err error
+	// Context is the caller's wrapping around the API server's error
+	// ("workload X: listing pods"), kept ahead of the shared wording so
+	// the diagnostic still says which read inside the command was
+	// refused. Empty when there was none.
+	Context string
 }
 
 func (e *RefusalError) Error() string {
-	if e.What == "" {
-		return e.Refusal.String()
+	msg := e.Refusal.String()
+	if e.What != "" {
+		msg += " — " + e.What
 	}
-	return e.Refusal.String() + " — " + e.What
+	if e.Context != "" {
+		msg = e.Context + ": " + msg
+	}
+	return msg
 }
 
 func (e *RefusalError) Unwrap() error { return e.Err }
@@ -267,7 +276,27 @@ func WordRefusal(err error) error {
 	if !ok {
 		return err
 	}
-	return &RefusalError{Refusal: r, What: cannotAnswer, Err: err}
+	return &RefusalError{Refusal: r, What: cannotAnswer, Err: err, Context: wrapContext(err)}
+}
+
+// wrapContext is the text err's wrappers put ahead of the API server's
+// own message — "workload X: listing pods" for
+// fmt.Errorf("workload X: listing pods: %w", apiErr) — or "" when the
+// API error is unwrapped or its message is not the tail of err's.
+func wrapContext(err error) string {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return ""
+	}
+	inner, ok := status.(error)
+	if !ok {
+		return ""
+	}
+	outer, tail := err.Error(), inner.Error()
+	if outer == tail || !strings.HasSuffix(outer, tail) {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSuffix(outer, tail), ": ")
 }
 
 // isRead reports whether verb is one of the read verbs `view` grants.

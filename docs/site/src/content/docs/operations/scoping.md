@@ -309,7 +309,7 @@ on. Those still exit 1, but the diagnostic on stderr (and the MCP
 tool error) is the same refusal line, ending in what was lost:
 
 ```
-lookout stab drain: forbidden: list pods — namespaced, this identity lacks it; grant list on pods (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — the command cannot answer without it
+lookout stab drain: listing pods: forbidden: list pods — namespaced, this identity lacks it; grant list on pods (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — the command cannot answer without it
 ```
 
 | Command | Exits 1 when it is refused | Everything else it reads |
