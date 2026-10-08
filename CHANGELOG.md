@@ -35,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   location is known: the agent in each task needs both to address the
   cluster, and without them it guessed project IDs in the #569 test
   run.
+- **A rollout of a crash-looping Deployment no longer opens two
+  incidents.** When the old ReplicaSet's pod was still backing off and
+  the new one's started too, `lookout watch` opened a session for each
+  pod, though it is one fault on one Deployment. A new incident of the
+  same kind and reason class as a live one on the same workload
+  (Deployment, StatefulSet, DaemonSet, Job, CronJob, or ReplicaSet) now
+  goes into the existing session as a `family.member` followup naming
+  the shared owner. Different workloads failing the same way stay
+  separate unless storm correlation groups them, and a burst of three
+  or more still forms a storm. Needs storm correlation (`--storm`,
+  `auto` by default), which supplies the owner chain. The fingerprint
+  and every payload field are unchanged.
 
 ## [0.33.0] - 2026-10-07
 

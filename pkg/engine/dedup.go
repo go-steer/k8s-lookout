@@ -658,6 +658,57 @@ func (c *DedupCache) SessionForAncestors(self EventKey, candidates []string, fam
 	return "", "", false
 }
 
+// SessionForSibling answers the sibling-fold question (DESIGN.md §7.7
+// amendment 2026-10-08): is a LIVE incident of the same class — same
+// signal kind, same canonical reason — already bound to a session of
+// its own under one of these workload-owner keys? It is how a crash
+// loop seen on the old ReplicaSet's pod and again on the new one's
+// during a rollout stays ONE incident: the two pods have different
+// UIDs (two dedup keys) but the same Deployment ancestor.
+//
+// candidates are Ancestor.Key() values in priority order; the caller
+// restricts them to the owner chain, so a shared Node, ConfigMap or
+// namespace never folds two workloads together. Unlike
+// SessionForAncestors there is no per-family budget: each sibling key
+// folds at most once (the caller binds it to the returned session, so
+// its later events are plain duplicates), and the FollowupSources
+// budget stays untouched for the warnings §7.7 reattaches.
+//
+// A target must be within the dedup window (LastSeen), bound, and not
+// storm-claimed — the storm stage runs first and owns aggregate
+// grouping (§7.5). Ties within one candidate resolve to the most
+// recently active incident, then by UID.
+func (c *DedupCache) SessionForSibling(self EventKey, kind string, candidates []string) (sessionID, matched string, ok bool) {
+	if len(candidates) == 0 {
+		return "", "", false
+	}
+	self.Reason = CanonicalReason(self.Reason)
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, cand := range candidates {
+		var bestKey EventKey
+		var best *dedupEntry
+		for k, entry := range c.entries {
+			if k == self || k.Reason != self.Reason || entry.SourceKind != kind ||
+				entry.SessionID == "" || entry.Storm != "" || now.Sub(entry.LastSeen) > c.window {
+				continue
+			}
+			if !slices.Contains(entry.AncestorKeys, cand) {
+				continue
+			}
+			if best == nil || entry.LastSeen.After(best.LastSeen) ||
+				(entry.LastSeen.Equal(best.LastSeen) && k.UID < bestKey.UID) {
+				bestKey, best = k, entry
+			}
+		}
+		if best != nil {
+			return best.SessionID, cand, true
+		}
+	}
+	return "", "", false
+}
+
 // CrossSourceJoin reports whether a duplicate signal of the given
 // kind is a cross-SOURCE join of the current window entry — a signal
 // from a different source family than the one that opened the

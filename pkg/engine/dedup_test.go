@@ -855,3 +855,44 @@ func TestDedup_Restore_CorruptFileStartsFresh(t *testing.T) {
 		t.Errorf("restore after repair = (%q, %v), want (sess-repaired, true)", sid, ok)
 	}
 }
+
+// TestSessionForSibling pins the sibling-fold lookup (§7.7 amendment
+// 2026-10-08): a same-kind, same-class incident bound under a shared
+// owner key is found; a different class, a different kind, an
+// unshared key, an expired window and a storm-claimed target are not.
+func TestSessionForSibling(t *testing.T) {
+	t.Parallel()
+	c := newTestDedup(t, 5*time.Minute, "")
+	now := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	deploy := Ancestor{Kind: "Deployment", Namespace: "shop", Name: "checkout"}.Key()
+	target := EventKey{UID: "pod-a", Reason: "BackOff"}
+	c.Observe(target, now)
+	c.NoteIncidentKind(target, KindK8sEvent)
+	c.BindSession(target, "sess-a")
+	c.NoteAncestors(target, []string{deploy})
+	self := EventKey{UID: "pod-b", Reason: "BackOff"}
+	c.Observe(self, now)
+
+	if sid, matched, ok := c.SessionForSibling(self, KindK8sEvent, []string{deploy}); !ok || sid != "sess-a" || matched != deploy {
+		t.Errorf("same class, shared Deployment = (%q, %q, %v), want (sess-a, %s, true)", sid, matched, ok, deploy)
+	}
+	if _, _, ok := c.SessionForSibling(EventKey{UID: "pod-b", Reason: "OOMKilling"}, KindK8sEvent, []string{deploy}); ok {
+		t.Error("a different reason class must never fold")
+	}
+	if _, _, ok := c.SessionForSibling(self, "objectstate.restart_burst", []string{deploy}); ok {
+		t.Error("a different signal kind must never fold")
+	}
+	if _, _, ok := c.SessionForSibling(self, KindK8sEvent, []string{"Deployment/shop/other"}); ok {
+		t.Error("an unshared owner key must never fold")
+	}
+	now = now.Add(6 * time.Minute)
+	if _, _, ok := c.SessionForSibling(self, KindK8sEvent, []string{deploy}); ok {
+		t.Error("a target outside the dedup window is not live and must not absorb a new incident")
+	}
+	now = now.Add(-6 * time.Minute)
+	c.AttachToStorm(target, "storm-sess", "fp", IncidentRef{})
+	if _, _, ok := c.SessionForSibling(self, KindK8sEvent, []string{deploy}); ok {
+		t.Error("a storm-claimed incident is never a sibling target (§7.5 owns aggregates)")
+	}
+}

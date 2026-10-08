@@ -715,6 +715,32 @@ modes become per-class:
 | `warning` | shared watchboard session, batched (rolling digest inject) |
 | `info` | stored only (§9.1); surfaced by read-path queries and digests |
 
+**Amendment (2026-10-08): one workload's same-class failures are one
+incident.** The dedup key is `(uid, reason)`, so two pods are two
+incidents even when the fingerprint (which hashes the class, not the
+pod) is the same. A crash-looping Deployment rolled out mid-failure
+showed the cost on a live cluster: the old ReplicaSet's pod was still
+backing off when the new one's started, and lookout opened two
+sessions for one missing ConfigMap key. A pair never reaches
+`--storm-min`, and a storm is the wrong artifact for it anyway
+(aggregate blast radius, not one fault seen twice — the reasoning of
+the warning-path ancestor reattachment, #220). So a new critical
+incident that falls through the storm stage is checked against live
+incidents first: if one of the **same kind and canonical reason** is
+bound to a session under the same **owner-chain** ancestor
+(Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob), the
+new one goes into that session as a `kind=family.member` followup
+(`family` = the shared owner) and binds there instead of opening its
+own. The Deployment is the key that matters: across a rollout the
+ReplicaSets differ. Node, shared config and namespace are not owners,
+so two workloads failing alike on one node stay two incidents unless
+§7.5 groups them; a different failure class on the same workload stays
+its own incident; the fold runs after the storm stage, so a burst big
+enough to storm still storms. Like #220 it reads the topology graph,
+which exists only under `--storm` (`auto` resolves on wherever the
+graph grants exist); with storm off, the pair stays two incidents. The
+fingerprint recipe and the payload field sets are unchanged.
+
 ### 7.8 Untrusted input: the prompt-injection boundary
 
 Every free-text field a payload carries into an agent session originates

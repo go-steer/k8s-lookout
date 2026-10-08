@@ -1307,7 +1307,7 @@ func (r *runner) run(ctx context.Context) error {
 		if disp.board != nil {
 			disp.resolver = feed
 			disp.board.reattach = disp.reattachWatchboardEntry
-			log.Printf("watchboard: ancestor reattachment enabled — a buffered warning whose blast-radius ancestor already owns a live incident is delivered there as a kind=family.member followup instead of a digest entry (§7.7)")
+			log.Printf("watchboard: ancestor reattachment enabled — a buffered warning whose blast-radius ancestor already owns a live incident is delivered there as a kind=family.member followup instead of a digest entry (§7.7); a new incident of the same class on another pod of a workload that already has one (a rollout's new ReplicaSet) folds into that session the same way")
 		}
 		// Graph history (§6.6): periodic compressed snapshots into the
 		// store, alongside the continuously logged deltas above. Only

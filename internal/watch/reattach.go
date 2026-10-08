@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
 // Ancestor reattachment (§7.7 + issue #220): one root cause observed
@@ -136,6 +137,105 @@ func (d *dispatcher) noteAncestors(key engine.EventKey, sig engine.Signal) {
 	if keys := d.ancestorKeysFor(sig); len(keys) > 0 {
 		d.dedup.NoteAncestors(key, keys)
 	}
+}
+
+// siblingOwnerKinds are the ancestor classes a NEW incident may fold
+// into a sibling's session through (DESIGN.md §7.7 amendment
+// 2026-10-08): the owner chain only — §7.5 class 1. Placement and
+// shared config are excluded on purpose: two Deployments on one node,
+// or mounting one ConfigMap, failing the same way are two workloads
+// and stay two incidents unless the storm stage groups them. The
+// Deployment is the key that matters: across a rollout the pods'
+// ReplicaSets differ, their Deployment does not.
+var siblingOwnerKinds = map[string]bool{
+	"Deployment":  true,
+	"ReplicaSet":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+	"Job":         true,
+	"CronJob":     true,
+}
+
+// foldSibling is the sibling fold (§7.7 amendment 2026-10-08): a new
+// critical incident whose workload owner already has a live incident
+// of the same class — same kind, same canonical reason — goes into
+// that incident's session as a kind=family.member followup instead
+// of opening a second one. It reports whether sig was consumed.
+//
+// The case it exists for: a crash-looping Deployment is rolled out,
+// the old ReplicaSet's pod is still backing off and the new one's
+// starts. Two pods are two dedup keys (uid, reason), a pair never
+// reaches --storm-min, and a storm is the wrong artifact anyway
+// (aggregate blast radius, not one fault seen twice — #220's
+// reasoning). The fingerprint is untouched: it already hashes the
+// class, not the pod.
+//
+// Runs AFTER the storm stage, so a burst big enough to storm still
+// storms exactly as before. Inert without a resolver (the topology
+// graph is built only under --storm, like #220's reattachment). A
+// failed inject degrades to the incident's own session, never to
+// silence.
+func (d *dispatcher) foldSibling(ctx context.Context, sig engine.Signal, key engine.EventKey, count int) bool {
+	if d.resolver == nil {
+		return false
+	}
+	var cands []string
+	for _, a := range d.resolver.Ancestors(engine.ObjectRef{
+		Kind:      sig.KindOfObject,
+		Namespace: sig.Namespace,
+		Name:      sig.Name,
+	}) {
+		if siblingOwnerKinds[a.Kind] {
+			cands = append(cands, a.Key())
+		}
+	}
+	sid, matched, ok := d.dedup.SessionForSibling(key, sig.Kind, cands)
+	if !ok {
+		return false
+	}
+	payload := inject.FamilyMemberPayload{
+		Kind:         inject.KindFamilyMember,
+		MemberKind:   sig.Kind,
+		Reason:       sig.Key.Reason,
+		Severity:     string(sig.Severity),
+		Namespace:    sig.Namespace,
+		KindOfObject: sig.KindOfObject,
+		Name:         sig.Name,
+		UID:          sig.Key.UID,
+		Fingerprint:  sig.Fingerprint,
+		Family:       matched,
+		OpenedBy:     engine.SourceFamily(sig.Kind),
+		Cluster:      sig.Cluster,
+		SessionID:    sid,
+		Message: fmt.Sprintf(
+			"same-workload join: %s %s (%s, count=%d) shows the same failure (%s) as this session's incident under %s — another pod of the same workload (a rollout's new ReplicaSet, or another replica), folded here instead of opening a second incident",
+			sig.KindOfObject, sig.Name, sig.Key.Reason, count, key.Reason, matched),
+		DesignRef: inject.FamilyMemberDesignRef,
+	}
+	if err := d.injector.Append(ctx, sid, payload); err != nil {
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		log.Printf("sibling fold %s %s/%s into sid=%s failed (%v) — opening its own session",
+			sig.Key.Reason, sig.Namespace, sig.Name, sid, err)
+		return false
+	}
+	// Bind so this pod's later events are plain duplicates of the
+	// shared session and its §7.4 outcome closes there. Deliberately
+	// NOT indexed by ancestors (noteAncestors) and NOT noted as a storm
+	// member session: the original incident stays the one target, and
+	// a later storm supersedes that session once, not twice.
+	d.dedup.BindIncident(key, sid, sig.IncidentRef())
+	if d.tracker != nil {
+		d.tracker.Track(engine.Incident{
+			Key:       key,
+			SessionID: sid,
+			FirstSeen: sig.FirstSeen,
+			Ref:       sig.IncidentRef(),
+		})
+	}
+	d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: sid})
+	log.Printf("sibling fold %s %s/%s → sid=%s (ancestor=%s: a live incident of the same class already owns this workload — followup instead of a second incident)",
+		sig.Key.Reason, sig.Namespace, sig.Name, sid, matched)
+	return true
 }
 
 // reattachWatchboardEntry is the watchboard's flush-time callback: it
