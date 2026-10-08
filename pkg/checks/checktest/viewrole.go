@@ -128,6 +128,46 @@ func ViewRoleFake(f *k8stesting.Fake) (refused func() []schema.GroupResource) {
 	}
 }
 
+// RefuseRead makes f behave as a credential bound to a custom role
+// that grants every read but one: every get, list and watch of gr
+// answers 403 the way the API server does, and everything else passes
+// through (#584). It returns a func reporting whether anything asked
+// for gr, so a test can tell "degraded around the refusal" from "never
+// needed it".
+func RefuseRead(f *k8stesting.Fake, gr schema.GroupResource) (asked func() bool) {
+	var (
+		mu  sync.Mutex
+		hit bool
+	)
+	mark := func() {
+		mu.Lock()
+		hit = true
+		mu.Unlock()
+	}
+	deny := func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "" || action.GetResource().GroupResource() != gr {
+			return false, nil, nil
+		}
+		mark()
+		return true, nil, forbidden(action.GetVerb(), gr)
+	}
+	for _, verb := range []string{"get", "list"} {
+		f.PrependReactor(verb, gr.Resource, deny)
+	}
+	f.PrependWatchReactor(gr.Resource, func(action k8stesting.Action) (bool, watch.Interface, error) {
+		if action.GetResource().GroupResource() != gr {
+			return false, nil, nil
+		}
+		mark()
+		return true, nil, forbidden("watch", gr)
+	})
+	return func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return hit
+	}
+}
+
 // forbidden is the 403 the API server answers, worded as it words it.
 func forbidden(verb string, gr schema.GroupResource) error {
 	return apierrors.NewForbidden(gr, "", errors.New(`User "system:serviceaccount:lookout:agent" cannot `+verb+` resource "`+gr.Resource+`" in API group "`+gr.Group+`"`))

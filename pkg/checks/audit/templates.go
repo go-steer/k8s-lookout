@@ -25,6 +25,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 )
 
 // podTemplate is one pod template with the object an operator would
@@ -62,7 +64,14 @@ type podTemplate struct {
 // The result is sorted by namespace, kind, then name, which is what
 // makes a caller's per-namespace aggregates deterministic before
 // sortFindings ever sees them.
-func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns string) ([]podTemplate, error) {
+//
+// With tolerate, a kind whose List RBAC refuses is skipped and named in
+// the returned refusals (#584) — for a caller whose claims are each
+// about one template, so a missing kind costs only its own templates.
+// Without it any error is fatal: `audit netpol` judges policies against
+// the whole population, where a missing kind would make a live policy
+// read as selecting nothing.
+func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns string, tolerate bool) ([]podTemplate, []kindRefusal, error) {
 	var out []podTemplate
 	add := func(kind, namespace, name string, labels map[string]string, spec corev1.PodSpec) {
 		out = append(out, podTemplate{
@@ -148,9 +157,15 @@ func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns strin
 			})
 		},
 	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+	var refused []kindRefusal
+	for i, step := range steps {
+		err := step()
+		if r, ok := checks.ForbiddenRefusal(err); ok && tolerate {
+			refused = append(refused, kindRefusal{Refusal: r, kind: templateStepKinds[i]})
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -164,7 +179,17 @@ func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns strin
 		}
 		return a.name < b.name
 	})
-	return out, nil
+	return out, refused, nil
+}
+
+// templateStepKinds names listPodTemplates' steps, in order, as the
+// subjects a refusal costs.
+var templateStepKinds = []string{"Deployment", "StatefulSet", "DaemonSet", "CronJob", "unowned Job", "unowned Pod"}
+
+// kindRefusal is one pod-template kind whose List RBAC refused.
+type kindRefusal struct {
+	checks.Refusal
+	kind string
 }
 
 // listNamespacesInScope resolves the namespace population that a

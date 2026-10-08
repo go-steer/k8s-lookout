@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -216,6 +217,20 @@ func lookupTarget(snap *graph.Snapshot, wl emit.WorkloadRef, at time.Time) (grap
 			wl, at.UTC().Format(time.RFC3339))
 	}
 	return graph.NoNode, fmt.Errorf("workload %s not found in the topology", wl)
+}
+
+// targetRefused turns a target lookup failure into the refusal behind
+// it when the live List that would have observed the target's kind
+// was forbidden (#584): "not found" would claim an absence nobody
+// looked for. Any other failure comes back unchanged.
+func targetRefused(cluster *state.Cluster, wl emit.WorkloadRef, err error) error {
+	if cluster == nil {
+		return err
+	}
+	if r, ok := cluster.RefusedKind(graphKinds[wl.Kind]); ok {
+		return &checks.RefusalError{Refusal: r, What: "target " + wl.String() + " cannot be looked up without it", Err: err}
+	}
+	return err
 }
 
 // historicalSnapshot opens the sentinel store read-only and resolves

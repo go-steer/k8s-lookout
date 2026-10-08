@@ -38,6 +38,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | Kind | Severity | Claim |
 | --- | --- | --- |
 | `inventory.object` | info | one object in scope, rendered as kubectl's default columns for its kind — an aggregated `kubectl get`, so every row is emitted, healthy or not |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -84,8 +85,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `age` | time since metadata.creationTimestamp, kubectl-style (45s, 3h20m, 12d) |
 | `kinds` | summary-line note: how many kinds the listing covered |
 | `truncated` | summary-line note: how many objects --max left out; they are the LAST kinds of the listing, which is ordered workloads → routing → configuration for this reason |
-| `skipped` | summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact) |
+| `skipped` | summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact; each forbidden kind also gets a read.unavailable record naming the grant that fixes it) |
 | `namespace_absent` | summary-line note: "true" when the listing was empty because the namespace does not exist, which an empty listing alone cannot distinguish from an empty namespace |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

@@ -137,7 +137,7 @@ func New(deps Deps) checks.Command {
 		Output: append([]checks.OutputField{
 			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
-			{Name: "skipped", Doc: "on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role"},
+			{Name: "skipped", Doc: "on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role. When a List was refused, the head's message names each refusal, why this identity lacks it, and the grant that fixes it"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
 			{Name: "hop", Doc: "radius neighbor's BFS depth from the target (1 = direct edge)"},
 			{Name: "observed", Doc: "unknown on a radius neighbor whose kind the bundle's List pass could not read (skipped= names it): it is referenced, and nothing is claimed about whether it exists"},
@@ -332,6 +332,19 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	if note := cluster.SkippedNote(); note != "" {
 		head.Details = append(head.Details, emit.Field{Key: "skipped", Value: note})
+	}
+	// skipped= is the digest; a refused List also says why and which
+	// grant fixes it, in the wording every other refusal uses (#584).
+	// A --lists deselection is the caller's own choice and needs no
+	// explanation.
+	var refused []string
+	for _, req := range cluster.Skipped() {
+		if why := cluster.SkipReason(req); strings.HasPrefix(why, "forbidden: ") {
+			refused = append(refused, why)
+		}
+	}
+	if len(refused) > 0 {
+		head.Message = "partial bundle, the sections that need these reads are incomplete: " + strings.Join(refused, " | ")
 	}
 	if joiner != nil {
 		joiner.Annotate(&head)

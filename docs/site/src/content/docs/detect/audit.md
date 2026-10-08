@@ -54,6 +54,7 @@ Workload security posture: containers running privileged or holding node-root ca
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## [`lookout audit netpol`](/reference/audit-netpol/)
 

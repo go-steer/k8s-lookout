@@ -387,3 +387,27 @@ func TestWorkloadTimelineUnderViewRole(t *testing.T) {
 	}
 	checktest.Golden(t, "testdata/events-workload.golden", res.Stdout)
 }
+
+// TestWorkloadTimelineReplicaSetsRefused: a custom role refusing
+// ReplicaSets (#584) cuts the Deployment → ReplicaSet → Pod hop, so the
+// pods' events drop out of the tree — and the timeline says so in one
+// read.unavailable record instead of reading as a quiet workload.
+func TestWorkloadTimelineReplicaSetsRefused(t *testing.T) {
+	client := fake.NewClientset(append(webTree(), webEvents()...)...)
+	checktest.RefuseRead(&client.Fake, schema.GroupResource{Group: "apps", Resource: "replicasets"})
+	cmd := newCommand(func(context.Context) (kubernetes.Interface, error) { return client, nil }, func() time.Time { return testNow })
+	res := checktest.Run(t, cmd, "--workload=Deployment/prod/web")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	want := `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list replicasets.apps — namespaced, this identity lacks it; grant list on replicasets (apps) via a ClusterRole or Role, as lookout's shipped ClusterRole does — events of replicasets.apps in the owner-reference tree, and of anything reached only through them, are not in the timeline" resource=replicasets.apps`
+	if !strings.Contains(res.Stdout, want) {
+		t.Errorf("missing the refusal record:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "reason=ScalingReplicaSet") {
+		t.Errorf("the Deployment's own events were lost with the hop:\n%s", res.Stdout)
+	}
+	if err := checktest.Verify(cmd, res.Stdout, emit.FormatLogfmt); err != nil {
+		t.Errorf("contract: %v", err)
+	}
+}

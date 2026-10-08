@@ -340,14 +340,20 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		// Only the owner tree is needed — pods and the workload kinds —
 		// so a role without Secrets, RBAC or Nodes (the built-in
 		// `view`) resolves the member set exactly as full access does
-		// (#546).
-		cluster, err := state.LoadCluster(ctx, client, listNS, state.Lists(state.OwnerTreeLists))
+		// (#546). A custom role refusing one of those kinds (#584)
+		// matters only on the path from the workload to its pods:
+		// there it leaves no member set to rate, which is fatal in the
+		// shared refusal wording; off it, nothing changes.
+		cluster, err := state.LoadCluster(ctx, client, listNS, state.Lists(state.OwnerTreeLists), state.Tolerate())
 		if err != nil {
 			return 0, err
 		}
 		pods, err := cluster.WorkloadPods(wl)
 		if err != nil {
 			return 0, err
+		}
+		if r, refused := cluster.MemberPodsRefused(wl); refused {
+			return 0, &checks.RefusalError{Refusal: r, What: "the member pods of " + wl.String() + " cannot be resolved without it, and every row is one of them"}
 		}
 		scanned += cluster.Scanned()
 		podSet = make(map[string]bool, len(pods))

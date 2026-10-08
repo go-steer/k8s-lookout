@@ -191,6 +191,9 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if err != nil {
 		return 0, err
 	}
+	if r, refused := ix.kindsRefused[wl.Kind]; refused && !wl.IsZero() {
+		return 0, &checks.RefusalError{Refusal: r, What: "workload " + wl.String() + " cannot be audited without it"}
+	}
 
 	var findings []emit.Finding
 	scanned := 0
@@ -264,6 +267,29 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 			return 0, err
 		}
 	}
+	// A custom role refusing a core read (#584) costs the claims that
+	// read it, each named here, and nothing else.
+	var refusals []emit.Finding
+	if wl.IsZero() {
+		for _, kind := range workloadStepKinds {
+			if r, ok := ix.kindsRefused[kind]; ok {
+				refusals = append(refusals, checks.RefusedFinding(r, kind+"s not audited"))
+			}
+		}
+	}
+	if ix.pdbsRefused != nil {
+		refusals = append(refusals, checks.RefusedFinding(*ix.pdbsRefused,
+			"audit.no_pdb not judged: PDB coverage is read from the PodDisruptionBudgets"))
+	}
+	if ix.hpasRefused != nil {
+		refusals = append(refusals, checks.RefusedFinding(*ix.hpasRefused,
+			"audit.single_replica, audit.no_pdb, audit.no_spread and audit.hpa_* not judged: a workload's replica floor is its HorizontalPodAutoscaler's minReplicas"))
+	}
+	for _, f := range refusals {
+		if err := inv.Out.Emit(f); err != nil {
+			return 0, err
+		}
+	}
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
@@ -276,10 +302,13 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		{"workloads", fmt.Sprintf("%d/%d/%d/%d", counts[0], counts[1], counts[2], counts[3])},
 		{"jobs", itoa(jobs)},
 	}
-	if ix.nodesRefused != nil {
-		notes = append(notes[:2], notes[3:]...)
-	}
+	// A count of objects that could not be read is not a count: the
+	// refused ones' notes are dropped, their records above say why.
+	drop := map[string]bool{"pdbs": ix.pdbsRefused != nil, "hpas": ix.hpasRefused != nil, "nodes": ix.nodesRefused != nil}
 	for _, n := range notes {
+		if drop[n[0]] {
+			continue
+		}
 		if err := inv.Out.Note(n[0], n[1]); err != nil {
 			return 0, err
 		}
@@ -358,13 +387,22 @@ type workloadIndex struct {
 	// placement claim is then skipped rather than resolved against an
 	// empty node set (#546).
 	nodesRefused *checks.Refusal
+	// kindsRefused, pdbsRefused and hpasRefused are the same for a
+	// custom role that refuses a read the built-in `view` grants
+	// (#584): a refused workload kind is not audited, refused PDBs
+	// skip the coverage claim instead of calling every workload
+	// uncovered, and refused HPAs skip every claim that judges the
+	// replica floor instead of judging spec.replicas in its place.
+	kindsRefused map[string]checks.Refusal
+	pdbsRefused  *checks.Refusal
+	hpasRefused  *checks.Refusal
 	// pdbsByNS counts PDBs per namespace, so a no-PDB finding can say
 	// whether the namespace uses PDBs at all.
 	pdbsByNS map[string]int
 }
 
 func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
-	ix := &workloadIndex{pdbsByNS: map[string]int{}}
+	ix := &workloadIndex{pdbsByNS: map[string]int{}, kindsRefused: map[string]checks.Refusal{}}
 	steps := []func() error{
 		func() error {
 			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
@@ -473,12 +511,23 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 		// Nodes feed only the placement claim, and the built-in `view`
 		// role does not grant them (#546): a refused node List skips
 		// that one claim, named by a read.unavailable record, and
-		// every other claim still answers.
-		if r, ok := checks.ForbiddenRefusal(err); ok && i == len(steps)-1 {
-			ix.nodesRefused = &r
-			continue
+		// every other claim still answers. A custom role refusing one of
+		// the other reads (#584) is recorded the same way; the claims
+		// that need it skip themselves (workloadIndex fields above).
+		r, ok := checks.ForbiddenRefusal(err)
+		if !ok {
+			return nil, err
 		}
-		return nil, err
+		switch i {
+		case len(steps) - 1:
+			ix.nodesRefused = &r
+		case 5:
+			ix.pdbsRefused = &r
+		case 6:
+			ix.hpasRefused = &r
+		default:
+			ix.kindsRefused[workloadStepKinds[i]] = r
+		}
 	}
 	sort.Slice(ix.workloads, func(i, j int) bool {
 		a, b := ix.workloads[i], ix.workloads[j]
@@ -521,6 +570,9 @@ func (ix *workloadIndex) judge(w workload) []emit.Finding {
 	return out
 }
 
+// workloadStepKinds names listWorkloadIndex's first five steps.
+var workloadStepKinds = []string{"Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job"}
+
 // availability judges the disruption-survival claims: replica count,
 // PDB coverage, and spread.
 //
@@ -533,7 +585,7 @@ func (ix *workloadIndex) judge(w workload) []emit.Finding {
 // is advice nobody should act on. Its probes are still judged — the
 // template is what runs when it is scaled back up.
 func (ix *workloadIndex) availability(w workload) []emit.Finding {
-	if w.kind == "DaemonSet" {
+	if w.kind == "DaemonSet" || ix.hpasRefused != nil {
 		return nil
 	}
 	want, via := ix.replicaFloor(w)
@@ -561,7 +613,7 @@ func (ix *workloadIndex) availability(w workload) []emit.Finding {
 	}
 
 	var out []emit.Finding
-	if !ix.covered(w) {
+	if ix.pdbsRefused == nil && !ix.covered(w) {
 		out = append(out, emit.Finding{
 			Kind:     kindNoPDB,
 			Severity: emit.SeverityWarning,

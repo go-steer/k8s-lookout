@@ -184,13 +184,20 @@ type viewClients struct {
 }
 
 func newViewClients() *viewClients {
+	return newGuardedClients(func(f *k8stesting.Fake) { checktest.ViewRoleFake(f) })
+}
+
+// newGuardedClients builds the fixture's fakes with guard installed on
+// each of them — the exact `view` role here, one refused core read in
+// refuse_core_test.go.
+func newGuardedClients(guard func(*k8stesting.Fake)) *viewClients {
 	cs := fake.NewClientset(viewFixture()...)
-	checktest.ViewRole(cs)
+	guard(&cs.Fake)
 	scheme := runtime.NewScheme()
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, viewDynamicListKinds())
-	checktest.ViewRoleFake(&dyn.Fake)
+	guard(&dyn.Fake)
 	metrics := metricsfake.NewSimpleClientset()
-	checktest.ViewRoleFake(&metrics.Fake)
+	guard(&metrics.Fake)
 	return &viewClients{cs: cs, dyn: dyn, metrics: metrics, disc: &fakediscovery.FakeDiscovery{Fake: &k8stesting.Fake{}}}
 }
 
@@ -441,9 +448,13 @@ func TestEveryReadPathCommandExitsZeroUnderView(t *testing.T) {
 // read.unavailable records under exactly `view`, in order. A case
 // absent here emits none — it either reads nothing `view` refuses, or
 // reports the gap in its own established form (health's unavailable
-// categories, bundle's and triage list's skipped= note, scan's
-// drilldown_skipped= note beside its stages' own records).
+// categories, bundle's skipped= note with the refusals in its head's
+// message, scan's drilldown_skipped= note beside its stages' own
+// records). triage list keeps its skipped= note and, since #584, also
+// words each refusal as a record.
 var viewUnread = map[string][]string{
+	"triage list --namespace=prod":                  {"secrets"},
+	"triage list -A":                                {"secrets"},
 	"triage delta ":                                 {"nodes"},
 	"triage top --namespace=prod":                   {"pods.metrics.k8s.io"},
 	"triage top -A":                                 {"pods.metrics.k8s.io"},

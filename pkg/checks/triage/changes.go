@@ -178,6 +178,22 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		}
 		return nil
 	}
+	// readEvents adds the rescale events to the timeline. Events are
+	// one source among several: a role that refuses them (#584) costs
+	// the timeline its scaling entries, named by a read.unavailable
+	// record, not the rollout and delta-log changes beside them.
+	readEvents := func(hood map[string]string, approximation bool) error {
+		evs, n, err := eventEntries(ctx, client, wl.Namespace, hood, from, to, approximation)
+		if r, ok := checks.ForbiddenRefusal(err); ok {
+			return inv.Out.Emit(checks.RefusedFinding(r, "rescale events not read: scaling changes are missing from this timeline"))
+		}
+		if err != nil {
+			return err
+		}
+		scanned += n
+		entries = append(entries, evs...)
+		return nil
+	}
 
 	if inv.Scope.Store != "" {
 		st, err := store.OpenRead(inv.Scope.Store)
@@ -203,7 +219,7 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		}
 		id, err := lookupTarget(snap, wl, inv.Scope.At)
 		if err != nil {
-			return 0, err
+			return 0, targetRefused(cluster, wl, err)
 		}
 		if err := emitGaps(); err != nil {
 			return 0, err
@@ -222,12 +238,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		// delta log); in --at mode there is no client and the window
 		// usually predates event retention anyway.
 		if client != nil {
-			evs, n, err := eventEntries(ctx, client, wl.Namespace, hood, from, to, false)
-			if err != nil {
+			if err := readEvents(hood, false); err != nil {
 				return 0, err
 			}
-			scanned += n
-			entries = append(entries, evs...)
 		}
 	} else {
 		// PURE live mode: no delta log to read — approximate from
@@ -235,19 +248,16 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		// recent scaling events (§6.6: answer live-only and say so).
 		id, err := lookupTarget(snap, wl, time.Time{})
 		if err != nil {
-			return 0, err
+			return 0, targetRefused(cluster, wl, err)
 		}
 		if err := emitGaps(); err != nil {
 			return 0, err
 		}
 		hood := neighborhood(snap, id, depth)
 		entries = append(entries, rolloutEntries(cluster, hood, from, to)...)
-		evs, n, err := eventEntries(ctx, client, wl.Namespace, hood, from, to, true)
-		if err != nil {
+		if err := readEvents(hood, true); err != nil {
 			return 0, err
 		}
-		scanned += n
-		entries = append(entries, evs...)
 		if err := inv.Out.Note("source", "live-approximation"); err != nil {
 			return 0, err
 		}

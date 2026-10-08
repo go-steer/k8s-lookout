@@ -147,8 +147,9 @@ func DriftCommand(deps Deps) checks.Command {
 		},
 		Kinds: []checks.KindField{
 			checks.Kind("drift.manual_edit", "a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env)", emit.SeverityCritical, emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "manager", Doc: "on findings: the foreign manager string from managedFields (a tool name like kubectl-edit — never a user identity; see --identity); on the summary line: the resolved GitOps manager"},
 			{Name: "detection", Doc: "summary note: how the GitOps manager was resolved — declared (--manager), majority (auto-detected recognized GitOps controller owning >50% of the spec leaf fields in scope), or none (no manager resolved; nothing emitted)"},
 			{Name: "detection_reason", Doc: "summary note on detection=none, naming why: no-spec-fields-in-scope (nothing in scope owns a spec field), no-majority-manager (a leading candidate exists but owns 50% or less), or not-a-gitops-manager (the majority owner is not a recognized GitOps controller — e.g. kubeadm or a kubectl manager on a cluster with no GitOps at all)"},
@@ -164,7 +165,7 @@ func DriftCommand(deps Deps) checks.Command {
 			{Name: "principal_agent", Doc: "--identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only"},
 			{Name: "other_principals", Doc: "--identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail"},
 			{Name: "identity", Doc: "summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent)"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout stab drift",
 			"lookout stab drift --namespace=prod --manager=argocd-controller",
@@ -219,9 +220,27 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 		ns = metav1.NamespaceAll
 	}
 
-	objs, err := listDriftObjects(ctx, client, ns)
+	objs, refused, err := listDriftObjects(ctx, client, ns)
 	if err != nil {
 		return 0, err
+	}
+	// The three kinds are scanned independently, so a role refusing
+	// one (#584) costs exactly that kind, named up front — unless it
+	// is the kind --workload asked about, which leaves nothing to
+	// answer.
+	for _, r := range refused {
+		if !wl.IsZero() && r.kind == wl.Kind {
+			return 0, &checks.RefusalError{Refusal: r.Refusal, What: "workload " + wl.String() + " cannot be read without it"}
+		}
+	}
+	for _, r := range refused {
+		if !wl.IsZero() {
+			break // another kind's gap does not touch one workload's answer
+		}
+		if err := inv.Out.Emit(checks.RefusedFinding(r.Refusal,
+			r.kind+"s not scanned for drift, nor counted toward GitOps manager detection")); err != nil {
+			return 0, err
+		}
 	}
 	if !wl.IsZero() {
 		filtered := objs[:0]
@@ -565,9 +584,17 @@ func highBlastRadius(path string) bool {
 		strings.HasSuffix(path, ".env")
 }
 
+// refusedKind is one workload kind whose List RBAC refused.
+type refusedKind struct {
+	checks.Refusal
+	kind string
+}
+
 // listDriftObjects lists the three workload kinds in ns and reduces
-// each object's managedFields to per-manager spec ownership.
-func listDriftObjects(ctx context.Context, client kubernetes.Interface, ns string) ([]driftObject, error) {
+// each object's managedFields to per-manager spec ownership. A kind
+// whose List is forbidden is skipped and reported in refused; any
+// other error is fatal.
+func listDriftObjects(ctx context.Context, client kubernetes.Interface, ns string) ([]driftObject, []refusedKind, error) {
 	var objs []driftObject
 	add := func(kind, namespace, name string, entries []metav1.ManagedFieldsEntry) {
 		objs = append(objs, driftObject{
@@ -604,13 +631,22 @@ func listDriftObjects(ctx context.Context, client kubernetes.Interface, ns strin
 			}, func(d *appsv1.DaemonSet) { add("DaemonSet", d.Namespace, d.Name, d.ManagedFields) })
 		},
 	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return nil, err
+	var refused []refusedKind
+	for i, step := range steps {
+		err := step()
+		if r, ok := checks.ForbiddenRefusal(err); ok {
+			refused = append(refused, refusedKind{Refusal: r, kind: driftKindOrder[i]})
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-	return objs, nil
+	return objs, refused, nil
 }
+
+// driftKindOrder names listDriftObjects' steps, in order.
+var driftKindOrder = []string{"Deployment", "StatefulSet", "DaemonSet"}
 
 // specOwners reduces managedFields entries to per-manager spec
 // ownership. Status-only co-managers are the nominal state — entries

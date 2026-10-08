@@ -85,6 +85,51 @@ func (c *Cluster) SkipReason(req ListRequirement) string {
 	return why.describe(req)
 }
 
+// RefusedKind reports the refusal that kept graph kind out of this
+// load — the List that would have observed it was forbidden — so a
+// target of that kind that "was not found" can say it was never
+// looked for (#584).
+func (c *Cluster) RefusedKind(kind graph.NodeKind) (checks.Refusal, bool) {
+	for _, req := range c.ix.skipped {
+		if c.ix.skipWhy[req] != skipForbidden {
+			continue
+		}
+		for _, k := range listKinds[req] {
+			if k == kind {
+				return checks.Refused("list", req.Group, req.Resource), true
+			}
+		}
+	}
+	return checks.Refusal{}, false
+}
+
+// memberChain is, per workload kind, every graph kind on the
+// owner-reference path from the workload down to its pods.
+var memberChain = map[string][]graph.NodeKind{
+	"Pod":         {graph.KindPod},
+	"Deployment":  {graph.KindDeployment, graph.KindReplicaSet, graph.KindPod},
+	"ReplicaSet":  {graph.KindReplicaSet, graph.KindPod},
+	"StatefulSet": {graph.KindStatefulSet, graph.KindPod},
+	"DaemonSet":   {graph.KindDaemonSet, graph.KindPod},
+	"Job":         {graph.KindJob, graph.KindPod},
+	"CronJob":     {graph.KindCronJob, graph.KindJob, graph.KindPod},
+}
+
+// MemberPodsRefused reports the refusal, if any, that leaves wl's
+// member pods unresolvable: a forbidden List of a kind on the
+// owner-reference path from wl to its pods (#584). A refused kind off
+// that path does not touch the member set and reports false. A caller
+// whose whole answer is the member pods fails on it; WorkloadPods
+// alone would return an empty set that reads as "no pods".
+func (c *Cluster) MemberPodsRefused(wl emit.WorkloadRef) (checks.Refusal, bool) {
+	for _, k := range memberChain[wl.Kind] {
+		if r, ok := c.RefusedKind(k); ok {
+			return r, true
+		}
+	}
+	return checks.Refusal{}, false
+}
+
 // UnreadFindings renders one read.unavailable record per skipped
 // resource that matters to the caller. affects names, for a skipped
 // requirement, what the caller could not verify without it ("Secret

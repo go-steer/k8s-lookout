@@ -644,7 +644,9 @@ func recordStageResult(s *scanner, name string, err error) {
 		Kind:     KindCheckFailed,
 		Severity: emit.SeverityWarning,
 		Reason:   "CheckFailed",
-		Message:  err.Error(),
+		// A stage refused its core read says so in the shared
+		// wording (#584), as it would run alone.
+		Message: checks.WordRefusal(err).Error(),
 	}
 	if emit.IsUsageError(err) {
 		f.Kind, f.Severity, f.Reason = KindCheckSkipped, emit.SeverityInfo, "NotApplicable"
