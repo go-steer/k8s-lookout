@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
 // The four open→bind→track→record paths — the fresh per-incident open
@@ -49,13 +50,21 @@ import (
 //     The caller binds/tracks/records as normal and counts the inject
 //     error itself, because the paths differ on WHEN they do so (storm
 //     formation defers it past the member rebind loop).
-func (d *dispatcher) openSession(ctx context.Context, payload any, reason string) (sid string, err error, ok bool) {
+//
+// key is lookout's identity for the incident (incidentKey/stormKey).
+// Sinks with the inject.KeyedOpener capability (the ax sink) open by it;
+// every other sink gets the plain OpenIncident it always did.
+func (d *dispatcher) openSession(ctx context.Context, key inject.IncidentKey, payload any, reason string) (sid string, err error, ok bool) {
 	// Fit the payload under the sink's per-inject wire ceiling before the
 	// open: an oversized enrichment bundle otherwise makes the daemon
 	// 400 the initial inject, leaving a bound-but-empty session (#198).
 	// Every open shape (incident + storm) routes through here.
 	payload = d.fitInject(payload)
-	sid, err = d.injector.OpenIncident(ctx, payload)
+	if ko, keyed := d.injector.(inject.KeyedOpener); keyed {
+		sid, err = ko.OpenIncidentKeyed(ctx, key, payload)
+	} else {
+		sid, err = d.injector.OpenIncident(ctx, payload)
+	}
 	if sid == "" {
 		d.metrics.sessionCreates.WithLabelValues("error").Inc()
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(reason), "session_create").Inc()
@@ -63,6 +72,20 @@ func (d *dispatcher) openSession(ctx context.Context, payload any, reason string
 	}
 	d.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	return sid, err, true
+}
+
+// incidentKey is the sink-facing identity of a per-incident open: this
+// runner's cluster plus the pipeline's canonical dedup key (UID +
+// canonical reason), the same key the incident is bound and tracked by.
+func (d *dispatcher) incidentKey(k engine.EventKey) inject.IncidentKey {
+	return inject.IncidentKey{Cluster: d.cluster, Kind: inject.IncidentKeyIncident, ID: k.UID + "/" + k.Reason}
+}
+
+// stormKey is the sink-facing identity of a storm: this runner's cluster
+// plus the storm's shared ancestor. Not the storm fingerprint, which is
+// the incident class and repeats for unrelated storms.
+func (d *dispatcher) stormKey(a engine.Ancestor) inject.IncidentKey {
+	return inject.IncidentKey{Cluster: d.cluster, Kind: inject.IncidentKeyStorm, ID: a.Key()}
 }
 
 // rebindStormMembers rebinds and retracks every storm member to the

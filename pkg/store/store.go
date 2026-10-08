@@ -329,6 +329,27 @@ var migrations = []string{
 		PRIMARY KEY (cluster, subject_key, topology_key)
 	);
 	CREATE INDEX leeway_baseline_updated ON leeway_baseline (updated_at);`,
+
+	// v9: which agent session each incident was delivered to, for sinks
+	// that reopen an incident into its earlier conversation (the ax
+	// sink, issue #590). Keyed (cluster, incident_key), where
+	// incident_key is inject.IncidentKey's text form; incident_id is the
+	// sink's opaque id ("<task>/<session>" for ax). Without this, a
+	// restarted sentinel would answer a recurring incident with a fresh
+	// session and the agent would start cold.
+	//
+	// Written synchronously on open (one row per incident, not per
+	// event). Covered by the §9.1 TTL prune on updated_at: a session
+	// nobody reopened within the retention window is history, and
+	// opening a new one then is the right answer anyway.
+	`CREATE TABLE sink_sessions (
+		cluster      TEXT NOT NULL DEFAULT '',
+		incident_key TEXT NOT NULL,
+		incident_id  TEXT NOT NULL,
+		updated_at   INTEGER NOT NULL,
+		PRIMARY KEY (cluster, incident_key)
+	);
+	CREATE INDEX sink_sessions_updated ON sink_sessions (updated_at);`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

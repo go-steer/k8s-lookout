@@ -72,7 +72,7 @@ func TestOpenSession_FitsOversizedPayload(t *testing.T) {
 		t.Fatalf("setup: payload should exceed the ceiling, got WireSize=%d", inject.WireSize(p))
 	}
 
-	sid, err, ok := d.openSession(context.Background(), p, p.Reason)
+	sid, err, ok := d.openSession(context.Background(), inject.IncidentKey{}, p, p.Reason)
 	if !ok || err != nil || sid == "" {
 		t.Fatalf("openSession: sid=%q err=%v ok=%v", sid, err, ok)
 	}
@@ -120,7 +120,7 @@ func TestOpenSession_NoShrinkWhenUnderCeiling(t *testing.T) {
 			Bundle: "section=spec container=metrics-server restarts=3",
 		},
 	}
-	if _, err, ok := d.openSession(context.Background(), p, p.Reason); !ok || err != nil {
+	if _, err, ok := d.openSession(context.Background(), inject.IncidentKey{}, p, p.Reason); !ok || err != nil {
 		t.Fatalf("openSession: err=%v ok=%v", err, ok)
 	}
 	got := sink.opened[0].(inject.Payload)

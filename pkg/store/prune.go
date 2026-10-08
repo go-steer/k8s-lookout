@@ -86,6 +86,7 @@ func (s *Store) PruneOnce(ctx context.Context) (PruneStats, error) {
 	for _, ttl := range []struct{ what, query string }{
 		{"occurrence", `DELETE FROM occurrences WHERE emitted_at < ?`},
 		{"graph change", `DELETE FROM graph_changes WHERE at < ?`},
+		{"sink session", `DELETE FROM sink_sessions WHERE updated_at < ?`},
 		{"graph snapshot", `DELETE FROM graph_snapshots WHERE taken_at < ?
 			AND id NOT IN (SELECT id FROM graph_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1)`},
 	} {

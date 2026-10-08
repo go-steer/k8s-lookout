@@ -41,6 +41,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/go-steer/k8s-lookout/internal/axsink"
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
 
@@ -883,6 +884,20 @@ func (r *runner) run(ctx context.Context) error {
 		disp.triage = newTriageOverrides(occStore, m, f.triageRegressFactor)
 		log.Printf("triage-status: enabled (open records refine routing every signal, cache refresh %s; recovery flips records to resolved; regression evidence at %dx the downgrade-time rate)",
 			triageRefreshInterval, f.triageRegressFactor)
+	}
+
+	// ax sink session reuse (issue #590): an incident that comes back
+	// reopens into its earlier session. The sink is process-wide, the
+	// store per cluster, so each runner hands the sink its own. Without
+	// --store the sink remembers sessions in memory only.
+	if as, ok := r.sink.(*axsink.Sink); ok {
+		if occStore != nil {
+			as.UseSessionStore(r.clusterName, occStore)
+			defer as.UseSessionStore(r.clusterName, nil)
+			log.Printf("ax sink: remembering incident sessions in %s, so a reopened incident reaches its earlier session across restarts", f.store)
+		} else {
+			log.Printf("ax sink: no --store, so incident sessions are remembered in memory only — after a restart, a reopened incident starts a new session (in the same task)")
+		}
 	}
 
 	// Severity routing (§7.7): the policy (source defaults +

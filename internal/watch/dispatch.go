@@ -452,7 +452,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// failed — bind anyway (followups and §7.4 outcomes still
 		// have a home) and count the inject error, exactly the
 		// pre-Sink behavior.
-		sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+		sid, err, ok := d.openSession(ctx, d.incidentKey(key), payload, sig.Key.Reason)
 		if !ok {
 			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
 			return
@@ -683,7 +683,7 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		}
 	}
 	payload := incidentPayload(sig, result)
-	sid, err, ok := d.openSession(ctx, payload, sig.Key.Reason)
+	sid, err, ok := d.openSession(ctx, d.incidentKey(key), payload, sig.Key.Reason)
 	if !ok {
 		log.Printf("dispatcher: retry create session for %s/%s: %v (unbound entry, count=%d)",
 			sig.Namespace, sig.Name, err, result.Count)

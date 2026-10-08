@@ -13,19 +13,20 @@
 // limitations under the License.
 
 // Package axsink is the ax implementation of lookout's agent Sink
-// (docs/ax-sink-design.md): each incident runs in its own Agent Executor
-// (AX) task on Agent Substrate. It lives under internal/ because it carries
+// (docs/ax-sink-design.md): incidents run in Agent Executor (AX) tasks on
+// Agent Substrate, one task per incident or one per cluster, named from
+// lookout's own incident identity. It lives under internal/ because it carries
 // the AX gRPC stubs, which the embeddable pkg/ half must not depend on.
 package axsink
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,14 +38,34 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
+// Scope is how incidents map onto AX tasks (--ax-task-scope).
+type Scope string
+
+const (
+	// ScopeIncident runs each incident (and each storm) in its own task,
+	// plus one stable watchboard task per cluster. The default.
+	ScopeIncident Scope = "incident"
+	// ScopeCluster runs one long-lived task per cluster; every incident,
+	// storm and watchboard digest gets its own session inside it.
+	ScopeCluster Scope = "cluster"
+)
+
+// SessionStore persists which incident id ("<task>/<session>") each
+// incident was last opened into, so a reopen after a restart reaches the
+// same conversation. *store.Store implements it (--store).
+type SessionStore interface {
+	SinkSession(ctx context.Context, cluster, incidentKey string) (string, bool, error)
+	PutSinkSession(ctx context.Context, cluster, incidentKey, id string) error
+}
+
 // Config configures the ax sink (docs/ax-sink-design.md): each incident
-// runs in its own Agent Executor (AX) task on Agent Substrate, and its
+// runs in an Agent Executor (AX) task on Agent Substrate, and its
 // payloads reach the agent through Substrate's router.
 type Config struct {
 	// Client is the AX API client. Required.
 	Client axapi.AXClient
 	// Template is the Task every incident runs as: image, command, egress,
-	// credentials, http.port. The sink sets metadata.name per incident and
+	// credentials, http.port. The sink sets metadata.name per task and
 	// never changes anything else. metadata.atespace defaults to "default".
 	Template *axapi.Task
 	// RouterURL is Agent Substrate's router, e.g.
@@ -55,6 +76,8 @@ type Config struct {
 	// API inside the task, exactly as for the core-agent sink.
 	BearerToken    string
 	AssertedCaller string
+	// Scope maps incidents onto tasks. Empty means ScopeIncident.
+	Scope Scope
 	// HTTPClient lets tests swap the transport; nil uses the shared sink
 	// client (10s timeout, otelhttp).
 	HTTPClient *http.Client
@@ -62,6 +85,11 @@ type Config struct {
 	// server to come up. Zero means two minutes.
 	StartTimeout time.Duration
 }
+
+// maxRemembered bounds the in-memory incident -> session map. Past it, an
+// arbitrary entry is forgotten; that incident's next reopen consults the
+// store (if any) or opens a new session.
+const maxRemembered = 4096
 
 // Sink is the ax implementation of inject.Sink. The incident id it returns is
 // "<task>/<session>": the task carries the incident, the session is the
@@ -71,11 +99,16 @@ type Sink struct {
 	atespace  string
 	base      *http.Client
 	injectors sync.Map // task name -> *inject.Injector
+	stores    sync.Map // cluster -> SessionStore
+
+	mu         sync.Mutex
+	remembered map[string]string // IncidentKey.String() -> "<task>/<session>"
 }
 
 var (
 	_ inject.Sink          = (*Sink)(nil)
 	_ inject.SessionOpener = (*Sink)(nil)
+	_ inject.KeyedOpener   = (*Sink)(nil)
 )
 
 // New validates cfg and returns the sink.
@@ -92,6 +125,13 @@ func New(cfg Config) (*Sink, error) {
 	if cfg.BearerToken == "" {
 		return nil, errors.New("ax sink: bearer token for the agent's session API is required")
 	}
+	switch cfg.Scope {
+	case "":
+		cfg.Scope = ScopeIncident
+	case ScopeIncident, ScopeCluster:
+	default:
+		return nil, fmt.Errorf("ax sink: task scope must be %q or %q (got %q)", ScopeIncident, ScopeCluster, cfg.Scope)
+	}
 	if cfg.StartTimeout <= 0 {
 		cfg.StartTimeout = 2 * time.Minute
 	}
@@ -103,33 +143,67 @@ func New(cfg Config) (*Sink, error) {
 	if atespace == "" {
 		atespace = "default"
 	}
-	return &Sink{cfg: cfg, atespace: atespace, base: base}, nil
+	return &Sink{cfg: cfg, atespace: atespace, base: base, remembered: map[string]string{}}, nil
 }
 
-// OpenIncident creates the incident's task (or finds it, when the same
-// incident is opened again), resumes it, then opens a session in it and
-// delivers payload — the same POST /sessions + inject pair as the
-// core-agent sink, sent through the router.
-func (s *Sink) OpenIncident(ctx context.Context, payload any) (string, error) {
-	task := taskNameFor(payload)
+// UseSessionStore makes the sink remember cluster's incident sessions in
+// st as well as in memory, so a reopen after a restart reaches the same
+// session. The sink is process-wide and each cluster runner has its own
+// store, hence the cluster. A later call for the same cluster replaces
+// the earlier store (a restarted runner reopens its store).
+func (s *Sink) UseSessionStore(cluster string, st SessionStore) {
+	if st == nil {
+		s.stores.Delete(cluster)
+		return
+	}
+	s.stores.Store(cluster, st)
+}
+
+// OpenIncidentKeyed opens the incident lookout identifies as key
+// (inject.KeyedOpener). The task comes from the key and the scope; if
+// this incident was opened before and its session is still known, the
+// payload goes into that session so the agent keeps the conversation.
+// Otherwise it opens a new session — the same POST /sessions + inject
+// pair as the core-agent sink, sent through the router.
+func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, payload any) (string, error) {
+	task := s.taskFor(key)
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
-	sid, err := s.injectorFor(task).OpenIncident(ctx, payload)
+	inj := s.injectorFor(task)
+	if id, ok := s.recall(ctx, key); ok {
+		if t, sid, ok := splitID(id); ok && t == task {
+			err := inj.Append(ctx, sid, payload)
+			var se *inject.StatusError
+			switch {
+			case err == nil:
+				s.remember(ctx, key, id)
+				return id, nil
+			case !errors.As(err, &se) || se.Code != http.StatusNotFound:
+				// The session may well still be there (a timeout, a
+				// 5xx): stay bound to it and let the caller count the
+				// failed delivery, as for a partial open.
+				return id, err
+			}
+			// 404: the agent no longer has the session (task
+			// recreated, agent state lost). Start a new one.
+		}
+	}
+	sid, err := inj.OpenIncident(ctx, payload)
 	if sid == "" {
 		return "", err
 	}
-	return task + "/" + sid, err
+	id := task + "/" + sid
+	s.remember(ctx, key, id)
+	return id, err
 }
 
-// CreateSession opens an empty incident in a fresh task, for watchboard
-// rotation (SessionOpener).
-func (s *Sink) CreateSession(ctx context.Context) (string, error) {
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", fmt.Errorf("ax sink: generating task name: %w", err)
-	}
-	task := "lookout-" + hex.EncodeToString(suffix)
+// CreateSessionKeyed opens an empty session in key's task
+// (inject.KeyedOpener). The watchboard uses it for its first session and
+// for each rotation, so it always opens a new session, never a
+// remembered one.
+func (s *Sink) CreateSessionKeyed(ctx context.Context, key inject.IncidentKey) (string, error) {
+	task := s.taskFor(key)
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
@@ -140,14 +214,76 @@ func (s *Sink) CreateSession(ctx context.Context) (string, error) {
 	return task + "/" + sid, nil
 }
 
+// OpenIncident is the plain Sink verb, for callers that don't pass
+// lookout's incident identity (lookout's dispatcher always does, through
+// OpenIncidentKeyed). The key is rebuilt from the payload as well as it
+// can be: uid + reason class for an incident, the ancestor for a storm,
+// otherwise the cluster's watchboard task.
+func (s *Sink) OpenIncident(ctx context.Context, payload any) (string, error) {
+	return s.OpenIncidentKeyed(ctx, keyFromPayload(payload), payload)
+}
+
+// CreateSession is the SessionOpener verb for callers without a key: an
+// empty session in the (cluster-less) watchboard task.
+func (s *Sink) CreateSession(ctx context.Context) (string, error) {
+	return s.CreateSessionKeyed(ctx, inject.IncidentKey{Kind: inject.IncidentKeyWatchboard})
+}
+
 // Append delivers payload to the incident's session. If the task is
 // suspended, Substrate's router resumes it before forwarding.
 func (s *Sink) Append(ctx context.Context, id string, payload any) error {
-	task, sid, ok := strings.Cut(id, "/")
-	if !ok || task == "" || sid == "" {
+	task, sid, ok := splitID(id)
+	if !ok {
 		return fmt.Errorf("ax sink: incident id %q is not <task>/<session>", id)
 	}
 	return s.injectorFor(task).Append(ctx, sid, payload)
+}
+
+func splitID(id string) (task, sid string, ok bool) {
+	task, sid, ok = strings.Cut(id, "/")
+	return task, sid, ok && task != "" && sid != ""
+}
+
+// recall returns the incident id key was last opened into: from memory,
+// else from the cluster's store.
+func (s *Sink) recall(ctx context.Context, key inject.IncidentKey) (string, bool) {
+	s.mu.Lock()
+	id, ok := s.remembered[key.String()]
+	s.mu.Unlock()
+	if ok {
+		return id, true
+	}
+	st, ok := s.stores.Load(key.Cluster)
+	if !ok {
+		return "", false
+	}
+	id, ok, err := st.(SessionStore).SinkSession(ctx, key.Cluster, key.String())
+	if err != nil {
+		log.Printf("ax sink: looking up the session for %s: %v (opening a new one)", key, err)
+		return "", false
+	}
+	return id, ok
+}
+
+// remember records that key now lives in id, in memory and in the
+// cluster's store. A store failure only costs session reuse after a
+// restart, so it is logged, not returned.
+func (s *Sink) remember(ctx context.Context, key inject.IncidentKey, id string) {
+	k := key.String()
+	s.mu.Lock()
+	if _, ok := s.remembered[k]; !ok && len(s.remembered) >= maxRemembered {
+		for old := range s.remembered {
+			delete(s.remembered, old)
+			break
+		}
+	}
+	s.remembered[k] = id
+	s.mu.Unlock()
+	if st, ok := s.stores.Load(key.Cluster); ok {
+		if err := st.(SessionStore).PutSinkSession(ctx, key.Cluster, k, id); err != nil {
+			log.Printf("ax sink: remembering the session for %s: %v (a reopen after a restart will start a new session)", key, err)
+		}
+	}
 }
 
 // startTask creates task from the template (an existing task with that name
@@ -246,33 +382,72 @@ func (t actorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r)
 }
 
-// taskNameFor names the task that carries an incident. It hashes the
-// payload's fingerprint, so opening the same incident again (a retry, or a
-// re-fire after the dedup cooldown) reaches the same task. Payloads without
-// a fingerprint fall back to uid+reason, then to the whole payload.
-func taskNameFor(payload any) string {
-	b, _ := json.Marshal(payload)
-	var fields struct {
-		Fingerprint string `json:"fingerprint"`
-		UID         string `json:"uid"`
-		Reason      string `json:"reason"`
-		ReasonClass string `json:"reason_class"`
+// taskFor names the task that carries key under the sink's scope.
+//
+// AX task names are DNS labels: at most 63 characters of [a-z0-9-]. Names
+// derived from a cluster keep a readable slug of it, followed by a hash of
+// the exact name so two clusters that slug alike still differ.
+//
+//   - cluster scope, any kind:     lookout-<cluster>-<hash8>
+//   - incident scope, watchboard:  lookout-wb-<cluster>-<hash8>
+//   - incident scope, incident or storm: lookout-<hash16 of cluster, kind, id>
+func (s *Sink) taskFor(key inject.IncidentKey) string {
+	if s.cfg.Scope == ScopeCluster {
+		return clusterTaskName("lookout-", key.Cluster)
 	}
-	_ = json.Unmarshal(b, &fields)
-	key := fields.Fingerprint
-	if key == "" && fields.UID != "" {
-		// The class, not the raw reason: kubelet reports one pull problem
-		// as both Failed and BackOff, and naming by the raw reason would
-		// split that incident across two tasks (#574).
-		reason := fields.ReasonClass
-		if reason == "" {
-			reason = fields.Reason
-		}
-		key = fields.UID + "/" + reason
+	if key.Kind == inject.IncidentKeyWatchboard {
+		return clusterTaskName("lookout-wb-", key.Cluster)
 	}
-	if key == "" {
-		key = string(b)
-	}
-	sum := sha256.Sum256([]byte(key))
+	sum := sha256.Sum256([]byte(key.Cluster + "\x00" + string(key.Kind) + "\x00" + key.ID))
 	return "lookout-" + hex.EncodeToString(sum[:8])
+}
+
+func clusterTaskName(prefix, cluster string) string {
+	sum := sha256.Sum256([]byte(cluster))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	var b strings.Builder
+	for _, r := range strings.ToLower(cluster) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if limit := 63 - len(prefix) - len(suffix); len(slug) > limit {
+		slug = strings.TrimRight(slug[:limit], "-")
+	}
+	if slug == "" {
+		slug = "cluster"
+	}
+	return prefix + slug + suffix
+}
+
+// keyFromPayload rebuilds an incident key for an OpenIncident without
+// one. Never the payload's fingerprint: that is the incident class.
+func keyFromPayload(payload any) inject.IncidentKey {
+	b, _ := json.Marshal(payload)
+	var f struct {
+		Cluster           string `json:"cluster"`
+		UID               string `json:"uid"`
+		Reason            string `json:"reason"`
+		ReasonClass       string `json:"reason_class"`
+		AncestorKind      string `json:"ancestor_kind"`
+		AncestorNamespace string `json:"ancestor_namespace"`
+		AncestorName      string `json:"ancestor_name"`
+	}
+	_ = json.Unmarshal(b, &f)
+	switch {
+	case f.UID != "":
+		reason := f.ReasonClass
+		if reason == "" {
+			reason = f.Reason
+		}
+		return inject.IncidentKey{Cluster: f.Cluster, Kind: inject.IncidentKeyIncident, ID: f.UID + "/" + reason}
+	case f.AncestorKind != "":
+		return inject.IncidentKey{Cluster: f.Cluster, Kind: inject.IncidentKeyStorm, ID: f.AncestorKind + "/" + f.AncestorNamespace + "/" + f.AncestorName}
+	default:
+		return inject.IncidentKey{Cluster: f.Cluster, Kind: inject.IncidentKeyWatchboard}
+	}
 }

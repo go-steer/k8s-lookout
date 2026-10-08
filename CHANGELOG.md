@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--ax-task-scope=incident|cluster` for the ax sink (#590).** `cluster`
+  runs one long-lived AX task per cluster, named from the cluster name,
+  with a session per incident inside it, for clusters where Substrate
+  workers are too scarce for a task per incident. `incident` stays the
+  default.
+
+### Fixed
+
+- **ax sink: tasks are named from the incident, not its class (#590).**
+  The task name used to hash the payload's `fingerprint`, which is the
+  incident class. A later, unrelated storm of the same class in the same
+  zone went into an old storm's task, and every watchboard digest made a
+  new task and held another worker. lookout now passes its own incident
+  identity to the sink: the cluster plus the dedup key (UID and reason
+  class) for an incident, the shared ancestor for a storm, and one
+  watchboard task per cluster. Task names change on upgrade, so open
+  incidents get new tasks once.
+- **ax sink: an incident that comes back reopens into its earlier
+  session (#590).** It used to get a new session in its task, so the
+  agent started cold. With `--store` this survives a restart (new
+  `sink_sessions` table, store migration v9); without it, sessions are
+  remembered in memory only. If the agent no longer has the session, a
+  new one is opened.
+
 ## [0.34.0] - 2026-10-08
 
 **This release tells agents what kind of failure an event is, and keeps

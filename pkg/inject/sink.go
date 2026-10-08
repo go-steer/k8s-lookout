@@ -16,6 +16,7 @@ package inject
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -65,6 +66,63 @@ type Sink interface {
 // after the successor's opening digest instead.
 type SessionOpener interface {
 	CreateSession(ctx context.Context) (string, error)
+}
+
+// IncidentKey is lookout's own identity for an incident, for sinks that
+// place incidents somewhere by it (the ax sink names an Agent Executor
+// task from it). It is what the dispatcher dedups and correlates on, not
+// anything read back out of the payload: the payload's fingerprint is the
+// incident CLASS, shared by unrelated incidents of the same kind.
+type IncidentKey struct {
+	// Cluster is the --cluster-name of the runner that saw the incident.
+	Cluster string
+	// Kind says which identity ID carries.
+	Kind IncidentKeyKind
+	// ID is the per-kind identity: "<uid>/<canonical reason>" (the
+	// dedup key) for an incident, the ancestor's "Kind/namespace/name"
+	// for a storm, empty for the watchboard (one per cluster).
+	ID string
+}
+
+// IncidentKeyKind is the kind of incident an IncidentKey identifies.
+type IncidentKeyKind string
+
+// The incident kinds the dispatcher opens.
+const (
+	IncidentKeyIncident   IncidentKeyKind = "incident"
+	IncidentKeyStorm      IncidentKeyKind = "storm"
+	IncidentKeyWatchboard IncidentKeyKind = "watchboard"
+)
+
+// String is the key's stable text form, "<kind>/<cluster>/<id>", for
+// logs and for sinks that persist a mapping from it.
+func (k IncidentKey) String() string {
+	return string(k.Kind) + "/" + k.Cluster + "/" + k.ID
+}
+
+// KeyedOpener is the optional capability a sink carries when it needs
+// lookout's incident identity to open an incident, not just the payload.
+// When the sink has it, the dispatcher opens incidents with
+// OpenIncidentKeyed, and the watchboard opens its sessions with
+// CreateSessionKeyed (so a KeyedOpener must also keep the SessionOpener
+// wire order: an empty session first). The core-agent and webhook sinks
+// don't implement it and see exactly the calls they always have.
+type KeyedOpener interface {
+	OpenIncidentKeyed(ctx context.Context, key IncidentKey, payload any) (id string, err error)
+	CreateSessionKeyed(ctx context.Context, key IncidentKey) (string, error)
+}
+
+// StatusError is the error a sink returns when the receiver answered
+// with an unexpected HTTP status. The message is unchanged from the
+// plain errors it replaced; callers can match the code with errors.As.
+type StatusError struct {
+	Op   string // e.g. "injector: POST inject"
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: status %d: %s", e.Op, e.Code, e.Body)
 }
 
 // newSinkHTTPClient is the shared production transport for every

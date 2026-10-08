@@ -44,6 +44,7 @@ func newAXSink(f *flags, token string) (*axsink.Sink, error) {
 		RouterURL:      f.axRouterURL,
 		BearerToken:    token,
 		AssertedCaller: f.owner,
+		Scope:          axsink.Scope(f.axTaskScope),
 	})
 }
 
