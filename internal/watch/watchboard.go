@@ -437,6 +437,7 @@ func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestP
 			Kind:         e.sig.Kind,
 			Fingerprint:  e.sig.Fingerprint,
 			Reason:       e.sig.Key.Reason,
+			ReasonClass:  engine.ReasonClass(e.sig.Kind, e.sig.Key.Reason, e.sig.Message),
 			Namespace:    e.sig.Namespace,
 			KindOfObject: e.sig.KindOfObject,
 			Name:         e.sig.Name,

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`reason_class` on event payloads: a crash loop now says so
+  (#574).** kubelet reports a crash loop as `reason: BackOff`, and uses
+  the same `BackOff` for image-pull retries; a pull failure arrives as
+  `Failed`. lookout already read the message to tell these apart, but
+  only used the answer internally, so a consumer routing on `reason`
+  sent a crash loop to its generic BackOff handler. Payloads now carry
+  that answer next to the untouched `reason`:
+  `{"reason":"BackOff", …, "reason_class":"CrashLoopBackOff"}`.
+  `k8s-event` and `k8s-event-followup` always carry it, even when it
+  equals `reason`, so consumers can route on `reason_class` alone.
+  Other kinds carry it only when their reason maps to a known family
+  (`capacity.pending` → `FailedScheduling`). It also rides
+  `triage.regressed`, storm member references and watchboard digest
+  entries. Additive and omitempty, appended as the last field of each
+  struct: `reason`, every other field and every fingerprint are
+  unchanged.
+
 ## [0.33.0] - 2026-10-07
 
 **This release lets the sentinel run for chosen namespaces only, adds an

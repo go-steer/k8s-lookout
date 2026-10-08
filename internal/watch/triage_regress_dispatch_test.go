@@ -157,7 +157,7 @@ func TestTriageRegressed_ExactWireShape(t *testing.T) {
 		`"baseline_count":2,"count":6,"factor":3,` +
 		`"first_seen":"2026-07-24T10:00:00Z","last_seen":"2026-07-24T10:10:00Z",` +
 		`"message":"downgraded incident regressed: 6 occurrences this dedup window vs 2 when the warning override was written (3x or more) — override still routing; re-triage via ` + "`lookout triage status`" + ` or escalate",` +
-		`"context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"}}`
+		`"context":{"controller_ref":"ReplicaSet/checkout-svc-7b9d"},"reason_class":"CrashLoopBackOff"}`
 	if got := messageOf(t, (*injects)[1].Body); got != want {
 		t.Errorf("triage.regressed wire shape drifted:\n got: %s\nwant: %s", got, want)
 	}

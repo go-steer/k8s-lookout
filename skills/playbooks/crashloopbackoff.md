@@ -1,8 +1,11 @@
 # Playbook: CrashLoopBackOff
 
 Trigger: a lookout-watch inject with `"kind":"k8s-event"` and
-`"reason":"BackOff"` (message like `Back-off restarting failed container
-<c> in pod <pod>_<ns>(<uid>)`), a `pod.crashloop` finding from
+`"reason_class":"CrashLoopBackOff"` (kubelet's own `reason` is the
+generic `"BackOff"`, message like `Back-off restarting failed container
+<c> in pod <pod>_<ns>(<uid>)`; a `BackOff` whose `reason_class` is
+`ImagePullBackOff` is an image-pull retry, not this playbook), a
+`pod.crashloop` finding from
 `triage delta`/`health`, or an operator reporting a restart loop.
 The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
 `context.controller_ref` names the owning workload.

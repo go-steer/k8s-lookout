@@ -331,8 +331,43 @@ signals — NOT omitempty, positioned after `context` to match
 kube-agents' watcher wire), `enrichment`\* (`bundle`), `forecast`\*
 (`eta`, `confidence_basis`), `quota_increase_draft`\* (`quota_id`,
 `region`, `unit`\*, `current_usage`, `current_limit`,
-`suggested_limit`, `slope_per_day`, `justification`). Fields marked
-\* are omitempty.
+`suggested_limit`, `slope_per_day`, `justification`), `reason_class`\*
+(the reason family lookout keyed the signal on — see below). Fields
+marked \* are omitempty.
+
+**`reason` vs `reason_class` (#574).** `reason` is exactly what the
+cluster said and is never rewritten. `reason_class` is the family
+lookout filed the signal under — the same value that drives dedup,
+the fingerprint and the store's `canonical_reason` — so a consumer can
+route without redoing lookout's message matching. kubelet emits
+`BackOff` for a crash loop AND for an image-pull retry, and `Failed`
+for a pull failure; only the message tells them apart:
+
+| `reason` | message shape | `reason_class` |
+| --- | --- | --- |
+| `BackOff` | `Back-off restarting failed container …` | `CrashLoopBackOff` |
+| `BackOff` | `Back-off pulling image "…"` | `ImagePullBackOff` |
+| `Failed` | `Failed to pull image "…": …` | `ImagePullBackOff` |
+| `FailedScheduling` | any | `FailedScheduling` |
+
+On `k8s-event` / `k8s-event-followup` it is ALWAYS set, even when it
+equals `reason`, so a consumer routes on `reason_class` alone. On
+source-namespaced kinds it is set only when a canonical mapping
+applies (`capacity.pending`'s `pending` → `FailedScheduling`,
+`objectstate.restart_burst`'s `restart_burst` → `CrashLoopBackOff`) and
+omitted otherwise — those reasons are lookout's own vocabulary and
+already name their class. `engine.ReasonClass` owns the rule. The
+same field rides `triage.regressed`, each `StormIncidentRef`
+(`representative_incidents`, `incident`) and each watchboard digest
+entry — every wire struct whose `reason` is the raw reason.
+`ResolvedPayload.reason` and `StormPayload.reason` are already the
+canonical class, and `family.member` carries it as `family`, so those
+three do not gain the field.
+
+The read path already agrees: `lookout triage events` reports the
+same message-aware class as its `reason` (raw spellings in
+`variants`), and `triage delta` / `health` read reasons from container
+status, which never says `BackOff`.
 
 **The M0 freeze inside the freeze:** on `kind=k8s-event` /
 `k8s-event-followup` the dispatcher never stamps
@@ -340,7 +375,9 @@ kube-agents' watcher wire), `enrichment`\* (`bundle`), `forecast`\*
 to the original watcher (playbook back-compat; wire pins in
 `internal/watch`), re-baselined twice: 2026-07-27 to add `type`, and
 2026-09-10 to stamp the IDENTITY block (`project`/`region`/`zone`) and
-add `pull_cause` (see §Amendments). Identity was excluded until a
+add `pull_cause` (see §Amendments) — and then extended additively
+2026-10-08 with the trailing `reason_class` (§Additive changes), which
+the pair always carries. Identity was excluded until a
 single process could watch a fleet, at which point `cluster` alone
 stopped identifying a cluster — a name is unique only within a
 (project, location) pair. The three still excluded are the pipeline's
@@ -486,6 +523,19 @@ first external consumer deploys.
   `Payload` entry in `frozenFields` was re-baselined once for the two
   insertions — the only observable change is field ORDER, and only to
   a byte-pin.
+
+## Additive changes (v1.x, after the amendment window)
+
+- **2026-10-08 — `reason_class` added (#574):** omitempty, APPENDED as
+  the last field of `Payload`, `TriageRegressedPayload`,
+  `StormIncidentRef` and `WatchboardEntry` per §Evolution, so every
+  existing field keeps its position and no fingerprint input changed.
+  It hands consumers the reason family lookout already computed
+  (`engine.CanonicalReasonForEvent`) — before it, a crash loop arrived
+  as `reason: BackOff` and a consumer routing on `reason` sent it to a
+  generic BackOff handler. The byte pins in `internal/watch` that
+  cover these structs gained the trailing field; see §Frozen field
+  sets for the rule.
 
 ## Evolution
 

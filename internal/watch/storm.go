@@ -409,6 +409,7 @@ func stormRef(m engine.StormMember) inject.StormIncidentRef {
 	return inject.StormIncidentRef{
 		Fingerprint:  m.Fingerprint,
 		Reason:       m.Reason,
+		ReasonClass:  m.ReasonClass,
 		Namespace:    m.Namespace,
 		KindOfObject: m.KindOfObject,
 		Name:         m.Name,

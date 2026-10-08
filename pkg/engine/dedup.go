@@ -340,6 +340,40 @@ func CanonicalReasonForEvent(reason, message string) string {
 	return CanonicalReason(reason)
 }
 
+// ReasonClass is the wire `reason_class` (issue #574): the reason
+// family lookout already filed a signal under, handed to the reader
+// so it does not have to redo the classification. kubelet says
+// `BackOff` for a crash loop AND for an image-pull retry, and
+// `Failed` for a pull failure; a consumer that routes on the raw
+// reason sends both to the wrong place. The payload's `reason` still
+// carries exactly what the cluster said; this sits beside it.
+//
+// The rule differs by kind, on purpose:
+//
+//   - Event-shaped kinds (k8s-event, k8s-event-followup; "" is the
+//     filter's alias for k8s-event): always set, to
+//     CanonicalReasonForEvent(reason, message), EVEN WHEN it equals
+//     reason — so a consumer routes on reason_class alone and never
+//     needs a fallback. This is the same value the dedup key, the
+//     fingerprint and the store's canonical_reason use.
+//   - Every other kind: CanonicalReason(reason) when a canonical
+//     mapping applies (it differs from reason — capacity.pending's
+//     `pending` → `FailedScheduling`, objectstate's `restart_burst` →
+//     `CrashLoopBackOff`), otherwise empty. Source-namespaced reasons
+//     are lookout's own vocabulary and already name their class;
+//     repeating them would add bytes, not information, and the empty
+//     value keeps every such payload byte-identical to before.
+func ReasonClass(kind, reason, message string) string {
+	switch kind {
+	case KindK8sEvent, KindK8sEventFollowup, "":
+		return CanonicalReasonForEvent(reason, message)
+	}
+	if canonical := CanonicalReason(reason); canonical != reason {
+		return canonical
+	}
+	return ""
+}
+
 // Observe records that key was just seen with eventLastTS (the
 // k8s Event's own LastTimestamp). Returns a dedupResult telling the
 // caller whether this is a fresh incident (start a new session) or
