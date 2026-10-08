@@ -98,6 +98,6 @@ real fleet-rollup integration + real-GCP drills (human steps; runbooks in
 `dev/drills/`), core-agent's shared Memory surface and
 CostCeiling-on-/usage TODOs, the `triage status` §4.1 extension
 awaiting review, `health`'s control-plane category not yet delegating
-to the perf packs, the `k8s-capacity` skill, and the M3 graph-history
-observations (the `GraphAt` restart-replay fix — still open, though
-`--storm` now defaults to auto rather than OFF).
+to the perf packs, and the `k8s-capacity` skill. The five M3
+graph-history observations (including the `GraphAt` restart replay)
+are closed by #55; M3.md names their guardian tests.
