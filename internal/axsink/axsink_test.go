@@ -150,6 +150,34 @@ func newTestAXSink(t *testing.T, router *fakeRouter) (*Sink, *fakeAX) {
 
 func newTestAXSinkScoped(t *testing.T, router *fakeRouter, scope Scope) (*Sink, *fakeAX) {
 	t.Helper()
+	client, ax := newFakeAXClient(t)
+	hs := httptest.NewServer(router)
+	t.Cleanup(hs.Close)
+
+	sink, err := New(Config{
+		Client:       client,
+		Template:     testTemplate(),
+		RouterURL:    hs.URL,
+		BearerToken:  "tok",
+		Scope:        scope,
+		StartTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sink, ax
+}
+
+func testTemplate() *axapi.Task {
+	return &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Atespace: "triage"},
+		Spec:     &axapi.TaskSpec{Image: "agent@sha256:abc", Http: &axapi.TaskHTTP{Port: 8484}},
+	}
+}
+
+// newFakeAXClient serves a fakeAX over bufconn and returns a client for it.
+func newFakeAXClient(t *testing.T) (axapi.AXClient, *fakeAX) {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
 	ax := &fakeAX{created: map[string]*axapi.Task{}}
@@ -164,25 +192,7 @@ func newTestAXSinkScoped(t *testing.T, router *fakeRouter, scope Scope) (*Sink, 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-
-	hs := httptest.NewServer(router)
-	t.Cleanup(hs.Close)
-
-	sink, err := New(Config{
-		Client: axapi.NewAXClient(conn),
-		Template: &axapi.Task{
-			Metadata: &axapi.ObjectMeta{Atespace: "triage"},
-			Spec:     &axapi.TaskSpec{Image: "agent@sha256:abc", Http: &axapi.TaskHTTP{Port: 8484}},
-		},
-		RouterURL:    hs.URL,
-		BearerToken:  "tok",
-		Scope:        scope,
-		StartTimeout: 10 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sink, ax
+	return axapi.NewAXClient(conn), ax
 }
 
 var (
@@ -228,6 +238,66 @@ func TestAXSink_OpenAndAppend(t *testing.T) {
 	}
 	if !strings.Contains(msgs[0], `"reason":"CrashLoopBackOff"`) || !strings.Contains(msgs[1], `"kind":"resolved"`) {
 		t.Errorf("unexpected messages %q", msgs)
+	}
+}
+
+// An https router works end to end (#580): readiness, session open, inject
+// and append all go over TLS, with the bearer token and ate-target-actor.
+func TestAXSink_HTTPSRouter(t *testing.T) {
+	router := &fakeRouter{}
+	var mu sync.Mutex
+	var plain, unauthenticated int
+	hs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.TLS == nil {
+			plain++
+		}
+		// The readiness probe is unauthenticated; the session calls are not.
+		if strings.HasPrefix(r.URL.Path, "/sessions") && r.Header.Get("Authorization") != "Bearer tok" {
+			unauthenticated++
+		}
+		mu.Unlock()
+		router.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hs.Close)
+
+	// The shared sink client (timeout, trace propagation) with the test
+	// server's CA trusted, as SSL_CERT_FILE would make it in production.
+	httpClient := inject.NewSinkHTTPClient()
+	httpClient.Transport = hs.Client().Transport
+
+	client, _ := newFakeAXClient(t)
+	sink, err := New(Config{
+		Client:       client,
+		Template:     testTemplate(),
+		RouterURL:    hs.URL,
+		BearerToken:  "tok",
+		HTTPClient:   httpClient,
+		StartTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(hs.URL, "https://") {
+		t.Fatalf("test server URL %q is not https", hs.URL)
+	}
+
+	ctx := context.Background()
+	id, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{Kind: "Pod", Reason: "CrashLoopBackOff", UID: "u1"})
+	if err != nil {
+		t.Fatalf("OpenIncidentKeyed over https: %v", err)
+	}
+	if err := sink.Append(ctx, id, inject.ResolvedPayload{Kind: "resolved"}); err != nil {
+		t.Fatalf("Append over https: %v", err)
+	}
+	task := sink.taskFor(crashKey)
+	if got := router.injects["triage/"+task+" /sessions/attach-1/inject"]; len(got) != 2 {
+		t.Fatalf("expected open + append delivered over https, got %v", router.injects)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if plain != 0 || unauthenticated != 0 {
+		t.Errorf("plain-http requests = %d, session calls without the bearer token = %d; want 0 and 0", plain, unauthenticated)
 	}
 }
 

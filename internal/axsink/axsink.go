@@ -120,7 +120,7 @@ func New(cfg Config) (*Sink, error) {
 		return nil, errors.New("ax sink: a task template with a spec is required")
 	}
 	if cfg.RouterURL == "" || strings.HasSuffix(cfg.RouterURL, "/") {
-		return nil, fmt.Errorf("ax sink: router URL is required and must not end with '/' (got %q)", cfg.RouterURL)
+		return nil, fmt.Errorf("ax sink: router URL is required and must not end with '/' (got %q)", inject.RedactedURL(cfg.RouterURL))
 	}
 	if cfg.BearerToken == "" {
 		return nil, errors.New("ax sink: bearer token for the agent's session API is required")

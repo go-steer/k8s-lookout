@@ -14,9 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a session per incident inside it, for clusters where Substrate
   workers are too scarce for a task per incident. `incident` stays the
   default.
+- **TLS for an AX in another cluster (#580).** `--ax-server-tls` dials the
+  AX API over TLS, verified against the system roots, and `--ax-ca-file`
+  swaps those for a private CA bundle; both are off by default, so
+  in-cluster deployments are unchanged. An `https://` `--ax-router-url`
+  works as is, and lookout now warns at startup when the router URL is
+  plain http to a host outside the cluster, because the `--token-env`
+  bearer token would cross the network unencrypted. AX itself checks no
+  credentials, so there is no per-RPC credential flag yet; see the
+  Cross-cluster section of `docs/ax-sink-design.md`.
 
 ### Fixed
 
+- **The webhook plain-http warning no longer prints a password embedded in
+  `--sink-url` (#580).** The same masking now applies to the webhook and ax
+  startup lines and to the flag errors that echo `--sink-url` or
+  `--ax-router-url`.
 - **ax sink: tasks are named from the incident, not its class (#590).**
   The task name used to hash the payload's `fingerprint`, which is the
   incident class. A later, unrelated storm of the same class in the same

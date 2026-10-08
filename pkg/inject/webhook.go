@@ -100,10 +100,10 @@ func NewWebhookSink(cfg WebhookConfig) (*WebhookSink, error) {
 		return nil, errors.New("webhook sink: url is required")
 	}
 	if strings.HasSuffix(cfg.URL, "/") {
-		return nil, fmt.Errorf("webhook sink: url must not end with '/' (got %q)", cfg.URL)
+		return nil, fmt.Errorf("webhook sink: url must not end with '/' (got %q)", RedactedURL(cfg.URL))
 	}
 	if !strings.HasPrefix(cfg.URL, "http://") && !strings.HasPrefix(cfg.URL, "https://") {
-		return nil, fmt.Errorf("webhook sink: url must start with http:// or https:// (got %q)", cfg.URL)
+		return nil, fmt.Errorf("webhook sink: url must start with http:// or https:// (got %q)", RedactedURL(cfg.URL))
 	}
 	client := cfg.HTTPClient
 	if client == nil {
