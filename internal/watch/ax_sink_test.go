@@ -47,6 +47,10 @@ spec:
           credentialUri: ate-secret://k8s.io/default/creds/google-token/token
   http:
     port: 8484
+  idle:
+    suspendAfter: 10m
+    busyPath: /busy
+  onCompletion: Suspend
 `)
 	tmpl, err := loadAXTaskTemplate(p)
 	if err != nil {
@@ -57,6 +61,11 @@ spec:
 	}
 	if got := tmpl.GetSpec().GetEgress()[0].GetCredentials()[0].GetCredentialUri(); !strings.HasPrefix(got, "ate-secret://") {
 		t.Errorf("credential uri = %q", got)
+	}
+	// AX suspends idle or finished tasks itself when the template asks it to;
+	// the sink only has to pass the fields through.
+	if idle := tmpl.GetSpec().GetIdle(); idle.GetSuspendAfter() != "10m" || idle.GetBusyPath() != "/busy" || tmpl.GetSpec().GetOnCompletion() != "Suspend" {
+		t.Errorf("idle policy not decoded: %v", tmpl.GetSpec())
 	}
 }
 

@@ -197,8 +197,11 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
 - **AX runner pass-through (`spec.http.port`).** Substrate's router only
   reaches the AX runner, so without a pass-through no request reaches the
   agent's session API. This is on a fork of AX
-  (`mastersingh24/ax:task-egress-credentials`) and will be proposed upstream.
-  The same fork lets a task declare egress and injected credentials.
+  (`mastersingh24/ax:task-idle-suspend`, built on `task-egress-credentials`)
+  and will be proposed upstream. The same fork lets a task declare egress and
+  injected credentials, and suspends idle or finished tasks itself
+  (`spec.idle`, `spec.onCompletion`; google/ax#420), which matters because
+  every open incident task otherwise holds a Substrate worker.
 - **The agent's session API.** The agent must serve `POST /sessions` and
   `POST /sessions/<sid>/inject` (core-agent's attach API). mast answered 501
   to `POST /sessions` until go-steer/mast `feat/ax-substrate-support`.
