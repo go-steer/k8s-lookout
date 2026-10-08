@@ -139,9 +139,10 @@ type ReplicaSetOwners interface {
 	DeploymentOf(namespace, name string) (string, bool)
 	// CurrentReplicaSet returns the Deployment's current ReplicaSet:
 	// the one it controls with the highest
-	// deployment.kubernetes.io/revision annotation. ok=false when that
-	// cannot be proven — no ReplicaSet, any of them without a
-	// parseable revision, or a tie.
+	// deployment.kubernetes.io/revision annotation, or — when any
+	// revision is missing or unparseable, or the top ties — the newest
+	// by creationTimestamp. ok=false when no ReplicaSet is controlled
+	// or the newest ties too.
 	CurrentReplicaSet(namespace, deployment string) (string, bool)
 }
 
