@@ -17,6 +17,7 @@ package computeclass
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,20 +65,43 @@ func autoscalerEvent(name string, p *corev1.Pod, reason string, after time.Durat
 	}
 }
 
+// testClock is a clock a test can move while Run is live. Run reads s.now
+// without the lock (the flush ticker, the post-barrier reconcile), so the
+// function has to be installed before Run starts and only the time it returns
+// may change afterwards. Unset, it is the wall clock.
+type testClock struct{ at atomic.Pointer[time.Time] }
+
+func (c *testClock) now() time.Time {
+	if at := c.at.Load(); at != nil {
+		return *at
+	}
+	return time.Now()
+}
+
+func (c *testClock) set(at time.Time) { c.at.Store(&at) }
+
+// withTestClock installs a testClock on a source that is not running yet.
+func withTestClock(s *Source) *testClock {
+	c := &testClock{}
+	s.now = c.now
+	return c
+}
+
 // runWithEvents starts a source over the fakes and waits until the scaleUps
 // map holds want verdicts for the pod — the Event informer is outside the sync
 // barrier, so the barrier alone does not promise they have arrived.
-func runWithEvents(t *testing.T, p *corev1.Pod, events ...*corev1.Event) *Source {
+func runWithEvents(t *testing.T, p *corev1.Pod, events ...*corev1.Event) (*Source, *testClock) {
 	t.Helper()
 	objs := []runtime.Object{p}
 	for _, ev := range events {
 		objs = append(objs, ev)
 	}
 	s := newRunnableSource(t, servedClient(objs...), dynClient(classObject(t, "locked", lockedSpec)))
+	clock := withTestClock(s)
 	runSource(t, s)
 	awaitVerdicts(t, s, p, len(events))
 	awaitPending(t, s, "locked", 1)
-	return s
+	return s, clock
 }
 
 func awaitVerdicts(t *testing.T, s *Source, p *corev1.Pod, want int) {
@@ -118,22 +142,21 @@ func awaitPending(t *testing.T, s *Source, class string, want int) {
 // passAcrossDwell runs one alert pass at T0+16s (the drill's first judge pass)
 // and one after the dwell, returning the wedged signals emitted and the wedged
 // verdict's reason at the second pass.
-func passAcrossDwell(t *testing.T, s *Source) ([]sources.Signal, string) {
+func passAcrossDwell(t *testing.T, s *Source, clock *testClock) ([]sources.Signal, string) {
 	t.Helper()
 	var wedged []sources.Signal
-	var now time.Time
 	s.mu.Lock()
 	s.emit = func(sig sources.Signal) {
 		if sig.Kind == leeway.KindRankWedged {
 			wedged = append(wedged, sig)
 		}
 	}
-	s.now = func() time.Time { return now }
 	s.mu.Unlock()
 
-	now = t0.Add(16 * time.Second)
+	clock.set(t0.Add(16 * time.Second))
 	s.runAlertPass(context.Background())
-	now = t0.Add(16*time.Second + leeway.DefaultDwell().For + time.Minute)
+	now := t0.Add(16*time.Second + leeway.DefaultDwell().For + time.Minute)
+	clock.set(now)
 	s.runAlertPass(context.Background())
 
 	var reason string
@@ -152,9 +175,9 @@ func passAcrossDwell(t *testing.T, s *Source) ([]sources.Signal, string) {
 // rather than asserting that no priority can be satisfied.
 func TestWedged_TheAutoscalerDeclined(t *testing.T) {
 	p := pendingClassPod("stuck", "locked")
-	s := runWithEvents(t, p, autoscalerEvent("stuck.1", p, leeway.ReasonNotTriggerScaleUp, 7*time.Second))
+	s, clock := runWithEvents(t, p, autoscalerEvent("stuck.1", p, leeway.ReasonNotTriggerScaleUp, 7*time.Second))
 
-	wedged, reason := passAcrossDwell(t, s)
+	wedged, reason := passAcrossDwell(t, s, clock)
 	if len(wedged) != 1 {
 		t.Fatalf("%d rank_wedged signal(s), want one (reason: %s)", len(wedged), reason)
 	}
@@ -171,9 +194,9 @@ func TestWedged_TheAutoscalerDeclined(t *testing.T) {
 // shape, or a dwell shorter than the provision. Not wedged.
 func TestWedged_AProvisioningFallbackIsNotWedged(t *testing.T) {
 	p := pendingClassPod("fallback", "locked")
-	s := runWithEvents(t, p, autoscalerEvent("fallback.1", p, leeway.ReasonTriggeredScaleUp, 7*time.Second))
+	s, clock := runWithEvents(t, p, autoscalerEvent("fallback.1", p, leeway.ReasonTriggeredScaleUp, 7*time.Second))
 
-	wedged, reason := passAcrossDwell(t, s)
+	wedged, reason := passAcrossDwell(t, s, clock)
 	if len(wedged) != 0 {
 		t.Fatalf("rank_wedged fired for a pod the autoscaler is provisioning a node for: %s", wedged[0].Message)
 	}
@@ -189,6 +212,7 @@ func TestWedged_ProvisioningThenFailedScaleUp(t *testing.T) {
 	p := pendingClassPod("stockout", "locked")
 	client := servedClient(p, autoscalerEvent("stockout.1", p, leeway.ReasonTriggeredScaleUp, 7*time.Second))
 	s := newRunnableSource(t, client, dynClient(classObject(t, "locked", lockedSpec)))
+	clock := withTestClock(s)
 	runSource(t, s)
 	awaitVerdicts(t, s, p, 1)
 	awaitPending(t, s, "locked", 1)
@@ -205,7 +229,7 @@ func TestWedged_ProvisioningThenFailedScaleUp(t *testing.T) {
 	}
 	awaitVerdicts(t, s, p, 2)
 
-	wedged, reason := passAcrossDwell(t, s)
+	wedged, reason := passAcrossDwell(t, s, clock)
 	if len(wedged) != 1 {
 		t.Fatalf("%d rank_wedged signal(s) after a FailedScaleUp, want one (reason: %s)", len(wedged), reason)
 	}
@@ -218,9 +242,9 @@ func TestWedged_ProvisioningThenFailedScaleUp(t *testing.T) {
 // inside the dwell. The message says no verdict was observed, and nothing more.
 func TestWedged_NoAutoscalerEventsStillFires(t *testing.T) {
 	p := pendingClassPod("silent", "locked")
-	s := runWithEvents(t, p)
+	s, clock := runWithEvents(t, p)
 
-	wedged, reason := passAcrossDwell(t, s)
+	wedged, reason := passAcrossDwell(t, s, clock)
 	if len(wedged) != 1 {
 		t.Fatalf("%d rank_wedged signal(s) with no autoscaler Events, want one (reason: %s)", len(wedged), reason)
 	}
