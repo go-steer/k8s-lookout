@@ -420,6 +420,14 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	if d.mode == "per-incident" && !d.dryRun {
+		// Sibling fold (§7.7 amendment 2026-10-08): another pod of the
+		// same workload already has a live incident of this class — a
+		// rollout's old and new ReplicaSet crash-looping on one fault.
+		// Folded into that session before enrichment, so no bundle is
+		// built for a session that never opens.
+		if d.foldSibling(ctx, sig, key, result.Count) {
+			return
+		}
 		// Enrichment (§7.6): pre-warm the session by attaching the
 		// in-process bundle to the INITIAL inject — composed BEFORE
 		// the open, because the sink delivers the initial payload
