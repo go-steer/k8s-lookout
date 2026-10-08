@@ -38,6 +38,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | Kind | Severity | Claim |
 | --- | --- | --- |
 | `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env) |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -60,6 +61,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `principal_agent` | --identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only |
 | `other_principals` | --identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail |
 | `identity` | summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent) |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

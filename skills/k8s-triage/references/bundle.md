@@ -100,7 +100,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | --- | --- |
 | `section` | which bundle section the finding belongs to: spec\|delta\|edges\|radius\|logs |
 | `sections` | on the bundle.target head finding: the sections that follow |
-| `skipped` | on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role |
+| `skipped` | on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role. When a List was refused, the head's message names each refusal, why this identity lacks it, and the grant that fixes it |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
 | `hop` | radius neighbor's BFS depth from the target (1 = direct edge) |
 | `observed` | unknown on a radius neighbor whose kind the bundle's List pass could not read (skipped= names it): it is referenced, and nothing is claimed about whether it exists |

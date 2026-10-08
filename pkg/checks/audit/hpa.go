@@ -139,7 +139,12 @@ func (ix *workloadIndex) scaleTarget(ns string, ref autoscalingv2.CrossVersionOb
 	if ref.APIVersion != "" && !strings.HasPrefix(ref.APIVersion, scalableAPIGroup) {
 		return nil, false
 	}
-	if _, ok := canonicalWorkloadKinds[strings.ToLower(ref.Kind)]; !ok {
+	kind, ok := canonicalWorkloadKinds[strings.ToLower(ref.Kind)]
+	if !ok {
+		return nil, false
+	}
+	// A kind whose List was refused (#584) was never looked at either.
+	if _, refused := ix.kindsRefused[kind]; refused {
 		return nil, false
 	}
 	for i := range ix.workloads {

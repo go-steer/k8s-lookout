@@ -120,8 +120,9 @@ func HardeningCommand(deps Deps) checks.Command {
 			checks.Kind(kindHostPath, "the pod mounts a host path; warning when it is writable, info when read-only", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindDefaultSAMount, "the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it", emit.SeverityWarning),
 			checks.Kind(kindPodSecurity, "the namespace enforces no Pod Security Admission level, so none of the above is prevented", emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "containers", Doc: "containers implicated by the finding — those running privileged, or holding a node-root capability"},
 			{Name: "container_names", Doc: "their names, capped at 8 with a +N more tail"},
 			{Name: "total_containers", Doc: "containers in the pod template, init containers included, so `containers` reads as a fraction"},
@@ -136,7 +137,7 @@ func HardeningCommand(deps Deps) checks.Command {
 			{Name: "pss_audit", Doc: "its /audit label, omitted when unset — same dry-run meaning"},
 			{Name: "workloads", Doc: "pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one"},
 			{Name: "namespaces", Doc: "summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit hardening -A",
 			"lookout audit hardening --namespace=prod",
@@ -169,6 +170,26 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		return 0, err
 	}
 
+	// A custom role refusing one of these reads (#584) costs the
+	// claims that need it, each named here; the rest still answer.
+	var refusals []emit.Finding
+	for _, r := range ix.refused {
+		refusals = append(refusals, checks.RefusedFinding(r.Refusal, r.kind+" pod templates not audited"))
+	}
+	if ix.saRefused != nil {
+		refusals = append(refusals, checks.RefusedFinding(*ix.saRefused,
+			kindDefaultSAMount+" not judged: it reads each namespace's default ServiceAccount"))
+	}
+	if ix.nsRefused != nil {
+		refusals = append(refusals, checks.RefusedFinding(*ix.nsRefused,
+			kindPodSecurity+" and "+kindDefaultSAMount+" not judged: they are claims about the Namespace objects"))
+	}
+	for _, f := range refusals {
+		if err := inv.Out.Emit(f); err != nil {
+			return 0, err
+		}
+	}
+
 	var findings []emit.Finding
 	for _, t := range ix.templates {
 		findings = append(findings, ix.judgeTemplate(t)...)
@@ -183,8 +204,10 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 			return 0, err
 		}
 	}
-	if err := inv.Out.Note("namespaces", itoa(len(ix.namespaces))); err != nil {
-		return 0, err
+	if ix.nsRefused == nil {
+		if err := inv.Out.Note("namespaces", itoa(len(ix.namespaces))); err != nil {
+			return 0, err
+		}
 	}
 	return len(ix.templates), nil
 }
@@ -206,6 +229,11 @@ type hardeningIndex struct {
 	// defaultSAUsers lists, per namespace, the workloads that would
 	// actually receive the default ServiceAccount's token.
 	defaultSAUsers map[string][]string
+	// refused, saRefused and nsRefused record the reads RBAC refused
+	// (#584): pod-template kinds, ServiceAccounts, Namespaces.
+	refused   []kindRefusal
+	saRefused *checks.Refusal
+	nsRefused *checks.Refusal
 }
 
 func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns string) (*hardeningIndex, error) {
@@ -214,11 +242,11 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 		templatesByNS:  map[string]int{},
 		defaultSAUsers: map[string][]string{},
 	}
-	templates, err := listPodTemplates(ctx, client, ns)
+	templates, refused, err := listPodTemplates(ctx, client, ns, true)
 	if err != nil {
 		return nil, err
 	}
-	ix.templates = templates
+	ix.templates, ix.refused = templates, refused
 
 	if err := listPages("serviceaccounts", func(o metav1.ListOptions) ([]corev1.ServiceAccount, string, error) {
 		l, err := client.CoreV1().ServiceAccounts(ns).List(ctx, o)
@@ -231,10 +259,20 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 			ix.defaultSAs[sa.Namespace] = sa
 		}
 	}); err != nil {
-		return nil, err
+		// No default ServiceAccount listed means the token claim makes
+		// no assertion (defaultSAs above), so a refusal only skips it.
+		r, ok := checks.ForbiddenRefusal(err)
+		if !ok {
+			return nil, err
+		}
+		ix.saRefused = &r
 	}
 	if ix.namespaces, err = listNamespacesInScope(ctx, client, ns); err != nil {
-		return nil, err
+		r, ok := checks.ForbiddenRefusal(err)
+		if !ok {
+			return nil, err
+		}
+		ix.nsRefused = &r
 	}
 
 	for _, t := range ix.templates {

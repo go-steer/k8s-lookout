@@ -457,6 +457,15 @@ func TestForbiddenKindIsReportedNotFatal(t *testing.T) {
 	if !strings.Contains(summary, "kinds=17") {
 		t.Errorf("kinds= should count the kinds actually listed: %s", summary)
 	}
+	// The note is the digest; the record carries the shared refusal
+	// wording — why, and the grant that fixes it (#584).
+	want := `kind=read.unavailable severity=info reason=ListForbidden message="forbidden: list secrets — namespaced, not granted by the built-in view role; grant list on secrets (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — Secret objects not listed: their absence here is a blind spot, not a fact" resource=secrets`
+	if !strings.Contains(res.Stdout, want) {
+		t.Errorf("the refusal is not worded like every other refusal:\n%s", res.Stdout)
+	}
+	if err := checktest.Verify(cmdFor(dyn), res.Stdout, emit.FormatLogfmt); err != nil {
+		t.Errorf("contract: %v", err)
+	}
 	if strings.Contains(res.Stdout, "target=Secret/") {
 		t.Errorf("a Secret was listed despite the refusal:\n%s", res.Stdout)
 	}

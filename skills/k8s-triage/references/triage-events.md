@@ -40,6 +40,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `event.warning` | warning | one collapsed timeline entry for a Warning-type event family on a subject |
 | `event.normal` | info | one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own |
 | `event.hpa_thrash` | warning | an HPA changed scale direction at least --hpa-flips times inside --hpa-window: the autoscaler is fighting itself |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
 
@@ -56,6 +57,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `flips` | event.hpa_thrash: most scale-direction changes observed inside one --hpa-window |
 | `window` | event.hpa_thrash: the --hpa-window the flips were counted in |
 | `target` | event.hpa_thrash: the HPA's scaleTargetRef as Kind/name (when the HPA object was readable) |
+| `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract
 

@@ -22,6 +22,7 @@
 package checks
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"regexp"
@@ -490,10 +491,16 @@ func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
 	if c.Positional != nil {
 		maxArgs = 1
 	}
+	run := c.Run
 	return emit.RunConfig{
-		Name:           "lookout " + c.Name,
-		Flags:          c.Flags,
-		Check:          c.Run,
+		Name:  "lookout " + c.Name,
+		Flags: c.Flags,
+		// A refused read that ends the run is worded like every other
+		// refusal (#584), on the CLI and over MCP alike.
+		Check: func(ctx context.Context, inv emit.Invocation) (int, error) {
+			n, err := run(ctx, inv)
+			return n, WordRefusal(err)
+		},
 		Help:           c.Help(),
 		MaxArgs:        maxArgs,
 		GraphBacked:    c.GraphBacked,

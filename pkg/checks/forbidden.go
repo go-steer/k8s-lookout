@@ -127,6 +127,10 @@ var cannotVerb = regexp.MustCompile(`cannot ([a-z]+) resource`)
 // Refusal (verb from the server's message, "list" when it names none).
 // Any other error reports false.
 func ForbiddenRefusal(err error) (Refusal, bool) {
+	var re *RefusalError
+	if errors.As(err, &re) {
+		return re.Refusal, true
+	}
 	if err == nil || !apierrors.IsForbidden(err) {
 		return Refusal{}, false
 	}
@@ -214,6 +218,56 @@ func RefusedAnswer(out *emit.Writer, err error, what string) (bool, error) {
 		return false, err
 	}
 	return true, out.Emit(RefusedFinding(r, what))
+}
+
+// RefusalError is a refused read a command cannot answer without
+// (#584): its subject, or the one input every check it runs needs.
+// Such a command still fails (exit 1), but its diagnostic says the
+// same three things a read.unavailable record does — what was
+// refused, why this identity lacks it, and the grant that fixes it —
+// instead of the API server's bare "is forbidden".
+type RefusalError struct {
+	Refusal Refusal
+	// What names what could not be answered without the read.
+	What string
+	// Err is the API server's error, when the refusal came from one
+	// (nil when a List pass recorded the refusal earlier and the
+	// command only now finds it needed the resource).
+	Err error
+}
+
+func (e *RefusalError) Error() string {
+	if e.What == "" {
+		return e.Refusal.String()
+	}
+	return e.Refusal.String() + " — " + e.What
+}
+
+func (e *RefusalError) Unwrap() error { return e.Err }
+
+// cannotAnswer is what a refusal the command did not word itself
+// says it cost.
+const cannotAnswer = "the command cannot answer without it"
+
+// WordRefusal rewrites an authorization refusal in err as a
+// RefusalError, so it reads in the shared wording wherever it is
+// rendered: the runner applies it to every command's error
+// (Command.RunConfig, which both the CLI and the MCP surface go
+// through), and scan to each stage's. An error that already carries a
+// RefusalError, or is no refusal at all, comes back unchanged.
+func WordRefusal(err error) error {
+	if err == nil {
+		return nil
+	}
+	var re *RefusalError
+	if errors.As(err, &re) {
+		return err
+	}
+	r, ok := ForbiddenRefusal(err)
+	if !ok {
+		return err
+	}
+	return &RefusalError{Refusal: r, What: cannotAnswer, Err: err}
 }
 
 // isRead reports whether verb is one of the read verbs `view` grants.

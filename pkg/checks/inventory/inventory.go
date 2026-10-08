@@ -137,8 +137,9 @@ func newCommand(deps Deps, now func() time.Time) checks.Command {
 		},
 		Kinds: []checks.KindField{
 			checks.Kind("inventory.object", "one object in scope, rendered as kubectl's default columns for its kind — an aggregated `kubectl get`, so every row is emitted, healthy or not", emit.SeverityInfo),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "target", Doc: "the object as <Kind>/<namespace>/<name> (<Kind>/<name> when cluster-scoped) — paste it into triage spec, state edges, triage radius or triage workload unchanged"},
 			{Name: "ready", Doc: "ready over desired, as kubectl's READY column: containers for a Pod, replicas for a workload"},
 			{Name: "status", Doc: "kubectl's STATUS column verbatim: a Pod's phase or its blocking container reason, a Job's condition, a Node's readiness"},
@@ -178,9 +179,9 @@ func newCommand(deps Deps, now func() time.Time) checks.Command {
 			{Name: "age", Doc: "time since metadata.creationTimestamp, kubectl-style (45s, 3h20m, 12d)"},
 			{Name: "kinds", Doc: "summary-line note: how many kinds the listing covered"},
 			{Name: "truncated", Doc: "summary-line note: how many objects --max left out; they are the LAST kinds of the listing, which is ordered workloads → routing → configuration for this reason"},
-			{Name: "skipped", Doc: "summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact)"},
+			{Name: "skipped", Doc: "summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact; each forbidden kind also gets a read.unavailable record naming the grant that fixes it)"},
 			{Name: "namespace_absent", Doc: "summary-line note: \"true\" when the listing was empty because the namespace does not exist, which an empty listing alone cannot distinguish from an empty namespace"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout triage list --namespace=storefront",
 			"lookout triage list --namespace=prod --kinds=pods,services,endpoints",
@@ -241,6 +242,7 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	var (
 		objects []object
 		skipped []string
+		refused []emit.Finding
 		listed  int
 	)
 	for _, k := range kinds {
@@ -255,6 +257,13 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			// line that cannot be missed, instead of failing the run.
 			if reason, tolerable := skipReason(err); tolerable {
 				skipped = append(skipped, k.kind+":"+reason)
+				// The note stays the one-line digest; the record says
+				// why and what grant fixes it, in the wording every
+				// other refusal uses (#584).
+				if r, ok := checks.ForbiddenRefusal(err); ok {
+					refused = append(refused, checks.RefusedFinding(r,
+						k.kind+" objects not listed: their absence here is a blind spot, not a fact"))
+				}
 				continue
 			}
 			return 0, fmt.Errorf("listing %s: %w", k.gvr.Resource, err)
@@ -268,6 +277,12 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	}
 	if len(skipped) > 0 {
 		if err := inv.Out.Note("skipped", strings.Join(skipped, ",")); err != nil {
+			return 0, err
+		}
+	}
+
+	for _, f := range refused {
+		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
 		}
 	}
@@ -286,9 +301,18 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		}
 	}
 
-	if len(objects) == 0 && ns != "" && l.namespaceAbsent(ctx, dyn, ns) {
-		if err := inv.Out.Note("namespace_absent", "true"); err != nil {
-			return 0, err
+	if len(objects) == 0 && ns != "" {
+		absent, refused := l.namespaceAbsent(ctx, dyn, ns)
+		if refused != nil {
+			if err := inv.Out.Emit(checks.RefusedFinding(*refused,
+				"this empty listing cannot be told apart from a namespace that does not exist")); err != nil {
+				return 0, err
+			}
+		}
+		if absent {
+			if err := inv.Out.Note("namespace_absent", "true"); err != nil {
+				return 0, err
+			}
 		}
 	}
 	return len(objects), nil
@@ -413,8 +437,12 @@ func skipReason(err error) (string, bool) {
 // is this namespace empty, or does it not exist? The two call for
 // completely different next moves, and the probe only runs when the
 // listing came back with nothing. A caller who may not read
-// namespaces gets no note rather than a wrong one.
-func (l *lister) namespaceAbsent(ctx context.Context, dyn dynamic.Interface, ns string) bool {
+// namespaces gets no note rather than a wrong one, and the refusal
+// that kept the question open (#584).
+func (l *lister) namespaceAbsent(ctx context.Context, dyn dynamic.Interface, ns string) (bool, *checks.Refusal) {
 	_, err := dyn.Resource(namespacesGVR).Get(ctx, ns, metav1.GetOptions{})
-	return apierrors.IsNotFound(err)
+	if r, ok := checks.ForbiddenRefusal(err); ok {
+		return false, &r
+	}
+	return apierrors.IsNotFound(err), nil
 }

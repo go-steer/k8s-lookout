@@ -32,6 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sink_sessions` table, store migration v9); without it, sessions are
   remembered in memory only. If the agent no longer has the session, a
   new one is opened.
+- **Custom roles that refuse a read `view` grants no longer fail
+  commands that can answer without it (#584).** The `view`-role work
+  (#546) covered the reads `view` leaves out. A custom role that also
+  refuses pods, events, PDBs or a workload kind still made most
+  commands exit 1. Now `triage events`, `triage changes`,
+  `audit hardening`, `audit workloads`, `stab drift`, `bundle` and the
+  rest report the refused read as a `read.unavailable` record in the
+  shared wording, skip only the claims that needed it, and exit 0.
+  Claims that would come out wrong without the read are skipped, not
+  guessed: `audit workloads` does not report `audit.no_pdb` without the
+  PDBs, and does not judge the replica floor without the HPAs. A
+  command that cannot answer without one read still exits 1: the target
+  of `--workload`, `events` for `triage events`, `pods` and the drain
+  blockers for `stab drain` and `stab scaledown`, and the policies,
+  namespaces and pod templates for `audit netpol`. Its stderr and its
+  MCP tool error now give the same refusal line (what was refused, why,
+  and the grant that fixes it) instead of the API server's bare
+  "is forbidden". A target whose kind could not be listed is reported
+  as refused, not "not found". The per-command table is in
+  `operations/scoping.md`.
+- **`triage list` and `bundle` say why a read was refused (#584).**
+  `triage list` keeps its `skipped=Secret:forbidden` note and adds one
+  `read.unavailable` record per refused kind. `bundle` adds the
+  refusal lines to its head finding's message. When the namespace
+  probe is refused, `triage list` says that an empty listing cannot be
+  told apart from a missing namespace.
 
 ## [0.34.0] - 2026-10-08
 

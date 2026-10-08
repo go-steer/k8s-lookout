@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 )
@@ -358,6 +359,11 @@ func (c *Cluster) WorkloadNode(wl emit.WorkloadRef) (graph.NodeID, error) {
 		ok = resolved && ref.Observed
 	}
 	if !ok {
+		// "Not found" would be a lie when the List that could have
+		// found it was refused: say which grant is missing (#584).
+		if r, refused := c.RefusedKind(kind); refused {
+			return graph.NoNode, &checks.RefusalError{Refusal: r, What: "workload " + wl.String() + " cannot be looked up without it"}
+		}
 		return graph.NoNode, fmt.Errorf("workload %s not found (%d objects listed)", wl, c.ix.scanned)
 	}
 	return id, nil
@@ -592,6 +598,9 @@ func (c *Cluster) EdgeFindings(wl emit.WorkloadRef, certWarn time.Duration, now 
 func (c *Cluster) ServiceEdgeFindings(svc emit.WorkloadRef, certWarn time.Duration, now time.Time) ([]emit.Finding, error) {
 	obj := c.ix.services[key(svc.Namespace, svc.Name)]
 	if obj == nil {
+		if r, refused := c.RefusedKind(graph.KindService); refused {
+			return nil, &checks.RefusalError{Refusal: r, What: "service " + svc.Namespace + "/" + svc.Name + " cannot be looked up without it"}
+		}
 		return nil, fmt.Errorf("service %s/%s not found (%d objects listed)", svc.Namespace, svc.Name, c.ix.scanned)
 	}
 	if certWarn <= 0 {

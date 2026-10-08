@@ -285,13 +285,52 @@ In order, the line gives:
 | `triage events --workload=…` | Nothing is lost. The owner-reference tree is resolved from pods and workload objects only. |
 | `scan` | Each stage reports its own gaps as above, as `read.unavailable` records, instead of failing as `scan.check_failed`, and the summary line's `unavailable=` names those stages. The edge drill-down still runs and names the lists it was refused in a short `drilldown_skipped=` note. `state edges --workload=…` on a flagged workload prints the full refusal line for each. |
 
-`bundle` and `triage list` report the same gaps in their existing
-`skipped=` notes. `triage events`, `triage logs`, `stab drift`,
-`state wi` and the other `audit` commands read nothing `view` refuses.
-To get a missing check back, grant the verb and resource the line
-names. A hermetic test, `pkg/checks/all/viewrole_test.go`, runs every
-read-path command against exactly `view` and fails if any of them
-exits non-zero.
+`bundle` names the gaps in its head finding's `skipped=` note and
+gives the refusal line for each in that finding's message. `triage
+list` keeps its `skipped=` note (`skipped=Secret:forbidden`) and adds
+one `read.unavailable` record per refused kind. `triage events`,
+`triage logs`, `stab drift`, `state wi` and the other `audit` commands
+read nothing `view` refuses. To get a missing check back, grant the
+verb and resource the line names. A hermetic test,
+`pkg/checks/all/viewrole_test.go`, runs every read-path command
+against exactly `view` and fails if any of them exits non-zero.
+
+## Custom roles that refuse a read `view` grants
+
+A custom role can refuse something `view` does grant: pods, events,
+PersistentVolumeClaims, a workload kind. The same rule applies. The
+part of the answer that needed the read reports it in the shared
+wording ("this identity lacks it", since `view` is not to blame) and
+the rest is still checked, exit 0.
+
+A few commands cannot give any honest answer without one particular
+read, because it is their subject or the input every claim depends
+on. Those still exit 1, but the diagnostic on stderr (and the MCP
+tool error) is the same refusal line, ending in what was lost:
+
+```
+lookout stab drain: forbidden: list pods — namespaced, this identity lacks it; grant list on pods (core) via a ClusterRole or Role, as lookout's shipped ClusterRole does — the command cannot answer without it
+```
+
+| Command | Exits 1 when it is refused | Everything else it reads |
+| --- | --- | --- |
+| `triage events` | `events`; with `--workload`, the target's own kind | A refused kind in the owner tree, or HPAs, is one `read.unavailable`; that hop's events are left out of the timeline. |
+| `triage top --workload=…` | the target's kind, `pods`, and any kind between them (`replicasets` for a Deployment, `jobs` for a CronJob) | Kinds off that path change nothing. Without `--workload`, refused `pods` is one `read.unavailable`. |
+| `triage logs` | the target and `pods` | |
+| `triage changes`, `triage radius`, `state edges`, `bundle` | the target's own kind (the error says it could not be looked up, rather than "not found") | One `read.unavailable` per refused kind that affects the answer (`bundle`: `skipped=` plus the refusal lines in its head finding). Refused `events` drop the rescale entries from `triage changes`. |
+| `stab drain`, `stab scaledown` | `pods`, `poddisruptionbudgets`, `replicasets`, `deployments`, `statefulsets` | A drain verdict that skipped a blocker would be a false "drainable". Refused `nodes` still degrade as above. |
+| `audit netpol` | `networkpolicies`, `namespaces`, and every pod-template kind | Coverage compares the policies against every pod template in a namespace. A missing kind would make a live policy look like it selects nothing. |
+| `audit hardening` | nothing | A refused pod-template kind is not audited. Refused `serviceaccounts` skip `audit.default_sa_automount`. Refused `namespaces` skip both namespace claims and the `namespaces=` note. |
+| `audit workloads` | the `--workload` target's kind | A refused workload kind is not audited. Refused PDBs skip `audit.no_pdb`. Refused HPAs skip every replica-floor claim (`single_replica`, `no_pdb`, `no_spread`, `hpa_*`). |
+| `stab drift` | the `--workload` target's kind | A refused kind is not scanned and does not count toward GitOps manager detection. |
+| `triage list` | nothing | One `read.unavailable` per refused kind, plus the `skipped=` note. |
+
+`health`, `triage delta`, `scan`, `state volumes`, `state storage`,
+`state webhooks`, `triage spec` and `net probe-from` degrade under
+every such role as well. `pkg/checks/all/refuse_core_test.go` refuses
+each read `view` grants, one at a time, against every read-path
+command. It fails if a command exits 1 where it should degrade, exits
+0 without a refusal line, or fails without the shared wording.
 
 `net probe-from` is not a read-path command, but the same guard holds
 it to the same rule: under `view` it changes nothing and answers with

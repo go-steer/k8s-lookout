@@ -143,7 +143,7 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 
 	id, err := lookupTarget(snap, wl, inv.Scope.At)
 	if err != nil {
-		return 0, err
+		return 0, targetRefused(cluster, wl, err)
 	}
 	if cluster != nil {
 		for _, f := range cluster.UnreadFindings(radiusUnverified) {

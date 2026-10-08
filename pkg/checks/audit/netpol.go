@@ -151,7 +151,9 @@ func runNetpol(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	templates, err := listPodTemplates(ctx, client, listNS)
+	// Strict: coverage compares the policies against every template in
+	// the namespace, so each of these reads is required (#584).
+	templates, _, err := listPodTemplates(ctx, client, listNS, false)
 	if err != nil {
 		return 0, err
 	}

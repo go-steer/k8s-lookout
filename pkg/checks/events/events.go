@@ -46,6 +46,7 @@ package events
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -97,8 +98,9 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("event.warning", "one collapsed timeline entry for a Warning-type event family on a subject", emit.SeverityWarning),
 			checks.Kind("event.normal", "one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own", emit.SeverityInfo),
 			checks.Kind("event.hpa_thrash", "an HPA changed scale direction at least --hpa-flips times inside --hpa-window: the autoscaler is fighting itself", emit.SeverityWarning),
+			checks.UnreadKind(),
 		},
-		Output: []checks.OutputField{
+		Output: append([]checks.OutputField{
 			{Name: "count", Doc: "events collapsed into this timeline entry: k8s per-event repeat counts summed across the entry's reason family"},
 			{Name: "first_seen", Doc: "RFC3339 timestamp of the entry's oldest activity"},
 			{Name: "last_seen", Doc: "RFC3339 timestamp of the entry's newest activity (the timeline sort key)"},
@@ -108,7 +110,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "flips", Doc: "event.hpa_thrash: most scale-direction changes observed inside one --hpa-window"},
 			{Name: "window", Doc: "event.hpa_thrash: the --hpa-window the flips were counted in"},
 			{Name: "target", Doc: "event.hpa_thrash: the HPA's scaleTargetRef as Kind/name (when the HPA object was readable)"},
-		},
+		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout triage events --workload=Deployment/prod/api",
 			"lookout triage events --workload=Pod/prod/api-6d5f8c-x2v9k --since=30m",
@@ -173,7 +175,12 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		// `state edges` pass also lists Secrets and RBAC objects, and
 		// under the built-in `view` role that one refusal used to fail
 		// the whole timeline for objects it never needed.
-		cluster, err := state.LoadCluster(ctx, client, listNS, state.Lists(ownerTreeLists))
+		//
+		// Tolerant (#584): a custom role that refuses one of those
+		// kinds costs the timeline that hop of the tree, named by a
+		// read.unavailable record; only the target's own kind is
+		// fatal, because without it there is no tree to walk.
+		cluster, err := state.LoadCluster(ctx, client, listNS, state.Lists(ownerTreeLists), state.Tolerate())
 		if err != nil {
 			return 0, err
 		}
@@ -181,8 +188,17 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		for _, f := range cluster.UnreadFindings(ownerTreeUnmatched) {
+			if err := inv.Out.Emit(f); err != nil {
+				return 0, err
+			}
+		}
 		match = ownerTree(cluster.Snapshot(), id)
 		hpas, err := listHPAs(ctx, client, listNS)
+		if r, ok := checks.ForbiddenRefusal(err); ok {
+			hpas, err = nil, inv.Out.Emit(checks.RefusedFinding(r,
+				"the workload's autoscaler is not in the owner tree: its rescale events and event.hpa_thrash are not reported"))
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -234,6 +250,10 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	// no HPA activity does not List HPAs for nothing.
 	if match == nil && len(rescales) > 0 {
 		hpas, err := listHPAs(ctx, client, listNS)
+		if r, ok := checks.ForbiddenRefusal(err); ok {
+			hpas, err = nil, inv.Out.Emit(checks.RefusedFinding(r,
+				"event.hpa_thrash findings carry no target= scaleTargetRef"))
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -259,6 +279,17 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 // object can sit in an owner-reference tree of these, so a role
 // without them (the built-in `view`) loses nothing from the timeline.
 var ownerTreeLists = state.OwnerTreeLists
+
+// ownerTreeUnmatched names what a refused owner-tree List costs the
+// timeline: the objects of that kind are not in the tree, so their
+// events are not matched — and neither are those of anything reached
+// only through them.
+func ownerTreeUnmatched(req state.ListRequirement) string {
+	if !slices.Contains(ownerTreeLists, req) {
+		return "" // deselected on purpose: never part of an owner tree
+	}
+	return "events of " + req.String() + " in the owner-reference tree, and of anything reached only through them, are not in the timeline"
+}
 
 // matchKey keys the owner-tree membership set. Graph kind names
 // (graph.NodeKind.String) are the canonical k8s kind spellings, so
