@@ -753,8 +753,12 @@ incident restored with a Deployment ref are both matched against all
 of the Deployment's ReplicaSets for "the workload still has pods", so
 `object_deleted` means the Deployment has no pods. Only the deleted
 pod's own ReplicaSet and the Deployment's current one (highest
-`deployment.kubernetes.io/revision`; unknown if any is missing,
-unparseable or tied) may vouch Ready — a restored Deployment ref, whose
+`deployment.kubernetes.io/revision`; when any is missing or
+unparseable, or the top ties, the newest by `creationTimestamp`;
+unknown only if that ties too — #600) may vouch Ready. A ReplicaSet is
+the Deployment's only under the live Deployment's UID when the
+Deployment cache is available, so a deleted-and-recreated Deployment's
+old ReplicaSets do not count (#601); without it, by name — a restored Deployment ref, whose
 original ReplicaSet is unknown, only the current one — so a rollout to
 a healthy new ReplicaSet recovers, while a stuck rollout's Ready old
 pods never clear the new pods' incident. A restored ReplicaSet ref keeps its

@@ -1538,6 +1538,11 @@ func enableEventOwners(ctx context.Context, src *k8sevents.Source, reviewer sour
 // (rollout, topology-drift, the storm graph and k8s-events owner
 // resolution use the same one). Nil, with one line, when replicasets
 // list/watch is denied: those incidents are judged as before.
+//
+// With deployments list/watch too (object-state and rollout already
+// run that informer on this factory), a ReplicaSet counts for a
+// Deployment only under the live Deployment's UID (#601); without it,
+// one line and the name match.
 func recoveryReplicaSetOwners(ctx context.Context, f *flags, client kubernetes.Interface, factory informers.SharedInformerFactory) (objectstate.ReplicaSetOwners, error) {
 	reviewer := newAccessReviewer(f, client)
 	for _, req := range sources.ExpandAll(reviewer, eventOwnerRSAccess) {
@@ -1550,7 +1555,25 @@ func recoveryReplicaSetOwners(ctx context.Context, f *flags, client kubernetes.I
 			return nil, nil
 		}
 	}
-	return objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets()), nil
+	for _, req := range sources.ExpandAll(reviewer, recoveryDeploymentAccess) {
+		d, err := reviewer.Allowed(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("recovery: capability probe for %q failed: %w", req, err)
+		}
+		if !d.Allowed {
+			log.Printf("recovery: %q denied (%s) — ReplicaSets are matched to their Deployment by name, so a deleted-and-recreated Deployment's old ReplicaSets count as its own until garbage-collected", req, sources.DenialDetail(d))
+			return objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets(), nil), nil
+		}
+	}
+	return objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets(), factory.Apps().V1().Deployments()), nil
+}
+
+// recoveryDeploymentAccess is what lets the ReplicaSet lookup tell a
+// Deployment's incarnations apart by UID (#601). In the shipped
+// ClusterRole and namespaced Role already, for object-state and rollout.
+var recoveryDeploymentAccess = []sources.Requirement{
+	{Group: "apps", Resource: "deployments", Verb: "list"},
+	{Group: "apps", Resource: "deployments", Verb: "watch"},
 }
 
 // recoveryTickInterval is how often the recovery tracker re-evaluates

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
+	appsv1informers "k8s.io/client-go/informers/apps/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -59,6 +60,25 @@ func rev(rs *appsv1.ReplicaSet, r string) *appsv1.ReplicaSet {
 	return rs
 }
 
+// created stamps rs's creationTimestamp — the fallback that picks the
+// current ReplicaSet when revisions cannot (#600).
+func created(rs *appsv1.ReplicaSet, at time.Time) *appsv1.ReplicaSet {
+	rs.CreationTimestamp = metav1.NewTime(at)
+	return rs
+}
+
+// ownedBy re-points rs's controller ownerReference at the Deployment
+// incarnation with UID uid.
+func ownedBy(rs *appsv1.ReplicaSet, uid string) *appsv1.ReplicaSet {
+	rs.OwnerReferences[0].UID = types.UID(uid)
+	return rs
+}
+
+// liveDeployment is Deployment name in "ns" with UID uid.
+func liveDeployment(name, uid string) *appsv1.Deployment {
+	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: types.UID(uid)}}
+}
+
 // startRSObserver starts the observer on a shared factory over objs,
 // with the ReplicaSet owners lookup installed, and waits for both the
 // pod and the ReplicaSet caches.
@@ -72,10 +92,23 @@ func startRSObserver(t *testing.T, objs ...runtime.Object) *podClearanceObserver
 // fake clientset, for the live-path tests that delete a pod.
 func startRSObserverClient(t *testing.T, objs ...runtime.Object) (*podClearanceObserver, *fake.Clientset) {
 	t.Helper()
+	return startRSObserverWith(t, false, objs...)
+}
+
+// startRSObserverWith is the shared body; withDeployments also backs
+// the lookup with the Deployment cache (UID matching, #601) — without
+// it ReplicaSets match their Deployment by name, the degraded mode a
+// sentinel without the deployments grant runs in.
+func startRSObserverWith(t *testing.T, withDeployments bool, objs ...runtime.Object) (*podClearanceObserver, *fake.Clientset) {
+	t.Helper()
 	client := fake.NewClientset(objs...)
 	factory := informers.NewSharedInformerFactory(client, 0)
 	obs := newPodClearanceObserver(client, factory)
-	owners := objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets())
+	var deployments appsv1informers.DeploymentInformer
+	if withDeployments {
+		deployments = factory.Apps().V1().Deployments()
+	}
+	owners := objectstate.NewReplicaSetOwners(factory.Apps().V1().ReplicaSets(), deployments)
 	obs.state.SetReplicaSetOwners(owners)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -299,21 +332,21 @@ func TestPodObserver_StuckRolloutOldReadyDoesNotVouch(t *testing.T) {
 	}
 }
 
-// Without a provable current ReplicaSet — the new one's revision
-// annotation missing or unparseable — no other ReplicaSet may vouch:
-// the deleted pod's own ReplicaSet only. A Ready pod under web-new
-// then proves a replacement exists (not object_deleted) but does not
-// clear the incident.
-func TestPodObserver_NoRevisionNoDeploymentWideVouch(t *testing.T) {
+// When revisions cannot pick the current ReplicaSet — one missing or
+// unparseable — the newest by creationTimestamp is current (#600), so
+// a Ready pod there recovers the deleted pod's incident instead of
+// leaving it open forever.
+func TestPodObserver_UnusableRevisionNewestCreatedVouches(t *testing.T) {
 	t.Parallel()
 	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	older, newer := readyAt.Add(-time.Hour), readyAt.Add(-30*time.Minute)
 	for _, revision := range []string{"", "two"} {
-		newRS := webRS("web-new", "apps/v1", "web")
+		newRS := created(webRS("web-new", "apps/v1", "web"), newer)
 		if revision != "" {
 			newRS = rev(newRS, revision)
 		}
 		obs, client := startRSObserverClient(t,
-			rev(webRS("web-old", "apps/v1", "web"), "1"),
+			created(rev(webRS("web-old", "apps/v1", "web"), "1"), older),
 			newRS,
 			podFixture{uid: "u-old", namespace: "ns", name: "web-old-aaaa", owner: "ReplicaSet/web-old"}.build(),
 			podFixture{uid: "u-new", namespace: "ns", name: "web-new-bbbb", owner: "ReplicaSet/web-new", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
@@ -324,9 +357,115 @@ func TestPodObserver_NoRevisionNoDeploymentWideVouch(t *testing.T) {
 		waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-old") })
 
 		verdict, ok := obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", "Deployment/web"))
-		if !ok || verdict.Cleared || verdict.Resolution == engine.ResolutionObjectDeleted {
-			t.Errorf("revision %q: want judged, NOT cleared, not object_deleted, got (%+v, %v)", revision, verdict, ok)
+		if !ok || !verdict.Cleared || verdict.Resolution != engine.ResolutionRecovered || !verdict.StableSince.Equal(readyAt) {
+			t.Errorf("revision %q: Ready pod in the newest-created ReplicaSet: want cleared/recovered since %v, got (%+v, %v)", revision, readyAt, verdict, ok)
 		}
+	}
+}
+
+// The same fallback, but the newest ReplicaSet is the one crash-looping
+// while an older one stays Ready: the workload is still broken, so the
+// incident stays open — live and restored.
+func TestPodObserver_UnusableRevisionNewestCrashingStaysOpen(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	objs := []runtime.Object{
+		created(rev(webRS("web-old", "apps/v1", "web"), "1"), readyAt.Add(-2*time.Hour)),
+		created(webRS("web-new", "apps/v1", "web"), readyAt.Add(-time.Hour)), // no revision
+		podFixture{uid: "u-o1", namespace: "ns", name: "web-old-o1", owner: "ReplicaSet/web-old", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+		podFixture{uid: "u-n2", namespace: "ns", name: "web-new-n2", owner: "ReplicaSet/web-new"}.build(),
+	}
+	live := slices.Concat(objs, []runtime.Object{podFixture{uid: "u-n1", namespace: "ns", name: "web-new-n1", owner: "ReplicaSet/web-new"}.build()})
+	obs, client := startRSObserverClient(t, live...)
+	if err := client.CoreV1().Pods("ns").Delete(context.Background(), "web-new-n1", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-n1") })
+	if v, ok := obs.Clearance(podIncident("u-n1", "ns", "web-new-n1", "Deployment/web")); !ok || v.Cleared {
+		t.Errorf("live: newest ReplicaSet crash-looping: want judged + NOT cleared, got (%+v, %v)", v, ok)
+	}
+
+	obs = startRSObserver(t, objs...)
+	if v, ok := obs.Clearance(podIncident("u-n1", "ns", "web-new-n1", "Deployment/web")); !ok || v.Cleared {
+		t.Errorf("restored: newest ReplicaSet crash-looping: want judged + NOT cleared, got (%+v, %v)", v, ok)
+	}
+}
+
+// A revision tie is broken by creationTimestamp too; only a tie on
+// both leaves the current ReplicaSet unknown — then nothing outside
+// the pod's own ReplicaSet vouches (not cleared, not object_deleted).
+func TestPodObserver_RevisionTieByCreation(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	cases := []struct {
+		name           string
+		oldAt, newAt   time.Time
+		wantCleared    bool
+		wantResolution engine.Resolution
+	}{
+		{"newer breaks the tie", readyAt.Add(-time.Hour), readyAt.Add(-30 * time.Minute), true, engine.ResolutionRecovered},
+		{"both tie", readyAt.Add(-time.Hour), readyAt.Add(-time.Hour), false, engine.ResolutionRecovered},
+	}
+	for _, tc := range cases {
+		obs, client := startRSObserverClient(t,
+			created(rev(webRS("web-old", "apps/v1", "web"), "2"), tc.oldAt),
+			created(rev(webRS("web-new", "apps/v1", "web"), "2"), tc.newAt),
+			podFixture{uid: "u-old", namespace: "ns", name: "web-old-aaaa", owner: "ReplicaSet/web-old"}.build(),
+			podFixture{uid: "u-new", namespace: "ns", name: "web-new-bbbb", owner: "ReplicaSet/web-new", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+		)
+		if err := client.CoreV1().Pods("ns").Delete(context.Background(), "web-old-aaaa", metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("delete pod: %v", err)
+		}
+		waitFor(t, "delete to reach the observer", func() bool { return !obs.state.HasLive("u-old") })
+
+		v, ok := obs.Clearance(podIncident("u-old", "ns", "web-old-aaaa", "Deployment/web"))
+		if !ok || v.Cleared != tc.wantCleared || v.Resolution != tc.wantResolution {
+			t.Errorf("%s: want cleared=%v resolution=%s, got (%+v, %v)", tc.name, tc.wantCleared, tc.wantResolution, v, ok)
+		}
+	}
+}
+
+// A Deployment deleted and recreated under the same name (#601): the
+// old incarnation's ReplicaSet — higher revision, Ready pod, still
+// awaiting garbage collection — is not the new Deployment's. With the
+// Deployment cache, ReplicaSets match by the live Deployment's UID: the
+// new incarnation's ReplicaSet is current, and the old one's pods
+// neither vouch nor count as the workload's.
+func TestPodObserver_RecreatedDeploymentMatchesByUID(t *testing.T) {
+	t.Parallel()
+	readyAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	oldIncarnation := func() []runtime.Object {
+		return []runtime.Object{
+			liveDeployment("web", "dep-web-2"),
+			rev(webRS("web-gen1", "apps/v1", "web"), "5"), // owner UID dep-web: the deleted incarnation
+			podFixture{uid: "u-g1", namespace: "ns", name: "web-gen1-aaaa", owner: "ReplicaSet/web-gen1", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+		}
+	}
+
+	// New incarnation crash-looping: the old incarnation's Ready pod,
+	// though under the higher revision, must not clear it.
+	obs, _ := startRSObserverWith(t, true, slices.Concat(oldIncarnation(), []runtime.Object{
+		ownedBy(rev(webRS("web-gen2", "apps/v1", "web"), "1"), "dep-web-2"),
+		podFixture{uid: "u-g2", namespace: "ns", name: "web-gen2-bbbb", owner: "ReplicaSet/web-gen2"}.build(),
+	})...)
+	if v, ok := obs.Clearance(podIncident("u-gone", "ns", "web-gen2-cccc", "Deployment/web")); !ok || v.Cleared {
+		t.Errorf("new incarnation crash-looping beside the old one's Ready pod: want judged + NOT cleared, got (%+v, %v)", v, ok)
+	}
+
+	// New incarnation Ready: its ReplicaSet is current and vouches.
+	obs, _ = startRSObserverWith(t, true, slices.Concat(oldIncarnation(), []runtime.Object{
+		ownedBy(rev(webRS("web-gen2", "apps/v1", "web"), "1"), "dep-web-2"),
+		podFixture{uid: "u-g2", namespace: "ns", name: "web-gen2-bbbb", owner: "ReplicaSet/web-gen2", ready: true, readyAt: readyAt, startedAt: readyAt}.build(),
+	})...)
+	if v, ok := obs.Clearance(podIncident("u-gone", "ns", "web-gen2-cccc", "Deployment/web")); !ok || !v.Cleared || v.Resolution != engine.ResolutionRecovered {
+		t.Errorf("new incarnation Ready: want cleared/recovered, got (%+v, %v)", v, ok)
+	}
+
+	// New incarnation without pods: the old incarnation's pods are not
+	// this workload's, so it has none — object_deleted.
+	obs, _ = startRSObserverWith(t, true, oldIncarnation()...)
+	if v, ok := obs.Clearance(podIncident("u-gone", "ns", "web-gen2-cccc", "Deployment/web")); !ok || !v.Cleared || v.Resolution != engine.ResolutionObjectDeleted {
+		t.Errorf("new incarnation without pods: want cleared/object_deleted, got (%+v, %v)", v, ok)
 	}
 }
 

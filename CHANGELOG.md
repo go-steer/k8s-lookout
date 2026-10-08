@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Recovery picks a Deployment's current ReplicaSet more reliably
+  (#600, #601).** When a ReplicaSet's revision annotation is missing,
+  unparseable or tied, the newest ReplicaSet by creation time now counts
+  as current, so a Ready replacement there resolves the incident
+  instead of leaving it open forever. A ReplicaSet now belongs to a
+  Deployment only if it points at the live Deployment's UID, so after a
+  Deployment is deleted and recreated under the same name, the old
+  ReplicaSets waiting for garbage collection no longer decide whether
+  the new one's incidents have recovered. Without the deployments
+  list/watch grant (shipped by default) lookout logs this at startup and
+  matches by name, as before.
 - **The webhook plain-http warning no longer prints a password embedded in
   `--sink-url` (#580).** The same masking now applies to the webhook and ax
   startup lines and to the flag errors that echo `--sink-url` or
