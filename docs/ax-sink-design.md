@@ -50,8 +50,8 @@ class, object kind, zone), deliberately not the object. A k8s-event payload
 has no fingerprint, so its task fell back to `uid` + reason; a storm payload
 has one, so an unrelated storm of the same class in the same zone, days later
 or in another cluster, landed in the old storm's task; a watchboard digest has
-neither, so every digest made a new task and held another Substrate worker
-(#590).
+neither, so every digest made a new task, and with it another running agent
+and its golden snapshot (#590).
 
 The dispatcher already knows what "the same incident" means, so it hands that
 to the sink instead of the sink guessing from the payload. `pkg/inject` has an
@@ -105,10 +105,11 @@ its own task, plus one watchboard task per cluster. Each incident gets its own
 sandbox, egress policy and blast radius.
 
 `--ax-task-scope=cluster` runs one long-lived task per cluster. Every incident,
-storm and watchboard digest gets its own session inside it. Substrate runs one
-actor per worker and workers are scarce, so this is the shape for clusters that
-see many incidents; the trade-off is that every incident shares the one agent
-process, its credentials and its egress policy.
+storm and watchboard digest gets its own session inside it. Every incident task
+is a running agent with its own memory and CPU on a Substrate worker (several
+agents can share a worker, up to its resources), so this is the shape for
+clusters that see many incidents; the trade-off is that every incident shares
+the one agent process, its credentials and its egress policy.
 
 The incident id is `<task>/<session>` in both scopes, so `Append` doesn't care.
 
@@ -262,7 +263,8 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   and will be proposed upstream. The same fork lets a task declare egress and
   injected credentials, and suspends idle or finished tasks itself
   (`spec.idle`, `spec.onCompletion`; google/ax#420), which matters because
-  every open incident task otherwise holds a Substrate worker.
+  every open incident task otherwise keeps a running agent, with its memory
+  and CPU, on a Substrate worker.
 - **The agent's session API.** The agent must serve `POST /sessions` and
   `POST /sessions/<sid>/inject` (core-agent's attach API). mast answered 501
   to `POST /sessions` until go-steer/mast `feat/ax-substrate-support`.
