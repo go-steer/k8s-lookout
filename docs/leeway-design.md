@@ -3889,6 +3889,22 @@ pipeline is for.
 > numbers are still reported, and that is a better answer than a wrong
 > mechanism.
 >
+> **Amended 2026-10-10 (#604): the cordon also has to begin before the
+> drift does.** The 2026-10-02 rule bounded the row from below only. In
+> the #585 soak `hard-1`'s skew began at 15:47:29, a zone worker was
+> drained at 15:56:58, and the finding fired at 15:57:59 as
+> `taint_exclusion` because the node was still cordoned. The row now
+> also skips a cordon dated more than 30 seconds after `firstSeenAt`.
+> The bound is not exactly `firstSeenAt`, because the comparison spans
+> two clocks: `cordonedAt` is the API server's `TimeAdded` when the
+> taint has one and our watch time when it does not, while
+> `firstSeenAt` is our alert tick. That tick already trails the drift's
+> true onset, so a causal cordon looks later only through clock skew or
+> watch-delivery lag, which is seconds. The soak's two correct
+> `taint_exclusion` findings keep their cause: colo-req's drain ended
+> inside the settle window, and hard-2's was in effect when its drift
+> began. §7.6's `LastDrainIn` has no upper bound and is unchanged.
+>
 > It is stored as a **per-domain latch**, not a log of removals, because that is
 > the shape of the question — an autoscaler packing forty nodes out of a zone is
 > one answer, not forty — and because it bounds the memory by the cluster's

@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `--dedup-persist`. New metric
   `lookout_repeat_followups_total{type=reminder|change}`; the skills
   now tell agents to let a diagnosis stand on a reminder.
+- **Leeway no longer blames a skew on a drain that started after it
+  (#604).** A `leeway.placement_drift` finding named `taint_exclusion`
+  whenever a node in an under-filled domain was cordoned, even if the
+  cordon came minutes after the skew had already begun; in the #585 soak
+  a drain nine and a half minutes into `hard-1`'s skew took the blame.
+  A cordon now counts only if it began no more than 30 seconds after the
+  episode's `firstSeenAt`, the slack covering the API server's and
+  lookout's clocks disagreeing. Such a drift now falls through to
+  whatever else explains it, often `unknown`. Because the cause is part
+  of the reason and the fingerprint, an affected finding gets a
+  different fingerprint than it would have before; the fingerprint
+  recipe itself is unchanged. §7.6's drain relaxation is unchanged.
 - **Recovery picks a Deployment's current ReplicaSet more reliably
   (#600, #601).** When a ReplicaSet's revision annotation is missing,
   unparseable or tied, the newest ReplicaSet by creation time now counts
@@ -128,6 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal lines to its head finding's message. When the namespace
   probe is refused, `triage list` says that an empty listing cannot be
   told apart from a missing namespace.
+
+### Security
+
+- **Go toolchain 1.26.9 and `golang.org/x/net` v0.60.0**, clearing the
+  standard-library and `x/net` advisories GO-2026-6605 through
+  GO-2026-6617 that `govulncheck` started reporting against 1.26.6 and
+  v0.59.0. No source change; `govulncheck` reports zero again. Like any
+  toolchain fix, it reaches users only through the released images and
+  binaries.
 
 ## [0.34.0] - 2026-10-08
 
