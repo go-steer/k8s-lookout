@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Leeway no longer blames a skew on a drain that started after it
+  (#604).** A `leeway.placement_drift` finding named `taint_exclusion`
+  whenever a node in an under-filled domain was cordoned, even if the
+  cordon came minutes after the skew had already begun; in the #585 soak
+  a drain nine and a half minutes into `hard-1`'s skew took the blame.
+  A cordon now counts only if it began no more than 30 seconds after the
+  episode's `firstSeenAt`, the slack covering the API server's and
+  lookout's clocks disagreeing. Such a drift now falls through to
+  whatever else explains it, often `unknown`. Because the cause is part
+  of the reason and the fingerprint, an affected finding gets a
+  different fingerprint than it would have before; the fingerprint
+  recipe itself is unchanged. §7.6's drain relaxation is unchanged.
 - **Recovery picks a Deployment's current ReplicaSet more reliably
   (#600, #601).** When a ReplicaSet's revision annotation is missing,
   unparseable or tied, the newest ReplicaSet by creation time now counts
