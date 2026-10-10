@@ -358,7 +358,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.tokenEndpoint, "token-endpoint", "", "Override base URL for the core-agent cost stack (default: --daemon-url — the §3 boundary rides the same daemon the injector talks to). No trailing slash.")
 
 	// Dedup.
-	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup.")
+	fs.DurationVar(&f.dedupWindow, "dedup-window", 5*time.Minute, "Rolling window for (uid,reason) dedup. An incident still open when its window lapses gets a reminder followup (repeat_count) instead of a new open; reminders back off from this window, doubling, to 1h.")
 	fs.StringVar(&f.dedupPersist, "dedup-persist", "", "Optional path to persist dedup cache across sidecar restart. In multi-cluster mode this is a stem: each runner gets its own file, suffixed with the cluster's project/location/name, so snapshots never clobber each other.")
 	fs.IntVar(&f.unhealthyMinCount, "unhealthy-min-count", 3, "Require this many consecutive Unhealthy events before firing.")
 	fs.IntVar(&f.backoffMinCount, "backoff-min-count", 3, "Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event.")

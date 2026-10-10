@@ -88,5 +88,7 @@ inject payload's `namespace`/`kind_of_object`/`name` name the pod.
    ```
 
    The `pod.pending` finding disappearing (summary `findings` drops) is
-   the all-clear; the sentinel's `k8s-event-followup` inject confirms the
-   mount events stopped.
+   the all-clear; the sentinel's `resolved` inject confirms the mount
+   events stopped. A `k8s-event-followup` with `repeat_count` > 0 before
+   that means the mount is still failing unchanged — the diagnosis
+   stands; one without `repeat_count` means something changed.

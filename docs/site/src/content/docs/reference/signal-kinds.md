@@ -27,7 +27,7 @@ Emitted by the dispatcher itself (outcome records, storms, watchboard, triage ev
 | Kind | Wire struct | Role |
 | --- | --- | --- |
 | `k8s-event` | `Payload` | Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat. |
-| `k8s-event-followup` | `Payload` | Frozen reactive kind: a dedup-window recurrence injected into the already-open incident session. |
+| `k8s-event-followup` | `Payload` | Frozen reactive kind: a repeat of an incident still open past its dedup window, injected into its session; repeat_count > 0 marks a pure reminder (nothing changed), omitted means the signal changed. |
 | `resolved` | `ResolvedPayload` | Outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered\|object_deleted. |
 | `resolved.reverted` | `ResolvedPayload` | Outcome record: the symptom recurred within the revert window after a resolve. |
 | `storm` | `StormPayload` | Aggregate incident: opened when --storm-min incidents share a blast-radius key within --storm-window. |

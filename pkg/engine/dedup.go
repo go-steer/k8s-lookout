@@ -107,6 +107,58 @@ type dedupEntry struct {
 	// window rolls — degrading to the pre-#220 digest behavior rather
 	// than mis-binding.
 	AncestorKeys []string `json:"ancestor_keys,omitempty"`
+
+	// The repeat schedule (issue #599, DESIGN.md §7.4 "Repeats of an
+	// open incident"). Before #599 an incident whose dedup window
+	// lapsed while it was still broken opened again, so a pod the
+	// scheduler re-queues every ~5 minutes opened a session every ~5
+	// minutes. Now a lapse on a still-open incident is a reminder into
+	// the bound session, on a doubling schedule, and these fields are
+	// that schedule. All of them are version tolerant both ways like
+	// Incident/Storm: an older snapshot loads them zero (see the
+	// legacy notes on each), and an older binary ignores the keys.
+	//
+	// SessionClass records that the signal which opened this entry
+	// routes to a session of its own (critical, or any class when no
+	// routing policy/watchboard is configured). Only such an entry can
+	// repeat: a warning bound to the watchboard session, or an info
+	// signal that was only stored, keeps the pre-#599 lapse-and-reopen
+	// path, so a §9.4 escalation of it still opens a per-incident
+	// session. Legacy entries load false and keep that path until
+	// their window next rolls.
+	SessionClass bool `json:"session_class,omitempty"`
+	// Resolved is set when a §7.4 kind=resolved outcome routed to this
+	// entry's session (MarkResolved). A resolved incident is not open:
+	// its recurrence is a fresh incident, exactly as before #599, even
+	// if the recovery tracker has already re-armed it.
+	Resolved bool `json:"resolved,omitempty"`
+	// RepeatCount is how many pure reminders went into the session
+	// since the last open or material change; the next one is number
+	// RepeatCount+1 and is due repeatInterval(window, RepeatCount+1)
+	// after LastInjectAt.
+	RepeatCount int `json:"repeat_count,omitempty"`
+	// LastInjectAt is when this incident last spoke into its session:
+	// the open, a reminder, or a material-change followup. Zero in a
+	// legacy entry, which repeat() reads as FirstSeen (the open).
+	LastInjectAt time.Time `json:"last_inject_at,omitzero"`
+	// InjectCount is Count as of LastInjectAt, so Count-InjectCount is
+	// the occurrences since the session last heard about this incident.
+	InjectCount int `json:"inject_count,omitempty"`
+	// RatePerHour is the reference occurrence rate for the count-jump
+	// test: the rate over the interval that ended at the last reminder
+	// (or at the last count-jump followup). Zero until the first
+	// reminder, which disables the test until then.
+	RatePerHour float64 `json:"rate_per_hour,omitempty"`
+	// Classes are the signal classes (repeatClass: kind, severity and
+	// message shape, hashed) this incident has shown, oldest first,
+	// capped at maxRepeatClasses. A repeat whose class is not here is a
+	// material change. A set rather than the last value because one
+	// incident legitimately alternates: kubelet's pull cycle emits
+	// `Failed to pull image`, `Error: ErrImagePull`, `Back-off pulling
+	// image` and `Error: ImagePullBackOff` onto the same key. Empty in
+	// a legacy entry; the first class seen after restore is adopted
+	// silently rather than read as a change.
+	Classes []string `json:"classes,omitempty"`
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -115,8 +167,12 @@ type dedupEntry struct {
 // window expired and this is a fresh incident (create new session).
 type DedupResult struct {
 	Kind      DedupResultKind
-	SessionID string // only set when Kind==duplicate; the existing session
-	Count     int    // window count (1 for first, N for duplicates)
+	SessionID string // set when Kind==duplicate or Kind==repeat; the bound session
+	// Count is the window count: 1 for a new incident, N for
+	// duplicates. For an open incident past its first window (repeats
+	// and absorbed duplicates) the window no longer rolls, so it keeps
+	// counting every occurrence since the open.
+	Count int
 	// Storm, when non-empty, is the fingerprint of the §7.5 storm this
 	// key was folded into (AttachToStorm). Set on DedupDuplicate results
 	// so the dispatcher's #96 unbound-retry guard can tell a storm-
@@ -124,7 +180,34 @@ type DedupResult struct {
 	// as a member) from genuine #84 open residue (retry the per-incident
 	// open) — the two compose only if the guard consults it (issue #104).
 	Storm string
+	// RepeatCount is set on DedupRepeat results: N > 0 means this is
+	// the N-th pure reminder since the open or the last material
+	// change; 0 means the signal changed materially (Change says how)
+	// and the session should look again. It rides the wire unchanged
+	// as the payload's repeat_count.
+	RepeatCount int
+	// Change names the material change on a DedupRepeat with
+	// RepeatCount 0: RepeatChangeClass or RepeatChangeRate.
+	Change string
+	// Absorbed marks a DedupDuplicate that belongs to an open incident
+	// past its first window: an occurrence between two reminders,
+	// counted and suppressed. The dispatcher uses it to keep a storm
+	// that owns the incident alive (§7.5 idle TTL), which the
+	// pre-#599 reopen used to do as a side effect.
+	Absorbed bool
 }
+
+// RepeatChange* name what made a repeat material (DedupResult.Change).
+const (
+	// RepeatChangeClass: a signal class the incident had not shown
+	// before — a new message shape, a severity change, or a different
+	// source kind on the same key.
+	RepeatChangeClass = "class"
+	// RepeatChangeRate: the occurrence rate since the last inject
+	// reached repeatJumpFactor times the reference rate, over at least
+	// repeatJumpMin occurrences.
+	RepeatChangeRate = "rate"
+)
 
 type DedupResultKind int
 
@@ -136,6 +219,11 @@ const (
 	// suppresses this event; the count is bumped and available
 	// via DedupResult.Count.
 	DedupDuplicate
+	// DedupRepeat: the window lapsed (or a reminder came due) while the
+	// incident is still open (issue #599). Caller injects a followup
+	// into DedupResult.SessionID — never opens a session — carrying
+	// DedupResult.RepeatCount.
+	DedupRepeat
 )
 
 // DedupCache is the rolling-window dedup store. Backed by a map +
@@ -151,6 +239,11 @@ type DedupCache struct {
 	persistPath string
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
+	// isOpen, when non-nil, answers whether the recovery tracker
+	// (§7.4) still holds key's incident as unresolved (SetOpenCheck).
+	// Nil when recovery tracking is off: no incident is ever known to
+	// be open, so every lapse reopens as it did before #599.
+	isOpen func(EventKey) bool
 }
 
 // maxDedupEntries caps the sidecar's cache size. 10k is plenty for
@@ -177,6 +270,25 @@ func NewDedupCache(window time.Duration, persistPath string) (*DedupCache, error
 		}
 	}
 	return c, nil
+}
+
+// SetOpenCheck installs the "is this incident still open?" predicate
+// the repeat schedule consults (issue #599) — the recovery tracker's
+// Open. Wire it once at startup, before events flow; nil restores the
+// pre-#599 behavior (every lapse is a new incident).
+func (c *DedupCache) SetOpenCheck(open func(EventKey) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.isOpen = open
+}
+
+// SetClock overrides the cache's clock. For tests and simulations
+// outside this package that need to step through hours of dedup
+// windows without sleeping; nil restores the real clock.
+func (c *DedupCache) SetClock(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
 }
 
 // clock returns the current time. Overridable for tests.
@@ -374,10 +486,37 @@ func ReasonClass(kind, reason, message string) string {
 	return ""
 }
 
-// Observe records that key was just seen with eventLastTS (the
-// k8s Event's own LastTimestamp). Returns a dedupResult telling the
-// caller whether this is a fresh incident (start a new session) or
-// a duplicate within the current window (suppress).
+// Observe is ObserveSignal for a caller that knows only the event's
+// LastTimestamp: the observation is not repeatable, so the result is
+// exactly the pre-#599 verdict (cases 1, 3 and 4 below). Kept for the
+// callers and tests that predate the repeat schedule.
+func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
+	return c.ObserveSignal(key, Observation{LastTS: eventLastTS})
+}
+
+// Observation is what ObserveSignal needs to know about one event
+// beyond its key.
+type Observation struct {
+	// LastTS is the k8s Event's own LastTimestamp (the signal's
+	// LastSeen): the replay test compares it with the entry's.
+	LastTS time.Time
+	// Kind, Severity and Message make up the signal's class for the
+	// material-change test (repeatClass). Only a hash of the message's
+	// shape is kept, never the text.
+	Kind     string
+	Severity Severity
+	Message  string
+	// Repeatable reports that this signal routes to a session of its
+	// own (the dispatcher's opensSessions): only then can a lapse on a
+	// still-open incident become a reminder instead of a new incident.
+	Repeatable bool
+}
+
+// ObserveSignal records that key was just seen and returns a
+// DedupResult telling the caller whether this is a fresh incident
+// (start a new session), a duplicate within the current window
+// (suppress), or a repeat of an incident that is still open (issue
+// #599: a followup into its bound session).
 //
 // The key's Reason is canonicalized (see reasonCanonical) so events
 // from the same underlying failure with different reason variants
@@ -385,33 +524,48 @@ func ReasonClass(kind, reason, message string) string {
 // slot. The wire event's original Reason is preserved on the
 // inject payload — canonicalization is a dedup-only mechanism.
 //
-// Three cases, checked in order:
+// Four cases, checked in order:
 //
-//  1. **Replay** — eventLastTS is not later than the recorded
+//  1. **Replay** — LastTS is not later than the recorded
 //     EventLastTS. This is the k8s Event object being re-delivered
 //     (informer watch-rotation triggers a re-List; kube-apiserver
 //     rotates watch connections every ~15-25min in practice). The
 //     activity is one we've already processed — dedup, do NOT
 //     advance LastSeen (retry cooldown continues to age from real
-//     activity time). Bump count so metrics stay accurate.
+//     activity time). Bump count so metrics stay accurate. A replay
+//     never reaches the repeat schedule either.
 //
-//  2. **New activity past cooldown** — eventLastTS is later AND
-//     wall-clock now is more than `window` past LastSeen. The prior
-//     session's cooldown has expired and k8s is still actively
-//     reporting the issue, so create a new session (retry safety
-//     net: if the previous agent-run failed to resolve the
-//     incident, the fresh reporting gives it another chance).
+//  2. **Still open** — LastTS is later, the entry is bound to a
+//     session by a session-class signal, this signal is session-class
+//     too, the incident has not been resolved (MarkResolved) and the
+//     recovery tracker still holds it (SetOpenCheck). Inside the
+//     first window that is a plain duplicate; once the window has
+//     lapsed it is handed to repeat, which returns a reminder, a
+//     material-change followup, or an absorbed duplicate.
 //
-//  3. **New activity within cooldown** — eventLastTS is later,
-//     within the window. Real new k8s aggregation on top of an
-//     ongoing incident — dedup to the existing session, advance
-//     both LastSeen and EventLastTS.
+//  3. **New activity past cooldown** — LastTS is later AND wall-clock
+//     now is more than `window` past LastSeen, and the incident is
+//     not known to be open (recovery off, untracked, resolved, or
+//     never session-bound). Create a new session (retry safety net:
+//     if the previous agent-run failed to resolve the incident, the
+//     fresh reporting gives it another chance). Before #599 this was
+//     the only lapse path.
+//
+//  4. **New activity within cooldown** — LastTS is later, within the
+//     window. Real new k8s aggregation on top of an ongoing incident
+//     — dedup to the existing session, advance both LastSeen and
+//     EventLastTS.
 //
 // Contract: the caller MUST call BindSession after a successful
 // CreateSession call to attach the SessionID to the newly-created
 // entry, so subsequent duplicates can route to the same session.
-func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
+//
+// Lock order: the open-check predicate (the recovery tracker's Open)
+// is called with the cache lock held, so it must never call back into
+// the cache. The tracker's Open takes only its own lock.
+func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	key.Reason = CanonicalReason(key.Reason)
+	class := repeatClass(obs.Kind, obs.Severity, obs.Message)
 	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -419,39 +573,68 @@ func (c *DedupCache) Observe(key EventKey, eventLastTS time.Time) DedupResult {
 	if !ok {
 		// First sighting for this key.
 		c.evictIfFull()
-		c.entries[key] = &dedupEntry{
-			FirstSeen:   now,
-			LastSeen:    now,
-			EventLastTS: eventLastTS,
-			Count:       1,
-		}
+		c.entries[key] = newDedupEntry(now, obs, class)
 		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
-	if !eventLastTS.After(entry.EventLastTS) {
+	if !obs.LastTS.After(entry.EventLastTS) {
 		// Case 1: replay. Same activity we already processed;
 		// don't advance LastSeen (retry cooldown untouched).
 		entry.Count++
 		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 	}
-	if now.Sub(entry.LastSeen) > c.window {
-		// Case 2: retry safety net. Prior session's cooldown
-		// elapsed AND k8s is still reporting new activity —
-		// spin up a fresh session so an agent that failed to
-		// resolve the last one gets another attempt.
+	lapsed := now.Sub(entry.LastSeen) > c.window
+	if obs.Repeatable && entry.SessionClass && !entry.Resolved &&
+		entry.SessionID != "" && entry.Incident != nil &&
+		c.isOpen != nil && c.isOpen(key) {
+		// Case 2: the incident is still open.
+		return c.repeat(entry, now, obs.LastTS, class, lapsed)
+	}
+	if lapsed {
+		// Case 3: retry safety net. Prior session's cooldown
+		// elapsed AND k8s is still reporting new activity, and
+		// nothing says the incident is still open — spin up a
+		// fresh session so an agent that failed to resolve the
+		// last one gets another attempt.
 		c.evictIfFull()
-		c.entries[key] = &dedupEntry{
-			FirstSeen:   now,
-			LastSeen:    now,
-			EventLastTS: eventLastTS,
-			Count:       1,
-		}
+		c.entries[key] = newDedupEntry(now, obs, class)
 		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
-	// Case 3: new activity within cooldown → dedup + advance.
+	// Case 4: new activity within cooldown → dedup + advance.
 	entry.Count++
 	entry.LastSeen = now
-	entry.EventLastTS = eventLastTS
+	entry.EventLastTS = obs.LastTS
+	entry.noteClass(class)
 	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
+}
+
+// newDedupEntry is the entry a new incident opens: the open is the
+// first inject, and its class the first the incident has shown.
+func newDedupEntry(now time.Time, obs Observation, class string) *dedupEntry {
+	return &dedupEntry{
+		FirstSeen:    now,
+		LastSeen:     now,
+		EventLastTS:  obs.LastTS,
+		Count:        1,
+		SessionClass: obs.Repeatable,
+		LastInjectAt: now,
+		InjectCount:  1,
+		Classes:      []string{class},
+	}
+}
+
+// MarkResolved records that key's incident was resolved (§7.4): the
+// dispatcher calls it when it routes a kind=resolved outcome, so a
+// recurrence opens a fresh incident instead of repeating into the
+// resolved one (issue #599). Not cleared by kind=resolved.reverted —
+// a recurrence is a new incident on the wire, exactly as before. A
+// new entry for the key starts unresolved. No-op on a missing entry.
+func (c *DedupCache) MarkResolved(key EventKey) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok {
+		entry.Resolved = true
+	}
 }
 
 // BindSession attaches the SessionID from a successful CreateSession

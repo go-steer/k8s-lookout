@@ -2087,6 +2087,11 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 		tracker.AddObserver(o)
 	}
 	disp.tracker = tracker
+	// Issue #599: a lapse on an incident the tracker still holds open
+	// is a reminder into its session, not a new incident. Without a
+	// tracker (recovery disabled) the cache has no open check and
+	// every lapse reopens, as before.
+	dedup.SetOpenCheck(tracker.Open)
 	// Resume clearance watching for bindings restored from
 	// --dedup-persist so the fix-verify loop survives a restart.
 	if bindings := dedup.Bindings(); len(bindings) > 0 {

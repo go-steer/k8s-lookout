@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failure that stays broken no longer reopens its incident every
+  dedup window (#599).** When an incident's `--dedup-window` lapsed
+  while it was still failing, lookout opened it again, so a pod the
+  scheduler re-queues every five minutes opened a new incident every
+  five minutes (225 in one 24h soak) and the agent re-diagnosed it each
+  time. Now, while recovery tracking still holds the incident open, the
+  lapse is a followup into the incident's existing session (the storm's,
+  if a storm owns it): `k8s-event-followup` for a k8s event, the
+  source's own kind otherwise, with a new `repeat_count` field. A
+  `repeat_count` above 0 is a pure reminder — still failing, nothing
+  changed — and reminders back off from the window, doubling, to one an
+  hour (5m, 10m, 20m, 40m, 1h at the default); occurrences in between
+  are counted, not sent. A followup without `repeat_count` means the
+  signal changed (a new message shape or severity, or a jump of 4× or
+  more in how often it fires) and restarts the schedule. A resolved
+  incident's recurrence still opens fresh, and without recovery
+  tracking every lapse reopens as before. The schedule survives restarts
+  through `--dedup-persist`. New metric
+  `lookout_repeat_followups_total{type=reminder|change}`; the skills
+  now tell agents to let a diagnosis stand on a reminder.
 - **Recovery picks a Deployment's current ReplicaSet more reliably
   (#600, #601).** When a ReplicaSet's revision annotation is missing,
   unparseable or tied, the newest ReplicaSet by creation time now counts

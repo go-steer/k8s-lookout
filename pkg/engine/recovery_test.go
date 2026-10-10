@@ -347,3 +347,32 @@ func TestRecoveryTracker_TrackCanonicalizesAndUpserts(t *testing.T) {
 		t.Errorf("resolved Key.Reason = %q, want canonical CrashLoopBackOff", h.emitted[0].Key.Reason)
 	}
 }
+
+// TestRecoveryTracker_Open pins the dedup open check (issue #599):
+// open while symptomatic or clearing, closed once resolved and once
+// untracked, and keyed canonically like Track.
+func TestRecoveryTracker_Open(t *testing.T) {
+	t.Parallel()
+	h := newRecoveryHarness(t, 5*time.Minute)
+	if h.tracker.Open(h.incident.Key) {
+		t.Fatal("an untracked incident must not be open")
+	}
+	h.tracker.Track(h.incident)
+	if !h.tracker.Open(EventKey{UID: "u1", Reason: "BackOff"}) {
+		t.Fatal("a tracked symptomatic incident must be open (lookup canonicalizes like Track)")
+	}
+	clearedAt := h.now.Add(time.Minute)
+	verdict := Clearance{Cleared: true, StableSince: clearedAt, Resolution: ResolutionRecovered}
+	h.tickAt(time.Minute, verdict, true)
+	if !h.tracker.Open(h.incident.Key) {
+		t.Fatal("a clearing incident is still open until resolved")
+	}
+	h.tickAt(6*time.Minute, verdict, true)
+	if len(h.emitted) != 1 || h.tracker.Open(h.incident.Key) {
+		t.Fatalf("resolved incident must not be open (emitted=%d)", len(h.emitted))
+	}
+	h.tickAt(6*time.Minute, verdict, true)
+	if h.tracker.Len() != 0 || h.tracker.Open(h.incident.Key) {
+		t.Fatal("an incident dropped after its revert window must not be open")
+	}
+}

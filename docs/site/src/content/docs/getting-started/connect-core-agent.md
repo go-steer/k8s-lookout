@@ -66,7 +66,10 @@ the rest — is cataloged in the generated
 [signal-kind reference](/reference/signal-kinds/).
 
 Beyond the initial inject, sessions receive followups without any agent
-polling: dedup-window repeats, `kind=storm.member` attachments, and —
+polling: reminders while an incident stays broken (`k8s-event-followup`
+with `repeat_count` > 0 — still failing, nothing changed — backing off
+from `--dedup-window` to one an hour; a followup without `repeat_count`
+means the signal changed), `kind=storm.member` attachments, and —
 the closed loop — `kind=resolved` when the sentinel observes the symptom
 clear and hold stable for `--recovery-stable-for` (with
 `kind=resolved.reverted` if it comes back).

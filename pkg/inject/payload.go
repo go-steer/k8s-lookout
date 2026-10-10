@@ -120,6 +120,18 @@ type Payload struct {
 	// evolution rule — docs/signal-schema-v1.md §Evolution): every
 	// existing field keeps its position.
 	ReasonClass string `json:"reason_class,omitempty"`
+	// RepeatCount marks a followup for an incident that is ALREADY
+	// open in this session (issue #599). N > 0 means "a reminder:
+	// still failing, nothing material changed since the last inject" —
+	// the N-th since the open or the last material change, on a
+	// doubling schedule from --dedup-window up to 1h. A reader can let
+	// its diagnosis stand. Omitted (zero) on everything else: every
+	// open, and a followup sent because the signal changed materially
+	// (a new message shape or severity, or a jump in its rate), which
+	// is worth looking at again. Only followups carry it: the frozen
+	// k8s-event-followup for k8s events, the signal's own kind for
+	// source-namespaced ones. ADDITIVE and LAST, per §Evolution.
+	RepeatCount int `json:"repeat_count,omitempty"`
 }
 
 // PayloadForecast mirrors DESIGN.md §8's forecast object: ETA is the

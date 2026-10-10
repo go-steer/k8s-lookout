@@ -638,6 +638,46 @@ longer polls to confirm its fix stuck, sessions can auto-conclude, and every
 incident record gains a ground-truth outcome (§9.3). **Highest value per line
 of code in this document; ships in M2 before any new source.**
 
+**Amendment (2026-10-10, #599): repeats of an open incident.** Knowing
+whether an incident is resolved also tells the sentinel what to do when one
+is *not*. The dedup window used to be a cooldown with a retry safety net:
+once it lapsed, the next occurrence opened the incident again. The scheduler
+re-queues an unschedulable pod about every five minutes, just past the 5m
+default, so the #585 soak's one stuck pod opened 225 sessions in 24 hours and
+its agent re-diagnosed an unchanged failure each time. Now:
+
+- **Still open** means: the dedup entry is bound to a session, the signal
+  that opened it and the one now arriving both route to a session of their
+  own (§7.7 — not the watchboard warning class, not info, not a §9.4
+  downgrade), no `kind=resolved` has been routed to it, and the recovery
+  tracker holds it as symptomatic or clearing. Where any of that is unknown —
+  recovery disabled, the incident never bound, `--mode=shared`, an incident
+  no observer has judged once the tracker drops it (one hour) — the lapse
+  opens a new incident as before.
+- A lapse on a still-open incident is a **followup** into the bound session
+  (the storm's, if a storm claimed it), never an open: the frozen
+  `k8s-event-followup` for a k8s event, the source's own kind otherwise,
+  carrying `repeat_count`. No enrichment rides it.
+- **Reminders back off.** Pure reminders (`repeat_count` = N > 0) come one
+  `--dedup-window` after the open, then 2, 4, 8 windows after the previous
+  one, capped at a fixed hour (5m, 10m, 20m, 40m, 1h, 1h… at the default;
+  no flag). Occurrences in between are absorbed: counted — the payload
+  `count` keeps every occurrence since the open — and not injected.
+- **A material change is not a reminder.** A signal class the incident has
+  not shown (kind, severity and message shape with digit runs collapsed, so
+  counts and ages don't register; a set, not the last value, because
+  kubelet's pull cycle alternates four messages on one key), or an
+  occurrence rate since the last inject at least 4× the reference rate over
+  at least 10 occurrences, goes in at once with `repeat_count` omitted, and
+  the schedule restarts from one window. The reason is not an input: it is
+  the dedup key already.
+- After the incident resolves, a recurrence opens fresh, as before. Replays
+  (an Event's `LastTimestamp` not advancing) never reach any of this.
+
+The schedule rides `--dedup-persist`, so a restart mid-backoff resumes at the
+next reminder. A storm-claimed incident's repeats refresh the storm's idle
+clock, which its re-fires used to do.
+
 ### 7.5 Storm correlation
 
 Today's dedup key is `(uid, reason)`: a node failure opens ~30 sessions for 30

@@ -100,12 +100,18 @@ var frozenFields = map[string][]string{
 	// match; "reason" itself is unchanged. The same field joined
 	// TriageRegressedPayload, StormIncidentRef and WatchboardEntry,
 	// the other structs that carry a raw wire reason.
+	//
+	// "repeat_count" landed 2026-10-10 (issue #599), additive +
+	// omitempty and APPENDED: on a followup for an incident that is
+	// already open, N > 0 means the N-th pure reminder (nothing
+	// material changed); zero/omitted on every open and on a followup
+	// for a material change. Payload only — no other struct repeats.
 	"Payload": {"kind", "reason", "namespace", "kind_of_object", "name",
 		"container", "uid", "message", "count", "first_seen", "last_seen",
 		"cluster", "project", "region", "zone", "pull_cause", "source",
 		"severity", "fingerprint",
 		"context", "type", "enrichment", "forecast", "quota_increase_draft",
-		"reason_class"},
+		"reason_class", "repeat_count"},
 	"ResolvedPayload": {"kind", "reason", "namespace", "kind_of_object",
 		"name", "container", "uid", "fingerprint", "cluster", "first_seen",
 		"resolved_at", "cleared_after", "observed_stable_for", "resolution",
@@ -283,6 +289,14 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 				Unit: "count", CurrentUsage: 1700, CurrentLimit: 2000, SuggestedLimit: 3000,
 				SlopePerDay: 50, Justification: "growth",
 			},
+		},
+		// A repeat reminder (issue #599): the frozen followup kind with
+		// the trailing repeat_count set.
+		inject.Payload{
+			Kind: inject.KindFollowup, Reason: "FailedScheduling", ReasonClass: "FailedScheduling",
+			Namespace: "prod", KindOfObject: "Pod", Name: "api-0", UID: "u1",
+			Message: "0/6 nodes are available", Count: 7, FirstSeen: ts, LastSeen: ts.Add(time.Hour),
+			Cluster: "prod-east", Type: "Warning", RepeatCount: 3,
 		},
 		inject.ResolvedPayload{
 			Kind: inject.KindResolvedReverted, Reason: "CrashLoopBackOff", Namespace: "prod",
