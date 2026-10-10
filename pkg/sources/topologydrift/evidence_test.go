@@ -37,7 +37,7 @@ func TestInventory_DrainTimesAnswersEveryDomainInOnePass(t *testing.T) {
 	inv.Upsert(node("n-c1", "us-central1-c"))
 
 	domains := []leeway.Domain{"us-central1-a", "us-central1-b", "us-central1-c"}
-	got := inv.DrainTimes(zoneKey, domains, time.Time{})
+	got := inv.DrainTimes(zoneKey, domains, time.Time{}, time.Time{})
 
 	// Per domain, the most recent drain — and c, which was never drained, is
 	// absent rather than present at the zero time, so a caller reading the map
@@ -66,10 +66,10 @@ func TestInventory_DrainTimesRefusesAnUnknownAxisOrAnEmptySet(t *testing.T) {
 	inv := fixedInventory(&now, zoneKey)
 	inv.Upsert(node("n-1", "us-central1-a", cordonedAtTaint(t0)))
 
-	if got := inv.DrainTimes("nope/key", []leeway.Domain{"us-central1-a"}, time.Time{}); got != nil {
+	if got := inv.DrainTimes("nope/key", []leeway.Domain{"us-central1-a"}, time.Time{}, time.Time{}); got != nil {
 		t.Errorf("DrainTimes on an untracked axis = %v, want nil", got)
 	}
-	if got := inv.DrainTimes(zoneKey, nil, time.Time{}); got != nil {
+	if got := inv.DrainTimes(zoneKey, nil, time.Time{}, time.Time{}); got != nil {
 		t.Errorf("DrainTimes over no domains = %v, want nil", got)
 	}
 }
@@ -369,9 +369,18 @@ func TestSource_EvidenceForToleratesAnAbsentDistribution(t *testing.T) {
 func soakScaleDown(t *testing.T, heldUntil time.Time) (cause leeway.SuspectedCause, eligible []leeway.Domain) {
 	t.Helper()
 	day := func(h, m, s int) time.Time { return time.Date(2026, 10, 1, h, m, s, 0, time.UTC) }
+	return soakDrift(t, day(21, 30, 0), heldUntil, day(22, 41, 15), day(22, 51, 45))
+}
 
+// soakDrift is soakScaleDown's cluster and [4 1 4] distribution with the
+// zone-b drain and the episode moved: zone-b-0 is cordoned at cordonAt and
+// handed back at heldUntil (the zero time leaves it cordoned), the episode
+// began at firstSeen, and the finding is built at now.
+func soakDrift(t *testing.T, cordonAt, heldUntil, firstSeen, now time.Time) (cause leeway.SuspectedCause, eligible []leeway.Domain) {
+	t.Helper()
+	at := now
 	s := New(fake.NewSimpleClientset(), Config{TopologyKeys: []leeway.TopologyKey{zoneKey}})
-	now := day(20, 0, 0)
+	now = cordonAt.Add(-time.Hour)
 	s.inv.now = func() time.Time { return now }
 
 	s.inv.Upsert(node("kind-control-plane", "",
@@ -382,14 +391,14 @@ func soakScaleDown(t *testing.T, heldUntil time.Time) (cause leeway.SuspectedCau
 		}
 	}
 
-	now = day(21, 30, 0)
+	now = cordonAt
 	s.inv.Upsert(node("zone-b-0", "zone-b", cordonedAtTaint(now)))
 	if !heldUntil.IsZero() {
 		now = heldUntil
 		s.inv.Upsert(node("zone-b-0", "zone-b"))
 	}
 
-	now = day(22, 51, 45)
+	now = at
 	rep := tscPod(zoneSpread(1, corev1.DoNotSchedule))
 	pods := replicas(rep,
 		"zone-a-0", "zone-a-0", "zone-a-1", "zone-a-1",
@@ -405,9 +414,103 @@ func soakScaleDown(t *testing.T, heldUntil time.Time) (cause leeway.SuspectedCau
 		t.Fatalf("[4 1 4] against maxSkew 1 / DoNotSchedule = %+v, want a Tier A breach — the fixture is not the soak's", ev.Verdict)
 	}
 
-	st := leeway.AlertState{FirstSeenAt: day(22, 41, 15)}
+	st := leeway.AlertState{FirstSeenAt: firstSeen}
 	f, _ := s.findingFor(webSubject, &ev, st, dist, now)
 	return f.SuspectedCause, ev.Eligible.Domains
+}
+
+// The #585 soak's three taint_exclusion findings, replayed on soakDrift's
+// cluster with each one's own drain and firstSeenAt. Only hard-1's was wrong:
+// its drain started nine and a half minutes after its skew already existed.
+func TestAttribution_SoakDrainTimelines(t *testing.T) {
+	at := func(d, h, m, s int) time.Time { return time.Date(2026, 10, d, h, m, s, 0, time.UTC) }
+	cases := []struct {
+		name                        string
+		cordon, uncordon, firstSeen time.Time
+		now                         time.Time
+		want                        leeway.SuspectedCause
+	}{{
+		// Still cordoned when the finding fired, which is why the #537
+		// lower bound let it through.
+		name:      "hard-1: drain began after the drift",
+		cordon:    at(9, 15, 56, 58),
+		firstSeen: at(9, 15, 47, 29),
+		now:       at(9, 15, 57, 59),
+		want:      leeway.CauseUnknown,
+	}, {
+		name:      "colo-req: drain ended inside the settle window",
+		cordon:    at(9, 21, 44, 28),
+		uncordon:  at(9, 21, 48, 28),
+		firstSeen: at(9, 21, 55, 59),
+		now:       at(9, 22, 6, 0),
+		want:      leeway.CauseTaintExclusion,
+	}, {
+		name:      "hard-2: drain in effect when the drift began",
+		cordon:    at(9, 11, 18, 30),
+		uncordon:  at(9, 11, 24, 7),
+		firstSeen: at(9, 11, 22, 29),
+		now:       at(9, 11, 32, 30),
+		want:      leeway.CauseTaintExclusion,
+	}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got, _ := soakDrift(t, c.cordon, c.uncordon, c.firstSeen, c.now); got != c.want {
+				t.Errorf("suspected cause = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The upper bound's edge: a cordon dated up to drainOnsetSlack after
+// firstSeenAt is still blamed, because the two timestamps come from different
+// clocks and firstSeenAt trails the true onset anyway; one dated past it is
+// not.
+func TestAttribution_DrainOnsetSlackBoundary(t *testing.T) {
+	firstSeen := time.Date(2026, 10, 9, 15, 47, 29, 0, time.UTC)
+	now := firstSeen.Add(10 * time.Minute)
+	for _, c := range []struct {
+		after time.Duration
+		want  leeway.SuspectedCause
+	}{
+		{-time.Second, leeway.CauseTaintExclusion},
+		{0, leeway.CauseTaintExclusion},
+		{drainOnsetSlack, leeway.CauseTaintExclusion},
+		{drainOnsetSlack + time.Second, leeway.CauseUnknown},
+	} {
+		got, _ := soakDrift(t, firstSeen.Add(c.after), time.Time{}, firstSeen, now)
+		if got != c.want {
+			t.Errorf("cordon %v after firstSeenAt: suspected cause = %q, want %q", c.after, got, c.want)
+		}
+	}
+}
+
+func TestInventory_DrainTimesSkipsACordonThatBeganAfterUntil(t *testing.T) {
+	now := t0.Add(-time.Hour)
+	inv := fixedInventory(&now, zoneKey)
+	until := t0.Add(-10 * time.Minute)
+	inv.Upsert(node("n-a1", "us-central1-a", cordonedAtTaint(until.Add(-time.Minute))))
+	inv.Upsert(node("n-a2", "us-central1-a", cordonedAtTaint(until.Add(time.Minute))))
+	inv.Upsert(node("n-b1", "us-central1-b", cordonedAtTaint(until)))
+	inv.Upsert(node("n-c1", "us-central1-c", cordonedAtTaint(until.Add(time.Second))))
+
+	domains := []leeway.Domain{"us-central1-a", "us-central1-b", "us-central1-c"}
+	got := inv.DrainTimes(zoneKey, domains, time.Time{}, until)
+	// Zone a falls back to its earlier cordon rather than losing the domain:
+	// the later node's drain is skipped, not the zone.
+	if want := until.Add(-time.Minute); !got["us-central1-a"].Equal(want) {
+		t.Errorf("zone a = %v, want the cordon before until %v", got["us-central1-a"], want)
+	}
+	if !got["us-central1-b"].Equal(until) {
+		t.Errorf("zone b = %v, want a cordon exactly at until kept", got["us-central1-b"])
+	}
+	if _, ok := got["us-central1-c"]; ok {
+		t.Errorf("zone c counted a cordon that began after until: %v", got)
+	}
+	// LastDrainIn has no upper bound: §7.6's settle relaxation still reads
+	// the newest drain.
+	if want := until.Add(time.Second); !inv.LastDrainIn(zoneKey, []leeway.Domain{"us-central1-c"}).Equal(want) {
+		t.Error("LastDrainIn lost zone c's drain; §7.6 reads it unbounded")
+	}
 }
 
 func TestAttribution_ScaleDownLongAfterAnUncordonIsNotATaint(t *testing.T) {
@@ -459,7 +562,7 @@ func TestInventory_DrainTimesSkipsACordonThatEndedBeforeSince(t *testing.T) {
 	// n-c is still cordoned.
 
 	domains := []leeway.Domain{"us-central1-a", "us-central1-b", "us-central1-c"}
-	got := inv.DrainTimes(zoneKey, domains, t0.Add(-10*time.Minute))
+	got := inv.DrainTimes(zoneKey, domains, t0.Add(-10*time.Minute), time.Time{})
 	if _, ok := got["us-central1-a"]; ok {
 		t.Errorf("zone a counted a cordon that ended 40m before since: %v", got)
 	}

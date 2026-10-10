@@ -22,6 +22,25 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 )
 
+// drainOnsetSlack is how far after the episode's firstSeenAt a cordon may be
+// dated and still be blamed for the drift.
+//
+// Not zero, though causality alone would say zero. firstSeenAt is the alert
+// tick that first saw the breach, so it already trails the drift's true onset,
+// and a drain that caused the drift was cordoned before that onset. A causal
+// cordon can only appear to come later through the two clocks being compared:
+// cordonedAt is preferably the taint's TimeAdded, stamped by the API server,
+// while firstSeenAt is ours; and where the taint is undated it is the moment
+// our node watch delivered the flip, which can trail the evictions the pod
+// watch delivered and the alert tick already scored. Both are seconds, not
+// minutes, so thirty seconds (one default alert interval) covers them with
+// room to spare and still refuses the case that prompted the bound, a drain
+// nine and a half minutes into a drift (#604).
+//
+// A constant rather than configuration, like the clocks it absorbs: nothing an
+// operator knows about their cluster would move it.
+const drainOnsetSlack = 30 * time.Second
+
 // evidenceFor assembles §8.5's attribution input for one subject-axis.
 //
 // Everything here is an observation this source already holds: the inventory's
@@ -56,8 +75,9 @@ import (
 // driftSince is when the drift being explained began — the §8.2 episode's
 // FirstSeenAt — and scopes the taint row: a cordon counts only if it was still
 // in effect within §7.6's drain settle window of that moment, because a node
-// back in service before the drift began cannot have produced it. The zero
-// time means "now", for a caller with no episode to point at.
+// back in service before the drift began cannot have produced it, and nor can
+// one that began more than drainOnsetSlack after that moment. The zero time
+// means "now", for a caller with no episode to point at.
 func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, eligible leeway.Eligibility, dist *leeway.Distribution, driftSince, now time.Time) leeway.Evidence {
 	ev := leeway.Evidence{
 		Domains:        make(map[leeway.Domain]leeway.DomainFacts, len(eligible.Domains)),
@@ -73,7 +93,8 @@ func (s *Source) evidenceFor(sub leeway.SubjectRef, key leeway.TopologyKey, elig
 	if driftSince.IsZero() {
 		driftSince = now
 	}
-	drains := s.inv.DrainTimes(key, eligible.Domains, driftSince.Add(-s.cfg.Transient.DrainSettleWindow))
+	drains := s.inv.DrainTimes(key, eligible.Domains,
+		driftSince.Add(-s.cfg.Transient.DrainSettleWindow), driftSince.Add(drainOnsetSlack))
 	packed := s.inv.ConsolidationTimes(key, eligible.Domains)
 	cutoff := now.Add(-s.cfg.Cause.Window)
 

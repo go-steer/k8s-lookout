@@ -495,7 +495,15 @@ func (inv *Inventory) LastDrainIn(key leeway.TopologyKey, domains []leeway.Domai
 // produced a drift that began at a given moment, and a node that was back in
 // service well before then cannot have (2026-10-02, the hard-8 soak finding).
 // The zero since skips nothing.
-func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain, since time.Time) map[leeway.Domain]time.Time {
+//
+// It also skips a cordon that began after until, for the other half of the
+// same reason: a drain that started once the drift already existed cannot
+// have produced it (2026-10-09, the hard-1 soak finding, #604). A node's
+// earlier cordons are not remembered, because cordonedAt is the latest, so a
+// node drained before the drift and again after it reads as the second drain
+// only and the row under-reports rather than guesses. The zero until skips
+// nothing.
+func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain, since, until time.Time) map[leeway.Domain]time.Time {
 	ordinal, ok := inv.Ordinal(key)
 	if !ok || len(domains) == 0 {
 		return nil
@@ -514,6 +522,9 @@ func (inv *Inventory) DrainTimes(key leeway.TopologyKey, domains []leeway.Domain
 			continue
 		}
 		if n.schedulable && !since.IsZero() && n.uncordonedAt.Before(since) {
+			continue
+		}
+		if !until.IsZero() && n.cordonedAt.After(until) {
 			continue
 		}
 		if n.cordonedAt.After(out[d]) {
