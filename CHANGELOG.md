@@ -109,6 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe is refused, `triage list` says that an empty listing cannot be
   told apart from a missing namespace.
 
+### Security
+
+- **Go toolchain 1.26.9 and `golang.org/x/net` v0.60.0**, clearing the
+  standard-library and `x/net` advisories GO-2026-6605 through
+  GO-2026-6617 that `govulncheck` started reporting against 1.26.6 and
+  v0.59.0. No source change; `govulncheck` reports zero again. Like any
+  toolchain fix, it reaches users only through the released images and
+  binaries.
+
 ## [0.34.0] - 2026-10-08
 
 **This release tells agents what kind of failure an event is, and keeps
