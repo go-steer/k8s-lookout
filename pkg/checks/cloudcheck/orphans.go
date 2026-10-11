@@ -58,10 +58,15 @@ package cloudcheck
 // 403, e.g. no compute.addresses.list) degrades alone: one
 // cloud.unavailable finding naming the class and permission, an
 // unavailable= summary note, and the other classes still swept, exit
-// 0. Any other provider error in one class's sweep degrades the same
-// way, as reason=SweepFailed carrying the provider's error (#612: one
-// load balancer the provider could not resolve once cost the whole
-// command its address sweep and exit code). Two failures stay runtime
+// 0. A refused token (cloud.ErrCredentialsUnavailable, #614: lookout's
+// own identity cannot authenticate at all) stops the sweep instead —
+// every remaining class would fail the same way — with one
+// CredentialsUnavailable record, exit 0; within lbs a refusal on any
+// rule ends the class, never one RuleUnresolved record per rule. Any
+// other provider error in one class's sweep degrades per class, as
+// reason=SweepFailed carrying the provider's error (#612: one load
+// balancer the provider could not resolve once cost the whole command
+// its address sweep and exit code). Two failures stay runtime
 // errors (exit 1): a canceled or timed-out invocation (--timeout),
 // and writing the output itself.
 //
@@ -255,6 +260,15 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		n, degraded, err := s.run()
 		if degraded != "" {
 			refused = append(refused, degraded)
+		}
+		if fix, noToken := cloud.DegradableCredentials(ctx, err); noToken {
+			// Not this class's problem: lookout's own identity has
+			// no token, so no later class can be swept either (#614).
+			if err := inv.Out.Emit(checks.CredentialsUnavailableFinding(provider.Name(), s.capability, "cloud orphans", fix)); err != nil {
+				return 0, err
+			}
+			refused = append(refused, cloud.CredentialsUnavailableNote)
+			break
 		}
 		if permission, denied := cloud.PermissionDenied(err); denied {
 			// A refused class degrades alone (#231, the #546 rule:

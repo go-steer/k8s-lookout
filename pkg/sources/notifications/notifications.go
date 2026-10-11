@@ -133,6 +133,20 @@ type Source struct {
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
+	// credentialsRetry overrides the refused-token retry interval for
+	// testing. 0 = the credentialsRetry constant.
+	credentialsRetry time.Duration
+	// logf overrides log.Printf for the refused-token / recovery lines
+	// in testing. nil = log.Printf.
+	logf func(format string, args ...any)
+}
+
+func (s *Source) printf(format string, args ...any) {
+	if s.logf != nil {
+		s.logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // New constructs the source. Like the quota source, construction
@@ -166,14 +180,59 @@ func (s *Source) clock() time.Time {
 	return time.Now()
 }
 
+// credentialsRetry is how long Run waits before re-opening the stream
+// after a refused token.
+const credentialsRetry = time.Minute
+
 // Run implements sources.Source: a blocking receive on the provider
 // stream until ctx is cancelled.
+//
+// A refused token (cloud.ErrCredentialsUnavailable, #614 — on GKE a
+// missing KSA→GSA binding) does not end the run: returning it would
+// crash-loop the whole sentinel (RunAll takes every source down) over
+// a fix applied in IAM, not in the pod. Run logs it once and re-opens
+// the stream every credentialsRetry until a receive gets going; any
+// other stream failure is returned as before. Like the quota and
+// capacity sources it logs one line at the refusal and one at the
+// recovery — the first notification delivered after it, or the
+// receive ending for any other reason — and re-arms, so a later
+// refusal is logged again.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
-	err := s.api.Receive(ctx, func(n cloud.ClusterNotification) {
-		if sig, ok := s.translate(n); ok {
-			emit(sig)
+	retry := s.credentialsRetry
+	if retry <= 0 {
+		retry = credentialsRetry
+	}
+	// refusing is set while a refusal is logged and not yet
+	// recovered; the receive callback may run concurrently.
+	var refusing atomic.Bool
+	recovered := func() {
+		if refusing.CompareAndSwap(true, false) {
+			s.printf("notifications: subscription receive recovered")
 		}
-	})
+	}
+	var err error
+	for {
+		err = s.api.Receive(ctx, func(n cloud.ClusterNotification) {
+			recovered()
+			if sig, ok := s.translate(n); ok {
+				emit(sig)
+			}
+		})
+		fix, noToken := cloud.DegradableCredentials(ctx, err)
+		if !noToken {
+			if ctx.Err() == nil {
+				recovered()
+			}
+			break
+		}
+		if refusing.CompareAndSwap(false, true) {
+			s.printf("notifications: %s; the source stays up and retries every %s, quietly until it recovers (%v)", cloud.CredentialsUnavailableMessage("the notifications subscription receive", fix), retry, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(retry):
+		}
+	}
 	if stale, unknown := s.droppedStale.Load(), s.droppedUnknown.Load(); stale > 0 || unknown > 0 {
 		log.Printf("notifications: dropped %d stale (older than %s at receipt) and %d unknown-type messages over this run", stale, s.cfg.StaleAfter, unknown)
 	}

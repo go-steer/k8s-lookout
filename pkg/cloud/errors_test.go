@@ -43,3 +43,39 @@ func TestPermissionDenied(t *testing.T) {
 		t.Error("nil classified as denied")
 	}
 }
+
+func TestCredentialsUnavailable(t *testing.T) {
+	base := errors.New(`Get "https://compute.googleapis.com/...": credentials: cannot fetch token: compute: Received 403`)
+	wrapped := fmt.Errorf("listing disks: %w", &CredentialsUnavailableError{Fix: "grant the binding", Err: base})
+
+	if !errors.Is(wrapped, ErrCredentialsUnavailable) {
+		t.Fatal("wrapped CredentialsUnavailableError does not match ErrCredentialsUnavailable")
+	}
+	if !errors.Is(wrapped, base) {
+		t.Error("CredentialsUnavailableError does not unwrap to the provider's error")
+	}
+	if errors.Is(wrapped, ErrPermissionDenied) {
+		t.Error("a refused token matches ErrPermissionDenied")
+	}
+	if fix, ok := CredentialsUnavailable(wrapped); !ok || fix != "grant the binding" {
+		t.Errorf("CredentialsUnavailable = %q, %v; want the fix, true", fix, ok)
+	}
+	if fix, ok := CredentialsUnavailable(fmt.Errorf("x: %w", ErrCredentialsUnavailable)); !ok || fix != "" {
+		t.Errorf("bare sentinel: CredentialsUnavailable = %q, %v; want \"\", true", fix, ok)
+	}
+	for _, err := range []error{nil, base, &PermissionDeniedError{Err: base}} {
+		if _, ok := CredentialsUnavailable(err); ok {
+			t.Errorf("%v classified as credentials unavailable", err)
+		}
+	}
+}
+
+func TestCredentialsUnavailableMessage(t *testing.T) {
+	const head = "cloud quota could not run: lookout's own cloud identity could not obtain an access token, so nothing was read from the cloud — "
+	if got := CredentialsUnavailableMessage("cloud quota", "grant X"); got != head+"grant X" {
+		t.Errorf("message = %q", got)
+	}
+	if got := CredentialsUnavailableMessage("cloud quota", ""); got != head+"check the credentials lookout runs with" {
+		t.Errorf("no-fix message = %q", got)
+	}
+}

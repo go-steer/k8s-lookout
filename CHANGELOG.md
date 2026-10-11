@@ -39,6 +39,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before `--timeout`, so a slow one degrades to `SweepFailed` instead
   of costing the others. A refused `--only=nodepools` cluster read now
   names its `capability` as `cluster-config` instead of `orphans`.
+- **A broken Workload Identity for lookout itself no longer crashes the
+  cloud commands (#614).** When lookout's own Kubernetes service account
+  could not act as its Google service account, the GKE metadata server
+  refused to hand out a token and every cloud-backed command exited 1
+  with a multi-line raw auth error. `state wi`, the command for
+  diagnosing broken Workload Identity, failed that way too. Now that
+  failure is recognised and reported like any other unavailable cloud
+  capability: exit 0 and one `cloud.unavailable` record with
+  `reason=CredentialsUnavailable`, whose message says lookout's own
+  identity could not get a token and names the fix (grant the
+  Kubernetes service account `roles/iam.workloadIdentityUser` on its
+  Google service account, or check the node's service account when
+  Workload Identity is off), plus the summary's `unavailable=` note.
+  This covers `state wi` (which then reports no `wi.*` verdicts it
+  could not check), `cloud quota`, `cloud orphans`, `cloud ipspace`,
+  `cloud stockout`, `perf probe`, `audit cluster`, `audit upgrades`,
+  and `triage top --history`. `stab drift --identity` reports it in its
+  `identity=` note, and `health` reports its control-plane category as
+  unavailable. In `lookout watch`, the quota source no longer exits at
+  startup over it, which took the whole sentinel into a crash loop; the
+  quota, capacity, and notifications sources each log it once, keep
+  retrying, and log once more when the binding is in place. In
+  `cloud orphans`, a refused token on any load balancer's lookups is
+  one `CredentialsUnavailable` record, not a `RuleUnresolved` record
+  per rule. A token server that is down or rate-limiting (5xx, 408,
+  429), and a `--timeout` that expires while a token is being fetched,
+  are still runtime errors. Cluster discovery for a multi-cluster
+  `lookout watch` is not covered: with no token there is no cluster to
+  watch, so startup still fails with the raw error.
 
 ## [0.35.0] - 2026-10-11
 

@@ -3,7 +3,9 @@ module github.com/go-steer/k8s-lookout
 go 1.26.9
 
 require (
+	cloud.google.com/go/auth v0.23.3
 	cloud.google.com/go/cloudquotas v1.13.0
+	cloud.google.com/go/compute/metadata v0.9.1
 	cloud.google.com/go/logging v1.20.0
 	cloud.google.com/go/pubsub v1.51.1
 	github.com/go-logr/stdr v1.2.2
@@ -37,9 +39,7 @@ require (
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/auth v0.23.3 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.1 // indirect
 	cloud.google.com/go/iam v1.12.0 // indirect
 	cloud.google.com/go/longrunning v1.2.0 // indirect
 	cloud.google.com/go/pubsub/v2 v2.6.0 // indirect

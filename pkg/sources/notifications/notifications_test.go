@@ -16,6 +16,8 @@ package notifications
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -213,5 +215,120 @@ func TestScopeAndName(t *testing.T) {
 	s := newTestSource(t, &fakeAPI{})
 	if s.Name() != "notifications" || s.Scope().String() != "project" {
 		t.Errorf("identity = %s/%s", s.Name(), s.Scope())
+	}
+}
+
+// refusingThenServingAPI refuses the first `refuse` receives the way
+// the provider reports lookout's OWN identity being refused a token
+// (#614), then replays notes and ends the stream with streamErr.
+type refusingThenServingAPI struct {
+	refuse    int
+	calls     int
+	notes     []cloud.ClusterNotification
+	streamErr error
+}
+
+func (f *refusingThenServingAPI) Receive(_ context.Context, handle func(cloud.ClusterNotification)) error {
+	f.calls++
+	if f.calls <= f.refuse {
+		return fmt.Errorf("pulling: %w", &cloud.CredentialsUnavailableError{Fix: "grant the binding", Err: errors.New("per-RPC creds failed")})
+	}
+	for _, n := range f.notes {
+		handle(n)
+	}
+	return f.streamErr
+}
+
+// TestRunRetriesOnNoToken: a refused token must not end Run — that
+// would take the whole sentinel down (RunAll) over a fix applied in
+// IAM. Run re-opens the stream until a receive gets going; any other
+// stream failure still ends it.
+func TestRunRetriesOnNoToken(t *testing.T) {
+	api := &refusingThenServingAPI{refuse: 3, notes: []cloud.ClusterNotification{upgradeNote("prod", "op-1")}, streamErr: errors.New("stream reset")}
+	s := newTestSource(t, api)
+	s.credentialsRetry = time.Millisecond
+	var got []engine.Signal
+	err := s.Run(context.Background(), func(sig engine.Signal) { got = append(got, sig) })
+	if err == nil || !strings.Contains(err.Error(), "stream reset") {
+		t.Fatalf("Run = %v, want the non-credentials stream error returned", err)
+	}
+	if api.calls != 4 || len(got) != 1 {
+		t.Errorf("receives = %d, signals = %d; want 3 refused + 1 served, 1 signal", api.calls, len(got))
+	}
+}
+
+func TestRunNoTokenStopsOnCancel(t *testing.T) {
+	api := &refusingThenServingAPI{refuse: 1 << 30}
+	s := newTestSource(t, api)
+	s.credentialsRetry = time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx, func(engine.Signal) {}); err != nil {
+		t.Fatalf("Run on cancel while refused = %v, want nil (clean shutdown)", err)
+	}
+	if api.calls < 2 {
+		t.Errorf("receives = %d, want the refused stream retried", api.calls)
+	}
+}
+
+// scriptedReceive plays one step per Receive call: notes to deliver,
+// then the error to end that receive with.
+type scriptedReceive struct {
+	steps []receiveStep
+	calls int
+}
+
+type receiveStep struct {
+	notes []cloud.ClusterNotification
+	err   error
+}
+
+func (f *scriptedReceive) Receive(_ context.Context, handle func(cloud.ClusterNotification)) error {
+	st := f.steps[f.calls]
+	f.calls++
+	for _, n := range st.notes {
+		handle(n)
+	}
+	return st.err
+}
+
+// TestRunNoTokenLogsRefusalAndRecoveryReArmed: like quota and
+// capacity — one line at a refusal, one at the recovery, and a second
+// refusal after the recovery is logged again, not swallowed.
+func TestRunNoTokenLogsRefusalAndRecoveryReArmed(t *testing.T) {
+	refused := fmt.Errorf("pulling: %w", &cloud.CredentialsUnavailableError{Fix: "grant the binding", Err: errors.New("per-RPC creds failed")})
+	api := &scriptedReceive{steps: []receiveStep{
+		{err: refused},
+		{err: refused},
+		{notes: []cloud.ClusterNotification{upgradeNote("prod", "op-1")}, err: refused}, // recovers, then refused again
+		{err: refused},
+		{err: errors.New("stream reset")}, // recovers by ending for another reason
+	}}
+	s := newTestSource(t, api)
+	s.credentialsRetry = time.Millisecond
+	var logs []string
+	s.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	var sigs int
+	err := s.Run(context.Background(), func(engine.Signal) { sigs++ })
+	if err == nil || !strings.Contains(err.Error(), "stream reset") {
+		t.Fatalf("Run = %v, want the stream reset", err)
+	}
+	var got []string
+	for _, l := range logs {
+		switch {
+		case strings.Contains(l, "lookout's own cloud identity could not obtain an access token"):
+			if !strings.Contains(l, "grant the binding") {
+				t.Errorf("refusal line %q does not name the fix", l)
+			}
+			got = append(got, "refused")
+		case strings.Contains(l, "subscription receive recovered"):
+			got = append(got, "recovered")
+		}
+	}
+	if want := "refused,recovered,refused,recovered"; strings.Join(got, ",") != want {
+		t.Errorf("log sequence = %v, want %s (logs: %q)", got, want, logs)
+	}
+	if sigs != 1 || api.calls != 5 {
+		t.Errorf("signals = %d, receives = %d; want 1, 5", sigs, api.calls)
 	}
 }

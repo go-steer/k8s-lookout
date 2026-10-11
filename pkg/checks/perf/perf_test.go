@@ -24,6 +24,7 @@ package perf_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -412,6 +413,47 @@ func TestBackendRuntimeError(t *testing.T) {
 	}
 	if !strings.Contains(res.Stderr, "monitoring 500") {
 		t.Errorf("stderr %q must surface the backend error", res.Stderr)
+	}
+}
+
+// noTokenBackend refuses every query the way the provider reports
+// lookout's OWN identity being refused a token (#614).
+type noTokenBackend struct{ queries int }
+
+func (b *noTokenBackend) QuerySeries(context.Context, cloud.SeriesQuery) ([]cloud.Series, error) {
+	b.queries++
+	return nil, fmt.Errorf("gke: listing series: %w", &cloud.CredentialsUnavailableError{
+		Fix: "grant lookout's KSA roles/iam.workloadIdentityUser on its GSA",
+		Err: errors.New(`Get "https://monitoring.googleapis.com/v3/projects/p/timeSeries": credentials: cannot fetch token: compute: Received 403 Unable to generate access token`),
+	})
+}
+
+// TestCredentialsUnavailable: a refused token degrades like an absent
+// backend — exit 0, ONE CredentialsUnavailable record for the pack
+// (not one per query), the unavailable= note, no raw error on stdout.
+func TestCredentialsUnavailable(t *testing.T) {
+	backend := &noTokenBackend{}
+	res := checktest.Run(t, perf.Command(testDeps(metricsProvider{Provider: cloud.NoProvider, backend: backend})), "--pack=apiserver")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0 (stderr: %s)", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 1 {
+		t.Fatalf("want exactly one record, got %v", recs)
+	}
+	r := recs[0]
+	if r["kind"] != "cloud.unavailable" || r["reason"] != cloud.ReasonCredentialsUnavailable || r["capability"] != "metrics" ||
+		r["message"] != cloud.CredentialsUnavailableMessage("perf probe --pack=apiserver", "grant lookout's KSA roles/iam.workloadIdentityUser on its GSA") {
+		t.Errorf("record = %v", r)
+	}
+	if sum := summaryLine(t, res.Stdout); sum["unavailable"] != cloud.CredentialsUnavailableNote || sum["pack"] != "apiserver" {
+		t.Errorf("summary = %v, want the unavailable= note beside pack=", sum)
+	}
+	if backend.queries != 1 {
+		t.Errorf("queries = %d, want 1 (stop at the first refused token)", backend.queries)
+	}
+	if strings.Contains(res.Stdout, "https://") || strings.Contains(res.Stdout, "cannot fetch token") {
+		t.Errorf("stdout carries the raw error: %s", res.Stdout)
 	}
 }
 

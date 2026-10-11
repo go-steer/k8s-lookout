@@ -111,6 +111,9 @@ func runStockout(ctx context.Context, deps Deps, inv emit.Invocation) (int, erro
 
 	now := deps.now()
 	events, err := api.Stockouts(ctx, cloud.TimeWindow{Start: now.Add(-since), End: now})
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityStockout, "cloud stockout", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("stockout extraction: %w", err)
 	}

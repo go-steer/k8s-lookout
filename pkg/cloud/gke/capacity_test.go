@@ -247,7 +247,7 @@ func TestProviderCapacityUsesLazyLister(t *testing.T) {
 	if !ok {
 		t.Fatal("Capacity() unavailable")
 	}
-	c, ok := api.(*capacityAPI)
+	c, ok := api.(credsCapacity).inner.(*capacityAPI)
 	if !ok {
 		t.Fatalf("Capacity() = %T", api)
 	}

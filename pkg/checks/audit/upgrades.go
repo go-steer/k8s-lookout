@@ -151,10 +151,16 @@ func runUpgrades(ctx context.Context, deps Deps, inv emit.Invocation) (int, erro
 		return emitUnavailable(inv, provider, cloud.CapabilityClusterConfig, "audit upgrades")
 	}
 	cfg, err := api.Config(ctx)
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityClusterConfig, "audit upgrades", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("cluster configuration: %w", err)
 	}
 	targets, err := api.UpgradeTargets(ctx, cfg.ReleaseChannel)
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityClusterConfig, "audit upgrades", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("published versions: %w", err)
 	}

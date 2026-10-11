@@ -164,7 +164,7 @@ func DriftCommand(deps Deps) checks.Command {
 			{Name: "principal", Doc: "--identity: the audited principal of the write nearest the drift time (GKE: principalEmail), or the explicit sentinel none-in-audit-window / no-write-time-anchor when the trail cannot answer"},
 			{Name: "principal_agent", Doc: "--identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only"},
 			{Name: "other_principals", Doc: "--identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail"},
-			{Name: "identity", Doc: "summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent)"},
+			{Name: "identity", Doc: "summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent / lookout's own cloud identity could not obtain an access token)"},
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout stab drift",
@@ -346,7 +346,25 @@ func runDrift(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 			return 0, err
 		}
 		if api, ok := provider.Audit(); ok {
-			if err := enrichIdentity(ctx, api, hits); err != nil {
+			base := make([]int, len(hits)) // detail counts before enrichment
+			for i := range hits {
+				base[i] = len(hits[i].f.Details)
+			}
+			err := enrichIdentity(ctx, api, hits)
+			if _, noToken := cloud.DegradableCredentials(ctx, err); noToken {
+				// lookout's own identity refused a token (#614):
+				// --identity is unavailable exactly as on a cluster
+				// without an audit trail — the portable findings
+				// still emit, none half-enriched, and the note says
+				// why.
+				for i := range hits {
+					hits[i].f.Details = hits[i].f.Details[:base[i]]
+				}
+				u := cloud.Unavailability{Provider: provider.Name(), Capability: cloud.CapabilityAudit, Reason: cloud.CredentialsUnavailableNote}
+				if err := inv.Out.Note("identity", u.Marker()); err != nil {
+					return 0, err
+				}
+			} else if err != nil {
 				return 0, err
 			}
 		} else if err := inv.Out.Note("identity", cloud.Unavailable(provider, cloud.CapabilityAudit).Marker()); err != nil {

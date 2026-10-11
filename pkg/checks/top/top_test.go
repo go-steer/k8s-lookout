@@ -32,6 +32,7 @@ package top_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -747,6 +748,70 @@ type metricsProvider struct {
 }
 
 func (p metricsProvider) Metrics() (cloud.MetricsBackend, bool) { return p.backend, true }
+
+// refusingAfterBackend serves the inner backend for the first `serve`
+// queries, then refuses every later one the way the provider reports
+// lookout's OWN identity being refused a token (#614).
+type refusingAfterBackend struct {
+	inner cloud.MetricsBackend
+	serve int
+	calls int
+}
+
+func (b *refusingAfterBackend) QuerySeries(ctx context.Context, q cloud.SeriesQuery) ([]cloud.Series, error) {
+	b.calls++
+	if b.calls <= b.serve {
+		return b.inner.QuerySeries(ctx, q)
+	}
+	return nil, &cloud.CredentialsUnavailableError{
+		Fix: "grant lookout's KSA roles/iam.workloadIdentityUser on its GSA",
+		Err: errors.New(`Get "https://monitoring.googleapis.com/v3/projects/p/timeSeries": credentials: cannot fetch token`),
+	}
+}
+
+// TestHistoryCredentialsUnavailable: a refused token makes --history
+// unavailable exactly like an absent backend — the CredentialsUnavailable
+// record first, the point-in-time findings intact, and no row left
+// half-enriched by the queries that ran before the refusal.
+func TestHistoryCredentialsUnavailable(t *testing.T) {
+	metrics := newMetricsFake(t, podMetrics("prod", "api-2", "app", "480m", "490Mi"))
+	backend := &refusingAfterBackend{inner: &fakeBackend{points: map[string][]float64{
+		top.HistoryMetricMemory: {256 << 20},
+		top.HistoryMetricCPU:    {250},
+	}}, serve: 1}
+	provider := metricsProvider{Provider: cloud.NoProvider, backend: backend}
+	cmd := top.New(testDeps(metrics, provider, pod("prod", "api-2", "n1", "app", "500m", "512Mi")))
+	res := checktest.Run(t, cmd, "--namespace=prod", "--history=1h")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if recs[0]["kind"] != "cloud.unavailable" || recs[0]["reason"] != cloud.ReasonCredentialsUnavailable ||
+		recs[0]["capability"] != "metrics" ||
+		!strings.HasPrefix(recs[0]["message"], "--history=1h0m0s could not run: lookout's own cloud identity could not obtain an access token") ||
+		!strings.HasSuffix(recs[0]["message"], "point-in-time findings are unaffected") {
+		t.Errorf("first finding = %v, want the CredentialsUnavailable record", recs[0])
+	}
+	sat := 0
+	for _, r := range recs {
+		if r["kind"] == "top.saturation" {
+			sat++
+			if r["max_pct"] != "" {
+				t.Errorf("history stats left on a row after the refusal: %v", r)
+			}
+		}
+	}
+	if sat != 2 {
+		t.Errorf("point-in-time findings = %d, want 2", sat)
+	}
+	sum := summaryLine(t, res.Stdout)
+	if sum["unavailable"] != cloud.CredentialsUnavailableNote || sum["history"] != "" {
+		t.Errorf("summary = %v, want unavailable=%q and no history=", sum, cloud.CredentialsUnavailableNote)
+	}
+	if strings.Contains(res.Stdout, "https://") {
+		t.Errorf("stdout carries the raw error: %s", res.Stdout)
+	}
+}
 
 func TestHistoryEnrichment(t *testing.T) {
 	metrics := newMetricsFake(t, podMetrics("prod", "api-2", "app", "480m", "490Mi"))
