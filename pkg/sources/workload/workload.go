@@ -324,6 +324,10 @@ func (s *Source) send(sigs []engine.Signal) {
 // Run implements sources.Source: starts both informers, arms after
 // the caches sync, then drives the miss sweep until ctx is cancelled.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()

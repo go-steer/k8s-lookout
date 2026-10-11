@@ -195,3 +195,20 @@ func TestRunAll_SourceFailureCancelsSiblingsAndNamesSource(t *testing.T) {
 		t.Errorf("error should name the failing source; got %v", err)
 	}
 }
+
+func TestRunAll_PrematureNilReturnFailsAndCancelsSiblings(t *testing.T) {
+	t.Parallel()
+	quitter := &fakeSource{name: "quitter", run: func(context.Context, func(Signal)) error {
+		return nil // returns nil while ctx is still live
+	}}
+	sibling := &fakeSource{name: "sibling"}
+
+	err := RunAll(context.Background(), []Source{quitter, sibling}, func(Signal) {})
+	if err == nil {
+		t.Fatal("RunAll must surface an error when a resident source returns nil before ctx cancellation")
+	}
+	want := "source quitter exited prematurely without error"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %q, want substring %q", err.Error(), want)
+	}
+}

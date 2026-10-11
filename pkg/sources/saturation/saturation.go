@@ -66,6 +66,10 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/informers"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 )
@@ -271,6 +275,7 @@ type Source struct {
 	cfg     Config
 	pods    PodUsageFetcher
 	volumes VolumeUsageFetcher
+	factory informers.SharedInformerFactory
 
 	mu     sync.Mutex
 	emit   func(engine.Signal)
@@ -308,6 +313,28 @@ func (s *Source) Name() string { return Name }
 // nodes/proxy, a cluster-scoped subresource — namespace-tier
 // deployments get the loud §11 startup failure.
 func (s *Source) Scope() sources.Scope { return sources.ScopeCluster }
+
+// WithPodLister attaches an informer cache PodLister to the underlying
+// metricsPodFetcher so sweeps read Pod specs in-memory instead of
+// listing pods from kube-apiserver every tick.
+func (s *Source) WithPodLister(l corelisters.PodLister) {
+	if l == nil {
+		return
+	}
+	if mpf, ok := s.pods.(*metricsPodFetcher); ok {
+		mpf.WithPodLister(l)
+	}
+}
+
+// WithFactory wires the shared informer factory (§6.3) so Pod specs are
+// read from its informer cache instead of listing pods from the API server.
+func (s *Source) WithFactory(f informers.SharedInformerFactory) {
+	if f == nil {
+		return
+	}
+	s.factory = f
+	s.WithPodLister(f.Core().V1().Pods().Lister())
+}
 
 // ClearanceObserver returns the §7.4 clearance predicate for
 // saturation.forecast incidents. Register it BEFORE any pod-scoped
@@ -376,6 +403,14 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
+	if s.factory != nil {
+		podInf := s.factory.Core().V1().Pods().Informer()
+		s.factory.Start(ctx.Done())
+		if !cache.WaitForCacheSync(ctx.Done(), podInf.HasSynced) {
+			return fmt.Errorf("saturation: pod informer cache sync failed")
+		}
+	}
+
 	// First sample synchronously: a dead metrics API at startup is a
 	// config/platform error the operator must see, not a silent gap.
 	first, err := s.pods.FetchPodUsage(ctx)
@@ -399,7 +434,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	}
 }
 
-// sampleOnce runs one full sampling cycle and returns the signals to
+// sampleOnce runs one full sampling sampling cycle and returns the signals to
 // emit. Exported to the package's tests, which drive it with a fake
 // clock and synthetic fetchers.
 func (s *Source) sampleOnce(ctx context.Context, now time.Time) []engine.Signal {
@@ -472,12 +507,18 @@ func (s *Source) finishCycle(now time.Time) {
 }
 
 // ingestPods records container samples and returns any forecasts.
+// Containers lacking a positive Limit never forecast against a ceiling, so
+// they allocate no ring-buffer entries in s.series.
 func (s *Source) ingestPods(samples []ContainerSample, now time.Time) []engine.Signal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []engine.Signal
 	for _, cs := range samples {
 		key := targetKey{uid: cs.PodUID + "/" + cs.Container, resource: cs.Resource}
+		if cs.Limit <= 0 {
+			delete(s.series, key)
+			continue
+		}
 		ser := s.seriesFor(key)
 		ser.kindOfObject = "Pod"
 		ser.namespace, ser.name, ser.container, ser.node = cs.Namespace, cs.Pod, cs.Container, cs.Node
@@ -495,6 +536,10 @@ func (s *Source) ingestVolumes(samples []VolumeSample, now time.Time) []engine.S
 	var out []engine.Signal
 	for _, vs := range samples {
 		key := targetKey{uid: "pvc:" + vs.Namespace + "/" + vs.ClaimName, resource: ResourcePVC}
+		if vs.CapacityBytes <= 0 {
+			delete(s.series, key)
+			continue
+		}
 		ser := s.seriesFor(key)
 		ser.kindOfObject = "PersistentVolumeClaim"
 		ser.namespace, ser.name = vs.Namespace, vs.ClaimName

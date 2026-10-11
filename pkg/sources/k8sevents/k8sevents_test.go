@@ -248,6 +248,107 @@ func TestSource_InterfaceMetadata(t *testing.T) {
 	}
 }
 
+func TestSource_WithReasons_CanonicalizesBeforeFiltering(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset()
+	rec := newSignalRecorder()
+	src := New(client, 0)
+	// Allow only canonical "ImagePullBackOff" — kubelet emits raw Reason="Failed"
+	// with "ErrImagePull" in Message, which must canonicalize BEFORE filtering.
+	src.WithReasons([]string{"ImagePullBackOff"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- src.Run(ctx, rec.emit) }()
+
+	waitArmed(ctx, t, src)
+
+	ignored := crashEvent("ignored.evt")
+	ignored.Reason = "FailedScheduling"
+	ignored.Message = "0/3 nodes are available"
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, ignored, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create ignored event: %v", err)
+	}
+
+	pullEvt := crashEvent("pull.evt")
+	pullEvt.Reason = "Failed"
+	pullEvt.Message = `Failed to pull image "gcr.io/example/app:v1": rpc error: code = Unknown desc = ErrImagePull`
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, pullEvt, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pull event: %v", err)
+	}
+
+	select {
+	case <-rec.first:
+	case <-ctx.Done():
+		t.Fatal("canonicalized ImagePullBackOff event did not pass WithReasons allow-list")
+	}
+	cancel()
+	<-done
+
+	got := rec.snapshot()
+	if len(got) != 1 || got[0].Message != pullEvt.Message {
+		t.Fatalf("emitted = %+v, want only pull.evt", got)
+	}
+}
+
+func TestDefaultEventReasons_ExcludesDeadContainerStateLiterals(t *testing.T) {
+	t.Parallel()
+	deadContainerStates := map[string]bool{
+		"OOMKilled":        true,
+		"CrashLoopBackOff": true,
+		"ErrImagePull":     true,
+		"ImagePullBackOff": true,
+	}
+	for _, r := range DefaultEventReasons {
+		if deadContainerStates[r] {
+			t.Errorf("DefaultEventReasons includes container status reason %q which kubelet never sets as corev1.Event.Reason", r)
+		}
+	}
+}
+
+func TestSource_SlowSinkNeverBlocksInformerCallbacks(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset()
+	src := New(client, 0)
+
+	unblock := make(chan struct{})
+	firstStarted := make(chan struct{})
+	var firstOnce sync.Once
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- src.Run(ctx, func(sources.Signal) {
+			firstOnce.Do(func() { close(firstStarted) })
+			<-unblock
+		})
+	}()
+
+	waitArmed(ctx, t, src)
+
+	for i := 0; i < 10; i++ {
+		ev := crashEvent("burst-" + string(rune('a'+i)))
+		if _, err := client.CoreV1().Events("checkout").Create(ctx, ev, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create burst event %d: %v", i, err)
+		}
+	}
+
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("first event never entered async emitter worker")
+	}
+	close(unblock)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+}
+
 func TestToTriageEvent_PopulatesAllFields(t *testing.T) {
 	t.Parallel()
 	// Direct unit test for the Event → TriageEvent conversion so

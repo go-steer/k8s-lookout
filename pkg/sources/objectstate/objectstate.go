@@ -625,6 +625,10 @@ func newSignal(kind, objKind, namespace, name, uid, node, msg string, ts time.Ti
 // after every cache syncs, then drives the sweep ticker until ctx is
 // cancelled.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()

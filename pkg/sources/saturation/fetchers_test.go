@@ -17,16 +17,34 @@ package saturation
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
+
+func fakeInformerFactoryWithPod(t *testing.T, pod *corev1.Pod) informers.SharedInformerFactory {
+	t.Helper()
+	cs := fake.NewSimpleClientset(pod)
+	factory := informers.NewSharedInformerFactory(cs, 0)
+	inf := factory.Core().V1().Pods().Informer()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	factory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+		t.Fatal("pod informer failed to sync")
+	}
+	return factory
+}
 
 // newMetricsFake seeds a metrics fake clientset. The objects go in
 // through Tracker().Create with the EXPLICIT pods GVR: the fake's
@@ -175,5 +193,98 @@ func TestKubeletVolumeFetcher_AllNodesFailing_IsAnError(t *testing.T) {
 	}
 	if _, err := f.FetchVolumeUsage(context.Background()); err == nil {
 		t.Fatal("every node failing must surface as an error (feeds the one-time loud log)")
+	}
+}
+
+func TestMetricsPodFetcher_UsesPodListerWithoutAPIList(t *testing.T) {
+	t.Parallel()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", UID: "u1"},
+		Spec: corev1.PodSpec{
+			NodeName: "n1",
+			Containers: []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				}},
+			}},
+		},
+	}
+	metrics := newMetricsFake(t, &metricsv1beta1.PodMetrics{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1"},
+		Containers: []metricsv1beta1.ContainerMetrics{{
+			Name:  "app",
+			Usage: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+		}},
+	})
+	// Pass a nil kubernetes.Interface so any accidental API List call panics immediately.
+	f := NewMetricsPodFetcher(metrics, nil).(*metricsPodFetcher)
+	factory := fakeInformerFactoryWithPod(t, pod)
+	f.WithPodLister(factory.Core().V1().Pods().Lister())
+
+	got, err := f.FetchPodUsage(context.Background())
+	if err != nil {
+		t.Fatalf("FetchPodUsage with cached PodLister failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d samples, want 2", len(got))
+	}
+}
+
+func TestKubeletVolumeFetcher_BoundsConcurrencyAndTimesOutHungNode(t *testing.T) {
+	t.Parallel()
+	nodes := make([]string, 12)
+	for i := range nodes {
+		nodes[i] = "n" + string(rune('a'+i))
+	}
+	var active, peak int32
+	var mu sync.Mutex
+
+	f := &kubeletVolumeFetcher{
+		maxConcurrency: 4,
+		nodeTimeout:    30 * time.Millisecond,
+		listNodes:      func(context.Context) ([]string, error) { return nodes, nil },
+		proxyGet: func(ctx context.Context, node string) ([]byte, error) {
+			mu.Lock()
+			active++
+			if active > peak {
+				peak = active
+			}
+			mu.Unlock()
+			defer func() {
+				mu.Lock()
+				active--
+				mu.Unlock()
+			}()
+			if node == "na" {
+				<-ctx.Done() // simulate a hung kubelet until nodeTimeout fires
+				return nil, ctx.Err()
+			}
+			return []byte(summaryFixture), nil
+		},
+	}
+
+	got, err := f.FetchVolumeUsage(context.Background())
+	if err != nil {
+		t.Fatalf("FetchVolumeUsage failed despite healthy nodes: %v", err)
+	}
+	if len(got) != 11 {
+		t.Fatalf("got %d samples, want 11 healthy nodes", len(got))
+	}
+	if peak > 4 {
+		t.Errorf("peak concurrent node proxy GETs = %d, exceeded limit 4", peak)
+	}
+}
+
+func TestSource_SkipsSeriesAllocationForLimitlessContainers(t *testing.T) {
+	t.Parallel()
+	s := New(DefaultConfig(), nil, nil)
+	now := time.Now()
+	s.ingestPods([]ContainerSample{
+		{Namespace: "prod", Pod: "web-1", PodUID: "u1", Container: "app", Resource: ResourceMemory, Used: 512 * mib, Limit: 0},
+		{Namespace: "prod", Pod: "web-1", PodUID: "u1", Container: "app", Resource: ResourceCPU, Used: 250, Limit: 0},
+	}, now)
+	if len(s.series) != 0 {
+		t.Fatalf("retained %d series for limit-less containers, want 0", len(s.series))
 	}
 }

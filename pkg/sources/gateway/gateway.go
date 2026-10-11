@@ -103,6 +103,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -329,17 +330,20 @@ func (s *Source) logPrintf(format string, args ...any) {
 // without the Gateway API installed skips the source instead of
 // enabling a watch that would fail loudly at startup.
 func GatewayAPIServed(client kubernetes.Interface) bool {
-	gw, hr := discoverResources(client)
+	gw, hr, _ := discoverResources(client)
 	return gw || hr
 }
 
 // discoverResources asks discovery which of gateways/httproutes the
-// gateway.networking.k8s.io/v1 group serves. A discovery error (group
-// absent) reads as "neither served".
-func discoverResources(client kubernetes.Interface) (gateways, httproutes bool) {
-	resources, err := client.Discovery().ServerResourcesForGroupVersion(gatewayGV.String())
-	if err != nil || resources == nil {
-		return false, false
+// gateway.networking.k8s.io/v1 group serves. NotFound reads as "neither
+// served"; transient API discovery failures return a non-nil error.
+func discoverResources(client kubernetes.Interface) (gateways, httproutes bool, err error) {
+	resources, derr := client.Discovery().ServerResourcesForGroupVersion(gatewayGV.String())
+	if derr != nil && !apierrors.IsNotFound(derr) && resources == nil {
+		return false, false, derr
+	}
+	if resources == nil {
+		return false, false, nil
 	}
 	for _, r := range resources.APIResources {
 		switch r.Name {
@@ -349,7 +353,7 @@ func discoverResources(client kubernetes.Interface) (gateways, httproutes bool) 
 			httproutes = true
 		}
 	}
-	return gateways, httproutes
+	return gateways, httproutes, nil
 }
 
 // arm enables emission — called once all informer caches sync.
@@ -395,7 +399,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.emit = emit
 	s.mu.Unlock()
 
-	s.watchGateways, s.watchRoutes = discoverResources(s.client)
+	var derr error
+	s.watchGateways, s.watchRoutes, derr = discoverResources(s.client)
+	if derr != nil {
+		return fmt.Errorf("gateway: Gateway API discovery failed: %w", derr)
+	}
 	if !s.watchGateways && !s.watchRoutes {
 		return fmt.Errorf("gateway: Gateway API not found (no %s or %s served) — enable it (a GKE Gateway class or the upstream CRDs) or drop %q from --sources",
 			gatewayGVR, httprouteGVR, Name)

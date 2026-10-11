@@ -51,16 +51,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.opentelemetry.io/otel/metric"
-	"k8s.io/client-go/informers"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
@@ -84,6 +87,8 @@ type options struct {
 	kubeconfig  string
 	kubeContext string
 	inCluster   bool
+	kubeQPS     float64
+	kubeBurst   int
 	cluster     string
 
 	metricsAddr  string
@@ -96,7 +101,8 @@ type options struct {
 	// fail, because they are relying on it; one that came from the
 	// default is a candidate, and a cluster that cannot serve it is a
 	// fact about the cluster rather than a misconfiguration.
-	sourcesNamed bool
+	sourcesNamed  bool
+	accessRecheck time.Duration
 
 	topologyKeys      string
 	topologyDefaults  string
@@ -120,12 +126,15 @@ func realMain(args []string, stdout, stderr *os.File) int {
 	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Empty uses the usual resolution (KUBECONFIG, then ~/.kube/config), or the in-cluster service account under --in-cluster.")
 	fs.StringVar(&o.kubeContext, "context", "", "Context in the kubeconfig to use instead of its current-context. Never written back. Meaningless with --in-cluster.")
 	fs.BoolVar(&o.inCluster, "in-cluster", false, "Force in-cluster service account credentials. The posture inside a Pod.")
+	fs.Float64Var(&o.kubeQPS, "kube-qps", float64(kube.DefaultQPS), "Client-side token bucket rate limit (queries per second) for Kubernetes API calls. Must be positive.")
+	fs.IntVar(&o.kubeBurst, "kube-burst", kube.DefaultBurst, "Client-side token bucket burst limit for Kubernetes API calls. Must be positive.")
 	fs.StringVar(&o.cluster, "cluster-name", "", "Cluster identity, stamped as the `cluster` label on every exported series and as k8s.cluster.name on the OTLP resource. Set it whenever more than one of these processes reports to one backend, which is the moment two clusters become indistinguishable without it.")
 
 	fs.StringVar(&o.metricsAddr, "metrics-addr", DefaultMetricsAddr, "Prometheus /metrics + /healthz + /readyz listener address (host:port). Port 0 binds a free port and the chosen one is logged. Empty disables the listener, which for this binary means it produces nothing observable at all — useful only with --otel-exporter=otlp.")
 	fs.StringVar(&o.otelExporter, "otel-exporter", "none", "Push metrics over OTLP as well as serving them: `otlp` or `none`. The /metrics endpoint is unconditional either way; this only adds the push reader, configured by the standard OTEL_EXPORTER_OTLP_* environment.")
 
 	fs.StringVar(&o.sources, "sources", strings.Join(defaultSources, ","), "Comma-separated sources to run. topology-drift is portable and reads only pods, nodes and replicasets; compute-class needs the GKE ComputeClass CRD and does nothing useful without it.")
+	fs.DurationVar(&o.accessRecheck, "access-recheck", sources.DefaultAccessRecheck, "How often to re-run the §11 SelfSubjectAccessReview probe over every enabled source's declared access; 0 disables runtime re-checking.")
 
 	fs.StringVar(&o.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels to treat as topology axes, in precedence order. The defaults are the two well-known labels; a cluster that partitions on a rack or cell label names it here.")
 	fs.StringVar(&o.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated. Unset ASSUMES the upstream system defaults and caps every intent derived from them below critical; \"none\" asserts your cluster configures none. Same three states as the sentinel's flag of this name.")
@@ -154,6 +163,18 @@ func realMain(args []string, stdout, stderr *os.File) int {
 	if o.showVersion {
 		fmt.Fprintln(stdout, version.String("leeway"))
 		return 0
+	}
+	if o.kubeQPS <= 0 {
+		fmt.Fprintf(stderr, "leeway: --kube-qps must be > 0 (got %v)\n", o.kubeQPS)
+		return 2
+	}
+	if o.kubeBurst <= 0 {
+		fmt.Fprintf(stderr, "leeway: --kube-burst must be > 0 (got %d)\n", o.kubeBurst)
+		return 2
+	}
+	if o.accessRecheck < 0 {
+		fmt.Fprintf(stderr, "leeway: --access-recheck must be >= 0 (got %v)\n", o.accessRecheck)
+		return 2
 	}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "sources" {
@@ -239,11 +260,31 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 		return err
 	}
 
-	srcs, stopFactory, err := buildSources(o, mp, stderr)
+	kopts := kube.Options{
+		InCluster:  o.inCluster,
+		Kubeconfig: o.kubeconfig,
+		Context:    o.kubeContext,
+		QPS:        float32(o.kubeQPS),
+		Burst:      o.kubeBurst,
+	}
+	client, err := kube.BuildClient(kopts)
+	if err != nil {
+		return err
+	}
+	dyn, err := kube.BuildDynamicClient(kopts)
+	if err != nil {
+		return err
+	}
+
+	srcs, stopFactory, err := buildSourcesForClients(o, client, dyn, mp, stderr)
 	if err != nil {
 		return err
 	}
 	defer stopFactory()
+
+	if err := probeSources(ctx, client, srcs, stderr); err != nil {
+		return err
+	}
 
 	// Serving starts before the sources do. A process whose informers
 	// are still listing is up and not yet ready, and that window is the
@@ -262,6 +303,35 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 		cancel()
 	}()
 
+	var (
+		revMu  sync.Mutex
+		revErr error
+	)
+	aw := sources.NewAccessWatch(sources.NewAccessReviewer(client), srcs)
+	if aw.Watching() && o.accessRecheck > 0 {
+		go func() {
+			_ = aw.Run(ctx, o.accessRecheck, sources.AccessEvents{
+				Revoked: func(rev sources.Revocation) {
+					fmt.Fprintf(stderr, "leeway: %s\n", rev)
+					if !rev.Requirement.Optional {
+						revMu.Lock()
+						if revErr == nil {
+							revErr = rev
+						}
+						revMu.Unlock()
+						cancel()
+					}
+				},
+				Restored: func(source string, req sources.Requirement) {
+					fmt.Fprintf(stderr, "leeway: source %q permission restored: %s\n", source, req)
+				},
+				Error: func(err error) {
+					fmt.Fprintf(stderr, "leeway: access recheck error: %v\n", err)
+				},
+			})
+		}()
+	}
+
 	runErr := sources.RunAll(ctx, srcs, em.emit)
 	// Cancelling here and not only in the deferred call is what makes a
 	// source failure an exit rather than a hang: with the sources gone
@@ -274,36 +344,47 @@ func run(ctx context.Context, o options, stderr *os.File) error {
 	if err := <-serveErr; err != nil {
 		return err
 	}
+	revMu.Lock()
+	rerr := revErr
+	revMu.Unlock()
+	if rerr != nil {
+		return rerr
+	}
 	return runErr
 }
 
-// buildSources constructs the enabled sources against their own clients
-// and their own informer factories. Each source builds its factory
-// itself when none is injected (§2.4 discipline 2 read the other way
-// round: injectable, not injected), which is what keeps this function
-// short enough to be obviously correct.
-// The factory it builds for topology-drift is returned so the caller can shut
-// it down: Run only shuts down a factory it owns, and this one it does not.
-func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]sources.Source, func(), error) {
+// probeSources runs the §11 startup SelfSubjectAccessReview probe across all
+// enabled sources so settled missing required RBAC grants fail immediately
+// rather than watching an empty stream forever. If the apiserver itself is
+// transiently unreachable at startup, the warning is logged and readiness stays
+// 503 ("still listing") while runtime AccessWatch re-checks once reachable.
+func probeSources(ctx context.Context, client kubernetes.Interface, srcs []sources.Source, stderr io.Writer) error {
+	notes, err := sources.Probe(ctx, sources.NewAccessReviewer(client), srcs...)
+	for _, note := range notes {
+		fmt.Fprintf(stderr, "leeway: %s\n", note)
+	}
+	if err != nil {
+		if errors.Is(err, sources.ErrAccessDenied) {
+			return err
+		}
+		fmt.Fprintf(stderr, "leeway: startup access probe inconclusive (%v); deferring to runtime re-check\n", err)
+	}
+	return nil
+}
+
+// buildSourcesForClients constructs the enabled sources sharing a single
+// transforming informer factory (§6.1, #626). Both topology-drift and
+// compute-class receive the same NewTransformingFactory instance so the
+// standalone process never opens duplicate Pod/Node watches or caches
+// untrimmed secret env values.
+func buildSourcesForClients(o options, client kubernetes.Interface, dyn dynamic.Interface, mp metric.MeterProvider, stderr io.Writer) ([]sources.Source, func(), error) {
 	names := splitCSV(o.sources)
 	if len(names) == 0 {
 		return nil, nil, errors.New("--sources names nothing to run")
 	}
-	var factory informers.SharedInformerFactory
+	factory := kube.NewTransformingFactory(client)
 	stop := func() {
-		if factory != nil {
-			factory.Shutdown()
-		}
-	}
-
-	kopts := kube.Options{InCluster: o.inCluster, Kubeconfig: o.kubeconfig, Context: o.kubeContext}
-	client, err := kube.BuildClient(kopts)
-	if err != nil {
-		return nil, nil, err
-	}
-	dyn, err := kube.BuildDynamicClient(kopts)
-	if err != nil {
-		return nil, nil, err
+		factory.Shutdown()
 	}
 
 	var out []sources.Source
@@ -331,14 +412,6 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 				TierCSignals:              o.topologyTierC,
 			}
 			src := topologydrift.New(client, cfg)
-			// The transform, exactly as in the sentinel. Left to build
-			// its own factory the source gets one with no transform on
-			// it, so every Pod and Node enters the cache untrimmed —
-			// resolved secret env values included, which §6.1 says must
-			// never be in the process, and for a binary whose whole
-			// purpose is measuring what the subsystem costs, measuring
-			// a configuration that does not ship.
-			factory = kube.NewTransformingFactory(client)
 			src.WithFactory(factory)
 			// Optional, exactly as in the sentinel: a nil dynamic client
 			// would just mean no LeewayPolicy watch, which is the state
@@ -365,6 +438,7 @@ func buildSources(o options, mp metric.MeterProvider, stderr *os.File) ([]source
 			if cerr != nil {
 				return nil, nil, cerr
 			}
+			src.WithFactory(factory)
 			src.WithMeter(mp.Meter(computeclass.MeterName))
 			out = append(out, src)
 		default:

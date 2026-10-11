@@ -73,6 +73,8 @@ breaking change to running deployments, never a refactor.
 | `--imagepull-transient-min-count` | int | `3` | Require an image-pull failure whose cause is RETRYABLE (registry 429/quota, 5xx, timeout, connection reset) to reach this Event.Count before firing, so a rate limit kubelet clears on its own does not open a noise session. Terminal causes (bad tag, denied, no space) and unrecognized ones still fire on the first event. 1 fires on the first event. |
 | `--in-cluster` | bool | — | Use in-cluster service account credentials. Auto-detected inside a pod. |
 | `--inject-max-bytes` | int | `8192` | Per-inject wire-body ceiling the dispatcher fits payloads to before POSTing (default matches the core-agent daemon's 8192-byte limit). An over-limit payload is shrunk least-signal-first — enrichment dropped, then message truncated — never identity, so the incident still routes; without this the daemon 400s the whole inject and a new incident lands as an empty session (issue #198). |
+| `--kube-burst` | int | `100` | Client-side Kubernetes API burst ceiling. Must be >= 1. |
+| `--kube-qps` | float | `50` | Client-side Kubernetes API request rate limit (queries per second). Must be > 0. |
 | `--kubeconfig` | string | — | Explicit kubeconfig path. Used outside a pod. |
 | `--log-level` | string | `info` | One of: debug, info, warn, error. |
 | `--metrics-addr` | string | — | Prometheus /metrics + /healthz + /readyz listener address (host:port). Empty = disabled. |

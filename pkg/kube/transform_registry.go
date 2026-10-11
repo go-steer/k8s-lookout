@@ -85,6 +85,12 @@ var sharedTransformRegistry = []fieldEntry{
 	},
 	{
 		Kind:   "Pod",
+		Path:   "metadata.annotations",
+		Action: fieldStripped,
+		Why:    "Filtered to drop full-manifest applied-configuration annotations (kubectl/kapp/rancher/flux last-applied blobs) while preserving all operational annotations.",
+	},
+	{
+		Kind:   "Pod",
 		Path:   "spec.containers[].env[].value",
 		Action: fieldStripped,
 		Why: "The literal resolved value of an environment variable, which is where " +
@@ -394,4 +400,119 @@ var sharedTransformRegistry = []fieldEntry{
 			"pkg/sources/topology-drift — eligible-domain computation, docs/leeway-design.md §7.1",
 		},
 	},
+}
+
+func init() {
+	for _, w := range []struct {
+		kind   string
+		prefix string
+	}{
+		{"Deployment", "spec.template"},
+		{"ReplicaSet", "spec.template"},
+		{"StatefulSet", "spec.template"},
+		{"DaemonSet", "spec.template"},
+		{"Job", "spec.template"},
+		{"CronJob", "spec.jobTemplate.spec.template"},
+	} {
+		sharedTransformRegistry = append(sharedTransformRegistry, workloadRegistryEntries(w.kind, w.prefix)...)
+	}
+}
+
+func workloadRegistryEntries(kind, prefix string) []fieldEntry {
+	entries := []fieldEntry{
+		{
+			Kind:   kind,
+			Path:   "metadata.managedFields",
+			Action: fieldStripped,
+			Why:    "Server-side-apply bookkeeping. Large, high-churn, and nothing in the repo reads it.",
+		},
+		{
+			Kind:   kind,
+			Path:   "metadata.annotations",
+			Action: fieldStripped,
+			Why:    "Filtered to drop full-manifest applied-configuration annotations while preserving rollout revision and operational annotations.",
+		},
+		{
+			Kind:   kind,
+			Path:   prefix + ".metadata.annotations",
+			Action: fieldStripped,
+			Why:    "Filtered to drop full-manifest applied-configuration annotations on the pod template.",
+		},
+		{
+			Kind:   kind,
+			Path:   prefix + ".spec.containers[].env[].name",
+			Action: fieldPreserved,
+			Why:    "Preserved so graph derivation and state checks can inspect template env bindings without retaining literal secrets.",
+			Readers: []string{
+				"pkg/graph/derive.go — template config/secret edge derivation",
+				"pkg/sources/workload — workload controller listers",
+			},
+		},
+		{
+			Kind:   kind,
+			Path:   prefix + ".spec.containers[].env[].valueFrom",
+			Action: fieldPreserved,
+			Why:    "Preserved so graph derivation can resolve ConfigMapKeyRef and SecretKeyRef edges on workload templates.",
+			Readers: []string{
+				"pkg/graph/derive.go — template ConfigMapKeyRef/SecretKeyRef edge derivation",
+			},
+		},
+		{
+			Kind:   kind,
+			Path:   prefix + ".spec.containers[].envFrom",
+			Action: fieldPreserved,
+			Why:    "Preserved so graph derivation can resolve bulk ConfigMapRef and SecretRef edges on workload templates.",
+			Readers: []string{
+				"pkg/graph/derive.go — template ConfigMapRef/SecretRef edge derivation",
+			},
+		},
+	}
+	for _, slice := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		base := prefix + ".spec." + slice + "[]"
+		entries = append(entries,
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".env[].value",
+				Action: fieldStripped,
+				Why:    "Literal environment variable values on workload templates carry embedded secrets and are never read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".command",
+				Action: fieldStripped,
+				Why:    "Container command lines on workload templates can carry credentials and are not read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".args",
+				Action: fieldStripped,
+				Why:    "Container argument lists on workload templates can carry credentials and are not read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".lifecycle",
+				Action: fieldStripped,
+				Why:    "Container lifecycle hooks on workload templates are not read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".livenessProbe",
+				Action: fieldStripped,
+				Why:    "Probe definitions on workload templates are not read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".readinessProbe",
+				Action: fieldStripped,
+				Why:    "Probe definitions on workload templates are not read by watch consumers.",
+			},
+			fieldEntry{
+				Kind:   kind,
+				Path:   base + ".startupProbe",
+				Action: fieldStripped,
+				Why:    "Probe definitions on workload templates are not read by watch consumers.",
+			},
+		)
+	}
+	return entries
 }

@@ -15,6 +15,8 @@
 package kube
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -23,11 +25,11 @@ import (
 // Object trimming for shared informer factories.
 //
 // Transform is attached to every factory this repo constructs, so these
-// functions run on every Pod and Node entering any process built from it
-// (§6.1). The gate the maintainer decision put on that — "source on, transform
-// off" until the preserved-field registry in transform_registry.go exists and
-// its guard test passes — is satisfied; the registry is the standing control,
-// not a one-time review.
+// functions run on every Pod, Node and workload controller entering any process
+// built from it (§6.1). The gate the maintainer decision put on that — "source
+// on, transform off" until the preserved-field registry in transform_registry.go
+// exists and its guard test passes — is satisfied; the registry is the standing
+// control, not a one-time review.
 //
 // # Why this lives in pkg/kube
 //
@@ -48,19 +50,17 @@ import (
 
 // Transform is the single cache.TransformFunc every factory in this repo
 // applies to every informer it serves. A factory takes one transform for all of
-// them, so the dispatch has to happen here, and anything that is not a Pod or a
-// Node must pass through untouched — the sentinel's factory also serves
-// Deployments, ReplicaSets, Events, HPAs, Ingresses and Services, and the
-// registry has no opinion about those.
+// them, so the dispatch has to happen here, and anything the registry has no
+// opinion about passes through untouched.
 //
 // Two contract points from client-go, both load-bearing:
 //
 //   - It must be IDEMPOTENT. Objects already in the cache can be handed back to
 //     Replace(), and a second pass over an object other goroutines are reading
-//     must not change it (delta_fifo.go:501-506). trimPod and trimNode are
-//     idempotent by construction — they assign zero values and filter to a fixed
-//     key set, never append or accumulate — and TestTransform_IsIdempotent pins
-//     that.
+//     must not change it (delta_fifo.go:501-506). Every trim function is
+//     idempotent by construction — assigning zero values and filtering to fixed
+//     key sets without mutating retained maps — and TestTransform_IsIdempotent
+//     pins that.
 //   - It never sees a DeletedFinalStateUnknown tombstone, and never runs on a
 //     Sync: DeltaFIFO skips the transformer for both, because in each case the
 //     object has already been through it (delta_fifo.go:507-516). The type
@@ -68,14 +68,26 @@ import (
 //     that ever changes.
 //
 // It is also on the hot path for every watch event in the process, so it stays
-// a type switch and two field-assignment passes. No allocation beyond what the
-// annotation filter needs.
+// a type switch and field-assignment passes. No allocation beyond what an
+// annotation filter actually changes.
 func Transform(obj any) (any, error) {
 	switch obj.(type) {
 	case *corev1.Pod:
 		return trimPod(obj)
 	case *corev1.Node:
 		return trimNode(obj)
+	case *appsv1.Deployment:
+		return trimDeployment(obj)
+	case *appsv1.ReplicaSet:
+		return trimReplicaSet(obj)
+	case *appsv1.StatefulSet:
+		return trimStatefulSet(obj)
+	case *appsv1.DaemonSet:
+		return trimDaemonSet(obj)
+	case *batchv1.Job:
+		return trimJob(obj)
+	case *batchv1.CronJob:
+		return trimCronJob(obj)
 	default:
 		return obj, nil
 	}
@@ -88,10 +100,7 @@ func Transform(obj any) (any, error) {
 // runner's namespace-filtered sibling, which attaches the same Transform. The
 // reason that matters is §6.1's security property rather than its memory one:
 // resolved secret env values are not supposed to be in the process at all, and
-// a factory built without the transform put them there. The memory saving is
-// real but is S8's measurement on real GKE objects (~25% of pod retained heap,
-// ~70% of node), not something the kwok scale ladder can see — that fixture
-// pads with annotations, which trimPod deliberately leaves alone.
+// a factory built without the transform put them there.
 //
 // What this guarantees is the part that must not diverge: there is one
 // definition of what enters a cache, and no caller can construct a factory that
@@ -99,6 +108,18 @@ func Transform(obj any) (any, error) {
 func NewTransformingFactory(client kubernetes.Interface) informers.SharedInformerFactory {
 	return informers.NewSharedInformerFactoryWithOptions(client, 0,
 		informers.WithTransform(Transform))
+}
+
+// strippedAnnotations lists full-manifest applied-state annotations that duplicate
+// raw YAML/JSON manifests (including literal secret env values and args) without
+// being read by any informer consumer (#628). Non-listed annotations (such as
+// rollout revision and custom metadata) survive intact.
+var strippedAnnotations = map[string]bool{
+	"kubectl.kubernetes.io/last-applied-configuration":       true,
+	"kapp.k14s.io/original":                                  true,
+	"field.cattle.io/publicEndpoints":                        true,
+	"fluxcd.io/last-applied-configuration":                   true,
+	"kustomize.toolkit.fluxcd.io/last-applied-configuration": true,
 }
 
 // retainedNodeAnnotations is load-bearing, not cosmetic. GKE records the
@@ -129,8 +150,85 @@ func trimPod(obj any) (any, error) {
 		return obj, nil // tombstones and other types pass through untouched
 	}
 	pod.ManagedFields = nil
-	trimContainers(pod.Spec.Containers)
-	trimContainers(pod.Spec.InitContainers)
+	pod.Annotations = stripAppliedAnnotations(pod.Annotations)
+	trimPodSpec(&pod.Spec)
+	return pod, nil
+}
+
+func trimDeployment(obj any) (any, error) {
+	d, ok := obj.(*appsv1.Deployment)
+	if !ok {
+		return obj, nil
+	}
+	d.ManagedFields = nil
+	d.Annotations = stripAppliedAnnotations(d.Annotations)
+	trimPodTemplateSpec(&d.Spec.Template)
+	return d, nil
+}
+
+func trimReplicaSet(obj any) (any, error) {
+	rs, ok := obj.(*appsv1.ReplicaSet)
+	if !ok {
+		return obj, nil
+	}
+	rs.ManagedFields = nil
+	rs.Annotations = stripAppliedAnnotations(rs.Annotations)
+	trimPodTemplateSpec(&rs.Spec.Template)
+	return rs, nil
+}
+
+func trimStatefulSet(obj any) (any, error) {
+	sts, ok := obj.(*appsv1.StatefulSet)
+	if !ok {
+		return obj, nil
+	}
+	sts.ManagedFields = nil
+	sts.Annotations = stripAppliedAnnotations(sts.Annotations)
+	trimPodTemplateSpec(&sts.Spec.Template)
+	return sts, nil
+}
+
+func trimDaemonSet(obj any) (any, error) {
+	ds, ok := obj.(*appsv1.DaemonSet)
+	if !ok {
+		return obj, nil
+	}
+	ds.ManagedFields = nil
+	ds.Annotations = stripAppliedAnnotations(ds.Annotations)
+	trimPodTemplateSpec(&ds.Spec.Template)
+	return ds, nil
+}
+
+func trimJob(obj any) (any, error) {
+	j, ok := obj.(*batchv1.Job)
+	if !ok {
+		return obj, nil
+	}
+	j.ManagedFields = nil
+	j.Annotations = stripAppliedAnnotations(j.Annotations)
+	trimPodTemplateSpec(&j.Spec.Template)
+	return j, nil
+}
+
+func trimCronJob(obj any) (any, error) {
+	cj, ok := obj.(*batchv1.CronJob)
+	if !ok {
+		return obj, nil
+	}
+	cj.ManagedFields = nil
+	cj.Annotations = stripAppliedAnnotations(cj.Annotations)
+	trimPodTemplateSpec(&cj.Spec.JobTemplate.Spec.Template)
+	return cj, nil
+}
+
+func trimPodTemplateSpec(tpl *corev1.PodTemplateSpec) {
+	tpl.Annotations = stripAppliedAnnotations(tpl.Annotations)
+	trimPodSpec(&tpl.Spec)
+}
+
+func trimPodSpec(spec *corev1.PodSpec) {
+	trimContainers(spec.Containers)
+	trimContainers(spec.InitContainers)
 
 	// Ephemeral containers carry the same EphemeralContainerCommon shape as a
 	// regular container, so a debug container started with `kubectl debug
@@ -138,10 +236,9 @@ func trimPod(obj any) (any, error) {
 	// transform exists to close. Their Name is preserved: pkg/checks/logs reads
 	// it to enumerate the containers it can fetch logs from, and that check is
 	// informer-reachable through the enricher.
-	for i := range pod.Spec.EphemeralContainers {
-		trimContainerCommon(&pod.Spec.EphemeralContainers[i].EphemeralContainerCommon)
+	for i := range spec.EphemeralContainers {
+		trimContainerCommon(&spec.EphemeralContainers[i].EphemeralContainerCommon)
 	}
-	return pod, nil
 }
 
 // trimContainers strips each container in place. It takes the slice rather than
@@ -190,6 +287,34 @@ func trimNode(obj any) (any, error) {
 		corev1.NodePIDPressure,
 	)
 	return node, nil
+}
+
+// stripAppliedAnnotations removes full-manifest applied-state keys from m
+// without mutating m in place. If none of strippedAnnotations are present, m is
+// returned directly without allocating.
+func stripAppliedAnnotations(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	drop := 0
+	for k := range m {
+		if strippedAnnotations[k] {
+			drop++
+		}
+	}
+	if drop == 0 {
+		return m
+	}
+	if drop == len(m) {
+		return nil
+	}
+	out := make(map[string]string, len(m)-drop)
+	for k, v := range m {
+		if !strippedAnnotations[k] {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // filterKeys returns m reduced to the keys in keep, or nil if none survive.

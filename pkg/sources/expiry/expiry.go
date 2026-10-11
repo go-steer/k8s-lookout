@@ -277,7 +277,8 @@ type Source struct {
 	gen    uint64
 
 	// certManager reports whether the Certificate CRD was discovered.
-	certManager bool
+	certManager               bool
+	certManagerNotFoundLogged bool
 
 	// acme is the ACME Challenge/Order memory (acme.go), keyed by
 	// object UID; acmeArmed flips once its informers have synced.
@@ -422,11 +423,17 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 }
 
 // discoverCertManager gates the Certificate target on the CRD's
-// presence. Absence is logged ONCE, loudly — never a silent skip.
+// presence. Absence is logged ONCE, loudly — never a silent skip — and
+// transient discovery errors are logged distinctly so API blips are not
+// misreported as missing CRDs. Re-probed on subsequent scans until found.
 func (s *Source) discoverCertManager() {
 	resources, err := s.client.Discovery().ServerResourcesForGroupVersion(certManagerGV.String())
+	if err != nil && !apierrors.IsNotFound(err) && resources == nil {
+		s.logPrintf("expiry: cert-manager discovery failed (transient API error, will retry next scan): %v", err)
+		return
+	}
 	found := false
-	if err == nil && resources != nil {
+	if resources != nil {
 		for _, r := range resources.APIResources {
 			if r.Name == certManagerGVR.Resource {
 				found = true
@@ -436,9 +443,15 @@ func (s *Source) discoverCertManager() {
 	}
 	switch {
 	case !found:
-		s.logPrintf("expiry: cert-manager CRD (%s %s) not found — Certificate renewal-state scanning disabled; TLS secrets and webhook CA bundles are still scanned", certManagerGV, certManagerGVR.Resource)
+		if !s.certManagerNotFoundLogged {
+			s.certManagerNotFoundLogged = true
+			s.logPrintf("expiry: cert-manager CRD (%s %s) not found — Certificate renewal-state scanning disabled; TLS secrets and webhook CA bundles are still scanned", certManagerGV, certManagerGVR.Resource)
+		}
 	case s.dyn == nil:
-		s.logPrintf("expiry: cert-manager CRD present but no dynamic client — Certificate renewal-state scanning disabled")
+		if !s.certManagerNotFoundLogged {
+			s.certManagerNotFoundLogged = true
+			s.logPrintf("expiry: cert-manager CRD present but no dynamic client — Certificate renewal-state scanning disabled")
+		}
 	default:
 		s.certManager = true
 		s.logPrintf("expiry: cert-manager detected — Certificate renewal state included in the scan")
@@ -456,6 +469,9 @@ func (s *Source) namespaces() []string {
 // scan runs one full pass over every target and judges the findings
 // against the per-object threshold latches.
 func (s *Source) scan(ctx context.Context) error {
+	if !s.certManager {
+		s.discoverCertManager()
+	}
 	now := s.clock()
 	var findings []finding
 

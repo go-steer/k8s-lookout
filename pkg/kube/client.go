@@ -26,6 +26,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const (
+	// DefaultQPS is the default client-side token-bucket rate applied when
+	// Options.QPS is unset (0). Kubernetes client-go defaults to 5 QPS, which
+	// self-throttles multi-informer startup and periodic sweeps on large clusters.
+	DefaultQPS float32 = 50
+	// DefaultBurst is the default client-side token-bucket burst applied when
+	// Options.Burst is unset (0).
+	DefaultBurst int = 100
+)
+
 // Options selects how the Kubernetes client config is resolved.
 type Options struct {
 	// InCluster forces in-cluster service account credentials.
@@ -41,6 +51,10 @@ type Options struct {
 	// Meaningless in-cluster — there is no kubeconfig to select from —
 	// and BuildConfig says so rather than ignoring it.
 	Context string
+	// QPS sets the maximum queries per second for the REST client (0 = DefaultQPS).
+	QPS float32
+	// Burst sets the maximum burst for the REST client throttle (0 = DefaultBurst).
+	Burst int
 }
 
 // BuildClient constructs a kubernetes.Interface from the options
@@ -136,6 +150,16 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 			return nil, fmt.Errorf("default kubeconfig: %w", err)
 		}
 	}
+	qps := opts.QPS
+	if qps == 0 {
+		qps = DefaultQPS
+	}
+	burst := opts.Burst
+	if burst == 0 {
+		burst = DefaultBurst
+	}
+	cfg.QPS = qps
+	cfg.Burst = burst
 	return cfg, nil
 }
 

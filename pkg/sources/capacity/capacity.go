@@ -457,6 +457,10 @@ func (s *Source) send(sig engine.Signal) {
 // (clusters without a cluster autoscaler are legal deployments — the
 // absence is logged once); informer sync failure is.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()
