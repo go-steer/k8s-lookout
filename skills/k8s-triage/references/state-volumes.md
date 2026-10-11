@@ -51,7 +51,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `node` | node the attachment targets or the pod is scheduled on |
 | `attacher` | CSI driver responsible for the attachment (spec.attacher) |
 | `age` | how long the attach/detach error has persisted, truncated to seconds |
-| `error` | the attach/detach error message, truncated to 200 chars |
+| `error` | volume.attach_error: the attach/detach error message, truncated to 200 chars (cloud.unavailable from cloud orphans, reason=SweepFailed or RuleUnresolved, uses the same key for the provider error — masked, cut to 300 characters) |
 | `attached` | the attachment's status.attached at scan time |
 | `pv_zones` | zones the PV's node affinity allows, sorted |
 | `node_zone` | zone label of the node the pod is scheduled on |

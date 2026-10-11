@@ -149,7 +149,7 @@ func VolumesCommand(deps Deps) checks.Command {
 			{Name: "node", Doc: "node the attachment targets or the pod is scheduled on"},
 			{Name: "attacher", Doc: "CSI driver responsible for the attachment (spec.attacher)"},
 			{Name: "age", Doc: "how long the attach/detach error has persisted, truncated to seconds"},
-			{Name: "error", Doc: "the attach/detach error message, truncated to 200 chars"},
+			{Name: "error", Doc: "volume.attach_error: the attach/detach error message, truncated to 200 chars (cloud.unavailable from cloud orphans, reason=SweepFailed or RuleUnresolved, uses the same key for the provider error — masked, cut to 300 characters)"},
 			{Name: "attached", Doc: "the attachment's status.attached at scan time"},
 			{Name: "pv_zones", Doc: "zones the PV's node affinity allows, sorted"},
 			{Name: "node_zone", Doc: "zone label of the node the pod is scheduled on"},

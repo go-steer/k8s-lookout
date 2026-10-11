@@ -60,7 +60,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `disk_type` | orphan.disk: disk type short name (pd-ssd bills ~4x pd-standard idle) |
 | `unused_since` | orphan.disk: last detach (or creation, if never attached), RFC3339; omitted when the provider cannot date it |
 | `unused_for` | orphan.disk: how long the disk has been unattached; "unknown" when undatable |
-| `region` | orphan.lb, orphan.address: the forwarding rule's or address's region ("global" for global ones) |
+| `region` | orphan.lb, orphan.address, cloud.unavailable (reason=RuleUnresolved): the forwarding rule's or address's region ("global" for global ones) |
 | `why` | orphan.lb: the provider's orphan judgment (e.g. which backend resolved empty) |
 | `address` | orphan.address: the reserved IP |
 | `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
@@ -76,11 +76,12 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
 | `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
 | `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
-| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
-| `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
+| `class` | cloud.unavailable (reason=PermissionDenied, SweepFailed or RuleUnresolved): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools), or that the unresolved rule belongs to (lbs); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission, "sweep failed", or its count of unresolved rules |
+| `error` | cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API) — nothing from the failed class is reported, never a partial list; (reason=RuleUnresolved): the error on that one forwarding rule's backend chain (e.g. a 404 for a backend service deleted mid-sweep). Masked and cut to 300 characters |
+| `permission` | cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
 | `capability` | cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note: why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, or a forbidden Node/Pod List for nodepools) |
+| `unavailable` | summary-line note: why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — "sweep failed" — or a forbidden Node/Pod List for nodepools), plus "lbs: N rules unresolved" when some forwarding rules could not be judged ("(20 listed)" when the RuleUnresolved records were capped) |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

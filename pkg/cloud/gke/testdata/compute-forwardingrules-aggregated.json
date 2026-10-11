@@ -1,5 +1,5 @@
 {
-  "//": "Recorded-shape fixture: compute/v1 forwardingRules aggregatedList response. Authored from the Compute Engine ForwardingRules:aggregatedList API reference; rule shapes cover the three judged targets (backendService, targetPool, target HTTP proxy) plus an unjudged SSL-proxy rule (§13).",
+  "//": "Recorded-shape fixture: compute/v1 forwardingRules aggregatedList response. Authored from the Compute Engine ForwardingRules:aggregatedList API reference; rule shapes cover the three judged targets (backendService, targetPool, global and regional target HTTP(S) proxy) plus an unjudged SSL-proxy rule, and the global HTTP LB shapes of #612: a URL map onto a regional managed instance group (the rule name is the one the UAT run tripped on), onto empty zonal and regional instance groups, an HTTP-to-HTTPS redirect, a serverless NEG, a backend bucket, and an internet NEG, plus a regional internal HTTPS rule mixing a serverless NEG with an empty zonal NEG (§13).",
   "kind": "compute#forwardingRuleAggregatedList",
   "items": {
     "regions/us-east1": {
@@ -24,6 +24,13 @@
           "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
           "loadBalancingScheme": "EXTERNAL",
           "target": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/targetPools/live-pool"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "ilb7-mixed",
+          "region": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1",
+          "loadBalancingScheme": "INTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/regions/us-east1/targetHttpsProxies/ilb7-proxy"
         }
       ]
     },
@@ -37,9 +44,56 @@
         },
         {
           "kind": "compute#forwardingRule",
+          "name": "ingress-live-https",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpsProxies/web-https-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
           "name": "ssl-unjudged",
           "loadBalancingScheme": "EXTERNAL",
           "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetSslProxies/ssl-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "hypercomputer-w1-traffic-http-forwarding-rule",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/proj-1/global/forwardingRules/hypercomputer-w1-traffic-http-forwarding-rule",
+          "IPAddress": "34.111.22.33",
+          "IPProtocol": "TCP",
+          "portRange": "80-80",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "networkTier": "PREMIUM",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/hypercomputer-w1-traffic-http-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "mig-empty-http",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/mig-empty-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "redirect-http",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/redirect-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "serverless-https",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpsProxies/serverless-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "bucket-http",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/bucket-proxy"
+        },
+        {
+          "kind": "compute#forwardingRule",
+          "name": "origin-http",
+          "loadBalancingScheme": "EXTERNAL_MANAGED",
+          "target": "https://www.googleapis.com/compute/v1/projects/proj-1/global/targetHttpProxies/origin-proxy"
         }
       ]
     }

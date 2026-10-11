@@ -88,6 +88,8 @@ func (f *fakeStockouts) Stockouts(_ context.Context, w cloud.TimeWindow) ([]clou
 type fakeOrphans struct {
 	disks []cloud.OrphanDisk
 	lbs   []cloud.OrphanLoadBalancer
+	// unresolved are the rules the provider could not judge.
+	unresolved []cloud.UnresolvedLoadBalancer
 
 	addrs []cloud.OrphanAddress
 
@@ -107,9 +109,9 @@ func (f *fakeOrphans) OrphanDisks(context.Context) ([]cloud.OrphanDisk, error) {
 	return f.disks, f.disksErr
 }
 
-func (f *fakeOrphans) OrphanLoadBalancers(context.Context) ([]cloud.OrphanLoadBalancer, error) {
+func (f *fakeOrphans) OrphanLoadBalancers(context.Context) (cloud.LoadBalancerSweep, error) {
 	f.lbsCalled = true
-	return f.lbs, f.lbsErr
+	return cloud.LoadBalancerSweep{Orphans: f.lbs, Unresolved: f.unresolved}, f.lbsErr
 }
 
 type fakeIPSpace struct {

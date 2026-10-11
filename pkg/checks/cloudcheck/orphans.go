@@ -58,10 +58,36 @@ package cloudcheck
 // 403, e.g. no compute.addresses.list) degrades alone: one
 // cloud.unavailable finding naming the class and permission, an
 // unavailable= summary note, and the other classes still swept, exit
-// 0. Any other sweep error stays a runtime error (exit 1).
+// 0. Any other provider error in one class's sweep degrades the same
+// way, as reason=SweepFailed carrying the provider's error (#612: one
+// load balancer the provider could not resolve once cost the whole
+// command its address sweep and exit code). Two failures stay runtime
+// errors (exit 1): a canceled or timed-out invocation (--timeout),
+// and writing the output itself.
+//
+// Within lbs, one forwarding rule whose resolution chain fails (a
+// backend service deleted between the list and the get, a 403 on
+// another project's object) costs that rule alone: one
+// cloud.unavailable record (reason=RuleUnresolved) names it, and the
+// summary's unavailable= note counts them. The records are capped at
+// unresolvedRuleCap — the count is not — so a systemic failure
+// (every rule behind one unreadable project) cannot flood stdout.
+// The per-rule records reuse cloud.unavailable rather than a new
+// kind: they are the same claim (the provider could not answer)
+// scoped to one object, and every consumer that already handles
+// class-level cloud degradations handles them unchanged.
+//
+// lbs is the one class that fans out (several GETs per rule, serial
+// against a big project), so it runs LAST, after disks, addresses
+// and nodepools, and on a budget: its context ends a reserve (a
+// tenth of the time left, at most 5s) before the invocation's, so a
+// slow lbs class degrades to SweepFailed and the command still ends
+// with its records, its summary and exit 0 instead of being cut off
+// by --timeout.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -105,7 +131,7 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "disk_type", Doc: "orphan.disk: disk type short name (pd-ssd bills ~4x pd-standard idle)"},
 			{Name: "unused_since", Doc: "orphan.disk: last detach (or creation, if never attached), RFC3339; omitted when the provider cannot date it"},
 			{Name: "unused_for", Doc: "orphan.disk: how long the disk has been unattached; \"unknown\" when undatable"},
-			{Name: "region", Doc: "orphan.lb, orphan.address: the forwarding rule's or address's region (\"global\" for global ones)"},
+			{Name: "region", Doc: "orphan.lb, orphan.address, cloud.unavailable (reason=RuleUnresolved): the forwarding rule's or address's region (\"global\" for global ones)"},
 			{Name: "why", Doc: "orphan.lb: the provider's orphan judgment (e.g. which backend resolved empty)"},
 			{Name: "address", Doc: "orphan.address: the reserved IP"},
 			{Name: "network_tier", Doc: "orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none"},
@@ -121,11 +147,12 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "total_max_node_count", Doc: "orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits"},
 			{Name: "autoprovisioned", Doc: "orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise"},
 			{Name: "nodepools_skipped", Doc: "summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod)"},
-			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission"},
-			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
+			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied, SweepFailed or RuleUnresolved): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools), or that the unresolved rule belongs to (lbs); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission, \"sweep failed\", or its count of unresolved rules"},
+			{Name: "error", Doc: "cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API) — nothing from the failed class is reported, never a partial list; (reason=RuleUnresolved): the error on that one forwarding rule's backend chain (e.g. a 404 for a backend service deleted mid-sweep). Masked and cut to 300 characters"},
+			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
 			{Name: "capability", Doc: "cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools)"},
 			{Name: "provider", Doc: "cloud.unavailable: the provider that was asked"},
-			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, or a forbidden Node/Pod List for nodepools)"},
+			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — \"sweep failed\" — or a forbidden Node/Pod List for nodepools), plus \"lbs: N rules unresolved\" when some forwarding rules could not be judged (\"(20 listed)\" when the RuleUnresolved records were capped)"},
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout cloud orphans",
@@ -176,12 +203,13 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	}{
 		{"disks", "disk sweep", want.disks, cloud.CapabilityOrphans, hasOrphans,
 			plain(func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) })},
-		{"lbs", "load-balancer sweep", want.lbs, cloud.CapabilityOrphans, hasOrphans,
-			plain(func() (int, error) { return sweepLBs(ctx, api, inv) })},
 		{"addresses", "address sweep", want.addresses, cloud.CapabilityOrphans, hasOrphans,
 			plain(func() (int, error) { return sweepAddresses(ctx, api, inv, now, minAge) })},
 		{"nodepools", "node-pool sweep", want.nodepools, cloud.CapabilityClusterConfig, hasConfig,
 			func() (int, string, error) { return sweepNodePools(ctx, cc, deps, inv) }},
+		// Last, on a budget: see the package comment.
+		{"lbs", "load-balancer sweep", want.lbs, cloud.CapabilityOrphans, hasOrphans,
+			func() (int, string, error) { return sweepLBs(ctx, api, provider, inv) }},
 	}
 
 	// Missing capabilities first: one cloud.unavailable per capability,
@@ -234,7 +262,19 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 			// --only gained addresses, and an identity without
 			// compute.addresses.list must keep getting its disk and
 			// lb answer from the same invocation.
-			note, err := emitClassDenied(inv, provider, s.class, permission)
+			note, err := emitClassDenied(inv, provider, s.class, s.capability, permission)
+			if err != nil {
+				return 0, err
+			}
+			refused = append(refused, note)
+			continue
+		}
+		var failed *classSweepError
+		if errors.As(err, &failed) && ctx.Err() == nil {
+			// Any other provider failure degrades the class alone
+			// too (#612); a canceled or timed-out invocation does
+			// not — every later class would fail the same way.
+			note, err := emitClassFailed(inv, provider, s.class, s.capability, failed.err)
 			if err != nil {
 				return 0, err
 			}
@@ -258,13 +298,13 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 // cloud.unavailable finding naming the refused class and, when the
 // provider knows it, the permission to grant. It returns the
 // summary-note fragment for the class.
-func emitClassDenied(inv emit.Invocation, p cloud.Provider, class, permission string) (string, error) {
+func emitClassDenied(inv emit.Invocation, p cloud.Provider, class string, capability cloud.Capability, permission string) (string, error) {
 	need := "permission denied"
 	if permission != "" {
 		need = "needs " + permission
 	}
 	details := []emit.Field{
-		{Key: "capability", Value: string(cloud.CapabilityOrphans)},
+		{Key: "capability", Value: string(capability)},
 		{Key: "provider", Value: p.Name()},
 		{Key: "class", Value: class},
 	}
@@ -283,12 +323,68 @@ func emitClassDenied(inv emit.Invocation, p cloud.Provider, class, permission st
 	return class + ": " + need, nil
 }
 
+// classSweepError marks an error that came from the provider during
+// one class's sweep, as opposed to writing the output — only the
+// former may degrade the class.
+type classSweepError struct{ err error }
+
+func (e *classSweepError) Error() string { return e.err.Error() }
+func (e *classSweepError) Unwrap() error { return e.err }
+
+// providerFailure wraps a provider call's error as a classSweepError;
+// nil stays nil.
+func providerFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classSweepError{err: err}
+}
+
+// sweepErrorCap bounds the provider error carried on a SweepFailed
+// or RuleUnresolved record: enough for the API's status and message,
+// not a dump.
+const sweepErrorCap = 300
+
+// providerError is a provider error as a record carries it: masked,
+// then cut to sweepErrorCap. Mask before cutting: a cut through a
+// credential (a PEM block losing its END line) would hide it from the
+// writer's sanitizer.
+func providerError(cause error) string {
+	msg := emit.MaskString(cause.Error())
+	if r := []rune(msg); len(r) > sweepErrorCap {
+		msg = string(r[:sweepErrorCap]) + "…"
+	}
+	return msg
+}
+
+// emitClassFailed is emitClassDenied's twin for any other provider
+// failure: one cloud.unavailable finding (reason=SweepFailed) naming
+// the class and carrying the provider's error. It returns the
+// summary-note fragment for the class.
+func emitClassFailed(inv emit.Invocation, p cloud.Provider, class string, capability cloud.Capability, cause error) (string, error) {
+	if err := inv.Out.Emit(emit.Finding{
+		Kind:     "cloud.unavailable",
+		Severity: emit.SeverityInfo,
+		Reason:   "SweepFailed",
+		Message:  fmt.Sprintf("cloud orphans could not finish sweeping %s: a provider call failed (see error) — no %s are reported; the other selected classes were still swept", class, class),
+		Details: []emit.Field{
+			{Key: "capability", Value: string(capability)},
+			{Key: "provider", Value: p.Name()},
+			{Key: "class", Value: class},
+			{Key: "error", Value: providerError(cause)},
+		},
+	}); err != nil {
+		return "", err
+	}
+	return class + ": sweep failed", nil
+}
+
 // sweepDisks reports unattached disks at least minAge idle; it
 // returns how many unattached disks it examined.
 func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
 	disks, err := api.OrphanDisks(ctx)
 	if err != nil {
-		return 0, err
+		return 0, providerFailure(err)
 	}
 	var old []cloud.OrphanDisk
 	for _, d := range disks {
@@ -312,20 +408,87 @@ func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, n
 	return len(disks), nil
 }
 
-// sweepLBs reports forwarding rules routing to zero endpoints; it
-// returns how many orphaned rules the provider judged.
-func sweepLBs(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation) (int, error) {
-	lbs, err := api.OrphanLoadBalancers(ctx)
-	if err != nil {
-		return 0, err
+// unresolvedRuleCap bounds the RuleUnresolved records one run
+// emits; the summary note's count is never capped.
+const unresolvedRuleCap = 20
+
+// lbsReserveMax caps the reserve the lbs class leaves for the records
+// and summary after it: a tenth of the invocation's remaining time,
+// at most this.
+const lbsReserveMax = 5 * time.Second
+
+// lbsBudget derives the lbs class's context: it ends a reserve before
+// the invocation's deadline, so a slow lbs class degrades rather than
+// costing the run its summary and exit code. No deadline, no budget.
+func lbsBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
 	}
+	reserve := min(time.Until(deadline)/10, lbsReserveMax)
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
+}
+
+// sweepLBs reports forwarding rules routing to zero endpoints, and
+// each rule the provider could not judge (capped); it returns how
+// many orphaned rules the provider judged and the summary-note
+// fragment for unresolved rules.
+func sweepLBs(ctx context.Context, api cloud.OrphanAPI, p cloud.Provider, inv emit.Invocation) (int, string, error) {
+	lbCtx, cancel := lbsBudget(ctx)
+	defer cancel()
+	sweep, err := api.OrphanLoadBalancers(lbCtx)
+	if err != nil {
+		if ctx.Err() == nil && lbCtx.Err() != nil {
+			err = fmt.Errorf("the load-balancer sweep ran out of its share of --timeout (the rest is kept for the other classes and the summary): %w", err)
+		}
+		return 0, "", providerFailure(err)
+	}
+	lbs := sweep.Orphans
 	sort.Slice(lbs, func(i, j int) bool { return lbs[i].Name < lbs[j].Name })
 	for _, lb := range lbs {
 		if err := inv.Out.Emit(lbFinding(lb)); err != nil {
-			return 0, err
+			return 0, "", err
 		}
 	}
-	return len(lbs), nil
+	unresolved := sweep.Unresolved
+	if len(unresolved) == 0 {
+		return len(lbs), "", nil
+	}
+	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i].Name < unresolved[j].Name })
+	for _, u := range unresolved[:min(len(unresolved), unresolvedRuleCap)] {
+		if err := inv.Out.Emit(unresolvedFinding(p, u)); err != nil {
+			return 0, "", err
+		}
+	}
+	note := fmt.Sprintf("lbs: %d rules unresolved", len(unresolved))
+	if len(unresolved) > unresolvedRuleCap {
+		note += fmt.Sprintf(" (%d listed)", unresolvedRuleCap)
+	}
+	return len(lbs), note, nil
+}
+
+// unresolvedFinding is the RuleUnresolved record for one forwarding
+// rule the provider could not judge.
+func unresolvedFinding(p cloud.Provider, u cloud.UnresolvedLoadBalancer) emit.Finding {
+	details := []emit.Field{
+		{Key: "region", Value: u.Region},
+		{Key: "capability", Value: string(cloud.CapabilityOrphans)},
+		{Key: "provider", Value: p.Name()},
+		{Key: "class", Value: "lbs"},
+	}
+	if permission, denied := cloud.PermissionDenied(u.Err); denied && permission != "" {
+		details = append(details, emit.Field{Key: "permission", Value: permission})
+	}
+	details = append(details, emit.Field{Key: "error", Value: providerError(u.Err)})
+	return emit.Finding{
+		Kind:         "cloud.unavailable",
+		Severity:     emit.SeverityInfo,
+		KindOfObject: "ForwardingRule",
+		Name:         u.Name,
+		Reason:       "RuleUnresolved",
+		Message:      "cloud orphans could not judge this forwarding rule: a provider call on its backend chain failed (see error) — it is neither reported as an orphan nor known to be live; the other rules were still judged",
+		Details:      details,
+	}
 }
 
 // sweepAddresses reports idle external static IPs reserved at least
@@ -333,7 +496,7 @@ func sweepLBs(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation) (in
 func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
 	addrs, err := api.OrphanAddresses(ctx)
 	if err != nil {
-		return 0, err
+		return 0, providerFailure(err)
 	}
 	var old []cloud.OrphanAddress
 	for _, a := range addrs {

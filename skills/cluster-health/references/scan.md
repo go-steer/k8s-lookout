@@ -217,7 +217,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pvc` | PersistentVolumeClaim the pod mounts (same namespace as the pod) |
 | `node` | node the attachment targets or the pod is scheduled on |
 | `attacher` | CSI driver responsible for the attachment (spec.attacher) |
-| `error` | the attach/detach error message, truncated to 200 chars |
+| `error` | volume.attach_error: the attach/detach error message, truncated to 200 chars (cloud.unavailable from cloud orphans, reason=SweepFailed or RuleUnresolved, uses the same key for the provider error — masked, cut to 300 characters) |
 | `attached` | the attachment's status.attached at scan time |
 | `pv_zones` | zones the PV's node affinity allows, sorted |
 | `node_zone` | zone label of the node the pod is scheduled on |
@@ -340,7 +340,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `disk_type` | orphan.disk: disk type short name (pd-ssd bills ~4x pd-standard idle) |
 | `unused_since` | orphan.disk: last detach (or creation, if never attached), RFC3339; omitted when the provider cannot date it |
 | `unused_for` | orphan.disk: how long the disk has been unattached; "unknown" when undatable |
-| `region` | orphan.lb, orphan.address: the forwarding rule's or address's region ("global" for global ones) |
+| `region` | orphan.lb, orphan.address, cloud.unavailable (reason=RuleUnresolved): the forwarding rule's or address's region ("global" for global ones) |
 | `why` | orphan.lb: the provider's orphan judgment (e.g. which backend resolved empty) |
 | `address` | orphan.address: the reserved IP |
 | `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
@@ -356,8 +356,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
 | `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
 | `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
-| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
-| `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
+| `class` | cloud.unavailable (reason=PermissionDenied, SweepFailed or RuleUnresolved): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools), or that the unresolved rule belongs to (lbs); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission, "sweep failed", or its count of unresolved rules |
+| `permission` | cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
 | `usage` | current usage in the quota's own unit |
 | `limit` | the quota limit |
 | `unit` | the quota's unit, when the provider names one |

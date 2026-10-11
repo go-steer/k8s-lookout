@@ -183,6 +183,27 @@ type OrphanLoadBalancer struct {
 	Reason string
 }
 
+// UnresolvedLoadBalancer is a forwarding rule the provider could not
+// judge because a call on its resolution chain failed — a backend
+// service or URL map deleted between the list and the get (Ingress
+// churn), or a 403 on a resource in another project. It is neither
+// an orphan nor proof of a live rule.
+type UnresolvedLoadBalancer struct {
+	Name   string
+	Region string
+	// Err is the failed call's error (permission refusals wrapped as
+	// for a class, see PermissionDenied).
+	Err error
+}
+
+// LoadBalancerSweep is OrphanLoadBalancers' answer: the rules the
+// provider judged orphaned, and the rules it could not judge. One
+// rule's failure never costs the others their verdict.
+type LoadBalancerSweep struct {
+	Orphans    []OrphanLoadBalancer
+	Unresolved []UnresolvedLoadBalancer
+}
+
 // OrphanAddress is a reserved static IP address that nothing uses and
 // that bills while idle: an EXTERNAL address in the RESERVED state
 // with no users. Internal static addresses are never returned — they
@@ -213,10 +234,12 @@ type OrphanAddress struct {
 // honestly count what was examined. OrphanAddresses follows the same
 // rule: every idle billable address, dated, with the age threshold
 // left to the caller. OrphanLoadBalancers returns only the rules the
-// provider already judged orphaned.
+// provider already judged orphaned, plus the rules it could not judge
+// (LoadBalancerSweep.Unresolved); its error is reserved for failures
+// that cost the whole class — the rule list itself, or the context.
 type OrphanAPI interface {
 	OrphanDisks(ctx context.Context) ([]OrphanDisk, error)
-	OrphanLoadBalancers(ctx context.Context) ([]OrphanLoadBalancer, error)
+	OrphanLoadBalancers(ctx context.Context) (LoadBalancerSweep, error)
 	OrphanAddresses(ctx context.Context) ([]OrphanAddress, error)
 }
 

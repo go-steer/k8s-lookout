@@ -34,8 +34,8 @@ func (refusingOrphans) OrphanDisks(context.Context) ([]cloud.OrphanDisk, error) 
 	return []cloud.OrphanDisk{{Name: "idle-disk", Zone: "us-east1-b", SizeGB: 100, Type: "pd-ssd"}}, nil
 }
 
-func (refusingOrphans) OrphanLoadBalancers(context.Context) ([]cloud.OrphanLoadBalancer, error) {
-	return nil, nil
+func (refusingOrphans) OrphanLoadBalancers(context.Context) (cloud.LoadBalancerSweep, error) {
+	return cloud.LoadBalancerSweep{}, nil
 }
 
 func (refusingOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, error) {
