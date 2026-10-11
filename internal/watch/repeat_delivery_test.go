@@ -19,6 +19,8 @@ package watch
 // it into a second session.
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +33,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
 // faultyDaemon is the routing fake daemon with a per-inject status
@@ -142,6 +145,72 @@ func TestDispatchRepeat_SessionGoneReopens(t *testing.T) {
 	last = got[len(got)-1]
 	if p := payloadFields(t, last.Body); last.SessionID != "sess-2" || p["repeat_count"] != float64(1) {
 		t.Fatalf("next lapse: %s %v, want reminder 1 in sess-2", last.SessionID, p)
+	}
+}
+
+// goneSink is an in-process inject.Sink whose Append into a session
+// marked gone returns exactly *inject.StatusError{Code: 404} — the
+// error the ax sink (and its part-3 reminder hold) uses to say the
+// task or session no longer exists.
+type goneSink struct {
+	mu      sync.Mutex
+	opens   int
+	gone    map[string]bool
+	appends []routedInject
+}
+
+func (s *goneSink) OpenIncident(_ context.Context, payload any) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opens++
+	sid := fmt.Sprintf("task/sess-%d", s.opens)
+	b, _ := json.Marshal(payload)
+	s.appends = append(s.appends, routedInject{SessionID: sid, Body: string(b)})
+	return sid, nil
+}
+
+func (s *goneSink) Append(_ context.Context, id string, payload any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gone[id] {
+		return &inject.StatusError{Op: "ax sink: inject", Code: http.StatusNotFound}
+	}
+	b, _ := json.Marshal(payload)
+	s.appends = append(s.appends, routedInject{SessionID: id, Body: string(b)})
+	return nil
+}
+
+// TestDispatchRepeat_SinkStatusError404Reopens: the un-bind path keys
+// on errors.As(*inject.StatusError) with Code 404, not on message
+// text — a sink returning exactly that error gets the incident
+// reopened in a new session.
+func TestDispatchRepeat_SinkStatusError404Reopens(t *testing.T) {
+	t.Parallel()
+	sink := &goneSink{gone: map[string]bool{}}
+	d := newRecoveryDispatcher(t, "http://unused")
+	d.injector = sink
+	r := wireRepeat(t, d)
+	sig := unschedulableSignal()
+	r.emit(0, sig)
+	sink.mu.Lock()
+	sink.gone["task/sess-1"] = true
+	sink.mu.Unlock()
+	r.emit(5*time.Minute+5*time.Second, sig)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.opens != 2 {
+		t.Fatalf("opens = %d, want 2 (reopened after the StatusError 404)", sink.opens)
+	}
+	last := sink.appends[len(sink.appends)-1]
+	var p map[string]any
+	if err := json.Unmarshal([]byte(last.Body), &p); err != nil {
+		t.Fatal(err)
+	}
+	if last.SessionID != "task/sess-2" || p["kind"] != engine.KindK8sEvent {
+		t.Fatalf("after the 404: %s %v, want the k8s-event open in task/sess-2", last.SessionID, p)
+	}
+	if sid, ok := d.dedup.LookupSession(sig.CanonicalKey()); !ok || sid != "task/sess-2" {
+		t.Fatalf("binding = %q %v, want task/sess-2", sid, ok)
 	}
 }
 
