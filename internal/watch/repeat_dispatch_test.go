@@ -43,9 +43,10 @@ func (o *switchObserver) Clearance(engine.Incident) (engine.Clearance, bool) {
 	return engine.Clearance{Cleared: true, StableSince: time.Now().Add(-time.Hour), Resolution: engine.ResolutionRecovered}, true
 }
 
-// repeatRig is a dispatcher with the production #599 wiring — a
-// recovery tracker whose Open is the dedup cache's open check — on a
-// fake dedup clock.
+// repeatRig is a dispatcher with the production #599 wiring — §7.7
+// severity routing with a watchboard (which per-incident mode always
+// builds, so a warning is NOT session class), and a recovery tracker
+// whose Open is the dedup cache's open check — on a fake dedup clock.
 type repeatRig struct {
 	d   *dispatcher
 	obs *switchObserver
@@ -54,6 +55,20 @@ type repeatRig struct {
 
 func wireRepeat(t *testing.T, d *dispatcher) *repeatRig {
 	t.Helper()
+	if d.routing == nil {
+		d.routing = engine.NewRoutingPolicy(nil)
+	}
+	if d.board == nil {
+		d.board = newWatchboard(watchboardConfig{
+			injector:      d.injector,
+			metrics:       d.metrics,
+			cluster:       d.cluster,
+			batch:         100,
+			flushInterval: time.Hour,
+			rotateAfter:   200,
+		})
+		d.board.bind = d.bindWatchboardIncident
+	}
 	r := &repeatRig{d: d, obs: &switchObserver{}, now: time.Date(2026, 10, 9, 16, 56, 19, 0, time.UTC)}
 	d.dedup.SetClock(func() time.Time { return r.now })
 	tracker := engine.NewRecoveryTracker(time.Minute, func(sig engine.Signal) {
@@ -161,7 +176,8 @@ func TestDispatchRepeat_ExactWireShape(t *testing.T) {
 }
 
 // TestDispatchRepeat_MaterialChange: a new message shape mid-backoff
-// is a followup at once with repeat_count omitted.
+// is a followup with repeat_count omitted, at the first occurrence a
+// full window after the last inject.
 func TestDispatchRepeat_MaterialChange(t *testing.T) {
 	t.Parallel()
 	base, injects := newRoutingFakeDaemon(t)
@@ -171,7 +187,11 @@ func TestDispatchRepeat_MaterialChange(t *testing.T) {
 	r.emit(5*time.Minute+5*time.Second, sig) // reminder 1
 	r.emit(time.Minute, sig)                 // absorbed
 	sig.Message = "0/6 nodes are available: 6 Insufficient memory."
-	r.emit(time.Minute, sig)
+	r.emit(time.Minute, sig) // held: within a window of reminder 1
+	if len(*injects) != 2 {
+		t.Fatalf("injects = %d, want the change held inside the window", len(*injects))
+	}
+	r.emit(3*time.Minute+time.Second, sig) // a window past reminder 1
 	if len(*injects) != 3 {
 		t.Fatalf("injects = %d, want open + reminder + change", len(*injects))
 	}

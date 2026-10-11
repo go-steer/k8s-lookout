@@ -40,12 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hour (5m, 10m, 20m, 40m, 1h at the default); occurrences in between
   are counted, not sent. A followup without `repeat_count` means the
   signal changed (a new message shape or severity, or a jump of 4× or
-  more in how often it fires) and restarts the schedule. A resolved
-  incident's recurrence still opens fresh, and without recovery
-  tracking every lapse reopens as before. The schedule survives restarts
-  through `--dedup-persist`. New metric
-  `lookout_repeat_followups_total{type=reminder|change}`; the skills
-  now tell agents to let a diagnosis stand on a reminder.
+  more in how often it fires) and restarts the schedule; message and
+  severity changes are sent at most once per window. A warning from
+  another source on the same key (such as `capacity.pending` on a
+  `FailedScheduling` incident) no longer splits the incident. If the
+  agent has lost the session, the incident reopens in a new one; other
+  delivery failures are retried on the next occurrence, and an open
+  whose first delivery failed is re-sent in full rather than as a
+  reminder. A resolved incident's recurrence still opens fresh, and
+  without recovery tracking every lapse reopens as before. The schedule
+  survives restarts through `--dedup-persist`. New metric
+  `lookout_repeat_followups_total{type=reminder|change|open}`; the
+  skills now tell agents to let a diagnosis stand on a reminder.
 - **Leeway no longer blames a skew on a drain that started after it
   (#604).** A `leeway.placement_drift` finding named `taint_exclusion`
   whenever a node in an under-filled domain was cordoned, even if the

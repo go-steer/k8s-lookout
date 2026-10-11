@@ -173,19 +173,16 @@ func TestRepeat_SoakScenario(t *testing.T) {
 }
 
 // TestRepeat_FirstWindowIsPlainDuplicate: inside the incident's first
-// window nothing changes — duplicates are suppressed, not absorbed, and
-// even a new message shape is recorded silently.
+// window nothing changes — duplicates are suppressed, not absorbed —
+// and the first lapse is reminder 1.
 func TestRepeat_FirstWindowIsPlainDuplicate(t *testing.T) {
 	t.Parallel()
 	h := newRepeatHarness(t, "")
 	h.openIncident()
-	h.msg = "a completely different failure clause"
 	got := h.emit(time.Minute)
 	if got.Kind != DedupDuplicate || got.Absorbed {
 		t.Fatalf("first-window event = %+v, want a plain (non-absorbed) duplicate", got)
 	}
-	// The class was learned in the first window: the lapse is a plain
-	// reminder, not a change.
 	got = h.emit(5*time.Minute + time.Second)
 	if got.Kind != DedupRepeat || got.RepeatCount != 1 {
 		t.Fatalf("first lapse = %+v, want reminder 1", got)
@@ -226,8 +223,11 @@ func TestRepeat_SeverityChangeIsMaterial(t *testing.T) {
 	h.openIncident()
 	h.emit(6 * time.Minute) // reminder 1
 	h.sev = SeverityWarning
-	if got := h.emit(time.Minute); got.Kind != DedupRepeat || got.RepeatCount != 0 {
-		t.Fatalf("severity change = %+v, want a material-change followup", got)
+	if got := h.emit(time.Minute); got.Kind != DedupDuplicate || !got.Absorbed {
+		t.Fatalf("severity change within a window of the last inject = %+v, want it held", got)
+	}
+	if got := h.emit(5 * time.Minute); got.Kind != DedupRepeat || got.RepeatCount != 0 || got.Change != RepeatChangeClass {
+		t.Fatalf("held severity change = %+v, want a class change followup a window after the last inject", got)
 	}
 }
 
@@ -360,7 +360,7 @@ func TestRepeat_PreconditionsKeepLegacyLapse(t *testing.T) {
 				c.BindIncident(key, "sess-1", ref)
 			}
 			now = now.Add(6 * time.Minute)
-			got := c.ObserveSignal(key, Observation{LastTS: now, Kind: KindK8sEvent, Repeatable: tc.repeatable})
+			got := c.ObserveSignal(key, Observation{LastTS: now, Kind: KindK8sEvent, Repeatable: tc.repeatable, Downgraded: !tc.repeatable})
 			if got.Kind != DedupNewIncident {
 				t.Fatalf("lapse = %+v, want the legacy DedupNewIncident", got)
 			}

@@ -372,8 +372,8 @@ again after its dedup window lapsed, and §7.4 had not resolved it:
 | `repeat_count` | meaning | what a reader should do |
 | --- | --- | --- |
 | `N` > 0 | the N-th pure reminder since the open (or since the last material change): still failing, nothing material changed | let the diagnosis stand; no re-investigation needed |
-| omitted (0) on a followup | the signal changed materially: a message shape or severity the incident had not shown, or its occurrence rate jumped 4× or more over at least 10 occurrences | look again — this is new information about the same incident |
-| omitted on an open | an ordinary new incident | as before |
+| omitted (0) on a followup | the signal changed materially: a message shape or severity the incident had not shown, or its occurrence rate jumped 4× or more over at least 10 occurrences (class changes are spaced at least one window from the previous inject) | look again — this is new information about the same incident |
+| omitted on an open | an ordinary new incident (also an open re-sent into its session because its first delivery failed) | as before |
 
 Reminders follow a fixed doubling schedule from `--dedup-window` (5m,
 10m, 20m, 40m at the default) capped at 1h; occurrences between them

@@ -17,8 +17,10 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -258,6 +260,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		Severity:   sig.Severity,
 		Message:    sig.Message,
 		Repeatable: d.opensSessions(sig),
+		Downgraded: downgraded != nil,
 	})
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
 	// An occurrence of a still-open, storm-claimed incident past its
@@ -271,7 +274,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// Issue #599: the incident is still open, so its lapse is a
 		// followup into the bound session (the storm's, when a storm
 		// owns it), never a second open.
-		d.injectRepeat(ctx, sig, result)
+		d.injectRepeat(ctx, sig, key, result)
 		return
 	}
 	if result.Kind == engine.DedupDuplicate {
@@ -506,6 +509,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		if err != nil {
 			log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
 			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+			// Bound anyway, but the agent never got the incident: the
+			// next occurrence re-sends the full open payload instead of
+			// meeting it first as a pure reminder (#599).
+			d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 			return
 		}
 		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
@@ -589,34 +596,101 @@ func (d *dispatcher) opensSessions(sig engine.Signal) bool {
 // bound session: the incident's own payload, re-kinded as a followup —
 // k8s-event becomes the frozen k8s-event-followup, a source-namespaced
 // kind keeps its kind — with repeat_count stamped (N > 0 for the N-th
-// pure reminder, omitted for a material change). No enrichment and no
-// session open: the session already has both. Recorded as
-// route=followup against the bound session.
-func (d *dispatcher) injectRepeat(ctx context.Context, sig engine.Signal, result engine.DedupResult) {
-	payload := repeatPayload(sig, result)
+// pure reminder, omitted for a material change). No session open: the
+// session already exists. Recorded as route=followup against the bound
+// session.
+//
+// A re-send of an open whose initial delivery failed
+// (engine.RepeatChangeOpen) carries the full open payload instead —
+// kind, shape and enrichment of the open — because that agent has not
+// seen the incident at all.
+//
+// Delivery failures never go dark:
+//   - the sink says the session is gone (404/410 — an ax task
+//     recreated, a daemon restarted without its state): the entry is
+//     unbound and the incident reopened NOW, through the #84 open path,
+//     with this signal. Now rather than at the next occurrence because
+//     the occurrence in hand is current evidence of a verified-open
+//     incident, and a slow emitter's next occurrence may be an hour
+//     away. If the reopen fails too, the unbound entry retries on every
+//     occurrence through the #84 guard. A storm-claimed entry is
+//     unbound but not reopened per-incident (#104): it stays a
+//     session-less storm member and its next lapse goes back through
+//     the storm stage, as a re-fire did before #599.
+//   - any other error: the entry is marked undelivered, so the next
+//     occurrence re-sends the same inject instead of the schedule
+//     skipping it.
+func (d *dispatcher) injectRepeat(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult) {
+	var payload inject.Payload
 	what := "reminder"
-	if result.RepeatCount == 0 {
+	switch {
+	case result.Change == engine.RepeatChangeOpen:
+		what = "open"
+		if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
+			if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+				sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+			}
+		}
+		payload = incidentPayload(sig, result)
+		if d.injectMaxBytes > 0 {
+			if shed := payload.FitTo(d.injectMaxBytes); len(shed) > 0 {
+				d.noteInjectShrunk(sig.Namespace, sig.Name, shed)
+			}
+		}
+	case result.RepeatCount == 0:
 		what = "change"
+		payload = repeatPayload(sig, result)
+	default:
+		payload = repeatPayload(sig, result)
 	}
-	d.metrics.repeatFollowups.WithLabelValues(what).Inc()
-	d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
 	if d.dryRun {
+		d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+		d.metrics.repeatFollowups.WithLabelValues(what).Inc()
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
 		return
 	}
 	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
-		log.Printf("dispatcher: repeat followup for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, result.SessionID, err)
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		if sessionGone(err) {
+			log.Printf("dispatcher: repeat followup for %s/%s: session %s is gone (%v) — unbinding and reopening",
+				sig.Namespace, sig.Name, result.SessionID, err)
+			d.dedup.Unbind(key)
+			if result.Storm == "" && d.opensSessions(sig) {
+				d.retryIncidentOpen(ctx, sig, result, key)
+				return
+			}
+			d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
+			return
+		}
+		log.Printf("dispatcher: repeat followup for %s/%s (sid=%s): %v (re-sent at the next occurrence)",
+			sig.Namespace, sig.Name, result.SessionID, err)
+		d.dedup.MarkUndelivered(key, result.Change)
+		d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
 		return
 	}
-	if result.RepeatCount > 0 {
+	d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+	d.metrics.repeatFollowups.WithLabelValues(what).Inc()
+	switch what {
+	case "reminder":
 		log.Printf("repeat %s pod=%s/%s → sid=%s (still open: reminder %d, count=%d)",
 			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.RepeatCount, result.Count)
-		return
+	case "open":
+		log.Printf("repeat %s pod=%s/%s → sid=%s (open re-sent: its initial delivery had failed, count=%d)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.Count)
+	default:
+		log.Printf("repeat %s pod=%s/%s → sid=%s (still open, changed: %s, count=%d)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.Change, result.Count)
 	}
-	log.Printf("repeat %s pod=%s/%s → sid=%s (still open, changed: %s, count=%d)",
-		sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.Change, result.Count)
+}
+
+// sessionGone reports a sink error that means the bound session no
+// longer exists on the agent side (HTTP 404 or 410 on the inject) —
+// the same answer the ax sink's keyed open already treats as "start a
+// new one".
+func sessionGone(err error) bool {
+	var se *inject.StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)
 }
 
 // repeatPayload composes a repeat followup's wire body: incidentPayload
@@ -792,6 +866,9 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 	if err != nil {
 		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		// The session exists but never got the incident: the next
+		// occurrence re-sends the full open, never a pure reminder (#599).
+		d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 		return
 	}
 	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()

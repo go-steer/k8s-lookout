@@ -38,9 +38,17 @@ import (
 //     the default window). Occurrences in between are absorbed:
 //     counted, never injected.
 //   - a material-change followup (repeat_count 0, omitted on the
-//     wire) the moment the signal changes — a class the incident has
-//     not shown before, or a jump in its occurrence rate. The
-//     schedule restarts from one window after it.
+//     wire) when the signal changes — a class the incident has not
+//     shown before, or a jump in its occurrence rate. A class change
+//     goes in at the first occurrence a full window after the last
+//     inject (one seen inside the first window included); further
+//     changes inside that window fold into it. A rate jump has its own
+//     floor and goes in at once. The schedule restarts from one window
+//     after either.
+//   - a re-send of the last inject when it did not reach the session
+//     (MarkUndelivered) — including the open itself, so an agent whose
+//     session was created but never got the incident does not meet it
+//     first as a pure reminder.
 //
 // The first fire is untouched (still an immediate open), and a
 // resolved incident's recurrence is still a fresh open: only an
@@ -93,12 +101,20 @@ func repeatInterval(window time.Duration, n int) time.Duration {
 // of ObserveSignal). Called with the cache lock held; lapsed is
 // whether the dedup window had expired since the entry's LastSeen.
 //
-// Inside the incident's first window (no repeat inject yet, window not
-// lapsed) it is a plain duplicate. Past it, in order: a material
-// change is a RepeatCount-0 followup; a reminder that has come due is
-// the next RepeatCount; anything else is absorbed. The first lapse
-// always finds the first reminder due, since the open is at least a
-// window back.
+// In order:
+//
+//  1. An undelivered last inject (MarkUndelivered) is re-sent now,
+//     schedule or not: the session must not miss an open or a change.
+//  2. Inside the incident's first window (no repeat inject yet, the
+//     window not lapsed, nothing pending) it is a plain duplicate.
+//  3. A material change is a RepeatCount-0 followup: a pending class
+//     change once a full window has passed since the last inject
+//     (changes inside that window fold into it), or a rate jump.
+//  4. A reminder that has come due is the next RepeatCount.
+//  5. Anything else is absorbed.
+//
+// The first lapse always finds the first reminder due, since the open
+// is at least a window back.
 func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class string, lapsed bool) DedupResult {
 	if e.LastInjectAt.IsZero() {
 		// Legacy entry (pre-#599 snapshot): the open was the last
@@ -110,46 +126,64 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 	e.Count++
 	e.LastSeen = now
 	e.EventLastTS = eventLastTS
-	changed := e.noteClass(class)
+	if e.noteClass(class) {
+		e.PendingChange = true
+	}
+	result := DedupResult{Kind: DedupRepeat, SessionID: e.SessionID, Storm: e.Storm}
+	if e.Undelivered {
+		e.Undelivered = false
+		result.Change = e.LastChange
+		if result.Change == "" {
+			result.RepeatCount = e.RepeatCount
+		}
+		e.markInject(now)
+		result.Count = e.Count
+		return result
+	}
+	sinceInject := now.Sub(e.LastInjectAt)
+	changeDue := e.PendingChange && sinceInject > c.window
 	dup := DedupResult{Kind: DedupDuplicate, SessionID: e.SessionID, Count: e.Count, Storm: e.Storm}
-	if !inRepeat && !lapsed {
+	if !inRepeat && !lapsed && !changeDue {
 		// Still the first window: an ordinary duplicate. A new class
-		// here is recorded but not announced — the window's duplicates
-		// are the incident the open described.
+		// here is held as pending, announced once the window is past.
 		return dup
 	}
-	change := ""
 	switch {
-	case changed:
-		change = RepeatChangeClass
+	case changeDue:
+		result.Change = RepeatChangeClass
 	case inRepeat && e.countJump(now):
-		change = RepeatChangeRate
+		result.Change = RepeatChangeRate
+		// The jumped rate is the new normal: measure the next jump
+		// against it, not against the quiet rate it replaced.
+		e.RatePerHour = e.rateSinceInject(now)
 	}
-	if change != "" {
-		if change == RepeatChangeRate {
-			// The jumped rate is the new normal: measure the next jump
-			// against it, not against the quiet rate it replaced.
-			e.RatePerHour = e.rateSinceInject(now)
-		}
+	if result.Change != "" {
 		e.RepeatCount = 0
+		e.LastChange = result.Change
 		e.markInject(now)
-		return DedupResult{Kind: DedupRepeat, SessionID: e.SessionID, Count: e.Count, Storm: e.Storm, Change: change}
+		result.Count = e.Count
+		return result
 	}
 	next := e.RepeatCount + 1
-	if now.Sub(e.LastInjectAt) <= repeatInterval(c.window, next) {
+	if sinceInject <= repeatInterval(c.window, next) {
 		dup.Absorbed = true
 		return dup
 	}
 	e.RatePerHour = e.rateSinceInject(now)
 	e.RepeatCount = next
+	e.LastChange = ""
 	e.markInject(now)
-	return DedupResult{Kind: DedupRepeat, SessionID: e.SessionID, Count: e.Count, Storm: e.Storm, RepeatCount: next}
+	result.RepeatCount = next
+	result.Count = e.Count
+	return result
 }
 
-// markInject records that the incident just spoke into its session.
+// markInject records that the incident just spoke into its session;
+// whatever was pending is in that inject.
 func (e *dedupEntry) markInject(now time.Time) {
 	e.LastInjectAt = now
 	e.InjectCount = e.Count
+	e.PendingChange = false
 }
 
 // rateSinceInject is the occurrence rate, per hour, since the last

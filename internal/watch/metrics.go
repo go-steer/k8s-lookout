@@ -334,7 +334,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"source"}),
 		repeatFollowups: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_repeat_followups_total",
-			Help: "Total followups injected for an incident that was still open when its dedup window lapsed (issue #599), by type: reminder is a pure reminder (repeat_count above 0, on the doubling schedule up to 1h), change is a material change (new message shape or severity, or a rate jump). Occurrences absorbed between reminders count in lookout_events_deduped_total.",
+			Help: "Total followups injected for an incident that was still open when its dedup window lapsed (issue #599), by type: reminder is a pure reminder (repeat_count above 0, on the doubling schedule up to 1h), change is a material change (new message shape or severity, or a rate jump), open is the full open payload re-sent because the initial delivery had failed. Occurrences absorbed between reminders count in lookout_events_deduped_total.",
 		}, []string{"type"}),
 		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "lookout_sink_info",

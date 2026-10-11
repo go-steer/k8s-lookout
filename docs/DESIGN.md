@@ -653,7 +653,11 @@ its agent re-diagnosed an unchanged failure each time. Now:
   tracker holds it as symptomatic or clearing. Where any of that is unknown —
   recovery disabled, the incident never bound, `--mode=shared`, an incident
   no observer has judged once the tracker drops it (one hour) — the lapse
-  opens a new incident as before.
+  opens a new incident as before. A lower-class signal from *another*
+  source on the same key while the incident is open (`capacity.pending`,
+  a warning, on a `FailedScheduling` incident) is absorbed as evidence; it
+  never unbinds the incident. Only a §9.4 downgrade, or the opener's own
+  kind re-classed, takes the old lapse to the store or watchboard.
 - A lapse on a still-open incident is a **followup** into the bound session
   (the storm's, if a storm claimed it), never an open: the frozen
   `k8s-event-followup` for a k8s event, the source's own kind otherwise,
@@ -668,9 +672,21 @@ its agent re-diagnosed an unchanged failure each time. Now:
   counts and ages don't register; a set, not the last value, because
   kubelet's pull cycle alternates four messages on one key), or an
   occurrence rate since the last inject at least 4× the reference rate over
-  at least 10 occurrences, goes in at once with `repeat_count` omitted, and
-  the schedule restarts from one window. The reason is not an input: it is
-  the dedup key already.
+  at least 10 occurrences, goes in with `repeat_count` omitted, and the
+  schedule restarts from one window. A rate jump goes in at once (it has its
+  own floor); a class change goes in at the first occurrence a full window
+  after the last inject — one seen inside the first window included, so a
+  fast stream that never lapses still announces it — and further class
+  changes inside that window fold into it, so an incident rotating through
+  more shapes than the set holds cannot send a followup per occurrence. The
+  reason is not an input: it is the dedup key already.
+- **Delivery never goes dark.** If the sink says the bound session is gone
+  (404/410 on the inject), the incident is unbound and reopened at once with
+  the occurrence in hand (a storm member is only unbound; the storm stage
+  owns it). Any other delivery error re-sends the same inject at the next
+  occurrence. An open that created a session but failed its initial delivery
+  re-sends the full open payload at the next occurrence, so the agent never
+  meets an incident first as a pure reminder.
 - After the incident resolves, a recurrence opens fresh, as before. Replays
   (an Event's `LastTimestamp` not advancing) never reach any of this.
 

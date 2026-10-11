@@ -159,6 +159,34 @@ type dedupEntry struct {
 	// a legacy entry; the first class seen after restore is adopted
 	// silently rather than read as a change.
 	Classes []string `json:"classes,omitempty"`
+	// PendingChange records a material class change the session has
+	// not heard yet: seen inside the first window, or less than a
+	// window after the last inject. It is announced (one followup,
+	// repeat_count omitted) at the first occurrence a full window past
+	// the last inject, which is also the floor that keeps an incident
+	// rotating through more shapes than maxRepeatClasses from sending
+	// a change followup every occurrence.
+	PendingChange bool `json:"pending_change,omitempty"`
+	// Undelivered marks that the last inject decided for this entry
+	// (LastChange says which: RepeatChangeOpen, a RepeatChange* value,
+	// or "" for a reminder) failed to reach the session; the next
+	// occurrence re-sends it (MarkUndelivered).
+	Undelivered bool   `json:"undelivered,omitempty"`
+	LastChange  string `json:"last_change,omitempty"`
+}
+
+// clone deep-copies the entry, for Snapshot to encode outside the lock
+// while repeat keeps mutating the live one.
+func (e *dedupEntry) clone() *dedupEntry {
+	out := *e
+	if e.Incident != nil {
+		ref := *e.Incident
+		out.Incident = &ref
+	}
+	out.FollowupSources = slices.Clone(e.FollowupSources)
+	out.AncestorKeys = slices.Clone(e.AncestorKeys)
+	out.Classes = slices.Clone(e.Classes)
+	return &out
 }
 
 // DedupResult tells the caller what to do with the event that just
@@ -207,6 +235,11 @@ const (
 	// reached repeatJumpFactor times the reference rate, over at least
 	// repeatJumpMin occurrences.
 	RepeatChangeRate = "rate"
+	// RepeatChangeOpen: the incident's open created the session but
+	// its initial delivery failed, so this re-sends the full open
+	// payload (kind and shape of the open, no repeat_count) — the
+	// agent has not seen the incident yet.
+	RepeatChangeOpen = "open"
 )
 
 type DedupResultKind int
@@ -510,6 +543,11 @@ type Observation struct {
 	// own (the dispatcher's opensSessions): only then can a lapse on a
 	// still-open incident become a reminder instead of a new incident.
 	Repeatable bool
+	// Downgraded reports that a §9.4 triage-status record lowered this
+	// signal's class. A downgraded signal on an open incident takes the
+	// legacy lapse (to the store or watchboard) instead of being
+	// absorbed: the agent asked for exactly that.
+	Downgraded bool
 }
 
 // ObserveSignal records that key was just seen and returns a
@@ -583,11 +621,29 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 	}
 	lapsed := now.Sub(entry.LastSeen) > c.window
-	if obs.Repeatable && entry.SessionClass && !entry.Resolved &&
+	if entry.SessionClass && !entry.Resolved &&
 		entry.SessionID != "" && entry.Incident != nil &&
 		c.isOpen != nil && c.isOpen(key) {
 		// Case 2: the incident is still open.
-		return c.repeat(entry, now, obs.LastTS, class, lapsed)
+		if obs.Repeatable {
+			return c.repeat(entry, now, obs.LastTS, class, lapsed)
+		}
+		if !obs.Downgraded && obs.Kind != entry.SourceKind {
+			// Another source's lower-class angle on the same key —
+			// capacity.pending (warning) on a FailedScheduling
+			// incident, objectstate.restart_burst (warning) on a
+			// CrashLoopBackOff one. It is evidence the incident is
+			// still going, never a reason to unbind it: letting it
+			// fall to case 3 would replace the bound entry with an
+			// unbound one, and the next session-class occurrence would
+			// open a second session through the #84 retry. Absorbed.
+			// Only a §9.4 downgrade, or the opener's own kind
+			// re-classed, takes the legacy lapse below.
+			entry.Count++
+			entry.LastSeen = now
+			entry.EventLastTS = obs.LastTS
+			return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm, Absorbed: true}
+		}
 	}
 	if lapsed {
 		// Case 3: retry safety net. Prior session's cooldown
@@ -603,7 +659,11 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	entry.Count++
 	entry.LastSeen = now
 	entry.EventLastTS = obs.LastTS
-	entry.noteClass(class)
+	if entry.noteClass(class) {
+		// Recorded for the repeat schedule: announced once the
+		// incident is past its first window (see repeat).
+		entry.PendingChange = true
+	}
 	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 }
 
@@ -618,8 +678,55 @@ func newDedupEntry(now time.Time, obs Observation, class string) *dedupEntry {
 		SessionClass: obs.Repeatable,
 		LastInjectAt: now,
 		InjectCount:  1,
+		LastChange:   RepeatChangeOpen,
 		Classes:      []string{class},
 	}
+}
+
+// MarkUndelivered records that the inject the cache last decided for
+// key — an open (change = RepeatChangeOpen), a reminder ("") or a
+// material change — did not reach the bound session, so the next
+// occurrence of the still-open incident re-sends it whatever the
+// schedule says (issue #599). The dispatcher calls it on a delivery
+// error, and after an open that created a session but failed its
+// initial delivery: without it that agent's first message would be a
+// pure reminder for an incident it has never seen. No-op on a missing
+// entry.
+func (c *DedupCache) MarkUndelivered(key EventKey, change string) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok {
+		entry.Undelivered = true
+		entry.LastChange = change
+	}
+}
+
+// Unbind detaches key's entry from a session the sink reports gone
+// (HTTP 404/410: the agent lost it — an ax task recreated, a daemon
+// restarted without its state) and restarts its schedule as if
+// freshly opened, so the dispatcher can reopen the incident in a new
+// session (issue #599). A storm-claimed entry keeps its storm
+// fingerprint: it stays a session-less storm member, which the storm
+// stage owns recovering (#104), and never opens a per-incident session
+// of its own. No-op on a missing entry.
+func (c *DedupCache) Unbind(key EventKey) {
+	key.Reason = CanonicalReason(key.Reason)
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	e.SessionID = ""
+	e.FirstSeen = now
+	e.RepeatCount = 0
+	e.RatePerHour = 0
+	e.PendingChange = false
+	e.Undelivered = false
+	e.LastChange = RepeatChangeOpen
+	e.markInject(now)
 }
 
 // MarkResolved records that key's incident was resolved (§7.4): the
@@ -996,7 +1103,7 @@ func (c *DedupCache) Snapshot() error {
 	// during I/O.
 	snapshot := make(map[string]*dedupEntry, len(c.entries))
 	for k, v := range c.entries {
-		snapshot[serializeKey(k)] = v
+		snapshot[serializeKey(k)] = v.clone() // deep copy: repeat mutates live entries (Classes) concurrently
 	}
 	c.mu.Unlock()
 	data, err := json.MarshalIndent(snapshot, "", "  ")
