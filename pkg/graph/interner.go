@@ -38,8 +38,9 @@ import (
 //     published snapshot's length, so reads within the snapshot's
 //     bounds are race-free even when the writer grows the slice.
 type interner struct {
-	ids  sync.Map // string → NodeID
-	keys []string // NodeID-1 → key; writer-owned, append-only
+	ids   sync.Map // string → NodeID
+	keys  []string // NodeID-1 → key; writer-owned, append-only within an epoch
+	epoch uint64   // increments whenever Compact() remaps dense NodeIDs
 }
 
 // intern returns the NodeID for key, assigning the next ID on first

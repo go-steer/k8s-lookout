@@ -198,7 +198,9 @@ func Restore(data []byte) (*Snapshot, error) {
 	s.keys = make([]string, numKeys)
 	for i := range s.keys {
 		s.keys[i] = d.str()
-		s.ids.Store(s.keys[i], NodeID(i+1)) // #nosec G115 -- bounded by interner invariant
+		if s.keys[i] != "" {
+			s.ids.Store(s.keys[i], NodeID(i+1)) // #nosec G115 -- bounded by interner invariant
+		}
 	}
 
 	numNodes := d.uvarint()

@@ -295,9 +295,15 @@ func (w *Writer) flushLocked() {
 		w.applyDelta(b, pd.Delta)
 		rec.Effect = w.rec.encode()
 		w.rec = nil
+		if len(rec.FieldChanges) == 0 && len(rec.Effect) == 0 {
+			continue
+		}
 		recs = append(recs, rec)
 	}
 	w.pending = nil
+	if w.onChange == nil && len(w.intern.keys) > len(b.nodes) {
+		w.compactBatchLocked(b)
+	}
 	w.publish(b)
 	// Deliver after publish so Generation is the swap counter of the
 	// snapshot that first contains each change — the store's replay
@@ -306,6 +312,144 @@ func (w *Writer) flushLocked() {
 		recs[i].Generation = w.gen
 		w.onChange(recs[i])
 	}
+}
+
+// Epoch returns the current NodeID identity epoch of the writer. Compact()
+// increments the epoch when unreferenced keys are pruned and live NodeIDs
+// are densely reassigned (#657).
+func (w *Writer) Epoch() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.intern.epoch
+}
+
+// Compact flushes pending deltas, compacts unreferenced NodeKey entries out
+// of the writer's interner by reassigning dense 1..N NodeIDs across all live
+// nodes/edges/writer state, advances the history epoch, publishes a fresh
+// baseline snapshot, and returns it (#657). Existing Snapshot values remain
+// completely untouched and valid for concurrent readers.
+func (w *Writer) Compact() *Snapshot {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return w.g.snap.Load()
+	}
+	if len(w.pending) > 0 || w.g.snap.Load() == nil {
+		w.flushLocked()
+	}
+	if len(w.intern.keys) > len(w.g.snap.Load().nodes) {
+		b := w.newBatch()
+		w.compactBatchLocked(b)
+		w.publish(b)
+	}
+	return w.g.snap.Load()
+}
+
+func (w *Writer) compactBatchLocked(b *batch) {
+	oldIDs := make([]NodeID, 0, len(b.nodes))
+	for id := range b.nodes {
+		oldIDs = append(oldIDs, id)
+	}
+	sort.Slice(oldIDs, func(i, j int) bool { return oldIDs[i] < oldIDs[j] })
+
+	remap := make(map[NodeID]NodeID, len(oldIDs))
+	nextIntern := &interner{
+		keys:  make([]string, len(oldIDs)),
+		epoch: w.intern.epoch + 1,
+	}
+	for i, oldID := range oldIDs {
+		newID := NodeID(i + 1) // #nosec G115 -- bounded by existing NodeID count
+		remap[oldID] = newID
+		k := w.intern.keys[oldID-1]
+		nextIntern.keys[i] = k
+		nextIntern.ids.Store(k, newID)
+	}
+
+	nextNodes := make(map[NodeID]nodeInfo, len(b.nodes))
+	for oldID, info := range b.nodes {
+		if info.ns != NoNode {
+			info.ns = remap[info.ns]
+		}
+		nextNodes[remap[oldID]] = info
+	}
+
+	nextOut := make(map[NodeID][]Edge, len(b.out))
+	for oldID, edges := range b.out {
+		cp := make([]Edge, len(edges))
+		for i, e := range edges {
+			cp[i] = Edge{To: remap[e.To], Kind: e.Kind}
+		}
+		nextOut[remap[oldID]] = cp
+	}
+
+	nextIn := make(map[NodeID][]Edge, len(b.in))
+	for oldID, edges := range b.in {
+		cp := make([]Edge, len(edges))
+		for i, e := range edges {
+			cp[i] = Edge{To: remap[e.To], Kind: e.Kind}
+		}
+		nextIn[remap[oldID]] = cp
+	}
+
+	b.nodes = nextNodes
+	b.out = nextOut
+	b.in = nextIn
+
+	nextDeclared := make(map[NodeID][]halfEdge, len(w.declared))
+	for oldID, edges := range w.declared {
+		newFrom, ok := remap[oldID]
+		if !ok {
+			continue
+		}
+		cp := make([]halfEdge, 0, len(edges))
+		for _, e := range edges {
+			if newTo, toOK := remap[e.To]; toOK {
+				cp = append(cp, halfEdge{From: remap[e.From], To: newTo, Kind: e.Kind})
+			}
+		}
+		nextDeclared[newFrom] = cp
+	}
+	w.declared = nextDeclared
+
+	nextRefcnt := make(map[NodeID]int, len(w.refcnt))
+	for oldID, c := range w.refcnt {
+		if newID, ok := remap[oldID]; ok {
+			nextRefcnt[newID] = c
+		}
+	}
+	w.refcnt = nextRefcnt
+
+	for ns, pods := range w.podLabels {
+		nextPods := make(map[NodeID]labels.Set, len(pods))
+		for oldID, lbls := range pods {
+			if newID, ok := remap[oldID]; ok {
+				nextPods[newID] = lbls
+			}
+		}
+		w.podLabels[ns] = nextPods
+	}
+
+	for ns, sels := range w.selectors {
+		nextSels := make(map[NodeID]selEntry, len(sels))
+		for oldID, sel := range sels {
+			if newID, ok := remap[oldID]; ok {
+				nextSels[newID] = sel
+			}
+		}
+		w.selectors[ns] = nextSels
+	}
+
+	if w.tracked != nil {
+		nextTracked := make(map[NodeID]*trackedState, len(w.tracked))
+		for oldID, st := range w.tracked {
+			if newID, ok := remap[oldID]; ok {
+				nextTracked[newID] = st
+			}
+		}
+		w.tracked = nextTracked
+	}
+
+	w.intern = nextIntern
 }
 
 // newBatch clones the current snapshot's maps (or starts empty).
