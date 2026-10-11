@@ -19,6 +19,11 @@ set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
 
-ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
+GOVULNCHECK_VERSION="v1.1.4"
+ensure_tool govulncheck "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
 
-exec govulncheck ./...
+TAGS_FLAG=()
+if go list -tags allproviders ./pkg/cloud/gke >/dev/null 2>&1; then
+  TAGS_FLAG=(-tags=allproviders)
+fi
+exec govulncheck "${TAGS_FLAG[@]}" ./...

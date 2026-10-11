@@ -141,7 +141,7 @@ jobs:
             oci_description: 'k8s-lookout built with -tags allproviders: the gke cloud provider linked in for project-tier quota/capacity deployments (the default :<version> image is GCP-free by design).'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # #146 guard: deploy/51's image pin must be the version being
       # released — it sat at v0.1.0 for eleven releases because
@@ -176,13 +176,13 @@ jobs:
       # runner. Without this, buildx --platform fails for non-native
       # architectures.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -211,7 +211,7 @@ jobs:
       # from a release tag to the image it produced.
       - name: Compute image tags + labels + annotations
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         env:
           # For MULTI-ARCH images, GHCR pulls its package-page
           # description from manifest INDEX annotations, not from
@@ -295,12 +295,13 @@ jobs:
       # for the default flavor (GCP-free) and `allproviders` for -gke.
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
@@ -318,7 +319,7 @@ jobs:
       # image manifest with that, records signature in Rekor
       # (transparency log). No long-lived signing keys to manage.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign images
         env:
@@ -352,7 +353,7 @@ jobs:
       # what makes that difference externally checkable instead of a
       # claim in a release note (DESIGN.md §2).
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
 
       - name: Generate + attest SBOMs
         env:
@@ -460,9 +461,9 @@ jobs:
     if: (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')) && !inputs.chart_only
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -541,7 +542,7 @@ jobs:
           cat "lookout_${VERSION}_SHA256SUMS"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign checksums (cosign sign-blob, keyless)
         env:
@@ -551,7 +552,7 @@ jobs:
             --bundle "dist/lookout_${VERSION}_SHA256SUMS.sigstore.json" \
             "dist/lookout_${VERSION}_SHA256SUMS"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-binaries
           path: dist/*
@@ -612,14 +613,14 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # A chart_only dispatch runs off a branch, so check out the
           # tag being repaired: the chart packaged here must be the one
           # that release cut, not whatever main has drifted to.
           ref: ${{ inputs.tag || github.ref_name }}
-      - uses: azure/setup-helm@v5
-      - uses: sigstore/cosign-installer@v3
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       # cosign reads ~/.docker/config.json; `helm registry login` below
       # writes helm's OWN registry config and nothing else. Without
@@ -628,7 +629,7 @@ jobs:
       # v0.22.0 shipped with an unsigned chart, this job's first run on
       # a real tag.
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -711,8 +712,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-binaries
           path: dist

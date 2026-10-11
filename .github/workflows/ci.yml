@@ -21,10 +21,6 @@ on:
       # Docs — the parallel ci-docs.yml emits matching green stubs
       # so required checks stay satisfied.
       - '**/*.md'
-      # Image-build config — no Go code touched; release-images.yml
-      # rebuilds on its own trigger.
-      - 'Dockerfile'
-      - '.dockerignore'
       - '.github/workflows/release*.yml'
       - '.github/workflows/docs*.yml'
       # Docs-site sources — the Astro/Starlight build lives in
@@ -37,8 +33,6 @@ on:
     branches: [main]
     paths-ignore:
       - '**/*.md'
-      - 'Dockerfile'
-      - '.dockerignore'
       - '.github/workflows/release*.yml'
       - '.github/workflows/docs*.yml'
       - 'docs/site/**'
@@ -73,8 +67,8 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: '**/go.sum'
@@ -85,6 +79,8 @@ jobs:
         # Builds every provider build-tag variant (none / gke /
         # allproviders) — see dev/tools/build.
         run: dev/ci/presubmits/build
+      - name: Build Docker builder target
+        run: docker build --target builder .
       - name: Test
         run: dev/ci/presubmits/test-unit
       - name: Coverage summary
@@ -93,7 +89,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           go tool cover -func=coverage.out | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage
           path: coverage.out
@@ -104,8 +100,8 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: '**/go.sum'
@@ -122,8 +118,8 @@ jobs:
     name: go mod tidy is clean
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Verify tidy
@@ -139,8 +135,8 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Vuln scan
@@ -153,8 +149,8 @@ jobs:
     name: manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
       - name: Install kustomize, if the runner image stops shipping it
         run: |
           set -euo pipefail
@@ -162,8 +158,12 @@ jobs:
             kustomize version
             exit 0
           fi
-          cd /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | sudo bash
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl -sSfL -o "$tmp/kustomize_v5.6.0_linux_amd64.tar.gz" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz"
+          echo "54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f  $tmp/kustomize_v5.6.0_linux_amd64.tar.gz" | sha256sum -c -
+          sudo tar -xzf "$tmp/kustomize_v5.6.0_linux_amd64.tar.gz" -C /usr/local/bin kustomize
       - name: Chart matches deploy/*.yaml
         # HELM_PARITY_REQUIRE=1 turns the tool-missing skip into a
         # failure. Without it, a runner image that dropped kustomize

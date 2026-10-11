@@ -25,6 +25,12 @@ cd "$(repo_root)"
 GOLANGCI_LINT_VERSION="v2.12.1"
 ensure_tool golangci-lint "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
 
+TAGS_FLAG=()
+if go list -tags allproviders ./pkg/cloud/gke >/dev/null 2>&1; then
+  TAGS_FLAG=(--build-tags=allproviders)
+fi
+
 exec golangci-lint run \
   --config=dev/tools/.golangci.yml \
+  "${TAGS_FLAG[@]}" \
   "$@"
