@@ -379,3 +379,64 @@ func tail(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+func TestFitPayload_OversizedLabelsAndAppendPayloads(t *testing.T) {
+	hugeLabels := make(map[string]string, 200)
+	for i := range 200 {
+		hugeLabels[fmt.Sprintf("label-%03d", i)] = strings.Repeat("v", 80)
+	}
+
+	// 1. Open Payload with oversized labels: Message preserved, labels shrunk.
+	p := samplePayload("Back-off restarting failed container", "")
+	p.Context.Labels = hugeLabels
+	fitted, shed := FitPayload(p, MaxInjectBytes)
+	fp := fitted.(Payload)
+	if WireSize(fp) > MaxInjectBytes {
+		t.Fatalf("Payload with huge labels still over MaxInjectBytes: %d", WireSize(fp))
+	}
+	if !slices.Contains(shed, "labels") {
+		t.Errorf("expected labels in shed, got %v", shed)
+	}
+	if fp.Message != "Back-off restarting failed container" {
+		t.Errorf("short message should survive when shrinking labels sufficed, got %q", fp.Message)
+	}
+
+	// 2. Append ResolvedPayload with oversized labels fits under MaxInjectBytes.
+	rp := ResolvedPayload{
+		Kind:         KindResolved,
+		Reason:       "CrashLoopBackOff",
+		Namespace:    "prod",
+		KindOfObject: "Pod",
+		Name:         "api-0",
+		UID:          "u1",
+		Fingerprint:  "fp-1",
+		Cluster:      "prod",
+		Context:      PayloadContext{Labels: hugeLabels},
+	}
+	fittedResolved, shedResolved := FitPayload(rp, MaxInjectBytes)
+	if WireSize(fittedResolved) > MaxInjectBytes {
+		t.Fatalf("ResolvedPayload still over MaxInjectBytes: %d", WireSize(fittedResolved))
+	}
+	if !slices.Contains(shedResolved, "labels") {
+		t.Errorf("expected labels in shedResolved, got %v", shedResolved)
+	}
+
+	// 3. Append TriageRegressedPayload with oversized labels + message fits under MaxInjectBytes.
+	tp := TriageRegressedPayload{
+		Kind:      KindTriageRegressed,
+		Reason:    "CrashLoopBackOff",
+		Namespace: "prod",
+		Name:      "api-0",
+		UID:       "u1",
+		Cluster:   "prod",
+		Message:   strings.Repeat("R", 20_000),
+		Context:   PayloadContext{Labels: hugeLabels},
+	}
+	fittedTriage, shedTriage := FitPayload(tp, MaxInjectBytes)
+	if WireSize(fittedTriage) > MaxInjectBytes {
+		t.Fatalf("TriageRegressedPayload still over MaxInjectBytes: %d", WireSize(fittedTriage))
+	}
+	if !slices.Contains(shedTriage, "labels") || !slices.Contains(shedTriage, "message") {
+		t.Errorf("expected labels and message in shedTriage, got %v", shedTriage)
+	}
+}

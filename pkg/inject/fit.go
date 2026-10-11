@@ -14,7 +14,10 @@
 
 package inject
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // MaxInjectBytes is the core-agent daemon's per-inject request-body
 // ceiling: POST /sessions/<sid>/inject rejects a larger body with 400
@@ -49,6 +52,110 @@ func WireSize(payload any) int {
 	return len(wrapped)
 }
 
+// FitPayload fits any Open or Append wire payload (by value or pointer)
+// within maxBytes, returning a fitted value and the list of shed fields.
+// When maxBytes <= 0 or payload already fits, payload is returned unchanged
+// with a nil shed slice.
+func FitPayload(payload any, maxBytes int) (any, []string) {
+	if maxBytes <= 0 {
+		return payload, nil
+	}
+	switch p := payload.(type) {
+	case Payload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *Payload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case StormPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *StormPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case WatchboardDigestPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *WatchboardDigestPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case ResolvedPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *ResolvedPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case TriageRegressedPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *TriageRegressedPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case StormMemberPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *StormMemberPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case StormUpdatePayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *StormUpdatePayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case FamilyMemberPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *FamilyMemberPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	case WatchboardRotatedPayload:
+		shed := p.FitTo(maxBytes)
+		return p, shed
+	case *WatchboardRotatedPayload:
+		if p == nil {
+			return payload, nil
+		}
+		cp := *p
+		shed := cp.FitTo(maxBytes)
+		return &cp, shed
+	default:
+		return payload, nil
+	}
+}
+
 // FitTo shrinks the payload in place so its WireSize is <= maxBytes,
 // returning a short list of what it shed (nil when the payload already
 // fit, so the frozen-wire pins stay byte-identical on normal payloads).
@@ -58,15 +165,14 @@ func WireSize(payload any) int {
 //
 //  1. drop Enrichment — the §7.6 warm-session bundle, best-effort and
 //     reproducible via the `lookout` commands its overflow trailers name.
-//  2. truncate Message to fit, with a … marker.
+//  2. bound Context.Labels if labels alone force the payload over ceiling,
+//     preserving a modest Message.
+//  3. truncate Message to fit, with a … marker.
+//  4. bound Context.Labels if still over ceiling.
 //
 // Identity and routing fields (reason, uid, fingerprint, cluster,
-// context, counts, timestamps) are never touched: a shrunk incident
-// still routes, dedups, and closes. If even an empty Message won't fit
-// (identity alone exceeds maxBytes — not reachable with a sane
-// --inject-max-bytes) FitTo leaves the smallest form it produced and
-// lets the caller POST it, so the daemon's own error stays the honest
-// signal.
+// controller_ref, node, counts, timestamps) are never touched: a shrunk
+// incident still routes, dedups, and closes.
 func (p *Payload) FitTo(maxBytes int) []string {
 	if WireSize(p) <= maxBytes {
 		return nil
@@ -79,37 +185,57 @@ func (p *Payload) FitTo(maxBytes int) []string {
 			return shed
 		}
 	}
+	if len(p.Context.Labels) > 0 {
+		// Check whether even a empty/short Message leaves the payload over
+		// maxBytes because Context.Labels itself is oversized.
+		origMsg := p.Message
+		if len(p.Message) > 128 {
+			p.Message = p.Message[:128]
+		}
+		labelsOverflow := WireSize(p) > maxBytes
+		p.Message = origMsg
+		if labelsOverflow {
+			if shrinkLabels(p.Context.Labels, maxBytes,
+				func(m map[string]string) { p.Context.Labels = m },
+				func() int {
+					saved := p.Message
+					if len(p.Message) > 128 {
+						p.Message = p.Message[:128]
+					}
+					sz := WireSize(p)
+					p.Message = saved
+					return sz
+				}) {
+				shed = append(shed, "labels")
+			}
+			if WireSize(p) <= maxBytes {
+				return shed
+			}
+		}
+	}
 	if p.Message != "" {
 		if shrinkText(p.Message, maxBytes,
 			func(s string) { p.Message = s },
 			func() int { return WireSize(p) }) {
 			shed = append(shed, "message")
 		}
+		if WireSize(p) <= maxBytes {
+			return shed
+		}
+	}
+	if len(p.Context.Labels) > 0 {
+		if shrinkLabels(p.Context.Labels, maxBytes,
+			func(m map[string]string) { p.Context.Labels = m },
+			func() int { return WireSize(p) }) {
+			if !slices.Contains(shed, "labels") {
+				shed = append(shed, "labels")
+			}
+		}
 	}
 	return shed
 }
 
-// FitTo is the StormPayload counterpart of Payload.FitTo: a storm's
-// initial inject carries a (radius-only, so usually smaller) enrichment
-// bundle and an aggregate message, and breaches the same daemon ceiling
-// the same way. Same never-touch-identity guarantee, with one extra
-// step wedged in the middle of the shrink order (issue #336).
-//
-// MemberFingerprints holds one entry per member and is otherwise
-// uncapped, so on a large storm it — not the enrichment, not the
-// message — IS the payload. Shedding enrichment and truncating a
-// ~150-byte message cannot claw back a 22 KiB body, so before #336 a
-// storm past ~330 members stayed over the ceiling after a full fit, the
-// daemon 400d the initial inject, and the storm landed as a
-// bound-but-empty session — the exact #198 failure the guard exists to
-// prevent. It is shed BEFORE Message for that reason: the message is a
-// generated summary derivable from the structured fields, but shedding
-// it first buys almost nothing and leaves the payload over anyway.
-//
-// Truncation keeps the earliest arrivals (the leading symptom, the same
-// end representatives are drawn from) and sets
-// MemberFingerprintsTruncated so a reader can tell a cut list from a
-// short storm. AffectedCount still carries the true member count.
+// FitTo is the StormPayload counterpart of Payload.FitTo.
 func (p *StormPayload) FitTo(maxBytes int) []string {
 	if WireSize(p) <= maxBytes {
 		return nil
@@ -136,6 +262,16 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 			return shed
 		}
 	}
+	if len(p.Context.Labels) > 0 {
+		if shrinkLabels(p.Context.Labels, maxBytes,
+			func(m map[string]string) { p.Context.Labels = m },
+			func() int { return WireSize(p) }) {
+			shed = append(shed, "labels")
+		}
+		if WireSize(p) <= maxBytes {
+			return shed
+		}
+	}
 	if p.Message != "" {
 		if shrinkText(p.Message, maxBytes,
 			func(s string) { p.Message = s },
@@ -147,21 +283,7 @@ func (p *StormPayload) FitTo(maxBytes int) []string {
 }
 
 // FitTo shrinks a watchboard digest under maxBytes by dropping its
-// OLDEST entries, returning what it shed (issue #337). The digest has
-// no enrichment and no prose message — its entries ARE the payload —
-// so there is exactly one thing to shed.
-//
-// Newest-wins, the opposite of StormPayload.FitTo's keep-the-earliest:
-// a storm's first arrivals are the leading symptom of one event, while
-// the watchboard is a rolling board of independent warnings where the
-// current state is what an operator acts on. The count dropped is
-// reported in EntriesDropped rather than silently, and the entries
-// were already counted in watchboard_entries_total.
-//
-// Without this the digest went to the wire unfitted: a
-// --watchboard-batch past roughly 22 (or fewer, with long
-// namespace/name pairs) made every flush 400 and drop its whole
-// buffer, permanently, from a legal flag value.
+// OLDEST entries, returning what it shed (issue #337).
 func (p *WatchboardDigestPayload) FitTo(maxBytes int) []string {
 	if WireSize(p) <= maxBytes {
 		return nil
@@ -192,6 +314,140 @@ func (p *WatchboardDigestPayload) FitTo(maxBytes int) []string {
 		return nil
 	}
 	return []string{"entries"}
+}
+
+// FitTo bounds a ResolvedPayload under maxBytes by shrinking Context.Labels
+// while keeping all outcome identity fields intact.
+func (p *ResolvedPayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	if len(p.Context.Labels) > 0 {
+		if shrinkLabels(p.Context.Labels, maxBytes,
+			func(m map[string]string) { p.Context.Labels = m },
+			func() int { return WireSize(p) }) {
+			return []string{"labels"}
+		}
+	}
+	return nil
+}
+
+// FitTo bounds a TriageRegressedPayload under maxBytes by shrinking
+// Context.Labels and truncating Message while keeping routing identity.
+func (p *TriageRegressedPayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	var shed []string
+	if len(p.Context.Labels) > 0 {
+		if shrinkLabels(p.Context.Labels, maxBytes,
+			func(m map[string]string) { p.Context.Labels = m },
+			func() int { return WireSize(p) }) {
+			shed = append(shed, "labels")
+		}
+		if WireSize(p) <= maxBytes {
+			return shed
+		}
+	}
+	if p.Message != "" {
+		if shrinkText(p.Message, maxBytes,
+			func(s string) { p.Message = s },
+			func() int { return WireSize(p) }) {
+			shed = append(shed, "message")
+		}
+	}
+	return shed
+}
+
+// FitTo bounds a StormMemberPayload under maxBytes by truncating Message.
+func (p *StormMemberPayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	if p.Message != "" {
+		if shrinkText(p.Message, maxBytes,
+			func(s string) { p.Message = s },
+			func() int { return WireSize(p) }) {
+			return []string{"message"}
+		}
+	}
+	return nil
+}
+
+// FitTo bounds a StormUpdatePayload under maxBytes by truncating Message.
+func (p *StormUpdatePayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	if p.Message != "" {
+		if shrinkText(p.Message, maxBytes,
+			func(s string) { p.Message = s },
+			func() int { return WireSize(p) }) {
+			return []string{"message"}
+		}
+	}
+	return nil
+}
+
+// FitTo bounds a FamilyMemberPayload under maxBytes by truncating Message.
+func (p *FamilyMemberPayload) FitTo(maxBytes int) []string {
+	if WireSize(p) <= maxBytes {
+		return nil
+	}
+	if p.Message != "" {
+		if shrinkText(p.Message, maxBytes,
+			func(s string) { p.Message = s },
+			func() int { return WireSize(p) }) {
+			return []string{"message"}
+		}
+	}
+	return nil
+}
+
+// FitTo is a no-op on WatchboardRotatedPayload (fixed small lineage fields).
+func (p *WatchboardRotatedPayload) FitTo(_ int) []string {
+	return nil
+}
+
+// shrinkLabels deterministically trims map entries (keeping sorted keys
+// prefix) so size() <= maxBytes, returning true if any entry was shed.
+func shrinkLabels(labels map[string]string, maxBytes int, set func(map[string]string), size func() int) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	build := func(n int) map[string]string {
+		if n <= 0 {
+			return nil
+		}
+		m := make(map[string]string, n)
+		for _, k := range keys[:n] {
+			m[k] = labels[k]
+		}
+		return m
+	}
+
+	lo, hi, best := 0, len(keys), -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		set(build(mid))
+		if size() <= maxBytes {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best < 0 {
+		best = 0
+	}
+	set(build(best))
+	return best < len(keys)
 }
 
 // shrinkText binary-searches the largest rune prefix of text that, once

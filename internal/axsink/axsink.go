@@ -93,15 +93,27 @@ type Config struct {
 // store (if any) or opens a new session.
 const maxRemembered = 4096
 
+// maxInjectors bounds the per-task *inject.Injector cache so high-churn
+// per-incident tasks cannot grow Sink memory without bound. When full, the
+// entry with the oldest lastUsed timestamp is evicted.
+const maxInjectors = 4096
+
+type injectorEntry struct {
+	inj      *inject.Injector
+	lastUsed time.Time
+}
+
 // Sink is the ax implementation of inject.Sink. The incident id it returns is
 // "<task>/<session>": the task carries the incident, the session is the
 // agent's conversation for it inside the task.
 type Sink struct {
-	cfg       Config
-	atespace  string
-	base      *http.Client
-	injectors sync.Map // task name -> *inject.Injector
-	stores    sync.Map // cluster -> SessionStore
+	cfg      Config
+	atespace string
+	base     *http.Client
+	stores   sync.Map // cluster -> SessionStore
+
+	injMu     sync.Mutex
+	injectors map[string]*injectorEntry // task name -> cached injector + lastUsed
 
 	mu         sync.Mutex
 	remembered map[string]string // IncidentKey.String() -> "<task>/<session>"
@@ -156,8 +168,13 @@ func New(cfg Config) (*Sink, error) {
 		atespace = "default"
 	}
 	return &Sink{
-		cfg: cfg, atespace: atespace, base: base, remembered: map[string]string{},
-		hold: newHolder(), idleAfter: idleAfterFor(cfg.Template),
+		cfg:        cfg,
+		atespace:   atespace,
+		base:       base,
+		injectors:  map[string]*injectorEntry{},
+		remembered: map[string]string{},
+		hold:       newHolder(),
+		idleAfter:  idleAfterFor(cfg.Template),
 	}, nil
 }
 
@@ -174,36 +191,97 @@ func (s *Sink) UseSessionStore(cluster string, st SessionStore) {
 	s.stores.Store(cluster, st)
 }
 
+func (s *Sink) isTaskKnownAwake(task string) bool {
+	s.hold.mu.Lock()
+	last, ok := s.hold.lastReal[task]
+	s.hold.mu.Unlock()
+	return ok && s.now().Sub(last) < s.idleAfter
+}
+
+func (s *Sink) clearAwake(task string) {
+	s.hold.mu.Lock()
+	delete(s.hold.lastReal, task)
+	s.hold.mu.Unlock()
+}
+
 // OpenIncidentKeyed opens the incident lookout identifies as key
 // (inject.KeyedOpener). The task comes from the key and the scope; if
 // this incident was opened before and its session is still known, the
 // payload goes into that session so the agent keeps the conversation.
 // Otherwise it opens a new session — the same POST /sessions + inject
 // pair as the core-agent sink, sent through the router.
+//
+// Fast path: when task received a real inject within s.idleAfter, skip
+// startTask (avoiding redundant CreateTask/GetTask/ResumeTask + /readyz
+// round-trips) and attempt direct session delivery first; on 404/410 or
+// session creation failure, clear wake state and fall back to startTask.
 func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, payload any) (string, error) {
 	task := s.taskFor(key)
+	inj := s.injectorFor(task)
+
+	recalledID, hasRecalled := s.recall(ctx, key)
+	recalledGone := false
+
+	if s.isTaskKnownAwake(task) {
+		s.flushHeld(ctx, task)
+		if hasRecalled {
+			if t, sid, ok := splitID(recalledID); ok && t == task {
+				err := inj.Append(ctx, sid, payload)
+				var se *inject.StatusError
+				switch {
+				case err == nil:
+					s.remember(ctx, key, recalledID)
+					s.paid(recalledID)
+					s.noteReal(task)
+					return recalledID, nil
+				case !errors.As(err, &se) || (se.Code != http.StatusNotFound && se.Code != http.StatusGone):
+					s.owe(recalledID)
+					return recalledID, err
+				default:
+					// 404 or 410: task or session gone — fall through to startTask + new session.
+					recalledGone = true
+					s.clearAwake(task)
+				}
+			}
+		} else {
+			// Task is known awake (e.g. ScopeCluster with another incident open):
+			// attempt opening the new session directly without startTask RPCs.
+			if sid, err := inj.OpenIncident(ctx, payload); sid != "" {
+				id := task + "/" + sid
+				s.remember(ctx, key, id)
+				if err != nil {
+					s.owe(id)
+					return id, err
+				}
+				s.paid(id)
+				s.noteReal(task)
+				return id, nil
+			}
+			s.clearAwake(task)
+		}
+	}
+
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
 	// The task is awake now: reminders held for it go first.
 	s.flushHeld(ctx, task)
-	inj := s.injectorFor(task)
-	if id, ok := s.recall(ctx, key); ok {
-		if t, sid, ok := splitID(id); ok && t == task {
+	if hasRecalled && !recalledGone {
+		if t, sid, ok := splitID(recalledID); ok && t == task {
 			err := inj.Append(ctx, sid, payload)
 			var se *inject.StatusError
 			switch {
 			case err == nil:
-				s.remember(ctx, key, id)
-				s.paid(id)
+				s.remember(ctx, key, recalledID)
+				s.paid(recalledID)
 				s.noteReal(task)
-				return id, nil
+				return recalledID, nil
 			case !errors.As(err, &se) || (se.Code != http.StatusNotFound && se.Code != http.StatusGone):
 				// The session may well still be there (a timeout, a
 				// 5xx): stay bound to it and let the caller count the
 				// failed delivery, as for a partial open.
-				s.owe(id)
-				return id, err
+				s.owe(recalledID)
+				return recalledID, err
 			}
 			// 404 or 410: the agent no longer has the session (task
 			// recreated, agent state lost). Start a new one.
@@ -231,11 +309,20 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 // remembered one.
 func (s *Sink) CreateSessionKeyed(ctx context.Context, key inject.IncidentKey) (string, error) {
 	task := s.taskFor(key)
+	inj := s.injectorFor(task)
+	if s.isTaskKnownAwake(task) {
+		s.flushHeld(ctx, task)
+		if sid, err := inj.CreateSession(ctx); err == nil && sid != "" {
+			s.noteReal(task)
+			return task + "/" + sid, nil
+		}
+		s.clearAwake(task)
+	}
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
 	s.flushHeld(ctx, task)
-	sid, err := s.injectorFor(task).CreateSession(ctx)
+	sid, err := inj.CreateSession(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -410,9 +497,27 @@ func (s *Sink) waitReady(ctx context.Context, task string) error {
 
 // injectorFor returns a core-agent Injector that reaches task through the
 // router, so the session wire stays identical to the core-agent sink.
+// Evicts the oldest idle entry when the cache exceeds maxInjectors.
 func (s *Sink) injectorFor(task string) *inject.Injector {
-	if v, ok := s.injectors.Load(task); ok {
-		return v.(*inject.Injector)
+	now := s.now()
+	s.injMu.Lock()
+	defer s.injMu.Unlock()
+	if entry, ok := s.injectors[task]; ok {
+		entry.lastUsed = now
+		return entry.inj
+	}
+	if len(s.injectors) >= maxInjectors {
+		var oldestTask string
+		var oldestAt time.Time
+		for k, e := range s.injectors {
+			if oldestTask == "" || e.lastUsed.Before(oldestAt) {
+				oldestTask = k
+				oldestAt = e.lastUsed
+			}
+		}
+		if oldestTask != "" {
+			delete(s.injectors, oldestTask)
+		}
 	}
 	inj, _ := inject.NewInjector(inject.Config{ // fields validated in New
 		DaemonURL:      s.cfg.RouterURL,
@@ -420,8 +525,8 @@ func (s *Sink) injectorFor(task string) *inject.Injector {
 		AssertedCaller: s.cfg.AssertedCaller,
 		HTTPClient:     s.routedClient(task),
 	})
-	v, _ := s.injectors.LoadOrStore(task, inj)
-	return v.(*inject.Injector)
+	s.injectors[task] = &injectorEntry{inj: inj, lastUsed: now}
+	return inj
 }
 
 // routedClient is the base client with ate-target-actor set for task.

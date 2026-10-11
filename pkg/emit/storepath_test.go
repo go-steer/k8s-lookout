@@ -33,7 +33,7 @@ func TestPerClusterPath(t *testing.T) {
 		{"no extension", "/data/lookout", "prod-eu", "/data/lookout-prod-eu"},
 		{"dedup snapshot shares the rule", "/data/dedup.json", "prod-us", "/data/dedup-prod-us.json"},
 		{"relative stem", "lookout.db", "kind", "lookout-kind.db"},
-		{"dotted cluster name flattens", "/data/l.db", "prod.us.example", "/data/l-prod-us-example.db"},
+		{"dotted cluster name flattens with hash", "/data/l.db", "prod.us.example", "/data/l-prod-us-example-fd47ad.db"},
 		{"underscores survive", "/data/l.db", "prod_us", "/data/l-prod_us.db"},
 		// The disabled states: --store unset, or a ref with no name.
 		// Both must return the base untouched so the single-cluster
@@ -74,11 +74,22 @@ func TestPerClusterPathCannotEscapeTheStem(t *testing.T) {
 	}
 }
 
-// Two clusters must never derive one path — the whole point. The names
-// here are distinct, so the slugs must be too.
+// Two clusters must never derive one path — including names that sanitize
+// to identical bare slugs ("prod.us" vs "prod-us" vs "prod/us" vs "prod_us",
+// issue #637).
 func TestPerClusterPathIsInjectiveOnDistinctNames(t *testing.T) {
 	seen := map[string]string{}
-	for _, name := range []string{"prod-us", "prod-eu", "prod_us", "staging", "dev-1", "dev-2"} {
+	for _, name := range []string{
+		"prod-us",
+		"prod.us",
+		"prod/us",
+		"prod_us",
+		"prod--us",
+		"prod-eu",
+		"staging",
+		"dev-1",
+		"dev-2",
+	} {
 		got := PerClusterPath("/data/lookout.db", name)
 		if prev, dup := seen[got]; dup {
 			t.Errorf("clusters %q and %q both derive %q", prev, name, got)

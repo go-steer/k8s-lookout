@@ -53,6 +53,10 @@ type Config struct {
 	// HTTPClient lets tests swap in a *http.Client that talks to
 	// httptest.NewServer. Nil in production; main.go leaves it nil.
 	HTTPClient *http.Client
+
+	// MaxInjectBytes, when > 0, fits outbound OpenIncident and Append
+	// payloads under the wire size ceiling before marshaling.
+	MaxInjectBytes int
 }
 
 // Injector wraps a small HTTP client that speaks the two daemon
@@ -247,6 +251,9 @@ func (i *Injector) InjectWatchboardRotated(ctx context.Context, sessionID string
 func (i *Injector) injectJSON(ctx context.Context, sessionID string, payload any) error {
 	if sessionID == "" {
 		return errors.New("injector: Inject: sessionID is required")
+	}
+	if i.cfg.MaxInjectBytes > 0 {
+		payload, _ = FitPayload(payload, i.cfg.MaxInjectBytes)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

@@ -596,3 +596,105 @@ func TestKeyFromPayload(t *testing.T) {
 		t.Errorf("digest key = %+v, want %+v", board, boardKey)
 	}
 }
+
+func TestAXSink_FastPathSkipsRedundantStartTaskWhenAwake(t *testing.T) {
+	router := &fakeRouter{}
+	hs := httptest.NewServer(router)
+	t.Cleanup(hs.Close)
+	now := time.Now()
+	client, ax := newFakeAXClient(t)
+	sink, err := New(Config{
+		Client:       client,
+		Template:     testTemplate(),
+		RouterURL:    hs.URL,
+		BearerToken:  "tok",
+		Scope:        ScopeCluster,
+		StartTimeout: 5 * time.Second,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// First open starts the task once.
+	if _, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{UID: "u1"}); err != nil {
+		t.Fatal(err)
+	}
+	resumedAfterFirst := len(ax.resumed)
+	readyAfterFirst := router.readyHits
+
+	// Subsequent opens and session rotations within idleAfter skip startTask + /readyz.
+	if _, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{UID: "u1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.OpenIncidentKeyed(ctx, oomKey, inject.Payload{UID: "u2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.CreateSessionKeyed(ctx, boardKey); err != nil {
+		t.Fatal(err)
+	}
+	if len(ax.resumed) != resumedAfterFirst {
+		t.Errorf("awake fast path called ResumeTask: got %d total calls, want %d", len(ax.resumed), resumedAfterFirst)
+	}
+	if router.readyHits != readyAfterFirst {
+		t.Errorf("awake fast path polled /readyz: got %d total hits, want %d", router.readyHits, readyAfterFirst)
+	}
+
+	// Once idleAfter elapses, reopening goes through startTask + ResumeTask again.
+	now = now.Add(sink.idleAfter + time.Second)
+	if _, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{UID: "u1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ax.resumed) <= resumedAfterFirst {
+		t.Errorf("expected startTask / ResumeTask after idle window elapsed, got %d calls", len(ax.resumed))
+	}
+}
+
+func TestAXSink_InjectorsMapBoundedEviction(t *testing.T) {
+	now := time.Now()
+	client, _ := newFakeAXClient(t)
+	sink, err := New(Config{
+		Client:      client,
+		Template:    testTemplate(),
+		RouterURL:   "http://router.test",
+		BearerToken: "tok",
+		Now:         func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Populate maxInjectors entries; touch task-0 most recently so task-1 is oldest.
+	for i := 0; i < maxInjectors; i++ {
+		now = now.Add(time.Millisecond)
+		sink.injectorFor("task-" + strings.Repeat("x", 0) + string(rune(i)))
+	}
+	// Reset deterministic named entries to verify exact oldest eviction.
+	sink.injMu.Lock()
+	sink.injectors = map[string]*injectorEntry{}
+	sink.injMu.Unlock()
+
+	for i := 0; i < maxInjectors; i++ {
+		now = now.Add(time.Second)
+		sink.injectorFor("t-" + time.Duration(i).String())
+	}
+	// Refresh the very first entry ("t-0s") so "t-1ns" becomes oldest.
+	now = now.Add(time.Second)
+	sink.injectorFor("t-0s")
+
+	now = now.Add(time.Second)
+	sink.injectorFor("overflow-task")
+
+	sink.injMu.Lock()
+	defer sink.injMu.Unlock()
+	if len(sink.injectors) > maxInjectors {
+		t.Errorf("len(injectors) = %d, exceeds maxInjectors=%d", len(sink.injectors), maxInjectors)
+	}
+	if _, ok := sink.injectors["t-0s"]; !ok {
+		t.Error("recently refreshed entry t-0s should not have been evicted")
+	}
+	if _, ok := sink.injectors["t-1ns"]; ok {
+		t.Error("oldest idle entry t-1ns should have been evicted")
+	}
+}

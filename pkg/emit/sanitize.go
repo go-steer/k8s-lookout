@@ -93,12 +93,44 @@ var structuralKeys = map[string]bool{
 	"resource_key": true, // triage status
 }
 
-// maskKeyedValue applies the key-anchored heuristics (credential key
-// name AND secret-shaped value → fully redacted) and then the
-// position-independent value-shape heuristics.
+// MaskKeyed applies the two-tier key-anchored credential rules and the
+// position-independent value-shape heuristics to a (key, value) pair:
+//
+//   - Strong secret keys (password, passwd, pwd, passphrase, apikey,
+//     api_key, client_secret, private_key, access_token, refresh_token,
+//     auth_token) redact any non-empty value regardless of length or
+//     entropy (unless already redacted or on the structural allowlist).
+//   - General credential keys (secret, token, key, auth, pass, …) require
+//     secretShaped(value) so resource names like secret=db-credentials
+//     survive.
+//   - All other values run through MaskString.
+func MaskKeyed(key, value string) string {
+	return maskKeyedValue(key, value)
+}
+
+// MaskMap returns a copy of m with every entry masked via MaskKeyed
+// (keys are preserved; a nil map returns nil for omitempty parity).
+func MaskMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = maskKeyedValue(k, v)
+	}
+	return out
+}
+
+// maskKeyedValue applies the two-tier key-anchored heuristics and then
+// the position-independent value-shape heuristics.
 func maskKeyedValue(key, value string) string {
-	if value != "" && !structuralKeys[key] && credentialKey(key) && secretShaped(value) {
-		return Redacted
+	if value != "" && !strings.HasPrefix(value, "[REDACTED") && !structuralKeys[key] {
+		if strongCredentialKey(key) {
+			return Redacted
+		}
+		if credentialKey(key) && secretShaped(value) {
+			return Redacted
+		}
 	}
 	return MaskString(value)
 }
@@ -130,10 +162,26 @@ var (
 	// appear.
 	reJWT = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}`)
 
-	// reAuthHeader masks the token of Bearer/Basic authorization
-	// header values. The scheme word survives so "authenticated
-	// with Bearer …" stays readable.
-	reAuthHeader = regexp.MustCompile(`(?i)\b(bearer|basic)[ \t]+[A-Za-z0-9+/=_.~-]{16,}`)
+	// reExplicitAuthHeader matches Authorization / Proxy-Authorization
+	// headers with Bearer or Basic credentials of any non-empty length
+	// (catching short Basic auth base64 values such as "Basic YTpi" or
+	// "Basic dXNlcjpwdw==").
+	reExplicitAuthHeader = regexp.MustCompile(`(?i)((?:proxy-)?authorization\s*:\s*(?:bearer|basic))[ \t]+(\S+)`)
+
+	// reAuthHeader masks standalone Bearer/Basic authorization tokens.
+	// For standalone "Basic <tok>" below 16 chars without an explicit
+	// Authorization: header, maskAuthHeaders checks that <tok> looks like
+	// base64 rather than prose ("Basic configuration missing").
+	reAuthHeader = regexp.MustCompile(`(?i)\b(bearer|basic)[ \t]+([A-Za-z0-9+/=_.~-]{4,})`)
+
+	// Vendor token prefixes that unambiguously identify credential material:
+	//   - Google API keys:     AIza[0-9A-Za-z_-]{35}
+	//   - Google OAuth tokens: ya29\.[0-9A-Za-z_-]+
+	//   - GitHub PATs:         ghp_[0-9A-Za-z]+, github_pat_[0-9A-Za-z_]+
+	//   - Slack tokens:        xox[baprs]-[0-9A-Za-z-]+
+	//   - Stripe live keys:    sk_live_[0-9A-Za-z]+
+	//   - GitLab PATs:         glpat-[0-9A-Za-z_-]+
+	reVendorToken = regexp.MustCompile(`\b(?:AIza[0-9A-Za-z_-]{35}|ya29\.[0-9A-Za-z_-]+|ghp_[0-9A-Za-z]+|github_pat_[0-9A-Za-z_]+|xox[baprs]-[0-9A-Za-z-]+|sk_live_[0-9A-Za-z]+|glpat-[0-9A-Za-z_-]+)`)
 
 	// reAWSKeyID matches AWS access key IDs (long-term AKIA…,
 	// temporary ASIA…): fixed 4-letter prefix + 16 uppercase
@@ -142,9 +190,11 @@ var (
 	reAWSKeyID = regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)
 
 	// reURLPassword matches the password of URL userinfo
-	// (scheme://user:password@host). Only the password is masked —
-	// scheme, user, host, and path are triage signal.
-	reURLPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^/@:\s]+:)[^@/\s]+@`)
+	// (scheme://user:password@host, including empty-username DSNs like
+	// redis://:secret@host and passwords containing `/` or percent-escapes
+	// up to `@`). Only the password is masked — scheme, user, host, and
+	// path are triage signal.
+	reURLPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^/@:\s]*:)([^@\s"']+)@`)
 
 	// reCredentialFlag matches command-line flags whose name
 	// contains a credential word (--db-password=x, --token x, …)
@@ -174,6 +224,10 @@ var (
 	// NEXT list element. Same 'pass'/'passphrase' segment-anchoring as
 	// reCredentialFlag (issue #106) so --bypass stays benign.
 	reCredentialFlagName = regexp.MustCompile(`(?i)^(?:--?[a-z0-9-]*(?:password|passwd|pwd|token|secret|credential|api-?key|access-?key|private-?key)[a-z0-9-]*|--?(?:[a-z0-9-]*-)?(?:passphrase|pass))$`)
+
+	// reInlineAssignment matches inline KEY=value assignments where KEY
+	// is a standalone identifier (not preceded by '-', '/', or ':').
+	reInlineAssignment = regexp.MustCompile(`(^|[\s,;'"(\[{])([A-Za-z_][A-Za-z0-9_.-]*)=([^\s,;'"\])}]+)`)
 )
 
 // credentialFlagRefSuffixes are flag-name suffixes that mark the
@@ -196,12 +250,67 @@ func MaskString(s string) string {
 	}
 	s = rePEMPrivateKey.ReplaceAllString(s, Redacted)
 	s = rePrivateKeyJSON.ReplaceAllString(s, "${1}"+Redacted+"${2}")
+	s = maskAuthHeaders(s)
 	s = reJWT.ReplaceAllString(s, Redacted)
-	s = reAuthHeader.ReplaceAllString(s, "${1} "+Redacted)
+	s = reVendorToken.ReplaceAllString(s, Redacted)
 	s = reAWSKeyID.ReplaceAllString(s, Redacted)
 	s = reURLPassword.ReplaceAllString(s, "${1}"+Redacted+"@")
 	s = maskCredentialFlags(s)
+	s = maskInlineAssignments(s)
 	return s
+}
+
+// maskAuthHeaders masks Authorization/Proxy-Authorization headers of any
+// token length plus standalone Bearer/Basic tokens while leaving English
+// prose like "Basic configuration missing" untouched.
+func maskAuthHeaders(s string) string {
+	s = reExplicitAuthHeader.ReplaceAllStringFunc(s, func(m string) string {
+		parts := reExplicitAuthHeader.FindStringSubmatch(m)
+		if strings.HasPrefix(parts[2], "[REDACTED") {
+			return m
+		}
+		return parts[1] + " " + Redacted
+	})
+	return reAuthHeader.ReplaceAllStringFunc(s, func(m string) string {
+		parts := reAuthHeader.FindStringSubmatch(m)
+		scheme, tok := parts[1], parts[2]
+		if len(tok) >= 16 {
+			return scheme + " " + Redacted
+		}
+		// Short standalone tokens (< 16 chars): require base64 padding,
+		// non-lowercase characters, or digits so ordinary lowercase prose
+		// words after "Basic" / "Bearer" (e.g. "Basic configuration") survive.
+		if strings.ContainsAny(tok, "=+/_-") || charClasses(tok) >= 2 {
+			return scheme + " " + Redacted
+		}
+		return m
+	})
+}
+
+// maskInlineAssignments masks inline KEY=value tokens when KEY is a
+// strong credential key (any non-empty value) or a general credential
+// key with a secret-shaped value.
+func maskInlineAssignments(s string) string {
+	return reInlineAssignment.ReplaceAllStringFunc(s, func(m string) string {
+		parts := reInlineAssignment.FindStringSubmatch(m)
+		prefix, key, val := parts[1], parts[2], parts[3]
+		if val == "" || strings.HasPrefix(val, "[REDACTED") || structuralKeys[key] || valueSourceRef(val) {
+			return m
+		}
+		if strongCredentialKey(key) || (credentialKey(key) && secretShaped(val)) {
+			return prefix + key + "=" + Redacted
+		}
+		return m
+	})
+}
+
+func valueSourceRef(val string) bool {
+	return strings.HasPrefix(val, "secretKeyRef:") ||
+		strings.HasPrefix(val, "configMapKeyRef:") ||
+		strings.HasPrefix(val, "fieldRef:") ||
+		strings.HasPrefix(val, "resourceFieldRef:") ||
+		strings.HasPrefix(val, "secretRef:") ||
+		strings.HasPrefix(val, "configMapRef:")
 }
 
 // maskCredentialFlags applies reCredentialFlag with the
@@ -222,6 +331,45 @@ func credentialFlagIsRef(name string) bool {
 	name = strings.ToLower(name)
 	for _, suffix := range credentialFlagRefSuffixes {
 		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// strongCredentialWords are single words whose presence in a key name
+// unambiguously marks the value as a secret credential rather than an
+// object reference or topology key.
+var strongCredentialWords = map[string]bool{
+	"password":   true,
+	"passwd":     true,
+	"pwd":        true,
+	"passphrase": true,
+	"apikey":     true,
+}
+
+// strongCredentialPairs are adjacent word pairs (in snake_case, kebab-case,
+// camelCase, or dot/slash-delimited keys) that unambiguously mark a value as
+// a secret credential even when short or low-entropy.
+var strongCredentialPairs = map[[2]string]bool{
+	{"api", "key"}:       true,
+	{"client", "secret"}: true,
+	{"private", "key"}:   true,
+	{"access", "token"}:  true,
+	{"refresh", "token"}: true,
+	{"auth", "token"}:    true,
+}
+
+// strongCredentialKey reports whether key names an unambiguous credential
+// value (Tier 1: password, passwd, pwd, passphrase, apikey, api_key,
+// client_secret, private_key, access_token, refresh_token, auth_token).
+func strongCredentialKey(key string) bool {
+	words := keyWords(key)
+	for i, w := range words {
+		if strongCredentialWords[w] {
+			return true
+		}
+		if i+1 < len(words) && strongCredentialPairs[[2]string{w, words[i+1]}] {
 			return true
 		}
 	}
@@ -400,12 +548,37 @@ func SanitizeObject(obj any) (map[string]any, error) {
 //     empty object is load-bearing). Full default-eliding is a later
 //     refinement.
 func SanitizeUnstructured(u map[string]any) map[string]any {
-	if kind, _ := u["kind"].(string); kind == "Secret" {
-		maskSecretPayload(u, "data", true)
-		maskSecretPayload(u, "stringData", false)
-	}
 	sanitizeMap(u, "")
 	return u
+}
+
+// isSecretMap reports whether m represents a Kubernetes Secret object —
+// either explicitly via kind=="Secret", or structurally when kind was
+// omitted or stripped (e.g. a typed corev1.Secret without TypeMeta) by
+// carrying a Secret type ("Opaque", "kubernetes.io/*",
+// "bootstrap.kubernetes.io/*", "helm.sh/*") alongside a "data" or
+// "stringData" map.
+func isSecretMap(m map[string]any) bool {
+	if kind, _ := m["kind"].(string); kind == "Secret" {
+		return true
+	}
+	if kind, _ := m["kind"].(string); kind != "" {
+		return false
+	}
+	t, ok := m["type"].(string)
+	if !ok || t == "" {
+		return false
+	}
+	isSecretType := t == "Opaque" ||
+		strings.HasPrefix(t, "kubernetes.io/") ||
+		strings.HasPrefix(t, "bootstrap.kubernetes.io/") ||
+		strings.HasPrefix(t, "helm.sh/")
+	if !isSecretType {
+		return false
+	}
+	_, hasData := m["data"].(map[string]any)
+	_, hasStringData := m["stringData"].(map[string]any)
+	return hasData || hasStringData
 }
 
 // maskSecretPayload replaces every value of a Secret data/stringData
@@ -421,6 +594,9 @@ func maskSecretPayload(u map[string]any, field string, isBase64 bool) {
 		s, ok := v.(string)
 		if !ok {
 			m[k] = Redacted
+			continue
+		}
+		if strings.HasPrefix(s, "[REDACTED:") && strings.HasSuffix(s, "B]") {
 			continue
 		}
 		n := len(s)
@@ -446,6 +622,27 @@ var systemMetadataFields = []string{
 // removed outright rather than sanitized.
 const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 
+// isAppliedConfigAnnotation reports whether an annotation key holds a
+// serialized original/last-applied manifest snapshot (kubectl, Carvel
+// kapp, Rancher cattle.io, etc.) that duplicates unsanitized fields.
+func isAppliedConfigAnnotation(key string) bool {
+	if key == lastAppliedAnnotation {
+		return true
+	}
+	lk := strings.ToLower(key)
+	if lk == "kapp.k14s.io/original" {
+		return true
+	}
+	if strings.Contains(lk, "last-applied") || strings.Contains(lk, "applied-config") || strings.Contains(lk, "original-configuration") {
+		return true
+	}
+	if (strings.HasPrefix(lk, "cattle.io/") || strings.Contains(lk, ".cattle.io/")) &&
+		(strings.Contains(lk, "applied") || strings.Contains(lk, "config") || strings.Contains(lk, "state")) {
+		return true
+	}
+	return false
+}
+
 // containerStatusKeys are the list keys whose entries carry runtime
 // identifiers (imageID, containerID) that are pure noise for triage.
 var containerStatusKeys = map[string]bool{
@@ -458,13 +655,21 @@ var containerStatusKeys = map[string]bool{
 // found under ("" at the object root, "metadata", "annotations",
 // "env" for env entries, …) and selects position-specific rules.
 func sanitizeMap(m map[string]any, parentKey string) {
+	if isSecretMap(m) {
+		maskSecretPayload(m, "data", true)
+		maskSecretPayload(m, "stringData", false)
+	}
 	switch {
 	case parentKey == "metadata":
 		for _, f := range systemMetadataFields {
 			delete(m, f)
 		}
 	case parentKey == "annotations":
-		delete(m, lastAppliedAnnotation)
+		for k := range m {
+			if isAppliedConfigAnnotation(k) {
+				delete(m, k)
+			}
+		}
 	case parentKey == "status":
 		delete(m, "observedGeneration")
 	case parentKey == "conditions":

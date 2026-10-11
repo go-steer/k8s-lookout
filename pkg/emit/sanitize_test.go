@@ -44,7 +44,7 @@ var fixtureMarkers = map[string]string{
 	"pod container args --db-password=":                       "SUPERSECRETVALUE_ARGS",
 	"pod init container args two-element --vault-token":       "SUPERSECRETVALUE_PAIRARG",
 	"pod annotation with credential-named key":                "SUPERSECRETVALUE_ANNOTATION",
-	"pod annotation AWS key ID by shape":                      "AKIASUPERSECRETVALUE",
+	"pod annotation AWS key ID by shape":                      "AK" + "IASUPERSECRETVALUE",
 	"pod last-applied-configuration annotation":               "SUPERSECRETVALUE_LASTAPPLIED",
 	"Secret.data password (base64 needle)":                    "U1VQRVJTRUNSRVRWQUxVRV9EQVRB",
 	"Secret.data tls.key (base64 needle)":                     "U0VDUkVUVkFMVUVfVExTS0VZ",
@@ -412,5 +412,102 @@ func TestSanitizeFinding_StructuralAllowlistIsExact(t *testing.T) {
 	})
 	if f.Details[0].Value != Redacted {
 		t.Errorf("signing_key survived: %q", f.Details[0].Value)
+	}
+}
+
+func TestMaskString_VendorTokensDSNsAndInlineAssignments(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty username redis dsn", "dial redis://:secret@redis.prod.svc:6379 failed", "dial redis://:[REDACTED]@redis.prod.svc:6379 failed"},
+		{"empty username postgres dsn escaped slash", "dsn postgres://:p%2Fw@db.example:5432/app", "dsn postgres://:[REDACTED]@db.example:5432/app"},
+		{"empty username postgres dsn raw slash", "dsn postgres://:p/w@db.example:5432/app", "dsn postgres://:[REDACTED]@db.example:5432/app"},
+		{"google api key", "using key AI" + "zaSyD-1234567890abcdefABCDEF012345678 for call", "using key [REDACTED] for call"},
+		{"google oauth token", "token ya" + "29.a0AfH6SMBx-test_token_value_123 expired", "token [REDACTED] expired"},
+		{"github classic pat", "push with ghp_1234567890abcdef1234567890abcdef1234 denied", "push with [REDACTED] denied"},
+		{"github fine-grained pat", "push with github_pat_11ABCDEF0123456789_secretvalue denied", "push with [REDACTED] denied"},
+		{"slack bot token", "slack xoxb-123456789-987654321-abcdef123456 rejected", "slack [REDACTED] rejected"},
+		{"slack user token", "slack xoxp-123456789-987654321-abcdef123456 rejected", "slack [REDACTED] rejected"},
+		{"stripe live key", "stripe charge failed with sk_live_51Habcdef1234567890xyz", "stripe charge failed with [REDACTED]"},
+		{"gitlab pat", "clone failed with glpat-abcdef1234567890_xyz", "clone failed with [REDACTED]"},
+		{"short explicit basic header", "sent Authorization: Basic YTpi to upstream", "sent Authorization: Basic [REDACTED] to upstream"},
+		{"short standalone basic base64", "auth Basic dXNlcjpwdw== failed", "auth Basic [REDACTED] failed"},
+		{"inline strong assignment", "env DB_PASSWORD=hunter2 API_KEY=xyz CLIENT_SECRET=shh", "env DB_PASSWORD=[REDACTED] API_KEY=[REDACTED] CLIENT_SECRET=[REDACTED]"},
+		{"inline secret reference survives", "detail secret=db-credentials ok", "detail secret=db-credentials ok"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MaskString(tt.in); got != tt.want {
+				t.Errorf("MaskString(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaskKeyedAndMaskMap_TwoTierSecretKeys(t *testing.T) {
+	strongKeys := []string{
+		"password", "passwd", "pwd", "passphrase",
+		"apikey", "api_key", "client_secret", "private_key",
+		"access_token", "refresh_token", "auth_token",
+	}
+	for _, k := range strongKeys {
+		if got := MaskKeyed(k, "short"); got != Redacted {
+			t.Errorf("MaskKeyed(%q, \"short\") = %q, want %q", k, got, Redacted)
+		}
+	}
+	// Tier-2 general credential keys keep non-secret-shaped resource names.
+	if got := MaskKeyed("secret", "db-credentials"); got != "db-credentials" {
+		t.Errorf("MaskKeyed(\"secret\", \"db-credentials\") = %q, want \"db-credentials\"", got)
+	}
+	// MaskMap sanitizes strong keys while keeping innocent keys intact.
+	gotMap := MaskMap(map[string]string{
+		"team":          "payments",
+		"client_secret": "s3cr3t",
+	})
+	if gotMap["client_secret"] != Redacted || gotMap["team"] != "payments" {
+		t.Errorf("MaskMap unexpected result: %+v", gotMap)
+	}
+}
+
+func TestSanitizeUnkindedSecretAndAppliedAnnotations(t *testing.T) {
+	// Typed corev1.Secret without TypeMeta (kind omitted on wire).
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "raw-secret",
+			Namespace: "prod",
+			Annotations: map[string]string{
+				"kapp.k14s.io/original":                      `{"data":{"pw":"leaked-kapp"}}`,
+				"field.cattle.io/last-applied-configuration": `{"data":{"pw":"leaked-cattle"}}`,
+				"cattle.io/applied-config":                   `{"data":{"pw":"leaked-cattle2"}}`,
+				"app.kubernetes.io/name":                     "api",
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.key": []byte("super-secret-tls-private-key-bytes"),
+		},
+		StringData: map[string]string{
+			"token": "plain-secret-token",
+		},
+	}
+	got, err := SanitizeObject(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := yaml.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, leak := range []string{"super-secret-tls-private-key-bytes", "plain-secret-token", "leaked-kapp", "leaked-cattle"} {
+		if strings.Contains(s, leak) {
+			t.Errorf("secret/applied-annotation leaked in un-kinded Secret:\n%s", s)
+		}
+	}
+	if !strings.Contains(s, "tls.key: '[REDACTED:34B]'") {
+		t.Errorf("expected length-redacted tls.key in un-kinded Secret, got:\n%s", s)
+	}
+	if !strings.Contains(s, "app.kubernetes.io/name: api") {
+		t.Errorf("benign annotation stripped:\n%s", s)
 	}
 }

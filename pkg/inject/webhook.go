@@ -51,6 +51,10 @@ type WebhookConfig struct {
 	// HTTPClient lets tests swap in a *http.Client that talks to
 	// httptest.NewServer. Nil in production; main.go leaves it nil.
 	HTTPClient *http.Client
+
+	// MaxInjectBytes, when > 0, fits outbound OpenIncident and Append
+	// payloads under the wire size ceiling before marshaling.
+	MaxInjectBytes int
 }
 
 // WebhookSink is the generic Sink (docs/agent-sink-design.md): any
@@ -155,6 +159,9 @@ func (s *WebhookSink) Append(ctx context.Context, id string, payload any) error 
 // responses surface as an error carrying the receiver's body for
 // diagnostic clarity, exactly like the core-agent client's.
 func (s *WebhookSink) post(ctx context.Context, u string, payload any) ([]byte, error) {
+	if s.cfg.MaxInjectBytes > 0 {
+		payload, _ = FitPayload(payload, s.cfg.MaxInjectBytes)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("webhook sink: marshal payload: %w", err)

@@ -15,6 +15,8 @@
 package emit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 )
@@ -67,13 +69,10 @@ func StorePath(v FlagValues) string {
 // emit is the lowest package both the CLI flag layer and the store can
 // share.)
 //
-// The suffix is the cluster NAME alone, which is the fleet-wide cluster
-// identity everywhere else too: the `cluster` metrics label, the frozen
-// `cluster` field on the wire, the /readyz entry, finding_state.cluster,
-// and every distilled fact's scope. A fleet whose discovery returns two
-// clusters with one name is ambiguous in all of those before it is
-// ambiguous here, which is why the sentinel skips such a pair rather
-// than papering over it with a longer path.
+// When normalization alters any character of cluster (e.g. "prod.us" vs
+// "prod-us" vs "prod/us"), a deterministic 6-hex SHA-256 suffix
+// (-<6-hex>) disambiguates the slug so distinct cluster names never
+// collide on disk (issue #637).
 //
 // An empty base (the disabled state) or an empty cluster returns the
 // base unchanged.
@@ -81,6 +80,10 @@ func PerClusterPath(base, cluster string) string {
 	slug := pathSlug(cluster)
 	if base == "" || slug == "" {
 		return base
+	}
+	if slug != cluster {
+		sum := sha256.Sum256([]byte(cluster))
+		slug = slug + "-" + hex.EncodeToString(sum[:3])
 	}
 	// Insert before the extension rather than appending, so the file
 	// keeps whatever suffix the operator (and their tooling, and
