@@ -1,0 +1,95 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# state wi fixtures (#179): one ServiceAccount per finding kind, each with
+# a running pod so the finding counts pods.
+#   wi-missing    annotates a GSA that does not exist   -> wi.gsa_missing
+#   wi-unbound    annotates a GSA with no WI binding    -> wi.unbound
+#   wi-keyfile    no annotation, GOOGLE_APPLICATION_CREDENTIALS set
+#                                                       -> wi.unannotated_use
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uat-wi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wi-missing
+  namespace: uat-wi
+  annotations:
+    iam.gke.io/gcp-service-account: __MISSING_GSA__@__PROJECT__.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wi-unbound
+  namespace: uat-wi
+  annotations:
+    iam.gke.io/gcp-service-account: __UNBOUND_GSA__@__PROJECT__.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wi-keyfile
+  namespace: uat-wi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wi-missing
+  namespace: uat-wi
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: wi-missing}}
+  template:
+    metadata: {labels: {app: wi-missing}}
+    spec:
+      serviceAccountName: wi-missing
+      containers:
+      - {name: app, image: registry.k8s.io/pause:3.9, resources: {requests: {cpu: 10m, memory: 16Mi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wi-unbound
+  namespace: uat-wi
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: wi-unbound}}
+  template:
+    metadata: {labels: {app: wi-unbound}}
+    spec:
+      serviceAccountName: wi-unbound
+      containers:
+      - {name: app, image: registry.k8s.io/pause:3.9, resources: {requests: {cpu: 10m, memory: 16Mi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wi-keyfile
+  namespace: uat-wi
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: wi-keyfile}}
+  template:
+    metadata: {labels: {app: wi-keyfile}}
+    spec:
+      serviceAccountName: wi-keyfile
+      containers:
+      - name: app
+        image: registry.k8s.io/pause:3.9
+        env:
+        - {name: GOOGLE_APPLICATION_CREDENTIALS, value: /var/secrets/google/key.json}
+        resources: {requests: {cpu: 10m, memory: 16Mi}}

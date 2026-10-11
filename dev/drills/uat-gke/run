@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# run — the UAT T2/T3 assertions (#179, #180) against the environment ./up
+# built. Every lookout invocation runs IN the cluster, as a pod under the
+# Workload-Identity KSA, on the published image: that is how the -gke
+# image is deployed and the only place its metadata identity resolves.
+# Each case writes $OUT/<case>.txt (stdout+stderr) and <case>.exit, and
+# the verdicts go to $OUT/summary.txt. Exit 0 when every assertion held.
+#
+# Usage: ./run [case-prefix ...]   (no args = every case)
+
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dev/drills/uat-gke/env
+source "$here/env"
+mkdir -p "$OUT"
+summary="$OUT/summary.txt"
+: > "$summary"
+fails=0
+only=("$@")
+
+k() { kubectl --context "$CTX" "$@"; }
+want() { [ ${#only[@]} -eq 0 ] && return 0; local p; for p in "${only[@]}"; do [[ "$1" == "$p"* ]] && return 0; done; return 1; }
+
+# lookout <case> <image> <args...>: run one invocation as a pod, wait for
+# it to finish, keep its log and exit code.
+lookout() {
+  local name="$1" image="$2"; shift 2
+  local pod="uat-${name//_/-}"
+  k -n "$NS_RUNNER" delete pod "$pod" --ignore-not-found --wait >/dev/null 2>&1
+  local args; args="$(printf '"%s",' "$@")"; args="[${args%,}]"
+  k -n "$NS_RUNNER" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: $pod, labels: {app: lookout-uat}}
+spec:
+  serviceAccountName: lookout-uat
+  restartPolicy: Never
+  containers:
+  - name: lookout
+    image: $image
+    command: ["/lookout"]   # the image's ENTRYPOINT is /lookout watch
+    args: $args
+EOF
+  local phase="" i
+  for i in $(seq 1 120); do
+    phase="$(k -n "$NS_RUNNER" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)"
+    [[ "$phase" == Succeeded || "$phase" == Failed ]] && break
+    sleep 2
+  done
+  k -n "$NS_RUNNER" logs "$pod" > "$OUT/$name.txt" 2>&1
+  k -n "$NS_RUNNER" get pod "$pod" \
+    -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' > "$OUT/$name.exit" 2>/dev/null
+  k -n "$NS_RUNNER" delete pod "$pod" --wait=false >/dev/null 2>&1
+}
+
+verdict() { # verdict PASS|FAIL <case> <claim>
+  printf '%-4s %-28s %s\n' "$1" "$2" "$3" | tee -a "$summary"
+  [ "$1" = FAIL ] && fails=$((fails + 1))
+  return 0
+}
+has()    { grep -Eq -- "$3" "$OUT/$1.txt" && verdict PASS "$1" "$2" || verdict FAIL "$1" "$2  [no match: $3]"; }
+hasnt()  { grep -Eq -- "$3" "$OUT/$1.txt" && verdict FAIL "$1" "$2  [unexpected: $3]" || verdict PASS "$1" "$2"; }
+exitis() { local got; got="$(cat "$OUT/$1.exit" 2>/dev/null)"; [ "$got" = "$3" ] && verdict PASS "$1" "$2" || verdict FAIL "$1" "$2  [exit $got, want $3]"; }
+exitnot(){ local got; got="$(cat "$OUT/$1.exit" 2>/dev/null)"; [ -n "$got" ] && [ "$got" != "$3" ] && verdict PASS "$1" "$2" || verdict FAIL "$1" "$2  [exit $got]"; }
+
+echo "# lookout UAT T2/T3 — $(date -u +%FT%TZ) — $CTX — $IMAGE_GKE / $IMAGE_DEFAULT" | tee -a "$summary"
+
+# --- T0 on GKE: the default (GCP-free) image degrades or refuses --------
+if want t0; then
+  # "Refuse loudly" is the explicit degradation record with exit 0 (data),
+  # per the provider-boundary rule: never silence, never an error exit.
+  for c in orphans quota ipspace stockout; do
+    lookout "t0_cloud_$c" "$IMAGE_DEFAULT" cloud "$c"
+    exitis "t0_cloud_$c" "default image: cloud $c exits 0" 0
+    has    "t0_cloud_$c" "default image: cloud $c says cloud.unavailable provider=none" 'cloud\.unavailable.*provider=none'
+  done
+  lookout t0_state_wi "$IMAGE_DEFAULT" state wi -A
+  has   t0_state_wi "default image: state wi says cloud.unavailable" 'cloud\.unavailable'
+  lookout t0_perf "$IMAGE_DEFAULT" perf probe --pack=apiserver
+  has   t0_perf "default image: perf probe degrades explicitly" 'pack_unavailable|cloud\.unavailable'
+fi
+
+# --- T2: state wi (#179) ---------------------------------------------------
+if want t2_wi; then
+  lookout t2_wi "$IMAGE_GKE" state wi -A
+  has   t2_wi "missing GSA -> wi.gsa_missing"            'wi\.gsa_missing.*wi-missing|wi-missing.*wi\.gsa_missing'
+  has   t2_wi "unbound GSA -> wi.unbound"                'wi\.unbound.*wi-unbound|wi-unbound.*wi\.unbound'
+  has   t2_wi "key file, no annotation -> unannotated"   'wi\.unannotated_use.*wi-keyfile|wi-keyfile.*wi\.unannotated_use'
+  hasnt t2_wi "correctly bound runner KSA is clean"      'wi\.[a-z_]+.*lookout-uat/lookout-uat|serviceaccount=lookout-uat .*wi\.'
+  hasnt t2_wi "no cloud.unavailable on the -gke image"   'cloud\.unavailable'
+fi
+
+# --- T2: state volumes, cross-node Multi-Attach (#179) ---------------------
+if want t2_volumes; then
+  lookout t2_volumes "$IMAGE_GKE" state volumes --namespace=uat-volumes
+  has t2_volumes "Multi-Attach diagnosed"                'volume\.multi_attach'
+  has t2_volumes "names the holder pod"                  'ma-holder'
+  has t2_volumes "names the blocked pod"                 'ma-blocked'
+fi
+
+# --- T2: perf probe, real packs (#179) -------------------------------------
+if want t2_perf; then
+  for p in apiserver apf etcd startup; do
+    lookout "t2_perf_$p" "$IMAGE_GKE" perf probe "--pack=$p"
+    exitis "t2_perf_$p" "perf probe --pack=$p exits 0" 0
+    hasnt  "t2_perf_$p" "--pack=$p is metric-backed, not pack_unavailable" 'perf\.pack_unavailable|cloud\.unavailable'
+  done
+  lookout t2_perf_bogus "$IMAGE_GKE" perf probe --pack=nope
+  exitis t2_perf_bogus "unknown pack is a usage error" 2
+fi
+
+# --- T2: stab drift --identity (#179) ---------------------------------------
+if want t2_drift; then
+  lookout t2_drift "$IMAGE_GKE" stab drift --namespace=uat-drift --manager=kubectl-client-side-apply --identity
+  has t2_drift "rogue write found as drift"              'drift\.manual_edit'
+  has t2_drift "names the foreign manager"               'rogue-operator'
+  has t2_drift "resolves an audited principal"           'principal=[^ ]*@'
+fi
+
+# --- T2: triage top --history (#179) ----------------------------------------
+if want t2_top; then
+  lookout t2_top "$IMAGE_GKE" triage top --namespace=uat-top --history=30m
+  has   t2_top "burner reported near its CPU limit"     'top\.saturation.*burner|burner.*top\.saturation'
+  has   t2_top "history stats from Cloud Monitoring"    'max_pct='
+  hasnt t2_top "no cloud.unavailable on the -gke image"  'cloud\.unavailable'
+fi
+
+# --- T3: cloud orphans (#180) ------------------------------------------------
+if want t3_orphans; then
+  lookout t3_orphans "$IMAGE_GKE" cloud orphans --min-age=5m
+  has   t3_orphans "unattached disk listed"              'orphan\.disk.*uat-orphan-disk|uat-orphan-disk.*orphan\.disk'
+  has   t3_orphans "unused external address listed"      'orphan\.address.*uat-orphan-ext|uat-orphan-ext.*orphan\.address'
+  has   t3_orphans "zero-endpoint LB listed"             'orphan\.lb'
+  hasnt t3_orphans "internal reservation never listed"   'uat-internal'
+  hasnt t3_orphans "nodepools not in the default sweep"  'orphan\.nodepool'
+  lookout t3_orphans_disks "$IMAGE_GKE" cloud orphans --min-age=5m --only=disks
+  has   t3_orphans_disks "--only=disks keeps disks"      'orphan\.disk'
+  hasnt t3_orphans_disks "--only=disks drops the rest"   'orphan\.(address|lb)'
+  lookout t3_orphans_addr "$IMAGE_GKE" cloud orphans --min-age=5m --only=addresses
+  has   t3_orphans_addr "--only=addresses lists the unused external IP" 'orphan\.address.*uat-orphan-ext|uat-orphan-ext.*orphan\.address'
+  hasnt t3_orphans_addr "--only=addresses never lists the internal one" 'uat-internal'
+  lookout t3_orphans_pools "$IMAGE_GKE" cloud orphans --only=nodepools
+  has   t3_orphans_pools "idle pool reported as info"    'orphan\.nodepool.*idle-pool|idle-pool.*orphan\.nodepool'
+  has   t3_orphans_pools "reason IdleMinNodeCount"       'IdleMinNodeCount'
+  lookout t3_orphans_age "$IMAGE_GKE" cloud orphans --min-age=720h
+  hasnt t3_orphans_age "fresh leftovers under --min-age excluded" 'uat-orphan-disk|uat-orphan-ext'
+fi
+
+# --- T3: cloud quota (#180) ---------------------------------------------------
+if want t3_quota; then
+  lookout t3_quota "$IMAGE_GKE" cloud quota
+  exitis t3_quota "cloud quota exits 0" 0
+  hasnt  t3_quota "no cloud.unavailable"                'cloud\.unavailable'
+  lookout t3_quota_low "$IMAGE_GKE" cloud quota --quota-warn=1
+  has    t3_quota_low "--quota-warn=1 surfaces a warn set" 'quota\.pressure'
+  lookout t3_quota_all "$IMAGE_GKE" cloud quota --all
+  has    t3_quota_all "--all dumps every ratable quota"  'quota\.pressure'
+fi
+
+# --- T3: cloud ipspace (#180) --------------------------------------------------
+if want t3_ipspace; then
+  lookout t3_ipspace "$IMAGE_GKE" cloud ipspace --all
+  has t3_ipspace "pod range at 75% (3 of 4 blocks), below the line" 'ipspace\.range.*pods.*75|pods.*75.*ipspace\.range'
+  has t3_ipspace "services range said not cloud-visible"            'services'
+  # Scale the tainted, empty idle-pool, never default-pool: removing a
+  # default-pool node would delete the Multi-Attach fixture's pods.
+  echo "  (scaling idle-pool to 2 nodes: pod range to 100%)" | tee -a "$summary"
+  gcloud container clusters resize "$CLUSTER" --node-pool idle-pool --num-nodes 2 \
+    --zone "$ZONE" --project "$PROJECT" --quiet >/dev/null 2>&1
+  # clusters.get's currentNodeCount (what ipspace counts) can trail the
+  # resize; wait for it so the case measures lookout, not GKE's lag.
+  for i in $(seq 1 30); do
+    n="$(gcloud container clusters describe "$CLUSTER" --zone "$ZONE" --project "$PROJECT" --format='value(currentNodeCount)')"
+    [ "$n" = 4 ] && break
+    sleep 10
+  done
+  echo "  (currentNodeCount=$n)" | tee -a "$summary"
+  lookout t3_ipspace_full "$IMAGE_GKE" cloud ipspace --all
+  has t3_ipspace_full "pod range critical at 100%"      'ipspace\.range severity=critical.*purpose=pods.*pct=100'
+  gcloud container clusters resize "$CLUSTER" --node-pool idle-pool --num-nodes 1 \
+    --zone "$ZONE" --project "$PROJECT" --quiet --async >/dev/null 2>&1
+fi
+
+# --- T3: cloud stockout (#180) -------------------------------------------------
+if want t3_stockout; then
+  lookout t3_stockout_default "$IMAGE_GKE" cloud stockout
+  exitis t3_stockout_default "cloud stockout with defaults (24h, 10s) exits 0" 0
+  # A 30-day Cloud Logging scan outlives the 10s default --timeout.
+  lookout t3_stockout "$IMAGE_GKE" cloud stockout --since=720h --timeout=120s
+  exitis t3_stockout "cloud stockout exits 0 (findings or an explicit empty result)" 0
+  hasnt  t3_stockout "no cloud.unavailable"              'cloud\.unavailable'
+fi
+
+echo "fails=$fails" | tee -a "$summary"
+[ "$fails" -eq 0 ]
