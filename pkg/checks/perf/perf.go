@@ -21,11 +21,14 @@
 // SeriesQuery shape (§15 Q4), and pack definitions are data
 // (packs.go).
 //
-// Two explicit degradation paths, never silence (§2, §11):
+// Explicit degradation paths, never silence (§2, §11):
 //
 //   - no provider / no metrics capability → the standard
 //     cloud.unavailable finding + `unavailable` summary marker, exit
 //     0 with scanned=0 (mirrors the cloudcheck group);
+//   - lookout's own identity refused a token
+//     (cloud.ErrCredentialsUnavailable, #614) → the same record with
+//     reason=CredentialsUnavailable, once, and the pack stops;
 //   - a pack metric positively absent from the workspace
 //     (cloud.ErrMetricAbsent — on GKE: control-plane metrics not
 //     enabled) → one warning-severity perf.pack_unavailable finding
@@ -176,6 +179,14 @@ func runProbe(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 				return 0, err
 			}
 			continue
+		}
+		// A refused token (#614) fails every query alike: one
+		// record for the pack, not one per query, and stop.
+		if handled, herr := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityMetrics, "perf probe --pack="+packName, err); handled {
+			if herr != nil {
+				return 0, herr
+			}
+			break
 		}
 		if err != nil {
 			return 0, fmt.Errorf("pack %s: %s query: %w", packName, q.metric, err)

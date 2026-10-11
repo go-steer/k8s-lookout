@@ -373,3 +373,44 @@ func waitFor(t *testing.T, cond func() bool) {
 func sprintf(format string, args ...any) string {
 	return strings.TrimSpace(fmt.Sprintf(format, args...))
 }
+
+// TestPoll_NoTokenLogsOnce: a refused token (#614) fails every tick
+// until IAM is fixed — one clear line naming the fix, quiet while it
+// persists, one recovery line, and the source never stops.
+func TestPoll_NoTokenLogsOnce(t *testing.T) {
+	t.Parallel()
+	api := &scriptedDecisions{err: fmt.Errorf("listing entries: %w", &cloud.CredentialsUnavailableError{
+		Fix: "grant the binding",
+		Err: fmt.Errorf("transport: per-RPC creds failed due to error: credentials: cannot fetch token"),
+	})}
+	s := New(fake.NewSimpleClientset(), newCapacityProvider(api), Config{})
+	s.emit = func(engine.Signal) {}
+	var logs []string
+	s.logf = func(format string, args ...any) { logs = append(logs, sprintf(format, args...)) }
+
+	for range 3 {
+		s.poll(context.Background())
+	}
+	api.mu.Lock()
+	api.err = nil
+	api.mu.Unlock()
+	s.poll(context.Background())
+
+	var noToken, recovered, raw int
+	for _, l := range logs {
+		switch {
+		case strings.Contains(l, "lookout's own cloud identity could not obtain an access token"):
+			noToken++
+			if !strings.Contains(l, "grant the binding") {
+				t.Errorf("refused-token log %q does not name the fix", l)
+			}
+		case strings.Contains(l, "scale-decision poll recovered"):
+			recovered++
+		case strings.Contains(l, "scale-decision poll failed"):
+			raw++
+		}
+	}
+	if noToken != 1 || recovered != 1 || raw != 0 {
+		t.Errorf("logs = %q, want one refused-token line, one recovery line, no per-tick failures", logs)
+	}
+}

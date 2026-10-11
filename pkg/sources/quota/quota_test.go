@@ -17,6 +17,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -394,6 +395,72 @@ func TestRun_StartupInventoryFailureIsLoud(t *testing.T) {
 	err := s.Run(context.Background(), func(engine.Signal) {})
 	if err == nil || !strings.Contains(err.Error(), "startup") || !strings.Contains(err.Error(), "compute 403") {
 		t.Fatalf("Run = %v, want a loud startup error wrapping the cause", err)
+	}
+}
+
+// TestRun_NoTokenAtStartupStaysUp: a refused token (#614 — lookout's
+// own identity, fixed in IAM, not in the pod) is the one startup
+// failure that is NOT fatal: Run logs it once, keeps polling quietly,
+// and goes live — with one recovery line — once the token comes.
+func TestRun_NoTokenAtStartupStaysUp(t *testing.T) {
+	t.Parallel()
+	api := &scriptedQuotaAPI{
+		inventory: []cloud.QuotaUsage{{Name: "CPUS", Scope: "us-east1", Usage: 1990, Limit: 2000}},
+		histories: map[string]cloud.QuotaHistory{},
+		invErr: fmt.Errorf("listing regions: %w", &cloud.CredentialsUnavailableError{
+			Fix: "grant the binding",
+			Err: errors.New("credentials: cannot fetch token: compute: Received 403"),
+		}),
+	}
+	s := newTestSource(t, api, Config{Poll: 5 * time.Millisecond})
+	var logMu sync.Mutex
+	var logs []string
+	s.logf = func(format string, args ...any) {
+		logMu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		logMu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan engine.Signal, 4)
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, func(sig engine.Signal) { signals <- sig }) }()
+
+	time.Sleep(50 * time.Millisecond) // several refused cycles
+	select {
+	case err := <-done:
+		t.Fatalf("Run exited on a refused token: %v", err)
+	default:
+	}
+	api.mu.Lock()
+	api.invErr = nil // the binding is granted
+	api.mu.Unlock()
+	select {
+	case <-signals:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no signal after the token came back")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run after cancel = %v, want nil", err)
+	}
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	var noToken, recovered int
+	for _, l := range logs {
+		if strings.Contains(l, "lookout's own cloud identity could not obtain an access token") {
+			noToken++
+			if !strings.Contains(l, "grant the binding") {
+				t.Errorf("refused-token log %q does not name the fix", l)
+			}
+		}
+		if strings.Contains(l, "inventory poll recovered") {
+			recovered++
+		}
+	}
+	if noToken != 1 || recovered != 1 {
+		t.Errorf("logs = %q, want exactly one refused-token line and one recovery line", logs)
 	}
 }
 

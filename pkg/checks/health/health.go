@@ -497,21 +497,29 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// the capability is genuinely absent (§2): no provider / no
 	// metrics capability, or the metric positively missing from the
 	// workspace (the pack_unavailable case — on GKE, control-plane
-	// metrics not enabled). A real backend failure fails the scan
-	// like any other category's read error.
+	// metrics not enabled), or lookout's own identity refused a token
+	// (cloud.ErrCredentialsUnavailable, #614). A real backend failure
+	// fails the scan like any other category's read error.
 	provider, err := deps.provider(ctx)
 	if err != nil {
 		return 0, err
 	}
 	if backend, ok := provider.Metrics(); ok {
 		findings, n, absent, err := perf.ControlPlaneProbe(ctx, backend, now)
-		if err != nil {
+		fix, noToken := cloud.DegradableCredentials(ctx, err)
+		if err != nil && !noToken {
 			return 0, err
 		}
-		if absent != "" {
+		switch {
+		case noToken:
+			// lookout's own identity refused a token (#614): the
+			// category cannot be read, which is unavailable, not a
+			// failed scan — the cluster-side categories stand.
+			card.unavailable["control-plane"] = cloud.CredentialsUnavailableMessage("the control-plane probe (perf probe --pack=apiserver)", fix)
+		case absent != "":
 			card.unavailable["control-plane"] = fmt.Sprintf(
 				"metric %s is not in the project's metrics workspace — enable GKE control-plane metrics for the API server (perf probe --pack=apiserver)", absent)
-		} else {
+		default:
 			scanned += n
 			for _, f := range findings {
 				card.add("control-plane", f)

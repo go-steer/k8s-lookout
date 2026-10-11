@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/checks/stab"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -166,6 +168,60 @@ func TestDriftIdentityBackendError(t *testing.T) {
 	}
 	if !strings.Contains(res.Stderr, "logging backend exploded") {
 		t.Errorf("stderr = %q", res.Stderr)
+	}
+}
+
+// noTokenAudit answers the first `serve` lookups with an empty trail,
+// then refuses every later one the way the provider reports
+// lookout's OWN identity being refused a token (#614).
+type noTokenAudit struct{ serve, calls int }
+
+func (f *noTokenAudit) ObjectWrites(context.Context, cloud.AuditRef, cloud.TimeWindow) ([]cloud.ObjectWrite, error) {
+	f.calls++
+	if f.calls <= f.serve {
+		return nil, nil
+	}
+	return nil, &cloud.CredentialsUnavailableError{
+		Fix: "grant the binding",
+		Err: errors.New(`Post "https://logging.googleapis.com/v2/entries:list": credentials: cannot fetch token`),
+	}
+}
+
+// TestDriftIdentityCredentialsUnavailable: a refused token is
+// --identity unavailable, exactly like a provider without an audit
+// trail — the findings still emit, none keeps a principal from the
+// lookups before the refusal, and the identity note says why.
+func TestDriftIdentityCredentialsUnavailable(t *testing.T) {
+	// Two anchored kubectl edits: the first lookup is served (its
+	// finding gains principal=none-in-audit-window), the second is
+	// refused — and the refusal must roll the first one back too.
+	objs := append(driftMixed(), deployment("prod", "web",
+		entry("argocd-controller", metav1.ManagedFieldsOperationApply, ptr(ago(240*time.Hour)), gitopsSpec),
+		entry("kubectl-edit", metav1.ManagedFieldsOperationUpdate, ptr(ago(time.Hour)), kubectlSpec),
+	))
+	deps := testDeps(objs...)
+	api := &noTokenAudit{serve: 1}
+	deps.Provider = func(context.Context) (cloud.Provider, error) {
+		return auditProvider{Provider: cloud.NoProvider, api: api}, nil
+	}
+	res := checktest.Run(t, stab.DriftCommand(deps), "--identity")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if api.calls != 2 {
+		t.Fatalf("audit lookups = %d, want 2 (one served, one refused)", api.calls)
+	}
+	for _, f := range findingLines(t, res.Stdout) {
+		if _, ok := f["principal"]; ok {
+			t.Errorf("principal left on a finding after the refusal: %v", f)
+		}
+	}
+	summary := summaryLine(t, res.Stdout)
+	if want := `unavailable reason="` + cloud.CredentialsUnavailableNote + `"`; summary["identity"] != want {
+		t.Errorf("summary identity note = %q, want %q", summary["identity"], want)
+	}
+	if strings.Contains(res.Stdout, "https://") {
+		t.Errorf("stdout carries the raw error: %s", res.Stdout)
 	}
 }
 

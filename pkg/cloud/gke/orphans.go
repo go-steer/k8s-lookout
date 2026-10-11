@@ -84,6 +84,7 @@ package gke
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -235,13 +236,17 @@ func (o *orphanAPI) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddress,
 // OrphanLoadBalancers implements cloud.OrphanAPI per the package
 // comment's resolution rules. A failed call on one rule's chain costs
 // that rule alone: it is returned as Unresolved and the sweep goes on
-// (#612). Only the rule list itself, or the context ending (every
-// later call would fail the same way), fails the class.
+// (#612). Only the rule list itself, the context ending, or a refused
+// token (#614: lookout's own identity — every later call would fail
+// the same way, so one class-level CredentialsUnavailable, not a
+// RuleUnresolved per rule) fails the class.
 func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) (cloud.LoadBalancerSweep, error) {
 	rules, err := o.gce.ListForwardingRules(ctx)
 	if err != nil {
 		return cloud.LoadBalancerSweep{}, fmt.Errorf("listing forwarding rules: %w", classifyPermission(err, "compute.forwardingRules.list"))
 	}
+	// The memo lives for this one sweep: a refusal it caches cannot
+	// outlive the run.
 	res := lbResolver{gce: newMemoGCE(o.gce)}
 	var out cloud.LoadBalancerSweep
 	for _, r := range rules {
@@ -252,6 +257,9 @@ func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) (cloud.LoadBalancer
 		if err != nil {
 			if ctx.Err() != nil {
 				return cloud.LoadBalancerSweep{}, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, err)
+			}
+			if creds := classifyCredentials(err); errors.Is(creds, cloud.ErrCredentialsUnavailable) {
+				return cloud.LoadBalancerSweep{}, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, creds)
 			}
 			out.Unresolved = append(out.Unresolved, cloud.UnresolvedLoadBalancer{
 				Name:   r.Name,

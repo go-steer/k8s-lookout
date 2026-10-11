@@ -60,7 +60,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `principal` | --identity: the audited principal of the write nearest the drift time (GKE: principalEmail), or the explicit sentinel none-in-audit-window / no-write-time-anchor when the trail cannot answer |
 | `principal_agent` | --identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only |
 | `other_principals` | --identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail |
-| `identity` | summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent) |
+| `identity` | summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent / lookout's own cloud identity could not obtain an access token) |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

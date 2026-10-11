@@ -171,7 +171,7 @@ expiry: cert-manager CRD not found — Certificate renewal-state scanning
 ## The `unavailable` markers
 
 Absent capability on the read-path is explicit output, never an error
-and never silence. Three shapes to recognize:
+and never silence. The shapes to recognize:
 
 - **Provider-gated commands** without a cloud provider emit one finding
   and exit 0, with the reason repeated on the summary line:
@@ -180,6 +180,17 @@ and never silence. Three shapes to recognize:
   kind=cloud.unavailable severity=info reason=CapabilityUnavailable message="cloud quota needs the provider quota capability: no cloud provider configured" capability=quota provider=none
   scanned=0 findings=1 elapsed=0s unavailable="no cloud provider configured"
   ```
+
+- **lookout's own cloud identity refused a token** (on GKE: the
+  Kubernetes service account lookout runs as may not act as its Google
+  service account) gives the same record with
+  `reason=CredentialsUnavailable`. The message names the fix: grant
+  the Kubernetes service account `roles/iam.workloadIdentityUser` on
+  the Google service account its `iam.gke.io/gcp-service-account`
+  annotation names, or, with Workload Identity off, check the node's
+  service account and access scopes. In `lookout watch` the quota,
+  capacity, and notifications sources log this once and keep retrying,
+  so the sentinel picks up the fix without a restart.
 
 - **`health` categories** answer `status=unavailable` (e.g.
   `category=control-plane … message="requires cloud provider metrics;

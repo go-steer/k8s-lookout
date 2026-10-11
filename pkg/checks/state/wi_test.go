@@ -304,6 +304,46 @@ func TestWIVerifyErrorFailsLoudly(t *testing.T) {
 	}
 }
 
+// wiNoTokenAPI fails every verification the way the provider reports
+// lookout's OWN identity being refused a token (#614): the raw cause
+// carries the token endpoint's URL and server prose.
+type wiNoTokenAPI struct{}
+
+func (wiNoTokenAPI) VerifyBinding(context.Context, string, string, string) (cloud.WIBinding, error) {
+	return cloud.WIBinding{}, fmt.Errorf("reading IAM policy of x: %w", &cloud.CredentialsUnavailableError{
+		Fix: "grant lookout's KSA roles/iam.workloadIdentityUser on its GSA",
+		Err: fmt.Errorf(`Post "https://iam.googleapis.com/v1/projects/-/serviceAccounts/x:getIamPolicy": credentials: cannot fetch token: compute: Received 403 Unable to generate access token`),
+	})
+}
+
+func TestWICredentialsUnavailable(t *testing.T) {
+	// lookout's own identity has no token: exit 0 with the one
+	// CredentialsUnavailable record — no wi.* verdict on the target
+	// GSAs it could not read (not even the cluster-only
+	// unannotated-use line wiMixed also produces), and none of the
+	// raw error on stdout.
+	res := checktest.Run(t, wiTestCommand(wiNoTokenAPI{}, wiMixed()...))
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0 (stderr: %s)", res.Code, res.Stderr)
+	}
+	lines := strings.Split(strings.TrimSuffix(res.Stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want exactly the CredentialsUnavailable record + summary, got: %q", res.Stdout)
+	}
+	want := `kind=cloud.unavailable severity=info reason=CredentialsUnavailable message="state wi could not run: lookout's own cloud identity could not obtain an access token, so nothing was read from the cloud — grant lookout's KSA roles/iam.workloadIdentityUser on its GSA" capability=workload-identity provider=none`
+	if lines[0] != want {
+		t.Errorf("record:\n got %s\nwant %s", lines[0], want)
+	}
+	if !strings.HasPrefix(lines[1], "scanned=") || !strings.Contains(lines[1], `unavailable="`+cloud.CredentialsUnavailableNote+`"`) {
+		t.Errorf("summary %q lacks the unavailable= note", lines[1])
+	}
+	for _, raw := range []string{"https://", "cannot fetch token", "Unable to generate", "kind=wi."} {
+		if strings.Contains(res.Stdout, raw) {
+			t.Errorf("stdout carries %q: %s", raw, res.Stdout)
+		}
+	}
+}
+
 func TestWIUsageErrors(t *testing.T) {
 	tests := []struct {
 		name   string

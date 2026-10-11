@@ -102,6 +102,9 @@ func runQuota(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 		return emitUnavailable(inv, provider, cloud.CapabilityQuota, "cloud quota")
 	}
 	quotas, err := api.Quotas(ctx)
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityQuota, "cloud quota", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("quota inventory: %w", err)
 	}

@@ -479,12 +479,36 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		if backend, ok := provider.Metrics(); ok {
 			now := deps.now()
 			window := cloud.TimeWindow{Start: now.Add(-history), End: now}
+			var noToken error
+			base := make([]int, 0, len(containerRows)) // detail counts of the rows enriched so far
 			for i := range containerRows {
-				if err := enrich(ctx, backend, &containerRows[i].f, containerRows[i].r, window); err != nil {
+				n := len(containerRows[i].f.Details)
+				err := enrich(ctx, backend, &containerRows[i].f, containerRows[i].r, window)
+				if _, ok := cloud.DegradableCredentials(ctx, err); ok {
+					noToken = err
+					break
+				}
+				if err != nil {
 					return 0, err
 				}
+				base = append(base, n)
 			}
-			if err := inv.Out.Note("history", history.String()); err != nil {
+			if fix, ok := cloud.DegradableCredentials(ctx, noToken); ok {
+				// lookout's own identity refused a token (#614):
+				// --history is unavailable like an absent backend,
+				// and rows enriched before the refusal drop their
+				// window stats so the report does not read as
+				// half-served.
+				for i, n := range base {
+					containerRows[i].f.Details = containerRows[i].f.Details[:n]
+				}
+				f := checks.CredentialsUnavailableFinding(provider.Name(), cloud.CapabilityMetrics, "--history="+history.String(), fix)
+				f.Message += " — point-in-time findings are unaffected"
+				unavailable = &f
+				if err := inv.Out.Note("unavailable", cloud.CredentialsUnavailableNote); err != nil {
+					return 0, err
+				}
+			} else if err := inv.Out.Note("history", history.String()); err != nil {
 				return 0, err
 			}
 		} else {

@@ -257,7 +257,7 @@ func (p *Provider) Metrics() (cloud.MetricsBackend, bool) {
 	if !p.available(cloud.CapabilityMetrics) {
 		return nil, false
 	}
-	return newMetricsBackend(p), true
+	return credsMetrics{newMetricsBackend(p)}, true
 }
 
 // Capacity implements cloud.Provider: the cluster-autoscaler
@@ -267,12 +267,12 @@ func (p *Provider) Capacity() (cloud.CapacityAPI, bool) {
 	if !p.available(cloud.CapabilityCapacity) {
 		return nil, false
 	}
-	return &capacityAPI{
+	return credsCapacity{&capacityAPI{
 		project:   p.project,
 		location:  p.location,
 		cluster:   p.cluster,
 		newLister: p.dialLogadmin,
-	}, true
+	}}, true
 }
 
 // dialLogadmin is capacityAPI's lister factory, wrapped so the client
@@ -292,7 +292,7 @@ func (p *Provider) Quota() (cloud.QuotaAPI, bool) {
 	if !p.available(cloud.CapabilityQuota) {
 		return nil, false
 	}
-	return newQuotaAPI(p), true
+	return credsQuota{newQuotaAPI(p)}, true
 }
 
 // Orphans implements cloud.Provider (M4, orphans.go).
@@ -300,7 +300,7 @@ func (p *Provider) Orphans() (cloud.OrphanAPI, bool) {
 	if !p.available(cloud.CapabilityOrphans) {
 		return nil, false
 	}
-	return newOrphanAPI(p), true
+	return credsOrphans{newOrphanAPI(p)}, true
 }
 
 // IPSpace implements cloud.Provider (M4, ipspace.go).
@@ -308,7 +308,7 @@ func (p *Provider) IPSpace() (cloud.IPSpaceAPI, bool) {
 	if !p.available(cloud.CapabilityIPSpace) {
 		return nil, false
 	}
-	return newIPSpaceAPI(p), true
+	return credsIPSpace{newIPSpaceAPI(p)}, true
 }
 
 // Stockouts implements cloud.Provider (M4, stockout.go).
@@ -316,7 +316,7 @@ func (p *Provider) Stockouts() (cloud.StockoutAPI, bool) {
 	if !p.available(cloud.CapabilityStockout) {
 		return nil, false
 	}
-	return newStockoutAPI(p), true
+	return credsStockout{newStockoutAPI(p)}, true
 }
 
 // WorkloadIdentity implements cloud.Provider (M5, wi.go). The IAM
@@ -325,7 +325,7 @@ func (p *Provider) WorkloadIdentity() (cloud.WorkloadIdentityAPI, bool) {
 	if !p.available(cloud.CapabilityWorkloadIdentity) {
 		return nil, false
 	}
-	return newWIAPI(p), true
+	return credsWI{newWIAPI(p)}, true
 }
 
 // Audit implements cloud.Provider (post-M5 #128, audit.go). The
@@ -334,7 +334,7 @@ func (p *Provider) Audit() (cloud.AuditAPI, bool) {
 	if !p.available(cloud.CapabilityAudit) {
 		return nil, false
 	}
-	return newAuditAPI(p), true
+	return credsAudit{newAuditAPI(p)}, true
 }
 
 // Notifications implements cloud.Provider (post-M5 #130,
@@ -343,7 +343,7 @@ func (p *Provider) Notifications() (cloud.NotificationsAPI, bool) {
 	if !p.available(cloud.CapabilityNotifications) {
 		return nil, false
 	}
-	return newNotificationsAPI(p), true
+	return credsNotifications{newNotificationsAPI(p)}, true
 }
 
 // ClusterConfig implements cloud.Provider (#186, clusterconfig.go).
@@ -352,7 +352,7 @@ func (p *Provider) ClusterConfig() (cloud.ClusterConfigAPI, bool) {
 	if !p.available(cloud.CapabilityClusterConfig) {
 		return nil, false
 	}
-	return newClusterConfigAPI(p), true
+	return credsClusterConfig{newClusterConfigAPI(p)}, true
 }
 
 // firstEnv returns the first non-empty value among the named

@@ -23,9 +23,11 @@ package audit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -330,6 +332,46 @@ func TestClusterReadErrorFails(t *testing.T) {
 	}
 	if !strings.Contains(res.Stderr, "permission denied") {
 		t.Errorf("stderr should carry the provider error, got: %s", res.Stderr)
+	}
+}
+
+// errNoToken is how the provider reports lookout's OWN identity being
+// refused a token (#614).
+var errNoToken = fmt.Errorf("reading cluster record: %w", &cloud.CredentialsUnavailableError{
+	Fix: "grant the binding",
+	Err: errors.New(`clusters.get: Get "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c": credentials: cannot fetch token`),
+})
+
+// A refused token is the one read failure that is not an error: no
+// claim about the cluster was possible, which is the same explicit
+// unavailable as an absent capability — for both commands, and for
+// the second (published-versions) read too.
+func TestClusterAndUpgradesCredentialsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  func(audit.Deps) checks.Command
+		api  *fakeClusterConfig
+	}{
+		{"audit cluster", audit.ClusterCommand, &fakeClusterConfig{err: errNoToken}},
+		{"audit upgrades", audit.UpgradesCommand, &fakeClusterConfig{err: errNoToken}},
+		{"audit upgrades", audit.UpgradesCommand, &fakeClusterConfig{cfg: exposedCluster(), targetsErr: errNoToken}},
+	} {
+		res := checktest.Run(t, tc.cmd(providerFor(tc.api)))
+		if res.Code != emit.ExitData {
+			t.Fatalf("%s: exit %d, stderr: %s", tc.name, res.Code, res.Stderr)
+		}
+		recs := findingLines(t, res.Stdout)
+		if len(recs) != 1 || recs[0]["kind"] != "cloud.unavailable" || recs[0]["reason"] != cloud.ReasonCredentialsUnavailable ||
+			recs[0]["capability"] != "cluster-config" || recs[0]["message"] != cloud.CredentialsUnavailableMessage(tc.name, "grant the binding") {
+			t.Errorf("%s: want one CredentialsUnavailable record, got:\n%s", tc.name, res.Stdout)
+		}
+		if !strings.Contains(res.Stdout, `scanned=0 findings=1 `) ||
+			!strings.Contains(res.Stdout, `unavailable="`+cloud.CredentialsUnavailableNote+`"`) {
+			t.Errorf("%s: want scanned=0 and the unavailable= note, got:\n%s", tc.name, res.Stdout)
+		}
+		if strings.Contains(res.Stdout, "https://") {
+			t.Errorf("%s: stdout carries the raw error:\n%s", tc.name, res.Stdout)
+		}
 	}
 }
 

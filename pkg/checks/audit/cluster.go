@@ -145,6 +145,9 @@ func runCluster(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		return emitUnavailable(inv, provider, cloud.CapabilityClusterConfig, "audit cluster")
 	}
 	cfg, err := api.Config(ctx)
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityClusterConfig, "audit cluster", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("cluster configuration: %w", err)
 	}

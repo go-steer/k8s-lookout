@@ -321,6 +321,10 @@ type Source struct {
 	// lastDecisions is the high-water mark of the provider
 	// scale-decision poll window.
 	lastDecisions time.Time
+	// decisionsNoToken dedupes the refused-token log line (#614): a
+	// missing KSA→GSA binding fails every tick until IAM is fixed,
+	// and one clear line beats a raw error per poll interval.
+	decisionsNoToken bool
 
 	// now overrides time.Now for testing. nil = real clock.
 	now func() time.Time
@@ -564,8 +568,19 @@ func (s *Source) poll(ctx context.Context) {
 		s.logPrintf("capacity: status ConfigMap poll failed (retry in %s): %v", s.cfg.PollInterval, err)
 	}
 	if s.decisions != nil {
-		if err := s.pollDecisions(ctx, now); err != nil {
+		err := s.pollDecisions(ctx, now)
+		fix, noToken := cloud.DegradableCredentials(ctx, err)
+		switch {
+		case noToken:
+			if !s.decisionsNoToken {
+				s.decisionsNoToken = true
+				s.logPrintf("capacity: %s; the sub-source keeps retrying every %s, quietly until it recovers (%v)", cloud.CredentialsUnavailableMessage("the provider scale-decision poll", fix), s.cfg.PollInterval, err)
+			}
+		case err != nil:
 			s.logPrintf("capacity: provider scale-decision poll failed (retry in %s): %v", s.cfg.PollInterval, err)
+		case s.decisionsNoToken:
+			s.decisionsNoToken = false
+			s.logPrintf("capacity: provider scale-decision poll recovered")
 		}
 	}
 	s.sweepPending(now)

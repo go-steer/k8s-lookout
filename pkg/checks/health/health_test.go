@@ -696,6 +696,27 @@ func TestControlPlaneUnavailableWhenMetricAbsent(t *testing.T) {
 	}
 }
 
+// TestControlPlaneUnavailableWhenNoToken: lookout's own identity
+// refused a token (#614) — the category cannot be read, which is
+// unavailable with the remedy, not a failed scan; the cluster-side
+// categories still answer.
+func TestControlPlaneUnavailableWhenNoToken(t *testing.T) {
+	b := &fakeBackend{err: fmt.Errorf("gke: listing series: %w", &cloud.CredentialsUnavailableError{
+		Fix: "grant the binding",
+		Err: fmt.Errorf(`Get "https://monitoring.googleapis.com/v3/projects/p/timeSeries": credentials: cannot fetch token`),
+	})}
+	status, _, reasons := statusesAndKinds(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if status["control-plane"] != "unavailable" {
+		t.Errorf("control-plane = %q, want unavailable (no token)", status["control-plane"])
+	}
+	if want := cloud.CredentialsUnavailableMessage("the control-plane probe (perf probe --pack=apiserver)", "grant the binding"); reasons["control-plane"] != want {
+		t.Errorf("unavailable reason = %q, want %q", reasons["control-plane"], want)
+	}
+	if status["nodes"] != "healthy" {
+		t.Errorf("nodes = %q: a refused cloud token must not touch the cluster-side categories", status["nodes"])
+	}
+}
+
 // TestControlPlaneBackendErrorFailsScan: a real backend failure
 // (auth, transport) fails the scan like any other category's read
 // error — never a silent healthy or a lying unavailable.

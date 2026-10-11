@@ -208,6 +208,15 @@ func runWI(ctx context.Context, deps WIDeps, inv emit.Invocation) (int, error) {
 	}
 
 	findings, err := wiScan(ctx, api, pods, serviceAccounts)
+	// lookout's OWN identity could not get a token (#614) — the one
+	// failure this command must neither crash over nor pass off as a
+	// verdict on the target GSAs. Nothing cloud-side was verified, so
+	// no wi.* finding is emitted: wiScan's partial result is
+	// discarded, the cluster-only unannotated-use heuristic included,
+	// rather than present a report that reads as complete.
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityWorkloadIdentity, "state wi", err); handled {
+		return len(pods) + saListed, err
+	}
 	if err != nil {
 		return 0, err
 	}

@@ -280,16 +280,30 @@ func (s *Source) send(sigs []engine.Signal) {
 // enablement error the operator must see (§11 fail loudly), not a
 // silent gap — then drives the poll ticker until ctx is cancelled.
 // Later transient failures skip the cycle with an edge-throttled log.
+//
+// The one startup failure that is NOT fatal is a refused token
+// (cloud.ErrCredentialsUnavailable, #614): lookout's own identity
+// cannot authenticate — on GKE, a missing KSA→GSA binding. Exiting
+// would only crash-loop the whole sentinel (RunAll takes every
+// source down) over a fix applied in IAM, not in the pod, so the
+// source logs it once and keeps polling; the first good cycle logs
+// the recovery and the source is live from there.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()
 
 	first, err := s.poll(ctx, s.clock())
-	if err != nil {
+	if fix, noToken := cloud.DegradableCredentials(ctx, err); noToken {
+		s.mu.Lock()
+		s.inventoryFailing = true
+		s.mu.Unlock()
+		s.printf("quota: %s; the source stays up and retries every %s (%v)", cloud.CredentialsUnavailableMessage("the quota inventory poll", fix), s.cfg.Poll, err)
+	} else if err != nil {
 		return fmt.Errorf("quota: quota inventory unavailable at startup: %w (fix cloud credentials / API enablement, or drop %q from --sources)", err, Name)
+	} else {
+		s.send(first)
 	}
-	s.send(first)
 
 	ticker := time.NewTicker(s.cfg.Poll)
 	defer ticker.Stop()
@@ -300,13 +314,19 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		case <-ticker.C:
 			sigs, err := s.poll(ctx, s.clock())
 			if err != nil {
-				// Transient (startup already proved the API works):
-				// skip the cycle, log the edge only.
+				// Transient (startup already proved the API works),
+				// or a refused token, fatal at no point: skip the
+				// cycle, log the edge only.
 				s.mu.Lock()
 				firstFailure := !s.inventoryFailing
 				s.inventoryFailing = true
 				s.mu.Unlock()
-				if firstFailure {
+				if !firstFailure {
+					continue
+				}
+				if fix, noToken := cloud.DegradableCredentials(ctx, err); noToken {
+					s.printf("quota: %s; skipping cycles until it recovers (%v)", cloud.CredentialsUnavailableMessage("the quota inventory poll", fix), err)
+				} else {
 					s.printf("quota: inventory poll failed (%v) — skipping cycles until it recovers", err)
 				}
 				continue

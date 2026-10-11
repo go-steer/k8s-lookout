@@ -50,7 +50,10 @@ const controlPlanePack = "apiserver"
 //     absent, so the caller reports the category unavailable with the
 //     pack_unavailable reason, never silence;
 //   - err is a real backend failure (auth, transport, quota): the
-//     caller fails the scan like any other category's read error.
+//     caller fails the scan like any other category's read error —
+//     except a refused token, which still matches
+//     cloud.ErrCredentialsUnavailable through the wrap and which the
+//     caller reports as the category unavailable (#614).
 //
 // The caller must hold a working cloud.MetricsBackend — resolving
 // provider capability absence (NoProvider, missing metrics) stays the

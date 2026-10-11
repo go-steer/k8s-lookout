@@ -94,6 +94,9 @@ func runIPSpace(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		return emitUnavailable(inv, provider, cloud.CapabilityIPSpace, "cloud ipspace")
 	}
 	ranges, err := api.SubnetUtilization(ctx)
+	if handled, err := checks.DegradeCredentials(ctx, inv.Out, provider.Name(), cloud.CapabilityIPSpace, "cloud ipspace", err); handled {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("subnet utilization: %w", err)
 	}
