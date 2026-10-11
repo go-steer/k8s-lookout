@@ -183,7 +183,12 @@ func trimNode(obj any) (any, error) {
 	node.Status.Images = nil
 	node.Status.VolumesInUse, node.Status.VolumesAttached = nil, nil
 	node.Status.NodeInfo = corev1.NodeSystemInfo{}
-	node.Status.Conditions = retainConditions(node.Status.Conditions, corev1.NodeReady)
+	node.Status.Conditions = retainConditions(node.Status.Conditions,
+		corev1.NodeReady,
+		corev1.NodeMemoryPressure,
+		corev1.NodeDiskPressure,
+		corev1.NodePIDPressure,
+	)
 	return node, nil
 }
 

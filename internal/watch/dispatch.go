@@ -663,6 +663,17 @@ func (d *dispatcher) injectRepeat(ctx context.Context, sig engine.Signal, key en
 				d.retryIncidentOpen(ctx, sig, result, key)
 				return
 			}
+			if result.Storm != "" {
+				if info, ok := d.clearDeadStormSession(result.Storm, result.SessionID); ok && d.opensSessions(sig) {
+					d.injectLock.Lock()
+					newSid := d.retryStormOpen(ctx, sig, info)
+					d.injectLock.Unlock()
+					if newSid != "" {
+						d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, SessionID: newSid, StormFingerprint: result.Storm})
+						return
+					}
+				}
+			}
 			d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
 			return
 		}
@@ -995,29 +1006,26 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 	// immediately). resolved.reverted deliberately does NOT restore
 	// it: a fix that failed to stick should page at its own class
 	// until the agent re-triages.
-	if d.triage != nil && sig.Kind == engine.KindResolved {
-		d.triage.resolve(ctx, sig)
-	}
-	// Storm bookkeeping first (§7.5): member clearance feeds the
-	// storm's recovery — the LAST member to clear resolves the storm.
-	// Recorded before the member's own routing so a lost binding
-	// (dropped outcome below) still keeps storm accounting correct.
-	var stormFinal *engine.StormInfo
-	if d.storm != nil {
-		switch sig.Kind {
-		case engine.KindResolved:
-			if info, done, ok := d.storm.MemberResolved(sig.Key); ok && done {
-				stormFinal = &info
-			}
-		case engine.KindResolvedReverted:
-			d.storm.MemberReverted(sig.Key)
+	commitResolved := func(sessionID string) {
+		if d.triage != nil && sig.Kind == engine.KindResolved {
+			d.triage.resolve(ctx, sig)
 		}
-		defer func() {
-			if stormFinal != nil {
-				d.stormResolved(ctx, sig, *stormFinal)
+		if sig.Kind == engine.KindResolved {
+			d.dedup.MarkResolved(sig.Key)
+		}
+		d.store.Record(sig, store.Outcome{Route: store.RouteResolved, SessionID: sessionID})
+		if d.storm != nil {
+			switch sig.Kind {
+			case engine.KindResolved:
+				if info, done, ok := d.storm.MemberResolved(sig.Key); ok && done {
+					d.stormResolved(ctx, sig, info)
+				}
+			case engine.KindResolvedReverted:
+				d.storm.MemberReverted(sig.Key)
 			}
-		}()
+		}
 	}
+
 	sid := d.targetSid
 	if d.mode == "per-incident" {
 		bound, ok := d.dedup.LookupSession(sig.Key)
@@ -1025,35 +1033,33 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 			d.metrics.recoveryDrops.WithLabelValues("unknown_session").Inc()
 			log.Printf("recovery: no bound session for %s %s/%s (uid=%s) — dropping %s (restart without --dedup-persist, or entry evicted)",
 				sig.Key.Reason, sig.Namespace, sig.Name, sig.Key.UID, sig.Kind)
-			// The OUTCOME still happened even though the inject has
-			// nowhere to go — keep it (NULL session) so §7.4 stability
-			// windows and recommendation history stay complete.
-			d.store.Record(sig, store.Outcome{Route: store.RouteResolved})
+			commitResolved("")
 			return
 		}
 		sid = bound
 	}
-	// The incident is closed: its recurrence must open fresh rather
-	// than repeat into this session (issue #599), even if the tracker
-	// re-arms it before the next event arrives.
-	if sig.Kind == engine.KindResolved {
-		d.dedup.MarkResolved(sig.Key)
-	}
-	// §9.1: resolved / resolved.reverted rows are what the stability-
-	// window and recommendation-history queries join against.
-	d.store.Record(sig, store.Outcome{Route: store.RouteResolved, SessionID: sid})
 	payload := resolvedPayload(sig)
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+		commitResolved(sid)
 		d.countResolved(sig)
 		return
 	}
 	if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("recovery: inject %s for %s/%s (sid=%s): %v", sig.Kind, sig.Namespace, sig.Name, sid, err)
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		if sessionGone(err) {
+			d.dedup.Unbind(sig.Key)
+			commitResolved("")
+			return
+		}
+		if d.tracker != nil && sig.Kind == engine.KindResolved {
+			d.tracker.RequeueResolved(sig.Key)
+		}
 		return
 	}
+	commitResolved(sid)
 	d.countResolved(sig)
 	log.Printf("%s %s pod=%s/%s → sid=%s (resolution=%s, cleared_after=%s, stable_for=%s)",
 		sig.Kind, sig.Key.Reason, sig.Namespace, sig.Name, sid,

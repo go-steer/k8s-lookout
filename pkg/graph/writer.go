@@ -349,13 +349,13 @@ func (w *Writer) publish(b *batch) {
 // record exists in the batch. Namespaced identities also ensure
 // their Namespace node.
 func (w *Writer) node(b *batch, kind NodeKind, namespace, name string) NodeID {
+	var nsID NodeID
+	if namespace != "" {
+		nsID = w.node(b, KindNamespace, "", namespace)
+	}
 	key := nodeKey(kind, namespace, name)
 	id := w.intern.intern(key)
 	if _, ok := b.nodes[id]; !ok {
-		var nsID NodeID
-		if namespace != "" {
-			nsID = w.node(b, KindNamespace, "", namespace)
-		}
 		// A namespaced identity proves its namespace exists, so
 		// Namespace nodes are observed from the start; everything
 		// else starts unobserved until its object is actually seen.

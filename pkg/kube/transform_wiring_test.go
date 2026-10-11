@@ -213,7 +213,10 @@ func TestNewTransformingFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 	if !hasCondition(cachedNode.Status.Conditions, corev1.NodeReady) {
 		t.Error("NodeReady was dropped")
 	}
-	if hasCondition(cachedNode.Status.Conditions, corev1.NodeMemoryPressure) {
+	if !hasCondition(cachedNode.Status.Conditions, corev1.NodeMemoryPressure) {
+		t.Error("NodeMemoryPressure was dropped — blinds objectstate.node_pressure (#622)")
+	}
+	if hasCondition(cachedNode.Status.Conditions, corev1.NodeNetworkUnavailable) {
 		t.Error("an unretained condition survived")
 	}
 }

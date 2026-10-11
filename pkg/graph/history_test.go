@@ -200,6 +200,56 @@ func TestReplayFromEmptyLog(t *testing.T) {
 	assertSnapshotsEqual(t, got, snap)
 }
 
+func TestReplay_NewUnseenNamespacesInFullEffectStream(t *testing.T) {
+	t.Parallel()
+	g, recs, _ := historyGraph(t)
+	w := g.Writer()
+	if err := w.FromObjects(slices.Values(synthCluster(2, 10))); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := g.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := snap.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add pods across multiple brand-new namespaces that were never seen
+	// as Namespace objects in the snapshot or delta stream (#656).
+	for _, ns := range []string{"brand-new-alpha", "brand-new-beta", "brand-new-gamma"} {
+		mustApply(t, w, Delta{
+			Op: OpAdd,
+			Object: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "worker-0"},
+				Spec:       corev1.PodSpec{NodeName: "node-0000"},
+			},
+		})
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	live, err := g.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := Restore(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewReplayer(base)
+	for _, rec := range *recs {
+		if rec.Generation <= snap.Generation() {
+			continue
+		}
+		if err := r.Apply(rec.Generation, rec.Effect); err != nil {
+			t.Fatalf("replay generation %d: %v", rec.Generation, err)
+		}
+	}
+	assertSnapshotsEqual(t, r.Snapshot(), live)
+}
+
 // TestEncodeRestore_RejectsCorruption is the serialization
 // "fuzz-lite": header damage, unknown versions, truncations, and
 // scattered bit flips must all return ErrBadSnapshot-class errors —

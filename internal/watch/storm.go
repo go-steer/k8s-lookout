@@ -185,6 +185,12 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	} else if err := d.injector.Append(ctx, sid, mp); err != nil {
 		log.Printf("storm: attach member %s/%s to %s (sid=%s): %v", sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		if sessionGone(err) {
+			if info, ok := d.clearDeadStormSession(v.Storm.Fingerprint, sid); ok {
+				sid = d.retryStormOpen(ctx, sig, info)
+				v.Storm.SessionID = sid
+			}
+		}
 	}
 	log.Printf("storm attach %s %s/%s → %s (sid=%s, members=%d)",
 		sig.Key.Reason, sig.Namespace, sig.Name, v.Storm.Ancestor.Display(), sid, v.Storm.AffectedCount)
@@ -197,6 +203,20 @@ func (d *dispatcher) stormAttached(ctx context.Context, sig engine.Signal, v eng
 	if v.SizeUpdate != nil && (d.dryRun || sid != "") {
 		d.stormSizeUpdate(ctx, sid, *v.SizeUpdate, v.Storm)
 	}
+}
+
+func (d *dispatcher) clearDeadStormSession(fp, deadSid string) (engine.StormInfo, bool) {
+	if d.storm == nil {
+		return engine.StormInfo{}, false
+	}
+	info, ok := d.storm.ClearStormSession(fp, deadSid)
+	if !ok {
+		return engine.StormInfo{}, false
+	}
+	for _, m := range d.storm.StormMembers(info.ID) {
+		d.dedup.Unbind(m.Key)
+	}
+	return info, true
 }
 
 // retryStormOpen re-attempts the storm-session open that failed at
@@ -274,6 +294,9 @@ func (d *dispatcher) stormSizeUpdate(ctx context.Context, sid string, upd engine
 	} else if err := d.injector.Append(ctx, sid, payload); err != nil {
 		log.Printf("storm: inject size update for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
 		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
+		if sessionGone(err) {
+			d.clearDeadStormSession(info.Fingerprint, sid)
+		}
 		return
 	}
 	d.metrics.stormUpdates.Inc()
@@ -292,8 +315,6 @@ func (d *dispatcher) stormResolved(ctx context.Context, sig engine.Signal, info 
 	if d.mode == "shared" {
 		sid = d.targetSid
 	}
-	d.metrics.stormsResolved.Inc()
-	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 	rec := sig.Recovery
 	payload := inject.ResolvedPayload{
 		Kind:              inject.KindResolved,
@@ -311,17 +332,29 @@ func (d *dispatcher) stormResolved(ctx context.Context, sig engine.Signal, info 
 		Resolution:        string(rec.Resolution),
 	}
 	if sid == "" {
+		d.metrics.stormsResolved.Inc()
+		d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 		log.Printf("storm: %s resolved (all %d members cleared) but no storm session bound — outcome dropped", info.Ancestor.Display(), info.AffectedCount)
 		return
 	}
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-	} else if err := d.injector.Append(ctx, sid, payload); err != nil {
-		log.Printf("storm: inject storm resolved for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
-		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
+		d.metrics.stormsResolved.Inc()
+		d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 		return
 	}
+	if err := d.injector.Append(ctx, sid, payload); err != nil {
+		log.Printf("storm: inject storm resolved for %s (sid=%s): %v", info.Ancestor.Display(), sid, err)
+		d.metrics.injectErrors.WithLabelValues("storm", "inject").Inc()
+		if sessionGone(err) {
+			d.metrics.stormsResolved.Inc()
+			d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
+		}
+		return
+	}
+	d.metrics.stormsResolved.Inc()
+	d.metrics.stormsActive.Set(float64(d.storm.ActiveStorms()))
 	log.Printf("storm resolved %s: all %d member(s) cleared → sid=%s", info.Ancestor.Display(), info.AffectedCount, sid)
 }
 
