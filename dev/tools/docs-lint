@@ -155,11 +155,15 @@ check_wrong_major_pins() {
 
 # Check 5: numeric or spelled signal-source counts in prose.
 #
-# Catches "nine signal sources", "nine §7.2 sources", "11 sources", "16 sources"
-# so prose never rots when new signal sources land under pkg/sources.
+# Catches "nine signal sources", "nine §7.2 sources", "11 sources" in
+# unguarded prose so documentation does not rot when sources are added.
+# Allow-lists "of the <N> sources are never auto-enabled" in sentinel.md,
+# which is verified directly against Go's knownSources registry by
+# TestCoverageMapExplicitOnlyCount (internal/watch/coveragedoc_test.go).
 check_source_counts() {
   local path="$1"
   grep -n -E '\b(seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|[7-9]|1[0-9])[- ]+(§7\.2 )?(signal )?sources\b' "$path" 2>/dev/null | \
+    grep -v -E 'of the [a-z]+ sources are never auto-enabled' | \
     awk -F: -v p="$path" '{
       msg = "hard-coded source count — describe sources by role or link §7.2 instead of a count that drifts";
       printf "%s:%s: %s\n", p, $1, msg
