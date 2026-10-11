@@ -85,10 +85,17 @@ type Writer struct {
 	onChange func(ChangeRecord)
 	now      func() time.Time
 
-	mu      sync.Mutex
+	// qmu guards only the ingress queue (closed, pending, timer) so
+	// Apply / ApplyInitial never block on snapshot COW map cloning (#660).
+	// Total lock acquisition order when both are needed: mu -> qmu.
+	qmu     sync.Mutex
 	closed  bool
 	pending []pendingDelta
 	timer   *time.Timer
+
+	// mu guards snapshot batch construction, incremental maintenance state,
+	// interner compaction, and OnChange emission.
+	mu sync.Mutex
 
 	intern *interner
 	gen    uint64
@@ -167,7 +174,10 @@ func (w *Writer) FromObjects(objs iter.Seq[any]) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed {
+	w.qmu.Lock()
+	closed := w.closed
+	w.qmu.Unlock()
+	if closed {
 		return ErrClosed
 	}
 	b := w.newBatch()
@@ -203,78 +213,19 @@ func (w *Writer) ApplyInitial(deltas ...Delta) error {
 	return w.queue(deltas, true)
 }
 
-func (w *Writer) queue(deltas []Delta, sync bool) error {
-	for i := range deltas {
-		if deltas[i].Op <= opInvalid || deltas[i].Op > OpDelete {
-			return fmt.Errorf("graph: delta %d: invalid op %d", i, deltas[i].Op)
-		}
-		if err := validateObject(deltas[i].Object); err != nil {
-			return fmt.Errorf("graph: delta %d: %w", i, err)
-		}
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return ErrClosed
-	}
-	for _, d := range deltas {
-		w.pending = append(w.pending, pendingDelta{Delta: d, sync: sync})
-	}
-	if w.timer == nil && w.interval > 0 {
-		w.timer = time.AfterFunc(w.interval, w.timedFlush)
-	}
-	return nil
-}
-
-func (w *Writer) timedFlush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.timer = nil
-	if w.closed {
+// flushLocked drains queued deltas and builds + publishes the next snapshot.
+// Caller holds mu.
+func (w *Writer) flushLocked() {
+	pending, closed := w.drainPending()
+	if closed {
 		return
 	}
-	w.flushLocked()
-}
-
-// Flush applies all pending deltas and publishes a snapshot
-// immediately. It also publishes when nothing is pending but no
-// snapshot exists yet (an explicitly empty-but-ready graph).
-func (w *Writer) Flush() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return ErrClosed
-	}
-	w.flushLocked()
-	return nil
-}
-
-// Close stops the batching timer and rejects further mutations.
-// Pending unflushed deltas are discarded; published snapshots remain
-// valid and readable forever.
-func (w *Writer) Close() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.closed = true
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
-	w.pending = nil
-}
-
-// flushLocked builds and publishes the next snapshot. Caller holds mu.
-func (w *Writer) flushLocked() {
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
-	if len(w.pending) == 0 && w.g.snap.Load() != nil {
+	if len(pending) == 0 && w.g.snap.Load() != nil {
 		return
 	}
 	b := w.newBatch()
 	var recs []ChangeRecord
-	for _, pd := range w.pending {
+	for _, pd := range pending {
 		if w.onChange == nil {
 			w.applyDelta(b, pd.Delta)
 			continue
@@ -300,7 +251,6 @@ func (w *Writer) flushLocked() {
 		}
 		recs = append(recs, rec)
 	}
-	w.pending = nil
 	if w.onChange == nil && len(w.intern.keys) > len(b.nodes) {
 		w.compactBatchLocked(b)
 	}
@@ -331,12 +281,13 @@ func (w *Writer) Epoch() uint64 {
 func (w *Writer) Compact() *Snapshot {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed {
+	w.qmu.Lock()
+	closed := w.closed
+	w.qmu.Unlock()
+	if closed {
 		return w.g.snap.Load()
 	}
-	if len(w.pending) > 0 || w.g.snap.Load() == nil {
-		w.flushLocked()
-	}
+	w.flushLocked()
 	if len(w.intern.keys) > len(w.g.snap.Load().nodes) {
 		b := w.newBatch()
 		w.compactBatchLocked(b)

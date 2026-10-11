@@ -66,3 +66,25 @@ Below those lines, plain maps win on code size, debuggability, and zero
 unsafe/arena machinery. If a threshold trips, the rewrite is confined to
 this package behind `Snapshot`/`Writer`; consumers (`state edges`,
 `triage radius`, storm correlation) do not change.
+
+## Large-Cluster Verification & Ingress Lock Decoupling (#660)
+
+To prevent informer handler tail-latency spikes when publishing snapshots on
+large clusters, `Writer` separates the hot ingress queue mutex (`qmu`, guarding
+only `closed`, `pending`, and `timer`) from the snapshot/maintenance mutex
+(`mu`, guarding `newBatch()` full-map COW clones, `applyDelta`, `publish`,
+interner compaction, and `OnChange` dispatch). Total lock order (`mu` → `qmu`)
+ensures `Apply` / `ApplyInitial` append incoming informer deltas in nanoseconds
+without waiting for `maps.Clone` snapshot copies during `Flush` / `timedFlush`.
+
+Measured with `BenchmarkGraphApplyAndSnapshot_WithOnChange` (active §6.6
+`OnChange` delta consumer + live `Snapshot()` reads every 200 deltas, AMD EPYC
+7B13, Go 1.26):
+
+| Metric | 50k pods | 100k pods |
+| --- | --- | --- |
+| Graph size (nodes / edges) | 179.0k / 441.0k | 358.2k / 882.1k |
+| Amortized delta cost (with `OnChange` + swap/200) | 40.2 µs/op | 52.4 µs/op |
+| Sustained throughput (`deltas/s`) | 24,867 deltas/s | 19,098 deltas/s |
+| Allocations per op (`B/op`, `allocs/op`) | 99.9 KB / 49 allocs | 196.0 KB / 56 allocs |
+

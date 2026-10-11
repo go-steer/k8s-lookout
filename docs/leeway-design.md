@@ -5247,3 +5247,66 @@ findings, restart-safe, no baselines and no compute classes.
    uncomfortably against lookout's read-only posture. Worth reserving surface now?
 10. **Region-level topology.** Multi-region clusters are rare but the model supports
     them. In scope for the target fleet, or is zone the only axis that matters?
+
+---
+
+## 16. Implementation rationale & invariants (`pkg/sources/topologydrift`)
+
+The invariants below were originally written inline as long file-header blocks across
+`pkg/sources/topologydrift` (`source.go`, `coalesce.go`, `domain.go`, `clusterdefault.go`)
+and extracted here so implementation files stay concise while preserving the operational
+reasoning.
+
+### 16.1 Timer cadences and why scoring, dwell, and learning have distinct tickers (`source.go`)
+
+- **Eligibility sweep (`DefaultEligibilitySweepInterval = 5m`):** §6.3 distinguishes the
+  narrow half of a node change (topology label relabeling — re-mapped synchronously per
+  node because counts move) from the broad half (NotReady transitions, taint updates,
+  allocatable shifts — bounded at one re-enqueue sweep every 5 minutes so rolling pool
+  upgrades touching thousands of nodes never enqueue `O(nodes × subjects)` evaluations).
+- **Alert pass (`DefaultAlertInterval = 30s`):** Dwell measures elapsed wall-clock time a
+  verdict held (`for`), so advancing the state machine per informer event would advance a
+  churning workload faster than a quiet workload that is equally mis-placed.
+- **Restart reconciliation (`DefaultReconcileGrace = 5m`):** Persisted `AlertRecord` rows
+  reconcile against fresh verdicts only after informer caches sync and initial scoring
+  completes; a generous grace window avoids discarding an active episode on slow startup.
+- **Ready sampling (`DefaultReadySampleInterval = 30s`):** Records domain peak usability
+  ahead of an outage so §7.6 outage ratios compare live counts against pre-outage peaks.
+- **Baseline sampling (`DefaultBaselineSampleInterval = 1m`) and flushing (`30s`):** EWMA
+  decay uses elapsed clock time `dt`; sampling once per minute keeps the 6h minimum age
+  (rather than the 200-sample count) as the true maturity gate.
+- **Deterministic clock injection (`Config.Now` / `CoalesceOptions.Now`):** Every state,
+  ticker, metric gauge, domain latch, inventory cordon/uncordon/disruption timestamp, and
+  coalescer burst reschedule resolves its timestamp through the injected clock seam
+  (`s.now()` / `c.clock()` / `inv.now`), defaulting to `time.Now` in production while
+  allowing zero-sleep deterministic unit tests across multi-minute/multi-hour windows.
+
+### 16.2 Evaluation coalescer & stale-tolerant min-heap (`coalesce.go`)
+
+- **`timerHeap` vs map scans:** Scanning all pending subjects on relist would be
+  `O(subjects²)` (~400M iterations at 20k subjects). Pushing monotonic stale-tolerant heap
+  entries keeps rescheduling `O(log N)` without tracking per-subject heap indices.
+- **Burst widening (`reschedule`):** The first enqueue of a burst waits `CoalesceWindow`
+  (2s). Subsequent enqueues within the pending window widen readiness to `RolloutWindow`
+  (15s) clamped at `first + MaxDelay` (60s), monotonic in `readyAt`. Unlike
+  `client-go/util/workqueue` (which takes the earliest `AddAfter`), this queue widens
+  active rollout bursts while bounding starvation.
+
+### 16.3 Domain availability latching & per-node axis exclusion (`domain.go`)
+
+- **`kubernetes.io/hostname` excluded from `DefaultDomainUnavailableKeys`:** On the node
+  axis, every node is its own domain; reporting domain unavailability on hostname would
+  duplicate `objectstate.node_notready` once per node during rolling pool upgrades.
+- **Latch retention (`sampleDomains`):** `domainSeen` latches any domain observed with
+  `Nodes > 0` and forgets a vanished domain only after both its nodes leave AND its
+  `ReadyHistory` expires. This ensures a completely lost failure domain stays in
+  `domainJudgements` across its full episode lifecycle rather than silently vanishing
+  after its history window ages out.
+
+### 16.4 Three-state cluster defaults (`clusterdefault.go`)
+
+- `Config.ClusterDefaultConstraints` is `*[]corev1.TopologySpreadConstraint`:
+  - `nil` = **UNSET** (`SystemDefaultConstraints` assumed at `ConfidenceAssumed`, capped below Tier A).
+  - `&[]` = **DECLARED EMPTY** (operator asserts the cluster runs without default spread constraints).
+  - non-empty slice = **DECLARED** (`ConfidenceDeclared`, eligible for Tier A when `DoNotSchedule`).
+

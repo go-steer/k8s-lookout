@@ -45,71 +45,27 @@ import (
 // Name is the source's stable config- and schema-facing name.
 const Name = "topology-drift"
 
-// DefaultEligibilitySweepInterval bounds how often a broad node change — a
-// node going NotReady, a taint appearing, allocatable shrinking — causes every
-// subject to be re-evaluated.
-//
-// §6.3 calls this the cheap half of the node-event asymmetry, and the interval
-// is what makes it cheap: a rolling node upgrade touches thousands of nodes,
-// and enqueuing 20,000 subjects per node touched is the one way this source
-// could take a cluster down. The narrow half — a node's topology labels
-// actually moving — is applied immediately, because it changes counts.
+// DefaultEligibilitySweepInterval bounds how often a broad node eligibility
+// change triggers subject re-evaluation (§6.3; see docs/leeway-design.md §16).
 const DefaultEligibilitySweepInterval = 5 * time.Minute
 
-// DefaultAlertInterval is how often §8.2's machine is advanced over every
-// scored subject.
-//
-// It is the resolution of every dwell timer in the subsystem — a 10-minute
-// dwell measured on a 30-second tick fires somewhere in [10:00, 10:30) — and
-// against a `for` measured in minutes that is noise. Going faster buys nothing:
-// the verdicts it reads are only recomputed when a pod or node event arrives,
-// so a 5-second tick would advance the machine over the same numbers six times
-// and reach the same answer.
+// DefaultAlertInterval is how often §8.2's dwell machine advances over scored
+// subjects (see docs/leeway-design.md §16).
 const DefaultAlertInterval = 30 * time.Second
 
 // DefaultReconcileGrace bounds how long a persisted alert record waits for its
-// subject to be scored again after a restart (§9.3 step 6).
-//
-// A record can only be reconciled against a verdict, and at startup there are
-// none: the informers have synced but nothing has been scored. Most subjects
-// are scored within one coalesce window of the first re-apply; this is the
-// allowance for the tail, after which an unclaimed record is taken to belong to
-// a workload that was deleted while we were down. Generous on purpose — the
-// cost of waiting is one row in a table, and the cost of dropping too early is
-// a dwell timer restarted for a subject that is still drifting.
+// subject to be scored again after a restart (§9.3 step 6; see docs/leeway-design.md §16).
 const DefaultReconcileGrace = 5 * time.Minute
 
-// DefaultReadySampleInterval is how often §7.6's ready-node series is
-// sampled.
-//
-// Thirty seconds gives a fifteen-minute outage window thirty samples, which is
-// more resolution than a test with a 50% threshold needs — the point of the
-// cadence is not precision but that a sample exists *at all* between the last
-// change and the outage, because the peak the outage is measured against has
-// to be somewhere in the window. Anything up to a couple of minutes would work;
-// this matches the alert tick so that the two passes stay roughly in step.
+// DefaultReadySampleInterval is how often §7.6's ready-node series is sampled
+// (see docs/leeway-design.md §16).
 const DefaultReadySampleInterval = 30 * time.Second
 
-// DefaultBaselineSampleInterval is how often §7.5's estimators are fed.
-//
-// A minute against a twelve-hour half-life is 720 samples per half-life,
-// which is far more than the estimate needs — the EWMA converges on elapsed
-// time, not on sample count, and `dt` comes from the clock precisely so that
-// the cadence is free to be wrong. What the cadence actually buys is the
-// 200-sample maturity gate: at one a minute a subject clears it in 3h20m,
-// comfortably inside the 6h age gate, so age is the binding constraint and
-// maturity means "we watched this for six hours" rather than "we sampled it
-// often enough".
-//
-// Going faster would make the sample count the binding gate on a cluster
-// that restarts often, which is the wrong gate: 200 samples in ten minutes
-// is a very good estimate of ten minutes.
+// DefaultBaselineSampleInterval is how often §7.5's baseline estimators are fed
+// (see docs/leeway-design.md §16).
 const DefaultBaselineSampleInterval = time.Minute
 
-// DefaultBaselineFlushInterval is §9.2's batched baseline write.
-//
-// Thirty seconds, straight from the design: losing it costs thirty seconds of
-// a twelve-hour half-life, which is not a durability promise anybody made.
+// DefaultBaselineFlushInterval is §9.2's batched baseline persistence cadence.
 const DefaultBaselineFlushInterval = 30 * time.Second
 
 // DefaultTopologyKeys are the axes tracked when none are configured (§10.2).
@@ -290,6 +246,10 @@ type Config struct {
 	// Meter is where the §8.4 instruments are declared. Nil means no-op, so
 	// the source is usable in tests and in a process with no telemetry.
 	Meter metric.Meter
+
+	// Now overrides time.Now for deterministic tests across state/ticker paths.
+	// Nil defaults to time.Now.
+	Now func() time.Time
 }
 
 func (c Config) normalize() Config {
@@ -554,6 +514,14 @@ func (s *Source) logger() func(string, ...any) {
 	return log.Printf
 }
 
+// now returns the current instant from Config.Now or time.Now.
+func (s *Source) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now()
+	}
+	return time.Now()
+}
+
 // New constructs the source.
 func New(client kubernetes.Interface, cfg Config) *Source {
 	cfg = cfg.normalize()
@@ -562,11 +530,15 @@ func New(client kubernetes.Interface, cfg Config) *Source {
 	s.warnedTies = map[string]bool{}
 	s.scales = newScaleLog()
 	s.inv = NewInventory(cfg.TopologyKeys)
+	if cfg.Now != nil {
+		s.inv.now = cfg.Now
+	}
 	s.queue = newCoalescer(CoalesceOptions{
 		Window:        cfg.CoalesceWindow,
 		RolloutWindow: cfg.RolloutCoalesceWindow,
 		MaxDelay:      cfg.MaxCoalesceDelay,
 		Evaluate:      s.evaluate,
+		Now:           cfg.Now,
 	})
 	s.state = NewState(StateOptions{
 		Inventory: s.inv,
@@ -1099,8 +1071,8 @@ func (s *Source) onPolicyDelete(obj any) {
 // measures how long a condition held rather than how often the subject's pods
 // churned, and it is the alert pass — not this one — that emits.
 func (s *Source) evaluate(ctx context.Context, sub leeway.SubjectRef) {
-	start := time.Now()
-	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, time.Since(start)) }()
+	start := s.now()
+	defer func() { s.metrics.recordEvaluation(ctx, sub.Kind, s.now().Sub(start)) }()
 
 	pod := s.subjectPod(sub)
 	if pod == nil {
@@ -1345,11 +1317,11 @@ func (s *Source) onScalable(obj any) {
 	case *appsv1.Deployment:
 		s.events.note(eventDeployment, s.scales.Observe(
 			leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: o.Namespace, Name: o.Name},
-			int32OrOne(o.Spec.Replicas), time.Now()))
+			int32OrOne(o.Spec.Replicas), s.now()))
 	case *appsv1.StatefulSet:
 		s.events.note(eventStatefulSet, s.scales.Observe(
 			leeway.SubjectRef{Kind: leeway.SubjectStatefulSet, Namespace: o.Namespace, Name: o.Name},
-			int32OrOne(o.Spec.Replicas), time.Now()))
+			int32OrOne(o.Spec.Replicas), s.now()))
 	}
 }
 
@@ -1678,12 +1650,12 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// episode can only be reconciled against a fresh verdict, and the queue has
 	// not scored anything yet. Read after arming, because until the caches are
 	// synced there is nothing to reconcile against either.
-	s.loadAlertState(ctx, time.Now())
+	s.loadAlertState(ctx, s.now())
 	// §9.3 step 1's other half, read at the same instant and for the same
 	// reason: step 7 measures one gap for the whole set, and a loader that
 	// read the clock per row would give two subjects loaded a second apart
 	// two different answers about the same outage.
-	s.loadBaselines(ctx, time.Now())
+	s.loadBaselines(ctx, s.now())
 
 	go s.queue.Run(ctx)
 
@@ -1724,8 +1696,8 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	// outage row for a pool reads the series the sample just extended.
 	readyTick := time.NewTicker(s.cfg.ReadySampleInterval)
 	defer readyTick.Stop()
-	s.sampleCluster(time.Now())
-	s.evaluateNodeGroups(time.Now())
+	s.sampleCluster(s.now())
+	s.evaluateNodeGroups(s.now())
 
 	// §7.5, on its own timer and not on the evaluation path. A half-life is a
 	// statement about elapsed time, so a subject whose pods churn must not
@@ -1757,11 +1729,11 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 		case <-alertTick.C:
 			s.runAlertPass(ctx)
 		case <-readyTick.C:
-			now := time.Now()
+			now := s.now()
 			s.sampleCluster(now)
 			s.evaluateNodeGroups(now)
 		case <-baselineTick.C:
-			s.sampleBaselines(time.Now())
+			s.sampleBaselines(s.now())
 		case <-baselineFlush.C:
 			s.flushBaselines(ctx)
 		}
@@ -1982,7 +1954,7 @@ func (s *Source) judgements(now time.Time) []Judgement {
 // know about turns into a duplicate the moment the process restarts, while a
 // persisted episode nobody was told about is one tick late at worst.
 func (s *Source) runAlertPass(ctx context.Context) {
-	now := time.Now()
+	now := s.now()
 	for _, o := range s.alerts.Pass(s.judgements(now), now, s.cfg.ReconcileGrace) {
 		s.persistOutcome(ctx, o, now)
 		if o.Transition == leeway.TransitionFiring {
@@ -2113,7 +2085,7 @@ func (s *Source) startMetrics() error {
 		Evaluations:        s.state.EachEvaluation,
 		Intents:            s.state.EachIntent,
 		Alerts:             s.alerts.Each,
-		Baselines:          func() baselineStats { return s.baselines.Stats(time.Now(), s.cfg.Baselines) },
+		Baselines:          func() baselineStats { return s.baselines.Stats(s.now(), s.cfg.Baselines) },
 		WatchEvents:        s.events.each,
 		LastEvents:         s.last.each,
 	})
@@ -2125,16 +2097,6 @@ func (s *Source) startMetrics() error {
 }
 
 // reapply rebuilds the counters from the synced pod cache.
-//
-// The handlers registered above already replayed the cache as adds, so most of
-// this is a no-op — but not all of it, and the part that is not is the point.
-// A pod whose ReplicaSet had not yet landed in its own cache resolved to no
-// subject and went uncounted; there is no ordering guarantee between two
-// informers' initial lists. Re-applying once both are synced closes that
-// window, and OnPodAdd is idempotent by construction precisely so this is safe
-// to do. Steady state has no equivalent race worth handling here — a pod is
-// created after its ReplicaSet and gets several more events within seconds —
-// and §6.5's verifier is the backstop for whatever slips through anyway.
 func (s *Source) reapply(lister corelisters.PodLister) error {
 	pods, err := lister.List(labels.Everything())
 	if err != nil {
@@ -2148,9 +2110,7 @@ func (s *Source) reapply(lister corelisters.PodLister) error {
 	return nil
 }
 
-// sweep re-enqueues every subject after a broad node change. It is a no-op
-// when nothing eligibility-relevant has happened since the last tick, which is
-// the common case.
+// sweep re-enqueues every subject after a broad node change.
 func (s *Source) sweep() {
 	s.mu.Lock()
 	pending := s.sweepPending
@@ -2167,9 +2127,6 @@ func (s *Source) sweep() {
 		len(subs), s.inv.Generation())
 }
 
-// The four pod and node handlers count every event they are delivered, the
-// malformed ones included (as inert), so the watch-event total is the
-// informer's delivery count and not leeway's opinion of it.
 func (s *Source) onPod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -2177,12 +2134,12 @@ func (s *Source) onPod(obj any) {
 		return
 	}
 	s.events.note(eventPod, s.state.OnPodAdd(pod))
-	s.last.stamp(eventPod, time.Now())
+	s.last.stamp(eventPod, s.now())
 }
 
 func (s *Source) onPodDelete(obj any) {
 	s.events.note(eventPod, s.state.OnPodDelete(obj))
-	s.last.stamp(eventPod, time.Now())
+	s.last.stamp(eventPod, s.now())
 }
 
 func (s *Source) onNode(obj any) {
@@ -2194,14 +2151,14 @@ func (s *Source) onNode(obj any) {
 	ch := s.state.OnNodeUpsert(node)
 	s.events.note(eventNode, ch.Any())
 	s.noteChange(ch)
-	s.last.stamp(eventNode, time.Now())
+	s.last.stamp(eventNode, s.now())
 }
 
 func (s *Source) onNodeDelete(obj any) {
 	ch := s.state.OnNodeDelete(obj)
 	s.events.note(eventNode, ch.Any())
 	s.noteChange(ch)
-	s.last.stamp(eventNode, time.Now())
+	s.last.stamp(eventNode, s.now())
 }
 
 // noteChange applies the §6.3 node-event asymmetry. The narrow half is already

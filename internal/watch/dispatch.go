@@ -180,10 +180,64 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev engine.TriageEvent) {
 // carried in-process but not serialized for that kind (§8: existing
 // fields keep their exact names; new fields ship with new kinds).
 func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
-	// Stamp deployment identity + derived fields sources leave
-	// blank: sources don't know which cluster they run in (§7.2),
-	// and the fingerprint (§8) needs the canonicalized reason-class
-	// + zone, so it is computed here, once, for every source.
+	d.stampClusterIdentity(&sig)
+	if sig.Kind == engine.KindResolved || sig.Kind == engine.KindResolvedReverted {
+		d.dispatchResolved(ctx, sig)
+		return
+	}
+
+	key, downgraded := d.classifySignal(ctx, &sig)
+	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
+	if ok, gate := d.filter.Decide(sig); !ok {
+		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
+		return
+	}
+
+	result := d.dedup.ObserveSignal(key, engine.Observation{
+		LastTS:     sig.LastSeen,
+		Kind:       sig.Kind,
+		Severity:   sig.Severity,
+		Message:    sig.Message,
+		Repeatable: d.opensSessions(sig),
+		Downgraded: downgraded != nil,
+	})
+	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
+	if d.storm != nil && result.Storm != "" && (result.Kind == engine.DedupRepeat || result.Absorbed) {
+		d.storm.NoteMemberActivity(key, sig.LastSeen)
+	}
+	if result.Kind == engine.DedupRepeat {
+		d.injectRepeat(ctx, sig, key, result)
+		return
+	}
+	if result.Kind == engine.DedupDuplicate {
+		d.handleDuplicateSignal(ctx, sig, key, result, downgraded)
+		return
+	}
+
+	d.metrics.findings.WithLabelValues(sig.Kind, string(sig.Severity)).Inc()
+	d.dedup.NoteIncidentKind(key, sig.Kind)
+	if d.triage != nil {
+		d.triage.windowRolled(key)
+	}
+	if d.routeInfoSignal(sig) {
+		return
+	}
+	if d.correlateStormSignal(ctx, sig) {
+		return
+	}
+	if d.mode == "per-incident" && d.board != nil && engine.RouteFor(sig.Severity) == engine.RouteWatchboard {
+		d.store.Record(sig, store.Outcome{Route: store.RouteWatchboard})
+		d.board.Add(ctx, sig, result.Count)
+		return
+	}
+	if d.mode == "per-incident" && !d.dryRun {
+		d.dispatchPerIncidentOpen(ctx, sig, key, result)
+		return
+	}
+	d.dispatchSharedOrDryRun(ctx, sig, key, result)
+}
+
+func (d *dispatcher) stampClusterIdentity(sig *engine.Signal) {
 	if sig.Cluster == "" {
 		sig.Cluster = d.cluster
 	}
@@ -199,378 +253,154 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if sig.Source == "" {
 		sig.Source = engine.SourceSentinel
 	}
-	// Resolved / resolved.reverted (§7.4) are outcome records for an
-	// EXISTING incident: they bypass filter + dedup (they are not new
-	// incidents) and route as followups into the incident's bound
-	// session. Their fingerprint is the original incident's — never
-	// re-stamped here.
-	if sig.Kind == engine.KindResolved || sig.Kind == engine.KindResolvedReverted {
-		d.dispatchResolved(ctx, sig)
-		return
-	}
-	// The canonical pipeline key, computed ONCE per signal with the
-	// message in hand (engine.CanonicalReasonForEvent): kubelet's
-	// generic BackOff/Failed reasons need the message to land in the
-	// right family (pull vs crash-loop). Every key-shaped stage below
-	// — fingerprint, dedup, cross-source joins, triage regression
-	// state, storm member notes, recovery tracking — uses THIS key,
-	// so they all agree on the incident's identity. The wire payload
-	// keeps sig.Key.Reason (the original event reason) untouched.
+}
+
+func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (engine.EventKey, *memory.TriageStatusRecord) {
 	key := sig.CanonicalKey()
-	// Image-pull cause class (issue #213), stamped once per signal
-	// alongside the canonical key and for the same reason: two stages
-	// below — the transient debounce in filter.Accept and the
-	// registry-scoped blast-radius key in the storm correlator — must
-	// agree on whether kubelet's own retry cycle is expected to clear
-	// this. Nil-safe: an unset memo classifies from the message alone.
-	//
-	// The same call now also recovers the cause TEXT for a message
-	// that does not carry it (issue #387) — same memo, same scopes,
-	// same TTLs, because the reason the class has to be inherited is
-	// the reason the words do.
-	sig.PullClass, sig.PullCause = d.pullClass.Resolve(sig)
+	sig.PullClass, sig.PullCause = d.pullClass.Resolve(*sig)
 	if sig.Fingerprint == "" {
 		sig.Fingerprint = engine.Fingerprint(sig.Kind, key.Reason, sig.KindOfObject,
 			engine.FailureDomain(sig.Region, sig.Zone))
 	}
-	// Effective severity (§7.7): the source-stamped per-kind default,
-	// unless config overrides the kind via --severity. Stamped before
-	// the storm stage so a storm's max-member severity honors the
-	// override too. A nil policy (pre-§7.7 unit tests) leaves the
-	// source's stamp untouched.
 	if d.routing != nil {
-		sig.Severity = d.routing.Classify(sig)
+		sig.Severity = d.routing.Classify(*sig)
 	}
-	// §9.4: triage-status records refine the class AFTER config —
-	// the agent that diagnosed the incident outranks the per-kind
-	// default. Downgraded incidents stop re-paging (they route to
-	// the watchboard/store); escalated pins critical and thereby
-	// bypasses the watchboard. Per-incident mode only, like the
-	// routing stages below. A returned record means THIS signal was
-	// downgraded — the input to the regression evidence check in the
-	// duplicate branch (M4 observation 3).
 	var downgraded *memory.TriageStatusRecord
 	if d.triage != nil && d.mode == "per-incident" {
-		sig.Severity, downgraded = d.triage.Apply(ctx, sig)
+		sig.Severity, downgraded = d.triage.Apply(ctx, *sig)
 	}
-	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
-	if ok, gate := d.filter.Decide(sig); !ok {
-		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
-		return
-	}
-	result := d.dedup.ObserveSignal(key, engine.Observation{
-		LastTS:     sig.LastSeen,
-		Kind:       sig.Kind,
-		Severity:   sig.Severity,
-		Message:    sig.Message,
-		Repeatable: d.opensSessions(sig),
-		Downgraded: downgraded != nil,
-	})
-	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
-	// An occurrence of a still-open, storm-claimed incident past its
-	// first window — a repeat or an absorbed one — is member activity
-	// for the storm's idle clock (§7.5). The pre-#599 reopen re-entered
-	// the storm stage and refreshed it; a repeat does not, so say so.
-	if d.storm != nil && result.Storm != "" && (result.Kind == engine.DedupRepeat || result.Absorbed) {
-		d.storm.NoteMemberActivity(key, sig.LastSeen)
-	}
-	if result.Kind == engine.DedupRepeat {
-		// Issue #599: the incident is still open, so its lapse is a
-		// followup into the bound session (the storm's, when a storm
-		// owns it), never a second open.
-		d.injectRepeat(ctx, sig, key, result)
-		return
-	}
-	if result.Kind == engine.DedupDuplicate {
-		d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
-		// Info-level log: the operator asked "is the watcher seeing
-		// events?" and today the answer was "yes when things break,
-		// silent when things work" — this line makes suppressed
-		// duplicates visible so the operator can distinguish
-		// "watcher missed the event" from "watcher saw it and
-		// correctly deduped". Bound is the dedup window (set via
-		// --dedup-window, default 5m); result.Count is the running
-		// hit count for this key within the current window.
-		log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
-			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
-		// §9.4 regression evidence (M4 observation 3): a steady
-		// symptom stream never exits the dedup window, so a
-		// downgraded incident could regress hard without any visible
-		// routing change until the loop pauses. When the window count
-		// reaches --triage-regress-factor × the count at downgrade
-		// time, ONE schema-stable kind=triage.regressed followup goes
-		// into the bound session. Evidence only — no re-page, no
-		// record rewrite: the agent/human decides
-		// (docs/triage-status-write-design.md §out-of-scope).
-		if downgraded != nil && result.SessionID != "" {
-			if baseline, due := d.triage.noteRegression(key, result.Count); due {
-				d.injectTriageRegressed(ctx, sig, *downgraded, baseline, result)
-			}
-		}
-		// Cross-source join visibility (M4 observation 4): when the
-		// duplicate comes from a DIFFERENT source family than the
-		// signal that opened the incident (leading↔reactive — e.g.
-		// capacity's quota_blocked folding into the quota source's
-		// forecast session), the join must be audible inside the
-		// session, not only store-visible: route it as a schema-stable
-		// kind=family.member followup instead of suppressing it.
-		// Bounded to one per source family per incident per window by
-		// CrossSourceJoin. Per-incident mode only, like every routing
-		// stage.
-		//
-		// STORM-CLAIMED entries are excluded (result.Storm != "": the
-		// bound session is the STORM's session, §7.5): a storm exists
-		// to collapse member-level chatter into one session, so a
-		// joined member of a storm must not fan out family.member
-		// injects there. The occurrence is still store-recorded below
-		// (route=suppressed, carrying the storm's session), just never
-		// injected.
-		if d.mode == "per-incident" && result.SessionID != "" && result.Storm == "" {
-			if openedBy, join := d.dedup.CrossSourceJoin(key, sig.Kind); join {
-				d.injectJoinFollowup(ctx, sig, result, key, openedBy)
-				return
-			}
-		}
-		// Unbound entry on a session-class duplicate (issue #84): the
-		// residue of an OpenIncident that failed with sid=="" — no
-		// BindIncident ever ran. The case-2 retry safety net cannot
-		// repair it, because case 3 advances LastSeen on every
-		// sub-window event and a steady symptom stream never exits
-		// the dedup window (see above). Retry the open on THIS
-		// duplicate instead — the #81 storm-path convention (retry on
-		// the next event, which has the payload in hand). Guarded to
-		// the severity class that opens sessions: info- and
-		// watchboard-routed entries are legitimately unbound, not
-		// residue. Never fires an Append at sid=="".
-		//
-		// A STORM-CLAIMED entry (result.Storm != "") is excluded (issue
-		// #104): a session-less storm member is not #84 open residue —
-		// the storm claimed it, and its own retry-on-attach (#94) owns
-		// recovering the storm session. Opening a fresh per-incident
-		// (kind=k8s-event) session here would overwrite the storm binding,
-		// the §7.5 N-session fan-out. It is suppressed as a storm member
-		// below instead; the storm's next fresh attach reopens the class.
-		if !d.dryRun && result.SessionID == "" && result.Storm == "" && d.opensSessions(sig) {
-			d.retryIncidentOpen(ctx, sig, result, key)
-			return
-		}
-		// Storm-claimed but session-less duplicate (issue #104): the
-		// storm's formation/attach open failed and has not recovered yet.
-		// Its outcome is membership, not a session of its own — record it
-		// against the storm (route=storm-member, empty session until the
-		// storm reopens) rather than the plain route=suppressed row below,
-		// and never open a competing per-incident session.
-		if result.SessionID == "" && result.Storm != "" {
-			d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
-			return
-		}
-		// §9.1: suppressed duplicates are still emitted signals — the
-		// store keeps them (with the session the incident is bound to)
-		// so lookback sees the true occurrence rate, not the deduped one.
-		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: result.SessionID})
-		return
-	}
-	// A fresh incident window: stamp which source family opened it
-	// (the reference point for cross-source join followups above) and
-	// reset any regression baseline from the previous window.
-	//
-	// This is also where a finding is COUNTED as found (#288). Every
-	// non-duplicate passes through here exactly once, before the
-	// routing branches below fork it to the store, the watchboard, a
-	// storm, or its own session — so lookout_findings_total measures
-	// detection, not delivery. Severity is post-triage (§9.4): the
-	// class the sentinel actually assigned, including an agent's
-	// downgrade.
-	d.metrics.findings.WithLabelValues(sig.Kind, string(sig.Severity)).Inc()
-	d.dedup.NoteIncidentKind(key, sig.Kind)
-	if d.triage != nil {
-		d.triage.windowRolled(key)
-	}
-	// Severity routing, info class (§7.7): stored only per §9.1 —
-	// with --store set the signal is persisted (route=info-stored) and
-	// surfaced by read-path queries and digests; without it, counted +
-	// logged and dropped, never silently ignored. The info_dropped
-	// metric counts the class in BOTH cases (frozen name; it is the
-	// "did not inject" count, store or no store). Placed after dedup
-	// (so it counts incident records, not raw event volume) and before
-	// storm correlation (info neither opens nor joins sessions, storms
-	// included). Shared mode skips routing entirely: ALL severities go
-	// to --target-session.
-	if d.mode == "per-incident" && d.routing != nil && engine.RouteFor(sig.Severity) == engine.RouteStore {
-		d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
-		if d.store != nil {
-			d.store.Record(sig, store.Outcome{Route: store.RouteInfoStored})
-			log.Printf("info-store %s %s/%s (severity=info: stored-only class; persisted to --store)",
-				sig.Kind, sig.Namespace, sig.Name)
-		} else {
-			log.Printf("info-drop %s %s/%s (severity=info: stored-only class; set --store to persist — counted and dropped)",
-				sig.Kind, sig.Namespace, sig.Name)
-		}
-		return
-	}
-	// Storm correlation (§7.5, pipeline position: after dedup,
-	// before severity routing): a new incident may form a storm,
-	// attach to an open one, or fall through per-incident.
-	// Only the in-memory Observe + stormReady channel registration runs
-	// under stormReadyMu; enrichment and sink HTTP I/O execute under the
-	// fine-grained per-ancestor stormKey so unrelated incidents/storms
-	// proceed concurrently (#642).
-	if d.storm != nil {
-		d.stormReadyMu.Lock()
-		v := d.storm.Observe(sig)
-		var formDone chan struct{}
-		switch v.Kind {
-		case engine.StormFormed:
-			if d.stormReady == nil {
-				d.stormReady = make(map[string]chan struct{})
-			}
-			formDone = make(chan struct{})
-			d.stormReady[v.Storm.ID] = formDone
-		case engine.StormAttached:
-			formDone = d.stormReady[v.Storm.ID]
-		}
-		d.stormReadyMu.Unlock()
+	return key, downgraded
+}
 
-		switch v.Kind {
-		case engine.StormFormed:
-			release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
-			defer func() {
-				close(formDone)
-				d.stormReadyMu.Lock()
-				delete(d.stormReady, v.Storm.ID)
-				d.stormReadyMu.Unlock()
-				release()
-			}()
-			d.stormFormed(ctx, sig, v)
-			return
-		case engine.StormAttached:
-			if formDone != nil {
-				select {
-				case <-formDone:
-				case <-ctx.Done():
-					return
-				}
-			}
-			release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
-			defer release()
-			if v.Storm.SessionID == "" {
-				if boundSid, ok := d.dedup.LookupSession(sig.Key); ok && boundSid != "" {
-					v.Storm.SessionID = boundSid
-				}
-			}
-			d.stormAttached(ctx, sig, v)
+func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord) {
+	d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
+	log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
+		sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
+	if downgraded != nil && result.SessionID != "" {
+		if baseline, due := d.triage.noteRegression(key, result.Count); due {
+			d.injectTriageRegressed(ctx, sig, *downgraded, baseline, result)
+		}
+	}
+	if d.mode == "per-incident" && result.SessionID != "" && result.Storm == "" {
+		if openedBy, join := d.dedup.CrossSourceJoin(key, sig.Kind); join {
+			d.injectJoinFollowup(ctx, sig, result, key, openedBy)
 			return
 		}
 	}
-	// Severity routing, warning class (§7.7): batch into the shared
-	// watchboard's rolling digest instead of opening a per-incident
-	// session. AFTER the storm stage on purpose: a correlated burst
-	// always opens a storm session regardless of member severity —
-	// §7.5's whole point is ONE aggregate incident an agent works,
-	// which a digest entry is not — so storm formation/attachment
-	// bypasses warning routing (the returns above). Only in
-	// per-incident mode: shared mode routes ALL severities to
-	// --target-session unchanged.
-	if d.mode == "per-incident" && d.board != nil && engine.RouteFor(sig.Severity) == engine.RouteWatchboard {
-		// Recorded without a session on purpose: the watchboard's
-		// session is created lazily at flush time and rotates — the
-		// digest inject, not this occurrence row, is the session-bound
-		// artifact.
-		d.store.Record(sig, store.Outcome{Route: store.RouteWatchboard})
-		d.board.Add(ctx, sig, result.Count)
+	if !d.dryRun && result.SessionID == "" && result.Storm == "" && d.opensSessions(sig) {
+		d.retryIncidentOpen(ctx, sig, result, key)
 		return
 	}
-	if d.mode == "per-incident" && !d.dryRun {
-		release := d.acquireKey(d.perIncidentCoordKey(sig, key))
+	if result.SessionID == "" && result.Storm != "" {
+		d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
+		return
+	}
+	d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: result.SessionID})
+}
+
+func (d *dispatcher) routeInfoSignal(sig engine.Signal) bool {
+	if d.mode != "per-incident" || d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore {
+		return false
+	}
+	d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
+	if d.store != nil {
+		d.store.Record(sig, store.Outcome{Route: store.RouteInfoStored})
+		log.Printf("info-store %s %s/%s (severity=info: stored-only class; persisted to --store)",
+			sig.Kind, sig.Namespace, sig.Name)
+	} else {
+		log.Printf("info-drop %s %s/%s (severity=info: stored-only class; set --store to persist — counted and dropped)",
+			sig.Kind, sig.Namespace, sig.Name)
+	}
+	return true
+}
+
+func (d *dispatcher) correlateStormSignal(ctx context.Context, sig engine.Signal) bool {
+	if d.storm == nil {
+		return false
+	}
+	d.stormReadyMu.Lock()
+	v := d.storm.Observe(sig)
+	var formDone chan struct{}
+	switch v.Kind {
+	case engine.StormFormed:
+		if d.stormReady == nil {
+			d.stormReady = make(map[string]chan struct{})
+		}
+		formDone = make(chan struct{})
+		d.stormReady[v.Storm.ID] = formDone
+	case engine.StormAttached:
+		formDone = d.stormReady[v.Storm.ID]
+	}
+	d.stormReadyMu.Unlock()
+
+	switch v.Kind {
+	case engine.StormFormed:
+		release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
+		defer func() {
+			close(formDone)
+			d.stormReadyMu.Lock()
+			delete(d.stormReady, v.Storm.ID)
+			d.stormReadyMu.Unlock()
+			release()
+		}()
+		d.stormFormed(ctx, sig, v)
+		return true
+	case engine.StormAttached:
+		if formDone != nil {
+			select {
+			case <-formDone:
+			case <-ctx.Done():
+				return true
+			}
+		}
+		release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
 		defer release()
-		// Sibling fold (§7.7 amendment 2026-10-08): another pod of the
-		// same workload already has a live incident of this class — a
-		// rollout's old and new ReplicaSet crash-looping on one fault.
-		// Folded into that session before enrichment, so no bundle is
-		// built for a session that never opens.
-		if d.foldSibling(ctx, sig, key, result.Count) {
-			return
-		}
-		// Enrichment (§7.6): pre-warm the session by attaching the
-		// in-process bundle to the INITIAL inject — composed BEFORE
-		// the open, because the sink delivers the initial payload
-		// with it. Severity-gated by --enrich; hard-capped by
-		// --enrich-timeout. Runs under the per-key / per-sibling lock
-		// so a followup for the same incident cannot race ahead of its
-		// initial open, while unrelated keys enrich concurrently (#642).
-		if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
-			if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
-				sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+		if v.Storm.SessionID == "" {
+			if boundSid, ok := d.dedup.LookupSession(sig.Key); ok && boundSid != "" {
+				v.Storm.SessionID = boundSid
 			}
 		}
-		payload := incidentPayload(sig, result)
-		// New incident → the sink's open verb: the core-agent sink
-		// POSTs /sessions then the frozen inject envelope (the exact
-		// pre-Sink byte sequence); the webhook sink POSTs /incidents
-		// with the payload as the body. A non-empty id alongside an
-		// error means the container opened but the initial delivery
-		// failed — bind anyway (followups and §7.4 outcomes still
-		// have a home) and count the inject error, exactly the
-		// pre-Sink behavior.
-		sid, err, ok := d.openSession(ctx, d.incidentKey(key), payload, sig.Key.Reason)
-		if !ok {
-			log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
-			return
+		d.stormAttached(ctx, sig, v)
+		return true
+	}
+	return false
+}
+
+func (d *dispatcher) dispatchPerIncidentOpen(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult) {
+	release := d.acquireKey(d.perIncidentCoordKey(sig, key))
+	defer release()
+	if d.foldSibling(ctx, sig, key, result.Count) {
+		if sid, ok := d.dedup.LookupSession(key); ok {
+			d.recordBoundSession(key, sid, sig, false)
 		}
-		// BindIncident = BindSession + the identity the recovery
-		// tracker needs to survive a restart (rides on dedup-persist).
-		d.dedup.BindIncident(key, sid, sig.IncidentRef())
-		// Index the bound incident by its §7.5 blast-radius keys so a
-		// later watchboard warning under the same ancestor reattaches
-		// here instead of opening a digest entry (issue #220).
-		d.noteAncestors(key, sig)
-		if d.storm != nil {
-			// Remember the session for a possible later supersede:
-			// if this incident becomes a founding storm member, the
-			// storm inject points its session at the storm's.
-			d.storm.NoteMemberSession(key, sid)
-		}
-		// Hand the bound incident to the recovery tracker (§7.4) so
-		// the fix-verify loop closes into this session.
-		if d.tracker != nil {
-			d.tracker.Track(engine.Incident{
-				Key:       key,
-				SessionID: sid,
-				FirstSeen: sig.FirstSeen,
-				Ref:       sig.IncidentRef(),
-			})
-		}
-		// §9.1: record the routing DECISION (route=injected, with the
-		// session it targets), not delivery success — delivery errors
-		// stay the sink's telemetry (inject_errors_total). The
-		// recorded signal carries no enrichment (the store strips it).
-		d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
-		if err != nil {
-			log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
-			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
-			// Bound anyway, but the agent never got the incident: the
-			// next occurrence re-sends the full open payload instead of
-			// meeting it first as a pure reminder (#599).
-			d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
-			return
-		}
-		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
-		// Info-level log: the successful-inject case was silent before
-		// #212 — operators had to correlate client-go informer warnings
-		// with daemon session-list dumps to infer whether the watcher
-		// was firing at all. Making success visible turns "is the
-		// sidecar working?" into a grep. sid is traceable in the daemon's
-		// own logs / /sessions API so cross-container reconstruction of
-		// an incident is a single traceID-style filter.
-		log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
-			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 		return
 	}
-	// Shared mode + dry-run: no incident open — the payload appends to
-	// the pre-configured target session (or prints).
+	if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
+		if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+			sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+		}
+	}
+	payload := incidentPayload(sig, result)
+	sid, err, ok := d.openSession(ctx, d.incidentKey(key), payload, sig.Key.Reason)
+	if !ok {
+		log.Printf("dispatcher: create session for %s/%s: %v", sig.Namespace, sig.Name, err)
+		return
+	}
+	d.recordBoundSession(key, sid, sig, true)
+	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
+	if err != nil {
+		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
+		return
+	}
+	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
+	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
+		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+}
+
+func (d *dispatcher) dispatchSharedOrDryRun(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult) {
 	sid := d.targetSid
-	// Hand the bound incident to the recovery tracker (§7.4). Shared
-	// mode tracks too — the outcome routes to the shared session.
 	if d.tracker != nil {
 		d.tracker.Track(engine.Incident{
 			Key:       key,
@@ -579,24 +409,17 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			Ref:       sig.IncidentRef(),
 		})
 	}
-	// Enrichment stays per-incident-mode-only (§7.6): shared mode has
-	// no session creation to warm and keeps its frozen contract.
 	if d.enrich != nil && d.mode == "per-incident" && d.enrich.enabledFor(sig.Severity) {
 		if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
 			sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
 		}
 	}
 	payload := incidentPayload(sig, result)
-	// Fit under the sink's per-inject ceiling like the open path does
-	// (#198). This shared/dry-run branch reaches Append directly (not
-	// openSession), so it carries its own guard; fitting before the
-	// dry-run print keeps the printed payload the true wire.
 	if d.injectMaxBytes > 0 {
 		if shed := payload.FitTo(d.injectMaxBytes); len(shed) > 0 {
 			d.noteInjectShrunk(sig.Namespace, sig.Name, shed)
 		}
 	}
-	// §9.1: record the routing DECISION — see the per-incident branch.
 	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
@@ -943,22 +766,10 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
 		return
 	}
-	d.dedup.BindIncident(key, sid, sig.IncidentRef())
-	d.noteAncestors(key, sig)
 	// The session's actual opener is THIS signal's source family —
 	// re-stamp so cross-source join followups reference reality.
 	d.dedup.NoteIncidentKind(key, sig.Kind)
-	if d.storm != nil {
-		d.storm.NoteMemberSession(key, sid)
-	}
-	if d.tracker != nil {
-		d.tracker.Track(engine.Incident{
-			Key:       key,
-			SessionID: sid,
-			FirstSeen: sig.FirstSeen,
-			Ref:       sig.IncidentRef(),
-		})
-	}
+	d.recordBoundSession(key, sid, sig, true)
 	d.store.Record(sig, store.Outcome{Route: store.RouteInjected, SessionID: sid})
 	if err != nil {
 		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)

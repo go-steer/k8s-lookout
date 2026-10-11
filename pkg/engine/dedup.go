@@ -108,78 +108,8 @@ type dedupEntry struct {
 	// than mis-binding.
 	AncestorKeys []string `json:"ancestor_keys,omitempty"`
 
-	// The repeat schedule (issue #599, DESIGN.md §7.4 "Repeats of an
-	// open incident"). Before #599 an incident whose dedup window
-	// lapsed while it was still broken opened again, so a pod the
-	// scheduler re-queues every ~5 minutes opened a session every ~5
-	// minutes. Now a lapse on a still-open incident is a reminder into
-	// the bound session, on a doubling schedule, and these fields are
-	// that schedule. All of them are version tolerant both ways like
-	// Incident/Storm: an older snapshot loads them zero (see the
-	// legacy notes on each), and an older binary ignores the keys.
-	//
-	// SessionClass records that the signal which opened this entry
-	// routes to a session of its own (critical, or any class when no
-	// routing policy/watchboard is configured). Only such an entry can
-	// repeat: a warning bound to the watchboard session, or an info
-	// signal that was only stored, keeps the pre-#599 lapse-and-reopen
-	// path, so a §9.4 escalation of it still opens a per-incident
-	// session. Legacy entries load false and keep that path until
-	// their window next rolls.
-	SessionClass bool `json:"session_class,omitempty"`
-	// Resolved is set when a §7.4 kind=resolved outcome routed to this
-	// entry's session (MarkResolved). A resolved incident is not open:
-	// its recurrence is a fresh incident, exactly as before #599, even
-	// if the recovery tracker has already re-armed it.
-	Resolved bool `json:"resolved,omitempty"`
-	// RepeatCount is how many pure reminders went into the session
-	// since the last open or material change: the wire number, so the
-	// next reminder is number RepeatCount+1.
-	RepeatCount int `json:"repeat_count,omitempty"`
-	// Step is the backoff step: how many reminders and class-change
-	// followups went in since the open (or the last rate jump). The
-	// next inject is due repeatInterval(window, Step+1) after
-	// LastInjectAt. Separate from RepeatCount because a class change
-	// restarts the wire numbering but must not rewind the interval —
-	// otherwise a failure rotating through message shapes would inject
-	// at the first step's pace forever. A rate jump resets it. Zero in
-	// an entry that predates it, which repeat reads as RepeatCount.
-	Step int `json:"step,omitempty"`
-	// LastInjectAt is when this incident last spoke into its session:
-	// the open, a reminder, or a material-change followup. Zero in a
-	// legacy entry, which repeat() reads as FirstSeen (the open).
-	LastInjectAt time.Time `json:"last_inject_at,omitzero"`
-	// InjectCount is Count as of LastInjectAt, so Count-InjectCount is
-	// the occurrences since the session last heard about this incident.
-	InjectCount int `json:"inject_count,omitempty"`
-	// RatePerHour is the reference occurrence rate for the count-jump
-	// test: the rate over the interval that ended at the last reminder
-	// (or at the last count-jump followup). Zero until the first
-	// reminder, which disables the test until then.
-	RatePerHour float64 `json:"rate_per_hour,omitempty"`
-	// Classes are the signal classes (repeatClass: kind, severity and
-	// message shape, hashed) this incident has shown, oldest first,
-	// capped at maxRepeatClasses. A repeat whose class is not here is a
-	// material change. A set rather than the last value because one
-	// incident legitimately alternates: kubelet's pull cycle emits
-	// `Failed to pull image`, `Error: ErrImagePull`, `Back-off pulling
-	// image` and `Error: ImagePullBackOff` onto the same key. Empty in
-	// a legacy entry; the first class seen after restore is adopted
-	// silently rather than read as a change.
-	Classes []string `json:"classes,omitempty"`
-	// PendingChange records a material class change the session has
-	// not heard yet. It is announced (one followup, repeat_count
-	// omitted) at the first occurrence more than max(2 windows, the
-	// current step's interval) past the last inject, and takes a backoff step (Step), the floor that
-	// keeps an incident rotating through more shapes than
-	// maxRepeatClasses from injecting faster than its reminders.
-	PendingChange bool `json:"pending_change,omitempty"`
-	// Undelivered marks that the last inject decided for this entry
-	// (LastChange says which: RepeatChangeOpen, a RepeatChange* value,
-	// or "" for a reminder) failed to reach the session; the next
-	// occurrence re-sends it (MarkUndelivered).
-	Undelivered bool   `json:"undelivered,omitempty"`
-	LastChange  string `json:"last_change,omitempty"`
+	repeatState
+
 	// Parent points a sibling-folded entry (§7.7 SessionForSibling) to
 	// the root entry whose per-incident session it folded into, so all
 	// sibling pods of a rolling deployment share one repeat schedule
@@ -187,10 +117,95 @@ type dedupEntry struct {
 	Parent *EventKey `json:"parent,omitempty"`
 }
 
+// repeatState encapsulates the per-entry repeat/backoff schedule state
+// (issue #599 / #644, DESIGN.md §7.4 "Repeats of an open incident").
+// Embedded anonymously in dedupEntry so JSON snapshot serialization stays
+// flat and 100% wire-compatible with pre-existing snapshots.
+type repeatState struct {
+	SessionClass  bool      `json:"session_class,omitempty"`
+	Resolved      bool      `json:"resolved,omitempty"`
+	RepeatCount   int       `json:"repeat_count,omitempty"`
+	Step          int       `json:"step,omitempty"`
+	LastInjectAt  time.Time `json:"last_inject_at,omitzero"`
+	InjectCount   int       `json:"inject_count,omitempty"`
+	RatePerHour   float64   `json:"rate_per_hour,omitempty"`
+	Classes       []string  `json:"classes,omitempty"`
+	PendingChange bool      `json:"pending_change,omitempty"`
+	Undelivered   bool      `json:"undelivered,omitempty"`
+	LastChange    string    `json:"last_change,omitempty"`
+}
+
+func newRepeatState(now time.Time, repeatable bool, class string) repeatState {
+	return repeatState{
+		SessionClass: repeatable,
+		LastInjectAt: now,
+		InjectCount:  1,
+		LastChange:   RepeatChangeOpen,
+		Classes:      []string{class},
+	}
+}
+
+func (r *repeatState) clone() repeatState {
+	out := *r
+	out.Classes = slices.Clone(r.Classes)
+	return out
+}
+
+func (r *repeatState) markUndelivered(change string) {
+	r.Undelivered = true
+	r.LastChange = change
+}
+
+func (r *repeatState) markResolved() {
+	r.Resolved = true
+}
+
+func (r *repeatState) resetForUnbind(now time.Time, count int) {
+	r.RepeatCount = 0
+	r.Step = 0
+	r.RatePerHour = 0
+	r.PendingChange = false
+	r.Undelivered = false
+	r.LastChange = RepeatChangeOpen
+	r.LastInjectAt = now
+	r.InjectCount = count
+}
+
+func (r *repeatState) recordRateJump(now time.Time, count int, rate float64) {
+	r.RatePerHour = rate
+	r.RepeatCount = 0
+	r.Step = 0
+	r.LastChange = RepeatChangeRate
+	r.LastInjectAt = now
+	r.InjectCount = count
+	r.PendingChange = false
+}
+
+func (r *repeatState) recordClassChange(now time.Time, count int) {
+	r.RepeatCount = 0
+	r.Step++
+	r.LastChange = RepeatChangeClass
+	r.LastInjectAt = now
+	r.InjectCount = count
+	r.PendingChange = false
+}
+
+func (r *repeatState) recordReminder(now time.Time, count int, rate float64) int {
+	r.RatePerHour = rate
+	r.RepeatCount++
+	r.Step++
+	r.LastChange = ""
+	r.LastInjectAt = now
+	r.InjectCount = count
+	r.PendingChange = false
+	return r.RepeatCount
+}
+
 // clone deep-copies the entry, for Snapshot to encode outside the lock
 // while repeat keeps mutating the live one.
 func (e *dedupEntry) clone() *dedupEntry {
 	out := *e
+	out.repeatState = e.repeatState.clone()
 	if e.Incident != nil {
 		ref := *e.Incident
 		out.Incident = &ref
@@ -201,7 +216,6 @@ func (e *dedupEntry) clone() *dedupEntry {
 	}
 	out.FollowupSources = slices.Clone(e.FollowupSources)
 	out.AncestorKeys = slices.Clone(e.AncestorKeys)
-	out.Classes = slices.Clone(e.Classes)
 	return &out
 }
 
@@ -737,15 +751,11 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 // first inject, and its class the first the incident has shown.
 func newDedupEntry(now time.Time, obs Observation, class string) *dedupEntry {
 	return &dedupEntry{
-		FirstSeen:    now,
-		LastSeen:     now,
-		EventLastTS:  obs.LastTS,
-		Count:        1,
-		SessionClass: obs.Repeatable,
-		LastInjectAt: now,
-		InjectCount:  1,
-		LastChange:   RepeatChangeOpen,
-		Classes:      []string{class},
+		FirstSeen:   now,
+		LastSeen:    now,
+		EventLastTS: obs.LastTS,
+		Count:       1,
+		repeatState: newRepeatState(now, obs.Repeatable, class),
 	}
 }
 
@@ -753,33 +763,18 @@ func newDedupEntry(now time.Time, obs Observation, class string) *dedupEntry {
 // key — an open (change = RepeatChangeOpen), a reminder ("") or a
 // material change — did not reach the bound session, so the next
 // occurrence of the still-open incident re-sends it whatever the
-// schedule says (issue #599). The dispatcher calls it on a delivery
-// error, and after an open that created a session but failed its
-// initial delivery: without it that agent's first message would be a
-// pure reminder for an incident it has never seen. No-op on a missing
-// entry.
+// schedule says (issue #599).
 func (c *DedupCache) MarkUndelivered(key EventKey, change string) {
 	key.Reason = CanonicalReason(key.Reason)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if entry, ok := c.entries[key]; ok {
-		entry.Undelivered = true
-		entry.LastChange = change
+		entry.markUndelivered(change)
 	}
 }
 
 // Unbind detaches key's entry from a session the sink reports gone
-// (HTTP 404/410: the agent lost it — an ax task recreated, a daemon
-// restarted without its state) and restarts its schedule as if
-// freshly opened, so the dispatcher can reopen the incident in a new
-// session (issue #599). A storm-claimed entry keeps its storm
-// fingerprint and never opens a per-incident session of its own
-// (#104): it becomes a session-less storm member, and its next lapse
-// goes back through the storm stage. That stage does NOT recover a
-// storm whose session is gone — stormAttached retries the open only
-// when the storm's session id is empty, so a storm still holding the
-// dead id keeps routing members there, exactly as before #599. No-op
-// on a missing entry.
+// (HTTP 404/410) and restarts its repeat schedule as if freshly opened.
 func (c *DedupCache) Unbind(key EventKey) {
 	key.Reason = CanonicalReason(key.Reason)
 	now := c.clock()
@@ -792,27 +787,16 @@ func (c *DedupCache) Unbind(key EventKey) {
 	e.SessionID = ""
 	e.Parent = nil
 	e.FirstSeen = now
-	e.RepeatCount = 0
-	e.Step = 0
-	e.RatePerHour = 0
-	e.PendingChange = false
-	e.Undelivered = false
-	e.LastChange = RepeatChangeOpen
-	e.markInject(now)
+	e.resetForUnbind(now, e.Count)
 }
 
-// MarkResolved records that key's incident was resolved (§7.4): the
-// dispatcher calls it when it routes a kind=resolved outcome, so a
-// recurrence opens a fresh incident instead of repeating into the
-// resolved one (issue #599). Not cleared by kind=resolved.reverted —
-// a recurrence is a new incident on the wire, exactly as before. A
-// new entry for the key starts unresolved. No-op on a missing entry.
+// MarkResolved records that key's incident was resolved (§7.4).
 func (c *DedupCache) MarkResolved(key EventKey) {
 	key.Reason = CanonicalReason(key.Reason)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if entry, ok := c.entries[key]; ok {
-		entry.Resolved = true
+		entry.markResolved()
 	}
 }
 
