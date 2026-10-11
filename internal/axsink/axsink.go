@@ -84,6 +84,8 @@ type Config struct {
 	// StartTimeout bounds creating and resuming a task and waiting for its
 	// server to come up. Zero means two minutes.
 	StartTimeout time.Duration
+	// Now is the clock for holding reminders (hold.go); nil is time.Now.
+	Now func() time.Time
 }
 
 // maxRemembered bounds the in-memory incident -> session map. Past it, an
@@ -103,6 +105,16 @@ type Sink struct {
 
 	mu         sync.Mutex
 	remembered map[string]string // IncidentKey.String() -> "<task>/<session>"
+
+	hold      *holder       // held reminders and each task's last real inject (hold.go)
+	idleAfter time.Duration // a task with no real inject for this long is idle
+}
+
+func (s *Sink) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now()
+	}
+	return time.Now()
 }
 
 var (
@@ -143,7 +155,10 @@ func New(cfg Config) (*Sink, error) {
 	if atespace == "" {
 		atespace = "default"
 	}
-	return &Sink{cfg: cfg, atespace: atespace, base: base, remembered: map[string]string{}}, nil
+	return &Sink{
+		cfg: cfg, atespace: atespace, base: base, remembered: map[string]string{},
+		hold: newHolder(), idleAfter: idleAfterFor(cfg.Template),
+	}, nil
 }
 
 // UseSessionStore makes the sink remember cluster's incident sessions in
@@ -170,6 +185,8 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
+	// The task is awake now: reminders held for it go first.
+	s.flushHeld(ctx, task)
 	inj := s.injectorFor(task)
 	if id, ok := s.recall(ctx, key); ok {
 		if t, sid, ok := splitID(id); ok && t == task {
@@ -178,11 +195,14 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 			switch {
 			case err == nil:
 				s.remember(ctx, key, id)
+				s.paid(id)
+				s.noteReal(task)
 				return id, nil
 			case !errors.As(err, &se) || se.Code != http.StatusNotFound:
 				// The session may well still be there (a timeout, a
 				// 5xx): stay bound to it and let the caller count the
 				// failed delivery, as for a partial open.
+				s.owe(id)
 				return id, err
 			}
 			// 404: the agent no longer has the session (task
@@ -195,7 +215,14 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 	}
 	id := task + "/" + sid
 	s.remember(ctx, key, id)
-	return id, err
+	if err != nil {
+		// The session exists but the payload never arrived.
+		s.owe(id)
+		return id, err
+	}
+	s.paid(id)
+	s.noteReal(task)
+	return id, nil
 }
 
 // CreateSessionKeyed opens an empty session in key's task
@@ -207,10 +234,12 @@ func (s *Sink) CreateSessionKeyed(ctx context.Context, key inject.IncidentKey) (
 	if err := s.startTask(ctx, task); err != nil {
 		return "", err
 	}
+	s.flushHeld(ctx, task)
 	sid, err := s.injectorFor(task).CreateSession(ctx)
 	if err != nil {
 		return "", err
 	}
+	s.noteReal(task)
 	return task + "/" + sid, nil
 }
 
@@ -231,12 +260,47 @@ func (s *Sink) CreateSession(ctx context.Context) (string, error) {
 
 // Append delivers payload to the incident's session. If the task is
 // suspended, Substrate's router resumes it before forwarding.
+//
+// A pure reminder (repeat_count > 0) is the exception (issue #599): if the
+// task is idle it is held, not sent, and Append returns nil; the latest
+// held reminder per session goes ahead of the next real inject to the
+// task. Anything else goes straight through, held reminders first.
 func (s *Sink) Append(ctx context.Context, id string, payload any) error {
 	task, sid, ok := splitID(id)
 	if !ok {
 		return fmt.Errorf("ax sink: incident id %q is not <task>/<session>", id)
 	}
-	return s.injectorFor(task).Append(ctx, sid, payload)
+	if cluster, isReminder := reminder(payload); isReminder {
+		// A reminder after a failed real inject may be the agent's first
+		// word on the incident: never hold it.
+		if !s.owes(id) {
+			switch s.stateOf(ctx, task) {
+			case taskGone:
+				s.dropHeldIn(task)
+				return s.goneError(task)
+			case taskIdle:
+				s.holdReminder(id, cluster, payload)
+				log.Printf("ax sink: holding the reminder for %s: the task is idle, so it waits for the next real inject", id)
+				return nil
+			}
+		}
+		s.forgetHeld(id)
+		err := s.injectorFor(task).Append(ctx, sid, payload)
+		if err == nil {
+			s.paid(id) // it carries the incident's payload
+			s.countReminder(cluster, ReminderDirect)
+		}
+		return err
+	}
+	s.flushHeld(ctx, task)
+	err := s.injectorFor(task).Append(ctx, sid, payload)
+	if err != nil {
+		s.owe(id)
+		return err
+	}
+	s.paid(id)
+	s.noteReal(task)
+	return nil
 }
 
 func splitID(id string) (task, sid string, ok bool) {

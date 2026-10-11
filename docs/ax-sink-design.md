@@ -7,7 +7,7 @@ a third, `--sink=ax`, which runs incidents in
 [Agent Executor (AX)](https://github.com/google/ax) tasks on Agent Substrate:
 by default one task per incident, or one long-lived task per cluster.
 Tracking issues: #567 (the sink), #590 (task identity, task scope, session
-reuse), #580 (TLS for an AX in another cluster).
+reuse), #580 (TLS for an AX in another cluster), #599 (holding reminders).
 
 **Decision: the ax sink creates (or finds) an AX task for each incident (or
 one per cluster), named from lookout's own incident identity, and speaks the
@@ -33,7 +33,7 @@ severity routing), so the mapping is direct.
 | Verb | ax sink |
 |---|---|
 | `OpenIncidentKeyed(key, payload)` | Create the key's task from the template (an existing task with that name is reused), `ResumeTask`, wait for the task to be ready. If this incident was opened before and its session is known, `POST /sessions/<sid>/inject` into that session; otherwise `POST /sessions` and `POST /sessions/<sid>/inject` with the payload as the message. Returns `<task>/<sid>`. |
-| `Append(id, payload)` | `POST /sessions/<sid>/inject`, routed to `<task>`. A suspended task is resumed by the router before the request is forwarded. |
+| `Append(id, payload)` | `POST /sessions/<sid>/inject`, routed to `<task>`. A suspended task is resumed by the router before the request is forwarded. A pure reminder (`repeat_count > 0`) to an idle task is held instead; see Holding reminders. |
 | `CreateSessionKeyed(key)` | Start the cluster's watchboard task, then `POST /sessions`. Keeps the watchboard rotation's frozen wire order (empty session first). |
 | `OpenIncident` / `CreateSession` | The plain `Sink` and `SessionOpener` verbs, for callers that don't pass a key. The key is rebuilt from the payload (see below); lookout's own dispatcher never uses them with this sink. |
 
@@ -138,6 +138,93 @@ session in a different task (the scope changed between runs) is ignored.
 
 Watchboard sessions are never reused: the first session and every rotation
 open a new session in the watchboard task, which is what rotation is for.
+
+### Holding reminders
+
+A failure that stays broken repeats into its open incident's session as a
+followup (#599). A followup with `repeat_count > 0` is a pure reminder: still
+failing, nothing material changed. Reminders back off from `--dedup-window`
+to one an hour. Sending one to an idle task keeps the task awake, and sending
+one to a suspended task wakes it, only to tell the agent what it already
+knows. So the ax sink holds reminders while a task is idle:
+
+- **A pure reminder to an idle task is held, not sent.** `Append` returns
+  nil. Nothing goes through the router and there is no `ResumeTask`, so
+  nothing can wake the task.
+- **Only the latest reminder per session is kept.** A newer one replaces it.
+- **Held reminders go first, ahead of the next real inject to the task.**
+  "Real" means anything that isn't a pure reminder: a material change (a
+  followup without `repeat_count`), a new incident, a reopen, a storm update,
+  a watchboard session, a resolution. In `cluster` scope that includes any
+  other incident's inject into the shared task. Each held reminder goes to its
+  own session, oldest first. A reminder that fails to deliver is logged and
+  dropped, and never fails the real inject behind it.
+- **A reminder to a busy task goes straight through,** as do all non-reminder
+  injects.
+- **The agent's first delivery for an incident is never held.** If an
+  incident's last real inject failed (an open whose payload never arrived,
+  or a change the agent didn't get), its next reminder goes straight
+  through, however idle the task. The reminder carries the incident's full
+  payload. The dispatcher also resends a failed open as an open (#607);
+  this check covers the same case from the sink's side.
+- **A gone task or session drops its held reminders.** A reminder whose task
+  AX no longer has (`GetTask` answers NotFound) isn't held for a wake that
+  will never come. The task's held reminders are dropped, and `Append`
+  answers 404, the same answer the agent gives for a lost session, so the
+  dispatcher un-binds the incident and reopens it. A held reminder whose
+  session turns out to be gone (404 when delivered ahead of a real inject)
+  is dropped as well.
+
+**Idle detection.** The sink keeps its own record of when it last delivered a
+real inject to each task. A task is busy if that was less than its idle
+window ago and AX doesn't record it as suspended. The idle window is the
+template's `spec.idle.suspendAfter` (#593), the same threshold AX suspends
+on. Without one it is a constant, ten minutes (AX's suggested setting); there
+is no flag. AX does expose a readable state: `GetTask` returns
+`status.phase`, a read of AX's own record that never wakes the task. But
+`Running` doesn't mean busy (an idle task is `Running` until AX suspends it,
+and a reminder in that interval resets AX's idle clock), and AX's phase can
+lag the actor by a reconcile pass. So the record decides. The `GetTask` made
+for each reminder adds two things: whether the task still exists, and a
+phase that catches a task suspended early (on completion, or by hand). If
+`GetTask` fails, the record alone decides.
+
+A reminder sent inside the window resets AX's idle clock, which can keep a
+task awake for up to one more window. That is bounded: reminders are at
+least `--dedup-window` apart, and the next one usually falls outside the
+window and is held.
+
+**Resolution.** A held reminder is delivered just before the resolution, not
+dropped. The task is waking for the resolution anyway, so it costs one more
+inject but no extra wake. The agent then reads the incident in order:
+"still failing (reminder N)", then "resolved". That tells it how long the
+failure lasted, which a bare resolution doesn't.
+
+**Bounds.** At most one held reminder per session, and at most 4096 in total.
+Past that the oldest is dropped. A held reminder older than three hours is
+dropped too, rather than delivered late. A still-failing incident refreshes
+its reminder at least hourly, so a reminder that old means lookout stopped
+sending reminders (the incident went quiet or lost its binding). The record
+of real injects is bounded at 4096 tasks. A forgotten task counts as idle, so
+its reminders are held rather than lost.
+
+**Restart.** Held reminders and the record live in memory only, and a
+restart loses them. That is acceptable: a held reminder only repeats what
+the agent already knows, and the next reminder on the schedule takes its
+place. After a restart the record is empty, so every task counts as idle
+until its next real inject, and reminders are held in the meantime.
+
+**Metrics.** `lookout_ax_reminders_total{outcome}`, per cluster:
+
+| Outcome | Meaning |
+|---|---|
+| `held` | Held because the task was idle. |
+| `superseded` | A held reminder replaced by a newer one for the same session. |
+| `delivered` | A held reminder sent ahead of a real inject. |
+| `direct` | Sent at once because the task was busy. |
+| `dropped` | A held reminder expired, was evicted, or failed delivery. |
+
+The core-agent and webhook sinks deliver every reminder at once, unchanged.
 
 ### Waiting for the agent
 
@@ -291,6 +378,12 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   the same agent process with the same credentials and egress.
 - **No credentials on the AX API.** TLS protects it in transit, but anyone
   who can reach it can create tasks; see Cross-cluster.
+- **Held reminders don't survive a restart.** See Holding reminders.
+- **The sink can't see an agent that is busy on its own.** A task counts as
+  busy only within its idle window after a real inject. An agent still
+  investigating past that (AX's `spec.idle.busyPath` keeps such a task from
+  suspending) gets its reminders held, not sent. This is harmless: the
+  reminder said nothing new.
 - **A storm reopens by ancestor.** A later storm on the same Node or workload
   goes into the earlier storm's session, by design; a different ancestor is a
   different task.
@@ -306,6 +399,24 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   `ate-target-actor` header and 404s unknown sessions.
 - `internal/axsink`: an `https://` router (`httptest.NewTLSServer`) carries
   readiness, open, inject and append over TLS with the bearer token.
+- `internal/axsink` (`hold_test.go`), holding reminders:
+  - A reminder to an idle task is held with no `ResumeTask` and no router
+    request.
+  - A reminder after a partial open is never held.
+  - A gone task drops its held reminders and answers 404.
+  - A reminder to a busy task goes through.
+  - A recent task that AX records as `Suspended` holds.
+  - Held reminders fold to the latest, which is delivered ahead of the next
+    real inject.
+  - A resolution delivers the held reminder first.
+  - In cluster scope, a new incident delivers another incident's held
+    reminder first.
+  - The idle window comes from `spec.idle.suspendAfter`.
+  - Stale reminders are dropped, the total held is bounded, and an empty
+    record (after a restart) counts as idle.
+  - Each outcome is counted.
+- `pkg/inject`: the core-agent and webhook sinks deliver every reminder at
+  once.
 - `internal/watch`: the AX API dialled over TLS with the CA file succeeds,
   over TLS without it fails on the self-signed certificate, and plaintext still
   works (a real local listener and a certificate generated in the test); bad

@@ -103,6 +103,7 @@ func MetricsInventory() []MetricDoc {
 		{m.triageRegressed, "counter", nil},
 		{m.crossSourceFollowups, "counter", []string{"source"}},
 		{m.repeatFollowups, "counter", []string{"type"}},
+		{m.axReminders, "counter", []string{"outcome"}},
 		{m.sinkInfo, "gauge", []string{"sink"}},
 		{m.runnerUp, "gauge", nil},
 		{m.runnerRestarts, "counter", nil},

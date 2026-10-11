@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
@@ -46,6 +47,8 @@ type fakeAX struct {
 	mu      sync.Mutex
 	created map[string]*axapi.Task
 	resumed []string
+	gets    int    // GetTask calls
+	phase   string // status.phase GetTask reports, when set
 }
 
 func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*axapi.Task, error) {
@@ -63,7 +66,12 @@ func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*a
 func (f *fakeAX) GetTask(_ context.Context, req *axapi.GetTaskRequest) (*axapi.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.gets++
 	if t, ok := f.created[req.GetName()]; ok {
+		if f.phase != "" {
+			t = proto.Clone(t).(*axapi.Task)
+			t.Status = &axapi.TaskStatus{Phase: f.phase}
+		}
 		return t, nil
 	}
 	return nil, status.Errorf(codes.NotFound, "task %q not found", req.GetName())
@@ -84,8 +92,10 @@ type fakeRouter struct {
 	injects   map[string][]string // "<actor> <path>" -> messages
 	sessions  map[string]int      // actor -> sessions created
 	readyHits int
-	notReady  int // answer /readyz with 503 this many times first
-	failWith  int // answer injects with this status, when set
+	notReady  int      // answer /readyz with 503 this many times first
+	failWith  int      // answer injects with this status, when set
+	order     []string // "<path> <message>" of every delivered inject, in order
+	requests  int      // every request, readiness probes included
 }
 
 func (r *fakeRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -96,6 +106,7 @@ func (r *fakeRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.requests++
 	if r.sessions == nil {
 		r.sessions = map[string]int{}
 		r.injects = map[string][]string{}
@@ -129,6 +140,7 @@ func (r *fakeRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		b, _ := io.ReadAll(req.Body)
 		_ = json.Unmarshal(b, &body)
 		r.injects[actor+" "+req.URL.Path] = append(r.injects[actor+" "+req.URL.Path], body.Message)
+		r.order = append(r.order, req.URL.Path+" "+body.Message)
 		w.WriteHeader(http.StatusAccepted)
 	default:
 		http.NotFound(w, req)
