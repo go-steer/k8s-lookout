@@ -182,8 +182,224 @@ func jsonFields(t reflect.Type) []string {
 	return out
 }
 
+// fieldContract pins a struct field's full wire JSON tag (including exact
+// omitempty presence/absence) and Go reflect.Kind (issue #636).
+type fieldContract struct {
+	Tag  string
+	Kind reflect.Kind
+}
+
+var frozenFieldContracts = map[string][]fieldContract{
+	"Payload": {
+		{"kind", reflect.String},
+		{"reason", reflect.String},
+		{"namespace", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"container,omitempty", reflect.String},
+		{"uid", reflect.String},
+		{"message", reflect.String},
+		{"count", reflect.Int},
+		{"first_seen", reflect.Struct},
+		{"last_seen", reflect.Struct},
+		{"cluster", reflect.String},
+		{"project,omitempty", reflect.String},
+		{"region,omitempty", reflect.String},
+		{"zone,omitempty", reflect.String},
+		{"pull_cause,omitempty", reflect.String},
+		{"source,omitempty", reflect.String},
+		{"severity,omitempty", reflect.String},
+		{"fingerprint,omitempty", reflect.String},
+		{"context", reflect.Struct},
+		{"type", reflect.String},
+		{"enrichment,omitempty", reflect.Pointer},
+		{"forecast,omitempty", reflect.Pointer},
+		{"quota_increase_draft,omitempty", reflect.Pointer},
+		{"reason_class,omitempty", reflect.String},
+		{"repeat_count,omitempty", reflect.Int},
+	},
+	"ResolvedPayload": {
+		{"kind", reflect.String},
+		{"reason", reflect.String},
+		{"namespace", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"container,omitempty", reflect.String},
+		{"uid", reflect.String},
+		{"fingerprint", reflect.String},
+		{"cluster", reflect.String},
+		{"first_seen", reflect.Struct},
+		{"resolved_at", reflect.Struct},
+		{"cleared_after", reflect.String},
+		{"observed_stable_for", reflect.String},
+		{"resolution", reflect.String},
+		{"reverted_after,omitempty", reflect.String},
+		{"context", reflect.Struct},
+	},
+	"StormPayload": {
+		{"kind", reflect.String},
+		{"fingerprint", reflect.String},
+		{"severity", reflect.String},
+		{"cluster", reflect.String},
+		{"ancestor_kind", reflect.String},
+		{"ancestor_namespace,omitempty", reflect.String},
+		{"ancestor_name", reflect.String},
+		{"reason", reflect.String},
+		{"message", reflect.String},
+		{"affected_count", reflect.Int},
+		{"namespaces_count", reflect.Int},
+		{"first_seen", reflect.Struct},
+		{"last_seen", reflect.Struct},
+		{"representative_incidents", reflect.Slice},
+		{"member_fingerprints", reflect.Slice},
+		{"member_fingerprints_truncated,omitempty", reflect.Bool},
+		{"context", reflect.Struct},
+		{"enrichment,omitempty", reflect.Pointer},
+		{"key_source,omitempty", reflect.String},
+	},
+	"StormMemberPayload": {
+		{"kind", reflect.String},
+		{"storm_fingerprint", reflect.String},
+		{"storm_session_id,omitempty", reflect.String},
+		{"ancestor_kind", reflect.String},
+		{"ancestor_namespace,omitempty", reflect.String},
+		{"ancestor_name", reflect.String},
+		{"cluster", reflect.String},
+		{"message", reflect.String},
+		{"incident", reflect.Struct},
+	},
+	"StormUpdatePayload": {
+		{"kind", reflect.String},
+		{"storm_fingerprint", reflect.String},
+		{"ancestor_kind", reflect.String},
+		{"ancestor_namespace,omitempty", reflect.String},
+		{"ancestor_name", reflect.String},
+		{"cluster", reflect.String},
+		{"message", reflect.String},
+		{"affected_count", reflect.Int},
+		{"namespaces_count", reflect.Int},
+		{"new_members_since_last", reflect.Int},
+	},
+	"WatchboardDigestPayload": {
+		{"kind", reflect.String},
+		{"cluster", reflect.String},
+		{"board_generation", reflect.Int},
+		{"sequence", reflect.Int},
+		{"window_start", reflect.Struct},
+		{"window_end", reflect.Struct},
+		{"entries", reflect.Slice},
+		{"entries_dropped,omitempty", reflect.Int},
+	},
+	"WatchboardRotatedPayload": {
+		{"kind", reflect.String},
+		{"cluster", reflect.String},
+		{"board_generation", reflect.Int},
+		{"successor_session_id", reflect.String},
+		{"injects_count", reflect.Int},
+		{"rotated_at", reflect.Struct},
+	},
+	"TriageRegressedPayload": {
+		{"kind", reflect.String},
+		{"reason", reflect.String},
+		{"namespace", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"container,omitempty", reflect.String},
+		{"uid", reflect.String},
+		{"fingerprint", reflect.String},
+		{"cluster", reflect.String},
+		{"triage_status", reflect.String},
+		{"severity_override,omitempty", reflect.String},
+		{"triage_session,omitempty", reflect.String},
+		{"baseline_count", reflect.Int},
+		{"count", reflect.Int},
+		{"factor", reflect.Int},
+		{"first_seen", reflect.Struct},
+		{"last_seen", reflect.Struct},
+		{"message", reflect.String},
+		{"context", reflect.Struct},
+		{"reason_class,omitempty", reflect.String},
+	},
+	"FamilyMemberPayload": {
+		{"kind", reflect.String},
+		{"member_kind", reflect.String},
+		{"reason", reflect.String},
+		{"severity,omitempty", reflect.String},
+		{"namespace,omitempty", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"uid", reflect.String},
+		{"fingerprint", reflect.String},
+		{"family", reflect.String},
+		{"opened_by", reflect.String},
+		{"cluster", reflect.String},
+		{"session_id,omitempty", reflect.String},
+		{"message", reflect.String},
+		{"design_ref", reflect.String},
+	},
+	"PayloadContext": {
+		{"controller_ref,omitempty", reflect.String},
+		{"node,omitempty", reflect.String},
+		{"labels,omitempty", reflect.Map},
+	},
+	"PayloadForecast": {
+		{"eta", reflect.Struct},
+		{"confidence_basis", reflect.String},
+	},
+	"PayloadEnrichment": {
+		{"bundle", reflect.String},
+	},
+	"PayloadQuotaDraft": {
+		{"quota_id", reflect.String},
+		{"region", reflect.String},
+		{"unit,omitempty", reflect.String},
+		{"current_usage", reflect.Float64},
+		{"current_limit", reflect.Float64},
+		{"suggested_limit", reflect.Float64},
+		{"slope_per_day", reflect.Float64},
+		{"justification", reflect.String},
+	},
+	"StormIncidentRef": {
+		{"fingerprint", reflect.String},
+		{"reason", reflect.String},
+		{"namespace,omitempty", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"uid", reflect.String},
+		{"session_id,omitempty", reflect.String},
+		{"reason_class,omitempty", reflect.String},
+	},
+	"WatchboardEntry": {
+		{"kind", reflect.String},
+		{"fingerprint", reflect.String},
+		{"reason", reflect.String},
+		{"namespace,omitempty", reflect.String},
+		{"kind_of_object", reflect.String},
+		{"name", reflect.String},
+		{"uid", reflect.String},
+		{"count", reflect.Int},
+		{"first_seen", reflect.Struct},
+		{"last_seen", reflect.Struct},
+		{"reason_class,omitempty", reflect.String},
+	},
+}
+
+func jsonFieldContracts(t reflect.Type) []fieldContract {
+	var out []fieldContract
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		out = append(out, fieldContract{Tag: tag, Kind: f.Type.Kind()})
+	}
+	return out
+}
+
 // TestSchemaV1_FieldSetsFrozen pins every wire struct's ordered json
-// field list to the v1 ledger.
+// field list, exact tag options (omitempty presence/absence), and Go
+// field reflect.Kind to the v1 ledger.
 func TestSchemaV1_FieldSetsFrozen(t *testing.T) {
 	t.Parallel()
 	types := map[string]reflect.Type{
@@ -203,14 +419,19 @@ func TestSchemaV1_FieldSetsFrozen(t *testing.T) {
 		"StormIncidentRef":         reflect.TypeOf(inject.StormIncidentRef{}),
 		"WatchboardEntry":          reflect.TypeOf(inject.WatchboardEntry{}),
 	}
-	if len(types) != len(frozenFields) {
-		t.Fatalf("ledger covers %d structs, test enumerates %d — keep them identical", len(frozenFields), len(types))
+	if len(types) != len(frozenFields) || len(types) != len(frozenFieldContracts) {
+		t.Fatalf("ledger mismatch: types=%d frozenFields=%d frozenFieldContracts=%d", len(types), len(frozenFields), len(frozenFieldContracts))
 	}
 	for name, typ := range types {
 		got := jsonFields(typ)
 		want := frozenFields[name]
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s wire fields drifted from the v1 freeze (docs/signal-schema-v1.md):\n got: %v\nwant: %v\nRemoving/renaming is a v2 negotiation with fleet consumers; additions must extend the ledger consciously.", name, got, want)
+		}
+		gotContracts := jsonFieldContracts(typ)
+		wantContracts := frozenFieldContracts[name]
+		if !reflect.DeepEqual(gotContracts, wantContracts) {
+			t.Errorf("%s wire json tags/omitempty or reflect.Kind drifted from v1 contract:\n got: %+v\nwant: %+v", name, gotContracts, wantContracts)
 		}
 	}
 }

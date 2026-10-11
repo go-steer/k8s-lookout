@@ -139,29 +139,31 @@ func realMain(argv []string) error {
 				log.Print(warning)
 			}
 			ws, werr := inject.NewWebhookSink(inject.WebhookConfig{
-				URL:         f.sinkURL,
-				BearerToken: sinkToken,
+				URL:            f.sinkURL,
+				BearerToken:    sinkToken,
+				MaxInjectBytes: f.injectMaxBytes,
 			})
 			if werr != nil {
 				return fmt.Errorf("webhook sink: %w", werr)
 			}
-			inj = ws
+			inj = MaskingSink(ws)
 		case sinkAX:
 			as, aerr := newAXSink(f, token)
 			if aerr != nil {
 				return fmt.Errorf("ax sink: %w", aerr)
 			}
-			inj = as
+			inj = MaskingSink(as)
 		default:
 			ci, cerr := inject.NewInjector(inject.Config{
 				DaemonURL:      f.daemonURL,
 				BearerToken:    token,
 				AssertedCaller: f.owner,
+				MaxInjectBytes: f.injectMaxBytes,
 			})
 			if cerr != nil {
 				return fmt.Errorf("injector: %w", cerr)
 			}
-			inj = ci
+			inj = MaskingSink(ci)
 		}
 	}
 
@@ -832,11 +834,12 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("WARNING: --sink=ax with project=%q region=%q zone=%q — payloads will not tell the agent where the cluster is; pass --project and --region (or --zone), or run a build with the GKE provider so they resolve from metadata", project, region, zone)
 	}
 
+	maskedSink := MaskingSink(r.sink)
 	disp := &dispatcher{
 		filter:    filter,
 		dedup:     dedup,
 		pullClass: engine.NewPullClassMemo(),
-		injector:  r.sink,
+		injector:  maskedSink,
 		metrics:   m,
 		cluster:   r.clusterName,
 		project:   project,
@@ -890,7 +893,7 @@ func (r *runner) run(ctx context.Context) error {
 	// reopens into its earlier session. The sink is process-wide, the
 	// store per cluster, so each runner hands the sink its own. Without
 	// --store the sink remembers sessions in memory only.
-	if as, ok := r.sink.(*axsink.Sink); ok {
+	if as, ok := unwrapSink(r.sink).(*axsink.Sink); ok {
 		if occStore != nil {
 			as.UseSessionStore(r.clusterName, occStore)
 			defer as.UseSessionStore(r.clusterName, nil)
@@ -913,7 +916,7 @@ func (r *runner) run(ctx context.Context) error {
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
-			injector:       r.sink,
+			injector:       maskedSink,
 			metrics:        m,
 			cluster:        r.clusterName,
 			dryRun:         f.dryRun,
