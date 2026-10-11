@@ -218,6 +218,11 @@
     }
   },
   "targetHttpsProxies": {
+    "web-https-proxy": {
+      "kind": "compute#targetHttpsProxy",
+      "name": "web-https-proxy",
+      "urlMap": "https://www.googleapis.com/compute/v1/projects/proj-1/global/urlMaps/web-um"
+    },
     "serverless-proxy": {
       "kind": "compute#targetHttpsProxy",
       "name": "serverless-proxy",
@@ -250,18 +255,21 @@
     "empty-neg": {
       "kind": "compute#networkEndpointGroup",
       "name": "empty-neg",
+      "zone": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b",
       "networkEndpointType": "GCE_VM_IP_PORT",
       "size": 0
     },
     "web-neg-b": {
       "kind": "compute#networkEndpointGroup",
       "name": "web-neg-b",
+      "zone": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b",
       "networkEndpointType": "GCE_VM_IP_PORT",
       "size": 2
     },
     "web-neg-c": {
       "kind": "compute#networkEndpointGroup",
       "name": "web-neg-c",
+      "zone": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-c",
       "networkEndpointType": "GCE_VM_IP_PORT",
       "size": 1
     },

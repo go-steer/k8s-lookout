@@ -48,8 +48,10 @@ type lbObjects struct {
 // fixtureGCE implements orphanComputeAPI from the recorded fixtures,
 // flattening aggregates through the same helpers production paging
 // uses. Every GET checks the scope it was asked for against the
-// recorded object's own location, so a regional object fetched as
-// global or zonal (#612) fails the way the live API would.
+// recorded object's own location — zone, region or global — so a
+// regional object fetched as global or zonal (#612) fails the way the
+// live API would; GETs by URL (backend services and groups) check the
+// URL's project too.
 type fixtureGCE struct {
 	t   *testing.T
 	lbs lbObjects
@@ -67,6 +69,24 @@ func newFixtureGCE(t *testing.T) *fixtureGCE {
 func checkScope(what, name, scope, recordedRegion string) error {
 	if want := resourceTail(recordedRegion); scope != want {
 		return fmt.Errorf("%s %q fetched with scope %q, recorded in %q", what, name, scope, want)
+	}
+	return nil
+}
+
+// fixtureProject is the project every recorded object lives in.
+const fixtureProject = "proj-1"
+
+// checkURL fails when a GET-by-URL names another project than the
+// fixtures', or a zone/region other than the recorded object's ("" on
+// both sides = global).
+func checkURL(what, u, recordedZone, recordedRegion string) error {
+	if p := resourceScopeValue(u, "projects"); p != fixtureProject {
+		return fmt.Errorf("%s %q fetched from project %q, recorded in %q", what, resourceTail(u), p, fixtureProject)
+	}
+	gotZone, gotRegion := resourceScopeValue(u, "zones"), resourceScopeValue(u, "regions")
+	if gotZone != resourceTail(recordedZone) || gotRegion != resourceTail(recordedRegion) {
+		return fmt.Errorf("%s %q fetched as zone=%q region=%q, recorded as zone=%q region=%q",
+			what, resourceTail(u), gotZone, gotRegion, resourceTail(recordedZone), resourceTail(recordedRegion))
 	}
 	return nil
 }
@@ -95,7 +115,7 @@ func (f *fixtureGCE) GetBackendService(_ context.Context, service string) (*comp
 	if bs == nil {
 		return nil, fmt.Errorf("no fixture backend service %q", name)
 	}
-	return bs, checkScope("backend service", name, resourceScopeValue(service, "regions"), bs.Region)
+	return bs, checkURL("backend service", service, "", bs.Region)
 }
 
 func (f *fixtureGCE) GetProxyURLMap(_ context.Context, scope, kind, name string) (string, error) {
@@ -141,18 +161,11 @@ func (f *fixtureGCE) GetBackendGroup(_ context.Context, group string) (backendGr
 	switch collection {
 	case collectionNEG:
 		if neg := f.lbs.NetworkEndpointGroups[name]; neg != nil {
-			return backendGroup{EndpointType: neg.NetworkEndpointType, Size: neg.Size}, nil
+			return backendGroup{EndpointType: neg.NetworkEndpointType, Size: neg.Size}, checkURL("NEG", group, neg.Zone, neg.Region)
 		}
 	case collectionInstanceGroup:
 		if ig := f.lbs.InstanceGroups[name]; ig != nil {
-			scope := resourceScopeValue(group, "zones")
-			if scope == "" {
-				scope = resourceScopeValue(group, "regions")
-			}
-			if want := resourceTail(ig.Zone + ig.Region); scope != want {
-				return backendGroup{}, fmt.Errorf("instance group %q fetched in %q, recorded in %q", name, scope, want)
-			}
-			return backendGroup{Size: ig.Size}, nil
+			return backendGroup{Size: ig.Size}, checkURL("instance group", group, ig.Zone, ig.Region)
 		}
 	}
 	return backendGroup{}, fmt.Errorf("no fixture group %q", group)
@@ -215,16 +228,21 @@ func TestOrphanAddressesFromRecordedAggregate(t *testing.T) {
 
 func TestOrphanLoadBalancersFromRecordedObjects(t *testing.T) {
 	api := &orphanAPI{gce: newFixtureGCE(t)}
-	got, err := api.OrphanLoadBalancers(context.Background())
+	sweep, err := api.OrphanLoadBalancers(context.Background())
 	if err != nil {
 		t.Fatalf("OrphanLoadBalancers: %v", err)
 	}
+	if len(sweep.Unresolved) != 0 {
+		t.Fatalf("unresolved = %+v, want every recorded rule resolved", sweep.Unresolved)
+	}
+	got := sweep.Orphans
 	// Orphans: ilb-empty (backend service → empty NEG), netlb-ghost
 	// (empty target pool), mig-empty-http (global HTTP → empty zonal
 	// and regional instance groups).
 	//
-	// Live: ingress-live (proxy → url map → web-bs → NEGs with 3
-	// endpoints), netlb-live (pool has an instance), the #612 rule
+	// Live: ingress-live and ingress-live-https (HTTP and HTTPS
+	// proxies → one url map → web-bs → NEGs with 3 endpoints),
+	// netlb-live (pool has an instance), the #612 rule
 	// (global HTTP → global backend service → regional MIG of 3),
 	// origin-http (route rule → internet NEG with an endpoint).
 	//
@@ -255,7 +273,8 @@ func TestOrphanLoadBalancersFromRecordedObjects(t *testing.T) {
 }
 
 // failingGCE wraps the fixtures and fails one backend service GET,
-// as a live 400/500 on one rule's chain would.
+// as a live 404 (deleted between the list and the get) or 500 on one
+// rule's chain would.
 type failingGCE struct {
 	*fixtureGCE
 	service string
@@ -269,22 +288,119 @@ func (f *failingGCE) GetBackendService(ctx context.Context, service string) (*co
 	return f.fixtureGCE.GetBackendService(ctx, service)
 }
 
-// TestOrphanLoadBalancersRuleErrorNamesRule: a GET failing on one
-// rule's chain fails the class with the rule named, for the command
-// to degrade to a class=lbs unavailable (cloudcheck owns that rule).
-func TestOrphanLoadBalancersRuleErrorNamesRule(t *testing.T) {
+// TestOrphanLoadBalancersRuleErrorCostsTheRuleOnly: a GET failing on
+// one rule's chain makes that rule unresolved, error kept, and every
+// other rule is still judged — the orphans included (#612).
+func TestOrphanLoadBalancersRuleErrorCostsTheRuleOnly(t *testing.T) {
 	api := &orphanAPI{gce: &failingGCE{
 		fixtureGCE: newFixtureGCE(t),
 		service:    "hypercomputer-w1-traffic-backend",
-		err:        errors.New("googleapi: Error 500: Internal Error, backendError"),
+		err:        errors.New("googleapi: Error 404: The resource 'hypercomputer-w1-traffic-backend' was not found, notFound"),
 	}}
-	_, err := api.OrphanLoadBalancers(context.Background())
-	if err == nil || !strings.Contains(err.Error(), `"hypercomputer-w1-traffic-http-forwarding-rule"`) ||
-		!strings.Contains(err.Error(), "Error 500") {
-		t.Fatalf("err = %v, want the 500 wrapped with the rule's name", err)
+	sweep, err := api.OrphanLoadBalancers(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v, want the sweep to succeed around the failed rule", err)
 	}
-	if _, denied := cloud.PermissionDenied(err); denied {
-		t.Errorf("err = %v classified as a permission refusal; a 500 is not one", err)
+	if len(sweep.Unresolved) != 1 {
+		t.Fatalf("unresolved = %+v, want the #612 rule only", sweep.Unresolved)
+	}
+	u := sweep.Unresolved[0]
+	if u.Name != "hypercomputer-w1-traffic-http-forwarding-rule" || u.Region != "global" || !strings.Contains(u.Err.Error(), "Error 404") {
+		t.Errorf("unresolved = %+v, want the rule, global, with the 404", u)
+	}
+	if _, denied := cloud.PermissionDenied(u.Err); denied {
+		t.Errorf("err = %v classified as a permission refusal; a 404 is not one", u.Err)
+	}
+	if len(sweep.Orphans) != 3 {
+		t.Errorf("orphans = %+v, want the three recorded orphans still judged", sweep.Orphans)
+	}
+}
+
+// TestOrphanLoadBalancersContextEndsTheClass: a call cut off by the
+// context is not one rule's failure — every later rule would fail the
+// same way — so it fails the class, as before.
+func TestOrphanLoadBalancersContextEndsTheClass(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	api := &orphanAPI{gce: &failingGCE{fixtureGCE: newFixtureGCE(t), service: "web-bs", err: context.Canceled}}
+	if _, err := api.OrphanLoadBalancers(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation to fail the class", err)
+	}
+}
+
+// countingGCE counts the GETs that reach the fixtures, and serves
+// only the given rules.
+type countingGCE struct {
+	*fixtureGCE
+	rules []string
+	calls map[string]int
+	// serviceErr fails the named backend services' GETs.
+	serviceErr map[string]error
+}
+
+func (c *countingGCE) ListForwardingRules(ctx context.Context) ([]*compute.ForwardingRule, error) {
+	all, err := c.fixtureGCE.ListForwardingRules(ctx)
+	var out []*compute.ForwardingRule
+	for _, r := range all {
+		if slices.Contains(c.rules, r.Name) {
+			out = append(out, r)
+		}
+	}
+	return out, err
+}
+
+func (c *countingGCE) GetProxyURLMap(ctx context.Context, scope, kind, name string) (string, error) {
+	c.calls["proxy"]++
+	return c.fixtureGCE.GetProxyURLMap(ctx, scope, kind, name)
+}
+
+func (c *countingGCE) GetURLMap(ctx context.Context, scope, name string) (*compute.UrlMap, error) {
+	c.calls["urlMap"]++
+	return c.fixtureGCE.GetURLMap(ctx, scope, name)
+}
+
+func (c *countingGCE) GetBackendService(ctx context.Context, service string) (*compute.BackendService, error) {
+	c.calls["backendService"]++
+	if err := c.serviceErr[resourceTail(service)]; err != nil {
+		return nil, err
+	}
+	return c.fixtureGCE.GetBackendService(ctx, service)
+}
+
+func (c *countingGCE) GetBackendGroup(ctx context.Context, group string) (backendGroup, error) {
+	c.calls["group"]++
+	return c.fixtureGCE.GetBackendGroup(ctx, group)
+}
+
+// TestOrphanLoadBalancersSharedURLMapFetchedOnce: a GKE Ingress's
+// HTTP and HTTPS rules have their own proxies but share the URL map
+// and everything behind it, which one sweep fetches once.
+func TestOrphanLoadBalancersSharedURLMapFetchedOnce(t *testing.T) {
+	gce := &countingGCE{fixtureGCE: newFixtureGCE(t), rules: []string{"ingress-live", "ingress-live-https"}, calls: map[string]int{}}
+	sweep, err := (&orphanAPI{gce: gce}).OrphanLoadBalancers(context.Background())
+	if err != nil || len(sweep.Orphans) != 0 || len(sweep.Unresolved) != 0 {
+		t.Fatalf("sweep = %+v, %v; want both rules judged live", sweep, err)
+	}
+	// Two proxies; one url map (web-um), one backend service (web-bs),
+	// its two NEGs.
+	want := map[string]int{"proxy": 2, "urlMap": 1, "backendService": 1, "group": 2}
+	for k, n := range want {
+		if gce.calls[k] != n {
+			t.Errorf("%s GETs = %d, want %d (calls: %v)", k, gce.calls[k], n, gce.calls)
+		}
+	}
+
+	// The memo holds failures too: a backend service both rules share
+	// that answers 404 is asked once, and both rules come back
+	// unresolved.
+	gce = &countingGCE{fixtureGCE: newFixtureGCE(t), rules: gce.rules, calls: map[string]int{},
+		serviceErr: map[string]error{"web-bs": errors.New("googleapi: Error 404: notFound")}}
+	sweep, err = (&orphanAPI{gce: gce}).OrphanLoadBalancers(context.Background())
+	if err != nil || len(sweep.Unresolved) != 2 {
+		t.Fatalf("sweep = %+v, %v; want both rules unresolved", sweep, err)
+	}
+	if gce.calls["backendService"] != 1 {
+		t.Errorf("failing backend service fetched %d times, want once", gce.calls["backendService"])
 	}
 }
 
@@ -389,6 +505,20 @@ func TestGCEOrphanClientBackendGroupPaths(t *testing.T) {
 	paths = nil
 	if _, err := c.GetBackendGroup(ctx, base+"proj-1/global/instanceGroups/ig"); err == nil || len(paths) != 0 {
 		t.Errorf("unscoped instance group: err=%v requests=%v, want an error and no request", err, paths)
+	}
+	paths = nil
+	if _, err := c.GetBackendGroup(ctx, base+"shared-proj/zones/us-east1-b/networkEndpointGroups/n"); err != nil {
+		t.Fatalf("GetBackendGroup: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/compute/v1/projects/shared-proj/zones/us-east1-b/networkEndpointGroups/n" {
+		t.Errorf("cross-project NEG requested %v, want it fetched from shared-proj", paths)
+	}
+	paths = nil
+	if _, err := c.GetBackendGroup(ctx, base+"shared-proj/regions/us-central1/instanceGroups/mig"); err != nil {
+		t.Fatalf("GetBackendGroup: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/compute/v1/projects/shared-proj/regions/us-central1/instanceGroups/mig" {
+		t.Errorf("cross-project instance group requested %v, want it fetched from shared-proj", paths)
 	}
 	paths = nil
 	if _, err := c.GetBackendService(ctx, base+"shared-proj/global/backendServices/bs"); err != nil {

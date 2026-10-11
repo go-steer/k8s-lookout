@@ -74,7 +74,13 @@ package gke
 // cloud.ErrPermissionDenied (classifyPermission), naming the
 // permission — from the API's message, else the list permission the
 // class needs — so the command degrades that one class to an
-// explicit unavailable instead of failing the whole sweep.
+// explicit unavailable instead of failing the whole sweep. For the
+// lb class that holds for the forwarding-rule list only: any error on
+// one rule's resolution chain (a 404 for an object deleted between
+// the list and the get, a 403 on another project's backend service)
+// returns that rule as unresolved and the sweep goes on. Shared
+// objects are fetched once per sweep (memoGCE): an Ingress's HTTP and
+// HTTPS rules share a URL map and everything behind it.
 
 import (
 	"context"
@@ -227,23 +233,35 @@ func (o *orphanAPI) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddress,
 }
 
 // OrphanLoadBalancers implements cloud.OrphanAPI per the package
-// comment's resolution rules.
-func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoadBalancer, error) {
+// comment's resolution rules. A failed call on one rule's chain costs
+// that rule alone: it is returned as Unresolved and the sweep goes on
+// (#612). Only the rule list itself, or the context ending (every
+// later call would fail the same way), fails the class.
+func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) (cloud.LoadBalancerSweep, error) {
 	rules, err := o.gce.ListForwardingRules(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing forwarding rules: %w", classifyPermission(err, "compute.forwardingRules.list"))
+		return cloud.LoadBalancerSweep{}, fmt.Errorf("listing forwarding rules: %w", classifyPermission(err, "compute.forwardingRules.list"))
 	}
-	var out []cloud.OrphanLoadBalancer
+	res := lbResolver{gce: newMemoGCE(o.gce)}
+	var out cloud.LoadBalancerSweep
 	for _, r := range rules {
 		if r == nil {
 			continue
 		}
-		orphaned, reason, err := o.judgeRule(ctx, r)
+		orphaned, reason, err := res.judgeRule(ctx, r)
 		if err != nil {
-			return nil, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, classifyPermission(err, ""))
+			if ctx.Err() != nil {
+				return cloud.LoadBalancerSweep{}, fmt.Errorf("resolving forwarding rule %q: %w", r.Name, err)
+			}
+			out.Unresolved = append(out.Unresolved, cloud.UnresolvedLoadBalancer{
+				Name:   r.Name,
+				Region: ruleRegion(r),
+				Err:    classifyPermission(err, ""),
+			})
+			continue
 		}
 		if orphaned {
-			out = append(out, cloud.OrphanLoadBalancer{
+			out.Orphans = append(out.Orphans, cloud.OrphanLoadBalancer{
 				Name:   r.Name,
 				Region: ruleRegion(r),
 				Reason: reason,
@@ -253,9 +271,17 @@ func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoad
 	return out, nil
 }
 
+// lbResolver judges forwarding rules for one sweep through a
+// memoizing client, so objects rules share (the HTTP and HTTPS rules
+// of one GKE Ingress share a URL map and everything behind it) are
+// fetched once.
+type lbResolver struct {
+	gce orphanComputeAPI
+}
+
 // judgeRule resolves one forwarding rule to a verdict; a rule it
 // cannot judge is (false, "", nil) — skipped, not an error.
-func (o *orphanAPI) judgeRule(ctx context.Context, r *compute.ForwardingRule) (orphaned bool, reason string, err error) {
+func (o lbResolver) judgeRule(ctx context.Context, r *compute.ForwardingRule) (orphaned bool, reason string, err error) {
 	switch {
 	case r.BackendService != "":
 		return o.judgeBackendServices(ctx, []string{r.BackendService})
@@ -303,7 +329,7 @@ func (o *orphanAPI) judgeRule(ctx context.Context, r *compute.ForwardingRule) (o
 // judgeBackendServices sums endpoint counts across the services'
 // judgeable backends: any endpoint → not orphaned; else any
 // unjudgeable backend → skipped; else orphaned.
-func (o *orphanAPI) judgeBackendServices(ctx context.Context, services []string) (bool, string, error) {
+func (o lbResolver) judgeBackendServices(ctx context.Context, services []string) (bool, string, error) {
 	total := int64(0)
 	unjudged := false
 	names := make([]string, 0, len(services))
@@ -337,6 +363,92 @@ func (o *orphanAPI) judgeBackendServices(ctx context.Context, services []string)
 		return false, "", nil
 	}
 	return true, fmt.Sprintf("backend service %s has 0 endpoints across all groups", strings.Join(names, ",")), nil
+}
+
+// memoGCE is a per-sweep memo over the GET calls rules share: target
+// proxies, URL maps, backend services, backend groups and target
+// pools, each keyed by what identifies the object. Errors are
+// memoized too — a backend service deleted mid-sweep answers 404 for
+// every rule behind it, once. It lives for one OrphanLoadBalancers
+// call, so nothing goes stale across invocations; calls are serial,
+// so no locking.
+type memoGCE struct {
+	orphanComputeAPI
+	proxies  map[string]memoResult[string]
+	urlMaps  map[string]memoResult[*compute.UrlMap]
+	services map[string]memoResult[*compute.BackendService]
+	groups   map[string]memoResult[backendGroup]
+	pools    map[string]memoResult[*compute.TargetPool]
+}
+
+type memoResult[V any] struct {
+	v   V
+	err error
+}
+
+func newMemoGCE(gce orphanComputeAPI) *memoGCE {
+	return &memoGCE{
+		orphanComputeAPI: gce,
+		proxies:          map[string]memoResult[string]{},
+		urlMaps:          map[string]memoResult[*compute.UrlMap]{},
+		services:         map[string]memoResult[*compute.BackendService]{},
+		groups:           map[string]memoResult[backendGroup]{},
+		pools:            map[string]memoResult[*compute.TargetPool]{},
+	}
+}
+
+// memoized returns m[key], fetching and recording it on a miss. A
+// call cut off by the context is never recorded: the sweep is ending
+// anyway.
+func memoized[V any](ctx context.Context, m map[string]memoResult[V], key string, fetch func() (V, error)) (V, error) {
+	if r, ok := m[key]; ok {
+		return r.v, r.err
+	}
+	v, err := fetch()
+	if ctx.Err() == nil {
+		m[key] = memoResult[V]{v: v, err: err}
+	}
+	return v, err
+}
+
+// resourceKey is a resource URL from "projects/" on, so one object
+// reached through differently prefixed self-links (v1 vs beta,
+// www.googleapis.com vs compute.googleapis.com) is one key.
+func resourceKey(u string) string {
+	if i := strings.Index(u, "projects/"); i >= 0 {
+		return u[i:]
+	}
+	return u
+}
+
+func (m *memoGCE) GetProxyURLMap(ctx context.Context, scope, kind, name string) (string, error) {
+	return memoized(ctx, m.proxies, scope+"/"+kind+"/"+name, func() (string, error) {
+		return m.orphanComputeAPI.GetProxyURLMap(ctx, scope, kind, name)
+	})
+}
+
+func (m *memoGCE) GetURLMap(ctx context.Context, scope, name string) (*compute.UrlMap, error) {
+	return memoized(ctx, m.urlMaps, scope+"/"+name, func() (*compute.UrlMap, error) {
+		return m.orphanComputeAPI.GetURLMap(ctx, scope, name)
+	})
+}
+
+func (m *memoGCE) GetBackendService(ctx context.Context, service string) (*compute.BackendService, error) {
+	return memoized(ctx, m.services, resourceKey(service), func() (*compute.BackendService, error) {
+		return m.orphanComputeAPI.GetBackendService(ctx, service)
+	})
+}
+
+func (m *memoGCE) GetBackendGroup(ctx context.Context, group string) (backendGroup, error) {
+	return memoized(ctx, m.groups, resourceKey(group), func() (backendGroup, error) {
+		return m.orphanComputeAPI.GetBackendGroup(ctx, group)
+	})
+}
+
+func (m *memoGCE) GetTargetPool(ctx context.Context, region, name string) (*compute.TargetPool, error) {
+	return memoized(ctx, m.pools, region+"/"+name, func() (*compute.TargetPool, error) {
+		return m.orphanComputeAPI.GetTargetPool(ctx, region, name)
+	})
 }
 
 // urlMapRoutes collects every backend service a URL map can route

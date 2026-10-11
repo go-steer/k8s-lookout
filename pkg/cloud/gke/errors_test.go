@@ -144,7 +144,7 @@ func TestClassifyPermission(t *testing.T) {
 
 // TestOrphanSweepsClassifyEveryClass: each class's list call names
 // its own permission when the API message does not, and a refusal
-// deep in LB resolution degrades the lb class too; a 500 is not
+// deep in LB resolution comes back classified on that one rule; a 500 is not
 // classified.
 func TestOrphanSweepsClassifyEveryClass(t *testing.T) {
 	bare403 := &googleapi.Error{Code: http.StatusForbidden, Message: "Forbidden"}
@@ -167,8 +167,22 @@ func TestOrphanSweepsClassifyEveryClass(t *testing.T) {
 
 	gce = &refusingGCE{fixtureGCE: newFixtureGCE(t), backendErr: &googleapi.Error{
 		Code: http.StatusForbidden, Message: "Required 'compute.regionBackendServices.get' permission for 'projects/p/regions/us-east1/backendServices/empty-bs'"}}
-	_, err = (&orphanAPI{gce: gce}).OrphanLoadBalancers(ctx)
-	if perm, ok := cloud.PermissionDenied(err); !ok || perm != "compute.regionBackendServices.get" {
+	// A refusal on one rule's chain costs that rule only (#612): it
+	// comes back unresolved, classified, and the sweep succeeds.
+	sweep, err := (&orphanAPI{gce: gce}).OrphanLoadBalancers(ctx)
+	if err != nil {
+		t.Fatalf("lb resolution: err = %v, want the rule unresolved and the sweep successful", err)
+	}
+	var refused *cloud.UnresolvedLoadBalancer
+	for i := range sweep.Unresolved {
+		if sweep.Unresolved[i].Name == "ilb-empty" {
+			refused = &sweep.Unresolved[i]
+		}
+	}
+	if refused == nil {
+		t.Fatalf("unresolved = %+v, want ilb-empty", sweep.Unresolved)
+	}
+	if perm, ok := cloud.PermissionDenied(refused.Err); !ok || perm != "compute.regionBackendServices.get" {
 		t.Errorf("lb resolution: (%q, %v), want compute.regionBackendServices.get", perm, ok)
 	}
 

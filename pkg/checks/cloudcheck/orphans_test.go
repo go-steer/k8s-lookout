@@ -294,8 +294,8 @@ func TestOrphansAllDenied(t *testing.T) {
 	}
 	want := []struct{ class, permission string }{
 		{"disks", "compute.disks.list"},
-		{"lbs", ""},
 		{"addresses", "compute.addresses.list"},
+		{"lbs", ""}, // lbs runs last
 	}
 	for i, r := range recs {
 		if r["kind"] != "cloud.unavailable" || r["reason"] != "PermissionDenied" ||
@@ -304,24 +304,25 @@ func TestOrphansAllDenied(t *testing.T) {
 		}
 	}
 	sum := summaryLine(t, res.Stdout)
-	wantNote := "disks: needs compute.disks.list; lbs: permission denied; addresses: needs compute.addresses.list"
+	wantNote := "disks: needs compute.disks.list; addresses: needs compute.addresses.list; lbs: permission denied"
 	if sum["scanned"] != "0" || sum["unavailable"] != wantNote {
 		t.Errorf("summary = %v, want scanned=0 unavailable=%q", sum, wantNote)
 	}
 }
 
-// lbResolveErr is the #612 failure as the GKE provider returned it:
-// one forwarding rule's backend fetched zonally with an empty zone.
-const lbResolveErr = `resolving forwarding rule "hypercomputer-w1-traffic-http-forwarding-rule": googleapi: Error 400: Invalid value for field 'zone': ''. Must be a match of regex '[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?|[1-9][0-9]{0,19}', invalid`
+// lbListErr is a class-level lb failure as the GKE provider returns
+// it: the forwarding-rule list itself failed. (One rule's failure is
+// RuleUnresolved instead — TestOrphansUnresolvedRules.)
+const lbListErr = `listing forwarding rules: googleapi: Error 500: Internal error encountered., backendError`
 
-// TestOrphansSweepFailedDegradesClass is the #612 regression: a
-// non-permission provider error in the lb sweep costs that class one
+// TestOrphansSweepFailedDegradesClass (#612): a non-permission
+// provider error in the lb sweep costs that class one
 // cloud.unavailable (reason=SweepFailed, class=lbs, the provider's
-// error) — the disk findings before it and the address sweep after it
-// still run, and the exit code stays 0.
+// error) — the disk and address findings still come, and the exit
+// code stays 0.
 func TestOrphansSweepFailedDegradesClass(t *testing.T) {
 	api := orphanFixture()
-	api.lbsErr = errors.New(lbResolveErr)
+	api.lbsErr = errors.New(lbListErr)
 	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
 	res := checktest.Run(t, cmd)
 	if res.Code != emit.ExitData {
@@ -348,9 +349,9 @@ func TestOrphansSweepFailedDegradesClass(t *testing.T) {
 	if u["reason"] != "SweepFailed" || u["severity"] != emit.SeverityInfo ||
 		u["capability"] != string(cloud.CapabilityOrphans) || u["provider"] != cloud.NoProviderName ||
 		u["class"] != "lbs" || u["permission"] != "" ||
-		!strings.Contains(u["error"], "hypercomputer-w1-traffic-http-forwarding-rule") ||
-		!strings.Contains(u["error"], "Error 400") {
-		t.Errorf("unavailable = %v, want SweepFailed class=lbs carrying the provider's 400", u)
+		!strings.Contains(u["error"], "listing forwarding rules") ||
+		!strings.Contains(u["error"], "Error 500") {
+		t.Errorf("unavailable = %v, want SweepFailed class=lbs carrying the provider's 500", u)
 	}
 	sum := summaryLine(t, res.Stdout)
 	// scanned = 4 disks + 3 idle addresses; the failed class adds none.
@@ -400,7 +401,7 @@ func TestOrphansSweepFailedErrorSanitized(t *testing.T) {
 // same invocation each get their own record and note fragment.
 func TestOrphansMixedDeniedAndFailed(t *testing.T) {
 	api := orphanFixture()
-	api.lbsErr = errors.New(lbResolveErr)
+	api.lbsErr = errors.New(lbListErr)
 	api.addrsErr = denied("compute.addresses.list")
 	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
 	res := checktest.Run(t, cmd)
@@ -408,7 +409,7 @@ func TestOrphansMixedDeniedAndFailed(t *testing.T) {
 		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
 	}
 	sum := summaryLine(t, res.Stdout)
-	want := "lbs: sweep failed; addresses: needs compute.addresses.list"
+	want := "addresses: needs compute.addresses.list; lbs: sweep failed"
 	if sum["scanned"] != "4" || sum["unavailable"] != want {
 		t.Errorf("summary = %v, want scanned=4 unavailable=%q", sum, want)
 	}
@@ -419,9 +420,9 @@ func TestOrphansMixedDeniedAndFailed(t *testing.T) {
 // --timeout.
 type ctxOrphans struct{ *fakeOrphans }
 
-func (c ctxOrphans) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoadBalancer, error) {
+func (c ctxOrphans) OrphanLoadBalancers(ctx context.Context) (cloud.LoadBalancerSweep, error) {
 	<-ctx.Done()
-	return nil, fmt.Errorf("resolving forwarding rule %q: %w", "web-rule", ctx.Err())
+	return cloud.LoadBalancerSweep{}, fmt.Errorf("resolving forwarding rule %q: %w", "web-rule", ctx.Err())
 }
 
 // TestOrphansTimeoutStaysFatal: an expired --timeout is not one
@@ -442,7 +443,7 @@ func TestOrphansTimeoutStaysFatal(t *testing.T) {
 // (error included) are in the output glossary.
 func TestOrphansSweepFailedContract(t *testing.T) {
 	api := orphanFixture()
-	api.lbsErr = errors.New(lbResolveErr)
+	api.lbsErr = errors.New(lbListErr)
 	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
 	checktest.VerifyContract(t, cmd)
 }
@@ -454,4 +455,114 @@ func TestOrphansDeniedContract(t *testing.T) {
 	api.addrsErr = denied("compute.addresses.list")
 	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
 	checktest.VerifyContract(t, cmd)
+}
+
+// TestOrphansUnresolvedRules: rules the provider could not judge each
+// get one cloud.unavailable (reason=RuleUnresolved) naming the rule
+// and carrying its error — a refusal also names the permission — while
+// the judged orphans and every other class are still reported, the
+// summary counts them, and the exit code stays 0.
+func TestOrphansUnresolvedRules(t *testing.T) {
+	api := orphanFixture()
+	api.unresolved = []cloud.UnresolvedLoadBalancer{
+		{Name: "shared-ingress", Region: "global", Err: &cloud.PermissionDeniedError{
+			Permission: "compute.backendServices.get", Err: errors.New("googleapi: Error 403: Required 'compute.backendServices.get' permission")}},
+		{Name: "churned-ingress", Region: "global", Err: errors.New("googleapi: Error 404: The resource 'k8s1-web-bs' was not found, notFound")},
+	}
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
+	}
+	kinds := map[string]int{}
+	unresolved := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		kinds[r["kind"]]++
+		if r["reason"] == "RuleUnresolved" {
+			unresolved[r["name"]] = r
+		}
+	}
+	if kinds["orphan.disk"] != 3 || kinds["orphan.lb"] != 2 || kinds["orphan.address"] != 2 || kinds["cloud.unavailable"] != 2 {
+		t.Errorf("kinds = %v, want 3 disks, 2 lbs, 2 addresses and 2 unresolved rules", kinds)
+	}
+	refused := unresolved["shared-ingress"]
+	if refused["kind_of_object"] != "ForwardingRule" || refused["class"] != "lbs" || refused["region"] != "global" ||
+		refused["permission"] != "compute.backendServices.get" || !strings.Contains(refused["error"], "Error 403") {
+		t.Errorf("shared-ingress = %v, want a RuleUnresolved ForwardingRule record with the permission and the 403", refused)
+	}
+	churned := unresolved["churned-ingress"]
+	if churned["permission"] != "" || !strings.Contains(churned["error"], "Error 404") || churned["severity"] != emit.SeverityInfo {
+		t.Errorf("churned-ingress = %v, want an info RuleUnresolved record with the 404 and no permission", churned)
+	}
+	sum := summaryLine(t, res.Stdout)
+	// scanned = 4 disks + 2 orphaned rules + 3 idle addresses.
+	if sum["scanned"] != "9" || sum["unavailable"] != "lbs: 2 rules unresolved" {
+		t.Errorf("summary = %v, want scanned=9 unavailable=\"lbs: 2 rules unresolved\"", sum)
+	}
+}
+
+// TestOrphansUnresolvedRulesCapped: a systemic failure (every rule
+// behind one unreadable project) is capped at 20 records; the summary
+// still counts them all.
+func TestOrphansUnresolvedRulesCapped(t *testing.T) {
+	api := orphanFixture()
+	for i := range 25 {
+		api.unresolved = append(api.unresolved, cloud.UnresolvedLoadBalancer{
+			Name: fmt.Sprintf("rule-%02d", i), Region: "global", Err: errors.New("googleapi: Error 500: backendError")})
+	}
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd, "--only=lbs")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
+	}
+	n := 0
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["reason"] == "RuleUnresolved" {
+			n++
+		}
+	}
+	sum := summaryLine(t, res.Stdout)
+	if n != 20 || sum["unavailable"] != "lbs: 25 rules unresolved (20 listed)" {
+		t.Errorf("records = %d, summary = %v; want 20 records and \"lbs: 25 rules unresolved (20 listed)\"", n, sum)
+	}
+}
+
+// TestOrphansUnresolvedContract: the RuleUnresolved fields are in the
+// output glossary.
+func TestOrphansUnresolvedContract(t *testing.T) {
+	api := orphanFixture()
+	api.unresolved = []cloud.UnresolvedLoadBalancer{{Name: "r", Region: "global", Err: &cloud.PermissionDeniedError{
+		Permission: "compute.backendServices.get", Err: errors.New("googleapi: Error 403")}}}
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	checktest.VerifyContract(t, cmd)
+}
+
+// TestOrphansSlowLBsCannotStarveTheRest: lbs runs last and on a
+// budget, so an lb sweep that would run past --timeout degrades to
+// SweepFailed — the disks and addresses are reported, the summary is
+// written, the exit code stays 0.
+func TestOrphansSlowLBsCannotStarveTheRest(t *testing.T) {
+	api := ctxOrphans{orphanFixture()}
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd, "--timeout=500ms")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	kinds := map[string]int{}
+	var failed map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		kinds[r["kind"]]++
+		if r["reason"] == "SweepFailed" {
+			failed = r
+		}
+	}
+	if kinds["orphan.disk"] != 3 || kinds["orphan.address"] != 2 {
+		t.Errorf("kinds = %v, want the disks and addresses reported", kinds)
+	}
+	if failed["class"] != "lbs" || !strings.Contains(failed["error"], "share of --timeout") {
+		t.Errorf("SweepFailed = %v, want class=lbs naming its --timeout share", failed)
+	}
+	if sum := summaryLine(t, res.Stdout); sum["unavailable"] != "lbs: sweep failed" {
+		t.Errorf("summary = %v, want unavailable=\"lbs: sweep failed\"", sum)
+	}
 }
