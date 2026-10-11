@@ -131,3 +131,24 @@ func (d *dispatcher) rebindStormMembers(members []engine.StormMember, sid, finge
 		}
 	}
 }
+
+// recordBoundSession binds key → sid in dedup, indexes blast-radius ancestors
+// (noteAncestors) so sibling folds and watchboard reattachments always see every
+// bound incident, optionally registers sid on the storm correlator for pre-storm
+// supersede pointers, arms recovery tracking, and updates activeIncidents.
+func (d *dispatcher) recordBoundSession(key engine.EventKey, sid string, sig engine.Signal, noteStorm bool) {
+	d.dedup.BindIncident(key, sid, sig.IncidentRef())
+	d.noteAncestors(key, sig)
+	if noteStorm && d.storm != nil {
+		d.storm.NoteMemberSession(key, sid)
+	}
+	if d.tracker != nil {
+		d.tracker.Track(engine.Incident{
+			Key:       key,
+			SessionID: sid,
+			FirstSeen: sig.FirstSeen,
+			Ref:       sig.IncidentRef(),
+		})
+	}
+	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
+}

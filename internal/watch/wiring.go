@@ -780,7 +780,6 @@ func (r *runner) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Build components.
 	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
 	filter := engine.NewFilter(filterCfg)
 
@@ -792,22 +791,111 @@ func (r *runner) run(ctx context.Context) error {
 	// This runner's metrics bundle (built once in newRunner; reused
 	// across supervisor restarts so its series aren't re-registered).
 	m := r.metrics
-
-	// Which sink this process delivers to, as a scrapeable info gauge
-	// (the frozen operation counters stay sink-agnostic — see
-	// metrics.go on why the sink dimension is not a new label).
 	m.sinkInfo.WithLabelValues(f.sink).Set(1)
 
+	project, region, zone := r.resolveRunnerIdentity(f)
+
+	maskedSink := MaskingSink(r.sink)
+	disp := &dispatcher{
+		filter:         filter,
+		dedup:          dedup,
+		pullClass:      engine.NewPullClassMemo(),
+		injector:       maskedSink,
+		metrics:        m,
+		cluster:        r.clusterName,
+		project:        project,
+		region:         region,
+		zone:           zone,
+		mode:           f.mode,
+		targetSid:      f.targetSession,
+		dryRun:         f.dryRun,
+		injectMaxBytes: f.injectMaxBytes,
+	}
+
+	occStore, cleanupStore, err := r.openRunnerStore(f, disp)
+	if err != nil {
+		return err
+	}
+	defer cleanupStore()
+
+	waitBoard := r.wireDispatcherRoutingAndLoops(ctx, f, maskedSink, disp, dedup, occStore)
+
+	restCfg, client, reviewer, err := r.buildRunnerClients(ctx, f)
+	if err != nil {
+		return err
+	}
+
+	bs, factories, cleanupSources, err := r.buildRunnerSources(ctx, f, restCfg, client, reviewer, occStore)
+	if err != nil {
+		return err
+	}
+	defer cleanupSources()
+	registry := bs.registry
+
+	feed, err := r.wireGraphAndEnrichment(ctx, f, client, reviewer, factories, disp, dedup, occStore, bs)
+	if err != nil {
+		return err
+	}
+
+	feedErrFn, err := r.startStormAndFeed(ctx, cancel, f, feed, disp, occStore)
+	if err != nil {
+		return err
+	}
+
+	switch f.sink {
+	case sinkWebhook:
+		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
+			r.clusterName, redactedURL(f.sinkURL))
+	case sinkAX:
+		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, server-tls=%t, router=%s, template=%s)",
+			r.clusterName, f.axServer, f.axServerTLS, redactedURL(f.axRouterURL), f.axTaskTemplate)
+	default:
+		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
+			r.clusterName, f.daemonURL, f.mode, f.owner)
+	}
+	m.runnerUp.Set(1)
+
+	// §11 capability re-check (issue #385).
+	var recheck accessRecheck
+	recheck.start(ctx, cancel, f.accessRecheck, reviewer, registry.All(), m, func(sig engine.Signal) {
+		disp.DispatchSignal(ctx, sig)
+	})
+
+	// Readiness (#285): ready once every source with an initial-LIST barrier has crossed it.
+	if r.ready != nil {
+		srcs := registry.All()
+		r.ready.set(r.clusterName, func() bool {
+			ok, _ := sources.AllSynced(srcs)
+			return ok
+		})
+		defer r.ready.clear(r.clusterName)
+	}
+
+	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
+		disp.DispatchSignal(ctx, sig)
+	})
+	m.runnerUp.Set(0)
+
+	if snapErr := dedup.Snapshot(); snapErr != nil {
+		log.Printf("dedup snapshot on shutdown: %v", snapErr)
+	}
+	if waitBoard != nil {
+		waitBoard()
+	}
+	if err == nil {
+		err = feedErrFn()
+	}
+	if err == nil {
+		err = recheck.failure()
+	}
+	return err
+}
+
+func (r *runner) resolveRunnerIdentity(f *flags) (project, region, zone string) {
 	// §8 deployment identity: cluster is --cluster-name (M0);
 	// zone/project resolve by precedence — explicit flag > provider
-	// metadata > empty (never fatal; empty fields reproduce the
-	// zone-less fingerprints deployments hashed before this wiring). In
-	// multi-cluster mode the fleet already knows each cluster's
-	// project/location (from the Container API), so a fleet runner's
-	// per-cluster values take precedence over the local provider
-	// metadata — the on-host metadata server describes the sentinel's
-	// own node, not the remote cluster it's watching.
-	project, region, zone := r.project, r.region, r.zone
+	// metadata > empty (never fatal).
+	project, region, zone = r.project, r.region, r.zone
 	if project == "" || region == "" {
 		idCtx, cancelID := context.WithTimeout(context.Background(), 15*time.Second)
 		p, rg, z := resolveIdentity(idCtx, f)
@@ -815,10 +903,7 @@ func (r *runner) run(ctx context.Context) error {
 		if project == "" {
 			project = p
 		}
-		// Region and zone move together (see identityFromProvider):
-		// a fleet runner that knows its cluster's location knows both,
-		// and one that knows neither must not mix a local metadata
-		// zone into a remote cluster's region.
+		// Region and zone move together (see identityFromProvider).
 		if region == "" {
 			region, zone = rg, z
 		}
@@ -827,40 +912,23 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("identity: stamping project=%q region=%q zone=%q (precedence: explicit flag > provider metadata > empty; a regional cluster has no zone, and the failure domain — zone else region — participates in the §8 fingerprint hash)", project, region, zone)
 	}
 	if f.sink == sinkAX && (project == "" || (region == "" && zone == "")) {
-		// The agent in each AX task has only the payload to go on, and
-		// GKE tooling addresses a cluster as projects/…/locations/…/
-		// clusters/…. Without both, it guesses (seen in the #569 test
-		// run, where it spent its budget trying project IDs).
 		log.Printf("WARNING: --sink=ax with project=%q region=%q zone=%q — payloads will not tell the agent where the cluster is; pass --project and --region (or --zone), or run a build with the GKE provider so they resolve from metadata", project, region, zone)
 	}
+	return project, region, zone
+}
 
-	maskedSink := MaskingSink(r.sink)
-	disp := &dispatcher{
-		filter:    filter,
-		dedup:     dedup,
-		pullClass: engine.NewPullClassMemo(),
-		injector:  maskedSink,
-		metrics:   m,
-		cluster:   r.clusterName,
-		project:   project,
-		region:    region,
-		zone:      zone,
-		mode:      f.mode,
-		targetSid: f.targetSession,
-		dryRun:    f.dryRun,
-
-		injectMaxBytes: f.injectMaxBytes,
+func (r *runner) openRunnerStore(f *flags, disp *dispatcher) (*store.Store, func(), error) {
+	m := r.metrics
+	var occStore *store.Store
+	var cleanups []func()
+	cleanup := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
 	}
 
-	// Occurrence store (§9.1): opt-in via --store. When unset, disp
-	// keeps a nil *store.Store whose methods are all no-ops — the M2
-	// behavior, byte for byte. Hooks wire the store's drop/prune/write
-	// visibility into this process's Prometheus registry; the deferred
-	// Close flushes the writer buffer on every return path (dry-run
-	// included — the store works in dry-run: routing decisions are
-	// real even when injects are printed).
-	var occStore *store.Store
 	if f.store != "" {
+		var err error
 		occStore, err = store.Open(f.store,
 			store.WithTTL(f.storeTTL),
 			store.WithMaxBytes(int64(f.storeMaxMB)<<20),
@@ -871,48 +939,46 @@ func (r *runner) run(ctx context.Context) error {
 			}),
 		)
 		if err != nil {
-			return err
+			return nil, cleanup, err
 		}
-		defer func() {
+		cleanups = append(cleanups, func() {
 			if cerr := occStore.Close(); cerr != nil {
 				log.Printf("store: close: %v", cerr)
 			}
-		}()
+		})
 		disp.store = occStore
 		log.Printf("store: enabled (path=%s, ttl=%s, max=%dMiB, prune every %s)",
 			f.store, f.storeTTL, f.storeMaxMB, store.PruneInterval(f.storeTTL))
-		// §9.4 triage-status records ride the same store: severity
-		// routing honors agent overrides (per-incident mode), and
-		// recovery flips records to resolved in every mode.
 		disp.triage = newTriageOverrides(occStore, m, f.triageRegressFactor)
 		log.Printf("triage-status: enabled (open records refine routing every signal, cache refresh %s; recovery flips records to resolved; regression evidence at %dx the downgrade-time rate)",
 			triageRefreshInterval, f.triageRegressFactor)
 	}
 
-	// ax sink session reuse (issue #590): an incident that comes back
-	// reopens into its earlier session. The sink is process-wide, the
-	// store per cluster, so each runner hands the sink its own. Without
-	// --store the sink remembers sessions in memory only.
+	// ax sink session reuse (issue #590) and idle reminder counter (#599).
 	if as, ok := unwrapSink(r.sink).(*axsink.Sink); ok {
 		if occStore != nil {
 			as.UseSessionStore(r.clusterName, occStore)
-			defer as.UseSessionStore(r.clusterName, nil)
+			cleanups = append(cleanups, func() { as.UseSessionStore(r.clusterName, nil) })
 			log.Printf("ax sink: remembering incident sessions in %s, so a reopened incident reaches its earlier session across restarts", f.store)
 		} else {
 			log.Printf("ax sink: no --store, so incident sessions are remembered in memory only — after a restart, a reopened incident starts a new session (in the same task)")
 		}
-		// Issue #599: reminders held for idle tasks are counted per
-		// cluster, like everything else in this runner's bundle.
 		as.UseReminderCounter(r.clusterName, func(outcome string) { m.axReminders.WithLabelValues(outcome).Inc() })
-		defer as.UseReminderCounter(r.clusterName, nil)
+		cleanups = append(cleanups, func() { as.UseReminderCounter(r.clusterName, nil) })
 	}
 
-	// Severity routing (§7.7): the policy (source defaults +
-	// --severity overrides) is always on; the shared watchboard only
-	// exists in per-incident mode — in --mode=shared ALL severities
-	// keep routing to --target-session exactly as before (frozen
-	// contract; the watchboard is the per-incident-mode answer to
-	// warning noise).
+	return occStore, cleanup, nil
+}
+
+func (r *runner) wireDispatcherRoutingAndLoops(
+	ctx context.Context,
+	f *flags,
+	maskedSink inject.Sink,
+	disp *dispatcher,
+	dedup *engine.DedupCache,
+	occStore *store.Store,
+) func() {
+	m := r.metrics
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
@@ -934,19 +1000,11 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("severity routing: --mode=shared — all severities route to --target-session (watchboard disabled)")
 	}
 
-	// Start the periodic dedup-snapshot ticker if configured.
 	if f.dedupPersist != "" && f.snapshotInterval > 0 {
 		go runSnapshotLoop(ctx, dedup, f.snapshotInterval)
 	}
-
-	// §9.1 TTL + size-bound prune loop (interval min(1h, ttl/24)).
-	// Nil-safe: returns immediately when the store is disabled.
 	go occStore.RunPrune(ctx)
 
-	// §9.2 distiller: the scheduled pass converting recurring
-	// occurrences into durable memory facts. Requires --store (both
-	// its input window and the in-tree memory backend live there);
-	// without one, distillation is off and says so once.
 	if occStore != nil && f.distillInterval > 0 {
 		go runDistillLoop(ctx, occStore, f.distillInterval, m)
 		log.Printf("distill: enabled (pass every %s over the last %s of occurrences → memory facts in %s)",
@@ -955,245 +1013,142 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("distill: disabled (requires --store; distilled facts live in the sentinel store — see pkg/memory)")
 	}
 
-	// Watchboard interval-flush loop (§7.7): flushes buffered
-	// warnings at --watchboard-flush age, plus a final best-effort
-	// flush on shutdown so a terminating sentinel keeps its buffer.
 	var waitBoard func()
 	if disp.board != nil {
 		waitBoard = startBoard(ctx, disp.board)
 		log.Printf("watchboard: enabled (batch=%d, flush=%s, rotate after %d digest injects — §15 Q2 size-based)",
 			f.watchboardBatch, f.watchboardFlush, f.watchboardRotate)
 	}
+	return waitBoard
+}
 
-	// Build the kube client. Dry-run runs the FULL watch pipeline —
-	// informers, sources, filter/dedup/routing — against the real
-	// cluster; only the sink deliveries are replaced by printing
-	// payloads to stdout (the dispatcher's dryRun branches). The M0
-	// behavior of skipping the kube client entirely made --dry-run a
-	// flag-validation no-op that watched nothing — adopted the fix
-	// from kube-agents' watcher: a dry run you cannot point at a
-	// cluster and SEE payloads from is not a dry run.
+func (r *runner) buildRunnerClients(ctx context.Context, f *flags) (*rest.Config, kubernetes.Interface, sources.AccessReviewer, error) {
 	if f.dryRun {
 		log.Printf("lookout watch: --dry-run: watching cluster %q; inject payloads print to stdout, no daemon/sink calls", r.clusterName)
 	}
-	// Resolve this runner's rest config once and share it across every
-	// client below. In the single-cluster default it comes from
-	// --in-cluster/--kubeconfig exactly as before; in multi-cluster
-	// GKE-endpoint mode (issue #208) the fleet already minted it per
-	// cluster (ADC over the DNS endpoint) and stored it on the runner.
 	restCfg := r.restCfg
 	if restCfg == nil {
+		var err error
 		restCfg, err = kube.BuildConfig(kube.Options{InCluster: f.inCluster, Kubeconfig: f.kubeconfig})
 		if err != nil {
-			return err
+			return nil, nil, nil, err
 		}
 	}
 	client, err := kube.BuildClientFromConfig(restCfg)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	// --watch-scope=namespace (#407): decide which listed namespaces this
-	// run watches before anything else reads the list — a namespace whose
-	// Role is missing is skipped loudly, not fatal (admitNamespaces).
-	if err := admitNamespaces(ctx, f, client, m); err != nil {
-		return err
+	if err := admitNamespaces(ctx, f, client, r.metrics); err != nil {
+		return nil, nil, nil, err
 	}
-	// Every capability question below goes through this one reviewer, so
-	// under --watch-scope=namespace each is asked in the scope namespace
-	// (#407) — see newAccessReviewer.
 	reviewer := newAccessReviewer(f, client)
-
-	// Auto defaults (--sources=auto / --storm=auto): resolve BEFORE
-	// any source-conditional client building below — the rest of
-	// startup then sees a concrete source list and a concrete storm
-	// on/off, exactly as if the operator had pinned them. Explicit
-	// values skip this entirely and keep the frozen §11 semantics
-	// (named source or --storm=on probe failure = fatal). Auto is the
-	// ONLY mode that downgrades a miss to skip-with-loud-line.
 	if err := resolveAutoDefaults(ctx, f, client); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
+	return restCfg, client, reviewer, nil
+}
 
-	// Signal sources (§7.2), individually enabled via --sources
-	// (auto resolves to the supported portable set above; an explicit
-	// list is honored verbatim). The dynamic
-	// client serves the expiry source's discovery-gated cert-manager
-	// reads, the gateway source's Gateway/HTTPRoute informers and the
-	// compute-class source's ComputeClass informer; the
-	// saturation source's metrics.k8s.io dimension needs its own
-	// clientset — each built from the same kube options, only when its
-	// source is enabled.
+func (r *runner) buildRunnerSources(
+	ctx context.Context,
+	f *flags,
+	restCfg *rest.Config,
+	client kubernetes.Interface,
+	reviewer sources.AccessReviewer,
+	occStore *store.Store,
+) (*builtSources, sharedFactories, func(), error) {
+	cleanup := func() {}
+	var err error
 	var dyn dynamic.Interface
 	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) || f.sourceEnabled(computeclass.Name) {
 		dyn, err = kube.BuildDynamicClientFromConfig(restCfg)
 		if err != nil {
-			return err
+			return nil, sharedFactories{}, cleanup, err
 		}
 	}
 	var metricsClient metricsv.Interface
 	if f.sourceEnabled(saturation.Name) {
 		metricsClient, err = metricsv.NewForConfig(restCfg)
 		if err != nil {
-			return fmt.Errorf("metrics.k8s.io client: %w", err)
+			return nil, sharedFactories{}, cleanup, fmt.Errorf("metrics.k8s.io client: %w", err)
 		}
 	}
-	// The cloud provider (§2 boundary) exists for the capacity
-	// source's provider scale-decision sub-source (§10.1 source 3)
-	// and the quota source (§10.2). On a default (untagged) build or
-	// off-cloud, cloud.New resolves to the NoProvider sentinel: the
-	// capacity sub-source then reports itself unavailable explicitly
-	// (never silently, §2), while the quota source REFUSES to start —
-	// quota.New's loud §11 error — because a project-tier deployment
-	// without a cloud makes no sense.
 	var provider cloud.Provider
 	if f.sourceEnabled(capacity.Name) || f.sourceEnabled(quota.Name) || f.sourceEnabled(notifications.Name) {
 		provider, err = cloud.New(ctx, cloud.Config{Project: r.project, Cluster: r.clusterName, NotificationsSubscription: f.notificationsSub})
 		if err != nil {
-			return fmt.Errorf("cloud provider: %w", err)
+			return nil, sharedFactories{}, cleanup, fmt.Errorf("cloud provider: %w", err)
 		}
-		// The provider is per-run, and multi-cluster restarts a runner
-		// in place — so without this every restart strands the gRPC
-		// clients the last one dialed (issue #382). Same treatment the
-		// store gets below; the provider was missed because at N=1 the
-		// process exits and the OS reclaims. Best-effort: a teardown
-		// error is worth a line, never worth failing a clean shutdown.
-		defer func() {
+		cleanup = func() {
 			if cerr := provider.Close(); cerr != nil {
 				log.Printf("cloud: provider %q close: %v", provider.Name(), cerr)
 			}
-		}()
+		}
 		log.Printf("cloud: provider %q selected (%d compiled in)", provider.Name(), len(cloud.Registered()))
 	}
+
 	bs, err := buildSources(f, r.token, client, dyn, metricsClient, provider)
 	if err != nil {
-		return err
+		return nil, sharedFactories{}, cleanup, err
 	}
-	registry := bs.registry
 
-	// ONE shared informer factory per runner serves every typed
-	// informer in this cluster (§6.3): the sources, the graph feed, and
-	// the §7.4 pod clearance observer. Built unconditionally — the
-	// sharing is a property of the process, not of any one feature.
-	//
-	// It used to be built only under --storm, which made an unrelated
-	// correlation flag decide whether pods were watched once or three
-	// times: with storm off every source fell back to its own factory,
-	// and even with it on, capacity/k8s-events/ingress/autoscaling and
-	// the pod observer stayed outside. That was 18 LIST+WATCH streams
-	// per cluster (3× pods, 3× events, 2× nodes) against a 256Mi
-	// default limit, multiplied per runner in multi-cluster mode. Now
-	// it is 13 — one per distinct object type, the floor.
-	//
-	// Gateway keeps its own dynamicinformer factory: different client
-	// type, cannot merge into this one.
-	//
-	// The transform trims Pods and Nodes on the way into the cache
-	// (§6.1). It is attached here rather than per-source because the
-	// cache is shared: a transform is a property of the factory, and
-	// every consumer of that factory sees its output. What it strips and
-	// what it deliberately preserves is in transform_registry.go, which
-	// is enforced by a behavioural guard test — read that before
-	// touching trimPod or trimNode.
 	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespaces())
-	sharedFactory := factories.Namespaced
 	switch {
 	case len(f.scopeNamespaces()) > 0:
-		// The scope is the one fact an operator most needs to confirm from
-		// the log, since it decides what this process can see at all.
 		log.Printf("watch: --watch-scope=namespace — one read shard per namespace (%s): each lists and watches its own namespace only, so nothing outside them enters the cache, and every source, the dispatcher, dedup, store and storm graph see their union; cluster-scoped reads (nodes and the like) stay cluster-wide on one shared factory where a source needs them and are probed as such (#407)", strings.Join(f.scopeNamespaces(), ", "))
 	case factories.Split():
-		// Worth a line: this is the one flag whose meaning widened from
-		// "do not report" to "do not watch", and the difference is only
-		// visible in API server audit logs.
 		log.Printf("watch: --exclude-namespace is scoping the watch — the namespaced informers list and watch with field selector %q, so excluded namespaces never enter the cache; nodes are cluster-scoped and unaffected", namespaceExclusionSelector(splitCSV(f.excludeNamespaces)))
 	}
 	attachSharedFactories(bs, factories)
 	if bs.k8sevents != nil {
 		if err := enableEventOwners(ctx, bs.k8sevents, reviewer); err != nil {
-			return err
+			return nil, sharedFactories{}, cleanup, err
 		}
 	}
 	if bs.topoDrift != nil {
 		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
 		if bs.rollout != nil {
-			// §7.6's rollout row. leeway relaxes its placement thresholds
-			// while a workload is mid-rollout, and the design is explicit
-			// that it consumes the rollout source's answer rather than
-			// recomputing one — two subsystems disagreeing about whether a
-			// rollout is running is a bug nobody would find.
-			//
-			// The adapter lives here rather than in either package because
-			// this is the only place that already knows about both, and
-			// neither should have to import the other to be testable.
 			bs.topoDrift.WithRolloutOracle(rolloutOracle(bs.rollout))
-			// §8.5's rolloutEndedAt — the other edge of the same predicate.
-			// One source, two oracles, because §7.6 must read an absent
-			// answer as "nothing is rolling out" while §8.5 must not read it
-			// as "the rollout ended long ago".
 			bs.topoDrift.WithRolloutEndOracle(rolloutEndOracle(bs.rollout))
 		}
 		if bs.capacity != nil {
-			// §8.5's pending-pod rows, on the same argument: the capacity
-			// source has already decided which pods the scheduler refused and
-			// whether it refused them for room, and a second reading of
-			// FailedScheduling here would be a second answer.
 			bs.topoDrift.WithCapacityOracle(capacityOracle(bs.capacity))
 		}
 		if occStore != nil {
-			// §9.1: the dwell timers ride the same --store the occurrence
-			// records do. Guarded rather than passed unconditionally, because
-			// a typed nil in an interface is not a nil interface — the source
-			// would see a store and get an error from every write.
-			//
-			// Without --store the machine still runs; a restart just starts
-			// every episode's clock again (§9.2: a missing history costs one
-			// dwell, never the monitoring).
 			bs.topoDrift.WithStore(occStore, r.clusterName)
 		}
 	}
 	if bs.compClass != nil {
 		bs.compClass.WithMeter(r.meter(computeclass.MeterName))
 		if occStore != nil {
-			// The same §9.1 arrangement topologydrift has, and the same
-			// typed-nil guard. The two sources share the one
-			// leeway_alert_state table and tell their rows apart by the
-			// subject kind, so this is not a second store and does not need
-			// to be a second flag.
 			bs.compClass.WithStore(occStore, r.clusterName)
 		}
 	}
+	return bs, factories, cleanup, nil
+}
 
+func (r *runner) wireGraphAndEnrichment(
+	ctx context.Context,
+	f *flags,
+	client kubernetes.Interface,
+	reviewer sources.AccessReviewer,
+	factories sharedFactories,
+	disp *dispatcher,
+	dedup *engine.DedupCache,
+	occStore *store.Store,
+	bs *builtSources,
+) (*graphFeed, error) {
 	var feed *graphFeed
 	if f.stormMine && !f.stormEnabled() {
-		// Not fatal: --storm=auto can resolve to off from a missing
-		// grant, and a sentinel that refuses to start over a stage it
-		// chose to disable is worse than one that says so. Loud, though
-		// — asking for mined keys and silently getting none is the
-		// failure mode this line exists to prevent.
 		log.Printf("storm: --storm-mine ignored — it is a third correlation tier on top of storm correlation, which is off (issue #225)")
 	}
 	if f.stormEnabled() {
-		// The graph feed joins the same factory the sources are already
-		// on, so its pods/nodes/replicasets informers are theirs — the
-		// §6.3 property, now independent of when the factory is built.
-		//
-		// Graph history (§6.6): with a store configured, every applied
-		// graph delta also logs a ChangeRecord through the store's
-		// buffered writer. Without one, onChange stays nil and the
-		// graph skips change tracking entirely.
-		//
-		// The store also buys the routing layer (#507): Services,
-		// EndpointSlices, Ingresses and NetworkPolicies are watched so
-		// history can answer Selects/RoutesTo, each only if its grant
-		// probes allowed. A sentinel without a store never starts
-		// those informers — correlation does not read them.
 		var onChange func(graph.ChangeRecord)
 		var routing []graph.NodeKind
 		if occStore != nil {
 			onChange = occStore.RecordGraphChange
 			kinds, lines, err := probeRoutingAccess(ctx, reviewer)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			for _, l := range lines {
 				log.Printf("%s", l)
@@ -1205,23 +1160,12 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("storm: disabled (--storm-window=0)")
 	}
 
-	// Enrichment (§7.6): per-incident mode only — shared mode routes
-	// everything to --target-session and keeps its frozen payload
-	// contract. When the graph feed runs, enrichment reuses its live
-	// topology snapshot and the shared informer caches (§4.3 surface
-	// 3); otherwise every run takes the scoped LoadCluster fallback.
-	// No startup RBAC probe on purpose: enrichment is best-effort by
-	// definition (§7.6 failure honesty) — a missing grant surfaces as
-	// enrichment_error trailers + enrichment_failures_total, never as
-	// a crash-loop or a silent degrade.
 	if f.mode == "per-incident" && f.enrich != "off" {
-		// --enrich-lists already validated in f.validate(); parse for the
-		// scoped-list fallback's LoadCluster selection (§7.6).
 		enrichLists, _ := state.ParseListSelection(f.enrichLists)
 		e := &enricher{
 			client:         client,
 			now:            time.Now,
-			metrics:        m,
+			metrics:        r.metrics,
 			policy:         f.enrich,
 			cap:            f.enrichCap,
 			logLines:       f.enrichLogLines,
@@ -1233,7 +1177,7 @@ func (r *runner) run(ctx context.Context) error {
 		path := "scoped-list"
 		if feed != nil {
 			e.snapshot = feed.snapshot
-			podLister := sharedFactory.Core().V1().Pods().Lister()
+			podLister := factories.Namespaced.Core().V1().Pods().Lister()
 			e.livePod = func(ns, name string) (*corev1.Pod, error) {
 				return podLister.Pods(ns).Get(name)
 			}
@@ -1246,179 +1190,88 @@ func (r *runner) run(ctx context.Context) error {
 		log.Printf("enrichment: --mode=shared — disabled (the shared session's payload contract is frozen; enrichment warms per-incident sessions)")
 	}
 
-	// §11: verify each source's declared RBAC before watching
-	// anything — a deployment whose ServiceAccount can't support a
-	// source fails loudly here, naming the source and the missing
-	// permission, never a silently empty watch.
-	probeNotes, err := sources.Probe(ctx, reviewer, registry.All()...)
+	probeNotes, err := sources.Probe(ctx, reviewer, bs.registry.All()...)
 	if !f.sourcesAutoResolved {
-		// Optional-requirement denials (#145): the source runs with
-		// one dimension degraded — reported here, never silent.
-		// Under --sources=auto the resolution summary already printed
-		// the same fact per source, so these would be duplicates.
 		for _, note := range probeNotes {
 			log.Printf("%s", note)
 		}
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if feed != nil {
-		// Same posture for the graph feed's informers: --storm is an
-		// explicit opt-in, so a missing grant fails loudly at startup.
 		if err := probeGraphAccess(ctx, reviewer); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	// Recovery injects (§7.4): watch bound incidents for symptom
-	// clearance and inject the outcome into the same session. Sources
-	// with their own clearance predicates register them ahead of the
-	// generic pod observer (§7.4: each source that can observe a
-	// symptom can observe its absence) — order matters for probe_flap,
-	// where "pod is Ready" is true between the flaps the incident is
-	// about.
 	if f.recoveryStableFor > 0 {
-		if err := setupRecovery(ctx, f, client, sharedFactory, dedup, disp, m, bs); err != nil {
-			return err
+		if err := setupRecovery(ctx, f, client, factories.Namespaced, dedup, disp, r.metrics, bs); err != nil {
+			return nil, err
 		}
 	}
+	return feed, nil
+}
 
-	// Arm the correlator and start the graph ingest loop. A feed
-	// failure is fatal like a source failure (§7.2 posture: a
-	// sentinel with a dead stage lies about its coverage) — it
-	// cancels the process and its error surfaces after RunAll.
+func (r *runner) startStormAndFeed(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	f *flags,
+	feed *graphFeed,
+	disp *dispatcher,
+	occStore *store.Store,
+) (func() error, error) {
 	var feedErr error
 	var feedMu sync.Mutex
-	if feed != nil {
-		correlator, cerr := engine.NewStormCorrelator(f.stormWindow, f.stormMin, feed)
-		if cerr != nil {
-			return cerr
-		}
-		if f.stormMine {
-			// Validation is the correlator's, not the flag layer's: the
-			// dimension list is a library concern (engine.mined.go owns
-			// the explainability gate), and a bad one is a config error
-			// like any other.
-			if merr := correlator.EnableMining(engine.DefaultMinedDimensions, f.stormMineMin); merr != nil {
-				return fmt.Errorf("--storm-mine: %w", merr)
-			}
-		}
-		if f.stormClusterFallback {
-			if cerr := correlator.EnableClusterFallback(feed.NodeCount); cerr != nil {
-				return fmt.Errorf("--storm-cluster-fallback: %w", cerr)
-			}
-		}
-		disp.storm = correlator
-		go func() {
-			if ferr := feed.Run(ctx); ferr != nil && ctx.Err() == nil {
-				feedMu.Lock()
-				feedErr = ferr
-				feedMu.Unlock()
-				cancel()
-			}
-		}()
-		log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
-		if !f.stormClusterFallback {
-			log.Printf("storm: cluster fallback disabled (--storm-cluster-fallback=false) — simultaneous failures of nodes carrying no topology.kubernetes.io/zone label will open one session each (issue #334)")
-		}
-		if f.stormMine {
-			log.Printf("storm: mined keys enabled (--storm-mine, min=%d) — incidents sharing an exact image, node or container may group into one storm with no topology ancestor between them; every such storm names the attribute it grouped on (issue #225)", f.stormMineMin)
-		}
-		// §7.7 ancestor reattachment (issue #220) rides the same
-		// topology index. Wired here, not at the board's construction
-		// above, because the graph feed does not exist until this
-		// point — and it only exists under --storm, which is therefore
-		// a de-facto precondition. Announced either way so the stage is
-		// never silently absent.
-		if disp.board != nil {
-			disp.resolver = feed
-			disp.board.reattach = disp.reattachWatchboardEntry
-			log.Printf("watchboard: ancestor reattachment enabled — a buffered warning whose blast-radius ancestor already owns a live incident is delivered there as a kind=family.member followup instead of a digest entry (§7.7); a new incident of the same class on another pod of a workload that already has one (a rollout's new ReplicaSet) folds into that session the same way")
-		}
-		// Graph history (§6.6): periodic compressed snapshots into the
-		// store, alongside the continuously logged deltas above. Only
-		// when BOTH the graph feed and the store run — one-shot CLI
-		// invocations read this history via --at + --store.
-		if occStore != nil {
-			go runGraphHistoryLoop(ctx, feed.snapshot, occStore, f.graphSnapshotInterval)
-			log.Printf("graph history: enabled (snapshot every %s + per-delta change log → %s; serves --at point-in-time queries and triage changes)",
-				f.graphSnapshotInterval, f.store)
-		}
-	}
-
-	switch f.sink {
-	case sinkWebhook:
-		log.Printf("lookout watch: starting on cluster %q → webhook sink %s (POST /incidents + /incidents/<id>/events, schema-v1 payload bodies)",
-			r.clusterName, redactedURL(f.sinkURL))
-	case sinkAX:
-		log.Printf("lookout watch: starting on cluster %q → ax sink: one AX task per incident (server=%s, server-tls=%t, router=%s, template=%s)",
-			r.clusterName, f.axServer, f.axServerTLS, redactedURL(f.axRouterURL), f.axTaskTemplate)
-	default:
-		log.Printf("lookout watch: starting on cluster %q → daemon %s (mode=%s, owner=%s)",
-			r.clusterName, f.daemonURL, f.mode, f.owner)
-	}
-	m.runnerUp.Set(1)
-	// §11 capability re-check (issue #385). The startup Probe above is
-	// a point-in-time answer; a grant revoked afterwards leaves the
-	// informer retrying a 403 on client-go's backoff forever with
-	// HasSynced still latched true, so the source goes quiet and reads
-	// downstream as "cluster healthy". Same question, asked on an
-	// interval, for as long as this runner lives.
-	var recheck accessRecheck
-	recheck.start(ctx, cancel, f.accessRecheck, reviewer, registry.All(), m, func(sig engine.Signal) {
-		disp.DispatchSignal(ctx, sig)
-	})
-	// Readiness (#285): this cluster is ready once every source with
-	// an initial-LIST barrier has crossed it. Registered before RunAll
-	// so the probe reports "syncing" rather than "not started" for the
-	// seconds the informers spend listing, and withdrawn on the way out
-	// so a runner between supervisor restarts is not counted as
-	// watching a cluster it has stopped watching.
-	if r.ready != nil {
-		srcs := registry.All()
-		r.ready.set(r.clusterName, func() bool {
-			ok, _ := sources.AllSynced(srcs)
-			return ok
-		})
-		defer r.ready.clear(r.clusterName)
-	}
-	err = sources.RunAll(ctx, registry.All(), func(sig engine.Signal) {
-		disp.DispatchSignal(ctx, sig)
-	})
-	m.runnerUp.Set(0)
-	// Final snapshot on shutdown so any un-persisted dedup state
-	// isn't lost. Best-effort — failure is logged, not fatal.
-	if snapErr := dedup.Snapshot(); snapErr != nil {
-		log.Printf("dedup snapshot on shutdown: %v", snapErr)
-	}
-	// Stop the watchboard and block on its final flush (§7.7, issue
-	// #108): run's shutdown branch does a best-effort FlushNow, and
-	// this join keeps the process alive until it lands so buffered
-	// warnings aren't dropped on SIGTERM. Nil-guarded: the board is
-	// optional (per-incident mode without warning routing).
-	//
-	// Reached on TWO paths — a cancelled ctx (SIGTERM) and a fatal
-	// source error from RunAll, which does not cancel this ctx. waitBoard
-	// stops the board itself so both behave the same; before #364 the
-	// error path blocked here forever and the process wedged instead of
-	// exiting with the diagnosis §7.2 promises.
-	if waitBoard != nil {
-		waitBoard()
-	}
-	if err == nil {
+	getFeedErr := func() error {
 		feedMu.Lock()
-		err = feedErr
-		feedMu.Unlock()
+		defer feedMu.Unlock()
+		return feedErr
 	}
-	// A revoked required grant cancelled this runner, so RunAll
-	// returned nil (a cancelled ctx is a clean exit). Surface it the
-	// same way the feed failure is surfaced — and after it, because a
-	// feed that died on its own did so first.
-	if err == nil {
-		err = recheck.failure()
+	if feed == nil {
+		return getFeedErr, nil
 	}
-	return err
+	correlator, cerr := engine.NewStormCorrelator(f.stormWindow, f.stormMin, feed)
+	if cerr != nil {
+		return nil, cerr
+	}
+	if f.stormMine {
+		if merr := correlator.EnableMining(engine.DefaultMinedDimensions, f.stormMineMin); merr != nil {
+			return nil, fmt.Errorf("--storm-mine: %w", merr)
+		}
+	}
+	if f.stormClusterFallback {
+		if cerr := correlator.EnableClusterFallback(feed.NodeCount); cerr != nil {
+			return nil, fmt.Errorf("--storm-cluster-fallback: %w", cerr)
+		}
+	}
+	disp.storm = correlator
+	go func() {
+		if ferr := feed.Run(ctx); ferr != nil && ctx.Err() == nil {
+			feedMu.Lock()
+			feedErr = ferr
+			feedMu.Unlock()
+			cancel()
+		}
+	}()
+	log.Printf("storm: correlation enabled (window=%s, min=%d)", f.stormWindow, f.stormMin)
+	if !f.stormClusterFallback {
+		log.Printf("storm: cluster fallback disabled (--storm-cluster-fallback=false) — simultaneous failures of nodes carrying no topology.kubernetes.io/zone label will open one session each (issue #334)")
+	}
+	if f.stormMine {
+		log.Printf("storm: mined keys enabled (--storm-mine, min=%d) — incidents sharing an exact image, node or container may group into one storm with no topology ancestor between them; every such storm names the attribute it grouped on (issue #225)", f.stormMineMin)
+	}
+	if disp.board != nil {
+		disp.resolver = feed
+		disp.board.reattach = disp.reattachWatchboardEntry
+		log.Printf("watchboard: ancestor reattachment enabled — a buffered warning whose blast-radius ancestor already owns a live incident is delivered there as a kind=family.member followup instead of a digest entry (§7.7); a new incident of the same class on another pod of a workload that already has one (a rollout's new ReplicaSet) folds into that session the same way")
+	}
+	if occStore != nil {
+		go runGraphHistoryLoop(ctx, feed.snapshot, occStore, f.graphSnapshotInterval)
+		log.Printf("graph history: enabled (snapshot every %s + per-delta change log → %s; serves --at point-in-time queries and triage changes)",
+			f.graphSnapshotInterval, f.store)
+	}
+	return getFeedErr, nil
 }
 
 // attachSharedFactories puts every informer-backed source on the runner's

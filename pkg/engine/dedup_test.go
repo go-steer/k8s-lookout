@@ -984,3 +984,53 @@ func TestStorm_MaxStormMembersCap(t *testing.T) {
 		t.Fatalf("len(MemberFingerprints) = %d, want capped at %d", len(last.Storm.MemberFingerprints), maxStormMembers)
 	}
 }
+
+func TestRepeatState_TransitionsAndWireCompatibility(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+	rs := newRepeatState(t0, true, "cls-init")
+	if !rs.SessionClass || rs.InjectCount != 1 || rs.LastChange != RepeatChangeOpen {
+		t.Fatalf("newRepeatState initial state = %+v", rs)
+	}
+
+	// Reminder increments step and repeat count together.
+	t1 := t0.Add(6 * time.Minute)
+	if n := rs.recordReminder(t1, 5, 40.0); n != 1 || rs.Step != 1 || rs.InjectCount != 5 || rs.RatePerHour != 40.0 {
+		t.Fatalf("after first reminder: n=%d state=%+v", n, rs)
+	}
+
+	// Class change resets wire RepeatCount to 0 while advancing Step backoff.
+	t2 := t1.Add(12 * time.Minute)
+	rs.recordClassChange(t2, 9)
+	if rs.RepeatCount != 0 || rs.Step != 2 || rs.LastChange != RepeatChangeClass || rs.InjectCount != 9 {
+		t.Fatalf("after class change: %+v", rs)
+	}
+
+	// Rate jump resets both RepeatCount and backoff Step to 0.
+	t3 := t2.Add(2 * time.Minute)
+	rs.recordRateJump(t3, 25, 480.0)
+	if rs.RepeatCount != 0 || rs.Step != 0 || rs.LastChange != RepeatChangeRate || rs.RatePerHour != 480.0 {
+		t.Fatalf("after rate jump: %+v", rs)
+	}
+
+	// Undelivered + Unbind reset clean state without mutating cloned snapshot.
+	snapEntry := (&dedupEntry{
+		SessionID:   "sess-1",
+		FirstSeen:   t0,
+		LastSeen:    t3,
+		Count:       25,
+		repeatState: rs,
+	}).clone()
+	rs.markUndelivered(RepeatChangeRate)
+	if !rs.Undelivered || snapEntry.Undelivered {
+		t.Fatalf("markUndelivered mutated snapshot clone: live=%+v clone=%+v", rs, snapEntry.repeatState)
+	}
+	rs.resetForUnbind(t3.Add(time.Minute), 25)
+	if rs.Undelivered || rs.Step != 0 || rs.RepeatCount != 0 || rs.LastChange != RepeatChangeOpen {
+		t.Fatalf("resetForUnbind = %+v", rs)
+	}
+	rs.markResolved()
+	if !rs.Resolved {
+		t.Fatalf("markResolved did not set Resolved")
+	}
+}

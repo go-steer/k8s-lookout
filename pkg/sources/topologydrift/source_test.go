@@ -1007,3 +1007,84 @@ func TestSource_TheWithheldReasonNamesTheControlThatDidIt(t *testing.T) {
 		t.Errorf("withheld[gate] = %d, want 0 — the namespace list did this, not the floor", got)
 	}
 }
+
+func TestSource_DeterministicClockAdvancesDwellAndDomainGaugeWithoutSleep(t *testing.T) {
+	ctx := context.Background()
+	cur := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return cur }
+
+	var emitted []sources.Signal
+	s := New(fake.NewSimpleClientset(), Config{
+		TopologyKeys:          []leeway.TopologyKey{zoneKey},
+		DomainUnavailableKeys: []leeway.TopologyKey{zoneKey},
+		Now:                   clock,
+	})
+	s.mu.Lock()
+	s.emit = func(sig sources.Signal) { emitted = append(emitted, sig) }
+	s.mu.Unlock()
+
+	// Seed healthy two-zone cluster at t=0.
+	nA := node("n-a", "us-central1-a")
+	nB := node("n-b", "us-central1-b")
+	s.onNode(nA)
+	s.onNode(nB)
+	s.sampleCluster(s.now())
+
+	if got := s.unavailableDomains()[zoneKey]; got != 0 {
+		t.Fatalf("unavailableDomains at t=0 = %d, want 0", got)
+	}
+
+	// Mark zone B node NotReady at t=30s; gauge reflects live clock immediately,
+	// alert machine enters Pending without emitting before dwell elapses.
+	cur = cur.Add(30 * time.Second)
+	nBDown := node("n-b", "us-central1-b", notReady())
+	s.onNode(nBDown)
+	if got := s.unavailableDomains()[zoneKey]; got != 1 {
+		t.Fatalf("unavailableDomains after zone B outage = %d, want 1", got)
+	}
+	s.runAlertPass(ctx)
+	if len(emitted) != 0 {
+		t.Fatalf("emitted before dwell = %d, want 0", len(emitted))
+	}
+
+	// Advance clock past default domain dwell (15m) with zero wall-clock sleep.
+	cur = cur.Add(16 * time.Minute)
+	s.runAlertPass(ctx)
+	if len(emitted) != 1 {
+		t.Fatalf("emitted after advancing clock 16m = %d, want 1", len(emitted))
+	}
+	if !emitted[0].LastSeen.Equal(cur) {
+		t.Errorf("emitted LastSeen = %v, want virtual clock %v", emitted[0].LastSeen, cur)
+	}
+}
+
+func TestCoalescer_DeterministicClockControlsWindowAndRolloutWidening(t *testing.T) {
+	cur := time.Date(2026, 10, 11, 14, 0, 0, 0, time.UTC)
+	c := newCoalescer(CoalesceOptions{
+		Window:        2 * time.Second,
+		RolloutWindow: 15 * time.Second,
+		MaxDelay:      60 * time.Second,
+		Now:           func() time.Time { return cur },
+	})
+	sub := leeway.SubjectRef{Kind: leeway.SubjectDeployment, Namespace: "prod", Name: "api"}
+
+	// First enqueue schedules sub at t + 2s.
+	c.Enqueue(sub)
+	if _, ok, wait := c.takeReady(c.clock()); ok || wait != 2*time.Second {
+		t.Fatalf("takeReady at t+0 = (ok=%v, wait=%v), want (false, 2s)", ok, wait)
+	}
+
+	// Re-enqueue at t + 1s widens deadline to (t+1s) + 15s = t + 16s.
+	cur = cur.Add(time.Second)
+	c.Enqueue(sub)
+	if _, ok, wait := c.takeReady(c.clock()); ok || wait != 15*time.Second {
+		t.Fatalf("takeReady after second enqueue = (ok=%v, wait=%v), want (false, 15s)", ok, wait)
+	}
+
+	// Stepping clock forward 15s makes sub ready with zero wall-clock wait.
+	cur = cur.Add(15 * time.Second)
+	got, ok, wait := c.takeReady(c.clock())
+	if !ok || got != sub || wait != 0 {
+		t.Fatalf("takeReady at t+16s = (%v, %v, %v), want (%v, true, 0)", got, ok, wait, sub)
+	}
+}

@@ -15,9 +15,37 @@
 package watch
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
+
+// frozenWatchFlags is the M0 predecessor flag set governed by the Frozen tier
+// of docs/cli-stability-policy.md (§Settled decisions #2).
+var frozenWatchFlags = []string{
+	"daemon-url", "token-env",
+	"mode", "target-session", "owner",
+	"reason", "namespace", "exclude-namespace",
+	"dedup-window", "dedup-persist", "unhealthy-min-count",
+	"recovery-stable-for",
+	"in-cluster", "kubeconfig", "cluster-name",
+	"log-level", "dry-run", "metrics-addr", "snapshot-interval",
+	"otel-exporter",
+}
+
+func watchFlagStabilityTier(f FlagDoc) string {
+	if slices.Contains(frozenWatchFlags, f.Name) {
+		return "frozen"
+	}
+	if strings.Contains(strings.ToLower(f.Help), "(experimental)") {
+		return "experimental"
+	}
+	return "stable"
+}
 
 // TestFlagSurfaceFrozen pins the core flag surface of `lookout watch`.
 // Every flag name here is load-bearing: an existing deployment must be
@@ -27,18 +55,8 @@ import (
 //
 // Adding a NEW flag is fine — add it to the list.
 func TestFlagSurfaceFrozen(t *testing.T) {
-	frozen := []string{
-		"daemon-url", "token-env",
-		"mode", "target-session", "owner",
-		"reason", "namespace", "exclude-namespace",
-		"dedup-window", "dedup-persist", "unhealthy-min-count",
-		"recovery-stable-for",
-		"in-cluster", "kubeconfig", "cluster-name",
-		"log-level", "dry-run", "metrics-addr", "snapshot-interval",
-		"otel-exporter",
-	}
-	args := make([]string, 0, len(frozen))
-	for _, name := range frozen {
+	args := make([]string, 0, len(frozenWatchFlags))
+	for _, name := range frozenWatchFlags {
 		switch name {
 		case "dedup-window", "recovery-stable-for":
 			args = append(args, "--"+name+"=5m")
@@ -88,5 +106,61 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 	}
 	if f.recoveryStableFor != 5*time.Minute {
 		t.Errorf("default recovery-stable-for = %v, want 5m", f.recoveryStableFor)
+	}
+}
+
+// TestFlagInventory_GoldenContract locks every flag declared by `lookout watch`
+// (name, type, default value, and CLI stability policy tier per
+// docs/cli-stability-policy.md) against testdata/watch_flags.golden (#645).
+//
+// Any addition, rename, type change, default change, or stability-tier change
+// requires an explicit golden review (`UPDATE_GOLDEN=1 go test ./internal/watch -run TestFlagInventory`).
+func TestFlagInventory_GoldenContract(t *testing.T) {
+	inv := FlagInventory()
+	if len(inv) < 100 {
+		t.Fatalf("expected >=100 watch flags in FlagInventory(), got %d", len(inv))
+	}
+
+	var b strings.Builder
+	b.WriteString("# lookout watch CLI flag contract (docs/cli-stability-policy.md)\n")
+	b.WriteString("# Format: <name>\\t<type>\\t<default>\\t<stability>\n")
+	for _, fl := range inv {
+		fmt.Fprintf(&b, "%s\t%s\t%q\t%s\n", fl.Name, fl.Type, fl.Default, watchFlagStabilityTier(fl))
+	}
+	got := b.String()
+
+	goldenPath := filepath.Join("testdata", "watch_flags.golden")
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatalf("mkdir testdata: %v", err)
+		}
+		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
+			t.Fatalf("write %s: %v", goldenPath, err)
+		}
+	}
+
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (run UPDATE_GOLDEN=1 go test ./internal/watch -run TestFlagInventory)", goldenPath, err)
+	}
+	want := string(wantBytes)
+	if got != want {
+		gotLines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+		wantLines := strings.Split(strings.TrimSuffix(want, "\n"), "\n")
+		maxLen := max(len(gotLines), len(wantLines))
+		var diff strings.Builder
+		for i := range maxLen {
+			var gLine, wLine string
+			if i < len(gotLines) {
+				gLine = gotLines[i]
+			}
+			if i < len(wantLines) {
+				wLine = wantLines[i]
+			}
+			if gLine != wLine {
+				fmt.Fprintf(&diff, "line %d:\n  want: %s\n  got:  %s\n", i+1, wLine, gLine)
+			}
+		}
+		t.Fatalf("watch flag surface drifted from %s:\n%s\n(to accept intentional changes: UPDATE_GOLDEN=1 go test ./internal/watch -run TestFlagInventory)", goldenPath, diff.String())
 	}
 }

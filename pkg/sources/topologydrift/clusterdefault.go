@@ -55,39 +55,8 @@ var SystemDefaultConstraints = []corev1.TopologySpreadConstraint{
 }
 
 // ClusterDefaultIntents derives FR-9 intents from the cluster's
-// `PodTopologySpread` default constraints.
-//
-// # Three states, and unset is not empty
-//
-// declared is a pointer because a nil slice and an empty one are the same value
-// after decoding, and collapsing them reintroduces the exact bug S4 exists to
-// stop — confident findings built on an assumption nobody made:
-//
-//   - nil: UNSET. Nobody has told us, so SystemDefaultConstraints is assumed and
-//     every intent is SourceClusterDefaultAssumed / ConfidenceAssumed.
-//   - non-nil and empty: DECLARED EMPTY. An operator asserts this cluster
-//     configures no defaults. No intents, and that is an answer rather than a
-//     gap.
-//   - non-nil and populated: DECLARED. Trusted, SourceClusterDefaultDeclared /
-//     ConfidenceDeclared — and an operator who declares a DoNotSchedule default
-//     is making an assertion of their own, so that one *can* reach Tier A.
-//
-// # Blast radius
-//
-// Default constraints apply only to a pod declaring no
-// topologySpreadConstraints of its own; one constraint on the pod and the
-// scheduler ignores the cluster defaults entirely. So a wrong assumption here
-// cannot corrupt the intent of any workload that has actually expressed intent
-// — it reaches only the population where leeway's reading was weakest anyway.
-//
-// # Why there is no label selector to check
-//
-// A pod's own constraint carries a labelSelector, and FR-4 has to ask whether
-// it selects this subject. A cluster default carries none: kube-scheduler
-// derives the population from the pod's own owner, which is the subject leeway
-// scores. The default therefore maps onto the subject without a selector test,
-// and the absence of one here is the correct reading rather than a missing
-// check.
+// `PodTopologySpread` default constraints (`nil` = unset/assumed,
+// `&[]` = declared empty, non-empty = declared; see docs/leeway-design.md §13 S4, §16).
 func ClusterDefaultIntents(pod *corev1.Pod, declared *[]corev1.TopologySpreadConstraint) []leeway.Intent {
 	if pod == nil || len(pod.Spec.TopologySpreadConstraints) > 0 {
 		return nil

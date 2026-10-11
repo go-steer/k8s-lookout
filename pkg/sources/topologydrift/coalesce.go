@@ -85,18 +85,7 @@ type pendingEntry struct {
 	hits int
 }
 
-// timerHeap orders subjects by readyAt.
-//
-// It exists because the alternative — scanning the pending map for the ripest
-// subject — is O(pending) per evaluation, and pending is the whole subject set
-// after a relist. At the 20k subjects of §6.6's baseline row that scan turns
-// one relist into 400M map iterations; the heap turns it into 20k pops.
-//
-// Entries are stale-tolerant rather than updated in place: rescheduling pushes
-// a second item for the same subject and the pop discards any item whose
-// readyAt no longer matches the live entry. Deleting from the middle of a heap
-// would need an index per subject kept correct through every swap, which is
-// more moving parts than the discard costs.
+// timerHeap orders subjects by readyAt using stale-tolerant heap entries (see docs/leeway-design.md §16).
 type timerHeap []heapItem
 
 type heapItem struct {
@@ -116,16 +105,7 @@ func (h timerHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *timerHeap) Push(x any)   { *h = append(*h, x.(heapItem)) }
 func (h *timerHeap) Pop() (x any) { old := *h; x, *h = old[len(old)-1], old[:len(old)-1]; return x }
 
-// reschedule folds an enqueue at now into e.
-//
-// The first enqueue of a burst waits the ordinary window. A second one says
-// the subject is still moving, which is what a rollout looks like from in here
-// — there is no need to ask the rollout source, because a Deployment replacing
-// 200 pods *is* 200 enqueues — so the window widens. The widening is measured
-// from now and clamped to maxDelay after the first enqueue, and it can only
-// push readyAt later, never pull it earlier: a burst must not be able to
-// starve itself by arriving in a tight loop, nor to shorten a wait it already
-// earned.
+// reschedule folds an enqueue at now into e, widening repeated bursts up to maxDelay (docs/leeway-design.md §6.4, §16).
 func (w coalesceWindows) reschedule(e *pendingEntry, now time.Time) {
 	if e.hits == 0 {
 		e.first = now
@@ -157,30 +137,18 @@ type CoalesceOptions struct {
 	// burst. Zero takes DefaultMaxCoalesceDelay.
 	MaxDelay time.Duration
 
-	// Evaluate is called once per coalesced burst. Nil means the queue still
-	// does its bookkeeping and drops the result, which is Phase 2's behaviour:
-	// there is nothing to evaluate until intent inference lands in Phase 3, but
-	// running the queue now means the scale properties are exercised by the
-	// same events that exercise the counters.
+	// Evaluate is called once per coalesced burst.
 	Evaluate func(context.Context, leeway.SubjectRef)
+
+	// Now overrides time.Now for deterministic tests. Nil uses time.Now.
+	Now func() time.Time
 }
 
-// coalescer collapses a burst of subject enqueues into one evaluation (§6.4).
-//
-// Evaluation is serial by construction: one goroutine owns both the timing and
-// the callback. That is not a placeholder for a worker pool. A subject's
-// counters are read by the evaluator and rewritten by §6.5's verifier, and
-// keeping evaluation single-threaded means those two never need to agree about
-// a lock they do not share. Raising concurrency is a Phase 3 decision to be
-// made against a measurement, not assumed here.
-//
-// Not built on k8s.io/client-go/util/workqueue, for one concrete reason: its
-// delaying queue takes the *earliest* readyAt when a waiting key is re-added,
-// so AddAfter can shorten a pending delay but never widen one. §6.4 needs
-// exactly the widening.
+// coalescer collapses a burst of subject enqueues into one evaluation (docs/leeway-design.md §6.4, §16).
 type coalescer struct {
 	windows  coalesceWindows
 	evaluate func(context.Context, leeway.SubjectRef)
+	now      func() time.Time
 
 	mu      sync.Mutex
 	pending map[leeway.SubjectRef]*pendingEntry
@@ -206,9 +174,17 @@ func newCoalescer(opts CoalesceOptions) *coalescer {
 			maxDelay: opts.MaxDelay,
 		}.normalise(),
 		evaluate: opts.Evaluate,
+		now:      opts.Now,
 		pending:  make(map[leeway.SubjectRef]*pendingEntry),
 		wake:     make(chan struct{}, 1),
 	}
+}
+
+func (c *coalescer) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // Enqueue schedules sub for evaluation. Safe to call from any goroutine,
@@ -221,7 +197,7 @@ func (c *coalescer) Enqueue(sub leeway.SubjectRef) {
 		c.pending[sub] = e
 	}
 	before := e.readyAt
-	c.windows.reschedule(e, time.Now())
+	c.windows.reschedule(e, c.clock())
 	c.enqueued++
 	if !e.readyAt.Equal(before) {
 		c.seq++
@@ -288,7 +264,7 @@ func (c *coalescer) Run(ctx context.Context) {
 	defer timer.Stop()
 
 	for {
-		sub, ok, wait := c.takeReady(time.Now())
+		sub, ok, wait := c.takeReady(c.clock())
 		if ok {
 			if c.evaluate != nil {
 				c.evaluate(ctx, sub)

@@ -55,6 +55,7 @@ package graph
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -158,4 +159,85 @@ func (g *Graph) Snapshot() (*Snapshot, error) {
 // design is single-writer — see §6.2).
 func (g *Graph) Writer() *Writer {
 	return g.writer
+}
+
+// queue validates deltas and appends them under qmu without taking the
+// writer snapshot mutex mu (#660). Informer handlers never wait on full
+// snapshot map cloning or OnChange dispatch during Flush/timedFlush.
+func (w *Writer) queue(deltas []Delta, sync bool) error {
+	for i := range deltas {
+		if deltas[i].Op <= opInvalid || deltas[i].Op > OpDelete {
+			return fmt.Errorf("graph: delta %d: invalid op %d", i, deltas[i].Op)
+		}
+		if err := validateObject(deltas[i].Object); err != nil {
+			return fmt.Errorf("graph: delta %d: %w", i, err)
+		}
+	}
+	w.qmu.Lock()
+	defer w.qmu.Unlock()
+	if w.closed {
+		return ErrClosed
+	}
+	for _, d := range deltas {
+		w.pending = append(w.pending, pendingDelta{Delta: d, sync: sync})
+	}
+	if w.timer == nil && w.interval > 0 {
+		w.timer = time.AfterFunc(w.interval, w.timedFlush)
+	}
+	return nil
+}
+
+// drainPending atomically swaps out queued deltas and disarms the batch timer.
+// Safe to call while holding w.mu (lock order: w.mu -> w.qmu).
+func (w *Writer) drainPending() (pending []pendingDelta, closed bool) {
+	w.qmu.Lock()
+	defer w.qmu.Unlock()
+	if w.closed {
+		return nil, true
+	}
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	pending = w.pending
+	w.pending = nil
+	return pending, false
+}
+
+func (w *Writer) timedFlush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.flushLocked()
+}
+
+// Flush applies all pending deltas and publishes a snapshot
+// immediately. It also publishes when nothing is pending but no
+// snapshot exists yet (an explicitly empty-but-ready graph).
+func (w *Writer) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.qmu.Lock()
+	closed := w.closed
+	w.qmu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	w.flushLocked()
+	return nil
+}
+
+// Close stops the batching timer and rejects further mutations.
+// Pending unflushed deltas are discarded; published snapshots remain
+// valid and readable forever.
+func (w *Writer) Close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.qmu.Lock()
+	w.closed = true
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.pending = nil
+	w.qmu.Unlock()
 }

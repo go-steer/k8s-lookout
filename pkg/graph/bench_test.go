@@ -183,3 +183,112 @@ func BenchmarkSnapshotSwap(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGraphApplyAndSnapshot_WithOnChange profiles large-cluster (50k and
+// 100k pods) steady-state ingestion with an active §6.6 OnChange delta listener
+// and live Snapshot reads (#660).
+func BenchmarkGraphApplyAndSnapshot_WithOnChange(b *testing.B) {
+	for _, n := range []int{50_000, 100_000} {
+		b.Run(fmt.Sprintf("pods=%d", n), func(b *testing.B) {
+			objs := synthCluster(42, n)
+			var changes uint64
+			g := New(Options{
+				SwapInterval: -1,
+				OnChange: func(_ ChangeRecord) {
+					changes++
+				},
+			})
+			w := g.Writer()
+			if err := w.FromObjects(slices.Values(objs)); err != nil {
+				b.Fatal(err)
+			}
+			snap, err := g.Snapshot()
+			if err != nil {
+				b.Fatal(err)
+			}
+			var deltas []Delta
+			for _, o := range objs {
+				p, ok := o.(*corev1.Pod)
+				if !ok {
+					continue
+				}
+				on := p.DeepCopy()
+				on.Labels["canary"] = "true"
+				deltas = append(deltas, Delta{Op: OpUpdate, Object: on}, Delta{Op: OpUpdate, Object: p.DeepCopy()})
+				if len(deltas) >= 2_000 {
+					break
+				}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				if err := w.Apply(deltas[i%len(deltas)]); err != nil {
+					b.Fatal(err)
+				}
+				if i%200 == 199 {
+					if err := w.Flush(); err != nil {
+						b.Fatal(err)
+					}
+					s, err := g.Snapshot()
+					if err != nil || s.NumNodes() == 0 {
+						b.Fatalf("Snapshot after Flush: %v", err)
+					}
+				}
+			}
+			if err := w.Flush(); err != nil {
+				b.Fatal(err)
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "deltas/s")
+			b.ReportMetric(float64(snap.NumNodes()), "nodes")
+			b.ReportMetric(float64(snap.NumEdges()), "edges")
+			b.ReportMetric(float64(changes), "changes")
+		})
+	}
+}
+
+func TestWriter_ConcurrentApplyFlushAndSnapshot_NonBlocking(t *testing.T) {
+	objs := synthCluster(7, 1_000)
+	var changes int64
+	g := New(Options{
+		SwapInterval: -1,
+		OnChange: func(_ ChangeRecord) {
+			changes++
+		},
+	})
+	w := g.Writer()
+	if err := w.FromObjects(slices.Values(objs)); err != nil {
+		t.Fatalf("FromObjects: %v", err)
+	}
+	deltas := relabelDeltas(objs[:200])
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 25 {
+			if err := w.Flush(); err != nil {
+				t.Errorf("Flush: %v", err)
+				return
+			}
+			s, err := g.Snapshot()
+			if err != nil || s.NumNodes() == 0 {
+				t.Errorf("Snapshot: %v", err)
+				return
+			}
+		}
+	}()
+
+	for i := range 2_000 {
+		if err := w.Apply(deltas[i%len(deltas)]); err != nil {
+			t.Fatalf("Apply(%d): %v", i, err)
+		}
+	}
+	<-done
+	if err := w.Flush(); err != nil {
+		t.Fatalf("final Flush: %v", err)
+	}
+	if changes == 0 {
+		t.Fatalf("expected OnChange records to be emitted, got 0")
+	}
+}
