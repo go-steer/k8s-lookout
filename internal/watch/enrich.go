@@ -90,6 +90,7 @@ import (
 const (
 	enrichSectionSpec   = "spec"
 	enrichSectionDelta  = "delta"
+	enrichSectionEvents = "events"
 	enrichSectionEdges  = "edges"
 	enrichSectionRadius = "radius"
 	enrichSectionLogs   = "logs"
@@ -371,8 +372,9 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 		b.stage(ctx, enrichSectionDelta, deltaCmd(wl), func() ([]emit.Finding, error) {
 			return delta.ScanObjects(e.now(), delta.Config{}, bundle.DeltaObjectsFor(obj, pods)), nil
 		})
-		// edges: not computable from the live informer set (see file
-		// comment) — the trailer names the command that computes it.
+		// events + edges: not computable without namespace Lists (see file
+		// comment) — trailers name the follow-up commands that compute them.
+		b.skip(enrichSectionEvents, eventsCmd(wl))
 		b.skip(enrichSectionEdges, edgesCmd(wl))
 	} else {
 		// A target that is not a workload (and not a Node, which
@@ -386,6 +388,7 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 		cmd := nonWorkloadCmd(wl)
 		b.skip(enrichSectionSpec, cmd)
 		b.skip(enrichSectionDelta, cmd)
+		b.skip(enrichSectionEvents, cmd)
 		b.skip(enrichSectionEdges, cmd)
 	}
 	b.stage(ctx, enrichSectionRadius, radiusCmd(wl), func() ([]emit.Finding, error) {
@@ -399,7 +402,7 @@ func (e *enricher) liveIncident(ctx context.Context, sig engine.Signal, b *enric
 
 // scopedIncident is the fallback read path: one namespace-scoped
 // state.LoadCluster pass (the CLI bundle's own List pass, §6.3
-// one-shot) feeding all five sections.
+// one-shot) feeding all six sections.
 func (e *enricher) scopedIncident(ctx context.Context, sig engine.Signal, b *enrichBundle) {
 	ref := emit.WorkloadRef{Kind: sig.KindOfObject, Namespace: sig.Namespace, Name: sig.Name}
 	var (
@@ -456,6 +459,9 @@ func (e *enricher) scopedIncident(ctx context.Context, sig engine.Signal, b *enr
 	})
 	b.stage(ctx, enrichSectionDelta, deltaCmd(wl), func() ([]emit.Finding, error) {
 		return delta.ScanObjects(e.now(), delta.Config{}, bundle.DeltaObjectsFor(cluster.WorkloadObject(wl), pods)), nil
+	})
+	b.stage(ctx, enrichSectionEvents, eventsCmd(wl), func() ([]emit.Finding, error) {
+		return bundle.EventFindings(ctx, e.client, cluster.Snapshot(), id, wl, 0, e.now())
 	})
 	b.stage(ctx, enrichSectionEdges, edgesCmd(wl), func() ([]emit.Finding, error) {
 		return cluster.EdgeFindings(wl, 0, e.now())
@@ -717,6 +723,7 @@ func specCmd(wl emit.WorkloadRef) string { return "lookout triage spec --workloa
 func deltaCmd(wl emit.WorkloadRef) string {
 	return "lookout triage delta --namespace=" + wl.Namespace
 }
+func eventsCmd(wl emit.WorkloadRef) string { return "lookout triage events --workload=" + wl.String() }
 func edgesCmd(wl emit.WorkloadRef) string  { return "lookout state edges --workload=" + wl.String() }
 func radiusCmd(wl emit.WorkloadRef) string { return "lookout bundle --workload=" + wl.String() }
 func logsCmd(wl emit.WorkloadRef) string {

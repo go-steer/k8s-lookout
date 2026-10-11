@@ -160,9 +160,24 @@ func enrichService() *corev1.Service {
 	}
 }
 
+func enrichEvent() *corev1.Event {
+	return &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Namespace: enrichNS, Name: "api-" + enrichHash + "-x2v9k.178a9b2c3d"},
+		InvolvedObject: corev1.ObjectReference{
+			Namespace: enrichNS, Kind: "Pod", Name: "api-" + enrichHash + "-x2v9k",
+		},
+		Type:           corev1.EventTypeWarning,
+		Reason:         "BackOff",
+		Message:        "Back-off restarting failed container api",
+		FirstTimestamp: metav1.NewTime(enrichNow.Add(-5 * time.Minute)),
+		LastTimestamp:  metav1.NewTime(enrichNow.Add(-2 * time.Minute)),
+		Count:          3,
+	}
+}
+
 func enrichFixtureObjects() []runtime.Object {
 	return []runtime.Object{
-		enrichDeployment(), enrichReplicaSet(), enrichPod(), enrichNode(), enrichService(),
+		enrichDeployment(), enrichReplicaSet(), enrichPod(), enrichNode(), enrichService(), enrichEvent(),
 	}
 }
 
@@ -336,8 +351,8 @@ func TestEnricherEnabledFor(t *testing.T) {
 
 // TestEnrichDispatch_ScopedEndToEnd is the §7.6 drill: a crash-looping
 // pod signal → per-incident session whose INITIAL inject carries the
-// in-process bundle — spec, delta, edges, radius, and logs sections —
-// while the frozen k8s-event fields stay untouched.
+// in-process bundle — spec, delta, events, edges, radius, and logs
+// sections — while the frozen k8s-event fields stay untouched.
 func TestEnrichDispatch_ScopedEndToEnd(t *testing.T) {
 	t.Parallel()
 	base, injects := newRoutingFakeDaemon(t)
@@ -360,7 +375,7 @@ func TestEnrichDispatch_ScopedEndToEnd(t *testing.T) {
 	// The head resolves the pod up the owner chain to the Deployment
 	// and lists every section that shipped.
 	head, _, _ := strings.Cut(b, "\n")
-	for _, want := range []string{"kind=bundle.target", "workload=Deployment/prod/api", "pods=1", "sections=spec,delta,edges,radius,logs"} {
+	for _, want := range []string{"kind=bundle.target", "workload=Deployment/prod/api", "pods=1", "sections=spec,delta,events,edges,radius,logs"} {
 		if !strings.Contains(head, want) {
 			t.Errorf("head line missing %q:\n%s", want, head)
 		}
@@ -371,6 +386,7 @@ func TestEnrichDispatch_ScopedEndToEnd(t *testing.T) {
 		"kind=pod.crashloop", // the delta derivation saw the crash loop
 		"section=delta",
 		"reason=CrashLoopBackOff",
+		"section=events",
 		"section=edges", // edge.missing_ref: env references absent ConfigMap app-config
 		"kind=edge.missing_ref",
 		"section=radius", // Service + Node neighbors from the same graph
@@ -474,6 +490,7 @@ func TestEnrich_TinyCap_OverflowTrailers(t *testing.T) {
 	want := []string{
 		`overflow section=spec cmd="lookout triage spec --workload=Deployment/prod/api"`,
 		`overflow section=delta cmd="lookout triage delta --namespace=prod"`,
+		`overflow section=events cmd="lookout triage events --workload=Deployment/prod/api"`,
 		`overflow section=edges cmd="lookout state edges --workload=Deployment/prod/api"`,
 		`overflow section=radius cmd="lookout bundle --workload=Deployment/prod/api"`,
 		`overflow section=logs cmd="lookout triage logs --workload=Deployment/prod/api --namespace=prod"`,

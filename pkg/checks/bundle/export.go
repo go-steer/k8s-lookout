@@ -23,7 +23,11 @@ package bundle
 // checks rule this package is built on.
 
 import (
+	"context"
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/delta"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
@@ -70,4 +74,11 @@ func RadiusNeighbors(snap *graph.Snapshot, id graph.NodeID, depth int) []Neighbo
 // bundle — the same scoping rule the CLI bundle applies.
 func DeltaObjectsFor(obj any, pods []*corev1.Pod) delta.Objects {
 	return deltaObjectsFor(obj, pods)
+}
+
+// EventFindings lists bounded Kubernetes Events matching wl and its owned
+// subtree for the bundle's events section.
+func EventFindings(ctx context.Context, client kubernetes.Interface, snap *graph.Snapshot, id graph.NodeID, wl emit.WorkloadRef, since time.Duration, now time.Time) ([]emit.Finding, error) {
+	fs, _, err := bundleEvents(ctx, client, snap, id, wl, since, now)
+	return fs, err
 }

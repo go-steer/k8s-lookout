@@ -81,13 +81,13 @@ Abridged real output (logfmt; one finding per line; `section=` says which
 part of the bundle a line belongs to):
 
 ```lookout-golden
-kind=bundle.target severity=info namespace=prod kind_of_object=Deployment name=api workload=Deployment/prod/api pods=2 sections=spec,delta,edges,radius,logs
+kind=bundle.target severity=info namespace=prod kind_of_object=Deployment name=api workload=Deployment/prod/api pods=2 sections=spec,delta,events,edges,radius,logs
 kind=pod.imagepull severity=critical namespace=prod kind_of_object=Pod name=api-7c9d8-bbbbb reason=ImagePullBackOff message="Back-off pulling image \"registry.example.com/api:v3-typo\"" section=delta container=api image=registry.example.com/api:v3-typo
 kind=edge.missing_key severity=critical namespace=prod kind_of_object=ConfigMap name=app-config reason=CreateContainerConfigError message="key log.level not found in configmap app-config (env LOG_LEVEL in container api)" section=edges workload=Deployment/prod/api container=api env=LOG_LEVEL key=log.level pods=2
 kind=radius.neighbor severity=info namespace=prod kind_of_object=Service name=api section=radius relation=upstream hop=1
 kind=log.template severity=warning namespace=prod kind_of_object=Pod name=api-7c9d8-aaaaa section=logs template="ERROR config key log.level missing, using default" count=1 level=error first_seen=2026-07-01T08:00:02Z last_seen=2026-07-01T08:00:02Z
 …
-scanned=12 findings=16 elapsed=100ms
+scanned=12 findings=15 elapsed=100ms
 ```
 
 Read it in this order: `bundle.target` (the head line — what was targeted,
