@@ -437,11 +437,15 @@ func TestCallTool_StdinReadsFailImmediately(t *testing.T) {
 }
 
 // TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied verifies S3
-// (#633): host-path flags (kubeconfig, context, exemptions, store, report) are
-// omitted from MCP schemas, rejected if sent by a client, and injected from
-// server-pinned WithSelection / WithExemptions / WithStore options.
+// (#633) + #676: host-path flags (kubeconfig, context, exemptions, store,
+// report) are omitted from MCP schemas, rejected if sent by a client, and
+// injected from server-pinned WithSelection / WithExemptions / WithStore /
+// WithReport options only onto commands that accept them.
 func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T) {
 	reg := checks.NewRegistry()
+	demo := checktest.DemoCommand()
+	demo.Hidden = false
+	reg.Register(demo)
 	reg.Register(checks.Command{
 		Name:        "pintest",
 		MCPName:     "k8s_pintest",
@@ -454,6 +458,7 @@ func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T)
 		Output: []checks.OutputField{
 			{Name: "kubeconfig", Doc: "pinned kubeconfig"},
 			{Name: "store", Doc: "pinned store"},
+			{Name: "report", Doc: "pinned report"},
 		},
 		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
 			return 1, inv.Out.Emit(emit.Finding{
@@ -466,6 +471,7 @@ func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T)
 				Details: []emit.Field{
 					{Key: "kubeconfig", Value: inv.Scope.Kubeconfig},
 					{Key: "store", Value: inv.Scope.Store},
+					{Key: "report", Value: inv.Flags.String("report")},
 				},
 			})
 		},
@@ -474,6 +480,7 @@ func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T)
 	cs := connect(t, New(reg, "test",
 		WithSelection("/etc/lookout/kubeconfig", "prod-west"),
 		WithStore("/var/lib/lookout/state.db"),
+		WithReport("/var/lib/lookout/report.logfmt"),
 	))
 
 	// Any attempt by an MCP client to supply server-scoped flags is rejected.
@@ -490,8 +497,16 @@ func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T)
 	got := text(t, res)
 	if !strings.Contains(got, "kubeconfig=/etc/lookout/kubeconfig") ||
 		!strings.Contains(got, "store=/var/lib/lookout/state.db") ||
+		!strings.Contains(got, "report=/var/lib/lookout/report.logfmt") ||
 		!strings.Contains(got, "context=prod-west") {
 		t.Errorf("pinned options not applied to invocation:\n%s", got)
+	}
+
+	// Commands without a --report flag still execute cleanly when WithReport
+	// is configured on the server.
+	resDemo, err := callTool(t, cs, "k8s_triage_demo", map[string]any{"count": 1})
+	if err != nil || resDemo.IsError {
+		t.Fatalf("non-report tool failed under WithReport: err=%v, res=%v", err, resDemo)
 	}
 }
 

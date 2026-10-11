@@ -64,6 +64,11 @@ uat_mcp_args() {
       value="$tok"
     fi
 
+    # Server-scoped flags (--store, --exemptions, --report, --kubeconfig,
+    # --context) belong to `lookout mcp` startup rather than the MCP input
+    # schema; skip any CLI flag absent from .properties.
+    jq -e --arg n "$name" '.properties | has($n)' <<<"$schema" >/dev/null || continue
+
     type="$(jq -r --arg n "$name" '.properties[$n].type // "string"' <<<"$schema")"
     case "$type" in
       boolean) out="$(jq -c --arg n "$name" --argjson v "$value" '.[$n]=$v' <<<"$out")" ;;
@@ -99,7 +104,7 @@ uat_case_mcp() {
     tool_of["$cli"]="$tool"
   done < <(uat_tool_names)
 
-  if ! uat_mcp_start; then
+  if ! uat_mcp_start --store="$UAT_STORE" --exemptions="$UAT_EXEMPTIONS" --report="$UAT_REPORT"; then
     uat_bad "mcp server starts on loopback" "no session id after 10s" "$(cat "$UAT_MCP_LOG" 2>/dev/null)"
     return 1
   fi
@@ -163,13 +168,21 @@ uat_case_mcp() {
     schema="$(jq -c --arg t "$tool" '.result.tools[] | select(.name==$t) | .inputSchema' <<<"$tools_json")"
     args="$(uat_mcp_args "$schema" "${UAT_INVOCATION[$cmd]}")"
 
+    # Match the operator-pinned flags passed to `lookout mcp` so CLI and
+    # MCP see identical exemptions, store, and report inputs.
+    local -a cli_pinned=(--exemptions="$UAT_EXEMPTIONS")
+    local help_txt
+    help_txt="$(run_lookout $cmd --help 2>/dev/null || true)"
+    [[ "$help_txt" == *"--store"* ]] && cli_pinned+=(--store="$UAT_STORE")
+    [[ "$help_txt" == *"--report"* ]] && cli_pinned+=(--report="$UAT_REPORT")
+
     # Rewind between the two calls: the store-backed commands persist
     # what they report, so without this the second caller is asking a
     # different question and a passing comparison would prove nothing.
     uat_store_rewind
     local -a argv
     # shellcheck disable=SC2206 — word splitting into an argv is the point
-    argv=($cmd ${UAT_INVOCATION[$cmd]})
+    argv=($cmd "${cli_pinned[@]}" ${UAT_INVOCATION[$cmd]})
     uat_run "${argv[@]}"
     cli_out="$(uat_normalize_payload <<<"$UAT_OUT")"
 

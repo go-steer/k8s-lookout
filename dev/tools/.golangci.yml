@@ -50,22 +50,47 @@ linters:
     # Security.
     - gosec          # OWASP-style checks (nosec via // #nosec)
 
+    # Function length & cognitive complexity ceilings (#672).
+    - funlen
+    - gocognit
+
   exclusions:
     # Generated code shouldn't fail the lint.
     generated: lax
+    paths:
+      - internal/axapi/
     presets:
       - common-false-positives
       - legacy
     rules:
-      # Tests can be looser about errcheck (eg. defer f.Close()) and
-      # have permission to use weak random / hardcoded creds.
+      # Tests can be looser about errcheck (eg. defer f.Close()), table length,
+      # and have permission to use weak random / hardcoded creds.
       - path: _test\.go
         linters:
           - errcheck
           - gosec
           - unparam
+          - funlen
+          - gocognit
+      - path: \.pb\.go$
+        linters:
+          - errcheck
+          - goheader
+          - staticcheck
+          - funlen
+          - gocognit
+      - path: internal/watch/(flags|wiring)\.go$
+        linters:
+          - funlen
+          - gocognit
 
   settings:
+    funlen:
+      lines: 285
+      statements: 155
+      ignore-comments: true
+    gocognit:
+      min-complexity: 105
     errcheck:
       # Noise patterns where checking the error has no useful action:
       # writing to stderr for a diagnostic, closing a file in defer,
