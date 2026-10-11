@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -35,6 +36,7 @@ import (
 
 // scanner holds one scan's inputs and accumulates findings.
 type scanner struct {
+	ctx     context.Context
 	client  kubernetes.Interface
 	ns      string // "" = all namespaces
 	now     time.Time
@@ -43,8 +45,9 @@ type scanner struct {
 
 	// tolerate turns a Forbidden List into a dropped part recorded in
 	// unavailable (part → reason) instead of a failed pass.
-	tolerate    bool
-	unavailable map[string]string
+	tolerate          bool
+	tolerateTransient bool
+	unavailable       map[string]string
 	// refusals is the same per part, as the structured Refusal the
 	// standalone command renders into read.unavailable records.
 	refusals map[string]checks.Refusal
@@ -64,6 +67,8 @@ type scanner struct {
 // class needs per-node occupancy) is not counted — the summary
 // reflects what was assessed, not what was downloaded.
 func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
+	s.client = kube.WrapClient(ctx, s.client)
+	s.ctx = ctx
 	scanned := 0
 
 	// Cluster-scoped classes follow the namespace scope rather
@@ -267,27 +272,34 @@ func (s *scanner) unreadFindings() []emit.Finding {
 }
 
 // refuse records err against parts when the pass is tolerant and err
-// is an authorization refusal, and reports whether it did. Anything
-// else stays fatal.
+// is an authorization refusal (or a non-context API error when
+// tolerateTransient is set), and reports whether it did.
 func (s *scanner) refuse(err error, parts ...string) bool {
 	if !s.tolerate {
-		return false
-	}
-	r, ok := checks.ForbiddenRefusal(err)
-	if !ok {
 		return false
 	}
 	if s.unavailable == nil {
 		s.unavailable = map[string]string{}
 		s.refusals = map[string]checks.Refusal{}
 	}
-	for _, p := range parts {
-		if _, seen := s.unavailable[p]; !seen {
-			s.unavailable[p] = r.String()
-			s.refusals[p] = r
+	if r, ok := checks.ForbiddenRefusal(err); ok {
+		for _, p := range parts {
+			if _, seen := s.unavailable[p]; !seen {
+				s.unavailable[p] = r.String()
+				s.refusals[p] = r
+			}
 		}
+		return true
 	}
-	return true
+	if s.tolerateTransient && (s.ctx == nil || s.ctx.Err() == nil) {
+		for _, p := range parts {
+			if _, seen := s.unavailable[p]; !seen {
+				s.unavailable[p] = err.Error()
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // firstErr runs fns in order and returns the first error, skipping the
@@ -325,25 +337,10 @@ func (s *scanner) age(t time.Time) string {
 func itoa(n int) string     { return strconv.Itoa(n) }
 func itoa32(n int32) string { return strconv.FormatInt(int64(n), 10) }
 
-// pageSize keeps single List responses bounded on large clusters;
-// the loop follows Continue tokens until the pass is complete.
-const pageSize = 500
-
-// paged drains one List call chain.
+// paged drains one List call chain via kube.ListAllPages (recovering
+// transparently from HTTP 410 Gone continue-token expiry).
 func paged[T any](ctx context.Context, list func(context.Context, metav1.ListOptions) ([]T, string, error)) ([]T, error) {
-	var out []T
-	opts := metav1.ListOptions{Limit: pageSize}
-	for {
-		items, cont, err := list(ctx, opts)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, items...)
-		if cont == "" {
-			return out, nil
-		}
-		opts.Continue = cont
-	}
+	return kube.ListAllPages(ctx, list)
 }
 
 func listPods(ctx context.Context, c kubernetes.Interface, ns string) ([]corev1.Pod, error) {

@@ -21,6 +21,8 @@ package delta
 // read; no cloud API calls.
 
 import (
+	"strings"
+
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,13 +37,59 @@ var pressureConditions = map[corev1.NodeConditionType]bool{
 
 // criticalCustomConditions are the non-standard (typically
 // node-problem-detector) conditions that mean the node cannot be
-// trusted at all when True. Everything else non-standard and True
-// is a warning: we cannot know an arbitrary NPD condition's
-// semantics, only that it is abnormal.
+// trusted at all when True.
 var criticalCustomConditions = map[corev1.NodeConditionType]bool{
 	"KernelDeadlock":              true,
 	"ReadonlyFilesystem":          true,
 	corev1.NodeNetworkUnavailable: true, // standard type, custom-critical handling
+}
+
+// knownProblemConditions enumerates explicit problem/fault NodeCondition types
+// whose Status==ConditionTrue indicates node impairment rather than normal
+// vendor agent readiness (such as NPProblemDetectorReady=True).
+var knownProblemConditions = map[corev1.NodeConditionType]bool{
+	"KernelDeadlock":              true,
+	"ReadonlyFilesystem":          true,
+	corev1.NodeNetworkUnavailable: true,
+	"FrequentKubeletRestart":      true,
+	"FrequentDockerRestart":       true,
+	"FrequentContainerdRestart":   true,
+	"CorruptDockerOverlay2":       true,
+	"FrequentUnregisterNetDevice": true,
+	"SystemOOM":                   true,
+	"OOMKilled":                   true,
+	"TaskHung":                    true,
+	"DockerHung":                  true,
+	"FilesystemCorruptionProblem": true,
+	"ContainerRuntimeUnhealthy":   true,
+	"KubeletUnhealthy":            true,
+	"EtcdIsVoter":                 false,
+}
+
+// isProblemNodeCondition reports whether cType is a known problem/pressure
+// NodeCondition when Status == ConditionTrue (excluding vendor informational or
+// positive readiness conditions like NPProblemDetectorReady=True).
+func isProblemNodeCondition(cType corev1.NodeConditionType) bool {
+	if known, exists := knownProblemConditions[cType]; exists {
+		return known
+	}
+	s := string(cType)
+	for _, pos := range []string{"Ready", "Up", "Healthy", "Initialized", "Available", "Synced", "Configured"} {
+		if strings.HasSuffix(s, pos) && !strings.HasSuffix(s, "Unavailable") && !strings.HasSuffix(s, "Unhealthy") && !strings.HasSuffix(s, "NotReady") {
+			return false
+		}
+	}
+	for _, prefix := range []string{"Frequent", "Corrupt", "Readonly", "Deadlock"} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{"Problem", "Deadlock", "Unhealthy", "Unavailable", "Pressure", "Hung", "Error", "Failed", "Degraded"} {
+		if strings.HasSuffix(s, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // reclaimTaints are the taint keys announcing that the node is
@@ -102,11 +150,7 @@ func (s *scanner) checkNode(node *corev1.Node, podCount int) {
 				s.add(f)
 			}
 		default:
-			// Anything else True is abnormal by convention:
-			// NPD and its cousins publish problem conditions
-			// with Status=True (KernelDeadlock,
-			// FrequentKubeletRestart, …).
-			if c.Status == corev1.ConditionTrue {
+			if c.Status == corev1.ConditionTrue && isProblemNodeCondition(c.Type) {
 				f := base
 				f.Kind = "node.condition"
 				f.Severity = emit.SeverityWarning

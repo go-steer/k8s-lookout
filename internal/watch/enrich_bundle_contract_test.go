@@ -35,7 +35,7 @@ import (
 // `lookout bundle` (CLI/MCP) or inside a §7.6 enrichment inject —
 // treat a failing pin as a breaking schema change, never as a test
 // to update.
-const frozenBundleSections = "spec,delta,edges,radius,logs"
+const frozenBundleSections = "spec,delta,events,edges,radius,logs"
 
 // TestBundleSectionContractFrozen is the issue #86 guardian: the
 // section identifiers live in TWO unexported constant sets —

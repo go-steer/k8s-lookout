@@ -110,6 +110,10 @@ type loadOptions struct {
 	// tolerate skips a step whose List returns Forbidden/NotFound
 	// instead of aborting the pass.
 	tolerate bool
+	// tolerateTransient skips a step whose List fails with any
+	// non-context error (recording the error under ix.skipErr) so
+	// callers like `lookout health` degrade only the affected category.
+	tolerateTransient bool
 	// preflight runs a SelfSubjectAccessReview per selected resource and
 	// drops the denied ones before listing.
 	preflight bool
@@ -131,8 +135,15 @@ type LoadOption func(*loadOptions)
 // Tolerate makes the List pass skip any resource whose List returns
 // Forbidden or NotFound — the least-privilege posture (§7.6): the
 // caller reads what it can and Cluster.Skipped() names the gap. Any
-// other error still aborts.
+// other error still aborts unless TolerateTransient is also enabled.
 func Tolerate() LoadOption { return func(o *loadOptions) { o.tolerate = true } }
+
+// TolerateTransient makes the List pass skip resources whose List fails
+// with a transient/API error while ctx is still live, recording the error
+// per ListRequirement for callers that degrade categories independently.
+func TolerateTransient() LoadOption {
+	return func(o *loadOptions) { o.tolerateTransient = true }
+}
 
 // Preflight adds a SelfSubjectAccessReview per selected resource so
 // known-denied lists are dropped without a 403 in the logs; it falls
@@ -308,6 +319,15 @@ func (c *Cluster) Scanned() int { return c.ix.scanned }
 // pass. Consumers surface it (e.g. a skipped= note) so a partial
 // bundle is never mistaken for a clean one.
 func (c *Cluster) Skipped() []ListRequirement { return c.ix.skipped }
+
+// SkipError returns the API read error recorded when req was skipped under
+// TolerateTransient, or nil if req succeeded or was skipped for RBAC/selection.
+func (c *Cluster) SkipError(req ListRequirement) error {
+	if c == nil || c.ix == nil || c.ix.skipErr == nil {
+		return nil
+	}
+	return c.ix.skipErr[req]
+}
 
 // SkippedNote renders Skipped() as the comma-separated value of a
 // skipped= detail field (e.g. "secrets,configmaps"); "" when the load

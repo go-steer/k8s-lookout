@@ -24,7 +24,9 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -246,12 +248,13 @@ func TestRunningSubPhaseIsBoundedByTheKubeletReset(t *testing.T) {
 		pod  *corev1.Pod
 		want []finding
 	}{
-		{"just restarted", pod(20*time.Second, 1, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
-		{"just inside the reset", pod(crashLoopBackOffReset-time.Second, 1, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
-		{"at the reset, below --restarts", pod(crashLoopBackOffReset, 1, "Error", 1), nil},
+		{"just restarted", pod(20*time.Second, 2, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
+		{"just inside the reset", pod(crashLoopBackOffReset-time.Second, 2, "Error", 1), []finding{{"pod.crashloop", "api-0", "critical"}}},
+		{"single prior exit is not a crashloop", pod(20*time.Second, 1, "Error", 1), nil},
+		{"at the reset, below --restarts", pod(crashLoopBackOffReset, 2, "Error", 1), nil},
 		{"recovered hours ago, past --restarts", pod(3*time.Hour, 12, "Error", 1), []finding{{"pod.restarts", "api-0", "warning"}}},
 		{"OOM keeps precedence", pod(20*time.Second, 3, "OOMKilled", 137), []finding{{"pod.oomkilled", "api-0", "warning"}}},
-		{"a clean last exit is not a loop", pod(20*time.Second, 1, "Completed", 0), nil},
+		{"a clean last exit is not a loop", pod(20*time.Second, 2, "Completed", 0), nil},
 		{"no restart yet", pod(20*time.Second, 0, "Error", 1), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,6 +262,54 @@ func TestRunningSubPhaseIsBoundedByTheKubeletReset(t *testing.T) {
 			assertFindings(t, got, tc.want)
 		})
 	}
+}
+
+func TestRolloutRespectsPartitionAndOnDeleteAndNodeConditionIgnoresVendorInfo(t *testing.T) {
+	replicas := int32(5)
+	partition := int32(3)
+	st := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "db"},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
+					Partition: &partition,
+				},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			ReadyReplicas:     5,
+			UpdatedReplicas:   2, // ordinances 3..4 updated, 0..2 below partition intentionally un-updated
+			AvailableReplicas: 5,
+		},
+	}
+	ds := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "agent"},
+		Spec: appsv1.DaemonSetSpec{
+			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
+				Type: appsv1.OnDeleteDaemonSetStrategyType,
+			},
+		},
+		Status: appsv1.DaemonSetStatus{
+			DesiredNumberScheduled: 3,
+			NumberReady:            3,
+			UpdatedNumberScheduled: 1, // awaiting manual delete under OnDelete
+			NumberAvailable:        3,
+		},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-vendor"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+				{Type: "NPProblemDetectorReady", Status: corev1.ConditionTrue, Message: "NPD agent ready"},
+				{Type: "KernelDeadlock", Status: corev1.ConditionFalse, Message: "kernel OK"},
+			},
+		},
+	}
+	got, _ := runFindings(t, testCommand(st, ds, node))
+	assertFindings(t, got, nil)
 }
 
 // A container that exits 0 and restarts under Always finished its

@@ -982,3 +982,66 @@ func TestEdgesRegisteredInDefaultRegistry(t *testing.T) {
 		t.Error("generated help does not document --cert-warn")
 	}
 }
+
+func TestEdgesEndpointMismatchExclusions(t *testing.T) {
+	t.Run("excludes terminal Pending terminating IP-less and readiness-gate-failing pods", func(t *testing.T) {
+		c := healthy(t)
+		nowMeta := metav1.NewTime(fixedNow)
+		succeeded := apiPod("api-"+hash+"-succ", c.podA.Labels, false)
+		succeeded.Status.Phase = corev1.PodSucceeded
+		failed := apiPod("api-"+hash+"-fail", c.podA.Labels, false)
+		failed.Status.Phase = corev1.PodFailed
+		pending := apiPod("api-"+hash+"-pend", c.podA.Labels, false)
+		pending.Status.Phase = corev1.PodPending
+		terminating := apiPod("api-"+hash+"-term", c.podA.Labels, true)
+		terminating.Status.Phase = corev1.PodRunning
+		terminating.Status.PodIP = "10.0.0.10"
+		terminating.DeletionTimestamp = &nowMeta
+		ipless := apiPod("api-"+hash+"-noip", c.podA.Labels, false)
+		ipless.Status.Phase = corev1.PodRunning
+		ipless.Status.PodIP = ""
+		gated := apiPod("api-"+hash+"-gated", c.podA.Labels, true)
+		gated.Status.Phase = corev1.PodRunning
+		gated.Status.PodIP = "10.0.0.11"
+		gated.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: "custom.io/gate"}}
+		gated.Status.Conditions = append(gated.Status.Conditions, corev1.PodCondition{
+			Type:   "custom.io/gate",
+			Status: corev1.ConditionFalse,
+		})
+
+		c.extra = append(c.extra, succeeded, failed, pending, terminating, ipless, gated)
+		c.slice = apiSlice(
+			endpoint("api-"+hash+"-aaaaa", true),
+			endpoint("api-"+hash+"-bbbbb", true),
+			endpoint("api-"+hash+"-gated", false),
+		)
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload="+wl)
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if strings.Contains(res.Stdout, "reason=EndpointMismatch") {
+			t.Errorf("expected no EndpointMismatch when only excluded/gated pods lack ready slice endpoints, got:\n%s", res.Stdout)
+		}
+	})
+
+	t.Run("flags missing EndpointSlice entry when running pod has IP and is Ready", func(t *testing.T) {
+		c := healthy(t)
+		missingFromSlice := apiPod("api-"+hash+"-liveip", c.podA.Labels, true)
+		missingFromSlice.Status.Phase = corev1.PodRunning
+		missingFromSlice.Status.PodIP = "10.0.0.99"
+		c.extra = append(c.extra, missingFromSlice)
+		c.slice = apiSlice(
+			endpoint("api-"+hash+"-aaaaa", true),
+			endpoint("api-"+hash+"-bbbbb", true),
+		)
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload="+wl)
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if !strings.Contains(res.Stdout, "reason=EndpointMismatch") {
+			t.Errorf("expected EndpointMismatch when running pod with PodIP is missing from EndpointSlice, got:\n%s", res.Stdout)
+		}
+	})
+}

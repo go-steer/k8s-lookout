@@ -33,7 +33,7 @@ lookout health [flags]
 | `--workload` | string | — | target one workload as \<Kind>/\<namespace>/\<name>, e.g. Deployment/prod/api |
 | `--since` | duration | — | how far back to look (0 = command default) |
 | `--format` | string | `logfmt` | output format: logfmt\|json (one record per line either way) |
-| `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
+| `--timeout` | duration | `30s` | abort the invocation after this long (exit 1) |
 | `--kubeconfig` | string | — | path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config |
 | `--context` | string | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=\<name> in the summary line |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |

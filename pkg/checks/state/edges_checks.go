@@ -1004,8 +1004,8 @@ func selectorDiff(selector, tpl map[string]string) string {
 	return strings.Join(diffs, ",")
 }
 
-// selectedPods returns the pods a service's selector currently
-// selects, from the graph's Selects edges.
+// selectedPods returns the non-terminal, non-terminating pods a
+// service's selector currently selects, from the graph's Selects edges.
 func (e *edgeScan) selectedPods(svc *corev1.Service) []string {
 	id, ok := e.snap.Lookup(graph.KindService, svc.Namespace, svc.Name)
 	if !ok {
@@ -1017,7 +1017,13 @@ func (e *edgeScan) selectedPods(svc *corev1.Service) []string {
 			continue
 		}
 		if ref, ok := e.snap.Resolve(edge.To); ok {
-			pods = append(pods, key(ref.Namespace, ref.Name))
+			pk := key(ref.Namespace, ref.Name)
+			if p := e.ix.pods[pk]; p != nil {
+				if p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+					continue
+				}
+			}
+			pods = append(pods, pk)
 		}
 	}
 	sort.Strings(pods)
@@ -1094,13 +1100,51 @@ func (e *edgeScan) checkSelectors() {
 	}
 }
 
-func podReady(p *corev1.Pod) bool {
+func hasPodConditionTrue(p *corev1.Pod, t corev1.PodConditionType) bool {
 	for _, c := range p.Status.Conditions {
-		if c.Type == corev1.PodReady {
+		if c.Type == t {
 			return c.Status == corev1.ConditionTrue
 		}
 	}
 	return false
+}
+
+func podHasIP(p *corev1.Pod) bool {
+	return p.Status.PodIP != "" || len(p.Status.PodIPs) > 0
+}
+
+// podEndpointEligible reports whether Kubernetes EndpointSliceController
+// is expected to materialize an Endpoint for p. Terminal, Pending,
+// terminating, and IP-less pods without an existing slice entry never
+// belong in an EndpointSlice and must not trigger EndpointMismatch.
+func podEndpointEligible(p *corev1.Pod, inSlice bool) bool {
+	if p == nil || p.DeletionTimestamp != nil {
+		return false
+	}
+	switch p.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodFailed, corev1.PodPending:
+		return false
+	}
+	if !inSlice && !podHasIP(p) {
+		return false
+	}
+	return true
+}
+
+func podReady(p *corev1.Pod) bool {
+	if p == nil || p.DeletionTimestamp != nil {
+		return false
+	}
+	switch p.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodFailed, corev1.PodPending:
+		return false
+	}
+	for _, g := range p.Spec.ReadinessGates {
+		if !hasPodConditionTrue(p, g.ConditionType) {
+			return false
+		}
+	}
+	return hasPodConditionTrue(p, corev1.PodReady)
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,23 +1161,32 @@ func (e *edgeScan) checkEndpoints() {
 		epSlices := e.ix.slicesByService[k]
 		if len(epSlices) == 0 {
 			if c.viaSelector {
-				e.add(emit.Finding{
-					Kind:         "edge.endpoints_missing",
-					Severity:     emit.SeverityCritical,
-					Namespace:    c.svc.Namespace,
-					KindOfObject: "Service",
-					Name:         c.svc.Name,
-					Reason:       "NoEndpointSlices",
-					Message:      fmt.Sprintf("no endpointslices exist for a service selecting %d pod(s) — no traffic can flow", len(c.selected)),
-					Details: []emit.Field{
-						{Key: "workload", Value: e.wl.String()},
-						{Key: "selected", Value: strconv.Itoa(len(c.selected))},
-					},
-				})
+				eligible := 0
+				for _, pk := range c.selected {
+					if podEndpointEligible(e.ix.pods[pk], true) {
+						eligible++
+					}
+				}
+				if eligible > 0 {
+					e.add(emit.Finding{
+						Kind:         "edge.endpoints_missing",
+						Severity:     emit.SeverityCritical,
+						Namespace:    c.svc.Namespace,
+						KindOfObject: "Service",
+						Name:         c.svc.Name,
+						Reason:       "NoEndpointSlices",
+						Message:      fmt.Sprintf("no endpointslices exist for a service selecting %d pod(s) — no traffic can flow", eligible),
+						Details: []emit.Field{
+							{Key: "workload", Value: e.wl.String()},
+							{Key: "selected", Value: strconv.Itoa(eligible)},
+						},
+					})
+				}
 			}
 			continue
 		}
 		total, ready := 0, 0
+		inSlice := map[string]bool{}
 		for _, sl := range epSlices {
 			for i := range sl.Endpoints {
 				ep := &sl.Endpoints[i]
@@ -1144,6 +1197,7 @@ func (e *edgeScan) checkEndpoints() {
 				if ep.TargetRef == nil || ep.TargetRef.Kind != "Pod" || ep.TargetRef.Name == "" {
 					continue
 				}
+				inSlice[key(sl.Namespace, ep.TargetRef.Name)] = true
 				if _, exists := e.ix.pods[key(sl.Namespace, ep.TargetRef.Name)]; !exists {
 					e.add(emit.Finding{
 						Kind:         "edge.endpoints_orphaned",
@@ -1164,14 +1218,25 @@ func (e *edgeScan) checkEndpoints() {
 		}
 		mismatch := false
 		var msg string
+		expectedTotal, expectedReady := 0, 0
 		if c.viaSelector {
+			for _, pk := range c.selected {
+				p := e.ix.pods[pk]
+				if !podEndpointEligible(p, inSlice[pk]) {
+					continue
+				}
+				expectedTotal++
+				if podReady(p) {
+					expectedReady++
+				}
+			}
 			// Readiness itself is reported by edge.selector_unready;
 			// here the question is whether the endpoint state
-			// *disagrees* with the selected pods (stale or lagging
-			// slices).
-			mismatch = total != len(c.selected) || ready != c.readyPods
+			// *disagrees* with the eligible selected pods (stale or
+			// lagging slices).
+			mismatch = total != expectedTotal || ready != expectedReady
 			msg = fmt.Sprintf("%d/%d endpoints ready across %d slice(s); selector selects %d pod(s), %d ready",
-				ready, total, len(epSlices), len(c.selected), c.readyPods)
+				ready, total, len(epSlices), expectedTotal, expectedReady)
 		} else if ready < total {
 			mismatch = true
 			msg = fmt.Sprintf("%d/%d endpoints ready across %d slice(s)", ready, total, len(epSlices))
@@ -1188,7 +1253,7 @@ func (e *edgeScan) checkEndpoints() {
 				{Key: "slices", Value: strconv.Itoa(len(epSlices))},
 			}
 			if c.viaSelector {
-				details = append(details, emit.Field{Key: "selected", Value: strconv.Itoa(len(c.selected))})
+				details = append(details, emit.Field{Key: "selected", Value: strconv.Itoa(expectedTotal)})
 			}
 			e.add(emit.Finding{
 				Kind:         "edge.endpoints_unready",

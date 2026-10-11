@@ -2,7 +2,7 @@
 
 # lookout bundle
 
-The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.
+The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, event timeline, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 5–6 separate reads.
 
 MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 
@@ -32,7 +32,7 @@ MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 | `--workload` | — | target one workload as <Kind>/<namespace>/<name>, e.g. Deployment/prod/api |
 | `--since` | — | how far back to look (0 = command default) |
 | `--format` | logfmt | output format: logfmt\|json (one record per line either way) |
-| `--timeout` | 10s | abort the invocation after this long (exit 1) |
+| `--timeout` | 30s | abort the invocation after this long (exit 1) |
 | `--kubeconfig` | — | path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config |
 | `--context` | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
@@ -72,6 +72,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `event.warning` | warning | one collapsed timeline entry for a Warning-type event family on a subject |
+| `event.normal` | info | one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own |
 | `log.template` | critical, warning, info | one distilled template and how many lines collapsed into it; severity is the guessed level — critical at fatal, warning for error-ish, info otherwise |
 | `log.stacktrace` | critical, warning, info | a template that is a Go panic, Java exception, or Python traceback, with its innermost frames |
 | `log.overflow` | info | the low-count tail --max-templates dropped, counted rather than discarded silently (§11: no coverage lies) |
@@ -98,7 +100,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 
 | Field | Meaning |
 | --- | --- |
-| `section` | which bundle section the finding belongs to: spec\|delta\|edges\|radius\|logs |
+| `section` | which bundle section the finding belongs to: spec\|delta\|events\|edges\|radius\|logs |
 | `sections` | on the bundle.target head finding: the sections that follow |
 | `skipped` | on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role. When a List was refused, the head's message names each refusal, why this identity lacks it, and the grant that fixes it |
 | `relation` | radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config) |
@@ -166,11 +168,16 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pct` | quota usage as percent of the hard limit |
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
+| `count` | events collapsed into this timeline entry: k8s per-event repeat counts summed across the entry's reason family |
+| `first_seen` | RFC3339 timestamp of the entry's oldest activity |
+| `last_seen` | RFC3339 timestamp of the entry's newest activity (the timeline sort key) |
+| `source` | reporting component (kubelet, horizontal-pod-autoscaler, …) |
+| `variants` | raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one) |
+| `flips` | event.hpa_thrash: most scale-direction changes observed inside one --hpa-window |
+| `window` | event.hpa_thrash: the --hpa-window the flips were counted in |
+| `target` | event.hpa_thrash: the HPA's scaleTargetRef as Kind/name (when the HPA object was readable) |
 | `template` | log template; <*> marks positions that varied across merged lines |
-| `count` | lines merged into this cluster (on log.probe_noise: probe lines stripped) |
 | `level` | guessed log level (fatal\|error\|warn\|info\|debug) from token/field match |
-| `first_seen` | RFC3339 timestamp of the oldest merged line (from log timestamps when parseable) |
-| `last_seen` | RFC3339 timestamp of the newest merged line |
 | `lang` | stack-trace runtime on log.stacktrace findings: go\|java\|python |
 | `frames` | top stack frames on log.stacktrace findings, innermost first, ' < ' separated |
 | `sample` | one representative raw line, truncated and sanitized |
