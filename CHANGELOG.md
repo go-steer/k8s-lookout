@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-11
+
+**This release stops a failure that stays broken from re-paging its
+agent, and keeps rollouts in one session even with storm correlation
+off.** Until now, an incident that nobody fixed was opened again every
+time its dedup window ran out: in a 24-hour soak, one pod that could
+never schedule opened 225 sessions. A repeat of an incident that is
+still open now arrives in its existing session as a followup carrying a
+new `repeat_count` field, spaced 5, 10, 20, 40 minutes and then hourly;
+a real change is sent no later than the next reminder would be. The ax sink
+goes further and holds those reminders while the agent's task is idle,
+so a stuck incident no longer keeps a task awake. A rolling restart's
+crash-looping old and new pods are now one incident with `--storm=off`
+too, and recovery judges a rolled-out pod against its Deployment's
+current ReplicaSet, so a stuck rollout no longer reads as recovered.
+lookout can reach an AX in another cluster over TLS, commands degrade
+instead of failing under custom roles that refuse a core read, leeway
+no longer blames a skew on a drain that started after it, and the Go
+toolchain moves to 1.26.9 to clear new standard-library advisories.
+
 ### Added
 
 - **`--ax-task-scope=incident|cluster` for the ax sink (#590).** `cluster`
@@ -38,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers 404, so the incident is reopened rather than left waiting. Held reminders live in memory (at
   most 4096, none older than three hours) and are lost on restart. New
   metric `lookout_ax_reminders_total{outcome}`.
+
+### Changed
+
+- **The vendored AX API is re-copied from upstream (#593)**, so task
+  templates can use AX's idle and on-completion suspend, which the ax
+  sink's reminder hold relies on. No lookout flag or payload changes.
 
 ### Fixed
 
