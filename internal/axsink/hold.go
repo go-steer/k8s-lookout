@@ -53,6 +53,11 @@ const maxHeld = 4096
 // reminding: the incident went quiet or lost its binding.
 const heldTTL = 3 * time.Hour
 
+// getTaskTimeout bounds the GetTask a reminder makes to read its task's
+// state. AX answers from its own store in milliseconds; past this the
+// sink decides from its own record (stateOf).
+const getTaskTimeout = 3 * time.Second
+
 // Reminder outcomes, the label values of lookout_ax_reminders_total.
 const (
 	ReminderHeld       = "held"       // held: the task was idle
@@ -145,7 +150,12 @@ func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	last, ok := s.hold.lastReal[task]
 	s.hold.mu.Unlock()
 	recent := ok && s.now().Sub(last) < s.idleAfter
-	t, err := s.cfg.Client.GetTask(ctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
+	// Bounded: the dispatcher calls Append on the source's emit goroutine,
+	// so a hung AX API must not stall the source. A timeout is an error
+	// like any other, and the record decides.
+	gctx, cancel := context.WithTimeout(ctx, getTaskTimeout)
+	t, err := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
+	cancel()
 	switch {
 	case status.Code(err) == codes.NotFound:
 		return taskGone

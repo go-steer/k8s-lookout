@@ -198,14 +198,14 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 				s.paid(id)
 				s.noteReal(task)
 				return id, nil
-			case !errors.As(err, &se) || se.Code != http.StatusNotFound:
+			case !errors.As(err, &se) || (se.Code != http.StatusNotFound && se.Code != http.StatusGone):
 				// The session may well still be there (a timeout, a
 				// 5xx): stay bound to it and let the caller count the
 				// failed delivery, as for a partial open.
 				s.owe(id)
 				return id, err
 			}
-			// 404: the agent no longer has the session (task
+			// 404 or 410: the agent no longer has the session (task
 			// recreated, agent state lost). Start a new one.
 		}
 	}

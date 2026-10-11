@@ -49,6 +49,7 @@ type fakeAX struct {
 	resumed []string
 	gets    int    // GetTask calls
 	phase   string // status.phase GetTask reports, when set
+	hang    bool   // GetTask blocks until the caller gives up
 }
 
 func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*axapi.Task, error) {
@@ -63,10 +64,15 @@ func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*a
 	return req.GetTask(), nil
 }
 
-func (f *fakeAX) GetTask(_ context.Context, req *axapi.GetTaskRequest) (*axapi.Task, error) {
+func (f *fakeAX) GetTask(ctx context.Context, req *axapi.GetTaskRequest) (*axapi.Task, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.gets++
+	if f.hang {
+		f.mu.Unlock()
+		<-ctx.Done() // a black-holed AX API: never answers
+		return nil, ctx.Err()
+	}
+	defer f.mu.Unlock()
 	if t, ok := f.created[req.GetName()]; ok {
 		if f.phase != "" {
 			t = proto.Clone(t).(*axapi.Task)
@@ -94,6 +100,7 @@ type fakeRouter struct {
 	readyHits int
 	notReady  int      // answer /readyz with 503 this many times first
 	failWith  int      // answer injects with this status, when set
+	goneCode  int      // answer an unknown session with this status (default 404)
 	order     []string // "<path> <message>" of every delivered inject, in order
 	requests  int      // every request, readiness probes included
 }
@@ -131,7 +138,11 @@ func (r *fakeRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var n int
 		if _, err := fmt.Sscanf(strings.TrimPrefix(req.URL.Path, "/sessions/"), "attach-%d/inject", &n); err != nil || n < 1 || n > r.sessions[actor] {
-			http.Error(w, "session not found", http.StatusNotFound)
+			code := http.StatusNotFound
+			if r.goneCode != 0 {
+				code = r.goneCode
+			}
+			http.Error(w, "session not found", code)
 			return
 		}
 		var body struct {
@@ -362,6 +373,45 @@ func TestAXSink_ReopenAfterSessionLostOpensNewSession(t *testing.T) {
 	}
 	if got, _ := sink.recall(ctx, oomKey); got != id {
 		t.Errorf("remembered %q, want the new session %q", got, id)
+	}
+}
+
+// A recreated task has none of the old sessions. Whether the agent answers
+// the recalled session with 404 or 410, the reopen starts a fresh session
+// instead of returning the dead one (which would rebind the dispatcher to
+// it and loop).
+func TestAXSink_RecreatedTaskReopensFreshSession(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusGone} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			router := &fakeRouter{goneCode: code}
+			sink, ax := newTestAXSink(t, router)
+			ctx := context.Background()
+			payload := inject.Payload{Kind: "Pod", Reason: "OOMKilled", UID: "u2"}
+			if _, err := sink.OpenIncidentKeyed(ctx, oomKey, payload); err != nil {
+				t.Fatal(err)
+			}
+			task := sink.taskFor(oomKey)
+			// The task is deleted and recreated: AX forgets it, the agent
+			// inside forgets every session.
+			ax.mu.Lock()
+			delete(ax.created, task)
+			ax.mu.Unlock()
+			router.forget("triage/" + task)
+
+			id, err := sink.OpenIncidentKeyed(ctx, oomKey, payload)
+			if err != nil {
+				t.Fatalf("reopen into a recreated task: %v", err)
+			}
+			if id != task+"/attach-1" {
+				t.Errorf("want a fresh session, got %s", id)
+			}
+			if ax.created[task] == nil {
+				t.Error("the task was not recreated")
+			}
+			if sink.owes(id) {
+				t.Error("the fresh session is marked undelivered")
+			}
+		})
 	}
 }
 

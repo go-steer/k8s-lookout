@@ -130,8 +130,8 @@ The sink remembers `IncidentKey -> <task>/<session>`:
   TTL (30 days by default): an incident that hasn't come back in that long
   gets a new session.
 
-If the agent answers the inject with 404 (the task was recreated, or the
-agent lost its state), the sink opens a new session and remembers that one.
+If the agent answers the inject with 404 or 410 (the task was recreated, or
+the agent lost its state), the sink opens a new session and remembers that one.
 Any other failure keeps the incident bound to the remembered session and
 reports the error, the same way a partial open is reported. A remembered
 session in a different task (the scope changed between runs) is ignored.
@@ -186,8 +186,10 @@ is no flag. AX does expose a readable state: `GetTask` returns
 and a reminder in that interval resets AX's idle clock), and AX's phase can
 lag the actor by a reconcile pass. So the record decides. The `GetTask` made
 for each reminder adds two things: whether the task still exists, and a
-phase that catches a task suspended early (on completion, or by hand). If
-`GetTask` fails, the record alone decides.
+phase that catches a task suspended early (on completion, or by hand).
+`GetTask` is bounded at three seconds, a constant, because the dispatcher
+calls `Append` on the source's own goroutine and a hung AX API must not stall
+the source. If `GetTask` fails or times out, the record alone decides.
 
 A reminder sent inside the window resets AX's idle clock, which can keep a
 task awake for up to one more window. That is bounded: reminders are at

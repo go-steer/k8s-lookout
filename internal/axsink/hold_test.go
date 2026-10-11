@@ -364,6 +364,41 @@ func TestHold_NoRecordMeansIdle(t *testing.T) {
 	}
 }
 
+// A hung AX API can't stall the dispatcher: the GetTask is bounded by
+// getTaskTimeout, and past it the sink's record decides — sent if a real
+// inject was recent, held otherwise. Append is called with a context that
+// has no deadline, as the dispatcher's is.
+func TestHold_HungGetTaskIsBounded(t *testing.T) {
+	cases := []struct {
+		name    string
+		since   time.Duration // since the open, the last real inject
+		wantOut string
+	}{
+		{"recent real inject: sent", time.Minute, ReminderDirect},
+		{"idle: held", defaultIdleAfter, ReminderHeld},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := newHoldRig(t, ScopeIncident, nil)
+			id := r.open(t, crashKey, crashPayload(0))
+			r.clock.advance(c.since)
+			r.ax.mu.Lock()
+			r.ax.hang = true
+			r.ax.mu.Unlock()
+
+			start := time.Now()
+			r.appendOK(t, id, crashPayload(1))
+			if took := time.Since(start); took > getTaskTimeout+2*time.Second {
+				t.Errorf("Append took %s against a hung AX API, want about %s", took, getTaskTimeout)
+			}
+			if r.counts.get(c.wantOut) != 1 {
+				t.Errorf("outcome %s not counted (held=%d direct=%d)", c.wantOut, r.counts.get(ReminderHeld), r.counts.get(ReminderDirect))
+			}
+		})
+	}
+}
+
 // A reminder after an open whose payload never arrived may be the agent's
 // first word on the incident: it is never held, however idle the task.
 func TestHold_NeverHoldsTheFirstDelivery(t *testing.T) {
