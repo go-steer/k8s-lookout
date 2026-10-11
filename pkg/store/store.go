@@ -350,6 +350,14 @@ var migrations = []string{
 		PRIMARY KEY (cluster, incident_key)
 	);
 	CREATE INDEX sink_sessions_updated ON sink_sessions (updated_at);`,
+
+	// v10: index occurrences(emitted_at) so TTL and size pruning avoid full
+	// table scans (#658), and add canonical_reason + cluster columns to
+	// triage_status so scan joins disambiguate multiple symptoms on one
+	// resource and isolate clusters (#659).
+	`CREATE INDEX IF NOT EXISTS idx_occurrences_emitted_at ON occurrences (emitted_at);
+	ALTER TABLE triage_status ADD COLUMN canonical_reason TEXT NOT NULL DEFAULT '';
+	ALTER TABLE triage_status ADD COLUMN cluster TEXT NOT NULL DEFAULT '';`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

@@ -628,4 +628,3 @@ func TestRepeat_SiblingFoldCoalescesSchedule(t *testing.T) {
 		t.Fatalf("coalesced reminders across 5 sibling pods over ~36m = %d, want 3 (5m, 10m, 20m)", reminders)
 	}
 }
-

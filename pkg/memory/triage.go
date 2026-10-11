@@ -96,6 +96,11 @@ type TriageStatusRecord struct {
 	// Action is the paper trail ("PR #402 opened; escalated to
 	// #platform-db").
 	Action string `json:"action,omitempty"`
+	// CanonicalReason is the canonicalized symptom class for fallback joins
+	// when a scan fingerprint differs from the sentinel fingerprint (#659).
+	CanonicalReason string `json:"canonical_reason,omitempty"`
+	// Cluster scopes triage status joins when multi-cluster records share a store (#659).
+	Cluster string `json:"cluster,omitempty"`
 	// Updated is when the record last changed. Assigned by the
 	// store on write.
 	Updated time.Time `json:"updated"`

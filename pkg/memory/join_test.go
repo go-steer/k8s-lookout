@@ -250,3 +250,55 @@ func TestJoiner_ZoneMismatchStillJoins(t *testing.T) {
 		t.Fatal("zone-less record failed to join")
 	}
 }
+
+func TestJoinerDeterministicTieBreakClusterAndCanonicalReason(t *testing.T) {
+	ts := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+
+	// 1. Equal Updated timestamps break ties deterministically by Fingerprint ASC, ResourceKey ASC, Session ASC (#659).
+	records := []TriageStatusRecord{
+		{
+			Fingerprint: "sha256:zzz",
+			ResourceKey: ResourceKey("Pod", "prod", "web-0"),
+			Session:     "sess-2",
+			Status:      StatusTriaged,
+			Updated:     ts,
+		},
+		{
+			Fingerprint: "sha256:aaa",
+			ResourceKey: ResourceKey("Pod", "prod", "web-0"),
+			Session:     "sess-1",
+			Status:      StatusTriaged,
+			Updated:     ts,
+		},
+	}
+	j := NewJoiner(records, ts)
+	got, ok := j.Match("Pod", "prod", "web-0", "CustomLeadingReason")
+	if !ok {
+		t.Fatal("expected deterministic fallback match")
+	}
+	if got.Fingerprint != "sha256:aaa" {
+		t.Fatalf("tie-break selected fingerprint %q, want sha256:aaa", got.Fingerprint)
+	}
+
+	// 2. Records carrying CanonicalReason join on (resource_key, canonical_reason) without smearing across unrelated symptoms on the same pod (#659).
+	reasonRecords := []TriageStatusRecord{
+		{
+			Fingerprint:     "sha256:zone-stamped-pull-fp",
+			ResourceKey:     ResourceKey("Pod", "prod", "api-1"),
+			CanonicalReason: "ImagePullBackOff",
+			Cluster:         "cluster-a",
+			Status:          StatusTriaged,
+			Updated:         ts,
+		},
+	}
+	clusterJoiner := NewJoinerForCluster(reasonRecords, "cluster-a", ts)
+	if _, matched := clusterJoiner.Match("Pod", "prod", "api-1", "ErrImagePull"); !matched {
+		t.Fatal("expected (resource_key, canonical_reason) match for same canonical pull family")
+	}
+	if _, matched := clusterJoiner.Match("Pod", "prod", "api-1", "Unhealthy"); matched {
+		t.Fatal("record with CanonicalReason=ImagePullBackOff must not smear onto Unhealthy finding on same pod")
+	}
+	if _, matched := clusterJoiner.MatchCluster("Pod", "prod", "api-1", "ErrImagePull", "cluster-b"); matched {
+		t.Fatal("record stamped with cluster-a must not match scan scoped to cluster-b")
+	}
+}

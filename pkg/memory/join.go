@@ -43,45 +43,58 @@ const (
 // read-only and safe for sequential reuse across findings.
 type Joiner struct {
 	records []TriageStatusRecord
+	cluster string
 	now     time.Time
 }
 
 // NewJoiner keeps the OPEN records (resolved ones are corpus, not
-// current truth), most recently updated first — when several records
-// match one finding, the freshest wins.
+// current truth), most recently updated first, with deterministic
+// tie-breaking across (Updated DESC, Fingerprint ASC, ResourceKey ASC,
+// Session ASC) (#659).
 func NewJoiner(records []TriageStatusRecord, now time.Time) *Joiner {
+	return NewJoinerForCluster(records, "", now)
+}
+
+// NewJoinerForCluster constructs a Joiner scoped to a specific cluster
+// when non-empty (#659).
+func NewJoinerForCluster(records []TriageStatusRecord, cluster string, now time.Time) *Joiner {
 	open := make([]TriageStatusRecord, 0, len(records))
 	for _, r := range records {
 		if r.Status.Open() {
 			open = append(open, r)
 		}
 	}
-	sort.SliceStable(open, func(i, j int) bool { return open[i].Updated.After(open[j].Updated) })
-	return &Joiner{records: open, now: now}
+	sort.SliceStable(open, func(i, j int) bool {
+		if !open[i].Updated.Equal(open[j].Updated) {
+			return open[i].Updated.After(open[j].Updated)
+		}
+		if open[i].Fingerprint != open[j].Fingerprint {
+			return open[i].Fingerprint < open[j].Fingerprint
+		}
+		if open[i].ResourceKey != open[j].ResourceKey {
+			return open[i].ResourceKey < open[j].ResourceKey
+		}
+		return open[i].Session < open[j].Session
+	})
+	return &Joiner{records: open, cluster: cluster, now: now}
 }
 
 // Len reports how many open records the joiner holds.
 func (j *Joiner) Len() int { return len(j.records) }
 
 // Match finds the open record for the identified resource + reason.
-// Records are keyed by the §9.4 PAIR (fingerprint, resource_key),
-// and the join respects both halves:
-//
-//   - resource_key is the required pin: the §8 fingerprint is
-//     class-level — it spans objects and clusters by design — so a
-//     fingerprint-only join would smear one incident's diagnosis
-//     over every same-class finding. MatchesResource compares the
-//     canonical key (with the documented group/version-prefix
-//     tolerance).
-//   - fingerprint disambiguates several open records on ONE
-//     resource: the finding's §8 scan candidate — the M0-frozen
-//     reactive kind ("k8s-event") + canonicalized reason + object
-//     class, zone empty (a point-in-time scan carries no deployment
-//     identity) — is preferred over recency. Records whose
-//     fingerprints a scan cannot reproduce (leading-indicator kinds,
-//     or zone-hashed fingerprints from a sentinel with zone stamping
-//     wired) still join via the resource pin, freshest first.
 func (j *Joiner) Match(kindOfObject, namespace, name, reason string) (TriageStatusRecord, bool) {
+	if j == nil {
+		return TriageStatusRecord{}, false
+	}
+	return j.MatchCluster(kindOfObject, namespace, name, reason, j.cluster)
+}
+
+// MatchCluster finds the open record for the identified resource + reason,
+// scoping by cluster when both cluster and r.Cluster are non-empty, matching
+// exact Fingerprint first, then (resource_key, canonical_reason), and falling
+// back to legacy resource_key-only matching only when r.CanonicalReason == "" (#659).
+func (j *Joiner) MatchCluster(kindOfObject, namespace, name, reason, cluster string) (TriageStatusRecord, bool) {
 	if j == nil || len(j.records) == 0 {
 		return TriageStatusRecord{}, false
 	}
@@ -90,22 +103,36 @@ func (j *Joiner) Match(kindOfObject, namespace, name, reason string) (TriageStat
 	if reason != "" {
 		candidate = engine.ScanFingerprint(reason, kindOfObject, "")
 	}
-	best := -1
+	canonReason := engine.CanonicalReason(reason)
+	bestReasonMatch := -1
+	bestLegacyMatch := -1
 	for i, r := range j.records {
+		if cluster != "" && r.Cluster != "" && r.Cluster != cluster {
+			continue
+		}
 		if !r.MatchesResource(key) {
 			continue
 		}
 		if candidate != "" && r.Fingerprint == candidate {
-			return r, true // exact class match beats recency
+			return r, true // Tier 1: exact class fingerprint match wins immediately
 		}
-		if best < 0 {
-			best = i // freshest resource match (records are sorted)
+		if r.CanonicalReason != "" {
+			if canonReason != "" && engine.CanonicalReason(r.CanonicalReason) == canonReason && bestReasonMatch < 0 {
+				bestReasonMatch = i // Tier 2: (resource_key, canonical_reason) match
+			}
+			continue
+		}
+		if bestLegacyMatch < 0 {
+			bestLegacyMatch = i // Tier 3: legacy record without canonical_reason
 		}
 	}
-	if best < 0 {
-		return TriageStatusRecord{}, false
+	if bestReasonMatch >= 0 {
+		return j.records[bestReasonMatch], true
 	}
-	return j.records[best], true
+	if bestLegacyMatch >= 0 {
+		return j.records[bestLegacyMatch], true
+	}
+	return TriageStatusRecord{}, false
 }
 
 // Annotate merges the matched record's triage fields into the

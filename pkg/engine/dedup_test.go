@@ -984,4 +984,3 @@ func TestStorm_MaxStormMembersCap(t *testing.T) {
 		t.Fatalf("len(MemberFingerprints) = %d, want capped at %d", len(last.Storm.MemberFingerprints), maxStormMembers)
 	}
 }
-
