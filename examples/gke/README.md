@@ -52,3 +52,7 @@ timing capture the automated scenarios don't attempt:
   — `quota.forecast` with the `-gke` image against real project quotas.
 - [`dev/drills/memory-leak.md`](../../dev/drills/memory-leak.md) — the
   slow leaker for `saturation.forecast` (leading, not reactive).
+- [`dev/drills/uat-gke.md`](../../dev/drills/uat-gke.md) — UAT tiers
+  T2/T3: `state wi`, cross-node Multi-Attach, `perf probe`,
+  `stab drift --identity`, `triage top --history` and the `cloud` group,
+  scripted end to end (`up` / `grant-iam` / `run` / `down`).

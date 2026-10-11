@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# grant-iam — the one step of the UAT T2/T3 setup that changes IAM, kept
+# out of ./up so a human reviews and runs it. It grants the UAT runner's
+# GSA read-only project roles and lets the runner's KSA impersonate it
+# through Workload Identity. ./down removes every binding added here.
+#
+# Roles, one per capability the T2/T3 commands read (this is the list
+# the -gke image needs; dev/drills/uat-gke.md records it):
+#   compute.viewer              cloud orphans (disks, addresses, forwarding
+#                               rules), cloud ipspace (subnetworks)
+#   container.clusterViewer     cloud ipspace (clusters.get), orphans
+#                               --only=nodepools, state wi pool checks
+#   monitoring.viewer           perf probe, triage top --history, cloud quota
+#                               history, cloud stockout
+#   logging.viewer              stab drift --identity (Admin Activity audit
+#                               logs), cloud stockout (CA visibility log)
+#   cloudquotas.viewer          cloud quota (quota IDs)
+#   iam.securityReviewer        state wi (reads each GSA's IAM policy)
+#   serviceusage.serviceUsageConsumer  quota-project billing for the APIs
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dev/drills/uat-gke/env
+source "$here/env"
+
+runner_email="$RUNNER_GSA@$PROJECT.iam.gserviceaccount.com"
+echo "granting read-only roles on project $PROJECT to $runner_email" >&2
+for role in roles/compute.viewer roles/container.clusterViewer roles/monitoring.viewer \
+            roles/logging.viewer roles/cloudquotas.viewer roles/iam.securityReviewer \
+            roles/serviceusage.serviceUsageConsumer; do
+  gcloud projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$runner_email" \
+    --role "$role" --condition None --quiet >/dev/null
+  echo "  $role" >&2
+done
+echo "letting KSA $NS_RUNNER/lookout-uat act as it (Workload Identity)" >&2
+gcloud iam service-accounts add-iam-policy-binding "$runner_email" --project "$PROJECT" \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:$PROJECT.svc.id.goog[$NS_RUNNER/lookout-uat]" --quiet >/dev/null
+echo "done; IAM changes take a minute or two to propagate" >&2

@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# up — build the UAT T2/T3 environment (#179, #180): a throwaway GKE
+# Standard cluster plus every fixture the runbook's assertions need.
+# Idempotent: re-running skips what already exists. IAM role bindings
+# are deliberately NOT here; they live in ./grant-iam, a separate step a
+# human reviews and runs. See dev/drills/uat-gke.md.
+#
+# STAGING PROJECTS ONLY: it creates a cluster, two service accounts, a
+# disk, two addresses, a load balancer and an extra node pool.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dev/drills/uat-gke/env
+source "$here/env"
+
+log() { printf '%s up: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+exists() { "$@" >/dev/null 2>&1; }
+
+# --- cluster -------------------------------------------------------------
+# Standard, zonal, two nodes (cross-node Multi-Attach needs two).
+# Workload Identity for `state wi` and the in-cluster runner; control-
+# plane metrics for `perf probe`'s apiserver/apf/etcd packs. The pod
+# range is the smallest GKE allows, a /21, carved into /23 per-node
+# blocks (256 max pods per node): four blocks in all, so `cloud ipspace`
+# sees each node as 25% of the range.
+if ! exists gcloud container clusters describe "$CLUSTER" --zone "$ZONE" --project "$PROJECT"; then
+  log "creating cluster $CLUSTER in $ZONE"
+  gcloud container clusters create "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
+    --machine-type e2-standard-4 --num-nodes 2 \
+    --workload-pool "$PROJECT.svc.id.goog" \
+    --enable-ip-alias --cluster-ipv4-cidr /21 --default-max-pods-per-node 256 \
+    --services-ipv4-cidr /24 \
+    --monitoring SYSTEM,API_SERVER,SCHEDULER,CONTROLLER_MANAGER \
+    --logging SYSTEM,WORKLOAD,API_SERVER \
+    --labels "$LABELS" --quiet
+fi
+gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1
+k() { kubectl --context "$CTX" "$@"; }
+
+# Idle node pool for `cloud orphans --only=nodepools`: autoscaling min 1,
+# tainted so nothing lands on it. Its node also takes the pod range from
+# 2 of 4 blocks (50%) to 3 of 4 (75%), just below the warning line;
+# ./run adds a fourth node to push it to 100% (see uat-gke.md).
+if ! exists gcloud container node-pools describe idle-pool --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT"; then
+  log "creating idle node pool"
+  gcloud container node-pools create idle-pool --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
+    --machine-type e2-small --num-nodes 1 --enable-autoscaling --min-nodes 1 --max-nodes 2 \
+    --node-taints uat=idle:NoSchedule --quiet
+fi
+
+# --- lookout's own identity ------------------------------------------------
+# The GSA and the annotated KSA. The roles and the workloadIdentityUser
+# binding are ./grant-iam's job.
+runner_email="$RUNNER_GSA@$PROJECT.iam.gserviceaccount.com"
+if ! exists gcloud iam service-accounts describe "$runner_email" --project "$PROJECT"; then
+  log "creating GSA $RUNNER_GSA"
+  gcloud iam service-accounts create "$RUNNER_GSA" --project "$PROJECT" \
+    --display-name "lookout UAT runner (#179/#180)"
+fi
+k create namespace "$NS_RUNNER" --dry-run=client -o yaml | k apply -f - >/dev/null
+k -n "$NS_RUNNER" create serviceaccount lookout-uat --dry-run=client -o yaml | k apply -f - >/dev/null
+k -n "$NS_RUNNER" annotate serviceaccount lookout-uat --overwrite \
+  "iam.gke.io/gcp-service-account=$runner_email" >/dev/null
+# The shipped read grants, so the run exercises the real ClusterRole.
+k apply -f "$here/../../../deploy/12-clusterrole-watcher.yaml" >/dev/null
+k create clusterrolebinding lookout-uat --clusterrole lookout-watch \
+  --serviceaccount "$NS_RUNNER:lookout-uat" --dry-run=client -o yaml | k apply -f - >/dev/null
+
+# --- state wi fixtures ----------------------------------------------------
+# A GSA that exists and is never bound: wi.unbound. The missing GSA is
+# never created: wi.gsa_missing.
+unbound_email="$UNBOUND_GSA@$PROJECT.iam.gserviceaccount.com"
+if ! exists gcloud iam service-accounts describe "$unbound_email" --project "$PROJECT"; then
+  log "creating unbound GSA $UNBOUND_GSA"
+  gcloud iam service-accounts create "$UNBOUND_GSA" --project "$PROJECT" \
+    --display-name "lookout UAT: no WI binding on purpose"
+fi
+sed -e "s/__PROJECT__/$PROJECT/g" -e "s/__UNBOUND_GSA__/$UNBOUND_GSA/g" \
+  -e "s/__MISSING_GSA__/$MISSING_GSA/g" "$here/fixtures/wi.yaml" | k apply -f - >/dev/null
+
+# --- state volumes: cross-node Multi-Attach -------------------------------
+k apply -f "$here/fixtures/multi-attach.yaml" >/dev/null
+mapfile -t nodes < <(k get nodes -l cloud.google.com/gke-nodepool=default-pool --field-selector spec.unschedulable=false -o name | sed 's|node/||' | sort)
+sed -e "s/__NODE__/${nodes[0]}/" -e "s/__ROLE__/holder/g" "$here/fixtures/multi-attach-pod.yaml" | k apply -f - >/dev/null
+k -n uat-volumes wait --for=condition=Ready pod/ma-holder --timeout=300s >/dev/null
+sed -e "s/__NODE__/${nodes[1]}/" -e "s/__ROLE__/blocked/g" "$here/fixtures/multi-attach-pod.yaml" | k apply -f - >/dev/null
+
+# --- stab drift --identity -------------------------------------------------
+k apply -f "$here/fixtures/drift.yaml" >/dev/null
+k -n uat-drift rollout status deploy/drifty --timeout=180s >/dev/null
+# A write by a different field manager: the drift whose writer the audit
+# trail must resolve to this caller's principal.
+k -n uat-drift patch deploy drifty --field-manager rogue-operator --type merge \
+  -p '{"spec":{"template":{"metadata":{"annotations":{"uat/rogue":"set-by-rogue"}}}}}' >/dev/null
+
+# --- triage top --history: something to have history about --------------
+k apply -f "$here/fixtures/cpu-burner.yaml" >/dev/null
+
+# --- cloud orphans ---------------------------------------------------------
+if ! exists gcloud compute disks describe uat-orphan-disk --zone "$ZONE" --project "$PROJECT"; then
+  log "creating unattached disk"
+  gcloud compute disks create uat-orphan-disk --zone "$ZONE" --project "$PROJECT" \
+    --size 10GB --type pd-standard --labels "$LABELS" --quiet >/dev/null
+fi
+if ! exists gcloud compute addresses describe uat-orphan-ext --region "$REGION" --project "$PROJECT"; then
+  gcloud compute addresses create uat-orphan-ext --region "$REGION" --project "$PROJECT" --quiet >/dev/null
+fi
+# Internal reservation: must NEVER be reported.
+if ! exists gcloud compute addresses describe uat-internal --region "$REGION" --project "$PROJECT"; then
+  gcloud compute addresses create uat-internal --region "$REGION" --project "$PROJECT" \
+    --subnet default --quiet >/dev/null
+fi
+# A LoadBalancer whose selector matches nothing: a forwarding rule with
+# zero endpoints.
+k apply -f "$here/fixtures/zero-endpoint-lb.yaml" >/dev/null
+
+date -u +%FT%TZ > "$here/.up-finished"
+log "done. Next: ./grant-iam (a human step), then wait ~10 minutes for LB provisioning and metrics/audit ingestion, then ./run"

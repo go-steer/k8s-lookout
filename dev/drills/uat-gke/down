@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# down — delete everything ./up and ./grant-iam created: the cluster (and
+# with it the LB's forwarding rule and the Multi-Attach PD), the orphan
+# disk, both addresses, both service accounts, and the runner's project
+# role bindings. Safe to re-run; anything already gone is skipped.
+
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dev/drills/uat-gke/env
+source "$here/env"
+log() { printf '%s down: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+
+# The LoadBalancer Service first, so GKE deletes its forwarding rule
+# while the cluster still exists to do it.
+kubectl --context "$CTX" delete namespace uat-orphans uat-volumes --ignore-not-found --wait=true --timeout=5m >/dev/null 2>&1
+
+log "deleting cluster $CLUSTER"
+gcloud container clusters delete "$CLUSTER" --zone "$ZONE" --project "$PROJECT" --quiet 2>&1 | tail -1
+
+log "deleting orphan disk and addresses"
+gcloud compute disks delete uat-orphan-disk --zone "$ZONE" --project "$PROJECT" --quiet >/dev/null 2>&1
+gcloud compute addresses delete uat-orphan-ext uat-internal --region "$REGION" --project "$PROJECT" --quiet >/dev/null 2>&1
+
+runner_email="$RUNNER_GSA@$PROJECT.iam.gserviceaccount.com"
+log "removing the runner's project role bindings"
+for role in roles/compute.viewer roles/container.clusterViewer roles/monitoring.viewer \
+            roles/logging.viewer roles/cloudquotas.viewer roles/iam.securityReviewer \
+            roles/serviceusage.serviceUsageConsumer; do
+  gcloud projects remove-iam-policy-binding "$PROJECT" --member "serviceAccount:$runner_email" \
+    --role "$role" --condition None --quiet >/dev/null 2>&1
+done
+
+log "deleting service accounts"
+gcloud iam service-accounts delete "$runner_email" --project "$PROJECT" --quiet >/dev/null 2>&1
+gcloud iam service-accounts delete "$UNBOUND_GSA@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT" --quiet >/dev/null 2>&1
+
+# Anything left with the UAT label is a leak worth knowing about.
+left="$(gcloud compute disks list --project "$PROJECT" --filter "labels.purpose=lookout-uat" --format 'value(name)' 2>/dev/null)"
+[ -n "$left" ] && log "WARNING: labelled disks still present: $left"
+kubectl config delete-context "$CTX" >/dev/null 2>&1
+log "done"
