@@ -128,7 +128,7 @@ testing the CLI through agent harnesses via skills or MCP.
 
 | Command | What it does |
 | --- | --- |
-| `watch` | resident sentinel: nine signal sources → filter → dedup → storm correlation → severity routing → enrichment → session injects |
+| `watch` | resident sentinel: pluggable signal sources → filter → dedup → storm correlation → severity routing → enrichment → session injects |
 | `mcp` | serve every read command 1:1 as MCP tools (stdio or localhost HTTP) — how a distroless daemon calls lookout |
 | `scan` | start here: one call runs every target-free incident check, then drills into the dependency edges of whatever it flagged. No target, no flags |
 | `bundle` | first call of every incident: sanitized spec + abnormal objects + broken edges + blast radius + distilled logs, one payload |

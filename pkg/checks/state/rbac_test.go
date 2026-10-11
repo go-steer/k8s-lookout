@@ -223,3 +223,79 @@ func groupLabel(group string) string {
 	}
 	return group
 }
+
+func TestShippedNamespacedRoleStaysReadOnly(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy-namespaced", "role-watcher.yaml"))
+	if err != nil {
+		t.Fatalf("reading deploy-namespaced/role-watcher.yaml: %v", err)
+	}
+	var role rbacv1.Role
+	if err := yaml.Unmarshal(data, &role); err != nil {
+		t.Fatalf("parsing deploy-namespaced/role-watcher.yaml: %v", err)
+	}
+	readOnly := []string{"get", "list", "watch"}
+	for _, rule := range role.Rules {
+		for _, verb := range rule.Verbs {
+			if !slices.Contains(readOnly, verb) {
+				t.Errorf("namespaced Role rule %v grants non-read verb %q", rule.Resources, verb)
+			}
+		}
+		if slices.Contains(rule.Resources, "secrets") {
+			for _, verb := range rule.Verbs {
+				if verb != "list" {
+					t.Errorf("namespaced Role secrets rule grants %q — only list is permitted", verb)
+				}
+			}
+		}
+	}
+}
+
+func TestShippedNodesClusterRoleStaysMinimal(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy-namespaced", "clusterrole-watcher-nodes.yaml"))
+	if err != nil {
+		t.Fatalf("reading deploy-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
+	}
+	var role rbacv1.ClusterRole
+	if err := yaml.Unmarshal(data, &role); err != nil {
+		t.Fatalf("parsing deploy-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
+	}
+	readOnly := []string{"get", "list", "watch"}
+	allowedResources := []string{"nodes", "persistentvolumes"}
+	for _, rule := range role.Rules {
+		for _, verb := range rule.Verbs {
+			if !slices.Contains(readOnly, verb) {
+				t.Errorf("nodes ClusterRole rule %v grants non-read verb %q", rule.Resources, verb)
+			}
+		}
+		for _, res := range rule.Resources {
+			if !slices.Contains(allowedResources, res) {
+				t.Errorf("nodes ClusterRole grants unexpected cluster resource %q (expected only nodes, persistentvolumes)", res)
+			}
+		}
+	}
+}
+
+func TestShippedCapacityRolePinsResourceName(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "14-role-watcher-capacity.yaml"))
+	if err != nil {
+		t.Fatalf("reading deploy/14-role-watcher-capacity.yaml: %v", err)
+	}
+	var role rbacv1.Role
+	if err := yaml.Unmarshal(data, &role); err != nil {
+		t.Fatalf("parsing deploy/14-role-watcher-capacity.yaml: %v", err)
+	}
+	if role.Namespace != "kube-system" {
+		t.Errorf("capacity Role namespace = %q, want kube-system", role.Namespace)
+	}
+	readOnly := []string{"get", "list"}
+	for _, rule := range role.Rules {
+		for _, verb := range rule.Verbs {
+			if !slices.Contains(readOnly, verb) {
+				t.Errorf("capacity Role rule %v grants unexpected verb %q", rule.Resources, verb)
+			}
+		}
+		if slices.Contains(rule.Verbs, "get") && !slices.Equal(rule.ResourceNames, []string{"cluster-autoscaler-status"}) {
+			t.Errorf("capacity Role get rule must pin resourceNames=[\"cluster-autoscaler-status\"], got %v", rule.ResourceNames)
+		}
+	}
+}

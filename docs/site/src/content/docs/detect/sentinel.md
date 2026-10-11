@@ -12,7 +12,7 @@ source's needs — RBAC grants, plus a metrics API for `saturation`,
 the Gateway API CRDs for `gateway`, and the ComputeClass CRD for
 `compute-class` — and enables everything your
 deployment supports, announcing each decision with one startup line.
-Three of the sixteen sources are never auto-enabled and stay
+Three external-API sources are never auto-enabled and stay
 explicit opt-ins: `quota` (a per-GCP-project deployment decision),
 `notifications` (needs an operator-created Pub/Sub subscription), and
 `token-burn` (a polling loop against the core-agent daemon's cost
