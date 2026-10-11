@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -55,19 +54,36 @@ func TestTransform_Dispatches(t *testing.T) {
 	if node.Status.Images != nil {
 		t.Error("Node was not routed to trimNode")
 	}
+
+	for _, w := range []any{
+		fullDeployment(t),
+		fullReplicaSet(t),
+		fullStatefulSet(t),
+		fullDaemonSet(t),
+		fullJob(t),
+		fullCronJob(t),
+	} {
+		out, err := Transform(w)
+		if err != nil {
+			t.Fatalf("Transform(%T): %v", w, err)
+		}
+		if m := out.(metav1.Object); m.GetManagedFields() != nil {
+			t.Errorf("%T was not routed to its trim helper (ManagedFields survived)", w)
+		}
+	}
 }
 
 // TestTransform_PassesThroughEverythingElse: a factory serves far more than
-// Pods and Nodes, and one transform covers all of them. A type the registry has
-// no opinion about must come back byte-identical — not a copy, the same pointer
-// — because anything else is an unreviewed mutation of an object some other
-// source depends on.
+// Pods, Nodes and workload controllers, and one transform covers all of them. A
+// type the registry has no opinion about must come back byte-identical — not a
+// copy, the same pointer — because anything else is an unreviewed mutation of
+// an object some other source depends on.
 func TestTransform_PassesThroughEverythingElse(t *testing.T) {
 	others := []any{
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc"}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm"}},
 		&corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "ev"}},
-		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs"}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec"}},
 		nil,
 	}
 	for _, in := range others {
@@ -94,6 +110,12 @@ func TestTransform_IsIdempotent(t *testing.T) {
 	}{
 		{"Pod", func(t *testing.T) any { return fullPod(t) }},
 		{"Node", func(t *testing.T) any { return fullNode(t) }},
+		{"Deployment", func(t *testing.T) any { return fullDeployment(t) }},
+		{"ReplicaSet", func(t *testing.T) any { return fullReplicaSet(t) }},
+		{"StatefulSet", func(t *testing.T) any { return fullStatefulSet(t) }},
+		{"DaemonSet", func(t *testing.T) any { return fullDaemonSet(t) }},
+		{"Job", func(t *testing.T) any { return fullJob(t) }},
+		{"CronJob", func(t *testing.T) any { return fullCronJob(t) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

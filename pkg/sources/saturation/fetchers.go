@@ -19,23 +19,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
+const (
+	defaultMaxConcurrentNodes = 8
+	defaultPerNodeTimeout     = 5 * time.Second
+)
+
 // metricsPodFetcher is the real PodUsageFetcher: container usage from
-// metrics.k8s.io joined with limits from the pod specs. For the
-// sentinel both listings are cluster-wide per cycle — one resident
-// process per cluster (§7.2) and the metrics API is itself a cache,
-// so this costs two LISTs per --saturation-interval, not per pod.
-// namespace (metav1.NamespaceAll for the sentinel) narrows both
-// LISTs for one-shot consumers.
+// metrics.k8s.io joined with limits from the pod specs. When a shared
+// informer PodLister is wired via WithPodLister / Source.WithFactory,
+// pod specs are read directly from the in-memory cache rather than
+// issuing a cluster-wide Pods().List API request on every sweep.
 type metricsPodFetcher struct {
 	metrics   metricsv.Interface
 	core      kubernetes.Interface
+	podLister corelisters.PodLister
 	namespace string
 }
 
@@ -54,14 +62,38 @@ func NewScopedMetricsPodFetcher(metrics metricsv.Interface, core kubernetes.Inte
 	return &metricsPodFetcher{metrics: metrics, core: core, namespace: namespace}
 }
 
+// WithPodLister attaches an informer cache lister so sweeps read Pod specs
+// in-memory instead of listing pods from the API server on every tick.
+func (f *metricsPodFetcher) WithPodLister(l corelisters.PodLister) {
+	f.podLister = l
+}
+
+func (f *metricsPodFetcher) listPods(ctx context.Context) ([]*corev1.Pod, error) {
+	if f.podLister != nil {
+		if f.namespace != "" && f.namespace != metav1.NamespaceAll {
+			return f.podLister.Pods(f.namespace).List(labels.Everything())
+		}
+		return f.podLister.List(labels.Everything())
+	}
+	podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	out := make([]*corev1.Pod, len(podList.Items))
+	for i := range podList.Items {
+		out[i] = &podList.Items[i]
+	}
+	return out, nil
+}
+
 func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSample, error) {
 	pmList, err := f.metrics.MetricsV1beta1().PodMetricses(f.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list pod metrics: %w", err)
 	}
-	podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, metav1.ListOptions{})
+	podItems, err := f.listPods(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
+		return nil, err
 	}
 	// One walk of each container's resource block yields both
 	// dimensions: limits (the saturation denominator) and requests
@@ -75,9 +107,8 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 		uid, node string
 		byName    map[string]resources
 	}
-	pods := make(map[string]podRef, len(podList.Items))
-	for i := range podList.Items {
-		p := &podList.Items[i]
+	pods := make(map[string]podRef, len(podItems))
+	for _, p := range podItems {
 		byName := make(map[string]resources)
 		for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
 			var l resources
@@ -131,8 +162,10 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 // overridable so tests exercise parsing and partial-failure
 // aggregation without a REST transport.
 type kubeletVolumeFetcher struct {
-	listNodes func(ctx context.Context) ([]string, error)
-	proxyGet  func(ctx context.Context, node string) ([]byte, error)
+	listNodes      func(ctx context.Context) ([]string, error)
+	proxyGet       func(ctx context.Context, node string) ([]byte, error)
+	maxConcurrency int
+	nodeTimeout    time.Duration
 }
 
 // NewKubeletVolumeFetcher returns the nodes/proxy-backed fetcher.
@@ -154,6 +187,8 @@ func NewKubeletVolumeFetcher(client kubernetes.Interface) VolumeUsageFetcher {
 				Resource("nodes").Name(node).SubResource("proxy").
 				Suffix("stats/summary").DoRaw(ctx)
 		},
+		maxConcurrency: defaultMaxConcurrentNodes,
+		nodeTimeout:    defaultPerNodeTimeout,
 	}
 }
 
@@ -173,42 +208,82 @@ type statsSummary struct {
 	} `json:"pods"`
 }
 
-// FetchVolumeUsage aggregates PVC usage across nodes. Per-node
-// failures are tolerated (nodes cordon, restart, and get replaced);
-// only a total blank — every node failing — is an error, which the
-// source turns into the one-time "PVC dimension skipped" log.
+// FetchVolumeUsage aggregates PVC usage across nodes using a bounded worker
+// pool and per-node timeout so a hung kubelet cannot stall the sweep. Per-node
+// failures are tolerated (nodes cordon, restart, and get replaced); only a
+// total blank — every node failing — is an error, which the source turns into
+// the one-time "PVC dimension skipped" log.
 func (f *kubeletVolumeFetcher) FetchVolumeUsage(ctx context.Context) ([]VolumeSample, error) {
 	nodes, err := f.listNodes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	var out []VolumeSample
-	var errs []error
-	for _, node := range nodes {
-		raw, err := f.proxyGet(ctx, node)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("node %s: %w", node, err))
-			continue
-		}
-		var sum statsSummary
-		if err := json.Unmarshal(raw, &sum); err != nil {
-			errs = append(errs, fmt.Errorf("node %s: parse stats summary: %w", node, err))
-			continue
-		}
-		for _, pod := range sum.Pods {
-			for _, vol := range pod.Volume {
-				if vol.PVCRef == nil || vol.UsedBytes == nil || vol.CapacityBytes == nil || *vol.CapacityBytes == 0 {
-					continue
-				}
-				out = append(out, VolumeSample{
-					Namespace:     vol.PVCRef.Namespace,
-					ClaimName:     vol.PVCRef.Name,
-					UsedBytes:     float64(*vol.UsedBytes),
-					CapacityBytes: float64(*vol.CapacityBytes),
-				})
-			}
-		}
+	concurrency := f.maxConcurrency
+	if concurrency <= 0 {
+		concurrency = defaultMaxConcurrentNodes
 	}
+	timeout := f.nodeTimeout
+	if timeout <= 0 {
+		timeout = defaultPerNodeTimeout
+	}
+
+	sem := make(chan struct{}, concurrency)
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		out  []VolumeSample
+		errs []error
+	)
+	for _, node := range nodes {
+		wg.Add(1)
+		go func(node string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("node %s: %w", node, ctx.Err()))
+				mu.Unlock()
+				return
+			}
+			defer func() { <-sem }()
+
+			nodeCtx, cancel := context.WithTimeout(ctx, timeout)
+			raw, err := f.proxyGet(nodeCtx, node)
+			cancel()
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("node %s: %w", node, err))
+				mu.Unlock()
+				return
+			}
+			var sum statsSummary
+			if err := json.Unmarshal(raw, &sum); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("node %s: parse stats summary: %w", node, err))
+				mu.Unlock()
+				return
+			}
+			var nodeSamples []VolumeSample
+			for _, pod := range sum.Pods {
+				for _, vol := range pod.Volume {
+					if vol.PVCRef == nil || vol.UsedBytes == nil || vol.CapacityBytes == nil || *vol.CapacityBytes == 0 {
+						continue
+					}
+					nodeSamples = append(nodeSamples, VolumeSample{
+						Namespace:     vol.PVCRef.Namespace,
+						ClaimName:     vol.PVCRef.Name,
+						UsedBytes:     float64(*vol.UsedBytes),
+						CapacityBytes: float64(*vol.CapacityBytes),
+					})
+				}
+			}
+			mu.Lock()
+			out = append(out, nodeSamples...)
+			mu.Unlock()
+		}(node)
+	}
+	wg.Wait()
 	if len(out) == 0 && len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

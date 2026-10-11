@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/randfill"
 )
@@ -30,10 +32,11 @@ import (
 // The obvious way to write this test is to declare the strip list as data and
 // diff it against the registry. That only moves the drift up one level: the
 // next person edits trimPod directly, the declared list is now a lie, and the
-// test still passes. So this observes BEHAVIOUR instead. It fills a Pod and a
-// Node so that every field is non-zero, runs the transform, and reflectively
-// collects the JSON path of everything that actually changed. That set must
-// equal the registry's stripped set exactly.
+// test still passes. So this observes BEHAVIOUR instead. It fills a Pod, a
+// Node, and every trimmed workload controller so that every field is non-zero,
+// runs the transform, and reflectively collects the JSON path of everything
+// that actually changed. That set must equal the registry's stripped set
+// exactly.
 //
 // Equality in both directions is the point:
 //   - a field stripped with no registry entry fails (the case the design asked for)
@@ -52,6 +55,12 @@ func TestSharedTransform_StripsExactlyTheRegistry(t *testing.T) {
 	}{
 		{"Pod", func() any { return fullPod(t) }, trimPod},
 		{"Node", func() any { return fullNode(t) }, trimNode},
+		{"Deployment", func() any { return fullDeployment(t) }, trimDeployment},
+		{"ReplicaSet", func() any { return fullReplicaSet(t) }, trimReplicaSet},
+		{"StatefulSet", func() any { return fullStatefulSet(t) }, trimStatefulSet},
+		{"DaemonSet", func() any { return fullDaemonSet(t) }, trimDaemonSet},
+		{"Job", func() any { return fullJob(t) }, trimJob},
+		{"CronJob", func() any { return fullCronJob(t) }, trimCronJob},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			before := tc.obj()
@@ -118,6 +127,9 @@ func TestSharedTransform_PreservesLoadBearingFields(t *testing.T) {
 		t.Error("spec.ephemeralContainers[].name was stripped; pkg/checks/logs/fetch.go:183 " +
 			"enumerates it to decide which container logs it can fetch")
 	}
+	if p.Annotations["example.com/custom"] != "kept" {
+		t.Error("custom Pod annotation was stripped; only applied-configuration blobs should be dropped")
+	}
 
 	node, err := trimNode(fullNode(t))
 	if err != nil {
@@ -174,6 +186,42 @@ func TestSharedTransform_StripsSecretEnvValues(t *testing.T) {
 	}
 }
 
+func TestSharedTransform_StripsAppliedAnnotationsAndWorkloadTemplates(t *testing.T) {
+	dep := fullDeployment(t)
+	dep.Annotations = map[string]string{
+		"kubectl.kubernetes.io/last-applied-configuration":       "{}",
+		"kapp.k14s.io/original":                                  "yaml",
+		"field.cattle.io/publicEndpoints":                        "[]",
+		"fluxcd.io/last-applied-configuration":                   "{}",
+		"kustomize.toolkit.fluxcd.io/last-applied-configuration": "{}",
+		"deployment.kubernetes.io/revision":                      "3",
+	}
+	dep.Spec.Template.Spec.Containers[0].Env[0].Value = "template-secret"
+
+	out, err := Transform(dep)
+	if err != nil {
+		t.Fatalf("Transform(Deployment): %v", err)
+	}
+	got := out.(*appsv1.Deployment)
+	for k := range strippedAnnotations {
+		if _, exists := got.Annotations[k]; exists {
+			t.Errorf("applied-config annotation %q survived on Deployment", k)
+		}
+	}
+	if got.Annotations["deployment.kubernetes.io/revision"] != "3" {
+		t.Errorf("rollout revision annotation was stripped from Deployment")
+	}
+	if got.Spec.Template.Spec.Containers[0].Env[0].Value != "" {
+		t.Errorf("Deployment template container env value survived: %q", got.Spec.Template.Spec.Containers[0].Env[0].Value)
+	}
+	if got.Spec.Template.Spec.Containers[0].Env[0].ValueFrom == nil {
+		t.Errorf("Deployment template container env ValueFrom was stripped")
+	}
+	if len(got.Spec.Template.Labels) == 0 {
+		t.Errorf("Deployment template labels were stripped")
+	}
+}
+
 // TestSharedTransform_PassesThroughUnknownTypes covers the tombstone path. A
 // DeletedFinalStateUnknown reaching a transform that type-asserts without the
 // comma-ok would panic the whole watch process.
@@ -181,7 +229,16 @@ func TestSharedTransform_PassesThroughUnknownTypes(t *testing.T) {
 	for _, fn := range []struct {
 		name string
 		f    func(any) (any, error)
-	}{{"trimPod", trimPod}, {"trimNode", trimNode}} {
+	}{
+		{"trimPod", trimPod},
+		{"trimNode", trimNode},
+		{"trimDeployment", trimDeployment},
+		{"trimReplicaSet", trimReplicaSet},
+		{"trimStatefulSet", trimStatefulSet},
+		{"trimDaemonSet", trimDaemonSet},
+		{"trimJob", trimJob},
+		{"trimCronJob", trimCronJob},
+	} {
 		in := &corev1.Service{}
 		out, err := fn.f(in)
 		if err != nil {
@@ -198,6 +255,11 @@ func TestSharedTransform_PassesThroughUnknownTypes(t *testing.T) {
 // contradiction; a preserved field with no reader has no reason to be exempt
 // from trimming and should be stripped instead.
 func TestSharedTransformRegistry_WellFormed(t *testing.T) {
+	validKinds := map[string]bool{
+		"Pod": true, "Node": true,
+		"Deployment": true, "ReplicaSet": true, "StatefulSet": true,
+		"DaemonSet": true, "Job": true, "CronJob": true,
+	}
 	seen := map[string]bool{}
 	for _, e := range sharedTransformRegistry {
 		key := e.Kind + " " + e.Path
@@ -206,8 +268,8 @@ func TestSharedTransformRegistry_WellFormed(t *testing.T) {
 		}
 		seen[key] = true
 
-		if e.Kind != "Pod" && e.Kind != "Node" {
-			t.Errorf("%s: Kind must be Pod or Node, got %q", key, e.Kind)
+		if !validKinds[e.Kind] {
+			t.Errorf("%s: unexpected Kind %q", key, e.Kind)
 		}
 		if strings.TrimSpace(e.Why) == "" {
 			t.Errorf("%s: Why is empty — the justification is the entire point of the entry", key)
@@ -237,9 +299,10 @@ func fullPod(t *testing.T) *corev1.Pod {
 	pod := &corev1.Pod{}
 	filler().Fill(pod)
 
-	// randfill leaves unexported fields alone and gives slices one element,
-	// which is what we want, but a few fields need pinning so the test asserts
-	// something specific rather than something random.
+	pod.Annotations = map[string]string{
+		"kubectl.kubernetes.io/last-applied-configuration": "{}",
+		"example.com/custom": "kept",
+	}
 	pod.Status.Phase = corev1.PodFailed
 	if len(pod.Spec.Containers) == 0 || len(pod.Spec.InitContainers) == 0 ||
 		len(pod.Spec.EphemeralContainers) == 0 {
@@ -248,6 +311,67 @@ func fullPod(t *testing.T) *corev1.Pod {
 			len(pod.Spec.Containers), len(pod.Spec.InitContainers), len(pod.Spec.EphemeralContainers))
 	}
 	return pod
+}
+
+func seedAnnotations() map[string]string {
+	return map[string]string{
+		"kubectl.kubernetes.io/last-applied-configuration": "{}",
+		"example.com/custom": "kept",
+	}
+}
+
+func fullDeployment(t *testing.T) *appsv1.Deployment {
+	t.Helper()
+	d := &appsv1.Deployment{}
+	filler().Fill(d)
+	d.Annotations = seedAnnotations()
+	d.Spec.Template.Annotations = seedAnnotations()
+	return d
+}
+
+func fullReplicaSet(t *testing.T) *appsv1.ReplicaSet {
+	t.Helper()
+	rs := &appsv1.ReplicaSet{}
+	filler().Fill(rs)
+	rs.Annotations = seedAnnotations()
+	rs.Spec.Template.Annotations = seedAnnotations()
+	return rs
+}
+
+func fullStatefulSet(t *testing.T) *appsv1.StatefulSet {
+	t.Helper()
+	sts := &appsv1.StatefulSet{}
+	filler().Fill(sts)
+	sts.Annotations = seedAnnotations()
+	sts.Spec.Template.Annotations = seedAnnotations()
+	return sts
+}
+
+func fullDaemonSet(t *testing.T) *appsv1.DaemonSet {
+	t.Helper()
+	ds := &appsv1.DaemonSet{}
+	filler().Fill(ds)
+	ds.Annotations = seedAnnotations()
+	ds.Spec.Template.Annotations = seedAnnotations()
+	return ds
+}
+
+func fullJob(t *testing.T) *batchv1.Job {
+	t.Helper()
+	j := &batchv1.Job{}
+	filler().Fill(j)
+	j.Annotations = seedAnnotations()
+	j.Spec.Template.Annotations = seedAnnotations()
+	return j
+}
+
+func fullCronJob(t *testing.T) *batchv1.CronJob {
+	t.Helper()
+	cj := &batchv1.CronJob{}
+	filler().Fill(cj)
+	cj.Annotations = seedAnnotations()
+	cj.Spec.JobTemplate.Spec.Template.Annotations = seedAnnotations()
+	return cj
 }
 
 // fullNode returns a Node with every field non-zero and the two filtered

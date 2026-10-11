@@ -279,6 +279,10 @@ func truncate(msg string) string {
 // after its cache syncs, then blocks until ctx is cancelled. The
 // whole source is the informer — there is no poll loop.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()

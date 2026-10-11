@@ -196,8 +196,11 @@ func RunAll(ctx context.Context, srcs []Source, emit func(Signal)) error {
 		go func(s Source) {
 			defer wg.Done()
 			err := s.Run(ctx, emit)
-			if err == nil || ctx.Err() != nil {
-				return // clean exit, or failure during shutdown
+			if ctx.Err() != nil {
+				return // clean shutdown or sibling-triggered cancellation
+			}
+			if err == nil {
+				err = fmt.Errorf("source %s exited prematurely without error", s.Name())
 			}
 			mu.Lock()
 			if firstErr == nil {

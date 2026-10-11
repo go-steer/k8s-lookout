@@ -61,6 +61,30 @@ import (
 // schema and config.
 const Name = "k8s-events"
 
+// DefaultEventReasons lists real Kubernetes core/v1 Event.Reason tokens
+// emitted by kubelet, kube-scheduler, and cluster-autoscaler for actionable
+// failures. Container status reason strings (OOMKilled, CrashLoopBackOff,
+// ErrImagePull, ImagePullBackOff) are intentionally omitted here: kubelet
+// records those on PodStatus.ContainerStatuses while emitting Event.Reason
+// values of "BackOff", "Failed", or "Killing", which CanonicalReasonForEvent
+// maps onto canonical reason classes.
+var DefaultEventReasons = []string{
+	"BackOff",
+	"Failed",
+	"FailedScheduling",
+	"Unhealthy",
+	"Killing",
+	"FailedMount",
+	"FailedAttachVolume",
+	"NetworkNotReady",
+	"FailedCreatePodSandBox",
+	"Evicted",
+	"OOMKilling",
+	"NodeNotReady",
+	"Rebooted",
+	"FailedScaleUp",
+}
+
 // Source wires a client-go informer for core/v1.Events into the
 // sentinel pipeline. On Add (new event object) and Update (event
 // count bump), the handler converts the *corev1.Event to a Signal and
@@ -83,6 +107,9 @@ type Source struct {
 	// owners fills ControllerRef on pod events (owner.go); nil when
 	// owner resolution is off. Set in Run, before the handler can fire.
 	owners *ownerResolver
+	// allowed, when non-empty via WithReasons, restricts emitted events
+	// to matching canonical or raw Event.Reason values.
+	allowed map[string]bool
 
 	mu sync.Mutex
 	// armed flips true once the informer's initial LIST has drained.
@@ -124,6 +151,34 @@ func (s *Source) WithFactory(f informers.SharedInformerFactory) {
 	}
 }
 
+// WithReasons restricts emitted events to the given raw or canonical
+// reason classes. Both raw reasons and their canonical equivalents
+// (engine.CanonicalReason) are indexed, and incoming events are
+// canonicalized via engine.CanonicalReasonForEvent BEFORE matching.
+func (s *Source) WithReasons(reasons []string) {
+	if len(reasons) == 0 {
+		s.allowed = nil
+		return
+	}
+	allowed := make(map[string]bool, len(reasons)*2)
+	for _, r := range reasons {
+		if r == "" {
+			continue
+		}
+		allowed[r] = true
+		allowed[engine.CanonicalReason(r)] = true
+	}
+	s.allowed = allowed
+}
+
+func (s *Source) allows(ev *corev1.Event) bool {
+	if len(s.allowed) == 0 {
+		return true
+	}
+	canon := engine.CanonicalReasonForEvent(ev.Reason, ev.Message)
+	return s.allowed[canon] || s.allowed[ev.Reason]
+}
+
 // WithOwnerResolution makes Run fill ControllerRef on pod events
 // from the pod informer cache — and, when replicaSets is true, walk a
 // ReplicaSet owner up to its Deployment through the ReplicaSet cache
@@ -162,6 +217,10 @@ func (s *Source) RequiredAccess() []sources.Requirement {
 // but not returned so callers can distinguish "startup failed,
 // restart me" from "clean shutdown."
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	factory, owned := s.factory, false
 	if factory == nil {
 		factory = informers.NewSharedInformerFactory(s.client, s.resyncPeriod)
@@ -186,7 +245,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			}
 			// The initial LIST arrives as Adds. Dropping them is
 			// the point of the gate, not a side effect of it.
-			if !s.HasSynced() {
+			if !s.HasSynced() || !s.allows(ev) {
 				return
 			}
 			emit(s.toSignal(ev))
@@ -202,7 +261,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				log.Printf("k8s-events: unexpected object type on Update: %T", newObj)
 				return
 			}
-			if !s.HasSynced() {
+			if !s.HasSynced() || !s.allows(ev) {
 				return
 			}
 			emit(s.toSignal(ev))

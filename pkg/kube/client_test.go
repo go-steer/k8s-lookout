@@ -118,3 +118,24 @@ func TestBuildConfigContextRejectedInCluster(t *testing.T) {
 		t.Errorf("error %q does not explain why the context was refused", err)
 	}
 }
+
+func TestBuildConfigRateLimits(t *testing.T) {
+	path := writeKubeconfig(t)
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+
+	def, err := BuildConfig(Options{Kubeconfig: path})
+	if err != nil {
+		t.Fatalf("BuildConfig defaults: %v", err)
+	}
+	if def.QPS != DefaultQPS || def.Burst != DefaultBurst {
+		t.Errorf("default QPS/Burst = %v/%d, want %v/%d", def.QPS, def.Burst, DefaultQPS, DefaultBurst)
+	}
+
+	custom, err := BuildConfig(Options{Kubeconfig: path, QPS: 80, Burst: 160})
+	if err != nil {
+		t.Fatalf("BuildConfig custom: %v", err)
+	}
+	if custom.QPS != 80 || custom.Burst != 160 {
+		t.Errorf("custom QPS/Burst = %v/%d, want 80/160", custom.QPS, custom.Burst)
+	}
+}

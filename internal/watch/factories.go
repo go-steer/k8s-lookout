@@ -67,6 +67,19 @@ func (sf sharedFactories) Start(stopCh <-chan struct{}) {
 	if sf.Split() {
 		sf.Cluster.Start(stopCh)
 	}
+	go func() {
+		<-stopCh
+		sf.Shutdown()
+	}()
+}
+
+// Shutdown shuts down every informer processor started by Start and blocks
+// until all handler goroutines have exited.
+func (sf sharedFactories) Shutdown() {
+	sf.Namespaced.Shutdown()
+	if sf.Split() {
+		sf.Cluster.Shutdown()
+	}
 }
 
 // newSharedFactories builds the runner's informer factories, with the transform

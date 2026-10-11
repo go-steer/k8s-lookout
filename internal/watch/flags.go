@@ -26,6 +26,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
@@ -162,6 +163,8 @@ type flags struct {
 	sourcesAutoResolved bool
 	inCluster           bool
 	kubeconfig          string
+	kubeQPS             float64
+	kubeBurst           int
 	clusterName         string
 	clusters            string
 	clustersFrom        string
@@ -443,6 +446,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// Kubernetes client.
 	fs.BoolVar(&f.inCluster, "in-cluster", false, "Use in-cluster service account credentials. Auto-detected inside a pod.")
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "Explicit kubeconfig path. Used outside a pod.")
+	fs.Float64Var(&f.kubeQPS, "kube-qps", float64(kube.DefaultQPS), "Client-side Kubernetes API request rate limit (queries per second). Must be > 0.")
+	fs.IntVar(&f.kubeBurst, "kube-burst", kube.DefaultBurst, "Client-side Kubernetes API burst ceiling. Must be >= 1.")
 	fs.StringVar(&f.clusterName, "cluster-name", "", "Human-readable cluster name included in every inject payload.")
 
 	// Multi-cluster (issue #208): opt one process into watching several
@@ -499,6 +504,12 @@ const defaultAXRouterURL = "http://atenet-router.ate-system.svc.cluster.local"
 // validate checks flag combinations after parse. Called once from
 // main so misconfig fails before any network / API touching.
 func (f *flags) validate() error {
+	if f.kubeQPS <= 0 {
+		return fmt.Errorf("--kube-qps must be > 0 (got %v)", f.kubeQPS)
+	}
+	if f.kubeBurst < 1 {
+		return fmt.Errorf("--kube-burst must be >= 1 (got %d)", f.kubeBurst)
+	}
 	// Agent sink (--sink): validated first — the daemon-flag
 	// requirements below are sink-conditional. A typo'd sink name is a
 	// config error in every mode, like --sources.

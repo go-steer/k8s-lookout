@@ -356,6 +356,10 @@ func (s *Source) send(sigs []engine.Signal) {
 // Run implements sources.Source: starts the two informers, arms after
 // caches sync, then drives the sampling tick until ctx is cancelled.
 func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
+	ae := sources.NewAsyncEmitter(ctx, emit, 0)
+	defer ae.Close()
+	emit = ae.Emit
+
 	s.mu.Lock()
 	s.emit = emit
 	s.mu.Unlock()
