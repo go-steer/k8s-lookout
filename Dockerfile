@@ -35,7 +35,7 @@
 # pulls. CGO_ENABLED=0 below means we don't care about the builder's
 # libc (musl vs glibc); we only ship the binary.
 ARG GO_VERSION=1.26.9
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS builder
 
 WORKDIR /src
 
@@ -120,7 +120,7 @@ RUN go build \
 #
 # :nonroot tag pre-creates UID 65532 + GID 65532 (user "nonroot")
 # and sets USER, so the binary runs unprivileged out of the box.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 # OCI image labels for registry tooling + GHCR metadata pages.
 # Per-release `title` / `description` / version labels are set by

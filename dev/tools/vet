@@ -17,4 +17,8 @@
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
-exec go vet ./...
+TAGS_FLAG=()
+if go list -tags allproviders ./pkg/cloud/gke >/dev/null 2>&1; then
+  TAGS_FLAG=(-tags=allproviders)
+fi
+exec go vet "${TAGS_FLAG[@]}" ./...

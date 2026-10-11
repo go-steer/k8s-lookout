@@ -238,7 +238,16 @@ goMemLimit: "600MiB"
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532
-securityContext: {}
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
 
 livenessProbe:
   httpGet:

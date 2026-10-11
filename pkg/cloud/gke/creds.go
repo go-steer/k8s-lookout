@@ -65,7 +65,7 @@ const credentialsFix = "grant lookout's Kubernetes service account roles/iam.wor
 // prefix must also carry a token endpoint's 4xx as the libraries
 // render it (grpcTokenStatus), or a grant-refusal OAuth2 error code
 // (grpcOAuthClientCode).
-const grpcCredsFailedPrefix = "transport: per-RPC creds failed due to error: "
+const grpcCredsFailedPrefix = "transport: per-RPC creds failed due to error: " //nolint:gosec // G101: gRPC error prefix string, not a credential
 
 // grpcTokenStatus finds the token endpoint's HTTP status in a
 // flattened token error, as each library renders it:

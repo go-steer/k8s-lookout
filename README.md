@@ -101,10 +101,12 @@ payload on stdout; diagnostics go to stderr only.
 
 ## Quickstart — sentinel
 
-The watch-path deploys per cluster from [`deploy/`](./deploy/):
+The watch-path deploys per cluster via Kustomize from [`deploy/`](./deploy/) or via Helm from [`deploy/chart`](./deploy/chart):
 
 ```sh
-kubectl apply -f deploy/
+kubectl apply -k deploy/
+# or via Helm:
+helm install lookout ./deploy/chart -n lookout-system --create-namespace
 ```
 
 That gives the sentinel a dedicated ServiceAccount with a

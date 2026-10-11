@@ -94,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`findings diff` void-stream protection (`#647`).** Require a valid terminating `scanned=... findings=... elapsed=...` summary line and cross-check parsed record counts before mutating stored finding state.
 - **CronJob default timezone (`#648`).** Evaluate unset `CronJob.Spec.TimeZone` schedules in `UTC` (`CRON_TZ=UTC`) instead of the CLI/MCP host's local timezone.
 - **Graph history namespace ordering & gap replay (`#656`).** Intern `Namespace` nodes before child object keys on first sight in `pkg/graph` and extend `Replayer.nodeNew` across keyed ID gaps so `--at` queries stay valid when new namespaces appear between snapshots.
+- **Enforce Pod Security Standards `restricted` security context on sentinel deployments (#662).** Both [`deploy/51-deployment-watcher.yaml`](./deploy/51-deployment-watcher.yaml) and the Helm chart default [`values.yaml`](./deploy/chart/values.yaml) now set `seccompProfile: {type: RuntimeDefault}` along with container-level `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and `capabilities.drop: [ALL]`.
+- **Harden workflow, image, and scanner supply-chain pins (#663).** Pin all GitHub Action `uses:` directives to full 40-char commit SHAs, pin both `Dockerfile` base images to multi-arch SHA256 digests, verify `kustomize` v5.6.0 archive checksum in CI instead of piping a script from `master`, enable `provenance: mode=max` on published image builds, and pin `govulncheck` to `v1.1.4`.
+- **Run static analysis across `-tags allproviders` and guard `Dockerfile` builder stage in CI (#664).** `dev/tools/vet`, `dev/tools/lint-go`, and `dev/tools/verify-vuln` now pass `allproviders` build tags whenever cloud provider dependencies resolve, and CI builds the `Dockerfile` `builder` target directly instead of ignoring `Dockerfile` / `.dockerignore` changes.
+- **Fix sentinel quickstart command in `README.md` (#668).** Replace `kubectl apply -f deploy/` (which failed on `kustomization.yaml`) with `kubectl apply -k deploy/` alongside the `helm install` quickstart command.
 
 ## [0.35.0] - 2026-10-11
 

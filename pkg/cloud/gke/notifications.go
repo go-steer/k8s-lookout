@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub" //nolint:staticcheck // SA1019: pubsub v1->v2 migration tracked in #665
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )

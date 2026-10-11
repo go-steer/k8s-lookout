@@ -91,6 +91,8 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: watcher
           # Pinned to the CURRENT release (issue #146 — it sat at
@@ -100,6 +102,14 @@ spec:
           # stale.
           image: ghcr.io/go-steer/lookout:v0.35.0
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           args:
             - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
             - "--token-env=WATCHER_TOKEN"
