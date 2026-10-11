@@ -372,13 +372,13 @@ again after its dedup window lapsed, and §7.4 had not resolved it:
 | `repeat_count` | meaning | what a reader should do |
 | --- | --- | --- |
 | `N` > 0 | the N-th pure reminder since the open (or since the last material change): still failing, nothing material changed | let the diagnosis stand; no re-investigation needed |
-| omitted (0) on a followup | the signal changed materially: a message shape or severity the incident had not shown, or its occurrence rate jumped 4× or more over at least 10 occurrences (a class change waits until more than max(2 windows, the next reminder interval) after the previous inject) | look again — this is new information about the same incident |
+| omitted (0) on a followup | the signal changed materially: a message shape or severity the incident had not shown, or its occurrence rate jumped 4× or more over at least 10 occurrences (a class change goes out no later than the next reminder would, and a stream of them backs off like reminders) | look again — this is new information about the same incident |
 | omitted on an open | an ordinary new incident (also an open re-sent into its session because its first delivery failed) | as before |
 
 Reminders follow a fixed doubling schedule from `--dedup-window` (5m,
 10m, 20m, 40m at the default) capped at 1h; occurrences between them
 are counted (`count` keeps every occurrence since the open) and never
-injected, and a material change restarts the schedule. The kind is the
+injected. A material change restarts the reminder numbering; only a rate jump also restarts the backoff interval. The kind is the
 incident's own: the frozen `k8s-event-followup` for a `k8s-event`
 incident, the source's own kind (e.g. `objectstate.restart_burst`) for
 a source-namespaced one. A storm-claimed incident's followups go to

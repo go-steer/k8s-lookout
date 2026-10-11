@@ -41,13 +41,14 @@ import (
 //     wire) when the signal changes — a class the incident has not
 //     shown before, or a jump in its occurrence rate. A class change
 //     goes in at the first occurrence more than max(2 windows, the
-//     next reminder's interval) after the last inject — one seen
-//     inside the first window included — and further changes fold
-//     into it, so a failure rotating through message shapes never
-//     injects more often than its reminder schedule. The cost: a lone
-//     real change late in the backoff waits up to that interval (1h at
-//     most). A rate jump has its own floor and goes in at once. The
-//     schedule restarts from one window after either.
+//     current step's interval) after the last inject, further changes
+//     fold into it, and it takes a backoff step just as a reminder
+//     does (repeat_count restarts, the interval does not), so a
+//     failure rotating through message shapes backs off 10m, 20m, 40m,
+//     1h and never injects more often than its reminder schedule. A
+//     lone real change goes out no later than the next reminder would
+//     have. A rate jump has its own floor, goes in at once, and
+//     restarts the backoff from one window.
 //   - a re-send of the last inject when it did not reach the session
 //     (MarkUndelivered) — including the open itself, so an agent whose
 //     session was created but never got the incident does not meet it
@@ -111,9 +112,9 @@ func repeatInterval(window time.Duration, n int) time.Duration {
 //     A stale reminder re-sends as the class change pending since.
 //  2. A rate jump is a RepeatCount-0 followup at once.
 //  3. A pending class change is a RepeatCount-0 followup once more
-//     than max(2 windows, the next reminder's interval) has passed
+//     than max(2 windows, the current step's interval) has passed
 //     since the last inject; until then it is held (absorbed), and it
-//     supersedes a reminder that comes due meanwhile.
+//     supersedes a reminder that comes due meanwhile. It takes a step.
 //  4. Inside the incident's first window (no repeat inject yet, the
 //     window not lapsed) it is a plain duplicate.
 //  5. A reminder that has come due is the next RepeatCount.
@@ -158,9 +159,19 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 		result.Count = e.Count
 		return result
 	}
+	if e.Step < e.RepeatCount {
+		// An entry written before Step existed: its reminders were its
+		// steps.
+		e.Step = e.RepeatCount
+	}
 	sinceInject := now.Sub(e.LastInjectAt)
 	next := e.RepeatCount + 1
-	interval := repeatInterval(c.window, next)
+	// The gap before the next inject comes from the backoff step, not
+	// the wire's reminder number: a class change restarts repeat_count
+	// (the next reminder is the first since the change) but takes a
+	// step like a reminder would, so a stream of changes backs off
+	// exactly as reminders do.
+	interval := repeatInterval(c.window, e.Step+1)
 	dup := DedupResult{Kind: DedupDuplicate, SessionID: e.SessionID, Count: e.Count, Storm: e.Storm}
 	if inRepeat && e.countJump(now) {
 		// A rate jump has its own floor (repeatJumpMin) and goes in at
@@ -169,6 +180,7 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 		// not against the quiet rate it replaced.
 		e.RatePerHour = e.rateSinceInject(now)
 		e.RepeatCount = 0
+		e.Step = 0 // a rate jump restarts the backoff; it has its own floor
 		e.LastChange = RepeatChangeRate
 		e.markInject(now)
 		result.Change = RepeatChangeRate
@@ -177,13 +189,16 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 	}
 	if e.PendingChange {
 		// A class change is announced no sooner than the later of two
-		// windows and the next reminder's interval after the last
-		// inject, so an incident rotating through shapes can never
-		// inject more often than its reminder schedule would. Until
-		// then it is held — and it supersedes a reminder that comes
-		// due meanwhile, so that reminder cannot swallow it.
+		// windows and the current step's interval after the last
+		// inject, and it advances the step, so an incident rotating
+		// through shapes backs off 10m, 20m, 40m, 1h… and never injects
+		// more often than its reminder schedule would. Until then it is
+		// held — and it supersedes a reminder that comes due meanwhile,
+		// so that reminder cannot swallow it. A lone change therefore
+		// goes out no later than the next reminder would have.
 		if sinceInject > max(2*c.window, interval) {
 			e.RepeatCount = 0
+			e.Step++
 			e.LastChange = RepeatChangeClass
 			e.markInject(now)
 			result.Change = RepeatChangeClass
@@ -203,6 +218,7 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 	}
 	e.RatePerHour = e.rateSinceInject(now)
 	e.RepeatCount = next
+	e.Step++
 	e.LastChange = ""
 	e.markInject(now)
 	result.RepeatCount = next

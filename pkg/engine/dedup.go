@@ -133,10 +133,18 @@ type dedupEntry struct {
 	// if the recovery tracker has already re-armed it.
 	Resolved bool `json:"resolved,omitempty"`
 	// RepeatCount is how many pure reminders went into the session
-	// since the last open or material change; the next one is number
-	// RepeatCount+1 and is due repeatInterval(window, RepeatCount+1)
-	// after LastInjectAt.
+	// since the last open or material change: the wire number, so the
+	// next reminder is number RepeatCount+1.
 	RepeatCount int `json:"repeat_count,omitempty"`
+	// Step is the backoff step: how many reminders and class-change
+	// followups went in since the open (or the last rate jump). The
+	// next inject is due repeatInterval(window, Step+1) after
+	// LastInjectAt. Separate from RepeatCount because a class change
+	// restarts the wire numbering but must not rewind the interval —
+	// otherwise a failure rotating through message shapes would inject
+	// at the first step's pace forever. A rate jump resets it. Zero in
+	// an entry that predates it, which repeat reads as RepeatCount.
+	Step int `json:"step,omitempty"`
 	// LastInjectAt is when this incident last spoke into its session:
 	// the open, a reminder, or a material-change followup. Zero in a
 	// legacy entry, which repeat() reads as FirstSeen (the open).
@@ -162,7 +170,7 @@ type dedupEntry struct {
 	// PendingChange records a material class change the session has
 	// not heard yet. It is announced (one followup, repeat_count
 	// omitted) at the first occurrence more than max(2 windows, the
-	// next reminder's interval) past the last inject, the floor that
+	// current step's interval) past the last inject, and takes a backoff step (Step), the floor that
 	// keeps an incident rotating through more shapes than
 	// maxRepeatClasses from injecting faster than its reminders.
 	PendingChange bool `json:"pending_change,omitempty"`
@@ -725,6 +733,7 @@ func (c *DedupCache) Unbind(key EventKey) {
 	e.SessionID = ""
 	e.FirstSeen = now
 	e.RepeatCount = 0
+	e.Step = 0
 	e.RatePerHour = 0
 	e.PendingChange = false
 	e.Undelivered = false

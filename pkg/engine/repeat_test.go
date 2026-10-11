@@ -189,10 +189,11 @@ func TestRepeat_FirstWindowIsPlainDuplicate(t *testing.T) {
 	}
 }
 
-// TestRepeat_MaterialChangeResetsSchedule: a new message shape in the
-// backoff is a RepeatCount-0 followup once past its floor, and the
-// schedule restarts from one window after it.
-func TestRepeat_MaterialChangeResetsSchedule(t *testing.T) {
+// TestRepeat_MaterialChangeRestartsNumbering: a new message shape in
+// the backoff is a RepeatCount-0 followup once past its floor. The next
+// reminder is numbered 1 again, but the change took a backoff step, so
+// it comes at the following step's interval (40m), not one window.
+func TestRepeat_MaterialChangeRestartsNumbering(t *testing.T) {
 	t.Parallel()
 	h := newRepeatHarness(t, "")
 	h.openIncident()
@@ -210,13 +211,14 @@ func TestRepeat_MaterialChangeResetsSchedule(t *testing.T) {
 	if got.Kind != DedupRepeat || got.RepeatCount != 0 || got.Change != RepeatChangeClass {
 		t.Fatalf("new message shape = %+v, want a material-change followup (repeat 0, change=class)", got)
 	}
-	// Back to the normal window: absorbed until it lapses, then
-	// reminder 1 again.
-	if got := h.emit(4 * time.Minute); got.Kind != DedupDuplicate || !got.Absorbed {
-		t.Fatalf("event inside the reset window = %+v, want absorbed", got)
+	// Absorbed through step 4's 40m interval, then reminder 1.
+	for range 7 { // 7 × 5m05s = 35m35s
+		if got := h.emit(cadence); got.Kind != DedupDuplicate || !got.Absorbed {
+			t.Fatalf("event inside step 4's interval = %+v, want absorbed", got)
+		}
 	}
-	if got := h.emit(90 * time.Second); got.Kind != DedupRepeat || got.RepeatCount != 1 {
-		t.Fatalf("first lapse after the change = %+v, want reminder 1", got)
+	if got := h.emit(cadence); got.Kind != DedupRepeat || got.RepeatCount != 1 {
+		t.Fatalf("first reminder after the change = %+v, want reminder 1 at ~40m", got)
 	}
 }
 

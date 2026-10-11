@@ -75,22 +75,70 @@ func TestRepeat_RotationAtSoakCadence(t *testing.T) {
 	h := newRepeatHarness(t, "")
 	h.openIncident()
 	const cadence = 5*time.Minute + 5*time.Second
-	var injects int
+	var gaps []time.Duration
 	last := h.now
-	for i := range 100 {
+	for i := range 100 { // ~8.5h
 		h.msg = fmt.Sprintf("shape %c failed", 'a'+i%17)
 		got := h.emit(cadence)
 		if got.Kind != DedupRepeat {
 			continue
 		}
-		injects++
-		if gap := h.now.Sub(last); gap <= 10*time.Minute {
-			t.Fatalf("inject %d came %s after the previous one, want more than 2 windows", injects, gap)
+		if got.RepeatCount != 0 {
+			t.Fatalf("rotation produced a pure reminder %+v; every inject should be a change", got)
 		}
+		gaps = append(gaps, h.now.Sub(last))
 		last = h.now
 	}
-	if injects > 50 {
-		t.Fatalf("injects = %d over 100 rotating occurrences, want at most half", injects)
+	// Floors: max(10m, step interval) → 10m, 10m, 20m, 40m, 1h, 1h, …
+	floors := []time.Duration{10 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour}
+	if len(gaps) < len(floors)+2 {
+		t.Fatalf("gaps = %v, want at least %d injects", gaps, len(floors)+2)
+	}
+	for i, g := range gaps {
+		floor := time.Hour
+		if i < len(floors) {
+			floor = floors[i]
+		}
+		if g <= floor || g > floor+cadence {
+			t.Errorf("inject %d came %s after the previous one, want just over %s", i+1, g, floor)
+		}
+	}
+	if len(gaps) > 12 {
+		t.Errorf("injects = %d over ~8.5h of rotation, want the reminder schedule's pace (≤12)", len(gaps))
+	}
+}
+
+// TestRepeat_LoneChangeLateInBackoff: deep in the backoff (1h step) a
+// single real change goes out no later than the next reminder would
+// have — it takes that reminder's slot.
+func TestRepeat_LoneChangeLateInBackoff(t *testing.T) {
+	t.Parallel()
+	h := newRepeatHarness(t, "")
+	h.openIncident()
+	const cadence = 5*time.Minute + 5*time.Second
+	var lastInject time.Time
+	for {
+		got := h.emit(cadence)
+		if got.Kind == DedupRepeat {
+			lastInject = h.now
+			if got.RepeatCount == 5 { // next interval: the 1h cap
+				break
+			}
+		}
+	}
+	h.msg = "0/6 nodes are available: 6 Insufficient memory."
+	for {
+		got := h.emit(cadence)
+		if got.Kind != DedupRepeat {
+			continue
+		}
+		if got.Change != RepeatChangeClass {
+			t.Fatalf("first inject after the change = %+v, want the class change", got)
+		}
+		if gap := h.now.Sub(lastInject); gap > time.Hour+cadence {
+			t.Fatalf("change went out %s after the last reminder, want within the 1h reminder interval", gap)
+		}
+		return
 	}
 }
 

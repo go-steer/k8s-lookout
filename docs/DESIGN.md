@@ -673,16 +673,18 @@ its agent re-diagnosed an unchanged failure each time. Now:
   kubelet's pull cycle alternates four messages on one key), or an
   occurrence rate since the last inject at least 4× the reference rate over
   at least 10 occurrences, goes in with `repeat_count` omitted, and the
-  schedule restarts from one window. A rate jump goes in at once (it has its
-  own floor); a class change goes in at the first occurrence more than
-  max(2 windows, the next reminder's interval) after the last inject — one
-  seen inside the first window included, so a fast stream that never lapses
-  still announces it — and supersedes a reminder that comes due meanwhile.
-  Further class changes fold into it, so an incident rotating through more
-  shapes than the set holds never injects more often than its reminder
-  schedule would; the price is that a lone change late in the backoff can
-  wait up to that interval (an hour at most). The reason is not an input:
-  it is the dedup key already.
+  reminder numbering restarts. A rate jump goes in at once (it has its own
+  floor) and restarts the backoff from one window. A class change goes in
+  at the first occurrence more than max(2 windows, the current step's
+  interval) after the last inject — a fast stream that never lapses still
+  announces it — supersedes a reminder that comes due meanwhile, and takes
+  a backoff step like a reminder: further class changes fold into it, and a
+  stream of them backs off 10m, 20m, 40m, 1h exactly like reminders, so an
+  incident rotating through more shapes than the set holds never injects
+  more often than its reminder schedule would. A lone change goes out no
+  later than the next reminder would have. Shapes first seen within a
+  window of the open belong to the open (kubelet's pull cycle) and are not
+  changes. The reason is not an input: it is the dedup key already.
 - **Delivery never goes dark.** If the sink says the bound session is gone
   (404/410 on the inject), the incident is unbound and reopened at once with
   the occurrence in hand. A storm member is only unbound and goes back
