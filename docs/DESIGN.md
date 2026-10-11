@@ -638,6 +638,69 @@ longer polls to confirm its fix stuck, sessions can auto-conclude, and every
 incident record gains a ground-truth outcome (§9.3). **Highest value per line
 of code in this document; ships in M2 before any new source.**
 
+**Amendment (2026-10-10, #599): repeats of an open incident.** Knowing
+whether an incident is resolved also tells the sentinel what to do when one
+is *not*. The dedup window used to be a cooldown with a retry safety net:
+once it lapsed, the next occurrence opened the incident again. The scheduler
+re-queues an unschedulable pod about every five minutes, just past the 5m
+default, so the #585 soak's one stuck pod opened 225 sessions in 24 hours and
+its agent re-diagnosed an unchanged failure each time. Now:
+
+- **Still open** means: the dedup entry is bound to a session, the signal
+  that opened it and the one now arriving both route to a session of their
+  own (§7.7 — not the watchboard warning class, not info, not a §9.4
+  downgrade), no `kind=resolved` has been routed to it, and the recovery
+  tracker holds it as symptomatic or clearing. Where any of that is unknown —
+  recovery disabled, the incident never bound, `--mode=shared`, an incident
+  no observer has judged once the tracker drops it (one hour) — the lapse
+  opens a new incident as before. A lower-class signal from *another*
+  source on the same key while the incident is open (`capacity.pending`,
+  a warning, on a `FailedScheduling` incident) is absorbed as evidence; it
+  never unbinds the incident. Only a §9.4 downgrade, or the opener's own
+  kind re-classed, takes the old lapse to the store or watchboard.
+- A lapse on a still-open incident is a **followup** into the bound session
+  (the storm's, if a storm claimed it), never an open: the frozen
+  `k8s-event-followup` for a k8s event, the source's own kind otherwise,
+  carrying `repeat_count`. No enrichment rides it.
+- **Reminders back off.** Pure reminders (`repeat_count` = N > 0) come one
+  `--dedup-window` after the open, then 2, 4, 8 windows after the previous
+  one, capped at a fixed hour (5m, 10m, 20m, 40m, 1h, 1h… at the default;
+  no flag). Occurrences in between are absorbed: counted — the payload
+  `count` keeps every occurrence since the open — and not injected.
+- **A material change is not a reminder.** A signal class the incident has
+  not shown (kind, severity and message shape with digit runs collapsed, so
+  counts and ages don't register; a set, not the last value, because
+  kubelet's pull cycle alternates four messages on one key), or an
+  occurrence rate since the last inject at least 4× the reference rate over
+  at least 10 occurrences, goes in with `repeat_count` omitted, and the
+  reminder numbering restarts. A rate jump goes in at once (it has its own
+  floor) and restarts the backoff from one window. A class change goes in
+  at the first occurrence more than max(2 windows, the current step's
+  interval) after the last inject — a fast stream that never lapses still
+  announces it — supersedes a reminder that comes due meanwhile, and takes
+  a backoff step like a reminder: further class changes fold into it, and a
+  stream of them backs off 10m, 20m, 40m, 1h exactly like reminders, so an
+  incident rotating through more shapes than the set holds never injects
+  more often than its reminder schedule would. A lone change goes out no
+  later than the next reminder would have. Shapes first seen within a
+  window of the open belong to the open (kubelet's pull cycle) and are not
+  changes. The reason is not an input: it is the dedup key already.
+- **Delivery never goes dark.** If the sink says the bound session is gone
+  (404/410 on the inject), the incident is unbound and reopened at once with
+  the occurrence in hand. A storm member is only unbound and goes back
+  through the storm stage, which does not yet reopen a storm whose own
+  session is gone. Any other delivery error re-sends the same inject at the
+  next occurrence (as the pending class change, if one arrived since).
+  An open that created a session but failed its initial delivery
+  re-sends the full open payload at the next occurrence, so the agent never
+  meets an incident first as a pure reminder.
+- After the incident resolves, a recurrence opens fresh, as before. Replays
+  (an Event's `LastTimestamp` not advancing) never reach any of this.
+
+The schedule rides `--dedup-persist`, so a restart mid-backoff resumes at the
+next reminder. A storm-claimed incident's repeats refresh the storm's idle
+clock, which its re-fires used to do.
+
 ### 7.5 Storm correlation
 
 Today's dedup key is `(uid, reason)`: a node failure opens ~30 sessions for 30

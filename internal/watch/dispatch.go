@@ -17,8 +17,10 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -252,8 +254,29 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
 		return
 	}
-	result := d.dedup.Observe(key, sig.LastSeen)
+	result := d.dedup.ObserveSignal(key, engine.Observation{
+		LastTS:     sig.LastSeen,
+		Kind:       sig.Kind,
+		Severity:   sig.Severity,
+		Message:    sig.Message,
+		Repeatable: d.opensSessions(sig),
+		Downgraded: downgraded != nil,
+	})
 	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
+	// An occurrence of a still-open, storm-claimed incident past its
+	// first window — a repeat or an absorbed one — is member activity
+	// for the storm's idle clock (§7.5). The pre-#599 reopen re-entered
+	// the storm stage and refreshed it; a repeat does not, so say so.
+	if d.storm != nil && result.Storm != "" && (result.Kind == engine.DedupRepeat || result.Absorbed) {
+		d.storm.NoteMemberActivity(key, sig.LastSeen)
+	}
+	if result.Kind == engine.DedupRepeat {
+		// Issue #599: the incident is still open, so its lapse is a
+		// followup into the bound session (the storm's, when a storm
+		// owns it), never a second open.
+		d.injectRepeat(ctx, sig, key, result)
+		return
+	}
 	if result.Kind == engine.DedupDuplicate {
 		d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 		// Info-level log: the operator asked "is the watcher seeing
@@ -323,9 +346,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// (kind=k8s-event) session here would overwrite the storm binding,
 		// the §7.5 N-session fan-out. It is suppressed as a storm member
 		// below instead; the storm's next fresh attach reopens the class.
-		if d.mode == "per-incident" && !d.dryRun && result.SessionID == "" && result.Storm == "" &&
-			(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
-			(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard) {
+		if !d.dryRun && result.SessionID == "" && result.Storm == "" && d.opensSessions(sig) {
 			d.retryIncidentOpen(ctx, sig, result, key)
 			return
 		}
@@ -488,6 +509,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		if err != nil {
 			log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
 			d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+			// Bound anyway, but the agent never got the incident: the
+			// next occurrence re-sends the full open payload instead of
+			// meeting it first as a pure reminder (#599).
+			d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 			return
 		}
 		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
@@ -550,6 +575,140 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
+}
+
+// opensSessions reports whether sig's severity class routes to a
+// session of its own: per-incident mode, and neither the info class
+// (stored only, §7.7) nor — when a watchboard runs — the warning class.
+// It is the guard the #84 unbound-retry uses, and the dedup cache's
+// Repeatable input (issue #599): only such a signal, on an incident a
+// session-class signal opened, can repeat into a bound session. A
+// downgraded (§9.4) incident therefore keeps lapsing to the store or
+// the watchboard exactly as before, and a watchboard warning that is
+// escalated to critical still opens its own session.
+func (d *dispatcher) opensSessions(sig engine.Signal) bool {
+	return d.mode == "per-incident" &&
+		(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
+		(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard)
+}
+
+// injectRepeat delivers a DedupRepeat (issue #599) into the incident's
+// bound session: the incident's own payload, re-kinded as a followup —
+// k8s-event becomes the frozen k8s-event-followup, a source-namespaced
+// kind keeps its kind — with repeat_count stamped (N > 0 for the N-th
+// pure reminder, omitted for a material change). No session open: the
+// session already exists. Recorded as route=followup against the bound
+// session.
+//
+// A re-send of an open whose initial delivery failed
+// (engine.RepeatChangeOpen) carries the full open payload instead —
+// kind, shape and enrichment of the open — because that agent has not
+// seen the incident at all.
+//
+// Delivery failures never go dark:
+//   - the sink says the session is gone (404/410 — an ax task
+//     recreated, a daemon restarted without its state): the entry is
+//     unbound and the incident reopened NOW, through the #84 open path,
+//     with this signal. Now rather than at the next occurrence because
+//     the occurrence in hand is current evidence of a verified-open
+//     incident, and a slow emitter's next occurrence may be an hour
+//     away. If the reopen fails too, the unbound entry retries on every
+//     occurrence through the #84 guard. A storm-claimed entry is
+//     unbound but not reopened per-incident (#104): it stays a
+//     session-less storm member and its next lapse goes back through
+//     the storm stage, as a re-fire did before #599. The storm stage
+//     does not reopen a storm whose session is gone (it retries only
+//     an empty storm session id), so such a storm keeps its dead id —
+//     the pre-#599 behavior, tracked separately.
+//   - any other error: the entry is marked undelivered, so the next
+//     occurrence re-sends the same inject instead of the schedule
+//     skipping it.
+func (d *dispatcher) injectRepeat(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult) {
+	var payload inject.Payload
+	what := "reminder"
+	switch {
+	case result.Change == engine.RepeatChangeOpen:
+		what = "open"
+		if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
+			if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
+				sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
+			}
+		}
+		payload = incidentPayload(sig, result)
+		if d.injectMaxBytes > 0 {
+			if shed := payload.FitTo(d.injectMaxBytes); len(shed) > 0 {
+				d.noteInjectShrunk(sig.Namespace, sig.Name, shed)
+			}
+		}
+	case result.RepeatCount == 0:
+		what = "change"
+		payload = repeatPayload(sig, result)
+	default:
+		payload = repeatPayload(sig, result)
+	}
+	if d.dryRun {
+		d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+		d.metrics.repeatFollowups.WithLabelValues(what).Inc()
+		out, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", result.SessionID, string(out))
+		return
+	}
+	if err := d.injector.Append(ctx, result.SessionID, payload); err != nil {
+		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		if sessionGone(err) {
+			log.Printf("dispatcher: repeat followup for %s/%s: session %s is gone (%v) — unbinding and reopening",
+				sig.Namespace, sig.Name, result.SessionID, err)
+			d.dedup.Unbind(key)
+			if result.Storm == "" && d.opensSessions(sig) {
+				d.retryIncidentOpen(ctx, sig, result, key)
+				return
+			}
+			d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, StormFingerprint: result.Storm})
+			return
+		}
+		log.Printf("dispatcher: repeat followup for %s/%s (sid=%s): %v (re-sent at the next occurrence)",
+			sig.Namespace, sig.Name, result.SessionID, err)
+		d.dedup.MarkUndelivered(key, result.Change)
+		d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+		return
+	}
+	d.store.Record(sig, store.Outcome{Route: store.RouteFollowup, SessionID: result.SessionID})
+	d.metrics.repeatFollowups.WithLabelValues(what).Inc()
+	switch what {
+	case "reminder":
+		log.Printf("repeat %s pod=%s/%s → sid=%s (still open: reminder %d, count=%d)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.RepeatCount, result.Count)
+	case "open":
+		log.Printf("repeat %s pod=%s/%s → sid=%s (open re-sent: its initial delivery had failed, count=%d)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.Count)
+	default:
+		log.Printf("repeat %s pod=%s/%s → sid=%s (still open, changed: %s, count=%d)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.SessionID, result.Change, result.Count)
+	}
+}
+
+// sessionGone reports a sink error that means the bound session no
+// longer exists on the agent side (HTTP 404 or 410 on the inject) —
+// the same answer the ax sink's keyed open already treats as "start a
+// new one".
+func sessionGone(err error) bool {
+	var se *inject.StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)
+}
+
+// repeatPayload composes a repeat followup's wire body: incidentPayload
+// with the kind switched to the followup kind and repeat_count set.
+// The kind switches BEFORE composition so stampIdentity and
+// ReasonClass apply the frozen-pair rules to k8s-event-followup exactly
+// as they do to k8s-event.
+func repeatPayload(sig engine.Signal, result engine.DedupResult) inject.Payload {
+	if sig.Kind == engine.KindK8sEvent {
+		sig.Kind = engine.KindK8sEventFollowup
+	}
+	sig.Enrichment = nil
+	payload := incidentPayload(sig, result)
+	payload.RepeatCount = result.RepeatCount
+	return payload
 }
 
 // incidentPayload composes the wire payload for a NEW incident from
@@ -710,6 +869,9 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 	if err != nil {
 		log.Printf("dispatcher: inject for %s/%s (sid=%s): %v", sig.Namespace, sig.Name, sid, err)
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
+		// The session exists but never got the incident: the next
+		// occurrence re-sends the full open, never a pure reminder (#599).
+		d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 		return
 	}
 	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
@@ -870,6 +1032,12 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 			return
 		}
 		sid = bound
+	}
+	// The incident is closed: its recurrence must open fresh rather
+	// than repeat into this session (issue #599), even if the tracker
+	// re-arms it before the next event arrives.
+	if sig.Kind == engine.KindResolved {
+		d.dedup.MarkResolved(sig.Key)
 	}
 	// §9.1: resolved / resolved.reverted rows are what the stability-
 	// window and recommendation-history queries join against.

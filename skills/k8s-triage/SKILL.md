@@ -63,6 +63,20 @@ resolves to the owning workload via the graph's owner chain:
 lookout bundle --incident='{"kind":"k8s-event","reason":"BackOff","namespace":"prod","kind_of_object":"Pod","name":"api-6d5f8c-x2v9k"}'
 ```
 
+**Later messages in the same session are followups, not new incidents.**
+While the failure stays broken the sentinel sends reminders into this
+session — `"kind":"k8s-event-followup"` (or the source's own kind) with
+`"repeat_count":N`, backing off from every 5 minutes to once an hour:
+
+- `repeat_count` > 0: still failing, nothing material changed. If you
+  already diagnosed it, the diagnosis stands — answer in a line ("still
+  failing, diagnosis stands") and do not re-run the investigation.
+- a followup **without** `repeat_count`: the signal changed (new
+  message, new severity, or it started firing much faster). Look again,
+  starting from what changed.
+- `"kind":"resolved"`: the symptom cleared and held — the incident is
+  over.
+
 Abridged real output (logfmt; one finding per line; `section=` says which
 part of the bundle a line belongs to):
 

@@ -332,8 +332,9 @@ kube-agents' watcher wire), `enrichment`\* (`bundle`), `forecast`\*
 (`eta`, `confidence_basis`), `quota_increase_draft`\* (`quota_id`,
 `region`, `unit`\*, `current_usage`, `current_limit`,
 `suggested_limit`, `slope_per_day`, `justification`), `reason_class`\*
-(the reason family lookout keyed the signal on — see below). Fields
-marked \* are omitempty.
+(the reason family lookout keyed the signal on — see below),
+`repeat_count`\* (a followup for an incident already open — see
+below). Fields marked \* are omitempty.
 
 **`reason` vs `reason_class` (#574).** `reason` is exactly what the
 cluster said and is never rewritten. `reason_class` is the family
@@ -364,6 +365,26 @@ entry — every wire struct whose `reason` is the raw reason.
 canonical class, and `family.member` carries it as `family`, so those
 three do not gain the field.
 
+**`repeat_count` (#599).** Set only on a followup for an incident
+that is already open in the receiving session — the sentinel saw it
+again after its dedup window lapsed, and §7.4 had not resolved it:
+
+| `repeat_count` | meaning | what a reader should do |
+| --- | --- | --- |
+| `N` > 0 | the N-th pure reminder since the open (or since the last material change): still failing, nothing material changed | let the diagnosis stand; no re-investigation needed |
+| omitted (0) on a followup | the signal changed materially: a message shape or severity the incident had not shown, or its occurrence rate jumped 4× or more over at least 10 occurrences (a class change goes out no later than the next reminder would, and a stream of them backs off like reminders) | look again — this is new information about the same incident |
+| omitted on an open | an ordinary new incident (also an open re-sent into its session because its first delivery failed) | as before |
+
+Reminders follow a fixed doubling schedule from `--dedup-window` (5m,
+10m, 20m, 40m at the default) capped at 1h; occurrences between them
+are counted (`count` keeps every occurrence since the open) and never
+injected. A material change restarts the reminder numbering; only a rate jump also restarts the backoff interval. The kind is the
+incident's own: the frozen `k8s-event-followup` for a `k8s-event`
+incident, the source's own kind (e.g. `objectstate.restart_burst`) for
+a source-namespaced one. A storm-claimed incident's followups go to
+the storm session. Never present on any other struct. DESIGN.md §7.4
+("Repeats of an open incident") owns the rules.
+
 The read path already agrees: `lookout triage events` reports the
 same message-aware class as its `reason` (raw spellings in
 `variants`), and `triage delta` / `health` read reasons from container
@@ -377,7 +398,8 @@ to the original watcher (playbook back-compat; wire pins in
 2026-09-10 to stamp the IDENTITY block (`project`/`region`/`zone`) and
 add `pull_cause` (see §Amendments) — and then extended additively
 2026-10-08 with the trailing `reason_class` (§Additive changes), which
-the pair always carries. Identity was excluded until a
+the pair always carries, and 2026-10-10 with `repeat_count` after it,
+which only a reminder followup carries. Identity was excluded until a
 single process could watch a fleet, at which point `cluster` alone
 stopped identifying a cluster — a name is unique only within a
 (project, location) pair. The three still excluded are the pipeline's
@@ -548,6 +570,21 @@ first external consumer deploys.
   owner the incident belongs to, which may be above the immediate
   controller. Not a fingerprint input, so no fingerprint changed; the
   field-set ledger is unchanged.
+- **2026-10-10 — `repeat_count` added (#599):** omitempty, APPENDED as
+  the last field of `Payload` per §Evolution, so every existing field
+  keeps its position and no fingerprint input changed. An incident that
+  stayed broken past its dedup window used to be opened again, the full
+  payload delivered as a new incident every window (225 sessions in 24h
+  for one unschedulable pod in the #585 soak); it is now a followup into
+  the bound session, and `N` > 0 tells the reader it is the N-th
+  reminder with nothing material changed (see §Frozen field sets). The
+  same change makes `k8s-event-followup` an emitted kind in practice —
+  its shape is the frozen `Payload` it always named, with
+  `source`/`severity`/`fingerprint` still unstamped like `k8s-event`.
+  Absent from every payload that predates it, so a consumer that
+  ignores it sees what it saw before, minus the duplicate opens. The
+  ledger, the round-trip fixture and the reminder byte pin
+  (`TestDispatchRepeat_ExactWireShape`) gained the field.
 
 ## Evolution
 

@@ -115,6 +115,7 @@ type metrics struct {
 	triageFlips          prometheus.Counter
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
+	repeatFollowups      *prometheus.CounterVec
 	sinkInfo             *prometheus.GaugeVec
 	runnerUp             prometheus.Gauge
 	runnerRestarts       prometheus.Counter
@@ -331,6 +332,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_cross_source_followups_total",
 			Help: "Total dedup-window duplicates injected as followups because their source family differs from the incident's opening source (leading/reactive joins made session-visible), by joining source family.",
 		}, []string{"source"}),
+		repeatFollowups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_repeat_followups_total",
+			Help: "Total followups injected for an incident that was still open when its dedup window lapsed (issue #599), by type: reminder is a pure reminder (repeat_count above 0, on the doubling schedule up to 1h), change is a material change (new message shape or severity, or a rate jump), open is the full open payload re-sent because the initial delivery had failed. Occurrences absorbed between reminders count in lookout_events_deduped_total.",
+		}, []string{"type"}),
 		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "lookout_sink_info",
 			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.",
@@ -394,6 +399,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.triageFlips,
 		m.triageRegressed,
 		m.crossSourceFollowups,
+		m.repeatFollowups,
 		m.sinkInfo,
 		m.runnerUp,
 		m.runnerRestarts,

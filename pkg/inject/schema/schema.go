@@ -81,7 +81,7 @@ var kinds = []KindSpec{
 	{inject.KindEvent, inject.Payload{}, "k8s-events",
 		"Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat."},
 	{inject.KindFollowup, inject.Payload{}, "k8s-events",
-		"Frozen reactive kind: a dedup-window recurrence injected into the already-open incident session."},
+		"Frozen reactive kind: a repeat of an incident still open past its dedup window, injected into its session; repeat_count > 0 marks a pure reminder (nothing changed), omitted means the signal changed."},
 
 	// §7.4 outcome records (the §9.3 ground-truth labels).
 	{inject.KindResolved, inject.ResolvedPayload{}, "",

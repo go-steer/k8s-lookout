@@ -258,6 +258,27 @@ func (t *RecoveryTracker) Len() int {
 	return len(t.incidents)
 }
 
+// Open reports whether key's incident is still open as far as §7.4
+// knows: tracked, and symptomatic or clearing — not yet declared
+// resolved. It is the dedup cache's open check (DedupCache.SetOpenCheck,
+// issue #599): a lapse on an open incident is a reminder into its
+// session, a lapse on anything else opens a new incident.
+//
+// An incident the tracker no longer holds is not open: one whose
+// outcome went final (dropped after the revert window), and one no
+// observer ever judged (dropped after uncoveredTTL — until then it
+// counts as open, so an incident no observer covers reopens at most
+// about hourly rather than every window). Restored bindings are
+// re-tracked at startup, so an incident open before a restart is open
+// after it. Safe from any goroutine; takes only the tracker lock.
+func (t *RecoveryTracker) Open(key EventKey) bool {
+	key.Reason = CanonicalReason(key.Reason)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ti, ok := t.incidents[key]
+	return ok && ti.state != stateResolved
+}
+
 // Tick evaluates every tracked incident against the observers and
 // advances the state machine, emitting resolved / resolved.reverted
 // Signals for any transitions. Called on an interval by the watch

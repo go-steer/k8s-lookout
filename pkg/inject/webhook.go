@@ -174,7 +174,10 @@ func (s *WebhookSink) post(ctx context.Context, u string, payload any) ([]byte, 
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("webhook sink: POST %s: status %d: %s", u, resp.StatusCode, string(respBody))
+		// A *StatusError (same text as before) so callers can match the
+		// code: a 404/410 on a followup means the receiver no longer
+		// has the incident, and the dispatcher reopens it (#599).
+		return nil, &StatusError{Op: "webhook sink: POST " + u, Code: resp.StatusCode, Body: string(respBody)}
 	}
 	return respBody, nil
 }

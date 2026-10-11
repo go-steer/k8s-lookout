@@ -117,8 +117,11 @@ The inject payload's `namespace`/`kind_of_object`/`name` name the pod;
    ```
 
    `findings=0` on the summary line (for this workload) is the verified
-   all-clear; the sentinel's followup inject (`k8s-event-followup`)
-   confirms the loop stopped from the watch side — and its `resolved`
-   inject flips your triage-status record to resolved automatically
-   (never write `--status=resolved` yourself; the sentinel owns that
-   transition).
+   all-clear; the sentinel's `resolved` inject confirms the loop stopped
+   from the watch side and flips your triage-status record to resolved
+   automatically (never write `--status=resolved` yourself; the sentinel
+   owns that transition). Until then, a `k8s-event-followup` with
+   `repeat_count` > 0 means "still crash-looping, nothing changed": the
+   diagnosis stands, so reply in a line instead of re-investigating. A
+   followup without `repeat_count` means the failure changed — look
+   again.

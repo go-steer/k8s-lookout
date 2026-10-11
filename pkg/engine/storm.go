@@ -938,6 +938,30 @@ func (c *StormCorrelator) NoteMemberSession(key EventKey, sessionID string) {
 	}
 }
 
+// NoteMemberActivity refreshes the storm that owns key, if one is
+// open, for an occurrence of a member that is still failing: its idle
+// clock restarts and its last-seen advances. Before issue #599 a
+// member past its dedup window re-entered Observe as a new incident,
+// and that re-fire is what kept a long storm alive (stormIdleTTL);
+// now such a member repeats into the storm session instead, so the
+// dispatcher reports the activity here. Membership, severity and the
+// size-update cadence are untouched. No-op when key belongs to no
+// open storm.
+func (c *StormCorrelator) NoteMemberActivity(key EventKey, seen time.Time) {
+	key.Reason = CanonicalReason(key.Reason)
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.storms[c.byKey[key]]
+	if !ok {
+		return
+	}
+	st.lastActive = now
+	if seen.After(st.lastSeen) {
+		st.lastSeen = seen
+	}
+}
+
 // BindStormSession attaches the created storm session to the storm.
 // The dispatcher calls it right after CreateSession for a
 // StormFormed verdict; late arrivals read it back via
