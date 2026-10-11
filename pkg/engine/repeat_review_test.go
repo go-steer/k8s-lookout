@@ -89,8 +89,8 @@ func TestRepeat_RotationAtSoakCadence(t *testing.T) {
 		gaps = append(gaps, h.now.Sub(last))
 		last = h.now
 	}
-	// Floors: max(10m, step interval) → 10m, 10m, 20m, 40m, 1h, 1h, …
-	floors := []time.Duration{10 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour}
+	// Floors: step interval → 5m, 10m, 20m, 40m, 1h, 1h, …
+	floors := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour}
 	if len(gaps) < len(floors)+2 {
 		t.Fatalf("gaps = %v, want at least %d injects", gaps, len(floors)+2)
 	}

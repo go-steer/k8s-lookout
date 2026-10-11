@@ -201,6 +201,11 @@ type RecoveryTracker struct {
 // the missing outcome record, never a missed page.
 const defaultUncoveredTTL = time.Hour
 
+// maxTrackedIncidents bounds RecoveryTracker.incidents so sustained
+// incident churn without resolved/uncovered cleanup cannot grow
+// unbounded in memory (#643). Matches maxDedupEntries.
+const maxTrackedIncidents = 10_000
+
 // NewRecoveryTracker constructs a tracker. stableFor must be > 0
 // (callers disable recovery by not constructing a tracker). The
 // revert window is set equal to stableFor per §7.4. emit receives
@@ -250,11 +255,37 @@ func (t *RecoveryTracker) Track(inc Incident) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if _, exists := t.incidents[inc.Key]; !exists && len(t.incidents) >= maxTrackedIncidents {
+		t.evictOneLocked(now)
+	}
 	t.incidents[inc.Key] = &trackedIncident{
 		inc:       inc,
 		state:     stateSymptomatic,
 		trackedAt: now,
 	}
+}
+
+func (t *RecoveryTracker) evictOneLocked(now time.Time) {
+	var victimKey EventKey
+	var victimTs time.Time
+	victimTier := 99
+	for k, ti := range t.incidents {
+		tier := 2
+		switch {
+		case ti.state == stateResolved:
+			tier = 0
+		case !ti.judged && now.Sub(ti.trackedAt) > t.uncoveredTTL:
+			tier = 0
+		case ti.state == stateClearing:
+			tier = 1
+		}
+		if tier < victimTier || (tier == victimTier && ti.trackedAt.Before(victimTs)) {
+			victimKey = k
+			victimTs = ti.trackedAt
+			victimTier = tier
+		}
+	}
+	delete(t.incidents, victimKey)
 }
 
 // Len returns the number of incidents currently tracked (the

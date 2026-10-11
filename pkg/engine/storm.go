@@ -293,21 +293,30 @@ type pendingIncident struct {
 	order  []string
 }
 
+// maxStormMembers bounds retained StormMember records per open storm so
+// a mega-storm cannot accumulate unbounded member structs or cause O(N²)
+// full-member scans on every attach (#643). Exact counts and distinct
+// namespaces continue to track every attached member incrementally.
+const maxStormMembers = 1_000
+
 // stormState is one open storm.
 type stormState struct {
-	id          string
-	ancestor    Ancestor
-	fingerprint string
-	reason      string
-	keySource   string
-	sessionID   string
-	maxSeverity Severity
-	firstSeen   time.Time
-	lastSeen    time.Time
-	lastActive  time.Time
-	members     []StormMember
-	resolved    map[EventKey]bool
-	unresolved  int
+	id           string
+	ancestor     Ancestor
+	fingerprint  string
+	reason       string
+	keySource    string
+	sessionID    string
+	maxSeverity  Severity
+	firstSeen    time.Time
+	lastSeen     time.Time
+	lastActive   time.Time
+	members      []StormMember
+	memberCount  int
+	namespaces   map[string]struct{}
+	fingerprints []string
+	resolved     map[EventKey]bool
+	unresolved   int
 	// idleTTL is this storm's own inactivity bound, so that a key
 	// formed on a coincidence expires faster than one formed on a
 	// modelled relationship (see simultaneityIdleTTL).
@@ -768,12 +777,13 @@ func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pen
 		lastSeen:    first.seen,
 		lastActive:  now,
 		idleTTL:     idleTTL,
+		namespaces:  make(map[string]struct{}),
 		resolved:    make(map[EventKey]bool),
 	}
 	inGroup := make(map[EventKey]bool, len(group))
 	for _, q := range group {
 		inGroup[q.member.Key] = true
-		st.members = append(st.members, q.member)
+		st.recordMember(q.member)
 		st.resolved[q.member.Key] = false
 		st.unresolved++
 		if severityRank(q.severity) > severityRank(st.maxSeverity) {
@@ -795,10 +805,23 @@ func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pen
 	}
 	c.pending = kept
 	// The formation payload is the first size report.
-	st.reportedCount = len(st.members)
+	st.reportedCount = st.memberCount
 	st.reportedAt = now
 	c.storms[st.id] = st
 	return st
+}
+
+// recordMember updates incremental storm summaries in O(1) and appends
+// to bounded st.members / st.fingerprints up to maxStormMembers (#643).
+func (st *stormState) recordMember(m StormMember) {
+	st.memberCount++
+	if m.Namespace != "" {
+		st.namespaces[m.Namespace] = struct{}{}
+	}
+	if len(st.members) < maxStormMembers {
+		st.members = append(st.members, m)
+		st.fingerprints = append(st.fingerprints, m.Fingerprint)
+	}
 }
 
 // maybeSizeUpdate decides whether a kind=storm.update size refresh is
@@ -808,7 +831,7 @@ func (c *StormCorrelator) form(ancestor Ancestor, keySource string, group []*pen
 // trailing update — the member followups and the eventual resolved
 // record already carry the final count. Caller holds mu.
 func (st *stormState) maybeSizeUpdate(now time.Time) *StormSizeUpdate {
-	count := len(st.members)
+	count := st.memberCount
 	grew := count - st.reportedCount
 	if count < 2*st.reportedCount && count < st.reportedCount+stormUpdateGrowth {
 		return nil
@@ -818,17 +841,11 @@ func (st *stormState) maybeSizeUpdate(now time.Time) *StormSizeUpdate {
 		// (larger) update once the interval has passed.
 		return nil
 	}
-	nss := make(map[string]bool)
-	for _, m := range st.members {
-		if m.Namespace != "" {
-			nss[m.Namespace] = true
-		}
-	}
 	st.reportedCount = count
 	st.reportedAt = now
 	return &StormSizeUpdate{
 		AffectedCount:  count,
-		NamespaceCount: len(nss),
+		NamespaceCount: len(st.namespaces),
 		NewSinceLast:   grew,
 	}
 }
@@ -850,29 +867,24 @@ func (st *stormState) addMember(m StormMember, sev Severity, seen, now time.Time
 		}
 		return
 	}
-	st.members = append(st.members, m)
+	st.recordMember(m)
 	st.resolved[m.Key] = false
 	st.unresolved++
 }
 
-// info snapshots the storm.
+// info snapshots the storm in O(retained members) without re-scanning
+// all historical members into temporary maps (#643).
 func (st *stormState) info() StormInfo {
 	sev := st.maxSeverity
-	if sev == SeverityWarning && len(st.members) >= stormEscalateSize {
+	if sev == SeverityWarning && st.memberCount >= stormEscalateSize {
 		sev = SeverityCritical
-	}
-	nss := make(map[string]bool)
-	fps := make([]string, 0, len(st.members))
-	for _, m := range st.members {
-		if m.Namespace != "" {
-			nss[m.Namespace] = true
-		}
-		fps = append(fps, m.Fingerprint)
 	}
 	reps := st.members
 	if len(reps) > stormRepresentatives {
 		reps = reps[:stormRepresentatives]
 	}
+	fps := make([]string, len(st.fingerprints))
+	copy(fps, st.fingerprints)
 	return StormInfo{
 		ID:                 st.id,
 		Ancestor:           st.ancestor,
@@ -881,8 +893,8 @@ func (st *stormState) info() StormInfo {
 		Severity:           sev,
 		KeySource:          st.keySource,
 		SessionID:          st.sessionID,
-		AffectedCount:      len(st.members),
-		NamespaceCount:     len(nss),
+		AffectedCount:      st.memberCount,
+		NamespaceCount:     len(st.namespaces),
 		FirstSeen:          st.firstSeen,
 		LastSeen:           st.lastSeen,
 		Representatives:    append([]StormMember(nil), reps...),
@@ -913,10 +925,10 @@ func (c *StormCorrelator) prune(now time.Time) {
 }
 
 // close removes a storm and its member index. Caller holds mu.
-func (c *StormCorrelator) close(id string, st *stormState) {
-	for _, m := range st.members {
-		if c.byKey[m.Key] == id {
-			delete(c.byKey, m.Key)
+func (c *StormCorrelator) close(id string, _ *stormState) {
+	for k, owner := range c.byKey {
+		if owner == id {
+			delete(c.byKey, k)
 		}
 	}
 	delete(c.storms, id)

@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -542,3 +543,89 @@ func TestStorm_NoteMemberActivityKeepsStormAlive(t *testing.T) {
 		t.Fatal("storm stayed open past the idle TTL with no member activity")
 	}
 }
+
+// TestRepeat_FirstLapseClassChangeAtSingleWindow verifies #641: when a
+// new signal class appears in window 2, it is announced at the first
+// reminder lapse (1*window = 5m after open), not delayed until 2*window.
+func TestRepeat_FirstLapseClassChangeAtSingleWindow(t *testing.T) {
+	t.Parallel()
+	h := newRepeatHarness(t, "")
+	h.openIncident()
+	h.msg = "new failure shape after opening window"
+	got := h.emit(5*time.Minute + time.Second)
+	if got.Kind != DedupRepeat || got.Change != RepeatChangeClass || got.RepeatCount != 0 {
+		t.Fatalf("first lapse class change = %+v, want DedupRepeat with Change=%q RepeatCount=0 at 5m01s", got, RepeatChangeClass)
+	}
+}
+
+// TestRepeat_SiblingFoldCoalescesSchedule verifies #641: multiple sibling
+// pods folded onto one per-incident session share a single doubling
+// repeat schedule instead of fanning out N parallel reminder schedules.
+func TestRepeat_SiblingFoldCoalescesSchedule(t *testing.T) {
+	t.Parallel()
+	const window = 5 * time.Minute
+	now := time.Unix(1_700_000_000, 0).UTC()
+	c, err := NewDedupCache(window, "")
+	if err != nil {
+		t.Fatalf("NewDedupCache: %v", err)
+	}
+	c.SetClock(func() time.Time { return now })
+	openPods := map[EventKey]bool{}
+	c.SetOpenCheck(func(k EventKey) bool { return openPods[k] })
+
+	deploy := "Deployment/shop/api"
+	root := EventKey{UID: "pod-0", Reason: "CrashLoopBackOff"}
+	openPods[root] = true
+	obs := func() Observation {
+		return Observation{
+			LastTS:     now,
+			Kind:       KindK8sEvent,
+			Severity:   SeverityCritical,
+			Message:    "Back-off restarting failed container",
+			Repeatable: true,
+		}
+	}
+	res := c.ObserveSignal(root, obs())
+	if res.Kind != DedupNewIncident {
+		t.Fatalf("root open = %+v, want DedupNewIncident", res)
+	}
+	c.NoteIncidentKind(root, KindK8sEvent)
+	c.BindIncident(root, "sess-1", IncidentRef{Fingerprint: "fp-api"})
+	c.NoteAncestors(root, []string{deploy})
+
+	siblings := make([]EventKey, 0, 4)
+	for i := 1; i <= 4; i++ {
+		now = now.Add(time.Second)
+		k := EventKey{UID: fmt.Sprintf("pod-%d", i), Reason: "CrashLoopBackOff"}
+		openPods[k] = true
+		c.ObserveSignal(k, obs())
+		sid, _, ok := c.SessionForSibling(k, KindK8sEvent, []string{deploy})
+		if !ok || sid != "sess-1" {
+			t.Fatalf("sibling %d did not fold: sid=%q ok=%v", i, sid, ok)
+		}
+		c.NoteIncidentKind(k, KindK8sEvent)
+		c.BindIncident(k, sid, IncidentRef{Fingerprint: "fp-api"})
+		c.NoteAncestors(k, []string{deploy})
+		siblings = append(siblings, k)
+	}
+
+	// Across 7 × (5m05s) = 35m35s of all 5 sibling pods lapsing,
+	// reminders must follow ONE doubling schedule (5m, +10m, +20m => 3
+	// reminders total), never 5 × 3 = 15 reminders.
+	var reminders int
+	allKeys := append([]EventKey{root}, siblings...)
+	for round := 0; round < 7; round++ {
+		now = now.Add(5*time.Minute + 5*time.Second)
+		for _, k := range allKeys {
+			now = now.Add(time.Second)
+			r := c.ObserveSignal(k, obs())
+			if r.Kind == DedupRepeat {
+				reminders++
+			}
+		}
+	}
+	if reminders != 3 {
+		t.Fatalf("coalesced reminders across 5 sibling pods over ~36m = %d, want 3 (5m, 10m, 20m)", reminders)
+	}
+}
+

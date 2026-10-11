@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -896,3 +897,91 @@ func TestSessionForSibling(t *testing.T) {
 		t.Error("a storm-claimed incident is never a sibling target (§7.5 owns aggregates)")
 	}
 }
+
+func TestDedup_ActiveBoundCountAndTieredEviction(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	c, err := NewDedupCache(5*time.Minute, "")
+	if err != nil {
+		t.Fatalf("NewDedupCache: %v", err)
+	}
+	c.max = 4
+	c.SetClock(func() time.Time { return now })
+	openSet := map[EventKey]bool{}
+	c.SetOpenCheck(func(k EventKey) bool { return openSet[k] })
+
+	openObs := func() Observation {
+		return Observation{LastTS: now, Kind: KindK8sEvent, Severity: SeverityCritical, Repeatable: true}
+	}
+	// Entry 1: live bound open incident (oldest LastSeen, but MUST survive eviction!)
+	liveKey := EventKey{UID: "live-open", Reason: "CrashLoopBackOff"}
+	openSet[liveKey] = true
+	c.ObserveSignal(liveKey, openObs())
+	c.BindIncident(liveKey, "sess-live", IncidentRef{Fingerprint: "fp"})
+
+	// Entries 2..4: resolved or unbound newer entries
+	for i := 0; i < 3; i++ {
+		now = now.Add(time.Second)
+		k := EventKey{UID: fmt.Sprintf("resolved-%d", i), Reason: "CrashLoopBackOff"}
+		c.ObserveSignal(k, openObs())
+		c.MarkResolved(k)
+	}
+	if got := c.ActiveBoundCount(); got != 1 {
+		t.Fatalf("ActiveBoundCount = %d, want 1 (resolved entries excluded)", got)
+	}
+
+	// Inserting a 5th entry into max=4 cache must evict a resolved entry, NOT liveKey.
+	now = now.Add(time.Second)
+	extra := EventKey{UID: "extra", Reason: "CrashLoopBackOff"}
+	c.ObserveSignal(extra, openObs())
+	if sid, ok := c.LookupSession(liveKey); !ok || sid != "sess-live" {
+		t.Fatalf("live bound open incident was evicted despite resolved entries present (sid=%q ok=%v)", sid, ok)
+	}
+
+	// Advance past window and sweep: resolved entries expire while liveKey stays open.
+	now = now.Add(6 * time.Minute)
+	c.Sweep()
+	if got := c.ActiveBoundCount(); got != 1 {
+		t.Fatalf("ActiveBoundCount after window with live open incident = %d, want 1", got)
+	}
+}
+
+func TestRecoveryTracker_BoundedIncidents(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	rt := NewRecoveryTrackerWithClock(5*time.Minute, func(Signal) {}, func() time.Time { return now })
+	for i := 0; i < maxTrackedIncidents+250; i++ {
+		rt.Track(Incident{
+			Key:       EventKey{UID: fmt.Sprintf("u-%d", i), Reason: "CrashLoopBackOff"},
+			SessionID: "sess",
+			FirstSeen: now,
+		})
+	}
+	if got := rt.Len(); got != maxTrackedIncidents {
+		t.Fatalf("RecoveryTracker.Len() = %d, want capped at %d", got, maxTrackedIncidents)
+	}
+}
+
+func TestStorm_MaxStormMembersCap(t *testing.T) {
+	t.Parallel()
+	res := &fakeResolver{byObject: map[ObjectRef][]Ancestor{}}
+	c, now := newTestCorrelator(t, DefaultStormWindow, 3, res)
+	var last StormVerdict
+	total := maxStormMembers + 200
+	for i := 0; i < total; i++ {
+		*now = now.Add(time.Millisecond)
+		sig := podSignal(i, fmt.Sprintf("ns-%d", i%5))
+		res.byObject[sig.ref()] = []Ancestor{ancNode}
+		last = c.Observe(sig)
+	}
+	if last.Storm.AffectedCount != total {
+		t.Fatalf("Storm.AffectedCount = %d, want exact %d", last.Storm.AffectedCount, total)
+	}
+	if last.Storm.NamespaceCount != 5 {
+		t.Fatalf("Storm.NamespaceCount = %d, want 5", last.Storm.NamespaceCount)
+	}
+	if len(last.Storm.MemberFingerprints) != maxStormMembers {
+		t.Fatalf("len(MemberFingerprints) = %d, want capped at %d", len(last.Storm.MemberFingerprints), maxStormMembers)
+	}
+}
+
