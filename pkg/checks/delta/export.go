@@ -51,6 +51,9 @@ type Config struct {
 	// HPAGrace is how long an HPA condition must have been False
 	// before it is flagged (default 5m).
 	HPAGrace time.Duration
+	// TolerateTransient degrades transient/API read errors on individual
+	// delta parts into unavailable reasons when ScanClusterPartial is used.
+	TolerateTransient bool
 }
 
 // thresholds applies the flag defaults to zero fields.
@@ -131,7 +134,15 @@ func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 		}
 		sel[c] = true
 	}
-	s := &scanner{client: client, ns: ns, now: now, th: cfg.thresholds(), classes: sel, tolerate: tolerate}
+	s := &scanner{
+		client:            client,
+		ns:                ns,
+		now:               now,
+		th:                cfg.thresholds(),
+		classes:           sel,
+		tolerate:          tolerate,
+		tolerateTransient: tolerate && cfg.TolerateTransient,
+	}
 	scanned, findings, err := s.scan(ctx)
 	if err != nil {
 		return 0, nil, nil, err

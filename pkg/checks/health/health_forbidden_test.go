@@ -167,22 +167,38 @@ func TestForbiddenCoreReadMakesCategoryUnavailable(t *testing.T) {
 	}
 }
 
-// TestNonForbiddenReadErrorStillFails: only a permission gap degrades.
-// Any other error from a category's read still fails the scan (exit 1)
-// — a broken API server is not a coverage note.
+// TestNonForbiddenReadErrorDegradesCategoryAndTimeoutFails verifies that
+// transient/API errors on one sub-check category emit an explicit
+// status=unavailable category finding (preserving healthy sibling
+// categories with exit 0), whereas an expired --timeout returns exit 1.
 func TestNonForbiddenReadErrorStillFails(t *testing.T) {
+	if cmd := health.New(health.Deps{}); cmd.TimeoutDefault <= 0 {
+		t.Fatalf("health TimeoutDefault = %s, want positive explicit timeout", cmd.TimeoutDefault)
+	}
 	internal := func(schema.GroupResource) error { return apierrors.NewInternalError(errors.New("etcd is on fire")) }
-	for _, gr := range []schema.GroupResource{{Resource: "secrets"}, {Resource: "services"}} {
-		res := checktest.Run(t, deniedCommand([]schema.GroupResource{gr}, internal, brokenObjects(t)...))
-		if res.Code != emit.ExitRuntime {
-			t.Errorf("%s internal error: exit %d, want %d", gr.Resource, res.Code, emit.ExitRuntime)
+	cases := []struct {
+		gr  schema.GroupResource
+		cat string
+	}{
+		{schema.GroupResource{Resource: "secrets"}, "certs"},
+		{schema.GroupResource{Resource: "services"}, "services"},
+		{schema.GroupResource{Resource: "nodes"}, "nodes"},
+		{schema.GroupResource{Group: "policy", Resource: "poddisruptionbudgets"}, "disruption"},
+	}
+	for _, tc := range cases {
+		status, _, _ := statusesAndKinds(t, deniedCommand([]schema.GroupResource{tc.gr}, internal, healthyObjects(t)...))
+		if status[tc.cat] != "unavailable" {
+			t.Errorf("%s internal error: category %s status = %q, want unavailable", tc.gr.Resource, tc.cat, status[tc.cat])
+		}
+		if status["quota"] != "healthy" {
+			t.Errorf("%s internal error: sibling category quota = %q, want healthy", tc.gr.Resource, status["quota"])
 		}
 	}
-	for _, gr := range []schema.GroupResource{{Resource: "nodes"}, {Group: "policy", Resource: "poddisruptionbudgets"}} {
-		res := checktest.Run(t, deniedCommand([]schema.GroupResource{gr}, internal, brokenObjects(t)...))
-		if res.Code != emit.ExitRuntime {
-			t.Errorf("%s internal error: exit %d, want %d", gr.Resource, res.Code, emit.ExitRuntime)
-		}
+
+	// Expired overall --timeout must still abort with exit 1 (emit.ExitRuntime).
+	res := checktest.Run(t, deniedCommand([]schema.GroupResource{{Resource: "nodes"}}, internal, healthyObjects(t)...), "--timeout=1ns")
+	if res.Code != emit.ExitRuntime {
+		t.Errorf("expired --timeout exit = %d, want %d (stderr: %s)", res.Code, emit.ExitRuntime, res.Stderr)
 	}
 }
 

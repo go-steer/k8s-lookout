@@ -513,6 +513,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	s := &scanner{}
 	inv.Out.Watch(s.observe)
 
+	ctx = kube.WithListCache(ctx)
 	scanned, ran, notRun, err := runStages(ctx, reg, inv, s, stages)
 	if err != nil {
 		return scanned, err

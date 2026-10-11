@@ -236,10 +236,9 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 	//
 	// Deliberately NOT gated on --restarts, exactly as the waiting
 	// branch above is not: a crash loop is a sustained state, and a
-	// count threshold is for churn. What makes it a loop rather than
-	// a single failure is the pair — a non-zero exit, and a kubelet
-	// that has already restarted it at least once.
-	if t := cs.State.Terminated; t != nil && t.ExitCode != 0 && cs.RestartCount > 0 {
+	// count threshold is for churn. Require RestartCount >= 2 so a
+	// single prior non-zero exit is not misreported as an active loop.
+	if t := cs.State.Terminated; t != nil && t.ExitCode != 0 && cs.RestartCount >= 2 {
 		s.add(crashloop(t))
 		return true
 	}
@@ -249,18 +248,10 @@ func (s *scanner) checkContainer(pod *corev1.Pod, cs corev1.ContainerStatus, pre
 	// to fail next. Neither branch above sees it, and a restart count
 	// below --restarts meant this read as healthy, so an enrichment
 	// that landed in that window shipped an empty delta section
-	// (#522). It is the same loop, so it is the same finding — the
-	// crashloop helper keeps the fingerprint across all three.
-	//
-	// "Still in the loop" is the kubelet's own definition: it resets a
-	// container's backoff only once the container has stayed up for
-	// crashLoopBackOffReset since its last start. Inside that window a
-	// fresh failure is backed off from where the loop left off; past
-	// it, one old crash is history and falls through to the restart
-	// churn rule below. That keeps a container that recovered hours
-	// ago out of here without inventing a threshold of our own.
+	// (#522). Require RestartCount >= 2 so a container with a single
+	// prior crash that restarted cleanly is not flagged as crash-looping.
 	if r, t := cs.State.Running, cs.LastTerminationState.Terminated; r != nil && t != nil &&
-		t.ExitCode != 0 && cs.RestartCount > 0 && s.now.Sub(r.StartedAt.Time) < crashLoopBackOffReset {
+		t.ExitCode != 0 && cs.RestartCount >= 2 && s.now.Sub(r.StartedAt.Time) < crashLoopBackOffReset {
 		s.add(crashloop(t))
 		return true
 	}
@@ -416,7 +407,18 @@ func (s *scanner) checkStatefulSet(st *appsv1.StatefulSet) {
 	if desired == 0 {
 		return
 	}
-	if st.Status.ReadyReplicas < desired || st.Status.UpdatedReplicas < desired {
+	expectedUpdated := desired
+	if st.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
+		expectedUpdated = 0
+	} else if st.Spec.UpdateStrategy.RollingUpdate != nil && st.Spec.UpdateStrategy.RollingUpdate.Partition != nil {
+		p := *st.Spec.UpdateStrategy.RollingUpdate.Partition
+		if p >= desired {
+			expectedUpdated = 0
+		} else if p > 0 {
+			expectedUpdated = desired - p
+		}
+	}
+	if st.Status.ReadyReplicas < desired || st.Status.UpdatedReplicas < expectedUpdated {
 		sev := emit.SeverityWarning
 		if st.Status.ReadyReplicas == 0 {
 			sev = emit.SeverityCritical
@@ -438,7 +440,11 @@ func (s *scanner) checkDaemonSet(d *appsv1.DaemonSet) {
 	if desired == 0 {
 		return // no nodes want this DaemonSet
 	}
-	if d.Status.NumberReady < desired || d.Status.UpdatedNumberScheduled < desired {
+	expectedUpdated := desired
+	if d.Spec.UpdateStrategy.Type == appsv1.OnDeleteDaemonSetStrategyType {
+		expectedUpdated = 0
+	}
+	if d.Status.NumberReady < desired || d.Status.UpdatedNumberScheduled < expectedUpdated {
 		sev := emit.SeverityWarning
 		if d.Status.NumberReady == 0 {
 			sev = emit.SeverityCritical

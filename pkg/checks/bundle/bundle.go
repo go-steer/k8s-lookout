@@ -48,6 +48,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/logs"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -102,6 +103,7 @@ func RadiusKinds() []checks.KindField {
 const (
 	sectionSpec   = "spec"
 	sectionDelta  = "delta"
+	sectionEvents = "events"
 	sectionEdges  = "edges"
 	sectionRadius = "radius"
 	sectionLogs   = "logs"
@@ -113,7 +115,7 @@ func New(deps Deps) checks.Command {
 		Name:        "bundle",
 		MCPName:     "k8s_triage_workload",
 		MCPProfiles: []string{"triage"},
-		Summary:     "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 4–5 separate reads.",
+		Summary:     "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, event timeline, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 5–6 separate reads.",
 		Flags: []emit.FlagSpec{
 			{Name: "incident", Type: emit.FlagString, Default: "",
 				Help: "inject payload JSON (the message a lookout-watch incident session starts with); its object reference resolves to the target workload via the owner chain, or for a Service via its selector — alternative to --workload"},
@@ -135,7 +137,7 @@ func New(deps Deps) checks.Command {
 			checks.Kind("bundle.target", "the head record: which workload the bundle is about and which sections follow", emit.SeverityInfo),
 		}, composedKinds()...),
 		Output: append([]checks.OutputField{
-			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|edges|radius|logs"},
+			{Name: "section", Doc: "which bundle section the finding belongs to: spec|delta|events|edges|radius|logs"},
 			{Name: "sections", Doc: "on the bundle.target head finding: the sections that follow"},
 			{Name: "skipped", Doc: "on the bundle.target head finding: comma-separated resources the List pass could not read (denied) or was told to omit (--lists) — the bundle is a documented partial, secret-free by default under a least-privilege role. When a List was refused, the head's message names each refusal, why this identity lacks it, and the grant that fixes it"},
 			{Name: "relation", Doc: "radius neighbor's relation to the target: upstream (routes/owns/governs it), downstream (it points at), lateral (shares a node/volume/config)"},
@@ -152,6 +154,7 @@ func New(deps Deps) checks.Command {
 			"lookout bundle --workload=StatefulSet/db/postgres --since=30m --format=json",
 			"lookout bundle --incident='{\"namespace\":\"prod\",\"kind_of_object\":\"Pod\",\"name\":\"api-6d5f8c-x2v9k\"}'",
 		},
+		TimeoutDefault: 30 * time.Second,
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
 			return run(ctx, deps, inv)
 		},
@@ -160,9 +163,9 @@ func New(deps Deps) checks.Command {
 
 // composedOutput is the union of the composed sections' glossaries:
 // every Details key the spec renderer, the delta derivations, the
-// edge checks, and the log distiller may emit, deduplicated. Sourced
-// from the composed commands' own metadata where they are registered,
-// so the glossaries cannot drift apart.
+// event timeline, the edge checks, and the log distiller may emit,
+// deduplicated. Sourced from the composed commands' own metadata where
+// they are registered, so the glossaries cannot drift apart.
 func composedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"section": true, "sections": true, "relation": true, "hop": true,
@@ -171,12 +174,12 @@ func composedOutput() []checks.OutputField {
 		memory.DetailTriageAge: true,
 	}
 	var out []checks.OutputField
-	for _, name := range []string{"triage spec", "triage delta", "triage logs", "state edges"} {
+	for _, name := range []string{"triage spec", "triage delta", "triage events", "triage logs", "state edges"} {
 		c, ok := checks.Lookup(name)
 		if !ok {
 			// Not registered (isolated test registry) — the §13
-			// contract test in this package asserts all four are
-			// present in the default registry.
+			// contract test in this package asserts all composed
+			// checks are present in the default registry.
 			continue
 		}
 		for _, f := range c.Output {
@@ -211,7 +214,7 @@ func composedKinds() []checks.KindField {
 			// bundle lists no autoscalers. read.unavailable is the
 			// standalone commands' record of their own List pass; the
 			// bundle reports its gaps as the skipped= note on its head.
-			if seen[k.Name] || strings.HasPrefix(k.Name, "hpa.") || k.Name == state.KindReadUnavailable {
+			if seen[k.Name] || strings.HasPrefix(k.Name, "hpa.") || k.Name == "event.hpa_thrash" || k.Name == state.KindReadUnavailable {
 				continue
 			}
 			seen[k.Name] = true
@@ -219,12 +222,12 @@ func composedKinds() []checks.KindField {
 		}
 	}
 	add(RadiusKinds())
-	for _, name := range []string{"triage spec", "triage delta", "triage logs", "state edges"} {
+	for _, name := range []string{"triage spec", "triage delta", "triage events", "triage logs", "state edges"} {
 		c, ok := checks.Lookup(name)
 		if !ok {
 			// Not registered (isolated test registry) — the §13
-			// contract test in this package asserts all four are
-			// present in the default registry.
+			// contract test in this package asserts all composed
+			// checks are present in the default registry.
 			continue
 		}
 		add(c.Kinds)
@@ -317,6 +320,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return nil
 	}
 
+	// Fetch bounded workload events up front so any RBAC refusal on core/v1
+	// events is recorded on the bundle.target head alongside LoadCluster gaps.
+	eventFs, eventCount, eventErr := bundleEvents(ctx, client, cluster.Snapshot(), id, wl, inv.Scope.Since, deps.now())
+
 	// Head: what this bundle is about and how to read it.
 	head := emit.Finding{
 		Kind:         "bundle.target",
@@ -327,12 +334,10 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		Details: []emit.Field{
 			{Key: "workload", Value: wl.String()},
 			{Key: "pods", Value: strconv.Itoa(len(pods))},
-			{Key: "sections", Value: strings.Join([]string{sectionSpec, sectionDelta, sectionEdges, sectionRadius, sectionLogs}, ",")},
+			{Key: "sections", Value: strings.Join([]string{sectionSpec, sectionDelta, sectionEvents, sectionEdges, sectionRadius, sectionLogs}, ",")},
 		},
 	}
-	if note := cluster.SkippedNote(); note != "" {
-		head.Details = append(head.Details, emit.Field{Key: "skipped", Value: note})
-	}
+	note := cluster.SkippedNote()
 	// skipped= is the digest; a refused List also says why and which
 	// grant fixes it, in the wording every other refusal uses (#584).
 	// A --lists deselection is the caller's own choice and needs no
@@ -342,6 +347,19 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		if why := cluster.SkipReason(req); strings.HasPrefix(why, "forbidden: ") {
 			refused = append(refused, why)
 		}
+	}
+	if eventErr != nil {
+		if r, ok := checks.ForbiddenRefusal(eventErr); ok {
+			if note == "" {
+				note = "events"
+			} else {
+				note += ",events"
+			}
+			refused = append(refused, r.String())
+		}
+	}
+	if note != "" {
+		head.Details = append(head.Details, emit.Field{Key: "skipped", Value: note})
 	}
 	if len(refused) > 0 {
 		head.Message = "partial bundle, the sections that need these reads are incomplete: " + strings.Join(refused, " | ")
@@ -366,6 +384,12 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 	// delta: abnormal state of the target's own objects.
 	if err := out(sectionDelta, delta.ScanObjects(deps.now(), delta.Config{}, deltaObjectsFor(cluster.WorkloadObject(wl), pods))); err != nil {
+		return 0, err
+	}
+
+	// events: bounded timeline of Kubernetes Events across the workload
+	// and its owned pods/controllers (§5).
+	if err := out(sectionEvents, eventFs); err != nil {
 		return 0, err
 	}
 
@@ -403,9 +427,247 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return 0, err
 	}
 
-	// The summary counts the whole scan: every listed object plus
-	// every raw log line distilled.
-	return cluster.Scanned() + lines, nil
+	// The summary counts the whole scan: every listed object, matched
+	// events, and every raw log line distilled.
+	return cluster.Scanned() + eventCount + lines, nil
+}
+
+const maxBundleEvents = 25
+
+type eventGroupKey struct {
+	kind      string
+	namespace string
+	name      string
+	reason    string
+}
+
+type eventGroup struct {
+	warning   bool
+	namespace string
+	objKind   string
+	name      string
+	reason    string
+	message   string
+	source    string
+	count     int64
+	firstSeen time.Time
+	lastSeen  time.Time
+	messages  map[string]bool
+}
+
+// bundleEvents lists core/v1 Events in wl.Namespace, matches events
+// belonging to the workload or its owner-reference subtree, collapses
+// repeated events, and returns at most maxBundleEvents findings ordered
+// chronologically.
+func bundleEvents(ctx context.Context, client kubernetes.Interface, snap *graph.Snapshot, root graph.NodeID, wl emit.WorkloadRef, since time.Duration, now time.Time) ([]emit.Finding, int, error) {
+	if wl.Namespace == "" {
+		return nil, 0, nil
+	}
+	match := map[string]bool{
+		wl.Kind + "/" + wl.Namespace + "/" + wl.Name: true,
+	}
+	addRef := func(ref graph.Ref) {
+		if ref.Kind.String() != "" && ref.Name != "" {
+			match[ref.Kind.String()+"/"+ref.Namespace+"/"+ref.Name] = true
+		}
+	}
+	if snap != nil && root != graph.NoNode {
+		if ref, ok := snap.Resolve(root); ok {
+			addRef(ref)
+		}
+		for _, oid := range snap.OwnerChain(root) {
+			if ref, ok := snap.Resolve(oid); ok {
+				addRef(ref)
+			}
+		}
+		queue := []graph.NodeID{root}
+		visited := map[graph.NodeID]bool{root: true}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, edge := range snap.Out(cur) {
+				if edge.Kind != graph.EdgeOwns || visited[edge.To] {
+					continue
+				}
+				visited[edge.To] = true
+				if ref, ok := snap.Resolve(edge.To); ok {
+					addRef(ref)
+				}
+				queue = append(queue, edge.To)
+			}
+		}
+	}
+
+	var cutoff time.Time
+	if since > 0 {
+		cutoff = now.Add(-since)
+	}
+	groups := map[eventGroupKey]*eventGroup{}
+	var scanned int
+
+	listErr := kube.ListPages(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Event, string, error) {
+		list, err := client.CoreV1().Events(wl.Namespace).List(ctx, opts)
+		if err != nil {
+			return nil, "", fmt.Errorf("listing events: %w", err)
+		}
+		return list.Items, list.Continue, nil
+	}, func(ev *corev1.Event) {
+		io := ev.InvolvedObject
+		ns := io.Namespace
+		if ns == "" {
+			ns = ev.Namespace
+		}
+		if !match[io.Kind+"/"+ns+"/"+io.Name] {
+			return
+		}
+		first, last := bundleEventBounds(ev)
+		if !cutoff.IsZero() && !last.IsZero() && last.Before(cutoff) {
+			return
+		}
+		scanned++
+		reason := engine.CanonicalReasonForEvent(ev.Reason, ev.Message)
+		gk := eventGroupKey{kind: io.Kind, namespace: ns, name: io.Name, reason: reason}
+		g, exists := groups[gk]
+		if !exists {
+			src := ev.Source.Component
+			if src == "" {
+				src = ev.ReportingController
+			}
+			g = &eventGroup{
+				warning:   ev.Type == corev1.EventTypeWarning,
+				namespace: ns,
+				objKind:   io.Kind,
+				name:      io.Name,
+				reason:    reason,
+				message:   ev.Message,
+				source:    src,
+				firstSeen: first,
+				lastSeen:  last,
+				messages:  map[string]bool{},
+			}
+			groups[gk] = g
+		}
+		n := int64(ev.Count)
+		if ev.Series != nil && int64(ev.Series.Count) > n {
+			n = int64(ev.Series.Count)
+		}
+		if n < 1 {
+			n = 1
+		}
+		g.count += n
+		if g.firstSeen.IsZero() || (!first.IsZero() && first.Before(g.firstSeen)) {
+			g.firstSeen = first
+		}
+		if g.lastSeen.IsZero() || (!last.IsZero() && last.After(g.lastSeen)) {
+			g.lastSeen = last
+			if ev.Message != "" {
+				g.message = ev.Message
+			}
+		}
+		if ev.Message != "" {
+			g.messages[ev.Message] = true
+		}
+	})
+	if listErr != nil {
+		return nil, 0, listErr
+	}
+
+	if len(groups) == 0 {
+		return nil, 0, nil
+	}
+
+	list := make([]*eventGroup, 0, len(groups))
+	for _, g := range groups {
+		list = append(list, g)
+	}
+	// Prioritize Warning events and most recent occurrences first before bounding.
+	slices.SortFunc(list, func(a, b *eventGroup) int {
+		if a.warning != b.warning {
+			if a.warning {
+				return -1
+			}
+			return 1
+		}
+		if !a.lastSeen.Equal(b.lastSeen) {
+			return b.lastSeen.Compare(a.lastSeen)
+		}
+		if a.name != b.name {
+			return strings.Compare(a.name, b.name)
+		}
+		return strings.Compare(a.reason, b.reason)
+	})
+	if len(list) > maxBundleEvents {
+		list = list[:maxBundleEvents]
+	}
+	// Render chronological timeline order.
+	slices.SortFunc(list, func(a, b *eventGroup) int {
+		if !a.firstSeen.Equal(b.firstSeen) {
+			return a.firstSeen.Compare(b.firstSeen)
+		}
+		if a.name != b.name {
+			return strings.Compare(a.name, b.name)
+		}
+		return strings.Compare(a.reason, b.reason)
+	})
+
+	out := make([]emit.Finding, 0, len(list))
+	for _, g := range list {
+		var details []emit.Field
+		if g.count > 1 {
+			details = append(details, emit.Field{Key: "count", Value: strconv.FormatInt(g.count, 10)})
+		}
+		if !g.firstSeen.IsZero() {
+			details = append(details, emit.Field{Key: "first_seen", Value: g.firstSeen.UTC().Format(time.RFC3339)})
+		}
+		if !g.lastSeen.IsZero() {
+			details = append(details, emit.Field{Key: "last_seen", Value: g.lastSeen.UTC().Format(time.RFC3339)})
+		}
+		if g.source != "" {
+			details = append(details, emit.Field{Key: "source", Value: g.source})
+		}
+		if len(g.messages) > 1 {
+			details = append(details, emit.Field{Key: "variants", Value: strconv.Itoa(len(g.messages))})
+		}
+		f := emit.Finding{
+			Kind:         "event.normal",
+			Severity:     emit.SeverityInfo,
+			Namespace:    g.namespace,
+			KindOfObject: g.objKind,
+			Name:         g.name,
+			Reason:       g.reason,
+			Message:      g.message,
+			Details:      details,
+		}
+		if g.warning {
+			f.Kind = "event.warning"
+			f.Severity = emit.SeverityWarning
+		}
+		out = append(out, f)
+	}
+	return out, scanned, nil
+}
+
+func bundleEventBounds(ev *corev1.Event) (first, last time.Time) {
+	first = ev.FirstTimestamp.Time
+	last = ev.LastTimestamp.Time
+	if !ev.EventTime.IsZero() {
+		if first.IsZero() {
+			first = ev.EventTime.Time
+		}
+		if last.IsZero() {
+			last = ev.EventTime.Time
+		}
+	}
+	if ev.Series != nil && !ev.Series.LastObservedTime.IsZero() {
+		last = ev.Series.LastObservedTime.Time
+	}
+	if first.IsZero() {
+		first = last
+	}
+	if last.IsZero() {
+		last = first
+	}
+	return first, last
 }
 
 func clientFor(ctx context.Context, deps Deps) (kubernetes.Interface, error) {

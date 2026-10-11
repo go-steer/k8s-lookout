@@ -205,6 +205,7 @@ func New(deps Deps) checks.Command {
 			"lookout health --format=json --top=5",
 			"lookout health --namespace=prod",
 		},
+		TimeoutDefault: 30 * time.Second,
 		Run: func(ctx context.Context, inv emit.Invocation) (int, error) {
 			return run(ctx, deps, inv)
 		},
@@ -345,6 +346,8 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	ctx = kube.WithListCache(ctx)
+	client = kube.WrapClient(ctx, client)
 	now := deps.now()
 	ns := inv.Scope.Namespace // "" (default and -A) = whole cluster
 
@@ -354,10 +357,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// Delta-backed categories: nodes, crashloops, pending, rollouts,
 	// addons, quota, disruption — one delta pass, findings bucketed by
 	// kind.
-	// Tolerant (#546): a part whose List RBAC refuses drops out alone
-	// and its categories answer unavailable with the reason — under the
-	// built-in `view` role that is nodes, which `view` never grants.
-	dScanned, dFindings, dUnavailable, err := delta.ScanClusterPartial(ctx, client, ns, now, delta.Config{},
+	// Tolerant (#546, #649): a part whose List is refused by RBAC or
+	// fails with a transient API error while ctx is still live drops
+	// out alone and its categories answer unavailable with the reason.
+	dScanned, dFindings, dUnavailable, err := delta.ScanClusterPartial(ctx, client, ns, now,
+		delta.Config{TolerateTransient: true},
 		"pods", "nodes", "pdb", "system", "quota")
 	if err != nil {
 		return 0, err
@@ -384,18 +388,16 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 	}
 
-	// A category whose read is refused on authorization grounds
-	// answers unavailable with the reason (#546): the built-in `view`
-	// role many teams give a read-only agent excludes Secrets, and
-	// that one refusal used to cost the whole scorecard. Only a
-	// Forbidden degrades — any other read error still fails the scan,
-	// because a broken API server is not a permission gap. Findings a
-	// category gathered before the refusal are dropped with it: a
-	// partial category must not score as if it were whole.
+	// A category whose read is refused or fails with a non-timeout API
+	// error answers unavailable with the reason (#546, #649), while an
+	// overall --timeout / context cancellation still aborts with exit 1.
 	refused := func(cat, needs string, err error) error {
+		if ctx.Err() != nil {
+			return err
+		}
 		reason, ok := state.ListForbidden(err)
 		if !ok {
-			return err
+			reason = err.Error()
 		}
 		delete(card.findings, cat)
 		card.unavailable[cat] = reason + " — " + needs
@@ -443,79 +445,68 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	// services: the edge sweep `lookout scan` runs as its stage 2,
-	// over only the objects it reads. Tolerant per list, strict per
-	// category: a sweep that could not list Services or the pods their
-	// selectors match would score healthy, and that is silence, so
-	// either refused makes the category unavailable. The other three
-	// lists only feed the Ingress half — whether a backend, a class
-	// (cluster-scoped: the built-in `view` role does not grant
-	// IngressClasses) or a TLS Secret exists — and those checks stay
-	// silent on an unread kind (#149), so the routing verdict stands
-	// and the gap is named on the scorecard line as unverified=.
-	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists), state.Tolerate())
+	// over only the objects it reads.
+	cluster, err := state.LoadCluster(ctx, client, ns, state.Lists(serviceLists), state.Tolerate(), state.TolerateTransient())
 	if err != nil {
-		return 0, err
-	}
-	var gaps, blind []string
-	for _, req := range serviceLists {
-		why := cluster.SkipReason(req)
-		switch {
-		case why == "":
-		case req.Resource == "pods" || req.Resource == "services":
-			gaps = append(gaps, why)
-		default:
-			blind = append(blind, serviceBlindSpot(req.Resource)+" ("+why+")")
+		if ctx.Err() != nil {
+			return 0, err
 		}
-	}
-	scanned += cluster.Scanned()
-	var sweep []emit.Finding
-	if len(gaps) > 0 {
-		card.unavailable["services"] = strings.Join(gaps, "; ") + " — Service routing is judged from Services and the pods their selectors match"
+		card.unavailable["services"] = err.Error() + " — Service routing is judged from Services and the pods their selectors match"
 	} else {
-		if len(blind) > 0 {
-			card.unverified["services"] = strings.Join(blind, "; ")
+		var gaps, blind []string
+		for _, req := range serviceLists {
+			why := cluster.SkipReason(req)
+			if why == "" {
+				if skipErr := cluster.SkipError(req); skipErr != nil {
+					why = skipErr.Error()
+				}
+			}
+			switch {
+			case why == "":
+			case req.Resource == "pods" || req.Resource == "services":
+				gaps = append(gaps, why)
+			default:
+				blind = append(blind, serviceBlindSpot(req.Resource)+" ("+why+")")
+			}
 		}
-		sweep = cluster.EdgeSweepFindings(certWarn, now)
-	}
-	for _, f := range sweep {
-		// The sweep also judges Ingress TLS certificates. The certs
-		// category already judges every TLS Secret in scope, so here
-		// they would be the same certificate reported twice under two
-		// kinds.
-		if strings.HasPrefix(f.Kind, "edge.cert_") {
-			continue
+		scanned += cluster.Scanned()
+		var sweep []emit.Finding
+		if len(gaps) > 0 {
+			card.unavailable["services"] = strings.Join(gaps, "; ") + " — Service routing is judged from Services and the pods their selectors match"
+		} else {
+			if len(blind) > 0 {
+				card.unverified["services"] = strings.Join(blind, "; ")
+			}
+			sweep = cluster.EdgeSweepFindings(certWarn, now)
 		}
-		card.add("services", f)
+		for _, f := range sweep {
+			if strings.HasPrefix(f.Kind, "edge.cert_") {
+				continue
+			}
+			card.add("services", f)
+		}
 	}
 
-	// control-plane: the §5 "control-plane latency (perf probe
-	// packs)" category, delegated to the shipped perf apiserver pack
-	// (p99 by verb/resource — the cheapest meaningful control-plane
-	// read) when the provider serves Metrics. Breaches degrade the
-	// category in `perf probe`'s exact finding shape; clean queries
-	// score healthy. The honest unavailable reason survives ONLY when
-	// the capability is genuinely absent (§2): no provider / no
-	// metrics capability, or the metric positively missing from the
-	// workspace (the pack_unavailable case — on GKE, control-plane
-	// metrics not enabled), or lookout's own identity refused a token
-	// (cloud.ErrCredentialsUnavailable, #614). A real backend failure
-	// fails the scan like any other category's read error.
+	// control-plane: delegated to the shipped perf apiserver pack when
+	// the provider serves Metrics.
 	provider, err := deps.provider(ctx)
 	if err != nil {
-		return 0, err
-	}
-	if backend, ok := provider.Metrics(); ok {
+		if ctx.Err() != nil {
+			return 0, err
+		}
+		card.unavailable["control-plane"] = err.Error()
+	} else if backend, ok := provider.Metrics(); ok {
 		findings, n, absent, err := perf.ControlPlaneProbe(ctx, backend, now)
 		fix, noToken := cloud.DegradableCredentials(ctx, err)
-		if err != nil && !noToken {
+		if err != nil && ctx.Err() != nil {
 			return 0, err
 		}
 		switch {
 		case noToken:
-			// lookout's own identity refused a token (#614): the
-			// category cannot be read, which is unavailable, not a
-			// failed scan — the cluster-side categories stand.
 			card.unavailable["control-plane"] = cloud.CredentialsUnavailableMessage("the control-plane probe (perf probe --pack=apiserver)", fix)
+		case err != nil:
+			card.unavailable["control-plane"] = fmt.Sprintf(
+				"control-plane probe failed: %v (perf probe --pack=apiserver)", err)
 		case absent != "":
 			card.unavailable["control-plane"] = fmt.Sprintf(
 				"metric %s is not in the project's metrics workspace — enable GKE control-plane metrics for the API server (perf probe --pack=apiserver)", absent)
@@ -750,24 +741,13 @@ func worstSeverity(fs []emit.Finding) string {
 	return worst
 }
 
-// pageLimit matches the other one-shot commands' paged Lists.
-const pageLimit = 500
-
 func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, error), each func(*T)) error {
-	opts := metav1.ListOptions{Limit: pageLimit}
-	for {
-		items, cont, err := list(opts)
-		if err != nil {
-			return fmt.Errorf("listing %s: %w", what, err)
-		}
-		for i := range items {
-			each(&items[i])
-		}
-		if cont == "" {
-			return nil
-		}
-		opts.Continue = cont
+	if err := kube.ListPages(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
+		return list(opts)
+	}, each); err != nil {
+		return fmt.Errorf("listing %s: %w", what, err)
 	}
+	return nil
 }
 
 // checkStorage flags PVCs not Bound: Pending (workloads mounting it

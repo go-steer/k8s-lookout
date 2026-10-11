@@ -187,32 +187,38 @@ func scoreCerts(ctx context.Context, deps Deps, client kubernetes.Interface, ns 
 			for _, f := range res.findings {
 				card.add("certs", f)
 			}
+		case ctx.Err() != nil:
+			return 0, err
 		case forbidden:
 			certRefused = refusal.String()
 		default:
-			return 0, err
+			certRefused = err.Error()
 		}
 	}
 
 	secrets, n, err := checkCerts(ctx, client, ns, now, warn, managed)
 	if err != nil {
-		refusal, forbidden := checks.ForbiddenRefusal(err)
-		switch {
-		case !forbidden:
+		if ctx.Err() != nil {
 			return 0, err
+		}
+		errReason := err.Error()
+		if refusal, forbidden := checks.ForbiddenRefusal(err); forbidden {
+			errReason = refusal.String()
+		}
+		switch {
 		case !served:
 			// No cert-manager: the TLS Secrets were the whole category.
 			return scanned, refused("certs", secretsNeeds, err)
 		case certRefused != "":
 			// Nothing the category reads could be read.
 			delete(card.findings, "certs")
-			card.unavailable["certs"] = refusal.String() + "; " + certRefused +
+			card.unavailable["certs"] = errReason + "; " + certRefused +
 				" — certificate expiry is read from cert-manager Certificates' status and the tls.crt of each kubernetes.io/tls Secret"
 			return scanned, nil
 		default:
 			// The Certificates scored; the Secrets nothing manages are
 			// the blind spot.
-			card.unverified["certs"] = "TLS Secrets no cert-manager Certificate manages (" + refusal.String() + ")"
+			card.unverified["certs"] = "TLS Secrets no cert-manager Certificate manages (" + errReason + ")"
 			return scanned, nil
 		}
 	}

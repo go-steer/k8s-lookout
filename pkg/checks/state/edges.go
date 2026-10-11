@@ -263,6 +263,9 @@ type index struct {
 	// skipWhy says, per skipped requirement, why it was not read — the
 	// raw material of the explicit read.unavailable record (#546).
 	skipWhy map[ListRequirement]skipCause
+	// skipErr records transient/API read errors per skipped requirement
+	// when TolerateTransient is active.
+	skipErr map[ListRequirement]error
 
 	pods            map[string]*corev1.Pod       // ns/name
 	configMaps      map[string]*corev1.ConfigMap // ns/name
@@ -305,28 +308,15 @@ type podTemplate struct {
 
 func key(ns, name string) string { return ns + "/" + name }
 
-// pageLimit is the paged-List page size (§6.3: "paged List, limit
-// ~5000" is the resident sentinel's number; a one-shot CLI call keeps
-// pages smaller to bound peak memory).
-const pageLimit = 500
-
-// listPages drives one paged List to exhaustion: list returns a
-// page's items plus the continue token; each is called per item.
+// listPages drives one paged List to exhaustion via kube.ListPages so
+// 410 Gone continue-token expiry transparently restarts from page 1.
 func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, error), each func(*T)) error {
-	opts := metav1.ListOptions{Limit: pageLimit}
-	for {
-		items, cont, err := list(opts)
-		if err != nil {
-			return fmt.Errorf("listing %s: %w", what, err)
-		}
-		for i := range items {
-			each(&items[i])
-		}
-		if cont == "" {
-			return nil
-		}
-		opts.Continue = cont
+	if err := kube.ListPages(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
+		return list(opts)
+	}, each); err != nil {
+		return fmt.Errorf("listing %s: %w", what, err)
 	}
+	return nil
 }
 
 // listCluster runs the paged Lists over the pod-nexus kinds in ns
@@ -341,6 +331,7 @@ func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, e
 // original all-or-nothing pass: nothing is deselected, tolerate is
 // off, so the first error aborts.
 func listCluster(ctx context.Context, client kubernetes.Interface, ns string, opts loadOptions) (*index, error) {
+	client = kube.WrapClient(ctx, client)
 	ix := &index{
 		pods:            map[string]*corev1.Pod{},
 		configMaps:      map[string]*corev1.ConfigMap{},
@@ -629,6 +620,14 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					why = skipNotServed
 				}
 				skip(req, why)
+				continue
+			}
+			if opts.tolerateTransient && ctx.Err() == nil {
+				if ix.skipErr == nil {
+					ix.skipErr = map[ListRequirement]error{}
+				}
+				ix.skipErr[req] = err
+				skip(req, skipNotRequested)
 				continue
 			}
 			return nil, err

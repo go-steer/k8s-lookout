@@ -717,17 +717,21 @@ func TestControlPlaneUnavailableWhenNoToken(t *testing.T) {
 	}
 }
 
-// TestControlPlaneBackendErrorFailsScan: a real backend failure
-// (auth, transport) fails the scan like any other category's read
-// error — never a silent healthy or a lying unavailable.
+// TestControlPlaneBackendErrorFailsScan verifies that a control-plane
+// metrics backend error degrades only the control-plane category to
+// status=unavailable with error details while healthy sibling categories
+// still emit cleanly (#649).
 func TestControlPlaneBackendErrorFailsScan(t *testing.T) {
 	b := &fakeBackend{err: fmt.Errorf("monitoring API: permission denied")}
-	res := checktest.Run(t, testCommandWithMetrics(b, healthyObjects(t)...))
-	if res.Code == emit.ExitData {
-		t.Fatalf("scan succeeded despite a backend failure:\n%s", res.Stdout)
+	status, _, reasons := statusesAndKinds(t, testCommandWithMetrics(b, healthyObjects(t)...))
+	if status["control-plane"] != "unavailable" {
+		t.Errorf("control-plane status = %q, want unavailable", status["control-plane"])
 	}
-	if !strings.Contains(res.Stderr, "permission denied") {
-		t.Errorf("stderr %q should carry the backend error", res.Stderr)
+	if !strings.Contains(reasons["control-plane"], "permission denied") {
+		t.Errorf("control-plane unavailable reason = %q, want backend error detail", reasons["control-plane"])
+	}
+	if status["nodes"] != "healthy" {
+		t.Errorf("nodes = %q, want healthy", status["nodes"])
 	}
 }
 

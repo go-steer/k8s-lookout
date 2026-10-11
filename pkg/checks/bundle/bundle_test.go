@@ -489,3 +489,52 @@ func TestVerifyContract(t *testing.T) {
 	}
 	checktest.VerifyContract(t, testCommand(healthyLogs, objs...), "--workload=Deployment/prod/api")
 }
+
+func TestBundleEventsSectionPopulatedBoundedAndSanitized(t *testing.T) {
+	if cmd := bundle.New(bundle.Deps{}); cmd.TimeoutDefault <= 0 {
+		t.Fatalf("bundle TimeoutDefault = %s, want positive explicit timeout", cmd.TimeoutDefault)
+	}
+	objs := append(brokenObjects(),
+		&corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "ev-warn-secret"},
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "Pod",
+				Namespace: "prod",
+				Name:      "api-" + hash + "-bbbbb",
+			},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "Failed",
+			Message:        "Error: failed to connect with token Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+			Count:          4,
+			FirstTimestamp: metav1.NewTime(fixedNow.Add(-5 * time.Minute)),
+			LastTimestamp:  metav1.NewTime(fixedNow.Add(-1 * time.Minute)),
+		},
+		&corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "ev-unrelated"},
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "Pod",
+				Namespace: "prod",
+				Name:      "other-workload-pod",
+			},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "Failed",
+			Message:        "unrelated workload event",
+			Count:          1,
+			FirstTimestamp: metav1.NewTime(fixedNow.Add(-2 * time.Minute)),
+			LastTimestamp:  metav1.NewTime(fixedNow.Add(-2 * time.Minute)),
+		},
+	)
+	res := checktest.Run(t, testCommand(brokenLogs(), objs...), "--workload=Deployment/prod/api")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit = %d, stderr = %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "section=events") || !strings.Contains(res.Stdout, "kind=event.warning") {
+		t.Fatalf("expected populated section=events warning finding in output:\n%s", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9") {
+		t.Fatalf("event message secret token leaked into bundle output:\n%s", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "other-workload-pod") {
+		t.Fatalf("unrelated pod event leaked into workload bundle:\n%s", res.Stdout)
+	}
+}
