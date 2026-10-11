@@ -34,6 +34,12 @@ import (
 const reasonLabelCap = 100
 const reasonOther = "other"
 
+// namespaceLabelCap bounds the distinct values the "namespace" label
+// may take on /metrics (#643), so dynamic/ephemeral namespaces (PR
+// environments, batch tenants) cannot cause high series churn.
+const namespaceLabelCap = 200
+const namespaceOther = "other"
+
 // fleetMetrics are the process-level sentinel metrics: the ones about
 // clusters rather than from inside one.
 //
@@ -130,6 +136,11 @@ type metrics struct {
 	// callbacks concurrently.
 	reasonMu   sync.Mutex
 	reasonSeen map[string]struct{}
+
+	// namespaceSeen tracks distinct namespace label values admitted to
+	// event counters, bounded by namespaceLabelCap (#643).
+	namespaceMu   sync.Mutex
+	namespaceSeen map[string]struct{}
 }
 
 // newMetrics registers all sidecar metrics against a fresh registry
@@ -162,7 +173,8 @@ func newMetricsFor(reg *prometheus.Registry, cluster string) *metrics {
 // to the underlying *Registry that promhttp gathers from.
 func buildMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
-		reasonSeen: make(map[string]struct{}),
+		reasonSeen:    make(map[string]struct{}),
+		namespaceSeen: make(map[string]struct{}),
 		eventsSeen: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_events_seen_total",
 			Help: "Total k8s events observed by the informer, before filter.",
@@ -424,6 +436,9 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 func (m *metrics) boundReason(reason string) string {
 	m.reasonMu.Lock()
 	defer m.reasonMu.Unlock()
+	if m.reasonSeen == nil {
+		m.reasonSeen = make(map[string]struct{})
+	}
 	if _, ok := m.reasonSeen[reason]; ok {
 		return reason
 	}
@@ -432,6 +447,26 @@ func (m *metrics) boundReason(reason string) string {
 	}
 	m.reasonSeen[reason] = struct{}{}
 	return reason
+}
+
+// boundNamespace caps the cardinality of the namespace label on
+// event counters (#643): the first namespaceLabelCap distinct
+// namespaces keep their real name; further new namespaces collapse
+// to namespaceOther.
+func (m *metrics) boundNamespace(ns string) string {
+	m.namespaceMu.Lock()
+	defer m.namespaceMu.Unlock()
+	if m.namespaceSeen == nil {
+		m.namespaceSeen = make(map[string]struct{})
+	}
+	if _, ok := m.namespaceSeen[ns]; ok {
+		return ns
+	}
+	if len(m.namespaceSeen) >= namespaceLabelCap {
+		return namespaceOther
+	}
+	m.namespaceSeen[ns] = struct{}{}
+	return ns
 }
 
 // serveMetrics starts a small HTTP server exposing /metrics, /healthz
