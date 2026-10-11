@@ -180,6 +180,11 @@ type dedupEntry struct {
 	// occurrence re-sends it (MarkUndelivered).
 	Undelivered bool   `json:"undelivered,omitempty"`
 	LastChange  string `json:"last_change,omitempty"`
+	// Parent points a sibling-folded entry (§7.7 SessionForSibling) to
+	// the root entry whose per-incident session it folded into, so all
+	// sibling pods of a rolling deployment share one repeat schedule
+	// and one coalesced recovery lifecycle (#641).
+	Parent *EventKey `json:"parent,omitempty"`
 }
 
 // clone deep-copies the entry, for Snapshot to encode outside the lock
@@ -189,6 +194,10 @@ func (e *dedupEntry) clone() *dedupEntry {
 	if e.Incident != nil {
 		ref := *e.Incident
 		out.Incident = &ref
+	}
+	if e.Parent != nil {
+		parent := *e.Parent
+		out.Parent = &parent
 	}
 	out.FollowupSources = slices.Clone(e.FollowupSources)
 	out.AncestorKeys = slices.Clone(e.AncestorKeys)
@@ -284,6 +293,9 @@ type DedupCache struct {
 	// Nil when recovery tracking is off: no incident is ever known to
 	// be open, so every lapse reopens as it did before #599.
 	isOpen func(EventKey) bool
+	// lastSweep records when sweepExpiredLocked last pruned expired
+	// unbound/resolved entries (#643).
+	lastSweep time.Time
 }
 
 // maxDedupEntries caps the sidecar's cache size. 10k is plenty for
@@ -614,10 +626,11 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.maybeSweepLocked(now)
 	entry, ok := c.entries[key]
 	if !ok {
 		// First sighting for this key.
-		c.evictIfFull()
+		c.evictIfFull(now)
 		c.entries[key] = newDedupEntry(now, obs, class)
 		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
@@ -627,10 +640,56 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 		entry.Count++
 		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
 	}
+	// Sibling-folded pods (§7.7, issue #641): delegate repeat cadence
+	// and count tracking onto the shared root entry so N crashing pods
+	// in a rolling deployment emit ONE doubling schedule, not N.
+	if entry.Parent != nil {
+		rootKey, root := c.resolveParentLocked(entry)
+		if root != nil && root.Storm == "" && !root.Resolved &&
+			root.SessionID != "" && root.SessionID == entry.SessionID &&
+			c.isGroupOpenLocked(rootKey, root) {
+			entry.Count++
+			entry.LastSeen = now
+			entry.EventLastTS = obs.LastTS
+			parentLapsed := now.Sub(root.LastSeen) > c.window
+			if obs.Repeatable {
+				lastInject := root.LastInjectAt
+				if lastInject.IsZero() {
+					lastInject = root.FirstSeen
+				}
+				step := max(root.Step, root.RepeatCount)
+				due := root.Undelivered || now.Sub(lastInject) > repeatInterval(c.window, step+1)
+				if due {
+					return c.repeat(root, now, obs.LastTS, class, parentLapsed)
+				}
+				root.Count++
+				root.InjectCount++
+				root.LastSeen = now
+				root.EventLastTS = obs.LastTS
+				if root.noteClass(class) && now.Sub(root.FirstSeen) > c.window {
+					root.PendingChange = true
+				}
+				return DedupResult{
+					Kind:      DedupDuplicate,
+					SessionID: root.SessionID,
+					Count:     root.Count,
+					Storm:     root.Storm,
+					Absorbed:  lastInject.After(root.FirstSeen) || parentLapsed,
+				}
+			}
+			if !obs.Downgraded && obs.Kind != root.SourceKind {
+				root.Count++
+				root.InjectCount++
+				root.LastSeen = now
+				root.EventLastTS = obs.LastTS
+				return DedupResult{Kind: DedupDuplicate, SessionID: root.SessionID, Count: root.Count, Storm: root.Storm, Absorbed: true}
+			}
+		}
+	}
 	lapsed := now.Sub(entry.LastSeen) > c.window
 	if entry.SessionClass && !entry.Resolved &&
 		entry.SessionID != "" && entry.Incident != nil &&
-		c.isOpen != nil && c.isOpen(key) {
+		c.isGroupOpenLocked(key, entry) {
 		// Case 2: the incident is still open.
 		if obs.Repeatable {
 			return c.repeat(entry, now, obs.LastTS, class, lapsed)
@@ -658,7 +717,7 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 		// nothing says the incident is still open — spin up a
 		// fresh session so an agent that failed to resolve the
 		// last one gets another attempt.
-		c.evictIfFull()
+		c.evictIfFull(now)
 		c.entries[key] = newDedupEntry(now, obs, class)
 		return DedupResult{Kind: DedupNewIncident, Count: 1}
 	}
@@ -731,6 +790,7 @@ func (c *DedupCache) Unbind(key EventKey) {
 		return
 	}
 	e.SessionID = ""
+	e.Parent = nil
 	e.FirstSeen = now
 	e.RepeatCount = 0
 	e.Step = 0
@@ -787,6 +847,12 @@ func (c *DedupCache) BindIncident(key EventKey, sessionID string, ref IncidentRe
 		entry.SessionID = sessionID
 		r := ref
 		entry.Incident = &r
+		if entry.Parent != nil {
+			parent, ok := c.entries[*entry.Parent]
+			if !ok || parent.SessionID != sessionID {
+				entry.Parent = nil
+			}
+		}
 	}
 }
 
@@ -807,6 +873,7 @@ func (c *DedupCache) AttachToStorm(key EventKey, sessionID, stormFingerprint str
 	}
 	entry.SessionID = sessionID
 	entry.Storm = stormFingerprint
+	entry.Parent = nil
 	if entry.Incident == nil {
 		r := ref
 		entry.Incident = &r
@@ -1005,10 +1072,95 @@ func (c *DedupCache) SessionForSibling(self EventKey, kind string, candidates []
 			}
 		}
 		if best != nil {
+			rootKey := bestKey
+			if best.Parent != nil {
+				rootKey = *best.Parent
+			}
+			if selfEntry, exists := c.entries[self]; exists {
+				rk := rootKey
+				selfEntry.Parent = &rk
+			}
+			if root := c.entries[rootKey]; root != nil {
+				root.Count++
+				root.InjectCount++
+			}
 			return best.SessionID, cand, true
 		}
 	}
 	return "", "", false
+}
+
+// resolveParentLocked walks entry.Parent to the root entry of a
+// sibling group. Caller holds mu.
+func (c *DedupCache) resolveParentLocked(entry *dedupEntry) (EventKey, *dedupEntry) {
+	if entry == nil || entry.Parent == nil {
+		return EventKey{}, nil
+	}
+	curKey := *entry.Parent
+	cur, ok := c.entries[curKey]
+	if !ok {
+		return EventKey{}, nil
+	}
+	for steps := 0; steps < 8 && cur.Parent != nil; steps++ {
+		nextKey := *cur.Parent
+		next, ok := c.entries[nextKey]
+		if !ok {
+			break
+		}
+		curKey, cur = nextKey, next
+	}
+	return curKey, cur
+}
+
+// isGroupOpenLocked reports whether rootKey or any unresolved sibling
+// child folded onto rootKey is still open in c.isOpen. Caller holds mu.
+func (c *DedupCache) isGroupOpenLocked(rootKey EventKey, root *dedupEntry) bool {
+	if c.isOpen == nil {
+		return false
+	}
+	if c.isOpen(rootKey) {
+		return true
+	}
+	for k, e := range c.entries {
+		if k != rootKey && e.Parent != nil && *e.Parent == rootKey && !e.Resolved && e.SessionID == root.SessionID {
+			if c.isOpen(k) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SiblingGroup returns the root key and all member keys sharing key's
+// non-storm sibling-fold group (§7.7, issue #641). Returns ok=false
+// when key is standalone, unbound, or storm-owned.
+func (c *DedupCache) SiblingGroup(key EventKey) (parent EventKey, keys []EventKey, ok bool) {
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, exists := c.entries[key]
+	if !exists || entry.SessionID == "" || entry.Storm != "" {
+		return EventKey{}, nil, false
+	}
+	rootKey := key
+	if entry.Parent != nil {
+		rk, r := c.resolveParentLocked(entry)
+		if r == nil || r.SessionID != entry.SessionID || r.Storm != "" {
+			return EventKey{}, nil, false
+		}
+		rootKey = rk
+	}
+	var group []EventKey
+	group = append(group, rootKey)
+	for k, e := range c.entries {
+		if k != rootKey && e.Parent != nil && *e.Parent == rootKey && e.SessionID == entry.SessionID && e.Storm == "" {
+			group = append(group, k)
+		}
+	}
+	if len(group) < 2 {
+		return EventKey{}, nil, false
+	}
+	return rootKey, group, true
 }
 
 // CrossSourceJoin reports whether a duplicate signal of the given
@@ -1077,24 +1229,115 @@ func (c *DedupCache) Bindings() []BoundIncident {
 	return out
 }
 
-// evictIfFull is called under lock. If the cache is at capacity,
-// evicts the LRU entry (lowest LastSeen). Bounded O(N) scan; called
-// only on new-incident cache-miss paths so amortized cost is fine.
-func (c *DedupCache) evictIfFull() {
+// Sweep removes expired entries that are either resolved or not kept
+// open by recovery tracking (#643). Safe to call from any goroutine.
+func (c *DedupCache) Sweep() int {
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweepExpiredLocked(now)
+}
+
+func (c *DedupCache) maybeSweepLocked(now time.Time) {
+	if c.window <= 0 {
+		return
+	}
+	if !c.lastSweep.IsZero() && now.Sub(c.lastSweep) < c.window {
+		return
+	}
+	c.sweepExpiredLocked(now)
+}
+
+func (c *DedupCache) sweepExpiredLocked(now time.Time) int {
+	c.lastSweep = now
+	if c.window <= 0 {
+		return 0
+	}
+	replayTTL := max(time.Hour, 4*c.window)
+	removed := 0
+	for k, e := range c.entries {
+		age := now.Sub(e.LastSeen)
+		if age <= c.window {
+			continue
+		}
+		if e.Resolved {
+			delete(c.entries, k)
+			removed++
+			continue
+		}
+		if e.SessionClass && e.SessionID != "" && e.Incident != nil && c.isGroupOpenLocked(k, e) {
+			continue
+		}
+		if age > replayTTL {
+			delete(c.entries, k)
+			removed++
+		}
+	}
+	return removed
+}
+
+func (c *DedupCache) evictionTierLocked(k EventKey, e *dedupEntry, now time.Time) int {
+	expired := c.window > 0 && now.Sub(e.LastSeen) > c.window
+	switch {
+	case e.Resolved || expired:
+		return 0
+	case e.SessionID == "" || !e.SessionClass:
+		return 1
+	case c.isOpen == nil || !c.isOpen(k):
+		return 2
+	default:
+		return 3
+	}
+}
+
+// evictIfFull is called under lock. If the cache is at capacity, it
+// first sweeps expired/resolved entries; if still full, it evicts the
+// lowest-priority (resolved/expired → unbound → closed → oldest live
+// bound) entry with the oldest LastSeen (#643).
+func (c *DedupCache) evictIfFull(now time.Time) {
 	if len(c.entries) < c.max {
 		return
 	}
-	var oldestKey EventKey
-	var oldestTs time.Time
-	first := true
+	c.sweepExpiredLocked(now)
+	if len(c.entries) < c.max {
+		return
+	}
+	var victimKey EventKey
+	var victimTs time.Time
+	victimTier := 99
 	for k, e := range c.entries {
-		if first || e.LastSeen.Before(oldestTs) {
-			oldestKey = k
-			oldestTs = e.LastSeen
-			first = false
+		tier := c.evictionTierLocked(k, e, now)
+		if tier < victimTier || (tier == victimTier && e.LastSeen.Before(victimTs)) {
+			victimKey = k
+			victimTs = e.LastSeen
+			victimTier = tier
 		}
 	}
-	delete(c.entries, oldestKey)
+	delete(c.entries, victimKey)
+}
+
+// ActiveBoundCount returns the number of live unresolved entries in
+// the cache (entries still within their dedup window or kept open by
+// recovery tracking, excluding resolved or stale expired entries) —
+// the true live value for lookout_active_incidents (#643).
+func (c *DedupCache) ActiveBoundCount() int {
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for k, e := range c.entries {
+		if e.Resolved {
+			continue
+		}
+		if c.window <= 0 || now.Sub(e.LastSeen) <= c.window {
+			count++
+			continue
+		}
+		if e.SessionClass && e.SessionID != "" && e.Incident != nil && c.isGroupOpenLocked(k, e) {
+			count++
+		}
+	}
+	return count
 }
 
 // Len returns the current cache size. Test / metrics helper.

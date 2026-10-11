@@ -233,6 +233,10 @@ func fingerprintsJSON(fps []string) string {
 // "no records"; writes refuse.
 const triageSchemaVersion = 4
 
+// triageReasonSchemaVersion is the first schema version carrying the
+// canonical_reason and cluster columns on triage_status (migration v10, #659).
+const triageReasonSchemaVersion = 10
+
 // UpsertTriageStatus implements memory.TriageWriter on the sentinel
 // store: the §9.4 record for (fingerprint, resource_key) is REPLACED
 // — it is current state, not a journal. Updated is assigned here.
@@ -259,17 +263,19 @@ func (s *Store) UpsertTriageStatus(ctx context.Context, rec memory.TriageStatusR
 	rec.Updated = s.clock().UTC()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO triage_status (
 		fingerprint, resource_key, session, status,
-		root_cause_hypothesis, severity_override, action, updated
-	) VALUES (?,?,?,?,?,?,?,?)
+		root_cause_hypothesis, severity_override, action, canonical_reason, cluster, updated
+	) VALUES (?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT (fingerprint, resource_key) DO UPDATE SET
 		session = excluded.session,
 		status = excluded.status,
 		root_cause_hypothesis = excluded.root_cause_hypothesis,
 		severity_override = excluded.severity_override,
 		action = excluded.action,
+		canonical_reason = excluded.canonical_reason,
+		cluster = excluded.cluster,
 		updated = excluded.updated`,
 		rec.Fingerprint, rec.ResourceKey, rec.Session, string(rec.Status),
-		rec.RootCauseHypothesis, rec.SeverityOverride, rec.Action, rec.Updated.UnixNano(),
+		rec.RootCauseHypothesis, rec.SeverityOverride, rec.Action, rec.CanonicalReason, rec.Cluster, rec.Updated.UnixNano(),
 	)
 	if err != nil {
 		return memory.TriageStatusRecord{}, fmt.Errorf("store: upsert triage status (%s, %s): %w", rec.Fingerprint, rec.ResourceKey, err)
@@ -319,19 +325,12 @@ func (s *Store) ResolveTriageStatus(ctx context.Context, fingerprint string, res
 
 // TriageStatuses implements memory.TriageReader. Nil-safe and
 // version-gated like Facts: disabled stores and pre-v4 stores answer
-// "no records".
+// "no records". Read-only opens of pre-v10 stores fall back cleanly
+// without canonical_reason / cluster columns (#659).
 func (s *Store) TriageStatuses(ctx context.Context, q memory.TriageQuery) ([]memory.TriageStatusRecord, error) {
 	if s == nil || s.schemaVersion < triageSchemaVersion {
 		return nil, nil
 	}
-	// Static SQL, optional filters folded in (zero value disables).
-	const query = `SELECT fingerprint, resource_key, session, status,
-		root_cause_hypothesis, severity_override, action, updated
-		FROM triage_status
-		WHERE (?1 = '' OR fingerprint = ?1)
-		  AND (?2 = 0 OR status != 'resolved')
-		  AND (?3 = 0 OR updated >= ?3)
-		ORDER BY updated DESC, fingerprint, resource_key`
 	openOnly := 0
 	if q.OpenOnly {
 		openOnly = 1
@@ -340,32 +339,59 @@ func (s *Store) TriageStatuses(ctx context.Context, q memory.TriageQuery) ([]mem
 	if !q.UpdatedSince.IsZero() {
 		sinceNs = q.UpdatedSince.UTC().UnixNano()
 	}
+	hasReasonCols := s.schemaVersion >= triageReasonSchemaVersion
+	query := `SELECT fingerprint, resource_key, session, status,
+		root_cause_hypothesis, severity_override, action, updated
+		FROM triage_status
+		WHERE (?1 = '' OR fingerprint = ?1)
+		  AND (?2 = 0 OR status != 'resolved')
+		  AND (?3 = 0 OR updated >= ?3)
+		ORDER BY updated DESC, fingerprint ASC, resource_key ASC, session ASC`
+	if hasReasonCols {
+		query = `SELECT fingerprint, resource_key, session, status,
+		root_cause_hypothesis, severity_override, action, canonical_reason, cluster, updated
+		FROM triage_status
+		WHERE (?1 = '' OR fingerprint = ?1)
+		  AND (?2 = 0 OR status != 'resolved')
+		  AND (?3 = 0 OR updated >= ?3)
+		ORDER BY updated DESC, fingerprint ASC, resource_key ASC, session ASC`
+	}
 	rows, err := s.db.QueryContext(ctx, query, q.Fingerprint, openOnly, sinceNs)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []memory.TriageStatusRecord
+	var results []memory.TriageStatusRecord
 	for rows.Next() {
 		var (
 			rec     memory.TriageStatusRecord
 			status  string
 			updated int64
 		)
-		if err := rows.Scan(
-			&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
-			&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action, &updated,
-		); err != nil {
-			return nil, err
+		if hasReasonCols {
+			if err := rows.Scan(
+				&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
+				&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action,
+				&rec.CanonicalReason, &rec.Cluster, &updated,
+			); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := rows.Scan(
+				&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
+				&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action, &updated,
+			); err != nil {
+				return nil, err
+			}
 		}
 		rec.Status = memory.TriageStatus(status)
 		rec.Updated = time.Unix(0, updated).UTC()
-		out = append(out, rec)
-		if q.Limit > 0 && len(out) == q.Limit {
+		results = append(results, rec)
+		if q.Limit > 0 && len(results) == q.Limit {
 			break
 		}
 	}
-	return out, rows.Err()
+	return results, rows.Err()
 }
 
 func mergeFingerprints(prev, next []string) []string {

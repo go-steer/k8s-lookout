@@ -144,12 +144,16 @@ type dispatcher struct {
 	// (--enrich=off, --mode=shared, dry-run, or unit tests predating
 	// §7.6 — a nil enricher keeps every payload byte-identical).
 	enrich *enricher
-	// injectLock serializes per-(app, sid) session creation +
-	// injects so two rapid-fire events for the same key don't
-	// both call CreateSession. Coarse-grained; a per-key map of
-	// mutexes would let concurrent keys parallelize but this
-	// path is nowhere near a bottleneck.
-	injectLock sync.Mutex
+	// inflightMu + inflight provide fine-grained per-key in-flight session
+	// creation / storm coordination so slow sink HTTP I/O or enrichment for one
+	// key or storm never blocks unrelated incidents across the cluster (#642).
+	inflightMu sync.Mutex
+	inflight   map[inject.IncidentKey]chan struct{}
+
+	// stormReadyMu + stormReady ensure a racing StormAttached waits for its
+	// founding StormFormed open to complete without holding any global mutex.
+	stormReadyMu sync.Mutex
+	stormReady   map[string]chan struct{}
 }
 
 // Dispatch is the TriageEvent-shaped entry point, kept from M0: it
@@ -249,7 +253,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if d.triage != nil && d.mode == "per-incident" {
 		sig.Severity, downgraded = d.triage.Apply(ctx, sig)
 	}
-	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	if ok, gate := d.filter.Decide(sig); !ok {
 		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
 		return
@@ -262,7 +266,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		Repeatable: d.opensSessions(sig),
 		Downgraded: downgraded != nil,
 	})
-	d.metrics.activeIncidents.Set(float64(d.dedup.Len()))
+	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
 	// An occurrence of a still-open, storm-claimed incident past its
 	// first window — a repeat or an absorbed one — is member activity
 	// for the storm's idle clock (§7.5). The pre-#599 reopen re-entered
@@ -278,7 +282,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	if result.Kind == engine.DedupDuplicate {
-		d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+		d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 		// Info-level log: the operator asked "is the watcher seeing
 		// events?" and today the answer was "yes when things break,
 		// silent when things work" — this line makes suppressed
@@ -404,20 +408,56 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		}
 		return
 	}
-	// New incident: correlate, then create or reuse a session and
-	// inject. The lock serializes storm formation with session
-	// creation so two racing incidents cannot both open the storm.
-	d.injectLock.Lock()
-	defer d.injectLock.Unlock()
 	// Storm correlation (§7.5, pipeline position: after dedup,
 	// before severity routing): a new incident may form a storm,
 	// attach to an open one, or fall through per-incident.
+	// Only the in-memory Observe + stormReady channel registration runs
+	// under stormReadyMu; enrichment and sink HTTP I/O execute under the
+	// fine-grained per-ancestor stormKey so unrelated incidents/storms
+	// proceed concurrently (#642).
 	if d.storm != nil {
-		switch v := d.storm.Observe(sig); v.Kind {
+		d.stormReadyMu.Lock()
+		v := d.storm.Observe(sig)
+		var formDone chan struct{}
+		switch v.Kind {
 		case engine.StormFormed:
+			if d.stormReady == nil {
+				d.stormReady = make(map[string]chan struct{})
+			}
+			formDone = make(chan struct{})
+			d.stormReady[v.Storm.ID] = formDone
+		case engine.StormAttached:
+			formDone = d.stormReady[v.Storm.ID]
+		}
+		d.stormReadyMu.Unlock()
+
+		switch v.Kind {
+		case engine.StormFormed:
+			release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
+			defer func() {
+				close(formDone)
+				d.stormReadyMu.Lock()
+				delete(d.stormReady, v.Storm.ID)
+				d.stormReadyMu.Unlock()
+				release()
+			}()
 			d.stormFormed(ctx, sig, v)
 			return
 		case engine.StormAttached:
+			if formDone != nil {
+				select {
+				case <-formDone:
+				case <-ctx.Done():
+					return
+				}
+			}
+			release := d.acquireKey(d.stormKey(v.Storm.Ancestor))
+			defer release()
+			if v.Storm.SessionID == "" {
+				if boundSid, ok := d.dedup.LookupSession(sig.Key); ok && boundSid != "" {
+					v.Storm.SessionID = boundSid
+				}
+			}
 			d.stormAttached(ctx, sig, v)
 			return
 		}
@@ -441,6 +481,8 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	if d.mode == "per-incident" && !d.dryRun {
+		release := d.acquireKey(d.perIncidentCoordKey(sig, key))
+		defer release()
 		// Sibling fold (§7.7 amendment 2026-10-08): another pod of the
 		// same workload already has a live incident of this class — a
 		// rollout's old and new ReplicaSet crash-looping on one fault.
@@ -453,12 +495,9 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		// in-process bundle to the INITIAL inject — composed BEFORE
 		// the open, because the sink delivers the initial payload
 		// with it. Severity-gated by --enrich; hard-capped by
-		// --enrich-timeout. Runs under injectLock deliberately —
-		// critical incidents are rare, the budget is seconds, and
-		// enriching after unlock would let a followup for the same
-		// key race ahead of the session's first message. Errors never
-		// block the inject: they ride inside the bundle as
-		// enrichment_error trailers.
+		// --enrich-timeout. Runs under the per-key / per-sibling lock
+		// so a followup for the same incident cannot race ahead of its
+		// initial open, while unrelated keys enrich concurrently (#642).
 		if d.enrich != nil && d.enrich.enabledFor(sig.Severity) {
 			if bundleStr := d.enrich.Incident(ctx, sig); bundleStr != "" {
 				sig.Enrichment = &engine.Enrichment{Bundle: bundleStr}
@@ -515,7 +554,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 			d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 			return
 		}
-		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 		// Info-level log: the successful-inject case was silent before
 		// #212 — operators had to correlate client-go informer warnings
 		// with daemon session-list dumps to infer whether the watcher
@@ -562,7 +601,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if d.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
-		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+		d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 		log.Printf("would-fire %s pod=%s/%s (sid=%s, mode=%s, dry-run)",
 			sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 		return
@@ -572,7 +611,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		d.metrics.injectErrors.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), "inject").Inc()
 		return
 	}
-	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
@@ -665,9 +704,9 @@ func (d *dispatcher) injectRepeat(ctx context.Context, sig engine.Signal, key en
 			}
 			if result.Storm != "" {
 				if info, ok := d.clearDeadStormSession(result.Storm, result.SessionID); ok && d.opensSessions(sig) {
-					d.injectLock.Lock()
+					release := d.acquireKey(d.stormKey(info.Ancestor))
 					newSid := d.retryStormOpen(ctx, sig, info)
-					d.injectLock.Unlock()
+					release()
 					if newSid != "" {
 						d.store.Record(sig, store.Outcome{Route: store.RouteStormMember, SessionID: newSid, StormFingerprint: result.Storm})
 						return
@@ -838,9 +877,53 @@ func (d *dispatcher) noteInjectShrunk(ns, name string, shed []string) {
 // stays down, each duplicate costs one POST /sessions
 // (sessionCreates{error}, like the original failure) and the key
 // stays suppressed; no Append is ever attempted without a session.
+// acquireKey serializes operations on a single logical session/storm key
+// while letting distinct incidents and storms execute enrichment and sink
+// HTTP I/O concurrently (#642).
+func (d *dispatcher) acquireKey(coordKey inject.IncidentKey) (release func()) {
+	for {
+		d.inflightMu.Lock()
+		if d.inflight == nil {
+			d.inflight = make(map[inject.IncidentKey]chan struct{})
+		}
+		waitCh, busy := d.inflight[coordKey]
+		if !busy {
+			ch := make(chan struct{})
+			d.inflight[coordKey] = ch
+			d.inflightMu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					d.inflightMu.Lock()
+					delete(d.inflight, coordKey)
+					close(ch)
+					d.inflightMu.Unlock()
+				})
+			}
+		}
+		d.inflightMu.Unlock()
+		<-waitCh
+	}
+}
+
+// perIncidentCoordKey returns the serialization key for per-incident session
+// creation: sibling pods under the same controller share a coordination key
+// so concurrent pod crashes during a rollout fold cleanly into one session
+// rather than racing past foldSibling, while unrelated workloads run in parallel.
+func (d *dispatcher) perIncidentCoordKey(sig engine.Signal, key engine.EventKey) inject.IncidentKey {
+	if sig.ControllerRef != "" {
+		return inject.IncidentKey{
+			Cluster: d.cluster,
+			Kind:    inject.IncidentKeyIncident,
+			ID:      "sibling/" + sig.Namespace + "/" + sig.ControllerRef + "/" + key.Reason,
+		}
+	}
+	return d.incidentKey(key)
+}
+
 func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, result engine.DedupResult, key engine.EventKey) {
-	d.injectLock.Lock()
-	defer d.injectLock.Unlock()
+	release := d.acquireKey(d.perIncidentCoordKey(sig, key))
+	defer release()
 	// Re-check under the lock: a racing duplicate (or a storm claim)
 	// may have just bound the key.
 	if sid, ok := d.dedup.LookupSession(key); ok && sid != "" {
@@ -885,7 +968,7 @@ func (d *dispatcher) retryIncidentOpen(ctx context.Context, sig engine.Signal, r
 		d.dedup.MarkUndelivered(key, engine.RepeatChangeOpen)
 		return
 	}
-	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), sig.Namespace).Inc()
+	d.metrics.eventsInjected.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	log.Printf("fire %s pod=%s/%s → sid=%s (mode=%s, open deferred past a failed create)",
 		sig.Key.Reason, sig.Namespace, sig.Name, sid, d.mode)
 }
@@ -1012,6 +1095,7 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 		}
 		if sig.Kind == engine.KindResolved {
 			d.dedup.MarkResolved(sig.Key)
+			d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
 		}
 		d.store.Record(sig, store.Outcome{Route: store.RouteResolved, SessionID: sessionID})
 		if d.storm != nil {
@@ -1037,6 +1121,9 @@ func (d *dispatcher) dispatchResolved(ctx context.Context, sig engine.Signal) {
 			return
 		}
 		sid = bound
+	}
+	if d.deferSiblingResolved(ctx, sig, sid) {
+		return
 	}
 	payload := resolvedPayload(sig)
 	if d.dryRun {

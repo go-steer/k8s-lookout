@@ -100,7 +100,8 @@ type watchboard struct {
 	// did pre-#220. Same lock contract as bind.
 	reattach func(ctx context.Context, sig engine.Signal, count int) bool
 
-	mu sync.Mutex
+	flushMu sync.Mutex
+	mu      sync.Mutex
 	// sid is the current watchboard session ("" until the first
 	// non-dry-run flush).
 	sid string
@@ -125,7 +126,6 @@ func newWatchboard(cfg watchboardConfig) *watchboard {
 // the interval tick flushes it within `--watchboard-flush`.
 func (b *watchboard) Add(ctx context.Context, sig engine.Signal, count int) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if len(b.buffer) == 0 {
 		b.opened = b.clock()
 	}
@@ -134,8 +134,10 @@ func (b *watchboard) Add(ctx context.Context, sig engine.Signal, count int) {
 	b.metrics.watchboardBuffered.Set(float64(len(b.buffer)))
 	log.Printf("watchboard: buffered %s %s/%s (severity=warning, buffered=%d/%d)",
 		sig.Kind, sig.Namespace, sig.Name, len(b.buffer), b.batch)
-	if len(b.buffer) >= b.batch {
-		b.flushLocked(ctx)
+	needFlush := len(b.buffer) >= b.batch
+	b.mu.Unlock()
+	if needFlush {
+		b.flush(ctx)
 	}
 }
 
@@ -144,12 +146,10 @@ func (b *watchboard) Add(ctx context.Context, sig engine.Signal, count int) {
 // flushInterval + the tick period.
 func (b *watchboard) Tick(ctx context.Context) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.buffer) == 0 {
-		return
-	}
-	if b.clock().Sub(b.opened) >= b.flushInterval {
-		b.flushLocked(ctx)
+	needFlush := len(b.buffer) > 0 && b.clock().Sub(b.opened) >= b.flushInterval
+	b.mu.Unlock()
+	if needFlush {
+		b.flush(ctx)
 	}
 }
 
@@ -157,9 +157,10 @@ func (b *watchboard) Tick(ctx context.Context) {
 // shutdown path, so a terminating sentinel doesn't drop its buffer.
 func (b *watchboard) FlushNow(ctx context.Context) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.buffer) > 0 {
-		b.flushLocked(ctx)
+	needFlush := len(b.buffer) > 0
+	b.mu.Unlock()
+	if needFlush {
+		b.flush(ctx)
 	}
 }
 
@@ -218,52 +219,72 @@ func startBoard(ctx context.Context, board *watchboard) (wait func()) {
 	}
 }
 
-// flushLocked injects the buffered warnings as one digest, rotating
-// the session first when the §15 Q2 threshold is reached. Caller
-// holds b.mu.
-func (b *watchboard) flushLocked(ctx context.Context) {
+// flush snapshots buffered entries under b.mu and executes all network
+// I/O (reattachment, session creation/rotation, digest Append) outside
+// b.mu while serialized by b.flushMu (#642).
+func (b *watchboard) flush(ctx context.Context) {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
+	b.mu.Lock()
+	if len(b.buffer) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	entries := b.buffer
+	windowStart := b.opened
+	b.buffer = nil
+	b.metrics.watchboardBuffered.Set(0)
+	sid := b.sid
+	gen := b.generation
+	injects := b.injects
+	b.mu.Unlock()
+
 	now := b.clock()
-	// §7.7 ancestor reattachment (issue #220), BEFORE the session
-	// decision below: entries that found a live per-incident session
-	// under their blast-radius ancestor were delivered there as
-	// followups and leave the buffer. A flush whose every entry
-	// reattached has nothing left to digest — and must not create a
-	// watchboard session to say so.
-	if b.reattachLocked(ctx); len(b.buffer) == 0 {
+	entries = b.reattachBatch(ctx, entries)
+	if len(entries) == 0 {
 		return
 	}
 	if b.dryRun {
-		if b.generation == 0 {
-			b.generation = 1
+		if gen == 0 {
+			gen = 1
 		}
-	} else if b.sid == "" || b.injects >= b.rotateAfter {
+	} else if sid == "" || injects >= b.rotateAfter {
 		opener, ok := b.sessionOpener()
 		if !ok {
-			// Stateless sink: the successor incident opens WITH the
-			// digest as its payload — the whole flush happens there.
-			b.openStatelessLocked(ctx, now)
+			newSid, newGen, newInjects := b.openStateless(ctx, now, windowStart, entries, sid, gen, injects)
+			b.mu.Lock()
+			b.sid, b.generation, b.injects = newSid, newGen, newInjects
+			b.mu.Unlock()
 			return
 		}
-		if !b.openSessionLocked(ctx, opener, now) {
+		var okOpen bool
+		sid, gen, injects, okOpen = b.openSession(ctx, opener, now, entries, sid, gen, injects)
+		if !okOpen {
+			b.mu.Lock()
+			b.sid, b.generation, b.injects = sid, gen, injects
+			b.mu.Unlock()
 			return
 		}
 	}
 
-	payload := b.digestPayloadLocked(now)
+	payload := b.digestPayload(now, windowStart, gen, injects, entries)
 	if b.dryRun {
 		out, _ := json.MarshalIndent(payload, "", "  ")
-		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", b.sid, string(out))
-	} else if err := b.injector.Append(ctx, b.sid, payload); err != nil {
-		// Dropped, consistent with a failed per-incident inject: the
-		// entries were counted (watchboard_entries_total) and remain
-		// visible in the dedup cache; retrying a stateful buffer
-		// against a down daemon would grow without bound.
+		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
+	} else if err := b.injector.Append(ctx, sid, payload); err != nil {
 		b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
-		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", b.sid, len(b.buffer), err)
-		b.clearBufferLocked()
+		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", sid, len(entries), err)
+		b.mu.Lock()
+		b.sid, b.generation, b.injects = sid, gen, injects
+		b.mu.Unlock()
 		return
 	}
-	b.finishFlushLocked()
+	injects++
+	b.mu.Lock()
+	b.sid, b.generation, b.injects = sid, gen, injects
+	b.mu.Unlock()
+	b.finishFlush(entries, sid, gen, injects)
 }
 
 // sessionOpener returns how this board opens an empty session, if its
@@ -282,100 +303,67 @@ func (b *watchboard) sessionOpener() (func(context.Context) (string, error), boo
 	return nil, false
 }
 
-// openSessionLocked creates (or rotates onto) the watchboard session
-// through the core-agent sink's SessionOpener capability, keeping the
-// frozen §15 Q2 wire order: empty successor first, kind=
-// watchboard.rotated into the closed session, digest afterwards (the
-// caller's flush). Returns false when the flush must stop (no session
-// to flush into — buffer already dropped). Caller holds b.mu.
-func (b *watchboard) openSessionLocked(ctx context.Context, opener func(context.Context) (string, error), now time.Time) bool {
-	rotating := b.sid != ""
+// openSession creates (or rotates onto) the watchboard session outside
+// b.mu (serialized by b.flushMu).
+func (b *watchboard) openSession(ctx context.Context, opener func(context.Context) (string, error), now time.Time, entries []boardEntry, sid string, gen, injects int) (string, int, int, bool) {
+	rotating := sid != ""
 	newSid, err := opener(ctx)
 	if err != nil {
 		b.metrics.sessionCreates.WithLabelValues("error").Inc()
 		if rotating {
-			// Rotation deferred, not data lost: keep flushing into
-			// the over-threshold session and retry the rotation on
-			// the next flush.
 			log.Printf("watchboard: create successor session failed (rotation deferred to next flush): %v", err)
-			return true
+			return sid, gen, injects, true
 		}
-		// No board session at all — drop the buffer, consistent
-		// with a failed per-incident CreateSession dropping its
-		// event. The next warning starts a fresh buffer.
 		b.metrics.injectErrors.WithLabelValues("watchboard", "session_create").Inc()
-		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(b.buffer), err)
-		b.clearBufferLocked()
-		return false
+		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(entries), err)
+		return sid, gen, injects, false
 	}
 	b.metrics.sessionCreates.WithLabelValues("ok").Inc()
 	if rotating {
 		rotated := inject.WatchboardRotatedPayload{
 			Kind:               inject.KindWatchboardRotated,
 			Cluster:            b.cluster,
-			BoardGeneration:    b.generation,
+			BoardGeneration:    gen,
 			SuccessorSessionID: newSid,
-			InjectsCount:       b.injects,
+			InjectsCount:       injects,
 			RotatedAt:          now,
 		}
-		if rerr := b.injector.Append(ctx, b.sid, rotated); rerr != nil {
-			// The lineage pointer is best-effort: the successor
-			// is already the live board, and the digest lineage
-			// stays reconstructable from (generation, sequence).
+		if rerr := b.injector.Append(ctx, sid, rotated); rerr != nil {
 			b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
-			log.Printf("watchboard: rotated lineage inject into %s failed: %v", b.sid, rerr)
+			log.Printf("watchboard: rotated lineage inject into %s failed: %v", sid, rerr)
 		}
 		b.metrics.watchboardRotations.Inc()
 		log.Printf("watchboard: rotated after %d digest inject(s): %s → %s (generation %d → %d)",
-			b.injects, b.sid, newSid, b.generation, b.generation+1)
+			injects, sid, newSid, gen, gen+1)
 	}
-	b.sid = newSid
-	b.generation++
-	b.injects = 0
-	return true
+	return newSid, gen + 1, 0, true
 }
 
-// openStatelessLocked is the flush + rotation path for sinks WITHOUT
-// the SessionOpener capability (the webhook sink): an incident at a
-// stateless receiver exists only by receiving its first payload, so
-// the successor opens WITH the digest and the kind=watchboard.rotated
-// lineage pointer is appended to the CLOSED incident afterwards — the
-// one place the webhook wire order differs from the core-agent
-// sink's. Caller holds b.mu.
-func (b *watchboard) openStatelessLocked(ctx context.Context, now time.Time) {
-	rotating := b.sid != ""
-	prevSid, prevGen, prevInjects := b.sid, b.generation, b.injects
-	// Successor lineage coordinates ride the opening digest:
-	// (generation+1, sequence 1).
-	b.generation++
-	b.injects = 0
-	payload := b.digestPayloadLocked(now)
+// openStateless handles flush + rotation for sinks without SessionOpener
+// outside b.mu (serialized by b.flushMu).
+func (b *watchboard) openStateless(ctx context.Context, now, windowStart time.Time, entries []boardEntry, prevSid string, prevGen, prevInjects int) (string, int, int) {
+	rotating := prevSid != ""
+	nextGen := prevGen + 1
+	payload := b.digestPayload(now, windowStart, nextGen, 0, entries)
 	newSid, err := b.injector.OpenIncident(ctx, payload)
 	if newSid == "" {
-		b.sid, b.generation, b.injects = prevSid, prevGen, prevInjects
 		b.metrics.sessionCreates.WithLabelValues("error").Inc()
 		if rotating {
-			// Rotation deferred like the SessionOpener path — but the
-			// digest rode the failed open, so deliver it into the
-			// over-threshold incident instead.
 			log.Printf("watchboard: open successor incident failed (rotation deferred to next flush): %v", err)
-			payload = b.digestPayloadLocked(now)
-			if aerr := b.injector.Append(ctx, b.sid, payload); aerr != nil {
+			payload = b.digestPayload(now, windowStart, prevGen, prevInjects, entries)
+			if aerr := b.injector.Append(ctx, prevSid, payload); aerr != nil {
 				b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
-				log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", b.sid, len(b.buffer), aerr)
-				b.clearBufferLocked()
-				return
+				log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", prevSid, len(entries), aerr)
+				return prevSid, prevGen, prevInjects
 			}
-			b.finishFlushLocked()
-			return
+			b.finishFlush(entries, prevSid, prevGen, prevInjects+1)
+			return prevSid, prevGen, prevInjects + 1
 		}
 		b.metrics.injectErrors.WithLabelValues("watchboard", "session_create").Inc()
-		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(b.buffer), err)
-		b.clearBufferLocked()
-		return
+		log.Printf("watchboard: create session failed — dropping %d buffered warning(s): %v", len(entries), err)
+		return prevSid, prevGen, prevInjects
 	}
 	b.metrics.sessionCreates.WithLabelValues("ok").Inc()
-	b.sid = newSid
 	if rotating {
 		rotated := inject.WatchboardRotatedPayload{
 			Kind:               inject.KindWatchboardRotated,
@@ -386,69 +374,50 @@ func (b *watchboard) openStatelessLocked(ctx context.Context, now time.Time) {
 			RotatedAt:          now,
 		}
 		if rerr := b.injector.Append(ctx, prevSid, rotated); rerr != nil {
-			// Best-effort lineage, same as the SessionOpener path.
 			b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
 			log.Printf("watchboard: rotated lineage inject into %s failed: %v", prevSid, rerr)
 		}
 		b.metrics.watchboardRotations.Inc()
 		log.Printf("watchboard: rotated after %d digest inject(s): %s → %s (generation %d → %d)",
-			prevInjects, prevSid, newSid, prevGen, prevGen+1)
+			prevInjects, prevSid, newSid, prevGen, nextGen)
 	}
 	if err != nil {
-		// Incident opened but the digest delivery failed (a partial
-		// open — not something the webhook sink produces today, but
-		// the Sink contract allows it): consistent with a failed
-		// digest inject, the buffer is dropped after counting.
 		b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
-		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", b.sid, len(b.buffer), err)
-		b.clearBufferLocked()
-		return
+		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", newSid, len(entries), err)
+		return newSid, nextGen, 0
 	}
-	b.finishFlushLocked()
+	b.finishFlush(entries, newSid, nextGen, 1)
+	return newSid, nextGen, 1
 }
 
-// reattachLocked offers each buffered entry to the §7.7 reattachment
-// stage and keeps only those it declined (issue #220). Order is
-// preserved, so a partially reattached flush digests its survivors in
-// arrival order exactly as before. Caller holds b.mu.
-func (b *watchboard) reattachLocked(ctx context.Context) {
-	if b.reattach == nil || len(b.buffer) == 0 {
-		return
+func (b *watchboard) reattachBatch(ctx context.Context, entries []boardEntry) []boardEntry {
+	if b.reattach == nil || len(entries) == 0 {
+		return entries
 	}
-	kept := b.buffer[:0]
-	for _, e := range b.buffer {
+	kept := entries[:0]
+	for _, e := range entries {
 		if b.reattach(ctx, e.sig, e.count) {
 			continue
 		}
 		kept = append(kept, e)
 	}
-	b.buffer = kept
-	b.metrics.watchboardBuffered.Set(float64(len(b.buffer)))
+	return kept
 }
 
-// finishFlushLocked is the common success tail of a digest delivery:
-// counters, per-entry session binding, the flush log, buffer reset.
-// Caller holds b.mu.
-func (b *watchboard) finishFlushLocked() {
-	b.injects++
+func (b *watchboard) finishFlush(entries []boardEntry, sid string, gen, injects int) {
 	b.metrics.watchboardDigests.Inc()
-	// Bind AFTER the successful inject: followups and §7.4 outcomes
-	// for these incidents now route to this watchboard session.
 	if b.bind != nil {
-		for _, e := range b.buffer {
-			b.bind(e.sig, b.sid)
+		for _, e := range entries {
+			b.bind(e.sig, sid)
 		}
 	}
 	log.Printf("watchboard: digest %d entry(ies) → sid=%s (generation=%d, injects=%d/%d, mode=per-incident)",
-		len(b.buffer), b.sid, b.generation, b.injects, b.rotateAfter)
-	b.clearBufferLocked()
+		len(entries), sid, gen, injects, b.rotateAfter)
 }
 
-// digestPayloadLocked composes the schema-stable kind=watchboard.digest
-// wire body from the buffer. Caller holds b.mu.
-func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestPayload {
-	entries := make([]inject.WatchboardEntry, 0, len(b.buffer))
-	for _, e := range b.buffer {
+func (b *watchboard) digestPayload(now, windowStart time.Time, gen, injects int, raw []boardEntry) inject.WatchboardDigestPayload {
+	entries := make([]inject.WatchboardEntry, 0, len(raw))
+	for _, e := range raw {
 		entries = append(entries, inject.WatchboardEntry{
 			Kind:         e.sig.Kind,
 			Fingerprint:  e.sig.Fingerprint,
@@ -466,17 +435,12 @@ func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestP
 	payload := inject.WatchboardDigestPayload{
 		Kind:            inject.KindWatchboardDigest,
 		Cluster:         b.cluster,
-		BoardGeneration: b.generation,
-		Sequence:        b.injects + 1,
-		WindowStart:     b.opened,
+		BoardGeneration: gen,
+		Sequence:        injects + 1,
+		WindowStart:     windowStart,
 		WindowEnd:       now,
 		Entries:         entries,
 	}
-	// Fit under the sink's per-inject ceiling here rather than at each
-	// call site: all three digest paths (append into a live session,
-	// the stateless open-WITH-digest, and the post-rotation append)
-	// build their payload through this one seam. An unfitted digest is
-	// 400d whole and its buffer discarded (#337).
 	if b.injectMaxBytes > 0 {
 		if shed := payload.FitTo(b.injectMaxBytes); len(shed) > 0 {
 			log.Printf("watchboard: digest exceeded --inject-max-bytes=%d; dropped the %d oldest of %d entries to fit "+
@@ -486,11 +450,6 @@ func (b *watchboard) digestPayloadLocked(now time.Time) inject.WatchboardDigestP
 		}
 	}
 	return payload
-}
-
-func (b *watchboard) clearBufferLocked() {
-	b.buffer = b.buffer[:0]
-	b.metrics.watchboardBuffered.Set(0)
 }
 
 // bindWatchboardIncident is the watchboard's bind callback: after a

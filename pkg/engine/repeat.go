@@ -188,15 +188,16 @@ func (c *DedupCache) repeat(e *dedupEntry, now, eventLastTS time.Time, class str
 		return result
 	}
 	if e.PendingChange {
-		// A class change is announced no sooner than the later of two
-		// windows and the current step's interval after the last
-		// inject, and it advances the step, so an incident rotating
-		// through shapes backs off 10m, 20m, 40m, 1h… and never injects
-		// more often than its reminder schedule would. Until then it is
-		// held — and it supersedes a reminder that comes due meanwhile,
-		// so that reminder cannot swallow it. A lone change therefore
-		// goes out no later than the next reminder would have.
-		if sinceInject > max(2*c.window, interval) {
+		// A class change is announced no sooner than the current step's
+		// reminder interval after the last inject, and it advances the
+		// step, so an incident rotating through shapes fires at the
+		// first reminder lapse (5m) and backs off 10m, 20m, 40m, 1h… —
+		// never injecting more often than its reminder schedule would.
+		// Until then it is held — and it supersedes a reminder that
+		// comes due meanwhile, so that reminder cannot swallow it. A
+		// lone change therefore goes out no later than the next
+		// reminder would have.
+		if sinceInject > interval {
 			e.RepeatCount = 0
 			e.Step++
 			e.LastChange = RepeatChangeClass

@@ -25,6 +25,11 @@ import (
 // converges in few transactions.
 const sizePruneBatch = 512
 
+// ttlPruneBatch caps how many expired rows a single TTL delete statement
+// removes per transaction so SQLite write locks are never held across tens
+// of thousands of rows at once (#658).
+const ttlPruneBatch = 5000
+
 // PruneStats reports one prune pass. Rows removed by the TTL cutoff
 // and by the size bound are counted separately — they are different
 // operator signals (retention working as designed vs. the store
@@ -67,15 +72,15 @@ func (s *Store) RunPrune(ctx context.Context) {
 }
 
 // PruneOnce enforces both bounds now, over ALL bounded tables
-// (occurrences, graph_changes, graph_snapshots — §9.1: one store,
-// one TTL policy): first the TTL cutoff, then the size bound (delete
-// oldest rows in batches until the database's used pages fit the
-// budget). The NEWEST graph snapshot is exempt from both bounds:
-// with zero snapshots every logged change is unreplayable, so a
-// sentinel quiet for longer than the TTL keeps exactly one baseline
-// (a snapshot describes current state, not an old event — keeping it
-// leaks no expired history). Deletions are loud: logged and reported
-// via OnPrune. Nil-safe; no-op on read-only opens.
+// (occurrences, graph_snapshots, graph_changes — §9.1: one store,
+// one TTL policy): first the TTL cutoff in bounded batches, then the
+// size bound (delete oldest rows in batches until the database's used
+// pages fit the budget). graph_snapshots are pruned BEFORE graph_changes
+// so retained older snapshots never lose their delta stream. The NEWEST
+// graph snapshot is exempt from both bounds: with zero snapshots every
+// logged change is unreplayable, so a sentinel quiet for longer than
+// the TTL keeps exactly one baseline. Deletions are loud: logged and
+// reported via OnPrune. Nil-safe; no-op on read-only opens.
 func (s *Store) PruneOnce(ctx context.Context) (PruneStats, error) {
 	if s == nil || s.readOnly {
 		return PruneStats{}, nil
@@ -84,22 +89,38 @@ func (s *Store) PruneOnce(ctx context.Context) (PruneStats, error) {
 
 	cutoff := s.clock().Add(-s.ttl).UTC().UnixNano()
 	for _, ttl := range []struct{ what, query string }{
-		{"occurrence", `DELETE FROM occurrences WHERE emitted_at < ?`},
-		{"graph change", `DELETE FROM graph_changes WHERE at < ?`},
-		{"sink session", `DELETE FROM sink_sessions WHERE updated_at < ?`},
-		{"graph snapshot", `DELETE FROM graph_snapshots WHERE taken_at < ?
-			AND id NOT IN (SELECT id FROM graph_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1)`},
+		{"occurrence", `DELETE FROM occurrences WHERE id IN
+			(SELECT id FROM occurrences WHERE emitted_at < ? ORDER BY emitted_at ASC, id ASC LIMIT ?)`},
+		{"graph snapshot", `DELETE FROM graph_snapshots WHERE id IN
+			(SELECT id FROM graph_snapshots WHERE taken_at < ?
+			 AND id NOT IN (SELECT id FROM graph_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1)
+			 ORDER BY taken_at ASC, id ASC LIMIT ?)`},
+		{"graph change", `DELETE FROM graph_changes WHERE id IN
+			(SELECT id FROM graph_changes WHERE at < ? ORDER BY at ASC, id ASC LIMIT ?)`},
+		{"sink session", `DELETE FROM sink_sessions WHERE ROWID IN
+			(SELECT ROWID FROM sink_sessions WHERE updated_at < ? ORDER BY updated_at ASC LIMIT ?)`},
 	} {
-		res, err := s.db.ExecContext(ctx, ttl.query, cutoff)
-		if err != nil {
-			return stats, err
+		var totalDeleted int64
+		for {
+			res, err := s.db.ExecContext(ctx, ttl.query, cutoff, ttlPruneBatch)
+			if err != nil {
+				return stats, err
+			}
+			n, _ := res.RowsAffected()
+			if n <= 0 {
+				break
+			}
+			totalDeleted += n
+			if n < ttlPruneBatch {
+				break
+			}
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			stats.TTLRows += n
+		if totalDeleted > 0 {
+			stats.TTLRows += totalDeleted
 			s.vacuum(ctx)
-			s.logf("store: pruned %d %s row(s) older than TTL %s", n, ttl.what, s.ttl)
+			s.logf("store: pruned %d %s row(s) older than TTL %s", totalDeleted, ttl.what, s.ttl)
 			if s.hooks.OnPrune != nil {
-				s.hooks.OnPrune("ttl", n)
+				s.hooks.OnPrune("ttl", totalDeleted)
 			}
 		}
 	}
@@ -135,18 +156,18 @@ func (s *Store) PruneOnce(ctx context.Context) (PruneStats, error) {
 
 // sizePruneStep deletes one batch of the oldest rows, working through
 // the tables in fixed order: occurrences first (highest volume,
-// lowest replay value), then graph changes, then graph snapshots —
-// always keeping the newest snapshot.
+// lowest replay value), then graph snapshots (always keeping the newest
+// snapshot), then graph changes (#658).
 func (s *Store) sizePruneStep(ctx context.Context) (int64, string, error) {
 	for _, step := range []struct{ what, query string }{
 		{"occurrence", `DELETE FROM occurrences WHERE id IN
 			(SELECT id FROM occurrences ORDER BY emitted_at ASC, id ASC LIMIT ?)`},
-		{"graph change", `DELETE FROM graph_changes WHERE id IN
-			(SELECT id FROM graph_changes ORDER BY at ASC, id ASC LIMIT ?)`},
 		{"graph snapshot", `DELETE FROM graph_snapshots WHERE id IN
 			(SELECT id FROM graph_snapshots WHERE id NOT IN
 				(SELECT id FROM graph_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1)
 			 ORDER BY taken_at ASC, id ASC LIMIT ?)`},
+		{"graph change", `DELETE FROM graph_changes WHERE id IN
+			(SELECT id FROM graph_changes ORDER BY at ASC, id ASC LIMIT ?)`},
 	} {
 		res, err := s.db.ExecContext(ctx, step.query, sizePruneBatch)
 		if err != nil {
