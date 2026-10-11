@@ -70,6 +70,7 @@ type config struct {
 	context        string
 	exemptions     string
 	store          string
+	report         string
 	maxConcurrency int
 }
 
@@ -107,6 +108,11 @@ func WithExemptions(path string) Option {
 // WithStore pins --store=<path> for MCP tool calls that accept a store.
 func WithStore(path string) Option {
 	return func(c *config) { c.store = path }
+}
+
+// WithReport pins --report=<path> for MCP tool calls that accept a report.
+func WithReport(path string) Option {
+	return func(c *config) { c.report = path }
 }
 
 // WithMaxConcurrency bounds concurrent MCP tool executions (default 8).
@@ -222,6 +228,15 @@ func commandAcceptsStore(c checks.Command) bool {
 	return false
 }
 
+func commandAcceptsReport(c checks.Command) bool {
+	for _, f := range c.Flags {
+		if f.Name == "report" {
+			return true
+		}
+	}
+	return false
+}
+
 func pinnedArgs(c checks.Command, cfg config) []string {
 	var out []string
 	if cfg.kubeconfig != "" {
@@ -235,6 +250,9 @@ func pinnedArgs(c checks.Command, cfg config) []string {
 	}
 	if cfg.store != "" && commandAcceptsStore(c) {
 		out = append(out, "--store="+cfg.store)
+	}
+	if cfg.report != "" && commandAcceptsReport(c) {
+		out = append(out, "--report="+cfg.report)
 	}
 	return out
 }

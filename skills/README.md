@@ -7,6 +7,7 @@ Task-triggered skills teaching the *decision tree across* lookout commands
 | --- | --- |
 | `k8s-triage/` | incident investigation: changes-first on sudden regressions, bundle first otherwise; logs vs events vs radius; webhook/volume/identity verification; when to net-probe |
 | `cluster-health/` | on-demand & scheduled assessment: health, reading the scorecard, drilling down, pre-maintenance drain checks |
+| `k8s-audit/` | security & reliability posture auditing: cluster, workloads, hardening, netpol, rbac, upgrades, exemption hygiene, and findings diff/ack baselining |
 | `gitops-drift/` | divergence auditing: stab drift ("who diverged") + triage changes ("what changed"), and when each answers |
 | `k8s-capacity/` | capacity & quota forecasting: the cloud stockout/quota/ipspace sweeps, capacity-source signals, reading quota.forecast + the drafted increase request, filing through the daemon's permission gate |
 | `playbooks/` | per-symptom command sequences (CrashLoopBackOff, FailedMount, HPA thrash), referenced by the skills |
@@ -49,12 +50,12 @@ repo and install into the consuming deployment — copy them next to the
 
 ```sh
 # project scope (one deployment/checkout)
-cp -r skills/k8s-triage skills/cluster-health skills/gitops-drift \
-      skills/k8s-capacity skills/playbooks /path/to/deployment/.agents/skills/
+cp -r skills/k8s-triage skills/cluster-health skills/k8s-audit \
+      skills/gitops-drift skills/k8s-capacity skills/playbooks /path/to/deployment/.agents/skills/
 
 # user scope (all sessions of one user)
-cp -r skills/k8s-triage skills/cluster-health skills/gitops-drift \
-      skills/k8s-capacity skills/playbooks "$HOME/.agents/skills/"
+cp -r skills/k8s-triage skills/cluster-health skills/k8s-audit \
+      skills/gitops-drift skills/k8s-capacity skills/playbooks "$HOME/.agents/skills/"
 ```
 
 `playbooks/` is not a skill itself (no frontmatter) — it is shared

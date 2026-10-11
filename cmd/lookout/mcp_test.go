@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -234,7 +235,7 @@ func TestMCPCommand_Help(t *testing.T) {
 	for _, want := range []string{
 		"--listen", "stdio", "loopback", "--access-log",
 		"--allow-non-loopback", "--auth-token-file",
-		"--kubeconfig", "--context", "--exemptions", "--store",
+		"--kubeconfig", "--context", "--exemptions", "--store", "--report",
 		"reverse proxy",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -243,5 +244,89 @@ func TestMCPCommand_Help(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("--help wrote to stderr: %q", stderr.String())
+	}
+}
+
+func TestMCPWithReportPinsReportAndRejectsClientOverride(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "state.db")
+	reportPath := filepath.Join(dir, "report.logfmt")
+	reportBody := "kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff message=\"back-off restarting failed container\"\nscanned=1 findings=1 elapsed=100ms\n"
+	if err := os.WriteFile(reportPath, []byte(reportBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := mcpserver.New(checks.Default(), version.Semver(),
+		mcpserver.WithStore(storePath),
+		mcpserver.WithReport(reportPath),
+	)
+	serverT, clientT := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(t.Context(), serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(t.Context(), clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// Caller-supplied "report" argument is rejected over JSON-RPC.
+	_, err = cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "k8s_findings_diff",
+		Arguments: map[string]any{"report": "/etc/passwd"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown argument "report"`) {
+		t.Fatalf("expected caller report argument rejection, got: %v", err)
+	}
+
+	// Operator-pinned --report and --store allow k8s_findings_diff to run cleanly.
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "k8s_findings_diff",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("k8s_findings_diff failed: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("k8s_findings_diff tool error: %v", res.Content)
+	}
+}
+
+func TestVerifyVersionFallbackScript(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "dev", "ci", "presubmits", "verify-version-fallback")
+	tests := []struct {
+		name   string
+		tag    string
+		actual string
+		wantOK bool
+	}{
+		{name: "minor release next minor fallback", tag: "v0.36.0", actual: "v0.37.0-dev", wantOK: true},
+		{name: "minor release next patch fallback", tag: "v0.36.0", actual: "v0.36.1-dev", wantOK: true},
+		{name: "patch release next minor fallback", tag: "v0.36.1", actual: "v0.37.0-dev", wantOK: true},
+		{name: "patch release next patch fallback", tag: "v0.36.1", actual: "v0.36.2-dev", wantOK: true},
+		{name: "minor release stale fallback", tag: "v0.36.0", actual: "v0.36.0-dev", wantOK: false},
+		{name: "patch release stale patch fallback", tag: "v0.36.1", actual: "v0.36.1-dev", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(script)
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(),
+				"VERIFY_VERSION_FALLBACK_TAG="+tc.tag,
+				"VERIFY_VERSION_FALLBACK_ACTUAL="+tc.actual,
+			)
+			out, err := cmd.CombinedOutput()
+			if tc.wantOK && err != nil {
+				t.Fatalf("expected exit 0 for tag=%s actual=%s, got err=%v:\n%s", tc.tag, tc.actual, err, out)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("expected non-zero exit for stale tag=%s actual=%s, got success:\n%s", tc.tag, tc.actual, out)
+			}
+		})
 	}
 }

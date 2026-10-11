@@ -38,9 +38,13 @@ advertise image-swap upgrades. This document is the successor rule.
    release and unmarked, it's Stable.
 
 3. **Deprecation window for Stable elements.** A breaking change to a
-   Stable flag (rename, syntax change, removal — a bool→string
-   conversion is a syntax change) must:
-   - keep the old form **accepted for ≥2 minor releases**, emitting a
+   Stable flag or subcommand (rename, syntax change, removal — a
+   bool→string conversion is a syntax change) must:
+   - keep the old form **accepted for BOTH ≥2 minor releases AND a
+     minimum calendar window of at least 60 days** pre-1.0 (**at least
+     90 days** at 1.0+), measured from the release date of the version
+     that first emitted the deprecation warning — so a burst of rapid
+     minor releases cannot expire a deprecation window in days; emit a
      one-line deprecation warning to stderr (never stdout — stdout is
      payload, DESIGN.md §4.2);
    - say so in CHANGELOG under `### Deprecated` when the window opens
@@ -59,7 +63,8 @@ advertise image-swap upgrades. This document is the successor rule.
    error (DESIGN.md §4.2) — agents branch on these.
 
 6. **At 1.0** the Stable tier converts to semver: breaking CLI changes
-   only at major versions, window rules unchanged otherwise.
+   land only at major versions after satisfying BOTH the ≥2-minor AND
+   ≥90-day calendar deprecation window beforehand.
 
 ## Out of scope
 

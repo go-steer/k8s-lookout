@@ -81,6 +81,8 @@ Flags:
                         MCP tool invocations.
   --store=<path>        path to a sentinel SQLite store pinned for MCP
                         tool invocations that read historical state.
+  --report=<path>       path to a findings report pinned for MCP tool
+                        invocations that read one.
   --profile=<name>      advertise only one curated tool surface
                         instead of all of them (see below).
   --tools=<selection>   adjust the surface tool by tool, left to
@@ -172,6 +174,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	contextName := fs.String("context", "", "kubeconfig context pinned for all MCP tool calls")
 	exemptions := fs.String("exemptions", "", "path to an exemption YAML file pinned for all MCP tool calls")
 	store := fs.String("store", "", "path to a sentinel SQLite store pinned for MCP tool calls that read one")
+	report := fs.String("report", "", "path to a findings report pinned for MCP tool calls that read one")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -260,6 +263,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mcpserver.WithSelection(*kubeconfig, *contextName),
 		mcpserver.WithExemptions(*exemptions),
 		mcpserver.WithStore(*store),
+		mcpserver.WithReport(*report),
 	)
 	if err := mcpserver.Serve(ctx, server, mcpserver.ServeOptions{
 		Listen:           *listen,
