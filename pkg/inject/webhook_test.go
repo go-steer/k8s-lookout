@@ -293,3 +293,69 @@ func TestWebhookSink_AppendEscapesID(t *testing.T) {
 		t.Errorf("append request URI = %q, want %q (id path-escaped as one segment)", rawURI, want)
 	}
 }
+
+// TestWebhookSink_ErrorPathsRedactUserinfo ensures neither username nor
+// password in cfg.URL ever leaks into returned error strings across invalid
+// URL parse failure, transport connection failure, and non-2xx (500/404)
+// HTTP responses (#632).
+func TestWebhookSink_ErrorPathsRedactUserinfo(t *testing.T) {
+	t.Parallel()
+	const (
+		user   = "user:"
+		secret = "s3cret-pw"
+	)
+	assertRedacted := func(t *testing.T, label string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", label)
+		}
+		msg := err.Error()
+		if strings.Contains(msg, secret) {
+			t.Errorf("%s leaked password %q in error: %s", label, secret, msg)
+		}
+		if strings.Contains(msg, user) {
+			t.Errorf("%s leaked userinfo %q in error: %s", label, user, msg)
+		}
+	}
+
+	// 1. Invalid URL error path in post (http.NewRequestWithContext parse error).
+	badURLSink, err := NewWebhookSink(WebhookConfig{URL: "https://user:s3cret-pw@127.0.0.1:badport"})
+	if err != nil {
+		t.Fatalf("NewWebhookSink: %v", err)
+	}
+	_, err = badURLSink.OpenIncident(context.Background(), Payload{Kind: KindEvent})
+	assertRedacted(t, "invalid URL OpenIncident", err)
+
+	// 2. Transport connection error path in post (closed server port).
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	closedHost := strings.TrimPrefix(closedSrv.URL, "http://")
+	closedSrv.Close()
+	connErrSink, err := NewWebhookSink(WebhookConfig{
+		URL: "https://user:s3cret-pw@" + closedHost,
+	})
+	if err != nil {
+		t.Fatalf("NewWebhookSink: %v", err)
+	}
+	_, err = connErrSink.OpenIncident(context.Background(), Payload{Kind: KindEvent})
+	assertRedacted(t, "connection error OpenIncident", err)
+
+	// 3. 500 and 404 HTTP status error responses.
+	for _, status := range []int{http.StatusInternalServerError, http.StatusNotFound} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "upstream failure", status)
+		}))
+		t.Cleanup(srv.Close)
+		host := strings.TrimPrefix(srv.URL, "http://")
+		s, err := NewWebhookSink(WebhookConfig{
+			URL: "http://user:s3cret-pw@" + host,
+		})
+		if err != nil {
+			t.Fatalf("NewWebhookSink: %v", err)
+		}
+		_, err = s.OpenIncident(context.Background(), Payload{Kind: KindEvent})
+		assertRedacted(t, "OpenIncident status error", err)
+
+		err = s.Append(context.Background(), "inc-1", Payload{Kind: KindFollowup})
+		assertRedacted(t, "Append status error", err)
+	}
+}

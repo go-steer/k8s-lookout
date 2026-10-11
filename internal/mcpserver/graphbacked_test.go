@@ -46,20 +46,27 @@ func TestInputSchema_GraphBackedGetsHistoryFlags(t *testing.T) {
 	gb := base
 	gb.GraphBacked = true
 	schema := inputSchema(gb)
-	for _, prop := range []string{"at", "store"} {
+	for _, prop := range []string{"at", "store_cluster"} {
 		if _, ok := schema.Properties[prop]; !ok {
 			t.Errorf("graph-backed schema missing %q", prop)
 		}
 	}
+	if _, ok := schema.Properties["store"]; ok {
+		t.Errorf("graph-backed schema must not expose server-scoped %q", "store")
+	}
 
-	// argv mapping accepts the properties and produces the flags.
-	args, err := argv(gb, []byte(`{"at":"20m","store":"/var/lib/lookout/lookout.db"}`))
+	// argv mapping accepts client-safe history flags (`at`, `store_cluster`)
+	// and rejects host-path `--store`.
+	args, err := argv(gb, []byte(`{"at":"20m","store_cluster":"prod-east"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--at=20m", "--store=/var/lib/lookout/lookout.db"}
+	want := []string{"--at=20m", "--store-cluster=prod-east"}
 	if len(args) != len(want) || args[0] != want[0] || args[1] != want[1] {
 		t.Errorf("argv = %v, want %v", args, want)
+	}
+	if _, err := argv(gb, []byte(`{"store":"/var/lib/lookout/lookout.db"}`)); err == nil {
+		t.Error("graph-backed argv must reject server-scoped store property")
 	}
 	// ...and rejects them for live-only commands.
 	if _, err := argv(base, []byte(`{"at":"20m"}`)); err == nil {

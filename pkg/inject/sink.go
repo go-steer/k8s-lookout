@@ -144,15 +144,16 @@ func newSinkHTTPClient() *http.Client {
 	}
 }
 
-// RedactedURL is raw with any userinfo password masked, for log lines and
-// errors: a sink URL may carry credentials (http://user:pass@host), and
-// those must never reach a log.
+// RedactedURL returns raw with any URL userinfo stripped completely, for log
+// lines and errors: a sink URL may carry credentials (http://user:pass@host),
+// and neither user nor password may reach a log or error surface.
 func RedactedURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "(unparseable URL)"
 	}
-	return u.Redacted()
+	u.User = nil
+	return u.String()
 }
 
 // NewSinkHTTPClient returns the shared sink transport for sinks that live

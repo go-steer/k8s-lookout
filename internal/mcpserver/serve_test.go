@@ -16,6 +16,7 @@ package mcpserver
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -133,4 +134,63 @@ func TestServe_LoopbackHTTPRoundTrip(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Serve did not return after cancellation")
 	}
+}
+
+// TestServe_HTTPMiddlewareRecordsRemoteAndLimitsBody verifies S3 (#633):
+// HTTP requests propagate r.RemoteAddr into AccessLog (remote=<addr>) and
+// wrapHTTPHandler enforces the 1 MiB request body cap via http.MaxBytesReader.
+func TestServe_HTTPMiddlewareRecordsRemoteAndLimitsBody(t *testing.T) {
+	log, buf := testLog(t, 5*time.Millisecond)
+	server := New(testRegistry(t), "test", WithAccessLog(log))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, server, ServeOptions{
+			Listen: "127.0.0.1:0",
+			Ready:  ready,
+		})
+	}()
+
+	var addr string
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("Serve exited before ready: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for listener")
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: "http://" + addr}, nil)
+	if err != nil {
+		t.Fatalf("client connect over HTTP: %v", err)
+	}
+	if _, err := callTool(t, cs, "k8s_triage_demo", map[string]any{"count": 1}); err != nil {
+		t.Fatalf("tools/call over HTTP: %v", err)
+	}
+	_ = cs.Close()
+
+	recs := records(t, buf)
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 access log record, got %d:\n%s", len(recs), buf.String())
+	}
+	if !strings.HasPrefix(recs[0]["remote"], "127.0.0.1:") {
+		t.Errorf("access log remote = %q, want 127.0.0.1:<port>", recs[0]["remote"])
+	}
+
+	// Verify > 1 MiB body is rejected by MaxBytesReader.
+	huge := strings.Repeat("a", maxHTTPBodyBytes+1024)
+	resp, err := http.Post("http://"+addr, "application/json", strings.NewReader(huge))
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			t.Errorf("expected >1 MiB HTTP body to fail, got status %d", resp.StatusCode)
+		}
+	}
+
+	cancel()
+	<-done
 }

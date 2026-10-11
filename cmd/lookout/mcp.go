@@ -52,15 +52,18 @@ k8s_triage_delta), input schemas mirror the CLI flags plus a "target"
 property where a command takes a positional argument, and tool
 results carry the same payload the CLI prints — logfmt findings
 terminated by the scanned=/findings=/elapsed= summary line, sanitized
-by §6.5.
+by §6.5. Host file paths and cluster credentials are server-scoped and
+never accepted from MCP clients.
 
 Flags:
   --listen=<host:port>  serve streamable HTTP on a loopback address
                         (e.g. 127.0.0.1:8383) instead of stdio.
-                        Non-loopback binds are refused unless all
-                        three of --allow-non-loopback,
-                        --auth-token-file, and --access-log are
-                        given (§4.3).
+                        Serves plain HTTP (no TLS) — off-host exposure
+                        requires a TLS-terminating reverse proxy in
+                        front of lookout mcp. Non-loopback binds are
+                        refused unless all three of --allow-non-loopback,
+                        --auth-token-file, and --access-log are given
+                        (§4.3).
   --allow-non-loopback  opt in to a routable bind. Not enough on its
                         own: a bind flag must not open an
                         unauthenticated cluster-read API.
@@ -69,6 +72,15 @@ Flags:
                         authorization — every caller presenting it
                         gets the full advertised surface. Compared in
                         constant time. mTLS is out of scope.
+  --kubeconfig=<path>   path to a kubeconfig file pinned for all MCP
+                        tool invocations (instead of $KUBECONFIG /
+                        ~/.kube/config).
+  --context=<name>      kubeconfig context pinned for all MCP tool
+                        invocations.
+  --exemptions=<path>   path to an exemption YAML file pinned for all
+                        MCP tool invocations.
+  --store=<path>        path to a sentinel SQLite store pinned for MCP
+                        tool invocations that read historical state.
   --profile=<name>      advertise only one curated tool surface
                         instead of all of them (see below).
   --tools=<selection>   adjust the surface tool by tool, left to
@@ -95,11 +107,12 @@ Flags:
                         (docs/in-pod-probe-design.md).
   --access-log=<path>   append one logfmt line per tool call:
                         ts, tool, exit code, duration, response
-                        bytes. Created if absent, appended if not,
-                        mode 0600. Deliberately not the arguments or
-                        the response body — the log is an operational
-                        record, not a second copy of cluster data.
-                        Optional on loopback, mandatory off-host.
+                        bytes (plus remote peer address on HTTP).
+                        Created if absent, appended if not, mode 0600.
+                        Deliberately not the arguments or the response
+                        body — the log is an operational record, not a
+                        second copy of cluster data. Optional on
+                        loopback, mandatory off-host.
 
 Profiles:
 %s
@@ -155,6 +168,10 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	allowNonLoopback := fs.Bool("allow-non-loopback", false, "permit a routable --listen address (requires --auth-token-file and --access-log)")
 	authTokenFile := fs.String("auth-token-file", "", "require this bearer token on every HTTP request")
 	probeFromImage := fs.String("probe-from-image", "", "serve the privileged k8s_net_probe_from tool, running this digest-pinned image")
+	kubeconfig := fs.String("kubeconfig", "", "path to a kubeconfig file pinned for all MCP tool calls")
+	contextName := fs.String("context", "", "kubeconfig context pinned for all MCP tool calls")
+	exemptions := fs.String("exemptions", "", "path to an exemption YAML file pinned for all MCP tool calls")
+	store := fs.String("store", "", "path to a sentinel SQLite store pinned for MCP tool calls that read one")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -238,7 +255,12 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	server := mcpserver.New(reg, version.Semver(),
-		mcpserver.WithTools(selected), mcpserver.WithAccessLog(log))
+		mcpserver.WithTools(selected),
+		mcpserver.WithAccessLog(log),
+		mcpserver.WithSelection(*kubeconfig, *contextName),
+		mcpserver.WithExemptions(*exemptions),
+		mcpserver.WithStore(*store),
+	)
 	if err := mcpserver.Serve(ctx, server, mcpserver.ServeOptions{
 		Listen:           *listen,
 		AllowNonLoopback: *allowNonLoopback,

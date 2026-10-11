@@ -113,9 +113,17 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 			}
 		}
 		for _, f := range c.Flags {
+			if mcpserver.IsServerScopedFlag(f.Name) {
+				continue
+			}
 			p := strings.ReplaceAll(f.Name, "-", "_")
 			if schema.Properties[p] == nil {
 				t.Errorf("tool %q: schema is missing declared flag property %q", tool.Name, p)
+			}
+		}
+		for _, forbidden := range []string{"kubeconfig", "context", "exemptions", "store", "report"} {
+			if schema.Properties[forbidden] != nil {
+				t.Errorf("tool %q: schema must not expose server-scoped flag %q", tool.Name, forbidden)
 			}
 		}
 		if _, hasTarget := schema.Properties["target"]; hasTarget != (c.Positional != nil) {
@@ -226,6 +234,8 @@ func TestMCPCommand_Help(t *testing.T) {
 	for _, want := range []string{
 		"--listen", "stdio", "loopback", "--access-log",
 		"--allow-non-loopback", "--auth-token-file",
+		"--kubeconfig", "--context", "--exemptions", "--store",
+		"reverse proxy",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help does not mention %q:\n%s", want, stdout.String())

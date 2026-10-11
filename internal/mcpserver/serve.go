@@ -83,11 +83,13 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 		return err
 	}
 	httpServer := &http.Server{
-		Handler: opts.Auth.Wrap(mcp.NewStreamableHTTPHandler(
-			func(*http.Request) *mcp.Server { return server }, nil)),
+		Handler: opts.Auth.Wrap(wrapHTTPHandler(mcp.NewStreamableHTTPHandler(
+			func(*http.Request) *mcp.Server { return server }, nil))),
 		// Bounded even on loopback: a wedged local client must not pin
-		// header reads open forever (gosec G112).
+		// header reads, request bodies, or keep-alive sockets open forever.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	announce(opts, ln.Addr().String())
 	if opts.Ready != nil {
@@ -222,4 +224,27 @@ func ValidateLoopback(addr string) error {
 			"only 127.0.0.1, ::1, or localhost are loopback (§4.3)", addr)
 	}
 	return nil
+}
+
+type remoteAddrKey struct{}
+
+func withRemoteAddr(ctx context.Context, addr string) context.Context {
+	return context.WithValue(ctx, remoteAddrKey{}, addr)
+}
+
+func remoteAddrFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(remoteAddrKey{}).(string)
+	return v
+}
+
+const maxHTTPBodyBytes = 1 << 20 // 1 MiB
+
+func wrapHTTPHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+		if r.RemoteAddr != "" {
+			r = r.WithContext(withRemoteAddr(r.Context(), r.RemoteAddr))
+		}
+		next.ServeHTTP(w, r)
+	})
 }

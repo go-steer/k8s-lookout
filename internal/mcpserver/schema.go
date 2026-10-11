@@ -55,16 +55,43 @@ func propertyName(flag string) string {
 	return strings.ReplaceAll(flag, "-", "_")
 }
 
+// serverScopedFlags are CLI flags that name host files or select a
+// cluster credential context. On the MCP surface those belong to the
+// operator starting `lookout mcp` (WithSelection, WithExemptions,
+// WithStore), never to an untrusted model client: they are omitted
+// from inputSchema and rejected by argv if sent.
+var serverScopedFlags = map[string]bool{
+	"kubeconfig": true,
+	"context":    true,
+	"exemptions": true,
+	"store":      true,
+	"report":     true,
+}
+
+// IsServerScopedFlag reports whether flag is stripped from the MCP
+// tool schema because it belongs to the server operator rather than
+// the MCP caller.
+func IsServerScopedFlag(flag string) bool {
+	return serverScopedFlags[flag]
+}
+
 // schemaSpecs returns the §4.2 common flags (plus, for graph-backed
 // commands, the §6.6 history flags) followed by the command's own
-// flags: the complete flag surface behind a tool's schema, in the
-// order the surfaces document them.
+// flags, minus serverScopedFlags: the complete flag surface behind a
+// tool's schema, in the order the surfaces document them.
 func schemaSpecs(c checks.Command) []emit.FlagSpec {
-	specs := c.CommonFlags()
+	raw := c.CommonFlags()
 	if c.GraphBacked {
-		specs = append(specs, emit.GraphHistoryFlags()...)
+		raw = append(raw, emit.GraphHistoryFlags()...)
 	}
-	return append(specs, c.Flags...)
+	raw = append(raw, c.Flags...)
+	specs := make([]emit.FlagSpec, 0, len(raw))
+	for _, s := range raw {
+		if !serverScopedFlags[s.Name] {
+			specs = append(specs, s)
+		}
+	}
+	return specs
 }
 
 // inputSchema derives a tool's JSON schema mechanically from the
