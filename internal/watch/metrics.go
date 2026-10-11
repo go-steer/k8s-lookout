@@ -116,6 +116,7 @@ type metrics struct {
 	triageRegressed      prometheus.Counter
 	crossSourceFollowups *prometheus.CounterVec
 	repeatFollowups      *prometheus.CounterVec
+	axReminders          *prometheus.CounterVec
 	sinkInfo             *prometheus.GaugeVec
 	runnerUp             prometheus.Gauge
 	runnerRestarts       prometheus.Counter
@@ -336,6 +337,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 			Name: "lookout_repeat_followups_total",
 			Help: "Total followups injected for an incident that was still open when its dedup window lapsed (issue #599), by type: reminder is a pure reminder (repeat_count above 0, on the doubling schedule up to 1h), change is a material change (new message shape or severity, or a rate jump), open is the full open payload re-sent because the initial delivery had failed. Occurrences absorbed between reminders count in lookout_events_deduped_total.",
 		}, []string{"type"}),
+		axReminders: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_ax_reminders_total",
+			Help: "Pure reminders (repeat_count above 0) handled by the ax sink (issue #599), by outcome: held (the task was idle, so the reminder was kept instead of waking it), superseded (a held reminder replaced by a newer one for the same session), delivered (a held reminder sent ahead of the next real inject to its task), direct (sent at once because the task was busy), dropped (a held reminder that expired after 3h, was evicted past 4096 held, or failed delivery). Zero with other sinks.",
+		}, []string{"outcome"}),
 		sinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "lookout_sink_info",
 			Help: "The configured agent sink (--sink), value fixed at 1 on the active label (core-agent|webhook). ADDITIVE metric: the sink is process-level config, so it rides this info gauge instead of a new label on the operation counters — existing scrapes keep their exact series identities.",
@@ -400,6 +405,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.triageRegressed,
 		m.crossSourceFollowups,
 		m.repeatFollowups,
+		m.axReminders,
 		m.sinkInfo,
 		m.runnerUp,
 		m.runnerRestarts,

@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bearer token would cross the network unencrypted. AX itself checks no
   credentials, so there is no per-RPC credential flag yet; see the
   Cross-cluster section of `docs/ax-sink-design.md`.
+- **The ax sink no longer wakes an idle task just to remind it (#599).**
+  A pure reminder (`repeat_count` above 0) for a task that has had no
+  real inject within its idle window (the template's
+  `spec.idle.suspendAfter`, else ten minutes), or that AX records as
+  suspended, is held instead of sent, so the task can go idle and be
+  suspended. Only the latest reminder per session is kept, and it is
+  delivered just ahead of the next real inject to that task: a change, a
+  new incident in the same task, or the resolution. Anything that isn't
+  a pure reminder goes straight through as before, and the core-agent
+  and webhook sinks are unchanged. A reminder is never held when it
+  could be the agent's first word on the incident (its open or last
+  change failed to deliver), and a reminder for a task AX no longer has
+  answers 404, so the incident is reopened rather than left waiting. Held reminders live in memory (at
+  most 4096, none older than three hours) and are lost on restart. New
+  metric `lookout_ax_reminders_total{outcome}`.
 
 ### Fixed
 

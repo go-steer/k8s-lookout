@@ -898,6 +898,10 @@ func (r *runner) run(ctx context.Context) error {
 		} else {
 			log.Printf("ax sink: no --store, so incident sessions are remembered in memory only — after a restart, a reopened incident starts a new session (in the same task)")
 		}
+		// Issue #599: reminders held for idle tasks are counted per
+		// cluster, like everything else in this runner's bundle.
+		as.UseReminderCounter(r.clusterName, func(outcome string) { m.axReminders.WithLabelValues(outcome).Inc() })
+		defer as.UseReminderCounter(r.clusterName, nil)
 	}
 
 	// Severity routing (§7.7): the policy (source defaults +
