@@ -264,7 +264,10 @@ func fullNode(t *testing.T) *corev1.Node {
 	}
 	node.Status.Conditions = []corev1.NodeCondition{
 		{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
-		{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionFalse},
+		{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue},
+		{Type: corev1.NodeDiskPressure, Status: corev1.ConditionFalse},
+		{Type: corev1.NodePIDPressure, Status: corev1.ConditionFalse},
+		{Type: corev1.NodeNetworkUnavailable, Status: corev1.ConditionFalse},
 	}
 	if len(node.Status.Images) == 0 || len(node.Spec.Taints) == 0 {
 		t.Fatal("filler produced a node with no images or no taints; the test would vacuously pass")

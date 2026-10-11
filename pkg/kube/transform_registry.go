@@ -342,7 +342,7 @@ var sharedTransformRegistry = []fieldEntry{
 		Kind:   "Node",
 		Path:   "status.conditions",
 		Action: fieldStripped,
-		Why:    "Filtered, not dropped: reduced to the Ready condition. The others (MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable) are not read on the watch path.",
+		Why:    "Filtered, not dropped: reduced to Ready + MemoryPressure + DiskPressure + PIDPressure. Other informational/custom conditions (e.g. NetworkUnavailable, KernelDeadlock) are not read on the watch path.",
 	},
 
 	// -------------------------------------------------------------- Node: preserved
@@ -362,9 +362,18 @@ var sharedTransformRegistry = []fieldEntry{
 		Kind:   "Node",
 		Path:   "status.conditions[Ready]",
 		Action: fieldPreserved,
-		Why:    "Node readiness gates whether a domain counts as available; the condition filter keeps exactly this one.",
+		Why:    "Node readiness gates whether a domain counts as available.",
 		Readers: []string{
 			"pkg/sources/topology-drift — domain inventory, docs/leeway-design.md §6.1",
+		},
+	},
+	{
+		Kind:   "Node",
+		Path:   "status.conditions[MemoryPressure,DiskPressure,PIDPressure]",
+		Action: fieldPreserved,
+		Why:    "Node pressure conditions drive objectstate.node_pressure signals, eviction-burst severity escalation, and node pressure clearance.",
+		Readers: []string{
+			"pkg/sources/objectstate — nodePressure / eviction escalation / nodeclearance",
 		},
 	},
 	{

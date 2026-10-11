@@ -85,6 +85,29 @@ func TestParse_TimeZoneShiftsTheActivation(t *testing.T) {
 	}
 }
 
+func TestParse_UnsetTimeZoneUsesUTCRegardlessOfHostLocalZone(t *testing.T) {
+	// Not parallel: mutates process-wide time.Local to simulate CLI/MCP
+	// execution on non-UTC hosts (#648).
+	anchor := ts(t, "2026-03-10T00:00:00Z")
+	wantUTC := ts(t, "2026-03-10T03:00:00Z")
+
+	origLocal := time.Local
+	defer func() { time.Local = origLocal }()
+
+	for _, zoneName := range []string{"Asia/Kolkata", "America/Los_Angeles"} {
+		loc, err := time.LoadLocation(zoneName)
+		if err != nil {
+			t.Fatalf("LoadLocation(%q): %v", zoneName, err)
+		}
+		time.Local = loc
+		got := mustParse(t, "0 3 * * *", "").Next(anchor)
+		if !got.UTC().Equal(wantUTC) {
+			t.Errorf("with time.Local=%s, Parse(\"0 3 * * *\", \"\").Next = %s, want %s (UTC)",
+				zoneName, got.UTC(), wantUTC)
+		}
+	}
+}
+
 func TestParse_UnknownTimeZoneIsAnError(t *testing.T) {
 	t.Parallel()
 	if _, err := Parse("0 3 * * *", "Mars/Olympus_Mons"); err == nil {

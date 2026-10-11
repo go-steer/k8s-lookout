@@ -30,9 +30,9 @@ package store
 //     goroutine as occurrences: it is called per applied informer
 //     delta (hot path, under the graph writer's mutex) and must
 //     never block — a full buffer drops the record loudly, exactly
-//     like an occurrence. A dropped change record degrades --at
-//     precision inside one snapshot interval, never correctness of
-//     later times (the next snapshot re-baselines).
+//     like an occurrence. Replayer.nodeNew extends the key table across
+//     keyed ID gaps left by dropped deltas until the next snapshot
+//     re-baselines (#656).
 //   - PutGraphSnapshot is synchronous: it runs on the sentinel's
 //     snapshot loop every ~5 minutes, and a failed snapshot should
 //     be seen (returned) there, not logged from a queue.

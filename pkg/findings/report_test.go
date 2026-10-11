@@ -200,8 +200,8 @@ func TestParseReportSummaryWithNotes(t *testing.T) {
 	// §6.6 graph-backed commands stamp source=/at= notes onto the
 	// summary; those must not be mistaken for a finding.
 	for _, line := range []string{
-		"scanned=10 findings=2 elapsed=1s source=history at=2026-08-13T12:00:00Z\n",
-		`{"scanned":10,"findings":2,"elapsed":"1s","source":"history"}` + "\n",
+		"scanned=10 findings=0 elapsed=1s source=history at=2026-08-13T12:00:00Z\n",
+		`{"scanned":10,"findings":0,"elapsed":"1s","source":"history"}` + "\n",
 	} {
 		got, _, err := ParseReport(strings.NewReader(line), "")
 		if err != nil {
@@ -210,6 +210,51 @@ func TestParseReportSummaryWithNotes(t *testing.T) {
 		if len(got) != 0 {
 			t.Errorf("ParseReport(%q) returned %d observations, want 0", line, len(got))
 		}
+	}
+}
+
+func TestParseReportRejectsVoidOrTruncatedStreams(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{
+			name: "empty stream",
+			in:   "",
+		},
+		{
+			name: "whitespace only",
+			in:   "\n   \n",
+		},
+		{
+			name: "truncated findings without summary",
+			in:   `kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-1 reason=CrashLoopBackOff` + "\n",
+		},
+		{
+			name: "summary count exceeds actual findings",
+			in:   "scanned=10 findings=2 elapsed=1s\n",
+		},
+		{
+			name: "summary count less than actual findings",
+			in: strings.Join([]string{
+				`kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-1 reason=CrashLoopBackOff`,
+				`scanned=10 findings=0 elapsed=1s`,
+			}, "\n") + "\n",
+		},
+		{
+			name: "finding line after summary line",
+			in: strings.Join([]string{
+				`scanned=1 findings=1 elapsed=1s`,
+				`kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-1 reason=CrashLoopBackOff`,
+			}, "\n") + "\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := ParseReport(strings.NewReader(tc.in), "prod"); err == nil {
+				t.Errorf("ParseReport(%s) = nil error, want rejection", tc.name)
+			}
+		})
 	}
 }
 

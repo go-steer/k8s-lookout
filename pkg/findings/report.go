@@ -96,6 +96,8 @@ func ParseReport(r io.Reader, cluster string) ([]Observation, int, error) {
 
 	var out []Observation
 	var noSubject int
+	var sawSummary bool
+	var declaredFindings int
 	line := 0
 	for sc.Scan() {
 		line++
@@ -109,9 +111,18 @@ func ParseReport(r io.Reader, cluster string) ([]Observation, int, error) {
 		}
 		if _, ok := fields["kind"]; !ok {
 			if isSummary(fields) {
+				n, err := strconv.Atoi(fields["findings"])
+				if err != nil || n < 0 {
+					return nil, 0, fmt.Errorf("report line %d: invalid findings count %q in summary line", line, fields["findings"])
+				}
+				sawSummary = true
+				declaredFindings = n
 				continue
 			}
 			return nil, 0, fmt.Errorf("report line %d: record has no kind and is not the summary line: %q", line, truncateForError(text))
+		}
+		if sawSummary {
+			return nil, 0, fmt.Errorf("report line %d: finding record appeared after summary line", line)
 		}
 		if fields["kind_of_object"] == "" && fields["name"] == "" {
 			noSubject++
@@ -130,6 +141,13 @@ func ParseReport(r io.Reader, cluster string) ([]Observation, int, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, 0, fmt.Errorf("read report: %w", err)
+	}
+	if !sawSummary {
+		return nil, 0, fmt.Errorf("report stream ended without a valid summary line (scanned=... findings=... elapsed=...); upstream command likely failed or was truncated")
+	}
+	parsedTotal := len(out) + noSubject
+	if parsedTotal != declaredFindings {
+		return nil, 0, fmt.Errorf("report summary declared findings=%d, but stream contained %d finding record(s)", declaredFindings, parsedTotal)
 	}
 	return out, noSubject, nil
 }

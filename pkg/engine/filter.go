@@ -194,6 +194,9 @@ func (f *Filter) Accept(sig Signal) bool {
 // events an operator expected is indistinguishable from a broken
 // watcher unless the suppression is countable per rule.
 func (f *Filter) Decide(sig Signal) (bool, string) {
+	if f == nil {
+		return true, ""
+	}
 	eventKind := isK8sEventKind(sig.Kind)
 	if eventKind && f.cfg.allowedReasons != nil {
 		if _, ok := f.cfg.allowedReasons[sig.Key.Reason]; !ok {

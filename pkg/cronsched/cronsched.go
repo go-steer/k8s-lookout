@@ -56,7 +56,7 @@ type Schedule struct {
 func (s Schedule) Spec() string { return s.spec }
 
 // Parse resolves schedule (spec.schedule) in timeZone (spec.timeZone,
-// "" for the controller's local time) into a Schedule.
+// "" defaults to UTC to match kube-controller-manager) into a Schedule.
 //
 // The API server rejects a malformed spec.schedule at admission, so a
 // parse error here means the API server and this parser disagree —
@@ -65,12 +65,22 @@ func Parse(schedule, timeZone string) (Schedule, error) {
 	spec := schedule
 	if timeZone != "" {
 		spec = "CRON_TZ=" + timeZone + " " + schedule
+	} else if schedule != "" && !hasZonePrefix(schedule) {
+		spec = "CRON_TZ=UTC " + schedule
 	}
 	inner, err := cron.ParseStandard(spec)
 	if err != nil {
 		return Schedule{}, fmt.Errorf("parse schedule %q: %w", spec, err)
 	}
-	return Schedule{inner: inner, spec: spec}, nil
+	outSpec := schedule
+	if timeZone != "" {
+		outSpec = spec
+	}
+	return Schedule{inner: inner, spec: outSpec}, nil
+}
+
+func hasZonePrefix(schedule string) bool {
+	return len(schedule) >= 3 && (schedule[:3] == "TZ=" || (len(schedule) >= 8 && schedule[:8] == "CRON_TZ="))
 }
 
 // Next returns the first activation strictly after t, or the zero time

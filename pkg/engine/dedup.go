@@ -1053,10 +1053,17 @@ type BoundIncident struct {
 // after a restart. Entries bound by the pre-recovery BindSession (or
 // restored from an older snapshot) lack the ref and are skipped.
 func (c *DedupCache) Bindings() []BoundIncident {
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]BoundIncident, 0, len(c.entries))
 	for key, entry := range c.entries {
+		if entry.Resolved {
+			if c.window > 0 && now.Sub(entry.LastSeen) > c.window {
+				delete(c.entries, key)
+			}
+			continue
+		}
 		if entry.SessionID == "" || entry.Incident == nil {
 			continue
 		}

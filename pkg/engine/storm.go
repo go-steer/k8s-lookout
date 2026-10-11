@@ -974,6 +974,32 @@ func (c *StormCorrelator) BindStormSession(id, sessionID string) {
 	}
 }
 
+// ClearStormSession unbinds deadSessionID from any storm carrying that
+// fingerprint (or all active storms when fp is empty) and returns the
+// updated StormInfo snapshot so callers can immediately reopen the
+// storm session after a 404/410 from the sink (#608).
+func (c *StormCorrelator) ClearStormSession(fp, deadSessionID string) (StormInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, st := range c.storms {
+		if st == nil {
+			continue
+		}
+		if (fp != "" && st.fingerprint == fp) || (deadSessionID != "" && st.sessionID == deadSessionID) {
+			if deadSessionID == "" || st.sessionID == deadSessionID {
+				st.sessionID = ""
+			}
+			for i := range st.members {
+				if st.members[i].SessionID == deadSessionID {
+					st.members[i].SessionID = ""
+				}
+			}
+			return st.info(), true
+		}
+	}
+	return StormInfo{}, false
+}
+
 // StormMembers snapshots an open storm's members (arrival order).
 // Read-only, like ActiveStorms — the dispatcher uses it to rebind
 // every member when it recovers a storm whose formation-time session

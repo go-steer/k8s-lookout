@@ -228,14 +228,22 @@ func (r *Replayer) nodeNew(d *decoder) error {
 	if kind >= numNodeKinds {
 		return fmt.Errorf("nodeNew %d: unknown kind %d", id, kind)
 	}
+	const maxIDGap = 1 << 20
 	switch {
-	case uint64(id) == uint64(len(r.keys))+1:
-		// Identity interned after the base snapshot: extend exactly
-		// like the live interner did, so NodeIDs stay identical.
+	case id == NoNode:
+		return fmt.Errorf("nodeNew %d: id outside interner (have %d identities)", id, len(r.keys))
+	case uint64(id) > uint64(len(r.keys)):
+		if key == "" || uint64(id)-uint64(len(r.keys)) > maxIDGap {
+			return fmt.Errorf("nodeNew %d: id outside interner (have %d identities)", id, len(r.keys))
+		}
+		for uint64(len(r.keys)) < uint64(id)-1 {
+			r.keys = append(r.keys, "")
+		}
 		r.keys = append(r.keys, key)
 		r.ids[key] = id
-	case id == NoNode || uint64(id) > uint64(len(r.keys)):
-		return fmt.Errorf("nodeNew %d: id outside interner (have %d identities)", id, len(r.keys))
+	case r.keys[id-1] == "":
+		r.keys[id-1] = key
+		r.ids[key] = id
 	case r.keys[id-1] != key:
 		return fmt.Errorf("nodeNew %d: key %q does not match interned %q", id, key, r.keys[id-1])
 	}

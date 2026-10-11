@@ -206,12 +206,19 @@ const defaultUncoveredTTL = time.Hour
 // revert window is set equal to stableFor per §7.4. emit receives
 // the resolved / resolved.reverted Signals.
 func NewRecoveryTracker(stableFor time.Duration, emit func(Signal)) *RecoveryTracker {
+	return NewRecoveryTrackerWithClock(stableFor, emit, nil)
+}
+
+// NewRecoveryTrackerWithClock constructs a tracker with an explicit clock
+// function for deterministic unit testing.
+func NewRecoveryTrackerWithClock(stableFor time.Duration, emit func(Signal), now func() time.Time) *RecoveryTracker {
 	return &RecoveryTracker{
 		incidents:    make(map[EventKey]*trackedIncident),
 		stableFor:    stableFor,
 		revertWindow: stableFor,
 		uncoveredTTL: defaultUncoveredTTL,
 		emit:         emit,
+		now:          now,
 	}
 }
 
@@ -277,6 +284,19 @@ func (t *RecoveryTracker) Open(key EventKey) bool {
 	defer t.mu.Unlock()
 	ti, ok := t.incidents[key]
 	return ok && ti.state != stateResolved
+}
+
+// RequeueResolved returns an incident whose kind=resolved delivery
+// failed transiently (e.g. HTTP 5xx from the sink) back to
+// stateClearing so the next Tick re-evaluates and re-emits the outcome
+// record once the sink recovers (#640).
+func (t *RecoveryTracker) RequeueResolved(key EventKey) {
+	key.Reason = CanonicalReason(key.Reason)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ti, ok := t.incidents[key]; ok && ti.state == stateResolved {
+		ti.state = stateClearing
+	}
 }
 
 // Tick evaluates every tracked incident against the observers and

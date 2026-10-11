@@ -89,6 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are still runtime errors. Cluster discovery for a multi-cluster
   `lookout watch` is not covered: with no token there is no cluster to
   watch, so startup still fails with the raw error.
+- **Informer node transform (`#622`).** Retain `MemoryPressure`, `DiskPressure`, and `PIDPressure` conditions on cached `Node` objects in `kube.Transform` so `objectstate.node_pressure`, pressure clearance, and eviction escalation fire reliably.
+- **Storm & recovery delivery resilience (`#608`, `#640`).** Clear dead storm session IDs on HTTP `404`/`410` across all storm append paths so replacement sessions open cleanly; exclude resolved entries from `DedupCache.Bindings()` across `--dedup-persist` restarts; and defer local `resolved` commit until sink delivery succeeds so transient `5xx` errors retry on the next tick.
+- **`findings diff` void-stream protection (`#647`).** Require a valid terminating `scanned=... findings=... elapsed=...` summary line and cross-check parsed record counts before mutating stored finding state.
+- **CronJob default timezone (`#648`).** Evaluate unset `CronJob.Spec.TimeZone` schedules in `UTC` (`CRON_TZ=UTC`) instead of the CLI/MCP host's local timezone.
+- **Graph history namespace ordering & gap replay (`#656`).** Intern `Namespace` nodes before child object keys on first sight in `pkg/graph` and extend `Replayer.nodeNew` across keyed ID gaps so `--at` queries stay valid when new namespaces appear between snapshots.
 
 ## [0.35.0] - 2026-10-11
 
