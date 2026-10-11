@@ -356,7 +356,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
 | `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
 | `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
-| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
+| `class` | cloud.unavailable (reason=PermissionDenied or SweepFailed): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission or "sweep failed" |
 | `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
 | `usage` | current usage in the quota's own unit |
 | `limit` | the quota limit |

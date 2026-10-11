@@ -58,10 +58,16 @@ package cloudcheck
 // 403, e.g. no compute.addresses.list) degrades alone: one
 // cloud.unavailable finding naming the class and permission, an
 // unavailable= summary note, and the other classes still swept, exit
-// 0. Any other sweep error stays a runtime error (exit 1).
+// 0. Any other provider error in one class's sweep degrades the same
+// way, as reason=SweepFailed carrying the provider's error (#612: one
+// load balancer the provider could not resolve once cost the whole
+// command its address sweep and exit code). Two failures stay runtime
+// errors (exit 1): a canceled or timed-out invocation (--timeout),
+// and writing the output itself.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -121,11 +127,12 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "total_max_node_count", Doc: "orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits"},
 			{Name: "autoprovisioned", Doc: "orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise"},
 			{Name: "nodepools_skipped", Doc: "summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod)"},
-			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission"},
+			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied or SweepFailed): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission or \"sweep failed\""},
+			{Name: "error", Doc: "cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API), cut to 300 characters; nothing from the failed class is reported, never a partial list"},
 			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
 			{Name: "capability", Doc: "cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools)"},
 			{Name: "provider", Doc: "cloud.unavailable: the provider that was asked"},
-			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, or a forbidden Node/Pod List for nodepools)"},
+			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — \"sweep failed\" — or a forbidden Node/Pod List for nodepools)"},
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout cloud orphans",
@@ -234,7 +241,19 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 			// --only gained addresses, and an identity without
 			// compute.addresses.list must keep getting its disk and
 			// lb answer from the same invocation.
-			note, err := emitClassDenied(inv, provider, s.class, permission)
+			note, err := emitClassDenied(inv, provider, s.class, s.capability, permission)
+			if err != nil {
+				return 0, err
+			}
+			refused = append(refused, note)
+			continue
+		}
+		var failed *classSweepError
+		if errors.As(err, &failed) && ctx.Err() == nil {
+			// Any other provider failure degrades the class alone
+			// too (#612); a canceled or timed-out invocation does
+			// not — every later class would fail the same way.
+			note, err := emitClassFailed(inv, provider, s.class, s.capability, failed.err)
 			if err != nil {
 				return 0, err
 			}
@@ -258,13 +277,13 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 // cloud.unavailable finding naming the refused class and, when the
 // provider knows it, the permission to grant. It returns the
 // summary-note fragment for the class.
-func emitClassDenied(inv emit.Invocation, p cloud.Provider, class, permission string) (string, error) {
+func emitClassDenied(inv emit.Invocation, p cloud.Provider, class string, capability cloud.Capability, permission string) (string, error) {
 	need := "permission denied"
 	if permission != "" {
 		need = "needs " + permission
 	}
 	details := []emit.Field{
-		{Key: "capability", Value: string(cloud.CapabilityOrphans)},
+		{Key: "capability", Value: string(capability)},
 		{Key: "provider", Value: p.Name()},
 		{Key: "class", Value: class},
 	}
@@ -283,12 +302,61 @@ func emitClassDenied(inv emit.Invocation, p cloud.Provider, class, permission st
 	return class + ": " + need, nil
 }
 
+// classSweepError marks an error that came from the provider during
+// one class's sweep, as opposed to writing the output — only the
+// former may degrade the class.
+type classSweepError struct{ err error }
+
+func (e *classSweepError) Error() string { return e.err.Error() }
+func (e *classSweepError) Unwrap() error { return e.err }
+
+// providerFailure wraps a provider call's error as a classSweepError;
+// nil stays nil.
+func providerFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classSweepError{err: err}
+}
+
+// sweepErrorCap bounds the provider error carried on a SweepFailed
+// record: enough for the API's status and message, not a dump.
+const sweepErrorCap = 300
+
+// emitClassFailed is emitClassDenied's twin for any other provider
+// failure: one cloud.unavailable finding (reason=SweepFailed) naming
+// the class and carrying the provider's error. It returns the
+// summary-note fragment for the class.
+func emitClassFailed(inv emit.Invocation, p cloud.Provider, class string, capability cloud.Capability, cause error) (string, error) {
+	// Mask before cutting: a cut through a credential (a PEM block
+	// losing its END line) would hide it from the writer's sanitizer.
+	msg := emit.MaskString(cause.Error())
+	if r := []rune(msg); len(r) > sweepErrorCap {
+		msg = string(r[:sweepErrorCap]) + "…"
+	}
+	if err := inv.Out.Emit(emit.Finding{
+		Kind:     "cloud.unavailable",
+		Severity: emit.SeverityInfo,
+		Reason:   "SweepFailed",
+		Message:  fmt.Sprintf("cloud orphans could not finish sweeping %s: a provider call failed (see error) — no %s are reported; the other selected classes were still swept", class, class),
+		Details: []emit.Field{
+			{Key: "capability", Value: string(capability)},
+			{Key: "provider", Value: p.Name()},
+			{Key: "class", Value: class},
+			{Key: "error", Value: msg},
+		},
+	}); err != nil {
+		return "", err
+	}
+	return class + ": sweep failed", nil
+}
+
 // sweepDisks reports unattached disks at least minAge idle; it
 // returns how many unattached disks it examined.
 func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
 	disks, err := api.OrphanDisks(ctx)
 	if err != nil {
-		return 0, err
+		return 0, providerFailure(err)
 	}
 	var old []cloud.OrphanDisk
 	for _, d := range disks {
@@ -317,7 +385,7 @@ func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, n
 func sweepLBs(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation) (int, error) {
 	lbs, err := api.OrphanLoadBalancers(ctx)
 	if err != nil {
-		return 0, err
+		return 0, providerFailure(err)
 	}
 	sort.Slice(lbs, func(i, j int) bool { return lbs[i].Name < lbs[j].Name })
 	for _, lb := range lbs {
@@ -333,7 +401,7 @@ func sweepLBs(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation) (in
 func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
 	addrs, err := api.OrphanAddresses(ctx)
 	if err != nil {
-		return 0, err
+		return 0, providerFailure(err)
 	}
 	var old []cloud.OrphanAddress
 	for _, a := range addrs {

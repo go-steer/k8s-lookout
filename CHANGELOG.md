@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cloud orphans` no longer fails in projects with a global HTTP(S)
+  load balancer (#612).** The load-balancer sweep fetched a regional
+  instance group behind a global backend service as if it were zonal,
+  with an empty zone; Compute answered 400, and the error ended the
+  whole command with exit 1 after the disk findings, so the address
+  sweep never ran. Backends are now fetched where they live (zonal or
+  regional instance groups; zonal, regional or global NEGs), and URL
+  maps are followed through route rules and weighted backends too. A
+  rule is reported only when every backend it routes to was counted
+  and all were empty: serverless and Private Service Connect NEGs,
+  backend buckets and redirect-only URL maps have no endpoint count to
+  judge, so their rules are skipped rather than called orphans.
+  Separately, any provider error in one class's sweep now degrades that
+  class alone, the way a refused permission already did: a
+  `cloud.unavailable` record with `reason=SweepFailed`, the `class`,
+  and the provider's message in a new `error` field, a `lbs: sweep
+  failed` fragment in the summary's `unavailable=` note, the other
+  classes still swept, and exit 0. A `--timeout` that expires is still
+  exit 1. A refused `--only=nodepools` cluster read now names its
+  `capability` as `cluster-config` instead of `orphans`.
+
 ## [0.35.0] - 2026-10-11
 
 **This release stops a failure that stays broken from re-paging its

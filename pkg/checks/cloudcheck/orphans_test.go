@@ -15,6 +15,7 @@
 package cloudcheck_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -309,19 +310,141 @@ func TestOrphansAllDenied(t *testing.T) {
 	}
 }
 
-// TestOrphansRuntimeErrorFatal: only a permission refusal degrades;
-// any other sweep failure stays a runtime error (exit 1).
-func TestOrphansRuntimeErrorFatal(t *testing.T) {
+// lbResolveErr is the #612 failure as the GKE provider returned it:
+// one forwarding rule's backend fetched zonally with an empty zone.
+const lbResolveErr = `resolving forwarding rule "hypercomputer-w1-traffic-http-forwarding-rule": googleapi: Error 400: Invalid value for field 'zone': ''. Must be a match of regex '[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?|[1-9][0-9]{0,19}', invalid`
+
+// TestOrphansSweepFailedDegradesClass is the #612 regression: a
+// non-permission provider error in the lb sweep costs that class one
+// cloud.unavailable (reason=SweepFailed, class=lbs, the provider's
+// error) — the disk findings before it and the address sweep after it
+// still run, and the exit code stays 0.
+func TestOrphansSweepFailedDegradesClass(t *testing.T) {
 	api := orphanFixture()
-	api.addrsErr = errors.New("listing addresses: googleapi: Error 500: Internal Error, backendError")
+	api.lbsErr = errors.New(lbResolveErr)
 	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
 	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0 (a failed class degrades, not fails); stderr: %s", res.Code, res.Stderr)
+	}
+	if !api.addrsCalled {
+		t.Fatal("address sweep never ran after the lb sweep failed")
+	}
+	kinds := map[string]int{}
+	var unavail []map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		kinds[r["kind"]]++
+		if r["kind"] == "cloud.unavailable" {
+			unavail = append(unavail, r)
+		}
+	}
+	if kinds["orphan.disk"] != 3 || kinds["orphan.lb"] != 0 || kinds["orphan.address"] != 2 {
+		t.Errorf("kinds = %v, want 3 orphan.disk, no orphan.lb, 2 orphan.address", kinds)
+	}
+	if len(unavail) != 1 {
+		t.Fatalf("cloud.unavailable findings = %v, want exactly one (lbs)", unavail)
+	}
+	u := unavail[0]
+	if u["reason"] != "SweepFailed" || u["severity"] != emit.SeverityInfo ||
+		u["capability"] != string(cloud.CapabilityOrphans) || u["provider"] != cloud.NoProviderName ||
+		u["class"] != "lbs" || u["permission"] != "" ||
+		!strings.Contains(u["error"], "hypercomputer-w1-traffic-http-forwarding-rule") ||
+		!strings.Contains(u["error"], "Error 400") {
+		t.Errorf("unavailable = %v, want SweepFailed class=lbs carrying the provider's 400", u)
+	}
+	sum := summaryLine(t, res.Stdout)
+	// scanned = 4 disks + 3 idle addresses; the failed class adds none.
+	if sum["scanned"] != "7" || sum["unavailable"] != "lbs: sweep failed" {
+		t.Errorf("summary = %v, want scanned=7 unavailable=\"lbs: sweep failed\"", sum)
+	}
+}
+
+// TestOrphansSweepFailedErrorBounded: a long provider error is cut
+// on the record rather than dumped.
+func TestOrphansSweepFailedErrorBounded(t *testing.T) {
+	api := orphanFixture()
+	api.disksErr = errors.New("listing disks: " + strings.Repeat("x", 1000))
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd, "--only=disks")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 1 || recs[0]["class"] != "disks" {
+		t.Fatalf("records = %v, want one class=disks unavailable", recs)
+	}
+	if n := len([]rune(recs[0]["error"])); n > 301 {
+		t.Errorf("error is %d runes, want at most 300 plus the ellipsis", n)
+	}
+}
+
+// TestOrphansSweepFailedErrorSanitized: the provider error is masked
+// before it is cut, so a credential straddling the cut (here a PEM
+// block whose END line falls past it) never reaches stdout.
+func TestOrphansSweepFailedErrorSanitized(t *testing.T) {
+	const keyBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+	pem := "-----BEGIN PRIVATE KEY-----\n" + strings.Repeat(keyBody, 8) + "\n-----END PRIVATE KEY-----"
+	api := orphanFixture()
+	api.lbsErr = errors.New("resolving forwarding rule \"r\": " + strings.Repeat("y", 200) + pem)
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd, "--only=lbs")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, keyBody) || strings.Contains(res.Stdout, "BEGIN PRIVATE KEY") {
+		t.Errorf("stdout leaks the key material:\n%s", res.Stdout)
+	}
+}
+
+// TestOrphansMixedDeniedAndFailed: a refusal and a failure in the
+// same invocation each get their own record and note fragment.
+func TestOrphansMixedDeniedAndFailed(t *testing.T) {
+	api := orphanFixture()
+	api.lbsErr = errors.New(lbResolveErr)
+	api.addrsErr = denied("compute.addresses.list")
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d; stderr: %s", res.Code, res.Stderr)
+	}
+	sum := summaryLine(t, res.Stdout)
+	want := "lbs: sweep failed; addresses: needs compute.addresses.list"
+	if sum["scanned"] != "4" || sum["unavailable"] != want {
+		t.Errorf("summary = %v, want scanned=4 unavailable=%q", sum, want)
+	}
+}
+
+// ctxOrphans blocks the lb sweep until the invocation's context
+// ends, then fails with the context's error — a call cut off by
+// --timeout.
+type ctxOrphans struct{ *fakeOrphans }
+
+func (c ctxOrphans) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoadBalancer, error) {
+	<-ctx.Done()
+	return nil, fmt.Errorf("resolving forwarding rule %q: %w", "web-rule", ctx.Err())
+}
+
+// TestOrphansTimeoutStaysFatal: an expired --timeout is not one
+// class's failure — every later class would fail the same way — so it
+// stays a runtime error (exit 1), as before.
+func TestOrphansTimeoutStaysFatal(t *testing.T) {
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: ctxOrphans{orphanFixture()}}))
+	res := checktest.Run(t, cmd, "--only=lbs", "--timeout=1ns")
 	if res.Code != emit.ExitRuntime {
-		t.Fatalf("exit %d, want %d (a 500 is not a refusal); stderr: %s", res.Code, emit.ExitRuntime, res.Stderr)
+		t.Fatalf("exit %d, want %d; stdout: %s", res.Code, emit.ExitRuntime, res.Stdout)
 	}
-	if !strings.Contains(res.Stderr, "address sweep") || !strings.Contains(res.Stderr, "Error 500") {
-		t.Errorf("stderr = %q, want the address sweep's 500", res.Stderr)
+	if !strings.Contains(res.Stderr, "timed out") || strings.Contains(res.Stdout, "SweepFailed") {
+		t.Errorf("stdout = %q, stderr = %q; want the timeout reported, not a SweepFailed record", res.Stdout, res.Stderr)
 	}
+}
+
+// TestOrphansSweepFailedContract: the SweepFailed record's fields
+// (error included) are in the output glossary.
+func TestOrphansSweepFailedContract(t *testing.T) {
+	api := orphanFixture()
+	api.lbsErr = errors.New(lbResolveErr)
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	checktest.VerifyContract(t, cmd)
 }
 
 // TestOrphansDeniedContract: the degraded path's fields (class,

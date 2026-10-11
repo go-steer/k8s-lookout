@@ -33,19 +33,42 @@ package gke
 //
 // Load balancers: a forwarding rule is orphaned when every backend
 // it routes to resolves to zero endpoints. Resolution follows the
-// rule's shape:
+// rule's shape, global or regional alike (#612):
 //
 //   - backendService rules (L4 ILB / L7-ILB via backend service):
 //     the backend service's NEG/instance-group sizes;
-//   - target-proxy rules (GKE Ingress: HTTP/HTTPS proxy → URL map):
-//     every backend service the URL map can route to;
+//   - target-proxy rules (GKE Ingress, global or regional HTTP/HTTPS
+//     proxy → URL map): every backend service the URL map can route
+//     to, through default services, path rules, route rules and
+//     weighted route actions;
 //   - targetPool rules (legacy network LB): the pool's instance list.
+//
+// A backend is judged only when its group's size counts what the
+// load balancer routes to:
+//
+//   - instance groups, zonal or regional: size is the instance count;
+//   - NEGs, zonal, regional or global, whose networkEndpointType holds
+//     attached endpoints (GCE_VM_IP_PORT, GCE_VM_IP, GCE_VM_IP_PORTMAP,
+//     NON_GCP_PRIVATE_IP_PORT, INTERNET_IP_PORT, INTERNET_FQDN_PORT):
+//     size is the endpoint count.
+//
+// Everything else is unjudgeable, never guessed at: SERVERLESS and
+// PRIVATE_SERVICE_CONNECT NEGs (size is always 0 — they front a
+// service, not endpoints), any other or absent endpoint type, a group
+// URL of no known shape, and URL-map destinations that are not
+// backend services (backend buckets, URL redirects). The verdict:
+// any judged endpoint → not orphaned; else anything unjudgeable →
+// skipped; else zero endpoints → orphaned. So a rule is reported only
+// when every destination was judged and all were empty, and no zonal
+// call is made without a zone (#612: a regional instance group once
+// reached the zonal API with zone="").
 //
 // The judgment counts endpoint PRESENCE, not health: a rule whose
 // NEGs have endpoints is not orphaned even if they are all
 // unhealthy — that is an outage (state edges / triage territory),
 // not an orphan. Rules with target kinds outside the three shapes
-// above (SSL/TCP proxies, VPN/IPsec) are skipped, not guessed at.
+// above (SSL/TCP/gRPC proxies, target instances, VPN/IPsec, Private
+// Service Connect) are skipped the same way.
 //
 // A 403 permission refusal on any call a class makes is wrapped into
 // cloud.ErrPermissionDenied (classifyPermission), naming the
@@ -78,9 +101,10 @@ type orphanComputeAPI interface {
 	// ListAddresses returns every static address in the project,
 	// regional and global (flattened aggregated list).
 	ListAddresses(ctx context.Context) ([]*compute.Address, error)
-	// GetBackendService fetches a backend service; scope is a
-	// region name or "" for global.
-	GetBackendService(ctx context.Context, scope, name string) (*compute.BackendService, error)
+	// GetBackendService fetches a backend service by its URL,
+	// global or regional (the URL's project is honored: a URL map
+	// may reference a service in another project).
+	GetBackendService(ctx context.Context, service string) (*compute.BackendService, error)
 	// GetProxyURLMap resolves a target HTTP(S) proxy to its URL map
 	// URL; kind is "targetHttpProxies" or "targetHttpsProxies",
 	// scope a region or "" for global.
@@ -89,9 +113,54 @@ type orphanComputeAPI interface {
 	GetURLMap(ctx context.Context, scope, name string) (*compute.UrlMap, error)
 	// GetTargetPool fetches a legacy target pool.
 	GetTargetPool(ctx context.Context, region, name string) (*compute.TargetPool, error)
-	// GroupSize returns the endpoint/instance count of a backend
-	// group URL (network endpoint group or instance group).
-	GroupSize(ctx context.Context, group string) (int64, error)
+	// GetBackendGroup fetches a backend group by its URL. Callers
+	// pass only URLs backendGroupShape accepts, so every call has the
+	// zone, region or global scope it needs.
+	GetBackendGroup(ctx context.Context, group string) (backendGroup, error)
+}
+
+// backendGroup is what the verdict needs from a backend's group.
+type backendGroup struct {
+	// EndpointType is a NEG's networkEndpointType; empty for
+	// instance groups.
+	EndpointType string
+	// Size is the NEG's endpoint count or the group's instance count.
+	Size int64
+}
+
+// countedEndpointTypes are the NEG types whose size counts attached
+// endpoints a load balancer routes to. SERVERLESS and
+// PRIVATE_SERVICE_CONNECT are deliberately absent: their size is
+// always 0 however live the service behind them.
+var countedEndpointTypes = map[string]bool{
+	"GCE_VM_IP_PORT":          true,
+	"GCE_VM_IP":               true,
+	"GCE_VM_IP_PORTMAP":       true,
+	"NON_GCP_PRIVATE_IP_PORT": true,
+	"INTERNET_IP_PORT":        true,
+	"INTERNET_FQDN_PORT":      true,
+}
+
+// Backend group URL collections.
+const (
+	collectionNEG           = "networkEndpointGroups"
+	collectionInstanceGroup = "instanceGroups"
+)
+
+// backendGroupShape reports a group URL's collection and whether it
+// has a shape GetBackendGroup can fetch: a NEG (zonal, regional or
+// global) or an instance group with a zone or a region (there are no
+// global instance groups).
+func backendGroupShape(group string) (collection string, ok bool) {
+	switch {
+	case strings.Contains(group, "/"+collectionNEG+"/"):
+		return collectionNEG, true
+	case strings.Contains(group, "/"+collectionInstanceGroup+"/"):
+		scoped := resourceScopeValue(group, "zones") != "" || resourceScopeValue(group, "regions") != ""
+		return collectionInstanceGroup, scoped
+	default:
+		return "", false
+	}
 }
 
 // orphanAPI implements cloud.OrphanAPI.
@@ -184,7 +253,8 @@ func (o *orphanAPI) OrphanLoadBalancers(ctx context.Context) ([]cloud.OrphanLoad
 	return out, nil
 }
 
-// judgeRule resolves one forwarding rule to its endpoint count.
+// judgeRule resolves one forwarding rule to a verdict; a rule it
+// cannot judge is (false, "", nil) — skipped, not an error.
 func (o *orphanAPI) judgeRule(ctx context.Context, r *compute.ForwardingRule) (orphaned bool, reason string, err error) {
 	switch {
 	case r.BackendService != "":
@@ -214,7 +284,11 @@ func (o *orphanAPI) judgeRule(ctx context.Context, r *compute.ForwardingRule) (o
 		if err != nil {
 			return false, "", err
 		}
-		services := urlMapServices(um)
+		services, elsewhere := urlMapRoutes(um)
+		if elsewhere {
+			// A bucket or a redirect serves without endpoints.
+			return false, "", nil
+		}
 		if len(services) == 0 {
 			return true, fmt.Sprintf("url map %s routes to no backend service", um.Name), nil
 		}
@@ -226,13 +300,15 @@ func (o *orphanAPI) judgeRule(ctx context.Context, r *compute.ForwardingRule) (o
 	}
 }
 
-// judgeBackendServices sums endpoint counts across services; zero
-// across the board is an orphan.
+// judgeBackendServices sums endpoint counts across the services'
+// judgeable backends: any endpoint → not orphaned; else any
+// unjudgeable backend → skipped; else orphaned.
 func (o *orphanAPI) judgeBackendServices(ctx context.Context, services []string) (bool, string, error) {
 	total := int64(0)
+	unjudged := false
 	names := make([]string, 0, len(services))
 	for _, s := range services {
-		bs, err := o.gce.GetBackendService(ctx, resourceScopeValue(s, "regions"), resourceTail(s))
+		bs, err := o.gce.GetBackendService(ctx, s)
 		if err != nil {
 			return false, "", err
 		}
@@ -241,45 +317,78 @@ func (o *orphanAPI) judgeBackendServices(ctx context.Context, services []string)
 			if b == nil || b.Group == "" {
 				continue
 			}
-			n, err := o.gce.GroupSize(ctx, b.Group)
+			collection, ok := backendGroupShape(b.Group)
+			if !ok {
+				unjudged = true
+				continue
+			}
+			g, err := o.gce.GetBackendGroup(ctx, b.Group)
 			if err != nil {
 				return false, "", err
 			}
-			total += n
+			if collection == collectionNEG && !countedEndpointTypes[g.EndpointType] {
+				unjudged = true
+				continue
+			}
+			total += g.Size
 		}
 	}
-	if total > 0 {
+	if total > 0 || unjudged {
 		return false, "", nil
 	}
 	return true, fmt.Sprintf("backend service %s has 0 endpoints across all groups", strings.Join(names, ",")), nil
 }
 
-// urlMapServices collects every backend service a URL map can route
-// to: the default service plus each path matcher's default and path
-// rules, deduplicated, order-stable.
-func urlMapServices(um *compute.UrlMap) []string {
+// urlMapRoutes collects every backend service a URL map can route
+// to — the default service and route action plus each path
+// matcher's default, path rules and route rules — deduplicated and
+// order-stable. elsewhere reports a destination that is not a
+// backend service (a backend bucket or a URL redirect), for which
+// the verdict has no endpoints to count.
+func urlMapRoutes(um *compute.UrlMap) (services []string, elsewhere bool) {
 	seen := map[string]bool{}
-	var out []string
 	add := func(s string) {
-		if s != "" && strings.Contains(s, "/backendServices/") && !seen[s] {
+		switch {
+		case s == "":
+		case !strings.Contains(s, "/backendServices/"):
+			elsewhere = true // a backendBuckets URL
+		case !seen[s]:
 			seen[s] = true
-			out = append(out, s)
+			services = append(services, s)
 		}
 	}
-	add(um.DefaultService)
+	route := func(service string, redirect *compute.HttpRedirectAction, action *compute.HttpRouteAction) {
+		add(service)
+		if redirect != nil {
+			elsewhere = true
+		}
+		if action != nil {
+			for _, w := range action.WeightedBackendServices {
+				if w != nil {
+					add(w.BackendService)
+				}
+			}
+		}
+	}
+	route(um.DefaultService, um.DefaultUrlRedirect, um.DefaultRouteAction)
 	for _, pm := range um.PathMatchers {
 		if pm == nil {
 			continue
 		}
-		add(pm.DefaultService)
+		route(pm.DefaultService, pm.DefaultUrlRedirect, pm.DefaultRouteAction)
 		for _, pr := range pm.PathRules {
 			if pr != nil {
-				add(pr.Service)
+				route(pr.Service, pr.UrlRedirect, pr.RouteAction)
+			}
+		}
+		for _, rr := range pm.RouteRules {
+			if rr != nil {
+				route(rr.Service, rr.UrlRedirect, rr.RouteAction)
 			}
 		}
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(services)
+	return services, elsewhere
 }
 
 // ruleRegion is the rule's region short name, "global" for global
@@ -395,15 +504,25 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-func (c *gceOrphanClient) GetBackendService(ctx context.Context, scope, name string) (*compute.BackendService, error) {
+func (c *gceOrphanClient) GetBackendService(ctx context.Context, service string) (*compute.BackendService, error) {
 	svc, err := c.svc(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if scope == "" {
-		return svc.BackendServices.Get(c.project, name).Context(ctx).Do()
+	project, name := c.projectOf(service), resourceTail(service)
+	if region := resourceScopeValue(service, "regions"); region != "" {
+		return svc.RegionBackendServices.Get(project, region, name).Context(ctx).Do()
 	}
-	return svc.RegionBackendServices.Get(c.project, scope, name).Context(ctx).Do()
+	return svc.BackendServices.Get(project, name).Context(ctx).Do()
+}
+
+// projectOf is the project a resource URL names, else the
+// provider's own.
+func (c *gceOrphanClient) projectOf(u string) string {
+	if p := resourceScopeValue(u, "projects"); p != "" {
+		return p
+	}
+	return c.project
 }
 
 func (c *gceOrphanClient) GetProxyURLMap(ctx context.Context, scope, kind, name string) (string, error) {
@@ -458,40 +577,42 @@ func (c *gceOrphanClient) GetTargetPool(ctx context.Context, region, name string
 	return svc.TargetPools.Get(c.project, region, name).Context(ctx).Do()
 }
 
-func (c *gceOrphanClient) GroupSize(ctx context.Context, group string) (int64, error) {
+func (c *gceOrphanClient) GetBackendGroup(ctx context.Context, group string) (backendGroup, error) {
+	collection, ok := backendGroupShape(group)
+	if !ok {
+		// Never reached through judgeBackendServices; a guard so no
+		// caller can turn a missing scope into zone="".
+		return backendGroup{}, fmt.Errorf("unrecognized backend group: %s", group)
+	}
 	svc, err := c.svc(ctx)
 	if err != nil {
-		return 0, err
+		return backendGroup{}, err
 	}
-	name := resourceTail(group)
-	switch {
-	case strings.Contains(group, "/networkEndpointGroups/"):
-		if zone := resourceScopeValue(group, "zones"); zone != "" {
-			neg, err := svc.NetworkEndpointGroups.Get(c.project, zone, name).Context(ctx).Do()
-			if err != nil {
-				return 0, err
-			}
-			return neg.Size, nil
+	project, name := c.projectOf(group), resourceTail(group)
+	zone, region := resourceScopeValue(group, "zones"), resourceScopeValue(group, "regions")
+	if collection == collectionNEG {
+		var neg *compute.NetworkEndpointGroup
+		switch {
+		case zone != "":
+			neg, err = svc.NetworkEndpointGroups.Get(project, zone, name).Context(ctx).Do()
+		case region != "":
+			neg, err = svc.RegionNetworkEndpointGroups.Get(project, region, name).Context(ctx).Do()
+		default:
+			neg, err = svc.GlobalNetworkEndpointGroups.Get(project, name).Context(ctx).Do()
 		}
-		if region := resourceScopeValue(group, "regions"); region != "" {
-			neg, err := svc.RegionNetworkEndpointGroups.Get(c.project, region, name).Context(ctx).Do()
-			if err != nil {
-				return 0, err
-			}
-			return neg.Size, nil
-		}
-		neg, err := svc.GlobalNetworkEndpointGroups.Get(c.project, name).Context(ctx).Do()
 		if err != nil {
-			return 0, err
+			return backendGroup{}, err
 		}
-		return neg.Size, nil
-	case strings.Contains(group, "/instanceGroups/"):
-		ig, err := svc.InstanceGroups.Get(c.project, resourceScopeValue(group, "zones"), name).Context(ctx).Do()
-		if err != nil {
-			return 0, err
-		}
-		return ig.Size, nil
-	default:
-		return 0, fmt.Errorf("unrecognized backend group kind: %s", group)
+		return backendGroup{EndpointType: neg.NetworkEndpointType, Size: neg.Size}, nil
 	}
+	var ig *compute.InstanceGroup
+	if zone != "" {
+		ig, err = svc.InstanceGroups.Get(project, zone, name).Context(ctx).Do()
+	} else {
+		ig, err = svc.RegionInstanceGroups.Get(project, region, name).Context(ctx).Do()
+	}
+	if err != nil {
+		return backendGroup{}, err
+	}
+	return backendGroup{Size: ig.Size}, nil
 }

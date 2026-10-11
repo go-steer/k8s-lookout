@@ -18,11 +18,17 @@ package gke
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	compute "google.golang.org/api/compute/v1"
+	"google.golang.org/api/option"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
@@ -33,13 +39,17 @@ type lbObjects struct {
 	BackendServices       map[string]*compute.BackendService       `json:"backendServices"`
 	URLMaps               map[string]*compute.UrlMap               `json:"urlMaps"`
 	TargetHTTPProxies     map[string]*compute.TargetHttpProxy      `json:"targetHttpProxies"`
+	TargetHTTPSProxies    map[string]*compute.TargetHttpsProxy     `json:"targetHttpsProxies"`
 	TargetPools           map[string]*compute.TargetPool           `json:"targetPools"`
 	NetworkEndpointGroups map[string]*compute.NetworkEndpointGroup `json:"networkEndpointGroups"`
+	InstanceGroups        map[string]*compute.InstanceGroup        `json:"instanceGroups"`
 }
 
 // fixtureGCE implements orphanComputeAPI from the recorded fixtures,
 // flattening aggregates through the same helpers production paging
-// uses.
+// uses. Every GET checks the scope it was asked for against the
+// recorded object's own location, so a regional object fetched as
+// global or zonal (#612) fails the way the live API would.
 type fixtureGCE struct {
 	t   *testing.T
 	lbs lbObjects
@@ -50,6 +60,15 @@ func newFixtureGCE(t *testing.T) *fixtureGCE {
 	f := &fixtureGCE{t: t}
 	loadJSON(t, "compute-lb-objects.json", &f.lbs)
 	return f
+}
+
+// checkScope fails when the requested scope ("" = global) is not the
+// recorded object's region.
+func checkScope(what, name, scope, recordedRegion string) error {
+	if want := resourceTail(recordedRegion); scope != want {
+		return fmt.Errorf("%s %q fetched with scope %q, recorded in %q", what, name, scope, want)
+	}
+	return nil
 }
 
 func (f *fixtureGCE) ListDisks(context.Context) ([]*compute.Disk, error) {
@@ -70,26 +89,34 @@ func (f *fixtureGCE) ListAddresses(context.Context) ([]*compute.Address, error) 
 	return flattenAddressAggregate(&page), nil
 }
 
-func (f *fixtureGCE) GetBackendService(_ context.Context, _, name string) (*compute.BackendService, error) {
-	if bs := f.lbs.BackendServices[name]; bs != nil {
-		return bs, nil
+func (f *fixtureGCE) GetBackendService(_ context.Context, service string) (*compute.BackendService, error) {
+	name := resourceTail(service)
+	bs := f.lbs.BackendServices[name]
+	if bs == nil {
+		return nil, fmt.Errorf("no fixture backend service %q", name)
 	}
-	return nil, fmt.Errorf("no fixture backend service %q", name)
+	return bs, checkScope("backend service", name, resourceScopeValue(service, "regions"), bs.Region)
 }
 
-func (f *fixtureGCE) GetProxyURLMap(_ context.Context, _, kind, name string) (string, error) {
-	if kind != "targetHttpProxies" {
+func (f *fixtureGCE) GetProxyURLMap(_ context.Context, scope, kind, name string) (string, error) {
+	switch kind {
+	case "targetHttpProxies":
+		if p := f.lbs.TargetHTTPProxies[name]; p != nil {
+			return p.UrlMap, checkScope("proxy", name, scope, p.Region)
+		}
+	case "targetHttpsProxies":
+		if p := f.lbs.TargetHTTPSProxies[name]; p != nil {
+			return p.UrlMap, checkScope("proxy", name, scope, p.Region)
+		}
+	default:
 		return "", fmt.Errorf("unexpected proxy kind %q", kind)
-	}
-	if p := f.lbs.TargetHTTPProxies[name]; p != nil {
-		return p.UrlMap, nil
 	}
 	return "", fmt.Errorf("no fixture proxy %q", name)
 }
 
-func (f *fixtureGCE) GetURLMap(_ context.Context, _, name string) (*compute.UrlMap, error) {
+func (f *fixtureGCE) GetURLMap(_ context.Context, scope, name string) (*compute.UrlMap, error) {
 	if um := f.lbs.URLMaps[name]; um != nil {
-		return um, nil
+		return um, checkScope("url map", name, scope, um.Region)
 	}
 	return nil, fmt.Errorf("no fixture url map %q", name)
 }
@@ -104,11 +131,31 @@ func (f *fixtureGCE) GetTargetPool(_ context.Context, region, name string) (*com
 	return nil, fmt.Errorf("no fixture target pool %q", name)
 }
 
-func (f *fixtureGCE) GroupSize(_ context.Context, group string) (int64, error) {
-	if neg := f.lbs.NetworkEndpointGroups[resourceTail(group)]; neg != nil {
-		return neg.Size, nil
+func (f *fixtureGCE) GetBackendGroup(_ context.Context, group string) (backendGroup, error) {
+	collection, ok := backendGroupShape(group)
+	if !ok {
+		f.t.Errorf("GetBackendGroup called with unfetchable group URL %q", group)
+		return backendGroup{}, fmt.Errorf("unfetchable group %q", group)
 	}
-	return 0, fmt.Errorf("no fixture group %q", group)
+	name := resourceTail(group)
+	switch collection {
+	case collectionNEG:
+		if neg := f.lbs.NetworkEndpointGroups[name]; neg != nil {
+			return backendGroup{EndpointType: neg.NetworkEndpointType, Size: neg.Size}, nil
+		}
+	case collectionInstanceGroup:
+		if ig := f.lbs.InstanceGroups[name]; ig != nil {
+			scope := resourceScopeValue(group, "zones")
+			if scope == "" {
+				scope = resourceScopeValue(group, "regions")
+			}
+			if want := resourceTail(ig.Zone + ig.Region); scope != want {
+				return backendGroup{}, fmt.Errorf("instance group %q fetched in %q, recorded in %q", name, scope, want)
+			}
+			return backendGroup{Size: ig.Size}, nil
+		}
+	}
+	return backendGroup{}, fmt.Errorf("no fixture group %q", group)
 }
 
 func TestOrphanDisksFromRecordedAggregate(t *testing.T) {
@@ -172,16 +219,26 @@ func TestOrphanLoadBalancersFromRecordedObjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrphanLoadBalancers: %v", err)
 	}
-	// ilb-empty (backend service → empty NEG) and netlb-ghost
-	// (empty target pool) are orphans. ingress-live resolves proxy →
-	// url map → web-bs → NEGs with 3 endpoints; netlb-live's pool
-	// has an instance; ssl-unjudged's target kind is skipped.
-	if len(got) != 2 {
-		t.Fatalf("orphans = %+v, want ilb-empty and netlb-ghost only", got)
-	}
+	// Orphans: ilb-empty (backend service → empty NEG), netlb-ghost
+	// (empty target pool), mig-empty-http (global HTTP → empty zonal
+	// and regional instance groups).
+	//
+	// Live: ingress-live (proxy → url map → web-bs → NEGs with 3
+	// endpoints), netlb-live (pool has an instance), the #612 rule
+	// (global HTTP → global backend service → regional MIG of 3),
+	// origin-http (route rule → internet NEG with an endpoint).
+	//
+	// Skipped, not guessed: ssl-unjudged (target kind), redirect-http
+	// (redirect-only url map), bucket-http (backend bucket),
+	// serverless-https (serverless NEG, size always 0), ilb7-mixed
+	// (regional HTTPS: an empty zonal NEG beside a serverless NEG —
+	// the serverless side cannot be counted, so no verdict).
 	byName := map[string]cloud.OrphanLoadBalancer{}
 	for _, o := range got {
 		byName[o.Name] = o
+	}
+	if len(got) != 3 {
+		t.Fatalf("orphans = %+v, want ilb-empty, netlb-ghost and mig-empty-http only", got)
 	}
 	ilb := byName["ilb-empty"]
 	if ilb.Region != "us-east1" || ilb.Reason != "backend service empty-bs has 0 endpoints across all groups" {
@@ -191,15 +248,153 @@ func TestOrphanLoadBalancersFromRecordedObjects(t *testing.T) {
 	if ghost.Region != "us-east1" || ghost.Reason != "target pool ghost-pool has no instances" {
 		t.Errorf("netlb-ghost = %+v, want the empty-pool judgment", ghost)
 	}
+	mig := byName["mig-empty-http"]
+	if mig.Region != "global" || mig.Reason != "backend service mig-empty-bs has 0 endpoints across all groups" {
+		t.Errorf("mig-empty-http = %+v, want the global empty-instance-group judgment", mig)
+	}
 }
 
-func TestURLMapServicesDeduplicated(t *testing.T) {
+// failingGCE wraps the fixtures and fails one backend service GET,
+// as a live 400/500 on one rule's chain would.
+type failingGCE struct {
+	*fixtureGCE
+	service string
+	err     error
+}
+
+func (f *failingGCE) GetBackendService(ctx context.Context, service string) (*compute.BackendService, error) {
+	if resourceTail(service) == f.service {
+		return nil, f.err
+	}
+	return f.fixtureGCE.GetBackendService(ctx, service)
+}
+
+// TestOrphanLoadBalancersRuleErrorNamesRule: a GET failing on one
+// rule's chain fails the class with the rule named, for the command
+// to degrade to a class=lbs unavailable (cloudcheck owns that rule).
+func TestOrphanLoadBalancersRuleErrorNamesRule(t *testing.T) {
+	api := &orphanAPI{gce: &failingGCE{
+		fixtureGCE: newFixtureGCE(t),
+		service:    "hypercomputer-w1-traffic-backend",
+		err:        errors.New("googleapi: Error 500: Internal Error, backendError"),
+	}}
+	_, err := api.OrphanLoadBalancers(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `"hypercomputer-w1-traffic-http-forwarding-rule"`) ||
+		!strings.Contains(err.Error(), "Error 500") {
+		t.Fatalf("err = %v, want the 500 wrapped with the rule's name", err)
+	}
+	if _, denied := cloud.PermissionDenied(err); denied {
+		t.Errorf("err = %v classified as a permission refusal; a 500 is not one", err)
+	}
+}
+
+func TestURLMapRoutes(t *testing.T) {
 	var lbs lbObjects
 	loadJSON(t, "compute-lb-objects.json", &lbs)
-	services := urlMapServices(lbs.URLMaps["web-um"])
-	// default service + path matcher default + path rule all point
-	// at web-bs → exactly one entry.
-	if len(services) != 1 || resourceTail(services[0]) != "web-bs" {
-		t.Errorf("urlMapServices = %v, want the single deduplicated web-bs", services)
+	cases := []struct {
+		urlMap        string
+		wantServices  []string
+		wantElsewhere bool
+	}{
+		// default service + path matcher default + path rule all
+		// point at web-bs → exactly one entry.
+		{"web-um", []string{"web-bs"}, false},
+		// A route rule's weighted backend services count.
+		{"origin-um", []string{"origin-bs"}, false},
+		{"redirect-um", nil, true},
+		{"bucket-um", nil, true},
+		{"ilb7-um", []string{"ilb7-bs"}, false},
+	}
+	for _, c := range cases {
+		services, elsewhere := urlMapRoutes(lbs.URLMaps[c.urlMap])
+		var tails []string
+		for _, s := range services {
+			tails = append(tails, resourceTail(s))
+		}
+		if !slices.Equal(tails, c.wantServices) || elsewhere != c.wantElsewhere {
+			t.Errorf("urlMapRoutes(%s) = %v, %v; want %v, %v", c.urlMap, tails, elsewhere, c.wantServices, c.wantElsewhere)
+		}
+	}
+}
+
+func TestBackendGroupShape(t *testing.T) {
+	const base = "https://www.googleapis.com/compute/v1/projects/proj-1/"
+	cases := []struct {
+		group          string
+		wantCollection string
+		wantOK         bool
+	}{
+		{base + "zones/us-east1-b/networkEndpointGroups/n", collectionNEG, true},
+		{base + "regions/us-east1/networkEndpointGroups/n", collectionNEG, true},
+		{base + "global/networkEndpointGroups/n", collectionNEG, true},
+		{base + "zones/us-east1-b/instanceGroups/ig", collectionInstanceGroup, true},
+		{base + "regions/us-east1/instanceGroups/mig", collectionInstanceGroup, true},
+		// No global instance groups exist; never fetched zone="".
+		{base + "global/instanceGroups/ig", collectionInstanceGroup, false},
+		{base + "global/backendBuckets/b", "", false},
+	}
+	for _, c := range cases {
+		collection, ok := backendGroupShape(c.group)
+		if collection != c.wantCollection || ok != c.wantOK {
+			t.Errorf("backendGroupShape(%s) = %q, %v; want %q, %v", c.group, collection, ok, c.wantCollection, c.wantOK)
+		}
+	}
+}
+
+// TestGCEOrphanClientBackendGroupPaths drives the production client
+// against a recording HTTP server: each group URL shape reaches its
+// own Compute collection — a regional instance group the regional
+// API, never the zonal one with zone="" (#612) — and a URL naming
+// another project is fetched there.
+func TestGCEOrphanClientBackendGroupPaths(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/networkEndpointGroups/"):
+			_, _ = w.Write([]byte(`{"networkEndpointType":"GCE_VM_IP_PORT","size":2}`))
+		case strings.Contains(r.URL.Path, "/backendServices/"):
+			_, _ = w.Write([]byte(`{"name":"bs"}`))
+		default:
+			_, _ = w.Write([]byte(`{"size":3}`))
+		}
+	}))
+	defer srv.Close()
+	c := &gceOrphanClient{
+		project: "proj-1",
+		svc: func(ctx context.Context) (*compute.Service, error) {
+			return compute.NewService(ctx, option.WithEndpoint(srv.URL+"/compute/v1/"), option.WithoutAuthentication())
+		},
+	}
+	const base = "https://www.googleapis.com/compute/v1/projects/"
+	groups := []struct{ url, wantPath string }{
+		{base + "proj-1/regions/us-central1/instanceGroups/hypercomputer-w1-mig", "/compute/v1/projects/proj-1/regions/us-central1/instanceGroups/hypercomputer-w1-mig"},
+		{base + "proj-1/zones/us-east1-b/instanceGroups/ig", "/compute/v1/projects/proj-1/zones/us-east1-b/instanceGroups/ig"},
+		{base + "proj-1/zones/us-east1-b/networkEndpointGroups/n", "/compute/v1/projects/proj-1/zones/us-east1-b/networkEndpointGroups/n"},
+		{base + "proj-1/regions/us-east1/networkEndpointGroups/run", "/compute/v1/projects/proj-1/regions/us-east1/networkEndpointGroups/run"},
+		{base + "proj-1/global/networkEndpointGroups/origin", "/compute/v1/projects/proj-1/global/networkEndpointGroups/origin"},
+	}
+	ctx := context.Background()
+	for _, g := range groups {
+		paths = nil
+		if _, err := c.GetBackendGroup(ctx, g.url); err != nil {
+			t.Errorf("GetBackendGroup(%s): %v", g.url, err)
+			continue
+		}
+		if len(paths) != 1 || paths[0] != g.wantPath {
+			t.Errorf("GetBackendGroup(%s) requested %v, want %s", g.url, paths, g.wantPath)
+		}
+	}
+	paths = nil
+	if _, err := c.GetBackendGroup(ctx, base+"proj-1/global/instanceGroups/ig"); err == nil || len(paths) != 0 {
+		t.Errorf("unscoped instance group: err=%v requests=%v, want an error and no request", err, paths)
+	}
+	paths = nil
+	if _, err := c.GetBackendService(ctx, base+"shared-proj/global/backendServices/bs"); err != nil {
+		t.Fatalf("GetBackendService: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/compute/v1/projects/shared-proj/global/backendServices/bs" {
+		t.Errorf("cross-project backend service requested %v, want it fetched from shared-proj", paths)
 	}
 }

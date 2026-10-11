@@ -58,7 +58,8 @@ package cloudcheck
 // what runs on them: Nodes joined to pools by their
 // cloud.google.com/gke-nodepool label, and Pods by spec.nodeName. A
 // refused clusters.get degrades the class like any refused sweep
-// (cloud.unavailable, reason=PermissionDenied); a refused Node or Pod
+// (cloud.unavailable, reason=PermissionDenied), and any other failed
+// clusters.get like any failed one (reason=SweepFailed); a refused Node or Pod
 // List degrades it with a read.unavailable record naming the resource,
 // because guessing without either would call a busy pool idle.
 
@@ -115,7 +116,7 @@ type poolTally struct {
 func sweepNodePools(ctx context.Context, api cloud.ClusterConfigAPI, deps Deps, inv emit.Invocation) (int, string, error) {
 	cfg, err := api.Config(ctx)
 	if err != nil {
-		return 0, "", err
+		return 0, "", providerFailure(err)
 	}
 	if cfg.Autopilot {
 		return 0, "", inv.Out.Note("nodepools_skipped", "autopilot: node pools are provider-managed and billed per pod")

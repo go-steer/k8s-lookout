@@ -76,11 +76,12 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
 | `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
 | `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
-| `class` | cloud.unavailable (reason=PermissionDenied): the --only class whose sweep the provider refused (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each refused class with its permission |
+| `class` | cloud.unavailable (reason=PermissionDenied or SweepFailed): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission or "sweep failed" |
+| `error` | cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API), cut to 300 characters; nothing from the failed class is reported, never a partial list |
 | `permission` | cloud.unavailable (reason=PermissionDenied): the provider permission the refused sweep needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |
 | `capability` | cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools) |
 | `provider` | cloud.unavailable: the provider that was asked |
-| `unavailable` | summary-line note: why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, or a forbidden Node/Pod List for nodepools) |
+| `unavailable` | summary-line note: why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — "sweep failed" — or a forbidden Node/Pod List for nodepools) |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

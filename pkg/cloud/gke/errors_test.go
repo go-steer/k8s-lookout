@@ -73,11 +73,11 @@ func (r *refusingGCE) ListAddresses(ctx context.Context) ([]*compute.Address, er
 	return r.fixtureGCE.ListAddresses(ctx)
 }
 
-func (r *refusingGCE) GetBackendService(ctx context.Context, scope, name string) (*compute.BackendService, error) {
+func (r *refusingGCE) GetBackendService(ctx context.Context, service string) (*compute.BackendService, error) {
 	if r.backendErr != nil {
 		return nil, r.backendErr
 	}
-	return r.fixtureGCE.GetBackendService(ctx, scope, name)
+	return r.fixtureGCE.GetBackendService(ctx, service)
 }
 
 // TestOrphanAddresses403IsPermissionDenied: the recorded 403 on the

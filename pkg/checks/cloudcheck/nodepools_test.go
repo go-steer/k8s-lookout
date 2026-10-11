@@ -289,11 +289,34 @@ func TestOrphansNodePoolsConfigDenied(t *testing.T) {
 	if kinds["orphan.disk"] != 3 || kinds["orphan.nodepool"] != 0 || kinds["cloud.unavailable"] != 1 {
 		t.Fatalf("kinds = %v, want 3 orphan.disk and one cloud.unavailable", kinds)
 	}
-	if u["reason"] != "PermissionDenied" || u["class"] != "nodepools" || u["permission"] != "container.clusters.get" {
-		t.Errorf("unavailable = %v, want PermissionDenied class=nodepools permission=container.clusters.get", u)
+	if u["reason"] != "PermissionDenied" || u["class"] != "nodepools" || u["capability"] != string(cloud.CapabilityClusterConfig) || u["permission"] != "container.clusters.get" {
+		t.Errorf("unavailable = %v, want PermissionDenied class=nodepools capability=cluster-config permission=container.clusters.get", u)
 	}
 	if sum := summaryLine(t, res.Stdout); sum["unavailable"] != "nodepools: needs container.clusters.get" || sum["scanned"] != "4" {
 		t.Errorf("summary = %v, want scanned=4 unavailable=\"nodepools: needs container.clusters.get\"", sum)
+	}
+}
+
+// TestOrphansNodePoolsConfigFailed: any other failed cluster read
+// degrades the class the same way (#612), as reason=SweepFailed.
+func TestOrphansNodePoolsConfigFailed(t *testing.T) {
+	cfg := poolsFixture()
+	cfg.err = errors.New("getting cluster: googleapi: Error 503: The service is currently unavailable., backendError")
+	res := nodePoolCmd(cfg, fake.NewClientset(clusterFixture()...)).run(t, "--only=disks,nodepools")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0; stderr: %s", res.Code, res.Stderr)
+	}
+	var u map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "cloud.unavailable" {
+			u = r
+		}
+	}
+	if u["reason"] != "SweepFailed" || u["class"] != "nodepools" || u["capability"] != string(cloud.CapabilityClusterConfig) || !strings.Contains(u["error"], "Error 503") {
+		t.Errorf("unavailable = %v, want SweepFailed class=nodepools capability=cluster-config with the 503", u)
+	}
+	if sum := summaryLine(t, res.Stdout); sum["unavailable"] != "nodepools: sweep failed" || sum["scanned"] != "4" {
+		t.Errorf("summary = %v, want scanned=4 unavailable=\"nodepools: sweep failed\"", sum)
 	}
 }
 
