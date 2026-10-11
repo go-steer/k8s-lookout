@@ -15,17 +15,9 @@
           "description": "limit to one container",
           "type": "string"
         },
-        "context": {
-          "description": "kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=\u003cname\u003e in the summary line",
-          "type": "string"
-        },
         "diff": {
           "description": "diff against the previous revision",
           "type": "boolean"
-        },
-        "exemptions": {
-          "description": "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\u003cn\u003e in the summary, never dropped",
-          "type": "string"
         },
         "format": {
           "default": "logfmt",
@@ -36,10 +28,6 @@
           "default": "30s",
           "description": "grace window (Go duration, e.g. \"90s\", \"5m\")",
           "pattern": "^-?([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
-          "type": "string"
-        },
-        "kubeconfig": {
-          "description": "path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config",
           "type": "string"
         },
         "namespace": {
@@ -87,18 +75,10 @@
           "description": "scan all namespaces",
           "type": "boolean"
         },
-        "context": {
-          "description": "kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=\u003cname\u003e in the summary line",
-          "type": "string"
-        },
         "count": {
           "default": 2,
           "description": "number of synthetic findings to emit",
           "type": "integer"
-        },
-        "exemptions": {
-          "description": "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\u003cn\u003e in the summary, never dropped",
-          "type": "string"
         },
         "fail": {
           "description": "return a runtime error after emitting",
@@ -112,10 +92,6 @@
         "hang": {
           "description": "block until the --timeout context fires",
           "type": "boolean"
-        },
-        "kubeconfig": {
-          "description": "path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config",
-          "type": "string"
         },
         "namespace": {
           "description": "limit the scan to one namespace",

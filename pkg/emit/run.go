@@ -264,9 +264,9 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 			// rate limits instead of the --timeout they set. The
 			// deadline is the headline; what noticed it stays as detail
 			// (issue #352).
-			fmt.Fprintf(stderr, "%s: timed out after %s: %v\n", cfg.Name, timeout, err)
+			fmt.Fprintf(stderr, "%s: timed out after %s: %s\n", cfg.Name, timeout, MaskString(err.Error()))
 		default:
-			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+			fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, MaskString(err.Error()))
 		}
 		return ExitRuntime
 	}

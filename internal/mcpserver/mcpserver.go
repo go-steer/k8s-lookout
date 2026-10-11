@@ -38,6 +38,7 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,6 +48,8 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
+
+const defaultMaxConcurrentCalls = 8
 
 // Option adjusts how a server is built. Options are variadic rather
 // than parameters so that adding the next one does not touch every
@@ -61,6 +64,13 @@ type config struct {
 	// log, when non-nil, receives one line per tool call. A nil log
 	// is the no-op default; AccessLog's methods tolerate it.
 	log *AccessLog
+	// Operator-pinned host file paths and cluster selection applied to
+	// every tool invocation instead of exposed in MCP input schemas.
+	kubeconfig     string
+	context        string
+	exemptions     string
+	store          string
+	maxConcurrency int
 }
 
 // WithTools restricts the advertised surface to the named tools.
@@ -80,15 +90,44 @@ func WithAccessLog(l *AccessLog) Option {
 	return func(c *config) { c.log = l }
 }
 
+// WithSelection pins --kubeconfig and --context for all MCP tool calls.
+// Empty values leave the corresponding flag unset.
+func WithSelection(kubeconfig, contextName string) Option {
+	return func(c *config) {
+		c.kubeconfig = kubeconfig
+		c.context = contextName
+	}
+}
+
+// WithExemptions pins --exemptions=<path> for all MCP tool calls.
+func WithExemptions(path string) Option {
+	return func(c *config) { c.exemptions = path }
+}
+
+// WithStore pins --store=<path> for MCP tool calls that accept a store.
+func WithStore(path string) Option {
+	return func(c *config) { c.store = path }
+}
+
+// WithMaxConcurrency bounds concurrent MCP tool executions (default 8).
+func WithMaxConcurrency(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.maxConcurrency = n
+		}
+	}
+}
+
 // New builds the MCP server for a registry: one tool per non-hidden
 // registered command, picked up automatically from the registry state
 // at construction time. WithTools narrows that to a profile or an
 // explicit list (issue #280).
 func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
-	var cfg config
+	cfg := config{maxConcurrency: defaultMaxConcurrentCalls}
 	for _, o := range opts {
 		o(&cfg)
 	}
+	sem := make(chan struct{}, cfg.maxConcurrency)
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
 	for _, c := range Advertised(reg, cfg.tools) {
 		server.AddTool(&mcp.Tool{
@@ -101,7 +140,7 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 			// non-read-only so a convention-following client does not
 			// auto-approve it as a read (issue #105).
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: !c.Writes},
-		}, handler(c, cfg.log))
+		}, handler(c, cfg, sem))
 	}
 	return server
 }
@@ -162,6 +201,44 @@ func EnablePrivileged(reg *checks.Registry, tools map[string]bool, mcpName strin
 	return out, nil
 }
 
+// errReader rejects any read attempt immediately so no MCP tool call
+// (such as k8s_findings_diff where --report defaults to "-") can ever
+// read os.Stdin and block or corrupt the stdio JSON-RPC stream.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) {
+	return 0, errors.New("stdin is not available on the MCP transport; pass explicit arguments instead")
+}
+
+func commandAcceptsStore(c checks.Command) bool {
+	if c.GraphBacked {
+		return true
+	}
+	for _, f := range c.Flags {
+		if f.Name == "store" {
+			return true
+		}
+	}
+	return false
+}
+
+func pinnedArgs(c checks.Command, cfg config) []string {
+	var out []string
+	if cfg.kubeconfig != "" {
+		out = append(out, "--kubeconfig="+cfg.kubeconfig)
+	}
+	if cfg.context != "" {
+		out = append(out, "--context="+cfg.context)
+	}
+	if cfg.exemptions != "" {
+		out = append(out, "--exemptions="+cfg.exemptions)
+	}
+	if cfg.store != "" && commandAcceptsStore(c) {
+		out = append(out, "--store="+cfg.store)
+	}
+	return out
+}
+
 // handler adapts one command to an MCP tool handler: map the
 // arguments back to argv, run in-process under emit.Run with captured
 // buffers, and translate the §4.2 exit code.
@@ -171,19 +248,34 @@ func EnablePrivileged(reg *checks.Registry, tools map[string]bool, mcpName strin
 // rejects is exactly the thing an access log is for, and it would be
 // the one call shape invisible in the log if the argv error returned
 // early.
-func handler(c checks.Command, log *AccessLog) mcp.ToolHandler {
+func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		start := log.now()
+		start := cfg.log.now()
+		remote := remoteAddrFromContext(ctx)
 		record := func(exit int, text string) {
-			log.Record(c.MCPName, exit, start, len(text))
+			cfg.log.Record(c.MCPName, exit, start, len(text), remote)
 		}
 		args, err := argv(c, req.Params.Arguments)
 		if err != nil {
 			record(emit.ExitUsage, err.Error())
 			return nil, invalidParams(err.Error())
 		}
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			msg := "lookout " + c.Name + ": " + ctx.Err().Error()
+			record(emit.ExitRuntime, msg)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+			}, nil
+		}
+		fullArgs := append(pinnedArgs(c, cfg), args...)
 		var stdout, stderr bytes.Buffer
-		switch code := emit.Run(ctx, c.RunConfig(&stdout, &stderr), args); code {
+		rc := c.RunConfig(&stdout, &stderr)
+		rc.Stdin = errReader{}
+		switch code := emit.Run(ctx, rc, fullArgs); code {
 		case emit.ExitData:
 			record(emit.ExitData, stdout.String())
 			return &mcp.CallToolResult{
@@ -213,12 +305,12 @@ func invalidParams(msg string) error {
 	return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: msg}
 }
 
-// diagnostics returns the captured stderr, trimmed; if a failure
-// preceded any diagnostic output, it still names the command rather
-// than returning an empty error.
+// diagnostics returns the captured stderr, trimmed and sanitized; if a
+// failure preceded any diagnostic output, it still names the command
+// rather than returning an empty error.
 func diagnostics(c checks.Command, stderr *bytes.Buffer) string {
 	if s := strings.TrimSpace(stderr.String()); s != "" {
-		return s
+		return emit.MaskString(s)
 	}
 	return "lookout " + c.Name + ": failed without diagnostics"
 }

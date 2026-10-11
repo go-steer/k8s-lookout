@@ -373,3 +373,171 @@ func TestCallTool_SanitizerHoldsOnMCPSurface(t *testing.T) {
 		t.Errorf("expected a redaction marker in:\n%s", got)
 	}
 }
+
+// TestCallTool_ErrorDiagnosticsSanitizeSecrets verifies S4 (#633): runtime
+// errors returned by checks pass through emit.MaskString on both stderr and
+// MCP tool-error responses so credential strings never leak.
+func TestCallTool_ErrorDiagnosticsSanitizeSecrets(t *testing.T) {
+	reg := checks.NewRegistry()
+	reg.Register(checks.Command{
+		Name:    "errleak",
+		MCPName: "k8s_errleak",
+		Summary: "Returns an error containing credentials; test scaffolding only.",
+		Kinds:   []checks.KindField{checks.Kind("fake.errleak", "synthetic; test scaffolding only", emit.SeverityInfo)},
+		Run: func(_ context.Context, _ emit.Invocation) (int, error) {
+			return 0, errors.New("dial https://admin:s3cret-db-pw@db.prod.svc:5432 failed with --token=tok_ultra_secret_999")
+		},
+	})
+	cs := connect(t, New(reg, "test"))
+	res, err := callTool(t, cs, "k8s_errleak", nil)
+	if err != nil {
+		t.Fatalf("tools/call: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected IsError for runtime failure")
+	}
+	got := text(t, res)
+	for _, secret := range []string{"s3cret-db-pw", "tok_ultra_secret_999"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("secret %q leaked into MCP error response: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, emit.Redacted) {
+		t.Errorf("expected %s marker in error diagnostics, got: %s", emit.Redacted, got)
+	}
+}
+
+// TestCallTool_StdinReadsFailImmediately verifies S2 (#633): commands that
+// read inv.In (such as findings diff when --report defaults to "-") immediately
+// receive an informative error instead of reading os.Stdin and wedging stdio.
+func TestCallTool_StdinReadsFailImmediately(t *testing.T) {
+	reg := checks.NewRegistry()
+	reg.Register(checks.Command{
+		Name:    "stdinread",
+		MCPName: "k8s_stdinread",
+		Summary: "Attempts to read inv.In; test scaffolding only.",
+		Kinds:   []checks.KindField{checks.Kind("fake.stdin", "synthetic; test scaffolding only", emit.SeverityInfo)},
+		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
+			var buf [16]byte
+			_, err := inv.In.Read(buf[:])
+			return 0, err
+		},
+	})
+	cs := connect(t, New(reg, "test"))
+	res, err := callTool(t, cs, "k8s_stdinread", nil)
+	if err != nil {
+		t.Fatalf("tools/call: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected IsError when check attempts to read stdin over MCP")
+	}
+	if got := text(t, res); !strings.Contains(got, "stdin is not available on the MCP transport") {
+		t.Errorf("error %q does not explain stdin refusal", got)
+	}
+}
+
+// TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied verifies S3
+// (#633): host-path flags (kubeconfig, context, exemptions, store, report) are
+// omitted from MCP schemas, rejected if sent by a client, and injected from
+// server-pinned WithSelection / WithExemptions / WithStore options.
+func TestCallTool_ServerScopedFlagsRejectedAndPinnedOptionsApplied(t *testing.T) {
+	reg := checks.NewRegistry()
+	reg.Register(checks.Command{
+		Name:        "pintest",
+		MCPName:     "k8s_pintest",
+		Summary:     "Echoes server-pinned scope values; test scaffolding only.",
+		GraphBacked: true,
+		Flags: []emit.FlagSpec{
+			{Name: "report", Type: emit.FlagString, Default: "-", Help: "report input"},
+		},
+		Kinds: []checks.KindField{checks.Kind("fake.pin", "synthetic; test scaffolding only", emit.SeverityInfo)},
+		Output: []checks.OutputField{
+			{Name: "kubeconfig", Doc: "pinned kubeconfig"},
+			{Name: "store", Doc: "pinned store"},
+		},
+		Run: func(_ context.Context, inv emit.Invocation) (int, error) {
+			return 1, inv.Out.Emit(emit.Finding{
+				Kind:         "fake.pin",
+				Severity:     emit.SeverityInfo,
+				KindOfObject: "Pod",
+				Name:         "pin",
+				Reason:       "Pin",
+				Message:      "ok",
+				Details: []emit.Field{
+					{Key: "kubeconfig", Value: inv.Scope.Kubeconfig},
+					{Key: "store", Value: inv.Scope.Store},
+				},
+			})
+		},
+	})
+
+	cs := connect(t, New(reg, "test",
+		WithSelection("/etc/lookout/kubeconfig", "prod-west"),
+		WithStore("/var/lib/lookout/state.db"),
+	))
+
+	// Any attempt by an MCP client to supply server-scoped flags is rejected.
+	for _, forbidden := range []string{"kubeconfig", "context", "exemptions", "store", "report"} {
+		_, err := callTool(t, cs, "k8s_pintest", map[string]any{forbidden: "/etc/passwd"})
+		wantInvalidParams(t, err, `unknown argument "`+forbidden+`"`)
+	}
+
+	// Operator-pinned values are automatically passed to emit.Run.
+	res, err := callTool(t, cs, "k8s_pintest", nil)
+	if err != nil {
+		t.Fatalf("tools/call: %v", err)
+	}
+	got := text(t, res)
+	if !strings.Contains(got, "kubeconfig=/etc/lookout/kubeconfig") ||
+		!strings.Contains(got, "store=/var/lib/lookout/state.db") ||
+		!strings.Contains(got, "context=prod-west") {
+		t.Errorf("pinned options not applied to invocation:\n%s", got)
+	}
+}
+
+// TestCallTool_MaxConcurrencyBoundsInFlightCalls verifies S3 (#633): bursts of
+// concurrent tool calls are gated by the server's concurrency semaphore.
+func TestCallTool_MaxConcurrencyBoundsInFlightCalls(t *testing.T) {
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	reg := checks.NewRegistry()
+	reg.Register(checks.Command{
+		Name:    "slow",
+		MCPName: "k8s_slow",
+		Summary: "Blocks until release channel closes; test scaffolding only.",
+		Kinds:   []checks.KindField{checks.Kind("fake.slow", "synthetic; test scaffolding only", emit.SeverityInfo)},
+		Run: func(ctx context.Context, _ emit.Invocation) (int, error) {
+			started <- struct{}{}
+			select {
+			case <-release:
+				return 1, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		},
+	})
+
+	cs := connect(t, New(reg, "test", WithMaxConcurrency(1)))
+
+	// Launch first call: should enter Run immediately.
+	done1 := make(chan error, 1)
+	go func() {
+		_, err := callTool(t, cs, "k8s_slow", nil)
+		done1 <- err
+	}()
+	<-started
+
+	// Second call while semaphore slot is held with canceled context fails
+	// cleanly rather than bypassing concurrency limit.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "k8s_slow"})
+	if err == nil && (res == nil || !res.IsError) {
+		t.Error("expected canceled waiting call to error while semaphore is full")
+	}
+
+	close(release)
+	if err := <-done1; err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+}

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Webhook sink error paths no longer leak URL credentials (#632).**
+  `WebhookSink.post` and `RedactedURL` now strip `user:password@` userinfo from
+  all formatted request-build, transport (`*url.Error`), and non-2xx HTTP status
+  errors while continuing to send full credentials on outbound requests.
+- **MCP server input, transport, concurrency, and error-surface hardening (#633).**
+  - Host file and cluster credential flags (`kubeconfig`, `context`,
+    `exemptions`, `store`, `report`) are omitted from MCP tool schemas and
+    rejected when passed by MCP clients; operators pin them once at startup via
+    `lookout mcp --kubeconfig/--context/--exemptions/--store` (`WithSelection`,
+    `WithExemptions`, `WithStore`).
+  - MCP tool invocations replace `Stdin` with a non-blocking error reader so
+    default `-` stdin flags can never hang or corrupt the stdio JSON-RPC stream.
+  - The MCP HTTP transport enforces a 1 MiB request body cap
+    (`http.MaxBytesReader`), bounded `ReadTimeout` (30s) and `IdleTimeout`
+    (120s), bounded concurrent tool executions (`WithMaxConcurrency`, default
+    8), and `remote=<addr>` client attribution in `--access-log`.
+  - Check runtime errors pass through `emit.MaskString` before reaching `stderr`
+    or MCP `IsError` tool diagnostics.
+
 ### Fixed
 
 - **`cloud orphans` no longer fails in projects with a global HTTP(S)

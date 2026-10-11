@@ -103,14 +103,14 @@ func OpenAccessLog(path string) (*AccessLog, io.Closer, error) {
 // tool call that already succeeded because its audit line could not be
 // persisted, and on stdio there is nowhere to report the failure that
 // is not the protocol stream itself.
-func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int) {
+func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int, remote ...string) {
 	if l == nil {
 		return
 	}
 	dur := l.clock().Sub(start)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	line := emit.EncodeLogfmt([]emit.Field{
+	fields := []emit.Field{
 		{Key: "ts", Value: start.UTC().Format(time.RFC3339)},
 		{Key: "tool", Value: tool},
 		{Key: "exit", Value: fmt.Sprint(exit)},
@@ -119,6 +119,10 @@ func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int) {
 		// on nanoseconds.
 		{Key: "dur", Value: dur.Truncate(time.Millisecond).String()},
 		{Key: "bytes", Value: fmt.Sprint(bytes)},
-	})
+	}
+	if len(remote) > 0 && remote[0] != "" {
+		fields = append(fields, emit.Field{Key: "remote", Value: remote[0]})
+	}
+	line := emit.EncodeLogfmt(fields)
 	_, _ = l.out.Write(line)
 }

@@ -159,9 +159,10 @@ func (s *WebhookSink) post(ctx context.Context, u string, payload any) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("webhook sink: marshal payload: %w", err)
 	}
+	redacted := RedactedURL(u)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("webhook sink: build POST %s: %w", u, err)
+		return nil, fmt.Errorf("webhook sink: build POST %s: %w", redacted, redactURLError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.cfg.BearerToken != "" {
@@ -169,7 +170,7 @@ func (s *WebhookSink) post(ctx context.Context, u string, payload any) ([]byte, 
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("webhook sink: POST %s: %w", u, err)
+		return nil, fmt.Errorf("webhook sink: POST %s: %w", redacted, redactURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -177,9 +178,19 @@ func (s *WebhookSink) post(ctx context.Context, u string, payload any) ([]byte, 
 		// A *StatusError (same text as before) so callers can match the
 		// code: a 404/410 on a followup means the receiver no longer
 		// has the incident, and the dispatcher reopens it (#599).
-		return nil, &StatusError{Op: "webhook sink: POST " + u, Code: resp.StatusCode, Body: string(respBody)}
+		return nil, &StatusError{Op: "webhook sink: POST " + redacted, Code: resp.StatusCode, Body: string(respBody)}
 	}
 	return respBody, nil
+}
+
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cp := *ue
+		cp.URL = RedactedURL(cp.URL)
+		return &cp
+	}
+	return err
 }
 
 // randomLocalID generates the stateless-receiver fallback incident id:
