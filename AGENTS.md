@@ -78,26 +78,19 @@ opens agent incident sessions from leading indicators (watch-path).
 
 ## Current state
 
-**Implementation complete through M5; released at v0.9.0** — the §14
-phase plan is finished, and post-M5 work has been hardening and
-operability, not new milestones: auto sentinel defaults (`--sources` /
-`--storm` probe-and-enable, #75), the runnable kind/GKE failure
-scenarios under `examples/` with non-blocking e2e CI (#76, #77), the
-Starlight docs site (`docs/site/`), and the round-1/round-2 adversarial
-review backlog (`docs/milestones/M5.md` §Remaining known gaps). Every
-§4.1 command and all nine §7.2 sources ship; the signal schema
-is FROZEN as v1 (`docs/signal-schema-v1.md` — removing/renaming a
-frozen field or touching the fingerprint recipe is a v2 negotiation
-with fleet consumers, never a test update; additions are additive-only and extend
-the ledger + doc in the same change). The full frozen-contract →
-guardian-test table is in `docs/repo-map.md`; per-milestone evidence
-and archaeology live in `docs/milestones/M0–M5.md`.
+**Implementation complete through M5; pre-1.0 active development** — the
+§14 phase plan is complete (`docs/milestones/M0–M5.md`), and subsequent
+releases have expanded the read surface (`scan`, `findings`, `audit`,
+`state gateway|keda|storage`, `stab scaledown`, opt-in `net probe-from`),
+the watch-path signal suite (`pkg/sources/*`, including placement-drift
+`topology-drift` + `compute-class` and standalone `cmd/leeway`), MCP
+serving (`lookout mcp` profiles + authenticated HTTP), AX sink integration
+(`internal/axsink`), Kustomize + Helm deployments (`deploy/chart`), and
+the Starlight docs site (`docs/site/`). Every §4.1 command group and all
+§7.2 signal sources ship; the signal schema is FROZEN as v1
+(`docs/signal-schema-v1.md` — removing/renaming a frozen field or touching
+the fingerprint recipe is a v2 negotiation with fleet consumers, never a
+test update; additions are additive-only and extend the ledger + doc in
+the same change). The full frozen-contract → guardian-test table lives in
+[`docs/repo-map.md`](./docs/repo-map.md).
 
-Key open items (full list in M5.md): the real-incident trajectory +
-real fleet-rollup integration + real-GCP drills (human steps; runbooks in
-`dev/drills/`), core-agent's shared Memory surface and
-CostCeiling-on-/usage TODOs, the `triage status` §4.1 extension
-awaiting review, `health`'s control-plane category not yet delegating
-to the perf packs, and the `k8s-capacity` skill. The five M3
-graph-history observations (including the `GraphAt` restart replay)
-are closed by #55; M3.md names their guardian tests.

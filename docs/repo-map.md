@@ -20,16 +20,19 @@ k8s-lookout/
 │                         #   informer). It is also the enforcement: the day a source
 │                         #   reaches into internal/watch, this stops compiling
 ├── internal/
+│   ├── axsink/           # AX agent sink implementation (task lifecycle + fast-path delivery)
+│   ├── axapi/            # Generated AX wire types
 │   ├── watch/            # the sentinel wiring (`lookout watch`): flag surface, dispatcher,
 │   │                     #   watchboard, enrichment, recovery/storm/triage dispatch, distiller,
 │   │                     #   graph feed — plus the scripted end-to-end drill tests
 │   ├── mcpserver/        # `lookout mcp`: MCP tool schemas generated from command metadata
 │   ├── telemetry/        # OTel bootstrap for --otel-exporter (propagator always, exporter
 │   │                     #   on opt-in); in-tree so no agent framework rides in for it
+│   ├── sitedoc/          # Starlight reference docs generator + drift test
 │   └── skilldoc/         # skill references/ generator + ```lookout doc-example contract tests
 ├── pkg/
 │   ├── checks/           # read-path check implementations, one package per group
-│   │   │                 #   (delta, logs, events, top, triage, state, stab, perf,
+│   │   │                 #   (scan, delta, logs, events, top, triage, state, stab, perf,
 │   │   │                 #   cloudcheck, netprobe, bundle, health, findings, audit)
 │   │   │                 #   — shared by CLI, MCP, and in-process enrichment
 │   │   ├── command.go    # Command metadata: flags, when-to-use line, output-field glossary,
@@ -48,24 +51,24 @@ k8s-lookout/
 │   ├── graph/            # in-memory topology index (COW snapshots) + LKGH history/replay
 │   ├── inject/           # agent sinks behind the two-verb Sink interface (core-agent
 │   │                     #   daemon client + generic webhook) + FROZEN wire payload types
-│   ├── kube/             # client bootstrap (kubeconfig/in-cluster) + informer source glue
+│   ├── kube/             # client bootstrap (kubeconfig/in-cluster), informer trimming + paging
+│   ├── leeway/           # shared placement intent & drift math used by topologydrift/computeclass
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
 │   ├── sources/          # §7.2 signal sources, one package each: k8sevents, objectstate,
-│   │                     #   rollout, workload, saturation, degradation, expiry, capacity,
-│   │                     #   ingress, quota, notifications, tokenburn; rbac.go declares
-│   │                     #   per-source RBAC requirements
+│   │                     #   rollout, workload, autoscaling, saturation, degradation, expiry,
+│   │                     #   capacity, ingress, gateway, topologydrift, computeclass, quota,
+│   │                     #   notifications, tokenburn; rbac.go declares per-source RBAC rules
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
-├── deploy/               # sentinel manifests: SA, read-only ClusterRole(+Binding),
-│                         #   capacity Role(+Binding), Deployment (image-swap compatible)
+├── deploy/               # sentinel manifests + Helm chart (deploy/chart): SA, read-only
+│                         #   ClusterRole(+Binding), capacity Role(+Binding), Deployment
 ├── dev/
 │   ├── ci/presubmits/    # the exact checks CI runs, individually invokable
 │   ├── drills/           # GKE/kind replay runbooks (node-failure, bad-deploy, memory-leak,
 │   │                     #   quota-exhaustion) + stub-daemon.py capture sink
 │   └── tools/            # ci (runs all presubmits), build, lint-go, test-unit,
-│                         #   gen-skill-refs, new-check (scaffolds a check + its suite),
-│                         #   harvest-corpus, add-license-headers, …
+│                         #   gen-skill-refs, gen-site-docs, new-check, verify-helm-parity, …
 ├── examples/             # runnable e2e: kind recipe, sentinel + capture stub, demo
 │                         #   workloads, inject/verify/revert failure scenarios, e2e driver,
 │                         #   agent-harness (skills/MCP) testing guide
@@ -89,9 +92,9 @@ enrichment (internal/watch) ───┘        │              (summary line, 
 Watch-path — the sentinel pipeline (§7.1), wired in `internal/watch`:
 
 ```
-pkg/sources (11) ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
-                  └────────────── pkg/engine ──────────┘   (pkg/checks,     (Sink)     daemon sessions
-                                     │                      in-process)                | webhook /incidents
+pkg/sources ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
+              └────────────── pkg/engine ──────────┘   (pkg/checks,     (Sink)     daemon sessions
+                                 │                      in-process)                | webhook / AX sink
         pkg/store (occurrences, graph history, §9.2/§9.4 records via pkg/memory)
         pkg/graph (blast-radius keys for storm correlation; snapshots into the store)
 ```

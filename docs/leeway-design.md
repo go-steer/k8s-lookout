@@ -1,6 +1,6 @@
 # leeway — Placement Drift Detection
 
-**Status:** Draft v0.6 — proposal. Both maintainer decisions taken (§15 Q3, Q4):
+**Status:** Implemented (shipped in `pkg/leeway`, `pkg/sources/{topologydrift,computeclass}`, and `cmd/leeway`). Both maintainer decisions taken (§15 Q3, Q4):
 the higher scale targets stand and DESIGN §6.2 is edited to match; `topology-drift`
 ships default-on. Spikes S9, S10 and S11 resolved against this repo; **S1, S2 and S3
 resolved against a live GKE cluster** — S1 rewrote the §7.7.2 annotation model and

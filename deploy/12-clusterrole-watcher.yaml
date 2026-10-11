@@ -176,8 +176,15 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    # Enrichment (§7.6) distills the target pods' logs into the warm
-    # bundle attached to the initial inject.
+    # §11 SECURITY NOTE — cluster-wide `pods/log` (`get` only):
+    # Enrichment (§7.6) distills recent tail lines of an incident's pods into
+    # the warm bundle attached to an initial critical inject. `pods/log` has no
+    # `list` or `watch` subresource verb, so it cannot stream cluster-wide; it
+    # is fetched on-demand only when an incident opens, and every line passes
+    # immediately through Drain log deduplication + `pkg/emit` credential masking
+    # before leaving the process. Deployments operating workloads that print
+    # unredacted PII/secrets to stdout and cannot rely on `pkg/emit` may remove
+    # this rule (enrichment degrades cleanly to a bundle without `logs`).
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: [""]

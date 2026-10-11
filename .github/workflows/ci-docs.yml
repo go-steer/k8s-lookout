@@ -55,8 +55,38 @@ permissions:
   contents: read
 
 jobs:
+  only-docs:
+    name: check non-Go diff scope
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.check.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            BASE="${{ github.event.before }}"
+          else
+            BASE="${{ github.event.pull_request.base.sha }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NON_DOC=$(git diff --name-only "$BASE" "${{ github.sha }}" | grep -v -E '^(\.github/workflows/(release|docs).*\.yml|docs/site/|LICENSE$|.*\.md$)' || true)
+          if [ -n "$NON_DOC" ]; then
+            echo "Mixed PR detected (ci.yml owns checks); skipping stub check runs."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: test
+    needs: [only-docs]
+    if: needs.only-docs.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -70,27 +100,36 @@ jobs:
 
   lint:
     name: lint
+    needs: [only-docs]
+    if: needs.only-docs.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - run: echo "non-Go change — no Go to lint"
 
   tidy:
     name: go mod tidy is clean
+    needs: [only-docs]
+    if: needs.only-docs.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - run: echo "non-Go change — go.mod untouched"
 
   vuln:
     name: govulncheck
+    needs: [only-docs]
+    if: needs.only-docs.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - run: echo "non-Go change — no Go to scan"
 
   manifests:
     name: manifests
+    needs: [only-docs]
+    if: needs.only-docs.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       # deploy/ is not in this workflow's paths: list, so a run here
       # means nothing under deploy/ changed and the chart cannot have
       # drifted off manifests that also did not change.
       - run: echo "non-Go change — deploy/ untouched"
+

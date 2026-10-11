@@ -139,6 +139,12 @@ args:
   - "--storm=on"
   - "--store=/var/lib/lookout/lookout.db"
 
+# -- Extra flags appended after `args` above so callers can pass one or
+# two additional sentinel flags (`--kube-qps`, `--owner`, `--exclude-namespace`)
+# without duplicating the full 11-flag base array. Empty by default so the
+# chart renders identically to kustomize build deploy/.
+extraArgs: []
+
 # -- The bearer token the sentinel presents to the core-agent daemon.
 # The chart does NOT create this Secret: a chart that takes a token as
 # a value writes it into the release's stored manifest, where anyone

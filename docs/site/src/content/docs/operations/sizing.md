@@ -8,7 +8,7 @@ sidebar:
 Almost all of a sentinel's memory is one thing: the shared informer
 cache. It holds every pod and node in the cluster, and every source
 reads from it rather than listing the API server again. That is what
-makes eleven sources cost roughly what one costs — and it is also what
+makes running the full source suite cost roughly what one source costs — and it is also what
 makes the memory limit a function of cluster size rather than of how
 many features you turned on.
 

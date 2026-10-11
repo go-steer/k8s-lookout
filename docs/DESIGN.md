@@ -609,6 +609,8 @@ type Source interface {
 | `quota` | leading (countdown) | Cloud Quotas + Monitoring quota metrics, per **project** (§10.2) | "CPUS us-east1 at 91%, exhausted in ~6 days at current slope" |
 | `notifications` | reactive (provider announcements) | provider cluster-notification stream, per **project** (GKE notificationConfig Pub/Sub; post-M5 #130) | upgrade started on a node pool (info → store, correlates incident windows), security bulletin (warning → watchboard) |
 | `token-burn` | leading (trend) | `core-agent` cost-stack API (§12) | "session X burning 4× baseline; budget exhausted in ~20 min" |
+| `topology-drift` | leading (sustained placement skew) | Pod, Node, PVC, PV, and optional `LeewayPolicy` / `ClusterLeewayPolicy` informers (`docs/leeway-design.md`, #416) | workload placement skew across zones/nodes/pools exceeding its declared or inferred tolerance (`topology.drift` — single-zone concentration, soft spread ignored, unpinned post-incident imbalance) |
+| `compute-class` | leading (sustained fallback rank) | GKE `ComputeClass` (`cloud.google.com`), Node, and Pod informers (`docs/leeway-design.md` §7.7, #416) | pods stranded on fallback hardware priorities after primary capacity returns (`compute.fallback_sustained`, `compute.class_unhealthy`) |
 
 Sources are individually enabled in config. A deployment whose RBAC can't
 support a source's scope gets an explicit startup error naming the source and
@@ -621,10 +623,11 @@ the missing permission — never a silent empty watch (§11).
 back-compat; new kinds are namespaced by source:
 `rollout.stall`, `saturation.forecast`, `degradation.capacity`,
 `expiry.warning`, `capacity.stockout`, `capacity.pending-aged`,
+`topology.drift`, `compute.fallback_sustained`,
 `quota.forecast`, `token.burn`, plus the cross-cutting `resolved` and
 `storm` kinds below.
 
-### 7.4 Recovery injects — the closed loop
+### 7.4 Recovery injects & open-incident repeats — the closed loop
 
 The dedup cache already binds incident keys to sessions (`BindSession`). Each
 source that can observe a symptom can observe its absence: pod Ready and
@@ -638,9 +641,10 @@ longer polls to confirm its fix stuck, sessions can auto-conclude, and every
 incident record gains a ground-truth outcome (§9.3). **Highest value per line
 of code in this document; ships in M2 before any new source.**
 
-**Amendment (2026-10-10, #599): repeats of an open incident.** Knowing
-whether an incident is resolved also tells the sentinel what to do when one
-is *not*. The dedup window used to be a cooldown with a retry safety net:
+#### Open-incident repeat & backoff policy (#599)
+
+Knowing whether an incident is resolved also tells the sentinel what to do when
+one is *not*. The dedup window used to be a cooldown with a retry safety net:
 once it lapsed, the next occurrence opened the incident again. The scheduler
 re-queues an unschedulable pod about every five minutes, just past the 5m
 default, so the #585 soak's one stuck pod opened 225 sessions in 24 hours and
@@ -778,8 +782,9 @@ modes become per-class:
 | `warning` | shared watchboard session, batched (rolling digest inject) |
 | `info` | stored only (§9.1); surfaced by read-path queries and digests |
 
-**Amendment (2026-10-08): one workload's same-class failures are one
-incident.** The dedup key is `(uid, reason)`, so two pods are two
+#### Same-class owner folding (#583 / #600 / #601)
+
+The dedup key is `(uid, reason)`, so two pods are two
 incidents even when the fingerprint (which hashes the class, not the
 pod) is the same. A crash-looping Deployment rolled out mid-failure
 showed the cost on a live cluster: the old ReplicaSet's pod was still

@@ -53,7 +53,7 @@ cd "$(repo_root)"
 # ---- paths in scope ---------------------------------------------------
 
 scoped_paths() {
-  find README.md docs/site/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort
+  find README.md AGENTS.md CONTRIBUTING.md ROADMAP.md SECURITY.md docs/site/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort
 }
 
 # ---- individual checks ------------------------------------------------
@@ -153,6 +153,23 @@ check_wrong_major_pins() {
     }' || true
 }
 
+# Check 5: numeric or spelled signal-source counts in prose.
+#
+# Catches "nine signal sources", "nine §7.2 sources", "11 sources" in
+# unguarded prose so documentation does not rot when sources are added.
+# Allow-lists "of the <N> sources are never auto-enabled" in sentinel.md,
+# which is verified directly against Go's knownSources registry by
+# TestCoverageMapExplicitOnlyCount (internal/watch/coveragedoc_test.go).
+check_source_counts() {
+  local path="$1"
+  grep -n -E '\b(seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|[7-9]|1[0-9])[- ]+(§7\.2 )?(signal )?sources\b' "$path" 2>/dev/null | \
+    grep -v -E 'of the [a-z]+ sources are never auto-enabled' | \
+    awk -F: -v p="$path" '{
+      msg = "hard-coded source count — describe sources by role or link §7.2 instead of a count that drifts";
+      printf "%s:%s: %s\n", p, $1, msg
+    }' || true
+}
+
 # ---- driver -----------------------------------------------------------
 
 run_all_checks() {
@@ -165,6 +182,7 @@ run_all_checks() {
       check_image_counts "$path"
       check_pinned_installs "$path"
       check_wrong_major_pins "$path"
+      check_source_counts "$path"
     )
     if [[ -n "$out" ]]; then
       printf '%s\n' "$out"
@@ -200,6 +218,7 @@ The 19-command read path is stale phrasing.
 Nineteen commands are registered by default.
 
 We ship two container images: `lookout` and `lookout-gke`.
+The sentinel runs nine signal sources out of the box.
 
 Install with:
 
@@ -226,8 +245,11 @@ EOF
   n=$(check_wrong_major_pins "$tmp/fixture.md" | wc -l)
   (( n >= 1 )) || { echo "self-test: check_wrong_major_pins fired 0 times, expected ≥1"; out=1; }
 
+  n=$(check_source_counts "$tmp/fixture.md" | wc -l)
+  (( n >= 1 )) || { echo "self-test: check_source_counts fired 0 times, expected ≥1"; out=1; }
+
   if (( out == 0 )); then
-    echo "docs-lint self-test: OK (all 4 rules fired on the fixture)"
+    echo "docs-lint self-test: OK (all 5 rules fired on the fixture)"
   fi
   return $out
 }
