@@ -176,8 +176,8 @@ func TestDispatchRepeat_ExactWireShape(t *testing.T) {
 }
 
 // TestDispatchRepeat_MaterialChange: a new message shape mid-backoff
-// is a followup with repeat_count omitted, at the first occurrence a
-// full window after the last inject.
+// is a followup with repeat_count omitted, at the first occurrence
+// past max(2 windows, the next reminder interval) after the last inject.
 func TestDispatchRepeat_MaterialChange(t *testing.T) {
 	t.Parallel()
 	base, injects := newRoutingFakeDaemon(t)
@@ -191,7 +191,7 @@ func TestDispatchRepeat_MaterialChange(t *testing.T) {
 	if len(*injects) != 2 {
 		t.Fatalf("injects = %d, want the change held inside the window", len(*injects))
 	}
-	r.emit(3*time.Minute+time.Second, sig) // a window past reminder 1
+	r.emit(8*time.Minute+time.Second, sig) // past max(2 windows, reminder 2 interval) after reminder 1
 	if len(*injects) != 3 {
 		t.Fatalf("injects = %d, want open + reminder + change", len(*injects))
 	}

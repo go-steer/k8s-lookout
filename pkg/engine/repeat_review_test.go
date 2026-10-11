@@ -48,20 +48,68 @@ func TestRepeat_LowerClassAngleIsAbsorbed(t *testing.T) {
 	}
 }
 
-// TestRepeat_FirstWindowChangeIsAnnounced: a new message shape inside
-// the first window stays a duplicate there, but it is pending — the
-// first lapse is a change followup, not reminder 1.
-func TestRepeat_FirstWindowChangeIsAnnounced(t *testing.T) {
+// TestRepeat_OpeningWindowShapesAreNotChanges: shapes first seen
+// within a window of the open (kubelet's pull cycle emits four within
+// seconds) are part of what the open described, so the first lapse is
+// reminder 1, not a change.
+func TestRepeat_OpeningWindowShapesAreNotChanges(t *testing.T) {
 	t.Parallel()
 	h := newRepeatHarness(t, "")
 	h.openIncident()
 	h.msg = "a completely different failure clause"
 	if got := h.emit(time.Minute); got.Kind != DedupDuplicate || got.Absorbed {
-		t.Fatalf("first-window change = %+v, want a plain duplicate", got)
+		t.Fatalf("opening-window shape = %+v, want a plain duplicate", got)
 	}
 	got := h.emit(5*time.Minute + time.Second)
+	if got.Kind != DedupRepeat || got.RepeatCount != 1 {
+		t.Fatalf("first lapse = %+v, want reminder 1", got)
+	}
+}
+
+// TestRepeat_RotationAtSoakCadence: 17 rotating shapes at the stuck
+// pod's own 5m05s cadence. Change followups must never come more often
+// than max(2 windows, the next reminder interval), so rotation cannot
+// out-inject the reminder schedule.
+func TestRepeat_RotationAtSoakCadence(t *testing.T) {
+	t.Parallel()
+	h := newRepeatHarness(t, "")
+	h.openIncident()
+	const cadence = 5*time.Minute + 5*time.Second
+	var injects int
+	last := h.now
+	for i := range 100 {
+		h.msg = fmt.Sprintf("shape %c failed", 'a'+i%17)
+		got := h.emit(cadence)
+		if got.Kind != DedupRepeat {
+			continue
+		}
+		injects++
+		if gap := h.now.Sub(last); gap <= 10*time.Minute {
+			t.Fatalf("inject %d came %s after the previous one, want more than 2 windows", injects, gap)
+		}
+		last = h.now
+	}
+	if injects > 50 {
+		t.Fatalf("injects = %d over 100 rotating occurrences, want at most half", injects)
+	}
+}
+
+// TestRepeat_UndeliveredReminderCarriesPendingChange: reminder 1 fails;
+// the next occurrence brings a new shape. The re-send must be the
+// change, not a stale reminder that swallows it.
+func TestRepeat_UndeliveredReminderCarriesPendingChange(t *testing.T) {
+	t.Parallel()
+	h := newRepeatHarness(t, "")
+	h.openIncident()
+	got := h.emit(6 * time.Minute)
+	if got.RepeatCount != 1 {
+		t.Fatalf("lapse = %+v, want reminder 1", got)
+	}
+	h.c.MarkUndelivered(h.key, got.Change)
+	h.msg = "0/6 nodes are available: 6 Insufficient memory."
+	got = h.emit(time.Minute)
 	if got.Kind != DedupRepeat || got.RepeatCount != 0 || got.Change != RepeatChangeClass {
-		t.Fatalf("first lapse after an in-window change = %+v, want a class change followup", got)
+		t.Fatalf("re-send with a new shape = %+v, want a class change followup", got)
 	}
 }
 

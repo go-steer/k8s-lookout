@@ -190,8 +190,8 @@ func TestRepeat_FirstWindowIsPlainDuplicate(t *testing.T) {
 }
 
 // TestRepeat_MaterialChangeResetsSchedule: a new message shape in the
-// backoff is a RepeatCount-0 followup at once, and the schedule
-// restarts from one window after it.
+// backoff is a RepeatCount-0 followup once past its floor, and the
+// schedule restarts from one window after it.
 func TestRepeat_MaterialChangeResetsSchedule(t *testing.T) {
 	t.Parallel()
 	h := newRepeatHarness(t, "")
@@ -201,7 +201,12 @@ func TestRepeat_MaterialChangeResetsSchedule(t *testing.T) {
 		h.emit(cadence)
 	}
 	h.msg = "0/6 nodes are available: 6 Insufficient cpu."
-	got := h.emit(time.Minute)
+	// Held until max(2 windows, reminder 3's 20m interval) after
+	// reminder 2 (at 15m15s).
+	if got := h.emit(time.Minute); got.Kind != DedupDuplicate || !got.Absorbed {
+		t.Fatalf("change inside the floor = %+v, want it held", got)
+	}
+	got := h.emit(14 * time.Minute)
 	if got.Kind != DedupRepeat || got.RepeatCount != 0 || got.Change != RepeatChangeClass {
 		t.Fatalf("new message shape = %+v, want a material-change followup (repeat 0, change=class)", got)
 	}
@@ -226,8 +231,13 @@ func TestRepeat_SeverityChangeIsMaterial(t *testing.T) {
 	if got := h.emit(time.Minute); got.Kind != DedupDuplicate || !got.Absorbed {
 		t.Fatalf("severity change within a window of the last inject = %+v, want it held", got)
 	}
+	// Reminder 1 was the last inject, so the floor is max(2 windows,
+	// reminder 2's 10m interval) = 10m — and it supersedes reminder 2.
+	if got := h.emit(5 * time.Minute); got.Kind != DedupDuplicate || !got.Absorbed {
+		t.Fatalf("held severity change at 6m = %+v, want it still held", got)
+	}
 	if got := h.emit(5 * time.Minute); got.Kind != DedupRepeat || got.RepeatCount != 0 || got.Change != RepeatChangeClass {
-		t.Fatalf("held severity change = %+v, want a class change followup a window after the last inject", got)
+		t.Fatalf("held severity change = %+v, want a class change followup past the floor", got)
 	}
 }
 

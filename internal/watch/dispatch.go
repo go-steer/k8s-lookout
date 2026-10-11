@@ -616,7 +616,10 @@ func (d *dispatcher) opensSessions(sig engine.Signal) bool {
 //     occurrence through the #84 guard. A storm-claimed entry is
 //     unbound but not reopened per-incident (#104): it stays a
 //     session-less storm member and its next lapse goes back through
-//     the storm stage, as a re-fire did before #599.
+//     the storm stage, as a re-fire did before #599. The storm stage
+//     does not reopen a storm whose session is gone (it retries only
+//     an empty storm session id), so such a storm keeps its dead id —
+//     the pre-#599 behavior, tracked separately.
 //   - any other error: the entry is marked undelivered, so the next
 //     occurrence re-sends the same inject instead of the schedule
 //     skipping it.

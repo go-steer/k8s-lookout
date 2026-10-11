@@ -214,6 +214,78 @@ func TestDispatchRepeat_SinkStatusError404Reopens(t *testing.T) {
 	}
 }
 
+// TestDispatchRepeat_WebhookGoneReopens: the webhook sink surfaces a
+// receiver's 404 on /incidents/<id>/events as *inject.StatusError, so a
+// receiver that dropped the incident gets it reopened (POST /incidents)
+// instead of a re-send into the dead id forever.
+func TestDispatchRepeat_WebhookGoneReopens(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var paths []string
+	opens := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/incidents":
+			opens++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"id":"inc-%d"}`, opens)
+		case r.URL.Path == "/incidents/inc-1/events":
+			http.Error(w, "no such incident", http.StatusNotFound)
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := wireRepeat(t, newWebhookDispatcher(t, srv.URL, ""))
+	sig := unschedulableSignal()
+	r.emit(0, sig)
+	r.emit(5*time.Minute+5*time.Second, sig) // reminder → 404 → reopen
+	mu.Lock()
+	gotOpens := opens
+	mu.Unlock()
+	if gotOpens != 2 {
+		t.Fatalf("webhook opens = %d (paths %v), want 2: the 404 must reopen", gotOpens, paths)
+	}
+	if sid, ok := r.d.dedup.LookupSession(sig.CanonicalKey()); !ok || sid != "inc-2" {
+		t.Fatalf("binding = %q %v, want inc-2", sid, ok)
+	}
+	r.emit(5*time.Minute+5*time.Second, sig)
+	mu.Lock()
+	defer mu.Unlock()
+	if last := paths[len(paths)-1]; last != "/incidents/inc-2/events" {
+		t.Fatalf("next reminder went to %q, want /incidents/inc-2/events", last)
+	}
+}
+
+// TestDispatchRepeat_FailedReminderThenNewShapeSendsChange: reminder 1
+// fails with a 5xx and the next occurrence brings a new shape; the
+// re-send must announce the change, not a stale reminder 1.
+func TestDispatchRepeat_FailedReminderThenNewShapeSendsChange(t *testing.T) {
+	t.Parallel()
+	base, fd := newFaultyDaemon(t)
+	r := wireRepeat(t, newRecoveryDispatcher(t, base))
+	sig := unschedulableSignal()
+	r.emit(0, sig)
+	fd.setFail(func(string) int { return http.StatusBadGateway })
+	r.emit(5*time.Minute+5*time.Second, sig) // reminder 1 → 502
+	fd.setFail(func(string) int { return 0 })
+	sig.Message = "0/6 nodes are available: 6 Insufficient memory."
+	r.emit(time.Minute, sig)
+	got := fd.captured()
+	if len(got) != 2 {
+		t.Fatalf("injects = %d, want the open + one re-send", len(got))
+	}
+	p := payloadFields(t, got[1].Body)
+	if p["kind"] != engine.KindK8sEventFollowup || p["repeat_count"] != nil {
+		t.Fatalf("re-send = %v, want a change followup (repeat_count omitted)", p)
+	}
+}
+
 // TestDispatchRepeat_FailedReminderIsResent: a transient delivery error
 // does not let the schedule skip the reminder; the next occurrence
 // re-sends it.

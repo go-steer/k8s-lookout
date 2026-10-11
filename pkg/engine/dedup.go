@@ -160,12 +160,11 @@ type dedupEntry struct {
 	// silently rather than read as a change.
 	Classes []string `json:"classes,omitempty"`
 	// PendingChange records a material class change the session has
-	// not heard yet: seen inside the first window, or less than a
-	// window after the last inject. It is announced (one followup,
-	// repeat_count omitted) at the first occurrence a full window past
-	// the last inject, which is also the floor that keeps an incident
-	// rotating through more shapes than maxRepeatClasses from sending
-	// a change followup every occurrence.
+	// not heard yet. It is announced (one followup, repeat_count
+	// omitted) at the first occurrence more than max(2 windows, the
+	// next reminder's interval) past the last inject, the floor that
+	// keeps an incident rotating through more shapes than
+	// maxRepeatClasses from injecting faster than its reminders.
 	PendingChange bool `json:"pending_change,omitempty"`
 	// Undelivered marks that the last inject decided for this entry
 	// (LastChange says which: RepeatChangeOpen, a RepeatChange* value,
@@ -659,9 +658,9 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	entry.Count++
 	entry.LastSeen = now
 	entry.EventLastTS = obs.LastTS
-	if entry.noteClass(class) {
-		// Recorded for the repeat schedule: announced once the
-		// incident is past its first window (see repeat).
+	if entry.noteClass(class) && now.Sub(entry.FirstSeen) > c.window {
+		// Recorded for the repeat schedule, under the same rule as
+		// repeat: only a class first seen after the open's window.
 		entry.PendingChange = true
 	}
 	return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
@@ -707,9 +706,13 @@ func (c *DedupCache) MarkUndelivered(key EventKey, change string) {
 // restarted without its state) and restarts its schedule as if
 // freshly opened, so the dispatcher can reopen the incident in a new
 // session (issue #599). A storm-claimed entry keeps its storm
-// fingerprint: it stays a session-less storm member, which the storm
-// stage owns recovering (#104), and never opens a per-incident session
-// of its own. No-op on a missing entry.
+// fingerprint and never opens a per-incident session of its own
+// (#104): it becomes a session-less storm member, and its next lapse
+// goes back through the storm stage. That stage does NOT recover a
+// storm whose session is gone — stormAttached retries the open only
+// when the storm's session id is empty, so a storm still holding the
+// dead id keeps routing members there, exactly as before #599. No-op
+// on a missing entry.
 func (c *DedupCache) Unbind(key EventKey) {
 	key.Reason = CanonicalReason(key.Reason)
 	now := c.clock()

@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are counted, not sent. A followup without `repeat_count` means the
   signal changed (a new message shape or severity, or a jump of 4× or
   more in how often it fires) and restarts the schedule; message and
-  severity changes are sent at most once per window. A warning from
+  severity changes are sent no more often than the reminders would be. A warning from
   another source on the same key (such as `capacity.pending` on a
   `FailedScheduling` incident) no longer splits the incident. If the
   agent has lost the session, the incident reopens in a new one; other

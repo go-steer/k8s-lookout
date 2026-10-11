@@ -674,17 +674,22 @@ its agent re-diagnosed an unchanged failure each time. Now:
   occurrence rate since the last inject at least 4× the reference rate over
   at least 10 occurrences, goes in with `repeat_count` omitted, and the
   schedule restarts from one window. A rate jump goes in at once (it has its
-  own floor); a class change goes in at the first occurrence a full window
-  after the last inject — one seen inside the first window included, so a
-  fast stream that never lapses still announces it — and further class
-  changes inside that window fold into it, so an incident rotating through
-  more shapes than the set holds cannot send a followup per occurrence. The
-  reason is not an input: it is the dedup key already.
+  own floor); a class change goes in at the first occurrence more than
+  max(2 windows, the next reminder's interval) after the last inject — one
+  seen inside the first window included, so a fast stream that never lapses
+  still announces it — and supersedes a reminder that comes due meanwhile.
+  Further class changes fold into it, so an incident rotating through more
+  shapes than the set holds never injects more often than its reminder
+  schedule would; the price is that a lone change late in the backoff can
+  wait up to that interval (an hour at most). The reason is not an input:
+  it is the dedup key already.
 - **Delivery never goes dark.** If the sink says the bound session is gone
   (404/410 on the inject), the incident is unbound and reopened at once with
-  the occurrence in hand (a storm member is only unbound; the storm stage
-  owns it). Any other delivery error re-sends the same inject at the next
-  occurrence. An open that created a session but failed its initial delivery
+  the occurrence in hand. A storm member is only unbound and goes back
+  through the storm stage, which does not yet reopen a storm whose own
+  session is gone. Any other delivery error re-sends the same inject at the
+  next occurrence (as the pending class change, if one arrived since).
+  An open that created a session but failed its initial delivery
   re-sends the full open payload at the next occurrence, so the agent never
   meets an incident first as a pure reminder.
 - After the incident resolves, a recurrence opens fresh, as before. Replays
