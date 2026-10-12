@@ -58,8 +58,8 @@ uat_toplevel_bundle() {
   # The head names every section it produced. Asserting the list rather
   # than only the contents means a section that stops being emitted
   # fails here instead of silently thinning every later assertion.
-  uat_expect_stdout 'kind=bundle\.target.*sections=spec,delta,edges,radius,logs' \
-    "bundle → the head names all five sections"
+  uat_expect_stdout 'kind=bundle\.target.*sections=spec,delta,events,edges,radius,logs' \
+    "bundle → the head names all six sections"
   uat_expect_stdout 'kind=bundle\.target.*workload=Deployment/'"$UAT_BROKEN_NS"'/faulty' \
     "bundle → and the workload it resolved"
 
