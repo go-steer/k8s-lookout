@@ -273,6 +273,16 @@ func (b *watchboard) flush(ctx context.Context) {
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Printf("--- dry-run payload for session %q ---\n%s\n", sid, string(out))
 	} else if err := b.injector.Append(ctx, sid, payload); err != nil {
+		if sessionGone(err) {
+			newSid, newGen, newInjects, delivered := b.recoverGoneSession(ctx, now, windowStart, entries, sid, gen, err)
+			b.mu.Lock()
+			b.sid, b.generation, b.injects = newSid, newGen, newInjects
+			b.mu.Unlock()
+			if delivered {
+				b.finishFlush(entries, newSid, newGen, newInjects)
+			}
+			return
+		}
 		b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
 		log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", sid, len(entries), err)
 		b.mu.Lock()
@@ -285,6 +295,38 @@ func (b *watchboard) flush(ctx context.Context) {
 	b.sid, b.generation, b.injects = sid, gen, injects
 	b.mu.Unlock()
 	b.finishFlush(entries, sid, gen, injects)
+}
+
+// recoverGoneSession handles HTTP 404/410 on digest Append (#689): clears
+// the lost session ID, records lookout_watchboard_sessions_lost_total,
+// opens a successor session without sending a rotation lineage pointer to
+// the dead session, and retries the digest batch once.
+func (b *watchboard) recoverGoneSession(ctx context.Context, now, windowStart time.Time, entries []boardEntry, lostSid string, gen int, err error) (string, int, int, bool) {
+	b.metrics.watchboardSessionsLost.Inc()
+	log.Printf("watchboard: session %s lost (%v) — opening new session and retrying %d warning(s)",
+		lostSid, err, len(entries))
+
+	opener, ok := b.sessionOpener()
+	if !ok {
+		newSid, newGen, newInjects := b.openStateless(ctx, now, windowStart, entries, "", gen, 0)
+		return newSid, newGen, newInjects, false
+	}
+	newSid, newGen, newInjects, okOpen := b.openSession(ctx, opener, now, entries, "", gen, 0)
+	if !okOpen {
+		return "", gen, 0, false
+	}
+	payload := b.digestPayload(now, windowStart, newGen, newInjects, entries)
+	if rerr := b.injector.Append(ctx, newSid, payload); rerr != nil {
+		b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
+		if sessionGone(rerr) {
+			b.metrics.watchboardSessionsLost.Inc()
+			log.Printf("watchboard: reopened session %s also lost (%v) — clearing session", newSid, rerr)
+			return "", newGen, 0, false
+		}
+		log.Printf("watchboard: retry digest inject (sid=%s, entries=%d): %v", newSid, len(entries), rerr)
+		return newSid, newGen, newInjects, false
+	}
+	return newSid, newGen, newInjects + 1, true
 }
 
 // sessionOpener returns how this board opens an empty session, if its
@@ -352,6 +394,11 @@ func (b *watchboard) openStateless(ctx context.Context, now, windowStart time.Ti
 			log.Printf("watchboard: open successor incident failed (rotation deferred to next flush): %v", err)
 			payload = b.digestPayload(now, windowStart, prevGen, prevInjects, entries)
 			if aerr := b.injector.Append(ctx, prevSid, payload); aerr != nil {
+				if sessionGone(aerr) {
+					b.metrics.watchboardSessionsLost.Inc()
+					log.Printf("watchboard: fallback session %s also lost (%v) — clearing session", prevSid, aerr)
+					return "", prevGen, 0
+				}
 				b.metrics.injectErrors.WithLabelValues("watchboard", "inject").Inc()
 				log.Printf("watchboard: digest inject (sid=%s, entries=%d): %v", prevSid, len(entries), aerr)
 				return prevSid, prevGen, prevInjects

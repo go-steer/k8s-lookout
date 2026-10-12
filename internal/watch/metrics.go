@@ -83,52 +83,53 @@ func newFleetMetrics(reg prometheus.Registerer) *fleetMetrics {
 // registry, wire metrics into it, and assert values without
 // stringifying Prometheus output.
 type metrics struct {
-	registry             *prometheus.Registry
-	eventsSeen           *prometheus.CounterVec
-	eventsInjected       *prometheus.CounterVec
-	eventsDedupSuppress  *prometheus.CounterVec
-	eventsFiltered       *prometheus.CounterVec
-	injectErrors         *prometheus.CounterVec
-	injectShrinks        *prometheus.CounterVec
-	sessionCreates       *prometheus.CounterVec
-	activeIncidents      prometheus.Gauge
-	recoveriesObserved   *prometheus.CounterVec
-	recoveriesReverted   prometheus.Counter
-	recoveryTracking     prometheus.Gauge
-	recoveryDrops        *prometheus.CounterVec
-	stormsFormed         prometheus.Counter
-	stormsResolved       prometheus.Counter
-	stormsActive         prometheus.Gauge
-	stormMembers         *prometheus.CounterVec
-	stormUpdates         prometheus.Counter
-	watchboardEntries    *prometheus.CounterVec
-	watchboardDigests    prometheus.Counter
-	watchboardRotations  prometheus.Counter
-	watchboardBuffered   prometheus.Gauge
-	watchboardReattached *prometheus.CounterVec
-	infoDropped          *prometheus.CounterVec
-	findings             *prometheus.CounterVec
-	storeRecords         *prometheus.CounterVec
-	storeDrops           *prometheus.CounterVec
-	storePruned          *prometheus.CounterVec
-	enrichments          *prometheus.CounterVec
-	enrichmentBytes      prometheus.Histogram
-	enrichmentTruncated  prometheus.Counter
-	enrichmentFailures   *prometheus.CounterVec
-	memoryFacts          *prometheus.CounterVec
-	distillErrors        prometheus.Counter
-	triageOverrides      *prometheus.CounterVec
-	triageFlips          prometheus.Counter
-	triageRegressed      prometheus.Counter
-	crossSourceFollowups *prometheus.CounterVec
-	repeatFollowups      *prometheus.CounterVec
-	axReminders          *prometheus.CounterVec
-	sinkInfo             *prometheus.GaugeVec
-	runnerUp             prometheus.Gauge
-	runnerRestarts       prometheus.Counter
-	runnerTerminal       *prometheus.GaugeVec
-	sourceDenied         *prometheus.GaugeVec
-	namespaceErrors      *prometheus.CounterVec
+	registry               *prometheus.Registry
+	eventsSeen             *prometheus.CounterVec
+	eventsInjected         *prometheus.CounterVec
+	eventsDedupSuppress    *prometheus.CounterVec
+	eventsFiltered         *prometheus.CounterVec
+	injectErrors           *prometheus.CounterVec
+	injectShrinks          *prometheus.CounterVec
+	sessionCreates         *prometheus.CounterVec
+	activeIncidents        prometheus.Gauge
+	recoveriesObserved     *prometheus.CounterVec
+	recoveriesReverted     prometheus.Counter
+	recoveryTracking       prometheus.Gauge
+	recoveryDrops          *prometheus.CounterVec
+	stormsFormed           prometheus.Counter
+	stormsResolved         prometheus.Counter
+	stormsActive           prometheus.Gauge
+	stormMembers           *prometheus.CounterVec
+	stormUpdates           prometheus.Counter
+	watchboardEntries      *prometheus.CounterVec
+	watchboardDigests      prometheus.Counter
+	watchboardRotations    prometheus.Counter
+	watchboardSessionsLost prometheus.Counter
+	watchboardBuffered     prometheus.Gauge
+	watchboardReattached   *prometheus.CounterVec
+	infoDropped            *prometheus.CounterVec
+	findings               *prometheus.CounterVec
+	storeRecords           *prometheus.CounterVec
+	storeDrops             *prometheus.CounterVec
+	storePruned            *prometheus.CounterVec
+	enrichments            *prometheus.CounterVec
+	enrichmentBytes        prometheus.Histogram
+	enrichmentTruncated    prometheus.Counter
+	enrichmentFailures     *prometheus.CounterVec
+	memoryFacts            *prometheus.CounterVec
+	distillErrors          prometheus.Counter
+	triageOverrides        *prometheus.CounterVec
+	triageFlips            prometheus.Counter
+	triageRegressed        prometheus.Counter
+	crossSourceFollowups   *prometheus.CounterVec
+	repeatFollowups        *prometheus.CounterVec
+	axReminders            *prometheus.CounterVec
+	sinkInfo               *prometheus.GaugeVec
+	runnerUp               prometheus.Gauge
+	runnerRestarts         prometheus.Counter
+	runnerTerminal         *prometheus.GaugeVec
+	sourceDenied           *prometheus.GaugeVec
+	namespaceErrors        *prometheus.CounterVec
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -254,6 +255,10 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		watchboardRotations: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lookout_watchboard_rotations_total",
 			Help: "Total size-based watchboard session rotations (§15 Q2): a fresh session opened after --watchboard-rotate digest injects.",
+		}),
+		watchboardSessionsLost: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lookout_watchboard_sessions_lost_total",
+			Help: "Total watchboard digest flushes where the target session disappeared on the sink (HTTP 404/410, issue #689), causing the sentinel to forget the dead session ID, advance generation, open a new session, and retry the warning batch.",
 		}),
 		watchboardBuffered: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "lookout_watchboard_buffered",
@@ -399,6 +404,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.watchboardEntries,
 		m.watchboardDigests,
 		m.watchboardRotations,
+		m.watchboardSessionsLost,
 		m.watchboardBuffered,
 		m.watchboardReattached,
 		m.infoDropped,

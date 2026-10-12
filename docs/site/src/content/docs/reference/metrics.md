@@ -47,6 +47,7 @@ them on; see the [`lookout watch` flag table](/reference/watch/).
 | `lookout_watchboard_entries_total` | counter | `kind` | Total warning-class signals buffered onto the shared watchboard digest, by signal kind. |
 | `lookout_watchboard_digests_total` | counter | — | Total kind=watchboard.digest injects flushed to the watchboard session. |
 | `lookout_watchboard_rotations_total` | counter | — | Total size-based watchboard session rotations: a fresh session opened after --watchboard-rotate digest injects. |
+| `lookout_watchboard_sessions_lost_total` | counter | — | Total watchboard digest flushes where the target session disappeared on the sink (HTTP 404/410, issue #689), causing the sentinel to forget the dead session ID, advance generation, open a new session, and retry the warning batch. |
 | `lookout_watchboard_buffered` | gauge | — | Warning-class signals currently buffered awaiting the next watchboard digest flush. |
 | `lookout_watchboard_reattached_total` | counter | `kind` | Total buffered warnings delivered as a kind=family.member followup into an existing per-incident session sharing their blast-radius ancestor, instead of a digest entry (issue #220), by signal kind. |
 | `lookout_info_dropped_total` | counter | `kind` | Total info-severity signals routed to the stored-only class (no inject anywhere), by signal kind. With --store set they are persisted; without it they are dropped after counting. |
