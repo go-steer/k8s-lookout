@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/api/googleapi"
@@ -116,4 +117,15 @@ func (c *mtClient) GetMetricDescriptor(ctx context.Context, metricType string) (
 func isNotFound(err error) bool {
 	var apiErr *googleapi.Error
 	return errors.As(err, &apiErr) && apiErr.Code == 404
+}
+
+// isMetricNotFound reports whether err is an HTTP 404 from
+// projects.timeSeries.list stating that the queried metric type does
+// not exist in the workspace ("Cannot find metric(s) that match type = …").
+// Unlike metricDescriptors.get (where any 404 on the descriptor resource
+// means absent), a timeSeries.list 404 on an unknown project ("Project … not found")
+// must remain a runtime error rather than degrading to pack_unavailable (#613).
+func isMetricNotFound(err error) bool {
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && apiErr.Code == 404 && strings.Contains(apiErr.Message, "Cannot find metric")
 }

@@ -241,7 +241,7 @@ func packUnavailableFinding(packName string, q packQuery) emit.Finding {
 		Kind:     "perf.pack_unavailable",
 		Severity: emit.SeverityWarning,
 		Reason:   "MetricAbsent",
-		Message: fmt.Sprintf("pack %s: metric %s is not in the project's metrics workspace — enable GKE control-plane metrics for the API server / etcd components; the pack's other queries still ran",
+		Message: fmt.Sprintf("pack %s: metric %s is not in the project's metrics workspace — GKE's managed control plane does not expose etcd/control-plane metrics unless enabled (enable GKE control-plane metrics for the API server / etcd components); the pack's other queries still ran",
 			packName, q.metric),
 		Details: []emit.Field{
 			{Key: "pack", Value: packName},

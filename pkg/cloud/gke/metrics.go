@@ -253,6 +253,10 @@ func (b *metricsBackend) QuerySeries(ctx context.Context, q cloud.SeriesQuery) (
 	}
 	series, err := b.series.ListAggregatedSeries(ctx, filter, q.Window, agg)
 	if err != nil {
+		if isMetricNotFound(err) {
+			return nil, fmt.Errorf("gke: metric %s (%s) is not in this project's workspace — GKE control-plane metrics not enabled: %w",
+				q.Metric, entry.metricType, cloud.ErrMetricAbsent)
+		}
 		return nil, fmt.Errorf("gke: listing %s series: %w", q.Metric, err)
 	}
 	if len(series) == 0 && entry.controlPlane {

@@ -119,4 +119,8 @@ rules:
   - apiGroups: ["cloud.google.com"]
     resources: ["computeclasses"]
     verbs: ["list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["list"]
 {{- end }}
+

@@ -85,13 +85,14 @@ func (c *loggingEntryClient) ListEntries(ctx context.Context, req *logging.ListL
 
 // stockoutFilter is the Cloud Logging filter for window w: failed
 // compute.instances.insert admin-activity entries carrying the
-// stockout code.
+// stockout code, plus operation-start entries (operation.first=true)
+// that carry protoPayload.request.machineType (#615).
 func stockoutFilter(project string, w cloud.TimeWindow) string {
 	return fmt.Sprintf(
 		`logName="projects/%s/logs/cloudaudit.googleapis.com%%2Factivity"`+"\n"+
 			`resource.type="gce_instance"`+"\n"+
 			`protoPayload.methodName:"compute.instances.insert"`+"\n"+
-			`protoPayload.status.message:%q`+"\n"+
+			`(protoPayload.status.message:%q OR operation.first=true)`+"\n"+
 			`timestamp>=%q AND timestamp<%q`,
 		project, stockoutCode,
 		w.Start.UTC().Format(time.RFC3339), w.End.UTC().Format(time.RFC3339))
@@ -109,6 +110,14 @@ type auditPayload struct {
 	} `json:"request"`
 }
 
+// pendingStockout pairs one parsed stockout completion record with its
+// GCE operation ID so request.machineType from the matching
+// operation.first=true entry can be joined across pages (#615).
+type pendingStockout struct {
+	rec  cloud.Stockout
+	opID string
+}
+
 // Stockouts implements cloud.StockoutAPI.
 func (s *stockoutAPI) Stockouts(ctx context.Context, w cloud.TimeWindow) ([]cloud.Stockout, error) {
 	req := &logging.ListLogEntriesRequest{
@@ -117,16 +126,17 @@ func (s *stockoutAPI) Stockouts(ctx context.Context, w cloud.TimeWindow) ([]clou
 		OrderBy:       "timestamp desc",
 		PageSize:      1000,
 	}
-	var out []cloud.Stockout
+	var pending []pendingStockout
+	opMachineTypes := map[string]string{}
 	for page := 0; page < stockoutMaxPages; page++ {
 		resp, err := s.entries.ListEntries(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("listing stockout log entries: %w", err)
 		}
 		for _, e := range resp.Entries {
-			rec, ok := parseStockoutEntry(e)
-			if ok {
-				out = append(out, rec)
+			recordOperationMachineType(e, opMachineTypes)
+			if rec, opID, ok := parseStockoutEntry(e); ok {
+				pending = append(pending, pendingStockout{rec: rec, opID: opID})
 			}
 		}
 		if resp.NextPageToken == "" {
@@ -134,27 +144,57 @@ func (s *stockoutAPI) Stockouts(ctx context.Context, w cloud.TimeWindow) ([]clou
 		}
 		req.PageToken = resp.NextPageToken
 	}
-	return out, nil
+	return resolveStockoutMachineTypes(pending, opMachineTypes), nil
 }
 
-// parseStockoutEntry extracts one record; entries the filter let
-// through but that lack the code (or a parsable payload) are
-// dropped — the filter is the contract, this is the belt.
-func parseStockoutEntry(e *logging.LogEntry) (cloud.Stockout, bool) {
-	var zero cloud.Stockout
-	if e == nil || len(e.ProtoPayload) == 0 {
-		return zero, false
+// recordOperationMachineType records canonical short machine types
+// keyed by GCE operation.id from any entry (operation.first=true or
+// completion) carrying protoPayload.request.machineType (#615).
+func recordOperationMachineType(e *logging.LogEntry, opMachineTypes map[string]string) {
+	if e == nil || e.Operation == nil || e.Operation.Id == "" || len(e.ProtoPayload) == 0 {
+		return
 	}
 	var p auditPayload
 	if err := json.Unmarshal(e.ProtoPayload, &p); err != nil {
-		return zero, false
+		return
+	}
+	if mt := resourceTail(p.Request.MachineType); mt != "" {
+		opMachineTypes[e.Operation.Id] = mt
+	}
+}
+
+// resolveStockoutMachineTypes backfills empty MachineType fields using
+// the operation.id index populated from operation.first=true entries.
+func resolveStockoutMachineTypes(pending []pendingStockout, opMachineTypes map[string]string) []cloud.Stockout {
+	out := make([]cloud.Stockout, len(pending))
+	for i, item := range pending {
+		rec := item.rec
+		if rec.MachineType == "" && item.opID != "" {
+			rec.MachineType = opMachineTypes[item.opID]
+		}
+		out[i] = rec
+	}
+	return out
+}
+
+// parseStockoutEntry extracts one record; entries the filter let
+// through (such as operation.first=true start entries without an error
+// status) or entries lacking a parsable payload are skipped here.
+func parseStockoutEntry(e *logging.LogEntry) (cloud.Stockout, string, bool) {
+	var zero cloud.Stockout
+	if e == nil || len(e.ProtoPayload) == 0 {
+		return zero, "", false
+	}
+	var p auditPayload
+	if err := json.Unmarshal(e.ProtoPayload, &p); err != nil {
+		return zero, "", false
 	}
 	if !strings.Contains(p.Status.Message, stockoutCode) {
-		return zero, false
+		return zero, "", false
 	}
 	t, err := time.Parse(time.RFC3339Nano, e.Timestamp)
 	if err != nil {
-		return zero, false
+		return zero, "", false
 	}
 	rec := cloud.Stockout{
 		Time:        t,
@@ -164,5 +204,9 @@ func parseStockoutEntry(e *logging.LogEntry) (cloud.Stockout, bool) {
 	if e.Resource != nil {
 		rec.Zone = e.Resource.Labels["zone"]
 	}
-	return rec, true
+	var opID string
+	if e.Operation != nil {
+		opID = e.Operation.Id
+	}
+	return rec, opID, true
 }

@@ -379,6 +379,38 @@ func TestPackUnavailable(t *testing.T) {
 	}
 }
 
+func TestEtcdPack_HealthyDBSizeAndAbsentWALFsyncExitsZero(t *testing.T) {
+	backend := &fakeBackend{
+		series: map[string][]cloud.Series{
+			"etcd_mvcc_db_total_size_in_bytes": {
+				series("etcd_mvcc_db_total_size_in_bytes", nil, 512*(1<<20), 600*(1<<20)),
+			},
+		},
+		errs: map[string]error{
+			"etcd_disk_wal_fsync_duration_seconds": fmt.Errorf("gke: metric etcd_disk_wal_fsync_duration_seconds is not in this project's workspace — GKE control-plane metrics not enabled: %w", cloud.ErrMetricAbsent),
+		},
+	}
+	res := checktest.Run(t, perf.Command(backedDeps(backend)), "--pack=etcd")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, want 0 (stderr: %s)", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 1 {
+		t.Fatalf("findings = %d, want 1 (perf.pack_unavailable only): %v", len(recs), recs)
+	}
+	pu := recs[0]
+	if pu["kind"] != "perf.pack_unavailable" || pu["severity"] != "warning" || pu["metric"] != "etcd_disk_wal_fsync_duration_seconds" {
+		t.Errorf("pack_unavailable = %v", pu)
+	}
+	if !strings.Contains(pu["message"], "managed control plane") {
+		t.Errorf("message %q must explain GKE managed control plane absence", pu["message"])
+	}
+	sum := summaryLine(t, res.Stdout)
+	if sum["scanned"] != "1" || sum["findings"] != "1" || sum["pack"] != "etcd" {
+		t.Errorf("summary = %v, want scanned=1 findings=1 pack=etcd", sum)
+	}
+}
+
 // TestNoProvider: the §2 no-provider degradation — one explicit
 // cloud.unavailable finding, the summary marker, exit 0, scanned=0.
 func TestNoProvider(t *testing.T) {

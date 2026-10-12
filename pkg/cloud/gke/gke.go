@@ -37,9 +37,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 
+	"k8s.io/client-go/tools/clientcmd"
+
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // Name is the registry name of this provider.
@@ -55,7 +59,7 @@ const reasonDeferred = "not implemented until M4/M5"
 const (
 	reasonNoProject = "GCP project undetectable (pin it in provider config or run on GCE)"
 
-	reasonNoClusterIdentity = "GKE cluster identity undetectable (project, location, and cluster name are all required — pin them or run on GKE)"
+	reasonNoClusterIdentity = "GKE cluster identity undetectable (project, location, and cluster name are all required — run on GKE, select a gke_<project>_<location>_<cluster> kubeconfig context, or pin them)"
 
 	reasonNoSubscription = "no notifications subscription configured (--notifications-subscription: a Pub/Sub subscription on the cluster's notificationConfig topic)"
 )
@@ -126,9 +130,10 @@ func (p *Provider) Close() error {
 // New constructs the GKE provider, resolving identity in precedence
 // order: explicit Config pins, then well-known env vars
 // (GOOGLE_CLOUD_PROJECT / CLOUDSDK_CORE_PROJECT), then the GCE
-// metadata server. Detection is best-effort: off-GCE with nothing
-// pinned, fields stay empty and the M4/M5 capability implementations
-// fail loudly when they actually need them.
+// metadata server, and finally the active kubeconfig context/cluster
+// name when it follows GKE's `gke_<project>_<location>_<cluster>`
+// convention (#616). Off-GCE with no GKE kubeconfig context or pins,
+// fields stay empty and capabilities degrade explicitly per §2.
 func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 	p := &Provider{
 		project:      cfg.Project,
@@ -153,7 +158,66 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 			p.cluster = md.lookup(ctx, "instance/attributes/cluster-name")
 		}
 	}
+
+	if p.project == "" || p.location == "" || p.cluster == "" {
+		proj, loc, clus := kubeconfigGKEIdentity(ctx)
+		if p.project == "" {
+			p.project = proj
+		}
+		if p.location == "" {
+			p.location = loc
+		}
+		if p.cluster == "" {
+			p.cluster = clus
+		}
+	}
 	return p, nil
+}
+
+// kubeconfigGKEIdentity inspects the selected kubeconfig context (or
+// default current-context) for GKE's `gke_<project>_<location>_<cluster>`
+// naming convention so off-cluster workstation invocations resolve
+// cluster-scoped cloud reads (`cloud ipspace`, `cloud orphans
+// --only=nodepools`, `audit cluster`, `stab drift --identity`) without
+// manual flags (#616).
+func kubeconfigGKEIdentity(ctx context.Context) (project, location, cluster string) {
+	sel := kube.SelectionFrom(ctx)
+	var loader clientcmd.ClientConfigLoader = clientcmd.NewDefaultClientConfigLoadingRules()
+	if sel.Kubeconfig != "" {
+		loader = &clientcmd.ClientConfigLoadingRules{ExplicitPath: sel.Kubeconfig}
+	}
+	raw, err := loader.Load()
+	if err != nil || raw == nil {
+		return "", "", ""
+	}
+	ctxName := sel.Context
+	if ctxName == "" {
+		ctxName = raw.CurrentContext
+	}
+	if ctxName == "" {
+		return "", "", ""
+	}
+	if proj, loc, clus, ok := parseGKEContextName(ctxName); ok {
+		return proj, loc, clus
+	}
+	if kctx, ok := raw.Contexts[ctxName]; ok && kctx != nil {
+		if proj, loc, clus, ok := parseGKEContextName(kctx.Cluster); ok {
+			return proj, loc, clus
+		}
+	}
+	return "", "", ""
+}
+
+// parseGKEContextName parses `gke_<project>_<location>_<cluster>` as
+// written by `gcloud container clusters get-credentials`. GCP project
+// IDs and locations never contain underscores (`_`), so splitting into
+// 4 segments (`gke`, project, location, cluster) is exact.
+func parseGKEContextName(name string) (project, location, cluster string, ok bool) {
+	parts := strings.SplitN(name, "_", 4)
+	if len(parts) != 4 || parts[0] != "gke" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+		return "", "", "", false
+	}
+	return parts[1], parts[2], parts[3], true
 }
 
 // The resolved identity doubles as the cloud.Identity surface the

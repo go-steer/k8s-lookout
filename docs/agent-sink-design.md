@@ -132,9 +132,15 @@ Substrate's router. See [`ax-sink-design.md`](./ax-sink-design.md).
   exists. The webhook contract is deliberately the smallest thing any
   framework can terminate; an adapter is a receiver-side afternoon,
   not a lookout release.
-- **Acknowledgement semantics beyond HTTP status.** 2xx is delivered,
+- **Acknowledgement semantics beyond HTTP status.** `2xx` is delivered,
   anything else is not; no receipts, no consumer offsets, no
-  read-back of agent state through the sink.
+  read-back of agent state through the sink. Under `core-agent >= 1.11.0`,
+  `2xx` means **queued and durable**, not acted on within any interval: a
+  session under an operator pause hold keeps queued injects without
+  advancing until an operator explicitly calls `POST /resume`, at which
+  point queued alerts drain in arrival order. `lookout` intentionally
+  never sends `wake`/`release_hold` or calls `POST /resume` on a paused
+  session — operator holds belong strictly to the operator.
 - **Multi-sink fanout.** One sink per sentinel. A deployment that
   wants both a daemon and a capture stream puts a fanout behind one
   webhook URL — receiver-side composition, not sentinel

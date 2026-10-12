@@ -173,3 +173,22 @@ func TestStockoutGolden(t *testing.T) {
 	}
 	checktest.Golden(t, "testdata/stockout.golden", res.Stdout)
 }
+
+func TestStockoutRecoveredMachineTypeSuggestsReroute(t *testing.T) {
+	api := &fakeStockouts{events: []cloud.Stockout{
+		stockoutAt(10, "us-east1-b", "e2-standard-4"),
+		stockoutAt(25, "us-east1-c", "c3-standard-8"),
+	}}
+	cmd := cloudcheck.StockoutCommand(testDeps(stockoutProvider{Provider: cloud.NoProvider, api: api}))
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	recs := findingLines(t, res.Stdout)
+	if len(recs) != 2 {
+		t.Fatalf("findings = %d, want 2: %v", len(recs), recs)
+	}
+	if recs[0]["name"] != "us-east1-b" || recs[0]["machine_type"] != "e2-standard-4" || recs[0]["reroute"] != "us-east1-c" {
+		t.Errorf("first finding = %v, want machine_type=e2-standard-4 reroute=us-east1-c", recs[0])
+	}
+}

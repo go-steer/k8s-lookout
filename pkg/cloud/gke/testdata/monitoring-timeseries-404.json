@@ -1,0 +1,8 @@
+{
+  "_comment": "Recorded HTTP 404 response shape from Cloud Monitoring v3 projects.timeSeries.list on a GKE managed control plane when the queried metric type is absent from the project workspace (#613).",
+  "error": {
+    "code": 404,
+    "message": "Cannot find metric(s) that match type = \"prometheus.googleapis.com/etcd_disk_wal_fsync_duration_seconds/histogram\".",
+    "status": "NOT_FOUND"
+  }
+}

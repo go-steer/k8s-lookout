@@ -69,6 +69,9 @@ var otherSourceBulkReads = []ListRequirement{
 	// NetworkPolicy→Pod Governs edges (internal/watch routingAccess). Pod
 	// selectors only; no informer starts without a store.
 	{"networking.k8s.io", "networkpolicies"},
+	// state volumes, #616: lists storage.k8s.io/volumeattachments to join
+	// Multi-Attach / FailedAttachVolume events to the holding node and pod.
+	{"storage.k8s.io", "volumeattachments"},
 }
 
 // TestShippedClusterRoleGrantsSubsetOfLoadCluster is the least-privilege
