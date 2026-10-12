@@ -221,7 +221,7 @@ Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings f
 
 #### [`lookout cloud stockout`](/reference/cloud-stockout/)
 
-GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.
+GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h; long windows like --since=720h scan up to 20 audit-log pages in ~15–25s, so pass --timeout=60s), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |

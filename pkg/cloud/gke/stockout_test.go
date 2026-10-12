@@ -73,7 +73,7 @@ func TestStockoutFilterShape(t *testing.T) {
 		`logName="projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity"`,
 		`resource.type="gce_instance"`,
 		`protoPayload.methodName:"compute.instances.insert"`,
-		`protoPayload.status.message:"ZONE_RESOURCE_POOL_EXHAUSTED"`,
+		`(protoPayload.status.message:"ZONE_RESOURCE_POOL_EXHAUSTED" OR operation.first=true)`,
 		`timestamp>="2026-07-24T12:00:00Z" AND timestamp<"2026-07-25T12:00:00Z"`,
 	} {
 		if !strings.Contains(f, want) {
@@ -123,6 +123,29 @@ func TestStockoutsFromRecordedEntries(t *testing.T) {
 	}
 	if req.OrderBy != "timestamp desc" || req.PageSize != 1000 {
 		t.Errorf("req order/page = %q/%d, want timestamp desc / 1000", req.OrderBy, req.PageSize)
+	}
+}
+
+func TestStockoutsSplitOperationRecoversMachineType(t *testing.T) {
+	var resp logging.ListLogEntriesResponse
+	loadJSON(t, "logging-entries-stockout-split-op.json", &resp)
+	// Also split the error entry and operation.first=true across two pages
+	// to prove cross-page operation.id backfilling (#615).
+	lister := &fakeEntryLister{pages: []*logging.ListLogEntriesResponse{
+		{Entries: resp.Entries[:1], NextPageToken: "page-2"},
+		{Entries: resp.Entries[1:]},
+	}}
+	api := &stockoutAPI{project: "proj-1", entries: lister}
+
+	got, err := api.Stockouts(context.Background(), stockoutWindow)
+	if err != nil {
+		t.Fatalf("Stockouts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("records = %d, want 1 stockout record (operation.first entries skipped as findings): %+v", len(got), got)
+	}
+	if got[0].Zone != "us-east1-b" || got[0].MachineType != "e2-standard-4" {
+		t.Errorf("record = %+v, want Zone=us-east1-b MachineType=e2-standard-4 recovered from operation.first=true", got[0])
 	}
 }
 

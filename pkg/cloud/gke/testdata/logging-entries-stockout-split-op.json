@@ -1,0 +1,88 @@
+{
+  "//": "Recorded-shape fixture for split GKE MIG compute.instances.insert audit entries (#615): completion error entries carry ZONE_RESOURCE_POOL_EXHAUSTED with empty request (@type only), while the initial operation.first=true entry sharing operation.id holds request.machineType.",
+  "entries": [
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T11:45:05.500000Z",
+      "severity": "ERROR",
+      "operation": {
+        "id": "operation-1721907900000-61e0c4a1b2c3d-e5f6a7b8-01234567",
+        "producer": "compute.googleapis.com",
+        "last": true
+      },
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-b",
+          "instance_id": "1111111111111111111"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "v1.compute.instances.insert",
+        "resourceName": "projects/proj-1/zones/us-east1-b/instances/gke-prod-default-pool-a1b2c3d4-xy9z",
+        "status": {
+          "code": 8,
+          "message": "ZONE_RESOURCE_POOL_EXHAUSTED"
+        },
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert"
+        }
+      }
+    },
+    {
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T11:45:01.100000Z",
+      "severity": "NOTICE",
+      "operation": {
+        "id": "operation-1721907900000-61e0c4a1b2c3d-e5f6a7b8-01234567",
+        "producer": "compute.googleapis.com",
+        "first": true
+      },
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-b",
+          "instance_id": "1111111111111111111"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "v1.compute.instances.insert",
+        "resourceName": "projects/proj-1/zones/us-east1-b/instances/gke-prod-default-pool-a1b2c3d4-xy9z",
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert",
+          "machineType": "https://www.googleapis.com/compute/v1/projects/proj-1/zones/us-east1-b/machineTypes/e2-standard-4"
+        }
+      }
+    },
+    {
+      "//": "Unrelated operation.first=true entry for a succeeded VM create in another zone: must populate operation map only, never emit a stockout.",
+      "logName": "projects/proj-1/logs/cloudaudit.googleapis.com%2Factivity",
+      "timestamp": "2026-07-25T11:40:00.000000Z",
+      "severity": "NOTICE",
+      "operation": {
+        "id": "operation-1721907600000-succeeded",
+        "producer": "compute.googleapis.com",
+        "first": true
+      },
+      "resource": {
+        "type": "gce_instance",
+        "labels": {
+          "project_id": "proj-1",
+          "zone": "us-east1-c"
+        }
+      },
+      "protoPayload": {
+        "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+        "methodName": "v1.compute.instances.insert",
+        "request": {
+          "@type": "type.googleapis.com/compute.instances.insert",
+          "machineType": "zones/us-east1-c/machineTypes/e2-standard-4"
+        }
+      }
+    }
+  ]
+}

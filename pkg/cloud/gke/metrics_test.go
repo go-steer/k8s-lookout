@@ -458,3 +458,58 @@ func TestMetricsQuery_DescriptorProbeErrorPropagates(t *testing.T) {
 		t.Fatalf("error = %v, want the probe failure, not absence", err)
 	}
 }
+
+func timeSeries404(t *testing.T) *googleapi.Error {
+	t.Helper()
+	var envelope struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(readFixture(t, "monitoring-timeseries-404.json"), &envelope); err != nil {
+		t.Fatalf("404 fixture: %v", err)
+	}
+	if envelope.Error.Code != 404 {
+		t.Fatalf("404 fixture code = %d (shape contract)", envelope.Error.Code)
+	}
+	return &googleapi.Error{Code: envelope.Error.Code, Message: envelope.Error.Message}
+}
+
+// TestMetricsQuery_TimeSeriesList404MapsToMetricAbsent pins #613: on GKE
+// managed control planes, projects.timeSeries.list returns HTTP 404
+// "Cannot find metric(s) that match type = ..." directly rather than an
+// empty series list; QuerySeries wraps cloud.ErrMetricAbsent directly
+// without needing a separate descriptor probe, whereas a project-not-found
+// 404 remains a runtime error.
+func TestMetricsQuery_TimeSeriesList404MapsToMetricAbsent(t *testing.T) {
+	b, s, d := fixtureBackend(nil)
+	s.err = timeSeries404(t)
+	_, err := b.QuerySeries(context.Background(), cloud.SeriesQuery{
+		Metric:     "etcd_disk_wal_fsync_duration_seconds",
+		Window:     mtTestWindow,
+		Percentile: 99,
+		GroupBy:    []string{},
+	})
+	if !errors.Is(err, cloud.ErrMetricAbsent) {
+		t.Fatalf("error = %v, want cloud.ErrMetricAbsent", err)
+	}
+	if !strings.Contains(err.Error(), "etcd_disk_wal_fsync_duration_seconds") {
+		t.Errorf("error %q does not name the metric", err)
+	}
+	if len(d.asked) != 0 {
+		t.Errorf("descriptor probed after positive 404 absence on timeSeries.list: %v", d.asked)
+	}
+
+	// Non-metric 404 (e.g. nonexistent project) stays a runtime error.
+	s.err = &googleapi.Error{Code: 404, Message: "Project 'bad-proj' not found."}
+	_, err = b.QuerySeries(context.Background(), cloud.SeriesQuery{
+		Metric:     "etcd_disk_wal_fsync_duration_seconds",
+		Window:     mtTestWindow,
+		Percentile: 99,
+		GroupBy:    []string{},
+	})
+	if err == nil || errors.Is(err, cloud.ErrMetricAbsent) {
+		t.Fatalf("non-metric 404 error = %v, want runtime error not cloud.ErrMetricAbsent", err)
+	}
+}

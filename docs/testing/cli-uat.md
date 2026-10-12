@@ -400,11 +400,14 @@ Control-plane & startup performance via Cloud Monitoring query packs.
   `apf`, `etcd`, `startup`; assert each returns metric-backed findings;
   a missing pack name → usage error.
 
-## `cloud` group — T3 (or T0 refusal path)
+## `cloud` group — T3 (or T0 explicit unavailability path)
 
 All four are GKE-only, gated by build tag. **On the GCP-free default
-image they must refuse loudly** (assert that at T0); the real assertions
-need the `-gke` image + credentials at T3.
+image they degrade explicitly per §2** rather than failing with exit 1:
+each command emits one `cloud.unavailable` finding with `provider=none`
+(plus the `unavailable=...` summary note) and **exits `0`** (`scanned=0
+findings=1` — assert that at T0). The real cloud assertions need the
+`-gke` image + credentials at T3.
 
 ### `lookout cloud orphans` — T3
 - **Provoke:** create then delete a PVC/Deployment so an unattached GCE
@@ -429,7 +432,8 @@ need the `-gke` image + credentials at T3.
 
 ### `lookout cloud stockout` — T3
 - **Provoke:** a zone/machine-type with recent stockout history over
-  `--since`.
+  `--since`. Note: long windows such as `--since=720h` (30d) scan up to
+  20 audit-log pages (typically 15–25s) and should pass `--timeout=60s`.
 - **Assert:** stockouts per zone/machine-type with reroute candidates.
 
 ## `net` group

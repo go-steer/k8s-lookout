@@ -451,4 +451,5 @@ var ShippedRoleGrants = map[schema.GroupResource][]string{
 	{Group: "gateway.networking.k8s.io", Resource: "gateways"}:                           {"list", "watch"},
 	{Group: "gateway.networking.k8s.io", Resource: "httproutes"}:                         {"list", "watch"},
 	{Group: "cloud.google.com", Resource: "computeclasses"}:                              {"list", "watch"},
+	{Group: "storage.k8s.io", Resource: "volumeattachments"}:                             {"list"},
 }

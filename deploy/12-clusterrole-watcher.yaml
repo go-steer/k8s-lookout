@@ -401,3 +401,10 @@ rules:
   - apiGroups: ["cloud.google.com"]
     resources: ["computeclasses"]
     verbs: ["list", "watch"]
+  # VolumeAttachments (`state volumes`, #616): joins RWO Multi-Attach /
+  # FailedAttachVolume events to the holding node and pod; attachment
+  # status metadata only.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["list"]
+

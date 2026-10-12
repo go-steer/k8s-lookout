@@ -23,6 +23,7 @@ package gke
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -140,6 +141,7 @@ func TestVerifyBindingPermissionErrorFailsLoudly(t *testing.T) {
 func TestWorkloadIdentityUnavailableWithoutProject(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
 	t.Setenv(metadataHostEnv, "localhost:1")
 	p, err := New(context.Background(), cloud.Config{})
 	if err != nil {

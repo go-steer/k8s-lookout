@@ -21,12 +21,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // Tagged counterpart of pkg/cloud's default-build conformance test:
@@ -42,6 +45,7 @@ func TestNewSelectsGKEAsSingleRegisteredProvider(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1") // keep detection off the network
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
 	p, err := cloud.New(context.Background(), cloud.Config{})
 	if err != nil {
 		t.Fatalf("New error: %v", err)
@@ -105,6 +109,7 @@ func TestIdentityFromEnvAndMetadata(t *testing.T) {
 func TestOffGCEDetectionIsBestEffort(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
 	t.Setenv(metadataHostEnv, "localhost:1")
 	p, err := New(context.Background(), cloud.Config{})
 	if err != nil {
@@ -116,17 +121,69 @@ func TestOffGCEDetectionIsBestEffort(t *testing.T) {
 	}
 }
 
-// TestCapabilityAvailability pins the per-capability availability
-// judgment as of M5: every implemented capability (metrics joined
-// the project-scoped set with the M5 backend) is available exactly
-// when the identity it needs is resolved, with the §2 explicit
-// reason otherwise; only workload identity stays deferred (its M5
-// track lands separately). Getters must mirror Capabilities()
-// exactly.
+func TestOffClusterKubeconfigGKEContextFallback(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv(metadataHostEnv, "localhost:1")
+
+	kcPath := filepath.Join(t.TempDir(), "kubeconfig")
+	const kcYAML = `apiVersion: v1
+kind: Config
+current-context: gke_uat-proj-1_us-central1_uat-cluster
+clusters:
+- name: gke_uat-proj-1_us-central1_uat-cluster
+  cluster:
+    server: https://10.0.0.1
+- name: gke_alt-proj_europe-west1-b_alt-cluster
+  cluster:
+    server: https://10.0.0.2
+contexts:
+- name: gke_uat-proj-1_us-central1_uat-cluster
+  context:
+    cluster: gke_uat-proj-1_us-central1_uat-cluster
+- name: renamed-alias
+  context:
+    cluster: gke_alt-proj_europe-west1-b_alt-cluster
+`
+	if err := os.WriteFile(kcPath, []byte(kcYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", kcPath)
+
+	// Default current-context off-cluster unlocks cluster-scoped GKE capabilities.
+	p, err := New(context.Background(), cloud.Config{})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	g := p.(*Provider)
+	if g.Project() != "uat-proj-1" || g.Location() != "us-central1" || g.Cluster() != "uat-cluster" {
+		t.Errorf("identity = %q/%q/%q, want uat-proj-1/us-central1/uat-cluster", g.Project(), g.Location(), g.Cluster())
+	}
+	if _, ok := g.IPSpace(); !ok {
+		t.Error("IPSpace() should be available off-cluster when kubeconfig context names a GKE cluster")
+	}
+	if _, ok := g.ClusterConfig(); !ok {
+		t.Error("ClusterConfig() should be available off-cluster when kubeconfig context names a GKE cluster")
+	}
+
+	// Explicit --context alias resolving cluster entry name + GOOGLE_CLOUD_PROJECT override.
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "override-proj")
+	ctx := kube.WithSelection(context.Background(), kube.Selection{Context: "renamed-alias"})
+	p2, err := New(ctx, cloud.Config{})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	g2 := p2.(*Provider)
+	if g2.Project() != "override-proj" || g2.Location() != "europe-west1-b" || g2.Cluster() != "alt-cluster" {
+		t.Errorf("identity = %q/%q/%q, want override-proj/europe-west1-b/alt-cluster", g2.Project(), g2.Location(), g2.Cluster())
+	}
+}
+
 func TestCapabilityAvailability(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
 
 	newProvider := func(cfg cloud.Config) cloud.Provider {
 		t.Helper()
@@ -238,6 +295,7 @@ func TestCapabilityAvailability(t *testing.T) {
 func TestCapacityUnavailableWithoutProject(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
 	t.Setenv(metadataHostEnv, "localhost:1")
 	p, err := New(context.Background(), cloud.Config{})
 	if err != nil {
