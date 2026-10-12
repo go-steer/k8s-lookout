@@ -35,11 +35,24 @@ package graph
 // selector index.
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+)
+
+const (
+	// kubeRootCAConfigMap is auto-published into every namespace by
+	// kube-controller-manager's root-ca-cert-publisher and mounted
+	// into every pod via projected service-account access volumes. It
+	// is Kubernetes plumbing, never an application dependency (#589).
+	kubeRootCAConfigMap = "kube-root-ca.crt"
+	// kubeAPIAccessVolumePrefix is the auto-injected service-account
+	// projected volume name prefix ("kube-api-access-<suffix>").
+	kubeAPIAccessVolumePrefix = "kube-api-access-"
 )
 
 // ownerNodeKinds maps ownerReference.Kind strings to graph kinds.
@@ -154,6 +167,9 @@ func (w *Writer) applyPod(b *batch, op Op, pod *corev1.Pod) {
 func (w *Writer) containerMounts(b *batch, ns string, pod NodeID, c *corev1.Container) []halfEdge {
 	var decl []halfEdge
 	mount := func(kind NodeKind, name string) {
+		if kind == KindConfigMap && name == kubeRootCAConfigMap {
+			return
+		}
 		decl = append(decl, halfEdge{From: pod, To: w.node(b, kind, ns, name), Kind: EdgeMounts})
 	}
 	for i := range c.Env {
@@ -178,10 +194,16 @@ func (w *Writer) containerMounts(b *batch, ns string, pod NodeID, c *corev1.Cont
 }
 
 // volumeMounts derives Pod→ConfigMap/Secret/PVC Mounts edges from
-// pod volumes, including projected volume sources.
+// pod volumes, including projected volume sources. Projected
+// service-account access volumes (kube-api-access-*) and auto-published
+// kube-root-ca.crt ConfigMap references are ignored so every pod in a
+// namespace does not share a spurious ConfigMap ancestor (#589).
 func (w *Writer) volumeMounts(b *batch, ns string, pod NodeID, volumes []corev1.Volume) []halfEdge {
 	var decl []halfEdge
 	mount := func(kind NodeKind, name string) {
+		if kind == KindConfigMap && name == kubeRootCAConfigMap {
+			return
+		}
 		decl = append(decl, halfEdge{From: pod, To: w.node(b, kind, ns, name), Kind: EdgeMounts})
 	}
 	for i := range volumes {
@@ -193,6 +215,9 @@ func (w *Writer) volumeMounts(b *batch, ns string, pod NodeID, volumes []corev1.
 		case v.PersistentVolumeClaim != nil:
 			mount(KindPersistentVolumeClaim, v.PersistentVolumeClaim.ClaimName)
 		case v.Projected != nil:
+			if strings.HasPrefix(v.Name, kubeAPIAccessVolumePrefix) {
+				continue
+			}
 			for j := range v.Projected.Sources {
 				s := &v.Projected.Sources[j]
 				if s.ConfigMap != nil {

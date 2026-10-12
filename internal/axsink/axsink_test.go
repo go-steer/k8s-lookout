@@ -16,9 +16,17 @@ package axsink
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +39,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
@@ -696,5 +706,124 @@ func TestAXSink_InjectorsMapBoundedEviction(t *testing.T) {
 	}
 	if _, ok := sink.injectors["t-1ns"]; ok {
 		t.Error("oldest idle entry t-1ns should have been evicted")
+	}
+}
+
+func TestAXSink_CrossClusterTLSAndBearerCredentialsEndToEnd(t *testing.T) {
+	const rpcToken = "ax-rpc-id-token-v1"
+	const routerToken = "session-bearer-token-v1"
+
+	// 1. Ephemeral CA + server certificate for the remote AX gRPC front.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmplCert := &x509.Certificate{
+		SerialNumber:          big.NewInt(42),
+		Subject:               pkix.Name{CommonName: "ax-remote-front"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmplCert, tmplCert, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCert, err := tls.X509KeyPair(certPEM, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Local TLS gRPC server enforcing per-RPC "authorization: Bearer <rpcToken>".
+	ax := &fakeAX{created: map[string]*axapi.Task{}}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewServerTLSFromCert(&srvCert)),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			md, ok := metadata.FromIncomingContext(ctx)
+			if !ok {
+				return nil, status.Error(codes.Unauthenticated, "missing metadata")
+			}
+			vals := md.Get("authorization")
+			if len(vals) != 1 || vals[0] != "Bearer "+rpcToken {
+				return nil, status.Errorf(codes.Unauthenticated, "authorization = %v", vals)
+			}
+			return handler(ctx, req)
+		}),
+	)
+	axapi.RegisterAXServer(srv, ax)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	// 3. Dial AX over TLS with RootCAs seeded from SystemCertPool + CA cert + BearerCredentials.
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to append CA PEM")
+	}
+	conn, err := grpc.NewClient(
+		lis.Addr().String(),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    pool,
+		})),
+		grpc.WithPerRPCCredentials(BearerCredentials(rpcToken)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// 4. HTTPS Substrate router with TLS server and session bearer token check.
+	router := &fakeRouter{}
+	httpsRouter := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/readyz" && req.Header.Get("Authorization") != "Bearer "+routerToken {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		router.ServeHTTP(w, req)
+	}))
+	t.Cleanup(httpsRouter.Close)
+
+	sink, err := New(Config{
+		Client:       axapi.NewAXClient(conn),
+		Template:     testTemplate(),
+		RouterURL:    httpsRouter.URL,
+		BearerToken:  routerToken,
+		HTTPClient:   httpsRouter.Client(),
+		StartTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	id, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{UID: "u-tls", Reason: "CrashLoopBackOff"})
+	if err != nil {
+		t.Fatalf("OpenIncidentKeyed over TLS + BearerCredentials + HTTPS router failed: %v", err)
+	}
+	if err := sink.Append(ctx, id, inject.Payload{Kind: "k8s-event-followup", UID: "u-tls"}); err != nil {
+		t.Fatalf("Append over HTTPS router failed: %v", err)
+	}
+	if len(ax.created) != 1 || len(ax.resumed) != 1 {
+		t.Errorf("created=%d resumed=%d, want 1 and 1", len(ax.created), len(ax.resumed))
+	}
+	if len(router.order) != 2 {
+		t.Errorf("router injects=%d, want 2 (open + append)", len(router.order))
 	}
 }

@@ -32,11 +32,32 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
+
+// BearerCredentials returns gRPC PerRPCCredentials that attach
+// "authorization: Bearer <token>" metadata to every RPC over a
+// transport-secured (TLS) connection. RequireTransportSecurity is
+// always true so bearer tokens never cross plaintext gRPC links (#580).
+func BearerCredentials(token string) credentials.PerRPCCredentials {
+	return bearerPerRPCCreds{token: token}
+}
+
+type bearerPerRPCCreds struct {
+	token string
+}
+
+func (b bearerPerRPCCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+
+func (bearerPerRPCCreds) RequireTransportSecurity() bool {
+	return true
+}
 
 // Scope is how incidents map onto AX tasks (--ax-task-scope).
 type Scope string

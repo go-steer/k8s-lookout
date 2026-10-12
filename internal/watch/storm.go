@@ -450,3 +450,13 @@ func stormRef(m engine.StormMember) inject.StormIncidentRef {
 		SessionID:    m.SessionID,
 	}
 }
+
+// isAutoInjectedAncestor reports whether ancestor a is Kubernetes
+// per-namespace plumbing rather than a shared workload dependency (#589).
+// Kubernetes publishes ConfigMap "kube-root-ca.crt" into every namespace and
+// mounts it into every pod via projected service-account access volumes, so
+// treating it as a correlation key collapses unrelated failures across a
+// namespace into one bogus ConfigMap storm.
+func isAutoInjectedAncestor(a engine.Ancestor) bool {
+	return a.Kind == "ConfigMap" && a.Name == "kube-root-ca.crt"
+}

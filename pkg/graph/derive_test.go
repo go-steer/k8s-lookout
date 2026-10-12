@@ -156,6 +156,99 @@ func TestPodEdgeDerivation(t *testing.T) {
 	})
 }
 
+func TestPodEdgeDerivation_SkipsKubeAPIAccessAndRootCA(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "app-1",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "app",
+				Env: []corev1.EnvVar{
+					{
+						Name: "ROOT_CA",
+						ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+							Key:                  "ca.crt",
+						}},
+					},
+					{
+						Name: "APP_MODE",
+						ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "app-config"},
+							Key:                  "mode",
+						}},
+					},
+				},
+				EnvFrom: []corev1.EnvFromSource{
+					{
+						ConfigMapRef: &corev1.ConfigMapEnvSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+						},
+					},
+				},
+			}},
+			Volumes: []corev1.Volume{
+				{
+					Name: "kube-api-access-x9f2k",
+					VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+						Sources: []corev1.VolumeProjection{
+							{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "token"}},
+							{ConfigMap: &corev1.ConfigMapProjection{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+							}},
+							{Secret: &corev1.SecretProjection{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "sa-projected-secret"},
+							}},
+						},
+					}},
+				},
+				{
+					Name: "direct-root-ca",
+					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+					}},
+				},
+				{
+					Name: "user-proj",
+					VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+						Sources: []corev1.VolumeProjection{
+							{ConfigMap: &corev1.ConfigMapProjection{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+							}},
+							{ConfigMap: &corev1.ConfigMapProjection{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "app-proj-cm"},
+							}},
+						},
+					}},
+				},
+				{
+					Name: "creds",
+					VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+						SecretName: "app-secret",
+					}},
+				},
+				{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "app-pvc",
+					}},
+				},
+			},
+		},
+	}
+
+	_, s := buildGraph(t, []any{pod})
+	assertEdges(t, s, []string{
+		"Pod/ns/app-1 -Contains-> Container/ns/app-1/app",
+		"Pod/ns/app-1 -Mounts-> !ConfigMap/ns/app-config",
+		"Pod/ns/app-1 -Mounts-> !ConfigMap/ns/app-proj-cm",
+		"Pod/ns/app-1 -Mounts-> !Secret/ns/app-secret",
+		"Pod/ns/app-1 -Mounts-> !PersistentVolumeClaim/ns/app-pvc",
+	})
+}
+
 func TestServiceSelectorLifecycle(t *testing.T) {
 	mkpod := func(name string, app string) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
