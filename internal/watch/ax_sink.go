@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
 	"github.com/go-steer/k8s-lookout/internal/axsink"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
@@ -47,8 +49,11 @@ func newAXSink(f *flags, token string) (*axsink.Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	if warning, ok := axRouterPlainHTTPWarning(f.axRouterURL); ok {
-		log.Print(warning)
+	if f.tokenEnv != "" || token != "" {
+		if warning, ok := axRouterPlainHTTPWarning(f.axRouterURL); ok {
+			slog.Warn(warning, "router_url", redactedURL(f.axRouterURL))
+			log.Print(warning)
+		}
 	}
 	return axsink.New(axsink.Config{
 		Client:         axapi.NewAXClient(conn),
@@ -63,13 +68,24 @@ func newAXSink(f *flags, token string) (*axsink.Sink, error) {
 // dialAX opens the AX API connection. gRPC connects lazily, so a TLS
 // failure (an untrusted certificate, a name mismatch) surfaces on the
 // first RPC as that incident's open error, not here; an unreadable CA
-// file fails here, at startup.
+// file or missing AX bearer token fails here, at startup.
 func dialAX(f *flags) (*grpc.ClientConn, error) {
 	creds, err := axTransportCredentials(f)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := grpc.NewClient(f.axServer, grpc.WithTransportCredentials(creds))
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	if f.axTokenEnv != "" {
+		if !f.axServerTLS {
+			return nil, emit.UsageErrorf("--ax-token-env needs --ax-server-tls: per-RPC bearer credentials require TLS transport")
+		}
+		tok := os.Getenv(f.axTokenEnv)
+		if tok == "" {
+			return nil, fmt.Errorf("AX API bearer token env var %s is empty", f.axTokenEnv)
+		}
+		opts = append(opts, grpc.WithPerRPCCredentials(axsink.BearerCredentials(tok)))
+	}
+	conn, err := grpc.NewClient(f.axServer, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to AX at %s: %w", f.axServer, err)
 	}
@@ -78,7 +94,7 @@ func dialAX(f *flags) (*grpc.ClientConn, error) {
 
 // axTransportCredentials is plaintext by default, which is what AX itself
 // serves. With --ax-server-tls the certificate is verified against the
-// system roots, or only against --ax-ca-file's CAs when that is set, and
+// system roots (augmented with --ax-ca-file's PEM certificates when set) and
 // against the host in --ax-server (gRPC takes the server name from it).
 func axTransportCredentials(f *flags) (credentials.TransportCredentials, error) {
 	if !f.axServerTLS {
@@ -90,7 +106,10 @@ func axTransportCredentials(f *flags) (credentials.TransportCredentials, error) 
 		if err != nil {
 			return nil, fmt.Errorf("reading --ax-ca-file: %w", err)
 		}
-		pool := x509.NewCertPool()
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("--ax-ca-file %s holds no PEM certificates", f.axCAFile)
 		}

@@ -536,6 +536,9 @@ func (g *graphFeed) Ancestors(ref engine.ObjectRef) []engine.Ancestor {
 			// into one storm.
 			continue
 		}
+		if isAutoInjectedAncestor(engine.Ancestor{Kind: r.Kind.String(), Namespace: r.Namespace, Name: r.Name}) {
+			continue
+		}
 		cands = append(cands, cand{class: class, idx: idx, ref: r})
 	}
 	slices.SortStableFunc(cands, func(a, b cand) int {

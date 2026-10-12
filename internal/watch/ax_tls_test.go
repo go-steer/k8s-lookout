@@ -32,9 +32,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/go-steer/k8s-lookout/internal/axapi"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
 // axGetTask answers GetTask, enough to prove an RPC made it through.
@@ -85,8 +89,8 @@ func selfSignedCert(t *testing.T) (tls.Certificate, string) {
 }
 
 // serveAX serves axGetTask on a local listener, over TLS when cert is
-// non-nil, and returns its address.
-func serveAX(t *testing.T, cert *tls.Certificate) string {
+// non-nil, with optional extra server options, and returns its address.
+func serveAX(t *testing.T, cert *tls.Certificate, extraOpts ...grpc.ServerOption) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -96,6 +100,7 @@ func serveAX(t *testing.T, cert *tls.Certificate) string {
 	if cert != nil {
 		opts = append(opts, grpc.Creds(credentials.NewServerTLSFromCert(cert)))
 	}
+	opts = append(opts, extraOpts...)
 	srv := grpc.NewServer(opts...)
 	axapi.RegisterAXServer(srv, axGetTask{})
 	go func() { _ = srv.Serve(lis) }()
@@ -122,6 +127,67 @@ func TestDialAX_TLSWithCAFile(t *testing.T) {
 	addr := serveAX(t, &cert)
 	if err := getTask(t, &flags{axServer: addr, axServerTLS: true, axCAFile: caFile}); err != nil {
 		t.Fatalf("TLS with the CA file: %v", err)
+	}
+}
+
+func TestDialAX_TLSAndBearerTokenEndToEnd(t *testing.T) {
+	const wantBearer = "Bearer id-token-cross-cluster-123"
+	cert, caFile := selfSignedCert(t)
+	authInterceptor := grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Error(codes.Unauthenticated, "missing metadata")
+		}
+		vals := md.Get("authorization")
+		if len(vals) != 1 || vals[0] != wantBearer {
+			return nil, status.Errorf(codes.Unauthenticated, "authorization = %v, want [%q]", vals, wantBearer)
+		}
+		return handler(ctx, req)
+	})
+	addr := serveAX(t, &cert, authInterceptor)
+
+	// Valid --ax-token-env over TLS with CA succeeds.
+	t.Setenv("AX_RPC_TOKEN", "id-token-cross-cluster-123")
+	if err := getTask(t, &flags{
+		axServer:    addr,
+		axServerTLS: true,
+		axCAFile:    caFile,
+		axTokenEnv:  "AX_RPC_TOKEN",
+	}); err != nil {
+		t.Fatalf("TLS + bearer credentials RPC failed: %v", err)
+	}
+
+	// Wrong token fails with Unauthenticated.
+	t.Setenv("AX_RPC_TOKEN", "wrong-token")
+	err := getTask(t, &flags{
+		axServer:    addr,
+		axServerTLS: true,
+		axCAFile:    caFile,
+		axTokenEnv:  "AX_RPC_TOKEN",
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("wrong bearer token error = %v (code %s), want Unauthenticated", err, status.Code(err))
+	}
+
+	// Empty token env var fails immediately at dialAX.
+	t.Setenv("AX_RPC_TOKEN", "")
+	if _, err := dialAX(&flags{
+		axServer:    addr,
+		axServerTLS: true,
+		axCAFile:    caFile,
+		axTokenEnv:  "AX_RPC_TOKEN",
+	}); err == nil {
+		t.Fatal("dialAX accepted empty AX_RPC_TOKEN")
+	}
+
+	// Setting --ax-token-env without --ax-server-tls is refused as a usage error.
+	t.Setenv("AX_RPC_TOKEN", "id-token-cross-cluster-123")
+	if _, err := dialAX(&flags{
+		axServer:    addr,
+		axServerTLS: false,
+		axTokenEnv:  "AX_RPC_TOKEN",
+	}); !emit.IsUsageError(err) {
+		t.Fatalf("dialAX without TLS = %v, want usage error", err)
 	}
 }
 
@@ -169,12 +235,14 @@ func TestClusterLocalHost(t *testing.T) {
 		"atenet-router.ate-system.svc.cluster.local":  true,
 		"atenet-router.ate-system.svc.cluster.local.": true,
 		"atenet-router.ate-system.svc":                true,
+		"switchboard.agent.svc":                       true,
 		"localhost":                                   true,
 		"127.0.0.1":                                   true,
 		"::1":                                         true,
 		"10.0.0.5":                                    false, // an internal LB in the VPC
 		"192.168.1.10":                                false,
 		"router.example.com":                          false,
+		"switchboard.external.example":                false,
 		"atenet-router.ate-system":                    false, // short names go through the search path
 		"svc.example.com":                             false,
 	}
@@ -187,15 +255,17 @@ func TestClusterLocalHost(t *testing.T) {
 
 func TestAXRouterPlainHTTPWarning(t *testing.T) {
 	cases := map[string]bool{
-		defaultAXRouterURL:                 false,
-		"http://localhost:8080":            false,
-		"http://[::1]:8080":                false,
-		"https://router.example.com":       false,
-		"https://10.0.0.5":                 false,
-		"http://router.example.com":        true,
-		"http://10.0.0.5:80":               true,
-		"http://atenet-router.ate-system":  true,
-		"http://router.example.com:8080/x": true,
+		defaultAXRouterURL:                         false,
+		"http://switchboard.agent.svc:8080":        false,
+		"http://localhost:8080":                    false,
+		"http://[::1]:8080":                        false,
+		"https://router.example.com":               false,
+		"https://10.0.0.5":                         false,
+		"http://router.example.com":                true,
+		"http://switchboard.external.example:8080": true,
+		"http://10.0.0.5:80":                       true,
+		"http://atenet-router.ate-system":          true,
+		"http://router.example.com:8080/x":         true,
 	}
 	for u, want := range cases {
 		if _, got := axRouterPlainHTTPWarning(u); got != want {
@@ -232,14 +302,16 @@ func TestNewAXSink_PlainHTTPWarningCarriesNoSecret(t *testing.T) {
 		t.Errorf("the warning leaked a secret: %q", out)
 	}
 
-	// The in-cluster default stays quiet.
-	buf.Reset()
-	f.axRouterURL = defaultAXRouterURL
-	if _, err := newAXSink(f, token); err != nil {
-		t.Fatalf("newAXSink: %v", err)
-	}
-	if strings.Contains(buf.String(), "WARNING") {
-		t.Errorf("warned about the in-cluster router: %q", buf.String())
+	// Cluster-local Services (switchboard.agent.svc:8080 and the default) stay quiet.
+	for _, localURL := range []string{defaultAXRouterURL, "http://switchboard.agent.svc:8080"} {
+		buf.Reset()
+		f.axRouterURL = localURL
+		if _, err := newAXSink(f, token); err != nil {
+			t.Fatalf("newAXSink(%s): %v", localURL, err)
+		}
+		if strings.Contains(buf.String(), "WARNING") {
+			t.Errorf("warned about cluster-local router %s: %q", localURL, buf.String())
+		}
 	}
 }
 

@@ -43,18 +43,21 @@ func TestSinkFlags_Defaults(t *testing.T) {
 	if f.sinkTokenEnv != "" {
 		t.Errorf("default --sink-token-env = %q, want empty", f.sinkTokenEnv)
 	}
-	// #580: the AX API stays plaintext unless TLS is asked for.
-	if f.axServerTLS || f.axCAFile != "" {
-		t.Errorf("default --ax-server-tls = %v, --ax-ca-file = %q, want false and empty", f.axServerTLS, f.axCAFile)
+	// #580: the AX API stays plaintext and unauthenticated unless TLS/auth are asked for.
+	if f.axServerTLS || f.axCAFile != "" || f.axTokenEnv != "" {
+		t.Errorf("default --ax-server-tls = %v, --ax-ca-file = %q, --ax-token-env = %q, want false and empty", f.axServerTLS, f.axCAFile, f.axTokenEnv)
 	}
 }
 
-// The #580 TLS flag errors are usage errors (exit 2, DESIGN.md §4.2).
+// The #580 TLS and bearer-token flag errors are usage errors (exit 2, DESIGN.md §4.2).
 func TestSinkFlags_AXTLSErrorsAreUsageErrors(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
 		{"--sink=ax", "--dry-run", "--ax-ca-file=ca.pem"},
+		{"--sink=ax", "--dry-run", "--ax-token-env=AX_TOK"},
 		{"--dry-run", "--ax-server-tls"},
+		{"--dry-run", "--ax-token-env=AX_TOK"},
+		{"--sink=webhook", "--dry-run", "--ax-token-env=AX_TOK"},
 	} {
 		f, err := parseFlags(args)
 		if err != nil {
@@ -151,8 +154,8 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 			wantErr: "only valid with --sink=ax",
 		},
 		{
-			name: "ax accepts TLS to the AX API, with and without a CA file",
-			args: []string{"--sink=ax", "--ax-server=ax.example.internal:443", "--ax-task-template=t.yaml", "--token-env=TOK", "--ax-server-tls", "--ax-ca-file=/etc/lookout/ax-ca.pem", "--ax-router-url=https://router.example.internal"},
+			name: "ax accepts TLS to the AX API, CA file, per-RPC bearer token, and https router",
+			args: []string{"--sink=ax", "--ax-server=ax.example.internal:443", "--ax-task-template=t.yaml", "--token-env=TOK", "--ax-server-tls", "--ax-ca-file=/etc/lookout/ax-ca.pem", "--ax-token-env=AX_RPC_TOKEN", "--ax-router-url=https://router.example.internal"},
 		},
 		{
 			name: "ax accepts TLS on system roots",
@@ -164,9 +167,19 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 			wantErr: "--ax-ca-file needs --ax-server-tls",
 		},
 		{
+			name:    "ax rejects ax-token-env without TLS",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-token-env=AX_RPC_TOKEN"},
+			wantErr: "--ax-token-env needs --ax-server-tls",
+		},
+		{
 			name:    "core-agent rejects ax-server-tls",
 			args:    []string{"--ax-server-tls", "--dry-run"},
 			wantErr: "--ax-server-tls and --ax-ca-file are only valid with --sink=ax",
+		},
+		{
+			name:    "core-agent rejects ax-token-env",
+			args:    []string{"--ax-token-env=AX_RPC_TOKEN", "--dry-run"},
+			wantErr: "--ax-token-env is only valid with --sink=ax",
 		},
 		{
 			name:    "webhook rejects ax-ca-file",
