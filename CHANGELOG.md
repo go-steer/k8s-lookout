@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cloud-backed checks now answer for the cluster you selected, not the one
+  lookout runs in (#694).** Inside a GKE pod, `--context` or `--kubeconfig`
+  pointed at another cluster sent the Kubernetes reads there, but the GKE
+  provider took project, location and cluster from the node's metadata server
+  first, so `cloud orphans`, `cloud ipspace`, `audit cluster`,
+  `stab drift --identity` and the cloud-backed `health` categories reported on
+  lookout's own cluster under the selected cluster's name. This applied on the
+  CLI and over `lookout mcp --context`. An explicit selection now outranks the
+  metadata server, which describes where lookout runs and not what it was
+  asked about. A selection whose context does not follow GKE's
+  `gke_<project>_<location>_<cluster>` naming no longer borrows the pod's
+  identity either: cluster-scoped capabilities report the explicit
+  `unavailable` reason instead, while `GOOGLE_CLOUD_PROJECT` /
+  `CLOUDSDK_CORE_PROJECT` still set the project. Without a selection nothing
+  changes.
+
 ## [0.36.0] - 2026-10-12
 
 **This release completes a repository-wide architecture, reliability, and security hardening sweep alongside GKE cloud provider resilience, cross-cluster AX TLS authentication, storm topology isolation, and watchboard session recovery.** Informer handlers now decouple event delivery from downstream processing through non-blocking queues, graph ingress and snapshot compaction stay lock-contention-free at 100k-pod scale, and repeat incident followups coalesce onto their canonical bound session without dropping first-lapse material changes. On the cloud and sink boundary, broken GKE Workload Identity bindings, regional/global HTTP(S) load balancers in `cloud orphans`, managed control-plane `perf probe --pack=etcd` 404s, off-cluster `gke_` kubeconfig contexts, and `compute.instances.insert` stockout operations now degrade cleanly and preserve full diagnostic fidelity; `lookout watch` verifies cross-cluster AX server certificates (`--ax-ca-file`), refreshes per-RPC bearer credentials (`--ax-token-env`), ignores auto-published `kube-root-ca.crt` ConfigMap ancestors during storm correlation, and automatically reopens and retries warning digests on a new watchboard session when a prior session disappears (`404`/`410`).
