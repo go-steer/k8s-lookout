@@ -259,7 +259,10 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   watch sources; the runtime complement to `audit.no_spread`),
   [`in-pod-probe-design.md`](./in-pod-probe-design.md)
   (decided — `net probe-from`, the one opt-in privileged probe, and
-  the `deploy-probe/` overlay; DESIGN §5 amendment of 2026-10-07).
+  the `deploy-probe/` overlay; DESIGN §5 amendment of 2026-10-07),
+  [`mcp-multi-tenant-design.md`](./mcp-multi-tenant-design.md)
+  (proposal — one MCP endpoint for many clusters and many callers;
+  per-call `cluster` argument, then per-user identity via steward).
 - [`milestones/`](./milestones/) — M0–M5 completion records with
   exit-check evidence and the post-M5 review backlog (M5.md).
 - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
