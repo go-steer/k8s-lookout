@@ -129,11 +129,24 @@ func (p *Provider) Close() error {
 
 // New constructs the GKE provider, resolving identity in precedence
 // order: explicit Config pins, then well-known env vars
-// (GOOGLE_CLOUD_PROJECT / CLOUDSDK_CORE_PROJECT), then the GCE
-// metadata server, and finally the active kubeconfig context/cluster
-// name when it follows GKE's `gke_<project>_<location>_<cluster>`
-// convention (#616). Off-GCE with no GKE kubeconfig context or pins,
-// fields stay empty and capabilities degrade explicitly per §2.
+// (GOOGLE_CLOUD_PROJECT / CLOUDSDK_CORE_PROJECT), then the cluster the
+// invocation selected, then where lookout runs.
+//
+// "The cluster the invocation selected" is an explicit --kubeconfig or
+// --context (kube.Selection) whose context or cluster entry follows
+// GKE's `gke_<project>_<location>_<cluster>` convention (#616). When a
+// selection is explicit, the GCE metadata server is not consulted at
+// all (#694): it describes the node lookout runs on, so inside a pod
+// it would answer for lookout's own cluster while the Kubernetes reads
+// went to the selected one, and every cloud-backed answer would be
+// about the wrong cluster under the right cluster's name. A selection
+// that does not name a GKE cluster leaves the fields empty, so
+// cluster-scoped capabilities degrade explicitly (§2) instead.
+//
+// With no selection, the metadata server comes first and the default
+// kubeconfig's current-context is the off-GCE fallback. Off-GCE with
+// no GKE kubeconfig context or pins, fields stay empty and
+// capabilities degrade explicitly per §2.
 func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 	p := &Provider{
 		project:      cfg.Project,
@@ -144,6 +157,11 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 
 	if p.project == "" {
 		p.project = firstEnv("GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
+	}
+
+	if !kube.SelectionFrom(ctx).IsZero() {
+		p.fillFromKubeconfig(ctx)
+		return p, nil
 	}
 
 	if p.project == "" || p.location == "" || p.cluster == "" {
@@ -158,20 +176,26 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 			p.cluster = md.lookup(ctx, "instance/attributes/cluster-name")
 		}
 	}
-
-	if p.project == "" || p.location == "" || p.cluster == "" {
-		proj, loc, clus := kubeconfigGKEIdentity(ctx)
-		if p.project == "" {
-			p.project = proj
-		}
-		if p.location == "" {
-			p.location = loc
-		}
-		if p.cluster == "" {
-			p.cluster = clus
-		}
-	}
+	p.fillFromKubeconfig(ctx)
 	return p, nil
+}
+
+// fillFromKubeconfig fills whichever identity fields are still empty
+// from the selected (or default) kubeconfig context's GKE name.
+func (p *Provider) fillFromKubeconfig(ctx context.Context) {
+	if p.project != "" && p.location != "" && p.cluster != "" {
+		return
+	}
+	proj, loc, clus := kubeconfigGKEIdentity(ctx)
+	if p.project == "" {
+		p.project = proj
+	}
+	if p.location == "" {
+		p.location = loc
+	}
+	if p.cluster == "" {
+		p.cluster = clus
+	}
 }
 
 // kubeconfigGKEIdentity inspects the selected kubeconfig context (or

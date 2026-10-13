@@ -179,6 +179,95 @@ contexts:
 	}
 }
 
+// An explicit selection outranks the metadata server (#694). In a pod
+// the metadata server always answers, for the pod's own cluster; if it
+// were consulted, an in-cluster `--context=<other>` would read the
+// other cluster's objects and this cluster's cloud state.
+func TestExplicitSelectionOutranksMetadata(t *testing.T) {
+	var mdCalls sync.Map
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/computeMetadata/v1/")
+		mdCalls.Store(path, true)
+		w.Header().Set("Metadata-Flavor", "Google")
+		switch path {
+		case "project/project-id":
+			_, _ = w.Write([]byte("pod-project"))
+		case "instance/attributes/cluster-name":
+			_, _ = w.Write([]byte("pod-cluster"))
+		case "instance/attributes/cluster-location":
+			_, _ = w.Write([]byte("us-east1"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer md.Close()
+	t.Setenv(metadataHostEnv, strings.TrimPrefix(md.URL, "http://"))
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+
+	kcPath := filepath.Join(t.TempDir(), "kubeconfig")
+	const kcYAML = `apiVersion: v1
+kind: Config
+current-context: gke_other-proj_europe-west1_other-cluster
+clusters:
+- name: gke_other-proj_europe-west1_other-cluster
+  cluster:
+    server: https://10.0.0.2
+- name: plain-cluster
+  cluster:
+    server: https://10.0.0.3
+contexts:
+- name: gke_other-proj_europe-west1_other-cluster
+  context:
+    cluster: gke_other-proj_europe-west1_other-cluster
+- name: plain
+  context:
+    cluster: plain-cluster
+`
+	if err := os.WriteFile(kcPath, []byte(kcYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", kcPath)
+
+	identity := func(sel kube.Selection) (string, string, string) {
+		t.Helper()
+		p, err := New(kube.WithSelection(context.Background(), sel), cloud.Config{})
+		if err != nil {
+			t.Fatalf("New error: %v", err)
+		}
+		g := p.(*Provider)
+		return g.Project(), g.Location(), g.Cluster()
+	}
+
+	for _, sel := range []kube.Selection{
+		{Context: "gke_other-proj_europe-west1_other-cluster"},
+		{Kubeconfig: kcPath},
+	} {
+		if p, l, c := identity(sel); p != "other-proj" || l != "europe-west1" || c != "other-cluster" {
+			t.Errorf("selection %+v: identity = %q/%q/%q, want the selected other-proj/europe-west1/other-cluster", sel, p, l, c)
+		}
+	}
+
+	// A selection that names no GKE cluster must not borrow the pod's
+	// identity: empty fields degrade cluster-scoped capabilities
+	// explicitly instead of answering for the wrong cluster.
+	if p, l, c := identity(kube.Selection{Context: "plain"}); p != "" || l != "" || c != "" {
+		t.Errorf("non-GKE selection: identity = %q/%q/%q, want empty (never the pod's)", p, l, c)
+	}
+
+	n := 0
+	mdCalls.Range(func(any, any) bool { n++; return true })
+	if n != 0 {
+		t.Errorf("metadata server contacted %d path(s) under an explicit selection, want none", n)
+	}
+
+	// No selection: the metadata server still identifies where lookout
+	// runs, ahead of the default kubeconfig's current-context.
+	if p, l, c := identity(kube.Selection{}); p != "pod-project" || l != "us-east1" || c != "pod-cluster" {
+		t.Errorf("no selection: identity = %q/%q/%q, want the metadata server's pod-project/us-east1/pod-cluster", p, l, c)
+	}
+}
+
 func TestCapabilityAvailability(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
