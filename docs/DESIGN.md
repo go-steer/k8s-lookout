@@ -216,6 +216,19 @@ and the fleet layer joins signals — not graphs — across clusters. What
 lookout owes the fleet tier is a signal schema a fleet-level consumer can
 aggregate without parsing prose — §8.
 
+**Amendment (2026-10-14): on-demand reads are not watching.** The
+objection above is to a process *watching* many API servers: resident
+informers on each, whose load, memory and credential reach grow with
+the fleet. A shared `lookout mcp` endpoint that answers tool calls for
+several clusters holds no informers. Each call names exactly one
+cluster, reads it, and finishes, so API-server load follows calls, not
+clusters. That is admitted, at any cluster count. What stays out of
+scope is unchanged: no tool merges, rolls up or compares answers across
+clusters, and the topology index stays per-cluster. The agent combines
+per-cluster answers, as the fleet layer combines signals. Design, scale
+argument and limits are in
+[`mcp-multi-tenant-design.md`](./mcp-multi-tenant-design.md).
+
 ---
 
 ## 4. Packaging & Invocation
@@ -299,7 +312,11 @@ constraint in operator-facing terms, alongside what the standalone gives up.
 All read-path logic lives in `pkg/checks`, consumed by:
 
 1. **CLI** — for deployments where the agent has a shell (`bash` tool).
-2. **MCP server** (`lookout mcp`, stdio or localhost HTTP) — the v2.6
+2. **MCP server** (`lookout mcp`, stdio, or HTTP: loopback by default,
+   off-host only with authentication and an access log; one endpoint may
+   serve several clusters and read as each caller's own Google identity,
+   per [`mcp-multi-tenant-design.md`](./mcp-multi-tenant-design.md),
+   amendment of 2026-10-14) — the v2.6
    retrospective showed distroless images kill `bash + curl`; MCP is how a
    distroless `core-agent` daemon calls these checks natively. Each subcommand
    maps 1:1 to an MCP tool with a JSON schema derived from its flags (e.g.
