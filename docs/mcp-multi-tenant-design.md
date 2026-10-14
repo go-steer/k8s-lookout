@@ -1,8 +1,8 @@
-# Shared MCP endpoint: many clusters, many callers — proposal
+# Shared MCP endpoint: many clusters, many callers — decided
 
-Status: proposal, 2026-10-13. Nothing here is built. When it is decided,
-DESIGN.md §3 and §4.3 take the amendments listed at the end, and this
-note becomes the design they point to.
+Status: decided 2026-10-14 (proposed 2026-10-13, PR #695). DESIGN.md §3
+and §4.3 carry the amendments of 2026-10-14 that point here. Phase 1
+(#694) shipped; the rest is not built yet. Tracked in #697.
 
 ## Why
 
@@ -26,7 +26,7 @@ caller could vary is fixed for the whole process:
   session. Idle HTTP sessions never expire (`SessionTimeout` is unset).
 
 So the only way to serve two clusters or two teams is two processes.
-This note proposes two modes for one endpoint, built in that order:
+This note designs two modes for one endpoint:
 
 1. **Many clusters, one identity, many users.** The endpoint reads
    several clusters as lookout's own identity. Each tool call names
@@ -35,8 +35,11 @@ This note proposes two modes for one endpoint, built in that order:
    calling user's own Google identity, so Kubernetes RBAC and Cloud
    IAM decide what that user can see.
 
-Mode 2 builds on mode 1: the per-call cluster seam is also where the
-per-call credential goes.
+Both modes rest on one seam: a per-call `rest.Config` carried by
+`kube.Selection` (Part 1, "The seam"). Mode 1 uses it to pick the
+cluster; mode 2 uses it to pick the credential. Mode 2 is built first,
+on a single cluster, because its main consumer (Gemini Enterprise) is
+the use case that matters now; see Phases.
 
 ## Part 1 — one endpoint, many clusters
 
@@ -126,13 +129,16 @@ would serve every cloud-backed answer (`cloud orphans`, `cloud ipspace`,
 **lookout's own cluster, labelled as the one asked for**. That is the worst
 failure available: a confident answer about the wrong cluster.
 
-This also happens today: an in-cluster `lookout mcp --context=<other>` reads
-the other cluster's Kubernetes objects and its own cluster's cloud state. It
-is filed as #694 and fixed before Part 1. The fix: the seven sites take
-`cloud.ConfigFrom(ctx)`, which fills project, location and cluster from the
-selection when the selection names a cluster. An explicit selection must
-outrank the metadata server, because the metadata server describes where
-lookout runs, not what it was asked about.
+This also happened with a single cluster: an in-cluster
+`lookout mcp --context=<other>` read the other cluster's Kubernetes objects
+and its own cluster's cloud state. Fixed in #694 (PR #696): when a
+`kube.Selection` is present, `gke.New` no longer consults the metadata
+server, because it describes where lookout runs, not what it was asked
+about. A selection that names no GKE cluster leaves the identity empty, so
+cluster-scoped capabilities degrade explicitly. The fix sits in `gke.New`,
+which already reads the selection from the context, so the seven call sites
+did not change. Part 1 extends the same rule: the per-call cluster's
+`ClusterRef` supplies project, location and cluster to the provider.
 
 ### Tools that answer from where lookout runs
 
@@ -438,18 +444,39 @@ sign people in without importing the MCP SDK.
 
 ## Phases
 
-1. **Fix the cloud selection bug** (#694, ships alone).
-2. **Part 1:** cluster flags, `cluster` argument, `k8s_list_clusters`,
-   `Command.Local`, per-cluster store stems and concurrency, stateless HTTP,
-   rediscovery.
-3. **Callers as workloads:** purser in front of the HTTP endpoint, `authz`
-   rules for tools, clusters and scopes, caller identity in the access log,
-   per-caller limits. Still reads as lookout.
-4. **Callers as people, through Gemini Enterprise:** steward Path A,
-   per-call user credentials for Kubernetes and Cloud APIs, the store
-   filter, `recorded_by`, a Gateway overlay with a managed certificate, and
-   a runbook for the Custom MCP Server data store.
-5. **Callers as people, through generic MCP clients:** steward Path B.
+Ordered 2026-10-14 with Gemini Enterprise first, because it is the use
+case that matters now and it does not need more than one cluster.
+
+1. **Fix the cloud selection bug** (#694). Shipped.
+2. **Spike: a Gemini Enterprise token against GKE (#698).** In the project where
+   supercargo's Gemini Enterprise app runs, register a Custom MCP Server
+   data store for a throwaway endpoint with scopes
+   `openid email https://www.googleapis.com/auth/cloud-platform`, and
+   confirm the token it sends (a) passes tokeninfo with our client as
+   `azp`, (b) authenticates to a GKE API server as the user, both over the
+   DNS endpoint and over the in-cluster address a single-cluster lookout
+   would use, and (c) calls the Cloud APIs the cloud-backed checks use.
+   The answer to (b) decides which endpoint phase 4 builds the per-call
+   `rest.Config` against.
+3. **steward Path A** (go-steer/steward#1), in the new public `go-steer/steward` repo:
+   supercargo's `internal/googleauth` moved in with its tests, the
+   protecting middleware yielding a `purser.Caller` plus the user's token
+   source, the allow-list. supercargo adopts it.
+4. **Callers as people, through Gemini Enterprise, on one cluster (#699):** the
+   per-call `rest.Config` seam in `kube.Selection`; a Google-token auth
+   mode on the HTTP endpoint through steward; the user's token for
+   Kubernetes and Cloud APIs, with no silent fallback; purser `authz`
+   rules for the write tool; the store filter; `recorded_by`; the caller
+   in the access log and per-caller limits; a Gateway overlay with a
+   managed certificate; and a runbook for the Custom MCP Server data
+   store. `--auth-token-file` keeps working.
+5. **Part 1, many clusters (#700):** cluster flags, `cluster` argument,
+   `k8s_list_clusters`, `Command.Local`, per-cluster store stems and
+   concurrency, stateless HTTP, rediscovery. It reuses phase 4's seam.
+6. **Callers as workloads (#701):** purser mTLS/SPIFFE in front of the HTTP
+   endpoint, for core-agent daemons and watch-opened sessions; still
+   reads as lookout or a configured service account.
+7. **Callers as people, through generic MCP clients (#702):** steward Path B.
 
 ## Open questions
 
@@ -477,10 +504,13 @@ attribution (lookout writes, `recorded_by` names the caller).
 - **Putting the authorization server in purser:** purser's design excludes
   the authorization code flow; it verifies tokens and does not issue them.
 
-## DESIGN.md amendments on decision
+## DESIGN.md amendments (made 2026-10-14)
 
-- **§3, fleet scope:** keep "one process watching a thousand API servers is
-  wrong" and add that on-demand, per-cluster reads through a shared endpoint
-  are not watching, and that no tool merges answers across clusters.
-- **§4.3, MCP server:** "stdio or localhost HTTP" becomes "stdio, or HTTP
-  (loopback by default; off-host per this note)", with a pointer here.
+- **§3, fleet scope:** keeps "one process watching a thousand API servers
+  is wrong" and adds that on-demand, per-cluster reads through a shared
+  endpoint are not watching, and that no tool merges answers across
+  clusters.
+- **§4.3, MCP server:** "stdio or localhost HTTP" becomes stdio, or HTTP
+  (loopback by default, off-host only with authentication and an access
+  log), with one endpoint able to serve several clusters and read as each
+  caller's own Google identity, pointing here.
