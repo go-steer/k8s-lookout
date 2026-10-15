@@ -181,6 +181,7 @@ cannot silently drift from tool output.
 | pipeline drills: scripted signal streams through the REAL dispatcher | `internal/watch/*_dispatch_test.go`, `m5_corpus_rollup_test.go` (storms, recovery, routing, quota, corpus, rollup) |
 | doc-example validation | `internal/skilldoc/examples_test.go` |
 | live-cluster replay drills (human-run, never CI) | `dev/drills/*.md` runbooks + `stub-daemon.py` |
+| Gemini Enterprise token spike (human-run, never CI; its own Go module, so steward stays out of lookout's go.mod) | `dev/drills/ge-token-spike/` (#698) |
 | live-cluster e2e scenarios (local kind / GKE staging; in CI only non-blocking — post-merge smoke + weekly full via `e2e-kind.yml`) | `examples/e2e` + `examples/scenarios/*` (inject/verify/revert against the wire capture + read-path) |
 
 CI: `dev/tools/ci` runs the same steps as `.github/workflows/ci.yml`
