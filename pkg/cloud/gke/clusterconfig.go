@@ -450,7 +450,9 @@ type gkeServerConfigClient struct {
 func newGKEServerConfigClient(project, location string) *gkeServerConfigClient {
 	return &gkeServerConfigClient{
 		project: project, location: location,
-		svc: lazyClient(func(ctx context.Context) (*container.Service, error) { return container.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*container.Service, error) {
+			return container.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 

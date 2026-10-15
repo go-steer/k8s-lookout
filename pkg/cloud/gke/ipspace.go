@@ -188,7 +188,9 @@ type gkeClusterClient struct {
 func newGKEClusterClient(project, location, cluster string) *gkeClusterClient {
 	return &gkeClusterClient{
 		project: project, location: location, cluster: cluster,
-		svc: lazyClient(func(ctx context.Context) (*container.Service, error) { return container.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*container.Service, error) {
+			return container.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 
@@ -210,7 +212,9 @@ type gceSubnetClient struct {
 func newGCESubnetClient(project string) *gceSubnetClient {
 	return &gceSubnetClient{
 		project: project,
-		svc:     lazyClient(func(ctx context.Context) (*compute.Service, error) { return compute.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*compute.Service, error) {
+			return compute.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 

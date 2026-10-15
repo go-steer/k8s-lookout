@@ -122,7 +122,9 @@ type gceQuotaClient struct {
 func newGCEQuotaClient(project string) *gceQuotaClient {
 	return &gceQuotaClient{
 		project: project,
-		svc:     lazyClient(func(ctx context.Context) (*compute.Service, error) { return compute.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*compute.Service, error) {
+			return compute.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 

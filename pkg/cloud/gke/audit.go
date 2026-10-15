@@ -58,7 +58,7 @@ type auditAPI struct {
 
 func newAuditAPI(p *Provider) *auditAPI {
 	svc := lazyClient(func(ctx context.Context) (*logging.Service, error) {
-		return logging.NewService(ctx)
+		return logging.NewService(ctx, clientOptions(ctx)...)
 	})
 	return &auditAPI{
 		project:  p.project,

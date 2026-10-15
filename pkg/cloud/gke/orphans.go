@@ -544,7 +544,9 @@ type gceOrphanClient struct {
 func newGCEOrphanClient(project string) *gceOrphanClient {
 	return &gceOrphanClient{
 		project: project,
-		svc:     lazyClient(func(ctx context.Context) (*compute.Service, error) { return compute.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*compute.Service, error) {
+			return compute.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 

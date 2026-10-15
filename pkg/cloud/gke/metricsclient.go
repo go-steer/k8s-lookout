@@ -72,7 +72,9 @@ type mtClient struct {
 func newMTClient(project string) *mtClient {
 	return &mtClient{
 		project: project,
-		svc:     lazyClient(func(ctx context.Context) (*monitoring.Service, error) { return monitoring.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*monitoring.Service, error) {
+			return monitoring.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 

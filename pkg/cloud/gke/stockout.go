@@ -62,7 +62,7 @@ type stockoutAPI struct {
 
 func newStockoutAPI(p *Provider) *stockoutAPI {
 	svc := lazyClient(func(ctx context.Context) (*logging.Service, error) {
-		return logging.NewService(ctx)
+		return logging.NewService(ctx, clientOptions(ctx)...)
 	})
 	return &stockoutAPI{
 		project: p.project,

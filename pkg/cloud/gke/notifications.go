@@ -86,7 +86,7 @@ func subscriptionID(project, configured string) (string, string) {
 
 func (r *pubsubReceiver) Receive(ctx context.Context, handle func(pubsubMessage)) error {
 	project, name := subscriptionID(r.project, r.subscription)
-	client, err := pubsub.NewClient(ctx, project)
+	client, err := pubsub.NewClient(ctx, project, clientOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("pubsub client: %w", err)
 	}

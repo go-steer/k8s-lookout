@@ -66,7 +66,7 @@ func newPQMetadataClient(p *Provider) *pqMetadataClient {
 	return &pqMetadataClient{
 		project: p.project,
 		client: lazyClient(func(ctx context.Context) (*cloudquotas.Client, error) {
-			c, err := cloudquotas.NewClient(ctx)
+			c, err := cloudquotas.NewClient(ctx, clientOptions(ctx)...)
 			if err != nil {
 				return nil, err
 			}
@@ -106,7 +106,9 @@ type pqSeriesClient struct {
 func newPQSeriesClient(project string) *pqSeriesClient {
 	return &pqSeriesClient{
 		project: project,
-		svc:     lazyClient(func(ctx context.Context) (*monitoring.Service, error) { return monitoring.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*monitoring.Service, error) {
+			return monitoring.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 
