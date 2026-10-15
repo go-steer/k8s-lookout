@@ -19,7 +19,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
 	"github.com/go-steer/k8s-lookout/internal/version"
@@ -62,8 +64,9 @@ Flags:
                         requires a TLS-terminating reverse proxy in
                         front of lookout mcp. Non-loopback binds are
                         refused unless all three of --allow-non-loopback,
-                        --auth-token-file, and --access-log are given
-                        (§4.3).
+                        --access-log, and an authentication mode
+                        (--auth-token-file or --google-client-id) are
+                        given (§4.3).
   --allow-non-loopback  opt in to a routable bind. Not enough on its
                         own: a bind flag must not open an
                         unauthenticated cluster-read API.
@@ -72,6 +75,37 @@ Flags:
                         authorization — every caller presenting it
                         gets the full advertised surface. Compared in
                         constant time. mTLS is out of scope.
+  --google-client-id=<ids>
+                        Google-token mode (#699): every tool call reads
+                        as the person who made it, with their own Google
+                        access token, so what they see is what their own
+                        Kubernetes RBAC and Cloud IAM allow; lookout's
+                        identity reads nothing on their behalf. For a
+                        Gemini Enterprise app calling lookout as a Custom
+                        MCP Server. The value is the OAuth client ID(s)
+                        the data store is configured with; tokens issued
+                        to any other client are refused, as are tokens
+                        without the cloud-platform scope. Requires
+                        --listen, --google-allow and --resource-url;
+                        exclusive with --auth-token-file. Serves
+                        stateless HTTP and RFC 9728 metadata at
+                        /.well-known/oauth-protected-resource/<path>.
+                        The cluster must be GKE and reached over https:
+                        the caller's token is never sent over plaintext
+                        or unverified TLS. --store and --report are not
+                        yet available in this mode.
+  --google-allow=<list> who is let in, comma-separated: exact emails, or
+                        "@domain" for every account Google says belongs
+                        to that Workspace domain (never matched on the
+                        email suffix alone).
+  --google-allow-write=<list>
+                        who may call tools that change state, same
+                        syntax. Empty: no caller may. While --store is
+                        unavailable in this mode, that is only
+                        k8s_net_probe_from (with --probe-from-image).
+  --resource-url=<url>  this server's MCP URL exactly as clients reach
+                        it (e.g. https://lookout.example.com/mcp); named
+                        in the RFC 9728 metadata and every 401.
   --kubeconfig=<path>   path to a kubeconfig file pinned for all MCP
                         tool invocations (instead of $KUBECONFIG /
                         ~/.kube/config).
@@ -128,6 +162,17 @@ transport a daemon uses when it spawns "lookout mcp" as a child
 process. Diagnostics go to stderr only.
 `
 
+// splitList splits a comma-separated flag value, dropping blanks.
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // enableProbeFrom swaps the CLI build of `net probe-from` (which
 // takes --image) for one with the operator's image fixed and no
 // image argument in its schema, and adds the tool to the selection.
@@ -175,6 +220,10 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	exemptions := fs.String("exemptions", "", "path to an exemption YAML file pinned for all MCP tool calls")
 	store := fs.String("store", "", "path to a sentinel SQLite store pinned for MCP tool calls that read one")
 	report := fs.String("report", "", "path to a findings report pinned for MCP tool calls that read one")
+	googleClientID := fs.String("google-client-id", "", "Google-token mode: the OAuth client ID(s) callers' tokens must be issued to (comma-separated)")
+	googleAllow := fs.String("google-allow", "", "Google-token mode: who is let in (comma-separated emails or @domain)")
+	googleAllowWrite := fs.String("google-allow-write", "", "Google-token mode: who may call tools that change state (comma-separated emails or @domain)")
+	resourceURL := fs.String("resource-url", "", "Google-token mode: this server's MCP URL as clients reach it")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -191,6 +240,43 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// The HTTP-only flags are rejected on stdio rather than ignored: a
 	// token that authenticates nothing reads, to whoever wrote the
 	// config, exactly like a token that does.
+	googleMode := *googleClientID != ""
+	if !googleMode {
+		for _, f := range []struct {
+			name string
+			set  bool
+		}{
+			{"--google-allow", *googleAllow != ""},
+			{"--google-allow-write", *googleAllowWrite != ""},
+			{"--resource-url", *resourceURL != ""},
+		} {
+			if f.set {
+				fmt.Fprintf(stderr, "lookout mcp: %s only applies in Google-token mode; pass --google-client-id as well.\n"+
+					"Run 'lookout mcp --help' for usage.\n", f.name)
+				return 2
+			}
+		}
+	} else {
+		var problem string
+		switch {
+		case *authTokenFile != "":
+			problem = "--google-client-id and --auth-token-file are exclusive: pick one way to authenticate callers"
+		case *googleAllow == "":
+			problem = "--google-client-id needs --google-allow: an empty allow-list would admit no one"
+		case *resourceURL == "":
+			problem = "--google-client-id needs --resource-url, this server's MCP URL as clients reach it (e.g. https://lookout.example.com/mcp)"
+		case *store != "" || *report != "":
+			// The store and reports are files lookout reads as itself, so
+			// they would show a caller rows their own RBAC hides. Refused
+			// until rows are filtered by the caller's access (#699).
+			problem = "--store and --report are not yet available in Google-token mode: they are read as lookout, " +
+				"not as the caller, so they would bypass the caller's own RBAC (#699)"
+		}
+		if problem != "" {
+			fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
+			return 2
+		}
+	}
 	if *listen == "" {
 		for _, f := range []struct {
 			name string
@@ -198,6 +284,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}{
 			{"--auth-token-file", *authTokenFile != ""},
 			{"--allow-non-loopback", *allowNonLoopback},
+			{"--google-client-id", googleMode},
 		} {
 			if f.set {
 				fmt.Fprintf(stderr, "lookout mcp: %s has no effect on the stdio transport "+
@@ -209,7 +296,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	} else if err := (mcpserver.BindPolicy{
 		Listen:           *listen,
 		AllowNonLoopback: *allowNonLoopback,
-		HasAuthToken:     *authTokenFile != "",
+		HasAuthToken:     *authTokenFile != "" || googleMode,
 		HasAccessLog:     *accessLog != "",
 	}).Validate(); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
@@ -257,6 +344,22 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		auth = a
 	}
 
+	var google *mcpserver.GoogleAuth
+	if googleMode {
+		g, err := mcpserver.NewGoogleAuth(mcpserver.GoogleOptions{
+			ClientIDs:  splitList(*googleClientID),
+			Allow:      splitList(*googleAllow),
+			AllowWrite: splitList(*googleAllowWrite),
+			Resource:   *resourceURL,
+			Logger:     slog.New(slog.NewTextHandler(stderr, nil)),
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
+			return 2
+		}
+		google = g
+	}
+
 	server := mcpserver.New(reg, version.Semver(),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),
@@ -264,11 +367,13 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mcpserver.WithExemptions(*exemptions),
 		mcpserver.WithStore(*store),
 		mcpserver.WithReport(*report),
+		mcpserver.WithGoogleAuth(google),
 	)
 	if err := mcpserver.Serve(ctx, server, mcpserver.ServeOptions{
 		Listen:           *listen,
 		AllowNonLoopback: *allowNonLoopback,
 		Auth:             auth,
+		Google:           google,
 		Announce:         stderr,
 		AccessLogPath:    *accessLog,
 	}); err != nil {

@@ -32,8 +32,9 @@ through the same sanitizer.
 
   ```
   --listen="0.0.0.0:8383": refusing to bind a non-loopback address.
-  To serve off-host, pass --allow-non-loopback together with
-  --auth-token-file=<path> and --access-log=<path>; without all three
+  To serve off-host, pass --allow-non-loopback together with an
+  authentication mode (--auth-token-file=<path> or
+  --google-client-id=<id>) and --access-log=<path>; without all three
   lookout mcp is loopback-only (§4.3)
   ```
 
@@ -85,6 +86,63 @@ with [`--profile`](#profiles-dont-advertise-what-the-agent-will-never-call)
 if a caller should not reach everything. mTLS is out of scope — it is
 the right answer for a production deployment and a much larger piece of
 work (cert distribution, rotation, a CA story).
+
+## Each caller reads as themselves (Google-token mode)
+
+For a Gemini Enterprise app calling lookout as a Custom MCP Server,
+`--google-client-id` replaces the shared token with each person's own
+Google access token. Every tool call then reads the cluster and Google
+Cloud **as the person who made it**: what they see is what their own
+Kubernetes RBAC and Cloud IAM allow (on GKE, IAM roles grant Kubernetes
+access too). lookout's own identity reads nothing on their behalf.
+
+```sh
+lookout mcp \
+  --listen=0.0.0.0:8383 \
+  --allow-non-loopback \
+  --access-log=/var/log/lookout/mcp-access.log \
+  --google-client-id=123-abc.apps.googleusercontent.com \
+  --google-allow=@example.com \
+  --google-allow-write=sre-lead@example.com \
+  --resource-url=https://lookout.example.com/mcp
+```
+
+- **`--google-client-id`** — the OAuth client the Gemini Enterprise data
+  store is configured with. A token issued to any other client is
+  refused, as is one without the `cloud-platform` scope. Tokens are
+  checked with Google ([steward](https://github.com/go-steer/steward)),
+  and a result is cached for at most ten minutes.
+- **`--google-allow`** — who is let in: exact emails, or `@domain` for
+  every account Google says belongs to that Workspace domain. An email
+  suffix alone never matches, because a personal Google account can carry
+  a company address.
+- **`--google-allow-write`** — who may call tools that change state.
+  Empty means nobody. While `--store` is unavailable in this mode, the
+  only such tool is `k8s_net_probe_from` (served with
+  `--probe-from-image`); the triage-status write needs `--store`.
+- **`--resource-url`** — this server's MCP URL as clients reach it. It is
+  named in the RFC 9728 metadata served at
+  `/.well-known/oauth-protected-resource/<path>` and in every `401`.
+
+What the mode guarantees:
+
+- **No fallback.** A call with no verified caller is refused; it never
+  runs as lookout.
+- **The token stays on verified TLS.** The caller's token is sent only to
+  an `https` API server whose certificate is verified, so point lookout at
+  GKE (in-cluster, or a kubeconfig context over https). A plaintext or
+  `insecure-skip-tls-verify` cluster is refused.
+- **Stateless HTTP.** Gemini Enterprise opens a new session for every
+  interaction and never closes one, so lookout keeps none.
+- **Per-caller limits.** One caller may have at most four calls in
+  flight, inside the server-wide limit.
+- **The access log names the caller** (`caller=<email>`), never the
+  token.
+
+`--store` and `--report` are not available in this mode yet: they are
+files lookout reads as itself, so they would show a caller rows their own
+RBAC hides. They return once those rows are filtered by the caller's
+access (#699).
 
 ## Wiring into a core-agent daemon
 

@@ -47,6 +47,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 const defaultMaxConcurrentCalls = 8
@@ -72,6 +73,17 @@ type config struct {
 	store          string
 	report         string
 	maxConcurrency int
+	// google, when non-nil, is Google-token mode: every call runs as its
+	// caller, and perCaller bounds each caller's calls in flight.
+	google    *GoogleAuth
+	perCaller *callerLimit
+}
+
+// WithGoogleAuth runs every tool call as its caller, with the caller's own
+// Google token (#699). Serve it with ServeOptions.Google set to the same g,
+// which puts the token on each request.
+func WithGoogleAuth(g *GoogleAuth) Option {
+	return func(c *config) { c.google = g }
 }
 
 // WithTools restricts the advertised surface to the named tools.
@@ -134,6 +146,9 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 		o(&cfg)
 	}
 	sem := make(chan struct{}, cfg.maxConcurrency)
+	if cfg.google != nil {
+		cfg.perCaller = newCallerLimit(defaultMaxConcurrentPerCaller)
+	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
 	for _, c := range Advertised(reg, cfg.tools) {
 		server.AddTool(&mcp.Tool{
@@ -147,6 +162,11 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 			// auto-approve it as a read (issue #105).
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: !c.Writes},
 		}, handler(c, cfg, sem))
+	}
+	if cfg.google != nil {
+		// Serve checks this before putting the Google HTTP layer in front
+		// of a server: only this one reads each caller's token.
+		cfg.google.server = server
 	}
 	return server
 }
@@ -270,8 +290,30 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		start := cfg.log.now()
 		remote := remoteAddrFromContext(ctx)
+		caller := ""
 		record := func(exit int, text string) {
-			cfg.log.Record(c.MCPName, exit, start, len(text), remote)
+			cfg.log.RecordAs(caller, c.MCPName, exit, start, len(text), remote)
+		}
+		toolError := func(msg string) *mcp.CallToolResult {
+			record(emit.ExitRuntime, msg)
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+		}
+		if cfg.google != nil {
+			// Read the caller from the request, not the context: the
+			// token is the one this HTTP request carried
+			// (mcpauth.TokenSource).
+			id, ts, err := cfg.google.caller(req, c)
+			caller = id.Email
+			if err != nil {
+				return toolError("lookout " + c.Name + ": " + err.Error()), nil
+			}
+			release, ok := cfg.perCaller.acquire(caller)
+			if !ok {
+				return toolError(fmt.Sprintf("lookout %s: %s already has %d calls in flight; retry when one finishes",
+					c.Name, caller, cfg.perCaller.max)), nil
+			}
+			defer release()
+			ctx = kube.WithCallerToken(ctx, ts)
 		}
 		args, err := argv(c, req.Params.Arguments)
 		if err != nil {
