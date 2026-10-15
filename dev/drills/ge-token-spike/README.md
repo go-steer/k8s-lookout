@@ -63,10 +63,11 @@ yours is. Giving yourself `view` makes the RBAC line more interesting.
 
 ## 1. The OAuth consent screen
 
-The project's consent screen already exists (supercargo's, Internal). Under
-**Data access**, add `https://www.googleapis.com/auth/cloud-platform` next to
-`openid` and `userinfo.email`, then **Save**. For an Internal app that's all
-it takes. It doesn't change what supercargo's client asks for.
+Nothing to do if the project already has an **Internal** consent screen
+(`gke-demos-345619` has supercargo's). An Internal app needs no scopes listed
+under Data access: the scopes come from the data store's Scopes field in
+step 4, and `cloud-platform` needs no app verification for an Internal app.
+On 2026-10-15 sign-in went straight through with nothing listed.
 
 ## 2. A new OAuth client
 
@@ -127,8 +128,14 @@ runbook §5), add `ge-token-spike-<project number>.<region>.run.app`.
 4. Location **global**, connector name `lookout token spike`, description:
    > Runs the lookout token spike report (issue 698). Use only when the user
    > asks to run the spike report.
-5. **Create**, wait for **Active**, then **Actions → Reload custom actions**,
-   and enable the connector in the chat.
+5. **Create** and wait for **Active**.
+6. **Connect the data store to your app** first
+   (https://docs.cloud.google.com/gemini/enterprise/docs/connectors/connect-existing-data-store).
+   Until it is connected, **Actions → Reload custom actions** fails with
+   "The service is currently unavailable" and never contacts the server
+   (the service log shows no `/mcp` request).
+7. Then **Actions → Reload custom actions**, and enable the connector in the
+   chat.
 
 ## 5. Run it
 
@@ -144,6 +151,23 @@ in the same chat and in a new one, and compare `token.fingerprint` and
 The service log (Cloud Run → `ge-token-spike` → Logs) has one line per run
 with the caller's email and the verdicts, and a warning if steward could
 not reach Google. It never contains the token.
+
+## Result (2026-10-15)
+
+Every check ACCEPTED, on both runs; full write-up in
+[#698](https://github.com/go-steer/k8s-lookout/issues/698#issuecomment-6201888022).
+Worth knowing before building on it:
+
+- **Gemini Enterprise is a stateless client in practice.** It calls with the
+  Google ADK (`google-adk/2.11.0`) and opens a new MCP session for every
+  interaction (initialize, initialized, one call), never reusing or closing
+  one.
+- **It refreshes the token itself.** Mid-conversation, after the first token
+  expired, the next call carried a new token with almost a full hour left,
+  and there was no re-consent.
+- **GKE access can come from IAM, not just RBAC.** The access review answered
+  "access granted by IAM permissions": a person's Cloud IAM roles also grant
+  Kubernetes access on GKE.
 
 ## 6. Clean up
 
