@@ -9,6 +9,7 @@ require (
 	cloud.google.com/go/logging v1.20.0
 	cloud.google.com/go/pubsub v1.51.1
 	github.com/go-logr/stdr v1.2.2
+	github.com/go-steer/steward v0.1.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.24.1
@@ -66,6 +67,7 @@ require (
 	github.com/go-openapi/swag/stringutils v0.28.0 // indirect
 	github.com/go-openapi/swag/typeutils v0.28.0 // indirect
 	github.com/go-openapi/swag/yamlutils v0.28.0 // indirect
+	github.com/go-steer/purser v0.2.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.10 // indirect
 	github.com/google/uuid v1.6.0 // indirect

@@ -104,6 +104,15 @@ func OpenAccessLog(path string) (*AccessLog, io.Closer, error) {
 // persisted, and on stdio there is nowhere to report the failure that
 // is not the protocol stream itself.
 func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int, remote ...string) {
+	l.RecordAs("", tool, exit, start, bytes, remote...)
+}
+
+// RecordAs is Record with the caller who made the call: in Google-token
+// mode (#699) every call has one, and "who called what" is the question
+// the log exists to answer. It is the last field (caller=), after
+// remote=, so a parser written before it sees every field it knew in the
+// place it knew it. An empty caller is omitted.
+func (l *AccessLog) RecordAs(caller, tool string, exit int, start time.Time, bytes int, remote ...string) {
 	if l == nil {
 		return
 	}
@@ -122,6 +131,9 @@ func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int, re
 	}
 	if len(remote) > 0 && remote[0] != "" {
 		fields = append(fields, emit.Field{Key: "remote", Value: remote[0]})
+	}
+	if caller != "" {
+		fields = append(fields, emit.Field{Key: "caller", Value: caller})
 	}
 	line := emit.EncodeLogfmt(fields)
 	_, _ = l.out.Write(line)

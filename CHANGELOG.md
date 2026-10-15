@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- **`lookout mcp` can read as each caller instead of as itself (#699).**
+  With `--google-client-id`, a Gemini Enterprise app calling lookout as a
+  Custom MCP Server sends each person's own Google access token, and every
+  tool call reads the cluster and Google Cloud with it, so what a person
+  sees is what their own Kubernetes RBAC and Cloud IAM allow; lookout's
+  identity reads nothing on their behalf, and a call with no verified
+  caller is refused rather than run as lookout. Tokens must be issued to
+  the configured OAuth client and carry `cloud-platform`; `--google-allow`
+  admits exact emails or `@domain` (matched on Google's Workspace domain,
+  never the email suffix), and `--google-allow-write` gates tools that
+  change state (today `k8s_net_probe_from`, when served). The mode serves
+  stateless HTTP only at the `--resource-url` path (Gemini Enterprise
+  opens a session per interaction and closes none) and RFC 9728 metadata
+  at the URL given by `--resource-url`, counts as authentication for an
+  off-host bind, limits each caller to four calls in flight, and adds
+  `caller=` to the access log. The caller's token is only ever sent to an
+  `https` API server with verified TLS. Underneath, every Kubernetes and
+  Google API client the read path builds now takes the caller's token
+  when one is present (#707), guarded by a test that fails on any Google
+  client built without it. `--store` and `--report` are refused in this
+  mode until rows from them are filtered by the caller's access. Built on
+  [steward](https://github.com/go-steer/steward) v0.1.0; the approach was
+  proven against a real Gemini Enterprise app first (#698).
 
 - **Cloud-backed checks now answer for the cluster you selected, not the one
   lookout runs in (#694).** Inside a GKE pod, `--context` or `--kubeconfig`

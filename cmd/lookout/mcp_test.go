@@ -16,12 +16,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -161,6 +163,43 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 		// token that authenticates nothing reads like one that does.
 		{"auth token without listen", []string{"--auth-token-file=/dev/null"}, 2, "stdio transport"},
 		{"allow-non-loopback without listen", []string{"--allow-non-loopback"}, 2, "stdio transport"},
+
+		// #699: Google-token mode.
+		{"google mode without listen", []string{
+			"--google-client-id=c", "--google-allow=@x.example", "--resource-url=https://l.example/mcp",
+		}, 2, "stdio transport"},
+		{"google mode needs an allow-list", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--resource-url=https://l.example/mcp",
+		}, 2, "--google-allow"},
+		{"google mode needs the resource URL", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+		}, 2, "--resource-url"},
+		{"google mode and a shared token are exclusive", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--resource-url=https://l.example/mcp", "--auth-token-file=/dev/null",
+		}, 2, "exclusive"},
+		{"google mode refuses the store until rows are filtered", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--resource-url=https://l.example/mcp", "--store=/tmp/x.db",
+		}, 2, "bypass the caller's own RBAC"},
+		{"google mode refuses a report too", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--resource-url=https://l.example/mcp", "--report=/tmp/r",
+		}, 2, "--report"},
+		{"google flags without google mode", []string{"--google-allow=@x.example"}, 2, "--google-client-id"},
+		{"resource URL without google mode", []string{"--resource-url=https://l.example/mcp"}, 2, "--google-client-id"},
+		{"a malformed allow entry", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=x.example",
+			"--resource-url=https://l.example/mcp",
+		}, 2, "--google-allow"},
+		{"a plaintext resource URL", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--resource-url=http://l.example/mcp",
+		}, 2, "--resource-url"},
+		{"google mode counts as authentication for the bind", []string{
+			"--listen=0.0.0.0:8383", "--allow-non-loopback", "--google-client-id=c", "--google-allow=@x.example",
+			"--resource-url=https://l.example/mcp",
+		}, 2, "--access-log"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +214,26 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 				t.Errorf("usage error wrote to stdout: %q", stdout.String())
 			}
 		})
+	}
+}
+
+// TestMCPGoogleModeServes: the real wiring starts Google-token mode with
+// both halves bound (the HTTP layer and the tools that read each caller's
+// token). If the server were built without WithGoogleAuth, Serve would
+// refuse with an internal error instead of serving.
+func TestMCPGoogleModeServes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	code := mcpMain(ctx, []string{
+		"--listen=127.0.0.1:0", "--google-client-id=123-abc.apps.googleusercontent.com",
+		"--google-allow=@x.example", "--resource-url=http://127.0.0.1/mcp",
+	}, &stdout, &stderr)
+	if code != 0 || strings.Contains(stderr.String(), "internal") {
+		t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Google-token mode") {
+		t.Errorf("no Google-token banner: %s", stderr.String())
 	}
 }
 

@@ -25,6 +25,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/go-steer/steward/mcpauth"
 )
 
 // ServeOptions is everything Serve needs beyond the server itself.
@@ -38,6 +40,13 @@ type ServeOptions struct {
 	// Auth, when non-nil, requires a bearer token on every HTTP
 	// request. It is what makes AllowNonLoopback permissible.
 	Auth *BearerAuth
+	// Google, when non-nil, is Google-token mode (#699): every request
+	// carries the caller's own Google token, checked by steward, and the
+	// server is stateless (a Gemini Enterprise client opens a session per
+	// interaction and closes none, so sessions would only accumulate).
+	// The server must be built WithGoogleAuth with the same value. Like
+	// Auth, it makes AllowNonLoopback permissible; the two are exclusive.
+	Google *GoogleAuth
 	// Announce, when non-nil, receives the one-line startup banner for
 	// an HTTP bind. Callers pass stderr; stdout carries protocol
 	// frames on the stdio transport and must stay clean.
@@ -58,7 +67,22 @@ type ServeOptions struct {
 // results). A non-empty listen address serves streamable HTTP, subject
 // to BindPolicy.
 func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
+	if opts.Google != nil && opts.Auth != nil {
+		return errors.New("--google-client-id and --auth-token-file are exclusive: pick one way to authenticate callers")
+	}
+	if opts.Google != nil && opts.Google.server != server {
+		// The HTTP layer would authenticate each caller and the tools
+		// would then read as lookout: the one outcome this mode exists to
+		// prevent. (The reverse mismatch, a server built WithGoogleAuth
+		// served without Google, fails closed: no request carries a
+		// caller, so every call is refused.)
+		return errors.New("internal: Google-token mode served in front of a server not built WithGoogleAuth with the same GoogleAuth; " +
+			"its tools would read as lookout, not as each caller")
+	}
 	if opts.Listen == "" {
+		if opts.Google != nil {
+			return errors.New("--google-client-id needs --listen: on stdio there is no HTTP request to carry a caller's token")
+		}
 		err := server.Run(ctx, &mcp.StdioTransport{})
 		if errors.Is(err, context.Canceled) || isPeerDisconnect(err) {
 			return nil // clean shutdown on signal or client exit
@@ -73,7 +97,7 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 	if err := (BindPolicy{
 		Listen:           opts.Listen,
 		AllowNonLoopback: opts.AllowNonLoopback,
-		HasAuthToken:     opts.Auth != nil,
+		HasAuthToken:     opts.Auth != nil || opts.Google != nil,
 		HasAccessLog:     opts.AccessLogPath != "",
 	}).Validate(); err != nil {
 		return err
@@ -82,9 +106,23 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
+	getServer := func(*http.Request) *mcp.Server { return server }
+	var handler http.Handler
+	if g := opts.Google; g != nil {
+		mux := http.NewServeMux()
+		// RFC 9728 metadata, unauthenticated: a client reads it to learn
+		// where to sign in before it has a token.
+		mux.Handle(g.protector.MetadataPath(), g.protector.MetadataHandler())
+		// MCP only at the --resource-url path, the resource the metadata
+		// describes; anything else is a 404.
+		mux.Handle(g.path, mcpauth.Middleware(g.protector)(mcp.NewStreamableHTTPHandler(getServer,
+			&mcp.StreamableHTTPOptions{Stateless: true})))
+		handler = wrapHTTPHandler(mux)
+	} else {
+		handler = opts.Auth.Wrap(wrapHTTPHandler(mcp.NewStreamableHTTPHandler(getServer, nil)))
+	}
 	httpServer := &http.Server{
-		Handler: opts.Auth.Wrap(wrapHTTPHandler(mcp.NewStreamableHTTPHandler(
-			func(*http.Request) *mcp.Server { return server }, nil))),
+		Handler: handler,
 		// Bounded even on loopback: a wedged local client must not pin
 		// header reads, request bodies, or keep-alive sockets open forever.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -121,14 +159,22 @@ func announce(opts ServeOptions, addr string) {
 	if opts.Announce == nil {
 		return
 	}
+	if opts.Google != nil {
+		fmt.Fprintf(opts.Announce, "lookout mcp: Google-token mode: every call reads as its caller, "+
+			"with their own token (RFC 9728 metadata at %s)\n", opts.Google.protector.MetadataURL())
+	}
 	if err := ValidateLoopback(opts.Listen); err == nil {
 		fmt.Fprintf(opts.Announce, "lookout mcp: serving MCP over HTTP on %s (loopback)\n", addr)
 		return
 	}
+	how := "bearer-token"
+	if opts.Google != nil {
+		how = "Google-token"
+	}
 	fmt.Fprintf(opts.Announce,
 		"lookout mcp: serving MCP over HTTP on %s — REACHABLE OFF-HOST.\n"+
-			"lookout mcp: bearer-token authentication is REQUIRED; every call is recorded to %s.\n",
-		addr, opts.AccessLogPath)
+			"lookout mcp: %s authentication is REQUIRED; every call is recorded to %s.\n",
+		addr, how, opts.AccessLogPath)
 }
 
 // codeServerClosing is the SDK's jsonrpc2 "server is closing" wire
@@ -187,11 +233,12 @@ func (p BindPolicy) Validate() error {
 	}
 	if !p.AllowNonLoopback {
 		return fmt.Errorf("--listen=%q: refusing to bind a non-loopback address. "+
-			"To serve off-host, pass --allow-non-loopback together with --auth-token-file=<path> "+
-			"and --access-log=<path>; without all three lookout mcp is loopback-only (§4.3)", p.Listen)
+			"To serve off-host, pass --allow-non-loopback together with an authentication mode "+
+			"(--auth-token-file=<path> or --google-client-id=<id>) and --access-log=<path>; "+
+			"without all three lookout mcp is loopback-only (§4.3)", p.Listen)
 	}
 	if !p.HasAuthToken {
-		return fmt.Errorf("--listen=%q with --allow-non-loopback requires --auth-token-file=<path>: "+
+		return fmt.Errorf("--listen=%q with --allow-non-loopback requires --auth-token-file=<path> or --google-client-id=<id>: "+
 			"an unauthenticated cluster-read API on a routable address is not something to open by accident", p.Listen)
 	}
 	if !p.HasAccessLog {
