@@ -17,9 +17,12 @@
 package kube
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
+	"golang.org/x/oauth2"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -55,6 +58,12 @@ type Options struct {
 	QPS float32
 	// Burst sets the maximum burst for the REST client throttle (0 = DefaultBurst).
 	Burst int
+	// CallerToken, when set, replaces whatever credential the resolved
+	// config carries (service-account token, kubeconfig user, exec or
+	// auth-provider plugin, client certificate) with this caller's own
+	// bearer token. The cluster, its address and its CA are unchanged.
+	// See WithCallerToken.
+	CallerToken oauth2.TokenSource
 }
 
 // BuildClient constructs a kubernetes.Interface from the options
@@ -160,7 +169,46 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 	}
 	cfg.QPS = qps
 	cfg.Burst = burst
+	if opts.CallerToken != nil {
+		return callerConfig(cfg, opts.CallerToken)
+	}
 	return cfg, nil
+}
+
+// callerConfig returns cfg with every credential replaced by the caller's
+// bearer token.
+//
+// It starts from rest.AnonymousClientConfig, client-go's allowlist of the
+// fields that carry no credential (host, CA, server name, rate limits,
+// dialer, proxy), and adds only the token. Nothing of lookout's own
+// identity can survive, including a credential field a future client-go
+// adds: a config that kept, say, lookout's client certificate would
+// authenticate as lookout with the caller's token riding along unused.
+//
+// The caller's token is a Google access token with cloud-platform scope,
+// worth far more than a cluster credential, so it is only ever sent over
+// verified TLS: a plaintext host or a config that skips verification is
+// refused rather than handed the token.
+//
+// The token is read once, here. A Config is built per invocation, so the
+// token lives as long as the call that brought it.
+func callerConfig(cfg *rest.Config, ts oauth2.TokenSource) (*rest.Config, error) {
+	if !strings.HasPrefix(cfg.Host, "https://") {
+		return nil, fmt.Errorf("caller token: refusing to send it to %q: the API server must be https", cfg.Host)
+	}
+	if cfg.Insecure {
+		return nil, fmt.Errorf("caller token: refusing to send it to %q: TLS verification is off for this cluster", cfg.Host)
+	}
+	tok, err := ts.Token()
+	if err != nil {
+		return nil, fmt.Errorf("caller token: %w", err)
+	}
+	if tok.AccessToken == "" {
+		return nil, errors.New("caller token: empty access token")
+	}
+	out := rest.AnonymousClientConfig(cfg)
+	out.BearerToken = tok.AccessToken
+	return out, nil
 }
 
 // loadKubeconfig resolves one kubeconfig with an optional

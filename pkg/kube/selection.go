@@ -69,5 +69,6 @@ func SelectionFrom(ctx context.Context) Selection {
 // config directly through BuildConfig.
 func OptionsFrom(ctx context.Context) Options {
 	s := SelectionFrom(ctx)
-	return Options{Kubeconfig: s.Kubeconfig, Context: s.Context}
+	ts, _ := CallerTokenFrom(ctx)
+	return Options{Kubeconfig: s.Kubeconfig, Context: s.Context, CallerToken: ts}
 }

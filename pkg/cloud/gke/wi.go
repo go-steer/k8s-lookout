@@ -56,7 +56,7 @@ type wiAPI struct {
 
 func newWIAPI(p *Provider) *wiAPI {
 	svc := lazyClient(func(ctx context.Context) (*iam.Service, error) {
-		return iam.NewService(ctx)
+		return iam.NewService(ctx, clientOptions(ctx)...)
 	})
 	return &wiAPI{
 		project: p.project,

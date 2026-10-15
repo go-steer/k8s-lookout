@@ -48,6 +48,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // cloudPlatformScope is the OAuth scope GKE control planes accept for
@@ -79,9 +80,13 @@ func (p *Provider) DiscoverClusters(ctx context.Context) ([]cloud.ClusterRef, er
 	return discoverClusters(ctx, p.project, p.location, newFleetLister())
 }
 
-// RESTConfig implements cloud.Fleet: an ADC-authenticated config for
-// the cluster's DNS endpoint.
+// RESTConfig implements cloud.Fleet: a config for the cluster's DNS
+// endpoint, authenticated with ADC, or with the caller's token when the
+// invocation runs as its caller (kube.WithCallerToken, #699).
 func (p *Provider) RESTConfig(ctx context.Context, ref cloud.ClusterRef) (*rest.Config, error) {
+	if ts, ok := kube.CallerTokenFrom(ctx); ok {
+		return restConfig(ctx, ref, func(context.Context, ...string) (oauth2.TokenSource, error) { return ts, nil })
+	}
 	return restConfig(ctx, ref, google.DefaultTokenSource)
 }
 
@@ -154,7 +159,9 @@ type gkeFleetLister struct {
 
 func newFleetLister() *gkeFleetLister {
 	return &gkeFleetLister{
-		svc: lazyClient(func(ctx context.Context) (*container.Service, error) { return container.NewService(ctx) }),
+		svc: lazyClient(func(ctx context.Context) (*container.Service, error) {
+			return container.NewService(ctx, clientOptions(ctx)...)
+		}),
 	}
 }
 
