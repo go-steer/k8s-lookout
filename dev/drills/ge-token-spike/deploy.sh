@@ -60,7 +60,7 @@ gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" \
   --service-account "$SA" \
   --no-invoker-iam-check \
   --max-instances 1 \
-  --set-env-vars "^@^SPIKE_CLIENT_ID=${SPIKE_CLIENT_ID}@SPIKE_MEMBERS=${SPIKE_MEMBERS}@SPIKE_CLUSTER=${SPIKE_CLUSTER}@SPIKE_RESOURCE=${URL}/mcp"
+  --set-env-vars "^|^SPIKE_CLIENT_ID=${SPIKE_CLIENT_ID}|SPIKE_MEMBERS=${SPIKE_MEMBERS}|SPIKE_CLUSTER=${SPIKE_CLUSTER}|SPIKE_RESOURCE=${URL}/mcp"
 
 echo
 echo "MCP server URL (for the data store): ${URL}/mcp"
