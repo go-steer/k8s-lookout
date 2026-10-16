@@ -83,7 +83,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
 | `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
 | `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
-| `edge.selector_empty` | critical | a Service selector selects zero pods, so the service routes nowhere |
+| `edge.selector_empty` | critical, info | a Service selector selects zero pods, so the service routes nowhere; info, not critical, when every workload it matches is scaled to zero on purpose |
 | `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
 | `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
 | `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |
@@ -185,6 +185,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `omitted_lines` | lines inside the dropped clusters (log.overflow only) |
 | `workload` | the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
 | `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
+| `scaled_to_zero` | on an info edge.selector_empty (reason BackendScaledToZero): the Deployments or StatefulSets the selector matches, as <Kind>/<name>, every one of them asking for zero replicas. The Service routes nowhere until one scales up, but nothing is misconfigured |
 | `volume` | pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken |
 | `key` | the referenced key that is missing from the ConfigMap/Secret |
 | `selected` | pods the Service selector currently selects |

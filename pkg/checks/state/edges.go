@@ -152,6 +152,7 @@ func EdgesCommand(deps Deps) checks.Command {
 		Output: append([]checks.OutputField{
 			{Name: "workload", Doc: "the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side"},
 			{Name: "likely_workload", Doc: "on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess"},
+			{Name: "scaled_to_zero", Doc: "on an info edge.selector_empty (reason BackendScaledToZero): the Deployments or StatefulSets the selector matches, as <Kind>/<name>, every one of them asking for zero replicas. The Service routes nowhere until one scales up, but nothing is misconfigured"},
 			{Name: "pods", Doc: "how many of the workload's pods carry the broken reference"},
 			{Name: "container", Doc: "container declaring the broken env/envFrom reference"},
 			{Name: "env", Doc: "environment variable whose valueFrom reference is broken"},
@@ -304,6 +305,10 @@ type podTemplate struct {
 	labels           map[string]string
 	serviceAccount   string
 	imagePullSecrets []string
+	// scaledToZero: a Deployment or StatefulSet whose spec asks for
+	// zero replicas, so a Service selecting it has no pods on purpose
+	// (#715). Never set for the kinds without a replica count.
+	scaledToZero bool
 }
 
 func key(ns, name string) string { return ns + "/" + name }
@@ -350,15 +355,16 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 		ix.graphObjs = append(ix.graphObjs, o)
 		ix.scanned++
 	}
-	template := func(kind, ns, name string, tpl corev1.PodTemplateSpec) {
+	template := func(kind string, obj metav1.Object, tpl corev1.PodTemplateSpec, replicas *int32) {
 		pull := make([]string, 0, len(tpl.Spec.ImagePullSecrets))
 		for _, r := range tpl.Spec.ImagePullSecrets {
 			pull = append(pull, r.Name)
 		}
-		ix.templates[kind+"/"+key(ns, name)] = podTemplate{
+		ix.templates[kind+"/"+key(obj.GetNamespace(), obj.GetName())] = podTemplate{
 			labels:           tpl.Labels,
 			serviceAccount:   tpl.Spec.ServiceAccountName,
 			imagePullSecrets: pull,
+			scaledToZero:     replicas != nil && *replicas == 0,
 		}
 	}
 
@@ -392,7 +398,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) { template("Deployment", d.Namespace, d.Name, d.Spec.Template); graphObj(d) })
+			}, func(d *appsv1.Deployment) { template("Deployment", d, d.Spec.Template, d.Spec.Replicas); graphObj(d) })
 		},
 		func() error {
 			return listPages("replicasets", func(o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
@@ -401,7 +407,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(r *appsv1.ReplicaSet) { template("ReplicaSet", r.Namespace, r.Name, r.Spec.Template); graphObj(r) })
+			}, func(r *appsv1.ReplicaSet) { template("ReplicaSet", r, r.Spec.Template, nil); graphObj(r) })
 		},
 		func() error {
 			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
@@ -411,7 +417,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 				}
 				return l.Items, l.Continue, nil
 			}, func(s *appsv1.StatefulSet) {
-				template("StatefulSet", s.Namespace, s.Name, s.Spec.Template)
+				template("StatefulSet", s, s.Spec.Template, s.Spec.Replicas)
 				// Kept whole, unlike the other workload kinds: the
 				// governing-Service and volumeClaimTemplates checks read
 				// spec fields no pod carries.
@@ -426,7 +432,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(d *appsv1.DaemonSet) { template("DaemonSet", d.Namespace, d.Name, d.Spec.Template); graphObj(d) })
+			}, func(d *appsv1.DaemonSet) { template("DaemonSet", d, d.Spec.Template, nil); graphObj(d) })
 		},
 		func() error {
 			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
@@ -435,7 +441,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(j *batchv1.Job) { template("Job", j.Namespace, j.Name, j.Spec.Template); graphObj(j) })
+			}, func(j *batchv1.Job) { template("Job", j, j.Spec.Template, nil); graphObj(j) })
 		},
 		func() error {
 			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
@@ -445,7 +451,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 				}
 				return l.Items, l.Continue, nil
 			}, func(c *batchv1.CronJob) {
-				template("CronJob", c.Namespace, c.Name, c.Spec.JobTemplate.Spec.Template)
+				template("CronJob", c, c.Spec.JobTemplate.Spec.Template, nil)
 				graphObj(c)
 			})
 		},

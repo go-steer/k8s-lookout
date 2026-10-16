@@ -525,6 +525,109 @@ func TestScan_EdgeSweepDoesNotDoubleReportAnAttributedService(t *testing.T) {
 	}
 }
 
+// TestScan_EdgeSweepSkipsAddonManagedServices: #715. GKE ships Services
+// that select nothing until a feature is enabled — Managed
+// Prometheus's alertmanager and rule-evaluator, antrea — and the addon
+// manager rewrites any edit to them within a minute. A bare scan of a
+// stock cluster led with all three as critical "dead" Services.
+func TestScan_EdgeSweepSkipsAddonManagedServices(t *testing.T) {
+	addon := service("kube-system", "antrea", map[string]string{"app": "antrea"})
+	addon.Labels = map[string]string{"addonmanager.kubernetes.io/mode": "Reconcile"}
+	// EnsureExists objects are created once and then left to the
+	// operator, so they stay in scope.
+	ensure := service("kube-system", "dns-extra", map[string]string{"app": "dns-extra"})
+	ensure.Labels = map[string]string{"addonmanager.kubernetes.io/mode": "EnsureExists"}
+
+	c := newScan(t, []runtime.Object{addon, ensure}, stage("triage delta", emits()))
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "name=antrea") {
+		t.Errorf("a Reconcile-mode addon Service was reported:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "kind=edge.selector_empty severity=critical namespace=kube-system kind_of_object=Service name=dns-extra") {
+		t.Errorf("an EnsureExists Service selecting nothing should still be critical:\n%s", res.Stdout)
+	}
+}
+
+// TestScan_EdgeSweepServiceOfAScaledToZeroWorkloadIsInfo: #715. A
+// Service whose selector matches a Deployment or StatefulSet that asks
+// for zero replicas selects no pods on purpose: scaled down, KEDA at
+// zero, a platform component held at zero. It routes nowhere until the
+// workload scales up, which is worth a line, but nothing is broken.
+func TestScan_EdgeSweepServiceOfAScaledToZeroWorkloadIsInfo(t *testing.T) {
+	zero := int32(0)
+	labels := map[string]string{"app": "rule-evaluator"}
+	dep := ownedPods("prod", "rule-evaluator", 0)
+	dep[0].(*appsv1.Deployment).Spec.Template.Labels = labels
+	dep[0].(*appsv1.Deployment).Spec.Replicas = &zero
+	dep[1].(*appsv1.ReplicaSet).Spec.Template.Labels = labels
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "alertmanager", UID: "prod/alertmanager"},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "alertmanager"}}},
+		},
+	}
+	objs := dep
+	objs = append(objs, sts,
+		service("prod", "rule-evaluator", labels),
+		service("prod", "alertmanager", map[string]string{"app": "alertmanager"}),
+		// Zero replicas does not excuse a selector that would not match
+		// the pods anyway: that one is still the rename that missed.
+		service("prod", "typo", map[string]string{"app": "rule-evaluatr"}),
+	)
+
+	c := newScan(t, objs, stage("triage delta", emits()))
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	for _, want := range []string{
+		"kind=edge.selector_empty severity=info namespace=prod kind_of_object=Service name=rule-evaluator " +
+			"reason=BackendScaledToZero message=\"selector app=rule-evaluator selects no pods: Deployment/rule-evaluator is scaled to zero replicas\" " +
+			"check=\"state edges\" selector=\"app=rule-evaluator\" scaled_to_zero=Deployment/rule-evaluator",
+		"kind=edge.selector_empty severity=info namespace=prod kind_of_object=Service name=alertmanager " +
+			"reason=BackendScaledToZero",
+		"scaled_to_zero=StatefulSet/alertmanager",
+		"kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=typo reason=NoMatchingPods",
+	} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, res.Stdout)
+		}
+	}
+	if err := checktest.Verify(c, res.Stdout, emit.FormatLogfmt); err != nil {
+		t.Errorf("output contract violated: %v", err)
+	}
+}
+
+// TestScan_EdgeSweepZeroReplicasDoesNotExcuseARunningMatch: the empty
+// selection is only on purpose when EVERY workload the selector matches
+// is at zero. One that should be running and has no pods is the fault.
+func TestScan_EdgeSweepZeroReplicasDoesNotExcuseARunningMatch(t *testing.T) {
+	zero, one := int32(0), int32(1)
+	labels := map[string]string{"app": "api"}
+	blue := ownedPods("prod", "api-blue", 0)
+	blue[0].(*appsv1.Deployment).Spec.Template.Labels = labels
+	blue[0].(*appsv1.Deployment).Spec.Replicas = &zero
+	green := ownedPods("prod", "api-green", 0)
+	green[0].(*appsv1.Deployment).Spec.Template.Labels = labels
+	green[0].(*appsv1.Deployment).Spec.Replicas = &one
+	objs := blue
+	objs = append(objs, green...)
+	objs = append(objs, service("prod", "api", labels))
+
+	c := newScan(t, objs, stage("triage delta", emits()))
+	res := checktest.Run(t, c)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api reason=NoMatchingPods") {
+		t.Errorf("a Service matching a workload that should be running must stay critical:\n%s", res.Stdout)
+	}
+}
+
 // TestScan_MaxDrilldownZeroDisablesTheSweepToo: stage 2 now runs even
 // when stage 1 found nothing, so --max-drilldown=0 is the only way to
 // opt out of its List pass. It has to keep meaning that.

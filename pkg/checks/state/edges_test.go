@@ -711,6 +711,23 @@ func TestEdgesEntersFromAService(t *testing.T) {
 		}
 	})
 
+	// The target-free sweep skips addon-managed Services (#715); asking
+	// about one by name is a different question, and gets the answer.
+	t.Run("an addon-managed Service named as the target is still judged", func(t *testing.T) {
+		c := healthy(t)
+		c.svc.Spec.Selector = map[string]string{"app": "api-v2"}
+		c.svc.Labels = map[string]string{"addonmanager.kubernetes.io/mode": "Reconcile"}
+		c.slice = apiSlice()
+
+		res := checktest.Run(t, testCommand(c.objects()...), "--workload=Service/prod/api")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if !strings.Contains(res.Stdout, "kind=edge.selector_empty severity=critical namespace=prod kind_of_object=Service name=api") {
+			t.Errorf("a named addon Service selecting nothing went unreported:\n%s", res.Stdout)
+		}
+	})
+
 	// Two workloads carrying the same labels fit the broken selector
 	// equally well; picking one alphabetically would be the invented
 	// attribution #332 was about. The Service still routes nowhere and

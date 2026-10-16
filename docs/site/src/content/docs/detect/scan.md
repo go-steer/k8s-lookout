@@ -161,7 +161,7 @@ what it dropped.
 | `edge.missing_key` | critical | the referenced key is absent from an existing ConfigMap/Secret |
 | `edge.invalid_ref` | warning | the referenced object exists but is the wrong type to serve the reference |
 | `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
-| `edge.selector_empty` | critical | a Service selector selects zero pods, so the service routes nowhere |
+| `edge.selector_empty` | critical, info | a Service selector selects zero pods, so the service routes nowhere; info, not critical, when every workload it matches is scaled to zero on purpose |
 | `edge.selector_unready` | critical, warning | the Service selects pods but some are not Ready; critical when none are |
 | `edge.endpoints_missing` | critical | a selecting Service has no EndpointSlices at all |
 | `edge.endpoints_orphaned` | warning | an endpoint targetRef names a pod that no longer exists |
