@@ -122,6 +122,9 @@ func runChanges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	if err != nil {
 		return 0, err
 	}
+	if err := callerMaySee(ctx, wl); err != nil {
+		return 0, err
+	}
 	window := inv.Scope.Since
 	if window == 0 {
 		window = defaultChangesWindow

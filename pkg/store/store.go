@@ -358,6 +358,12 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_occurrences_emitted_at ON occurrences (emitted_at);
 	ALTER TABLE triage_status ADD COLUMN canonical_reason TEXT NOT NULL DEFAULT '';
 	ALTER TABLE triage_status ADD COLUMN cluster TEXT NOT NULL DEFAULT '';`,
+
+	// v11: triage_status.recorded_by names who asked for a write when
+	// lookout knows (the caller's email in Google-token mode, #699).
+	// lookout stays the writer of record; '' for the CLI, the sentinel,
+	// and every record written before this column.
+	`ALTER TABLE triage_status ADD COLUMN recorded_by TEXT NOT NULL DEFAULT '';`,
 }
 
 // Hooks are the store's observability seams: pkg/store carries no

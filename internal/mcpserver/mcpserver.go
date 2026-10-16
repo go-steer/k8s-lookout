@@ -40,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -313,12 +314,21 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 					c.Name, caller, cfg.perCaller.max)), nil
 			}
 			defer release()
-			ctx = kube.WithCallerToken(ctx, ts)
+			ctx = kube.WithCallerName(kube.WithCallerToken(ctx, ts), caller)
 		}
 		args, err := argv(c, req.Params.Arguments)
 		if err != nil {
 			record(emit.ExitUsage, err.Error())
 			return nil, invalidParams(err.Error())
+		}
+		if cfg.google != nil && slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--store-cluster") }) {
+			// Which cluster's store a call reads is the operator's choice:
+			// the caller access check asks the cluster this server reads,
+			// so it cannot vouch for rows from another cluster's store
+			// (namespace names repeat across clusters).
+			msg := "store_cluster is not accepted in Google-token mode: the store this server reads is fixed by its operator"
+			record(emit.ExitUsage, msg)
+			return nil, invalidParams(msg)
 		}
 		select {
 		case sem <- struct{}{}:

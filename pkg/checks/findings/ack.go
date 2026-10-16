@@ -16,12 +16,27 @@ package findings
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	findingstate "github.com/go-steer/k8s-lookout/pkg/findings"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
+
+// subjectNamespace is the namespace part of a subject key
+// (<cluster>/<namespace>/<kind>/<name>/<reason>, findingstate.SubjectKey).
+// A key in any other shape yields "", which only cluster-wide read can
+// see: an unparseable key fails closed.
+func subjectNamespace(key string) string {
+	parts := strings.Split(key, "/")
+	if len(parts) != 5 {
+		return ""
+	}
+	return parts[1]
+}
 
 // defaultAckWindow is the ack duration when --for is not given: long
 // enough to cover a remediation and a rollout, short enough that
@@ -36,7 +51,9 @@ func AckCommand(deps Deps) checks.Command {
 		Name:    "findings ack",
 		MCPName: "k8s_findings_ack",
 		Writes:  true,
-		Summary: "Suppress one finding for a window after an operator has taken it — later diffs report it `suppressed` instead of re-raising it, and it comes back on its own when the window expires; the \"I'm on this, stop paging me until lunch\" surface.",
+		// Its findings are stored finding-state rows (#699).
+		CallerFiltered: true,
+		Summary:        "Suppress one finding for a window after an operator has taken it — later diffs report it `suppressed` instead of re-raising it, and it comes back on its own when the window expires; the \"I'm on this, stop paging me until lunch\" surface.",
 		Positional: &checks.Positional{
 			Meta: "<subject-key>",
 			Doc:  "the subject key from a `findings diff` record's subject_key field: <cluster>/<namespace>/<kind_of_object>/<normalized-name>/<canonical-reason>. Must name a currently-open subject — a resolved subject has no row to ack",
@@ -83,6 +100,20 @@ func runAck(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 		return 0, emit.UsageErrorf("--for must be positive, got %s; to end an ack use --clear", window)
 	}
 
+	by := inv.Flags.String("by")
+	if _, asCaller := kube.CallerTokenFrom(ctx); asCaller {
+		// Running as its caller (#699): ack only subjects in namespaces the
+		// caller can see, checked before the store is touched so that an
+		// unseen subject's existence is not revealed either way; and the
+		// ack is recorded as the caller, not whatever --by says.
+		if !kube.NewCallerVisibility(ctx).Visible(subjectNamespace(subjectKey)) {
+			return 0, fmt.Errorf("refusing to change the ack on %s: you cannot list pods in its namespace", subjectKey)
+		}
+		if name := kube.CallerNameFrom(ctx); name != "" {
+			by = name
+		}
+	}
+
 	st, err := openStore(emit.StorePath(inv.Flags))
 	if err != nil {
 		return 0, err
@@ -93,7 +124,7 @@ func runAck(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	if clear {
 		row, err = st.UnackFinding(ctx, subjectKey)
 	} else {
-		row, err = st.AckFinding(ctx, subjectKey, inv.Flags.String("by"), deps.now().UTC().Add(window))
+		row, err = st.AckFinding(ctx, subjectKey, by, deps.now().UTC().Add(window))
 	}
 	if err != nil {
 		return 0, err

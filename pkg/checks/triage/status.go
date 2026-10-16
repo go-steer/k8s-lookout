@@ -35,11 +35,13 @@ package triage
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/memory"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
@@ -66,8 +68,10 @@ func StatusCommand() checks.Command {
 		// state, the MCP surface must advertise it as a write
 		// (ReadOnlyHint:false) so clients don't auto-approve it as a
 		// read (issue #105).
-		Writes:  true,
-		Summary: "Write (or read back) the §9.4 triage-status record for an incident — diagnosis, action taken, and your severity judgment — so health scans stop reporting it as a fresh unknown and the sentinel stops re-paging followups; the incident playbooks' closing move.",
+		Writes: true,
+		// Its findings are the stored records themselves (#699).
+		CallerFiltered: true,
+		Summary:        "Write (or read back) the §9.4 triage-status record for an incident — diagnosis, action taken, and your severity judgment — so health scans stop reporting it as a fresh unknown and the sentinel stops re-paging followups; the incident playbooks' closing move.",
 		Flags: []emit.FlagSpec{
 			{Name: "store", Type: emit.FlagString, Default: "",
 				Help: "path to the sentinel's SQLite store (its --store file). Required: " + statusStoreHint},
@@ -97,6 +101,7 @@ func StatusCommand() checks.Command {
 			{Name: memory.DetailTriageAction, Doc: "the recorded action / paper trail"},
 			{Name: memory.DetailTriageSession, Doc: "the incident session that wrote the record"},
 			{Name: "severity_override", Doc: "the recorded severity judgment (critical|warning|info), when one is set"},
+			{Name: "recorded_by", Doc: "who asked for the write, when lookout knows: the caller's email in lookout mcp's Google-token mode (lookout remains the writer of record)"},
 			{Name: "updated", Doc: "when the record last changed, RFC 3339"},
 		},
 		Examples: []string{
@@ -138,6 +143,15 @@ func writeStatus(ctx context.Context, inv emit.Invocation, storePath, fingerprin
 	if ov := inv.Flags.String("severity-override"); ov != "" && ov != "critical" && ov != "warning" && ov != "info" {
 		return 0, emit.UsageErrorf("--severity-override=%q is not a §7.7 class (critical|warning|info)", ov)
 	}
+	if _, asCaller := kube.CallerTokenFrom(ctx); asCaller {
+		// Running as its caller (#699): the write allow-list says who may
+		// write at all, and this says where. A caller writes records only
+		// for objects in namespaces they can see.
+		_, namespace, _ := splitResourceKey(resource)
+		if !kube.NewCallerVisibility(ctx).Visible(namespace) {
+			return 0, fmt.Errorf("refusing to write a triage-status record for %s: you cannot list pods in its namespace", resource)
+		}
+	}
 	rec := memory.TriageStatusRecord{
 		Fingerprint:         fingerprint,
 		ResourceKey:         resource,
@@ -146,6 +160,7 @@ func writeStatus(ctx context.Context, inv emit.Invocation, storePath, fingerprin
 		RootCauseHypothesis: inv.Flags.String("root-cause"),
 		SeverityOverride:    inv.Flags.String("severity-override"),
 		Action:              inv.Flags.String("action"),
+		RecordedBy:          kube.CallerNameFrom(ctx),
 	}
 	st, err := store.Open(storePath)
 	if err != nil {
@@ -220,6 +235,7 @@ func statusFinding(rec memory.TriageStatusRecord) emit.Finding {
 	add("severity_override", rec.SeverityOverride)
 	add(memory.DetailTriageAction, rec.Action)
 	add(memory.DetailTriageSession, rec.Session)
+	add("recorded_by", rec.RecordedBy)
 	if !rec.Updated.IsZero() {
 		add("updated", rec.Updated.UTC().Format(time.RFC3339))
 	}

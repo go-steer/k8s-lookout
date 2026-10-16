@@ -16,6 +16,7 @@ package memory
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +50,24 @@ func TestTriageStatusRecord_SchemaGolden(t *testing.T) {
 		`"updated":"2026-07-25T08:00:00Z"}`
 	if string(got) != want {
 		t.Errorf("TriageStatusRecord wire shape drifted (§9.4 SCHEMA-STABLE):\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestTriageStatusRecord_RecordedByIsAdditive: recorded_by (#699) is a
+// trailing optional field, like canonical_reason and cluster: absent from
+// the wire when empty (so the §9.4 golden above is unchanged) and present
+// when set.
+func TestTriageStatusRecord_RecordedByIsAdditive(t *testing.T) {
+	t.Parallel()
+	rec := TriageStatusRecord{Fingerprint: "sha256:1", ResourceKey: "Pod/ns/p", Status: StatusTriaged}
+	b, _ := json.Marshal(rec)
+	if strings.Contains(string(b), "recorded_by") {
+		t.Errorf("empty recorded_by reached the wire: %s", b)
+	}
+	rec.RecordedBy = "dana@example.com"
+	b, _ = json.Marshal(rec)
+	if !strings.Contains(string(b), `"recorded_by":"dana@example.com"`) {
+		t.Errorf("recorded_by missing from the wire: %s", b)
 	}
 }
 

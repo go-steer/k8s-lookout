@@ -22,6 +22,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	findingstate "github.com/go-steer/k8s-lookout/pkg/findings"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // DiffCommand builds `lookout findings diff`.
@@ -34,8 +35,10 @@ func DiffCommand(deps Deps) checks.Command {
 		// answering, so the MCP surface must advertise it as a write
 		// (ReadOnlyHint:false) rather than let a client auto-approve it
 		// as a read (issue #105). --dry-run is the read-only mode.
-		Writes:  true,
-		Summary: "Diff a health report against the previous run and report what CHANGED — new, ongoing, escalated, resolved, suppressed — instead of re-listing every open finding; the command that makes a scheduled scan produce a digest an operator will keep reading.",
+		Writes: true,
+		// Its findings are report and stored finding-state rows (#699).
+		CallerFiltered: true,
+		Summary:        "Diff a health report against the previous run and report what CHANGED — new, ongoing, escalated, resolved, suppressed — instead of re-listing every open finding; the command that makes a scheduled scan produce a digest an operator will keep reading.",
 		Flags: []emit.FlagSpec{
 			{Name: "report", Type: emit.FlagString, Default: "-",
 				Help: "the §4.2 finding report to classify: `-` reads stdin (the usual `lookout health | lookout findings diff --report -`), or a file path. Either wire format is accepted, detected per line, so the upstream command does not need --format=json"},
@@ -131,7 +134,12 @@ func runDiff(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	// first and failing the write would hand them a digest whose
 	// transitions never happened as far as the next run is concerned,
 	// and every `new` in it would be reported `new` again.
-	if !inv.Flags.Bool("dry-run") {
+	//
+	// Running as its caller (#699), it never persists: the stored state is
+	// the whole cluster's, advanced by the operator's own runs, and one
+	// caller's request must not rewrite it for namespaces they cannot see.
+	_, asCaller := kube.CallerTokenFrom(ctx)
+	if !inv.Flags.Bool("dry-run") && !asCaller {
 		if err := st.ReplaceFindingStates(ctx, cluster, res.Next); err != nil {
 			return 0, err
 		}

@@ -116,10 +116,10 @@ lookout mcp \
   every account Google says belongs to that Workspace domain. An email
   suffix alone never matches, because a personal Google account can carry
   a company address.
-- **`--google-allow-write`** — who may call tools that change state.
-  Empty means nobody. While `--store` is unavailable in this mode, the
-  only such tool is `k8s_net_probe_from` (served with
-  `--probe-from-image`); the triage-status write needs `--store`.
+- **`--google-allow-write`** — who may call tools that change state: the
+  triage-status write and `findings diff`/`ack` (they update the store;
+  the gate is per tool, so it covers their read modes too), and
+  `k8s_net_probe_from` when served. Empty means nobody.
 - **`--resource-url`** — this server's MCP URL as clients reach it. It is
   named in the RFC 9728 metadata served at
   `/.well-known/oauth-protected-resource/<path>` and in every `401`.
@@ -139,10 +139,27 @@ What the mode guarantees:
 - **The access log names the caller** (`caller=<email>`), never the
   token.
 
-`--store` and `--report` are not available in this mode yet: they are
-files lookout reads as itself, so they would show a caller rows their own
-RBAC hides. They return once those rows are filtered by the caller's
-access (#699).
+- **Rows lookout reads as itself are filtered by the caller's access.**
+  Some tools answer from files rather than the API server: `triage status`
+  and `findings diff`/`ack` (the store and report), and `triage changes`
+  and `triage radius --at` (graph history). Their rows are shown only if
+  the caller may list pods in the row's namespace, or in all namespaces for
+  a cluster-scoped object, checked with the caller's own token
+  (`SelfSubjectAccessReview`, so lookout needs no extra grant). Withheld
+  rows are not silent: the summary line says `hidden=<n>`, and a failed
+  check hides the row. A history target in a namespace the caller cannot
+  see is refused before it is looked up. Live reads are not filtered:
+  the API server already applied the caller's RBAC to them.
+- **Callers cannot widen what lookout reads or writes.** `store_cluster`
+  is refused (the store is the operator's choice); a caller's `findings
+  diff` reports but never persists, since the stored state is the whole
+  cluster's; `findings ack` works only on subjects in namespaces the
+  caller can see and is recorded as the caller, whatever `by` says.
+- **Triage records name who wrote them.** A caller on the write list
+  writes records only for namespaces they can see, and each record carries
+  `recorded_by=<email>`; lookout stays the writer of record. That column
+  is store migration v11: upgrade the sentinel before (or with) the MCP
+  server, because older binaries refuse a store migrated past them.
 
 ## Wiring into a core-agent daemon
 

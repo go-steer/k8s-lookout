@@ -87,6 +87,14 @@ type Command struct {
 	// --store) in addition to the §4.2 common set. Live-only
 	// commands reject --at as an unknown flag.
 	GraphBacked bool
+	// CallerFiltered marks commands whose findings ARE rows lookout reads
+	// as itself (the sentinel store, a report file), not live reads. When
+	// an invocation runs as its caller (#699), each such finding is shown
+	// only if the caller may see its namespace (emit.Visibility).
+	// GraphBacked commands are always filtered (--at reads history from
+	// the store); live-read commands never are, because the API server
+	// already applied the caller's RBAC to everything they read.
+	CallerFiltered bool
 	// Hidden commands resolve and run but are omitted from every
 	// listing (used for test scaffolding).
 	Hidden bool
@@ -504,6 +512,7 @@ func (c Command) RunConfig(stdout, stderr io.Writer) emit.RunConfig {
 		Help:           c.Help(),
 		MaxArgs:        maxArgs,
 		GraphBacked:    c.GraphBacked,
+		CallerFiltered: c.CallerFiltered || c.GraphBacked,
 		TimeoutDefault: c.TimeoutDefault,
 		Stdout:         stdout,
 		Stderr:         stderr,

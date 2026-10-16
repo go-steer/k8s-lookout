@@ -178,14 +178,6 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
 			"--resource-url=https://l.example/mcp", "--auth-token-file=/dev/null",
 		}, 2, "exclusive"},
-		{"google mode refuses the store until rows are filtered", []string{
-			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
-			"--resource-url=https://l.example/mcp", "--store=/tmp/x.db",
-		}, 2, "bypass the caller's own RBAC"},
-		{"google mode refuses a report too", []string{
-			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
-			"--resource-url=https://l.example/mcp", "--report=/tmp/r",
-		}, 2, "--report"},
 		{"google flags without google mode", []string{"--google-allow=@x.example"}, 2, "--google-client-id"},
 		{"resource URL without google mode", []string{"--resource-url=https://l.example/mcp"}, 2, "--google-client-id"},
 		{"a malformed allow entry", []string{
