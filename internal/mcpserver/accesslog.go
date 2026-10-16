@@ -113,6 +113,15 @@ func (l *AccessLog) Record(tool string, exit int, start time.Time, bytes int, re
 // remote=, so a parser written before it sees every field it knew in the
 // place it knew it. An empty caller is omitted.
 func (l *AccessLog) RecordAs(caller, tool string, exit int, start time.Time, bytes int, remote ...string) {
+	l.RecordFor(caller, "", tool, exit, start, bytes, remote...)
+}
+
+// RecordFor is RecordAs with the cluster the call read, on a
+// multi-cluster endpoint (#700): its canonical name, which does not
+// change with who is asking. It is the last field (cluster=), after
+// caller=, for the same reason caller= follows remote=. An empty cluster
+// is omitted, so a single-cluster log line is unchanged.
+func (l *AccessLog) RecordFor(caller, cluster, tool string, exit int, start time.Time, bytes int, remote ...string) {
 	if l == nil {
 		return
 	}
@@ -134,6 +143,9 @@ func (l *AccessLog) RecordAs(caller, tool string, exit int, start time.Time, byt
 	}
 	if caller != "" {
 		fields = append(fields, emit.Field{Key: "caller", Value: caller})
+	}
+	if cluster != "" {
+		fields = append(fields, emit.Field{Key: "cluster", Value: cluster})
 	}
 	line := emit.EncodeLogfmt(fields)
 	_, _ = l.out.Write(line)

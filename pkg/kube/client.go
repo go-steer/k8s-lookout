@@ -64,6 +64,10 @@ type Options struct {
 	// bearer token. The cluster, its address and its CA are unchanged.
 	// See WithCallerToken.
 	CallerToken oauth2.TokenSource
+	// Target, when set, is a cluster chosen per call on a multi-cluster
+	// endpoint, and its config is used instead of any kubeconfig or
+	// in-cluster resolution. See WithTarget.
+	Target *Target
 }
 
 // BuildClient constructs a kubernetes.Interface from the options
@@ -137,6 +141,13 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 		err error
 	)
 	switch {
+	case opts.Target != nil:
+		if opts.Target.Config == nil {
+			return nil, fmt.Errorf("cluster %q has no client config", opts.Target.Name)
+		}
+		// Copied: the target config is shared by every call to that
+		// cluster, and QPS, burst and caller credentials are this call's.
+		cfg = rest.CopyConfig(opts.Target.Config)
 	case opts.Kubeconfig != "":
 		cfg, err = loadKubeconfig(&clientcmd.ClientConfigLoadingRules{ExplicitPath: opts.Kubeconfig}, opts.Context)
 		if err != nil {

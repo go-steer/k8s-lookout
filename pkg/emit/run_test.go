@@ -435,6 +435,34 @@ func TestRunClusterSelectionRidesTheContext(t *testing.T) {
 	}
 }
 
+// A multi-cluster endpoint's per-call cluster (kube.WithTarget) stays in
+// the context, is named in the summary line, and cannot be overridden by
+// --kubeconfig or --context on the same call (#700).
+func TestRunKeepsTheTargetCluster(t *testing.T) {
+	var got kube.Selection
+	capture := func(ctx context.Context, inv Invocation) (int, error) {
+		got = kube.SelectionFrom(ctx)
+		return 0, nil
+	}
+	ctx := kube.WithTarget(context.Background(), kube.Target{Name: "prod", Project: "p", Location: "us-central1"})
+	var stdout, stderr bytes.Buffer
+	cfg := RunConfig{Name: "triage demo", Check: capture, Stdout: &stdout, Stderr: &stderr}
+	if code := Run(ctx, cfg, nil); code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr.String())
+	}
+	if got.Target == nil || got.Target.Name != "prod" {
+		t.Errorf("the target did not reach the check: %+v", got)
+	}
+	if !strings.Contains(stdout.String(), "context=p/us-central1/prod") {
+		t.Errorf("summary line does not name the cluster: %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run(ctx, cfg, []string{"--context=other"}); code != ExitUsage || !strings.Contains(stderr.String(), `this call's cluster is "prod"`) {
+		t.Errorf("--context with a target: exit %d, stderr %q", code, stderr.String())
+	}
+}
+
 // context= is Writer-owned: a check that tries to set it is a bug,
 // and the guard is the same one that protects exempt=.
 func TestRunContextNoteIsReserved(t *testing.T) {

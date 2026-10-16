@@ -14,7 +14,11 @@
 
 package kube
 
-import "context"
+import (
+	"context"
+
+	"k8s.io/client-go/rest"
+)
 
 // The cluster a read-path invocation talks to is chosen once, by the
 // caller, and then has to reach a client constructor that may be
@@ -32,12 +36,38 @@ import "context"
 type selectionKey struct{}
 
 // Selection is the per-invocation cluster choice: the two values
-// behind `--kubeconfig` and `--context`. The zero value means
-// "resolve the way lookout always has" (in-cluster autodetect, then
-// $KUBECONFIG, then ~/.kube/config, at its current-context).
+// behind `--kubeconfig` and `--context`, or a Target named by the
+// caller of a multi-cluster endpoint. The zero value means "resolve the
+// way lookout always has" (in-cluster autodetect, then $KUBECONFIG,
+// then ~/.kube/config, at its current-context).
 type Selection struct {
 	Kubeconfig string
 	Context    string
+	// Target, when set, is the cluster this invocation reads: it wins
+	// over every other way of finding one.
+	Target *Target
+}
+
+// Target is one cluster of a multi-cluster endpoint, chosen per call
+// (#700): who it is, for the cloud provider, and the config that
+// reaches it, for every Kubernetes client. The config is the fleet
+// source's (a DNS endpoint with the server's credentials, or a
+// kubeconfig context's); a caller token still replaces its credentials
+// in BuildConfig, as it would any other config's.
+type Target struct {
+	// Name is the cluster's own name; Project and Location are empty
+	// for a cluster a kubeconfig fleet names, which knows neither.
+	Name     string
+	Project  string
+	Location string
+	Config   *rest.Config
+}
+
+// WithTarget returns a context whose selection is the target cluster.
+func WithTarget(ctx context.Context, t Target) context.Context {
+	s := SelectionFrom(ctx)
+	s.Target = &t
+	return context.WithValue(ctx, selectionKey{}, s)
 }
 
 // IsZero reports whether nothing was selected.
@@ -70,5 +100,5 @@ func SelectionFrom(ctx context.Context) Selection {
 func OptionsFrom(ctx context.Context) Options {
 	s := SelectionFrom(ctx)
 	ts, _ := CallerTokenFrom(ctx)
-	return Options{Kubeconfig: s.Kubeconfig, Context: s.Context, CallerToken: ts}
+	return Options{Kubeconfig: s.Kubeconfig, Context: s.Context, Target: s.Target, CallerToken: ts}
 }

@@ -159,7 +159,25 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 		p.project = firstEnv("GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
 	}
 
-	if !kube.SelectionFrom(ctx).IsZero() {
+	sel := kube.SelectionFrom(ctx)
+	if t := sel.Target; t != nil {
+		// A cluster named per call on a multi-cluster endpoint (#700):
+		// its own identity, over the environment's and the metadata
+		// server's, for the reason above. A kubeconfig-fleet target
+		// knows no project, which leaves cluster-scoped capabilities
+		// to degrade explicitly.
+		if cfg.Project == "" {
+			p.project = t.Project
+		}
+		if cfg.Location == "" {
+			p.location = t.Location
+		}
+		if cfg.Cluster == "" {
+			p.cluster = t.Name
+		}
+		return p, nil
+	}
+	if !sel.IsZero() {
 		p.fillFromKubeconfig(ctx)
 		return p, nil
 	}

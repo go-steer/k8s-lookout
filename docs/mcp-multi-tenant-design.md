@@ -65,7 +65,12 @@ current flags, schemas and behavior, byte for byte.
 
 In multi-cluster mode, every tool gains one argument, `cluster`, naming a
 configured cluster. It is required: with more than one cluster configured,
-there is no default for a call to fall back to without saying so.
+there is no default for a call to fall back to without saying so. As
+built it is required even when the set holds one cluster, because the set
+is discovered (in Google-token mode, per caller) after the schema is
+fixed at startup. Each answer's summary line names its cluster
+(`context=<project/location/name>`), so answers from parallel calls stay
+attributable.
 
 A tool call reads exactly one cluster. To cover three clusters, the client
 makes three calls, and MCP clients already issue parallel tool calls. A
@@ -85,7 +90,10 @@ multi-cluster argument was rejected because:
 The argument is a plain string, checked on the server against the
 configured set. The valid names come from a new tool, `k8s_list_clusters`
 (name, project, location, reachability; with a substring filter), which is
-advertised only in multi-cluster mode.
+advertised only in multi-cluster mode. As built, "reachability" is whether
+the control plane has a DNS endpoint (`dns_endpoint=`), which discovery
+already knows; probing each API server would cost a call per cluster per
+listing, and a tool call against an unreachable cluster already says so.
 
 An enum was rejected on cost. Every advertised schema is paid for on every
 model call: today's full surface is 37 tools and about 170 KB of schema
