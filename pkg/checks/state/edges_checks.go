@@ -64,7 +64,7 @@ func EdgeKinds() []checks.KindField {
 		checks.Kind("edge.missing_key", "the referenced key is absent from an existing ConfigMap/Secret", emit.SeverityCritical),
 		checks.Kind("edge.invalid_ref", "the referenced object exists but is the wrong type to serve the reference", emit.SeverityWarning),
 		checks.Kind("edge.unclassed", "the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it", emit.SeverityWarning),
-		checks.Kind("edge.selector_empty", "a Service selector selects zero pods, so the service routes nowhere", emit.SeverityCritical),
+		checks.Kind("edge.selector_empty", "a Service selector selects zero pods, so the service routes nowhere; info, not critical, when every workload it matches is scaled to zero on purpose", emit.SeverityCritical, emit.SeverityInfo),
 		checks.Kind("edge.selector_unready", "the Service selects pods but some are not Ready; critical when none are", emit.SeverityCritical, emit.SeverityWarning),
 		checks.Kind("edge.endpoints_missing", "a selecting Service has no EndpointSlices at all", emit.SeverityCritical),
 		checks.Kind("edge.endpoints_orphaned", "an endpoint targetRef names a pod that no longer exists", emit.SeverityWarning),
@@ -293,6 +293,16 @@ func (e *edgeScan) sweepCandidates() {
 	for _, k := range sortedKeys(e.ix.services) {
 		svc := e.ix.services[k]
 		if len(svc.Spec.Selector) == 0 || len(e.selectedPods(svc)) > 0 {
+			continue
+		}
+		// The platform's own Services, reconciled by the addon manager:
+		// GKE ships some selecting nothing until a feature is turned on
+		// (Managed Prometheus's alertmanager and rule-evaluator, antrea),
+		// and any edit is rewritten within a minute, so a finding would
+		// carry a remedy that cannot work (#715; audit rbac skips the
+		// same objects for the same reason). Naming one as the target
+		// still reports it.
+		if svc.Labels[labelAddonManagerMode] == valueAddonManagerReconcile {
 			continue
 		}
 		e.candidates[k] = &candidate{svc: svc, emptyIntent: true}
@@ -1030,6 +1040,40 @@ func (e *edgeScan) selectedPods(svc *corev1.Service) []string {
 	return pods
 }
 
+// The addon manager's mode label: a Reconcile-mode object is the
+// platform's, rewritten to its manifest within a minute of any edit.
+const (
+	labelAddonManagerMode      = "addonmanager.kubernetes.io/mode"
+	valueAddonManagerReconcile = "Reconcile"
+)
+
+// scaledToZeroBackend names the workloads ("Kind/name", comma-joined)
+// a zero-selecting Service exactly matches when every one of them is a
+// Deployment or StatefulSet asking for zero replicas, and "" otherwise.
+// One matching workload that should be running means the empty
+// selection is a fault after all. ReplicaSets and Jobs are left out:
+// their Deployment or CronJob answers for them, and an old ReplicaSet
+// is always at zero.
+func (e *edgeScan) scaledToZeroBackend(svc *corev1.Service) string {
+	var backends []string
+	for _, tk := range sortedKeys(e.ix.templates) {
+		kind, rest, _ := strings.Cut(tk, "/")
+		ns, name, _ := strings.Cut(rest, "/")
+		if ns != svc.Namespace || kind == "ReplicaSet" || kind == "Job" {
+			continue
+		}
+		t := e.ix.templates[tk]
+		if !selectsLabels(svc.Spec.Selector, t.labels) {
+			continue
+		}
+		if !t.scaledToZero {
+			return ""
+		}
+		backends = append(backends, kind+"/"+name)
+	}
+	return strings.Join(backends, ",")
+}
+
 func selectorString(selector map[string]string) string {
 	return labels.SelectorFromSet(labels.Set(selector)).String()
 }
@@ -1038,10 +1082,28 @@ func (e *edgeScan) checkSelectors() {
 	for _, k := range sortedKeys(e.candidates) {
 		c := e.candidates[k]
 		if c.emptyIntent {
-			diff := selectorDiff(c.svc.Spec.Selector, e.templateLabels())
 			msg := fmt.Sprintf("selector %s selects no pods", selectorString(c.svc.Spec.Selector))
 			details := append(e.workloadDetail(),
 				emit.Field{Key: "selector", Value: selectorString(c.svc.Spec.Selector)})
+			// Nothing is broken when the workload the selector matches is
+			// asked to run zero replicas: scaled down by hand, by KEDA, or
+			// held at zero by the platform until a feature is enabled.
+			// Still worth a line, because traffic to this Service fails
+			// until it scales up; not a critical (#715).
+			if backend := e.scaledToZeroBackend(c.svc); backend != "" {
+				e.add(emit.Finding{
+					Kind:         "edge.selector_empty",
+					Severity:     emit.SeverityInfo,
+					Namespace:    c.svc.Namespace,
+					KindOfObject: "Service",
+					Name:         c.svc.Name,
+					Reason:       "BackendScaledToZero",
+					Message:      msg + ": " + backend + " is scaled to zero replicas",
+					Details:      append(details, emit.Field{Key: "scaled_to_zero", Value: backend}),
+				})
+				continue
+			}
+			diff := selectorDiff(c.svc.Spec.Selector, e.templateLabels())
 			// Name the disagreement rather than the agreement: the
 			// value the pods actually carry IS the fix (#332).
 			if diff != "" {

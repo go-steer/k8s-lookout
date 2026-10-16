@@ -84,7 +84,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `perf.pack_unavailable` | warning | a metric the requested pack needs is not in the metrics workspace, so part of the pack could not run; the rest still did (no coverage lies) |
 | `edge.missing_ref` | critical | a referenced ConfigMap, Secret, ServiceAccount, TLS secret, IngressClass, StorageClass, or governing Service does not exist |
 | `edge.unclassed` | warning | the Ingress names no class and no IngressClass declares itself the cluster default — no controller will claim it |
-| `edge.selector_empty` | critical | a Service selector selects zero pods, so the service routes nowhere |
+| `edge.selector_empty` | critical, info | a Service selector selects zero pods, so the service routes nowhere; info, not critical, when every workload it matches is scaled to zero on purpose |
 | `edge.backend_missing` | critical | an Ingress backend service, or the port it names, does not exist |
 
 ## Output fields
@@ -148,6 +148,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
 | `workload` | the target the edges were traced from as \<Kind>/\<namespace>/\<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
 | `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
+| `scaled_to_zero` | on an info edge.selector_empty (reason BackendScaledToZero): the Deployments or StatefulSets the selector matches, as \<Kind>/\<name>, every one of them asking for zero replicas. The Service routes nowhere until one scales up, but nothing is misconfigured |
 | `env` | environment variable whose valueFrom reference is broken |
 | `volume` | pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken |
 | `key` | the referenced key that is missing from the ConfigMap/Secret |

@@ -97,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happens: an explicit unavailable finding where the cloud can't be
   reached.
 
+### Fixed
+
+- **`edge.selector_empty` no longer calls a deliberately empty Service
+  critical (#715).** On a stock GKE cluster, `scan` led with three
+  "dead" Services the platform runs empty on purpose. The target-free
+  sweep now skips Services the addon manager reconciles
+  (`addonmanager.kubernetes.io/mode=Reconcile`, the rule `audit rbac`
+  already uses); naming one as the target still reports it. A Service
+  whose matching Deployments or StatefulSets all ask for zero replicas
+  (scaled down, KEDA at zero) is now info with reason
+  `BackendScaledToZero` and a `scaled_to_zero=` field naming them. One
+  matching workload that should be running keeps it critical.
+
 ## [0.36.0] - 2026-10-12
 
 **This release completes a repository-wide architecture, reliability, and security hardening sweep alongside GKE cloud provider resilience, cross-cluster AX TLS authentication, storm topology isolation, and watchboard session recovery.** Informer handlers now decouple event delivery from downstream processing through non-blocking queues, graph ingress and snapshot compaction stay lock-contention-free at 100k-pod scale, and repeat incident followups coalesce onto their canonical bound session without dropping first-lapse material changes. On the cloud and sink boundary, broken GKE Workload Identity bindings, regional/global HTTP(S) load balancers in `cloud orphans`, managed control-plane `perf probe --pack=etcd` 404s, off-cluster `gke_` kubeconfig contexts, and `compute.instances.insert` stockout operations now degrade cleanly and preserve full diagnostic fidelity; `lookout watch` verifies cross-cluster AX server certificates (`--ax-ca-file`), refreshes per-RPC bearer credentials (`--ax-token-env`), ignores auto-published `kube-root-ca.crt` ConfigMap ancestors during storm correlation, and automatically reopens and retries warning digests on a new watchboard session when a prior session disappears (`404`/`410`).
