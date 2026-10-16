@@ -31,59 +31,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
-func TestParseClusters(t *testing.T) {
-	refs, err := parseClusters("prod-us=abc.us-central1.gke.goog, prod-eu=def.europe-west1.gke.goog")
-	if err != nil {
-		t.Fatalf("parseClusters: %v", err)
-	}
-	if len(refs) != 2 {
-		t.Fatalf("got %d refs, want 2", len(refs))
-	}
-	if refs[0].Name != "prod-us" || refs[0].Endpoint != "abc.us-central1.gke.goog" {
-		t.Errorf("ref[0] = %+v", refs[0])
-	}
-	if refs[1].Name != "prod-eu" || refs[1].Endpoint != "def.europe-west1.gke.goog" {
-		t.Errorf("ref[1] = %+v", refs[1])
-	}
-}
-
-func TestParseClustersBareEndpointDerivesName(t *testing.T) {
-	refs, err := parseClusters("uid123.us-central1.gke.goog")
-	if err != nil {
-		t.Fatalf("parseClusters: %v", err)
-	}
-	if len(refs) != 1 || refs[0].Name != "uid123" {
-		t.Fatalf("bare endpoint should derive first-label name, got %+v", refs)
-	}
-}
-
-func TestParseClustersErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name, in, want string
-	}{
-		{"empty", "", "empty"},
-		{"no endpoint", "prod-us=", "no endpoint"},
-		{"no name", "=abc.gke.goog", "no cluster name"},
-		{"duplicate", "a=x.gke.goog,a=y.gke.goog", "duplicate"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseClusters(tc.in)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("parseClusters(%q) err = %v, want contains %q", tc.in, err, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseClustersFrom(t *testing.T) {
-	if p, l := parseClustersFrom("my-proj"); p != "my-proj" || l != "" {
-		t.Errorf("project only: got (%q,%q)", p, l)
-	}
-	if p, l := parseClustersFrom("my-proj/us-central1"); p != "my-proj" || l != "us-central1" {
-		t.Errorf("project/location: got (%q,%q)", p, l)
-	}
-}
-
 func TestDropProjectTierSources(t *testing.T) {
 	// quota + notifications drop; the cluster-tier sources stay, in order.
 	got := dropProjectTierSources("k8s-events,quota,capacity,notifications,expiry")

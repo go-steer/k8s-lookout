@@ -25,6 +25,8 @@ k8s-lookout/
 │   ├── watch/            # the sentinel wiring (`lookout watch`): flag surface, dispatcher,
 │   │                     #   watchboard, enrichment, recovery/storm/triage dispatch, distiller,
 │   │                     #   graph feed — plus the scripted end-to-end drill tests
+│   ├── fleet/            # multi-cluster resolver shared by watch and mcp: --clusters,
+│   │                     #   --clusters-from scopes (projects, fleets, folders, orgs), kubeconfig
 │   ├── mcpserver/        # `lookout mcp`: MCP tool schemas generated from command metadata
 │   ├── telemetry/        # OTel bootstrap for --otel-exporter (propagator always, exporter
 │   │                     #   on opt-in); in-tree so no agent framework rides in for it
@@ -194,7 +196,7 @@ required checks for docs-only changes.
 Where the tree deliberately differs from DESIGN.md, in one place:
 
 - **Layout:** the §2 tree predates M1+. Not in it but real:
-  `internal/{watch,mcpserver,skilldoc,telemetry,version}` (the
+  `internal/{watch,fleet,mcpserver,skilldoc,telemetry,version}` (the
   sentinel wiring and serving layers live under `internal/`, not
   `cmd/lookout/`), `pkg/memory`, `pkg/corpus`,
   `pkg/checks/checktest`.

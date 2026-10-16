@@ -125,7 +125,14 @@ us a **project (or list of projects/locations)** and we
 the explicit endpoint list as the dead-simple floor:
 
 - `--clusters-from=project` — discover every cluster in the configured
-  project(s)/location(s) via the Container API.
+  project(s)/location(s) via the Container API. Since #700 the value is a
+  comma-separated list of scopes that may be mixed: projects
+  (`project[/location]`), GKE fleets (`fleet:<host-project>`, members
+  across projects), and `folders/<id>` / `organizations/<id>` (Cloud
+  Asset Inventory, or a logged Resource Manager walk when that API is
+  off). Overlapping scopes yield each cluster once. The resolver lives in
+  `internal/fleet`, shared with `lookout mcp`
+  (`docs/mcp-multi-tenant-design.md`, Part 1, "Many projects").
 - `--clusters=<endpoint,endpoint,…>` — an explicit endpoint list, no
   discovery call.
 

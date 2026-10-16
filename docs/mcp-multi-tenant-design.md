@@ -55,9 +55,8 @@ lookout mcp --clusters-from=kubeconfig:/etc/lookout/fleet.yaml
 `lookout watch` (`internal/watch/flags.go`, `docs/multi-cluster-design.md`):
 GKE discovery through the `cloud.Fleet` seam, kubeconfig-free over each
 cluster's DNS endpoint with one ADC identity, or one cluster per
-kubeconfig context. The resolver (`resolveFleet`, `kubeconfigFleet` in
-`internal/watch/fleet.go`) moves to a package both commands import, so
-the two cannot drift.
+kubeconfig context. The resolver now lives in `internal/fleet`, which
+both commands import, so the two cannot drift.
 
 Without either flag nothing changes: a single-cluster endpoint keeps its
 current flags, schemas and behavior, byte for byte.
