@@ -120,9 +120,10 @@ func listClustersTool() *mcp.Tool {
 		Description: "List the clusters this endpoint serves, and the name to pass as the cluster argument of " +
 			"every other tool. Call it when the user asks which clusters exist or names one you cannot match. " +
 			"One line per cluster: its name, project, location, canonical name, access (read: the user can " +
-			"read it cluster-wide; limited: they can see it exists but not read it cluster-wide, so most " +
-			"checks will be refused; unreachable: lookout could not reach it), and whether its control plane " +
-			"has a DNS endpoint. Readable clusters come first; prefer them. Then one line per discovery scope.",
+			"read it cluster-wide; limited: not cluster-wide, though they may read some namespaces, so pass " +
+			"the namespace they work in and expect cluster-wide checks to be refused; unreachable: lookout " +
+			"could not reach it), and whether its control plane has a DNS endpoint. Clusters readable " +
+			"cluster-wide come first. Then one line per discovery scope.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{

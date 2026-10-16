@@ -196,20 +196,25 @@ caller may *list*, which a folder- or organization-level role grants
 widely; reading inside one takes Kubernetes RBAC, or IAM such as
 `roles/container.viewer`, in that cluster. So each discovery also asks
 every cluster, as the caller, whether they may list pods cluster-wide:
-`access=read` if so, `limited` if not (they may still read some
-namespaces), `unreachable` if the cluster could not be asked. Readable
-clusters are listed first and are the only ones chosen on a caller's
-behalf.
+`access=read` if so, `limited` if not, `unreachable` if the cluster
+could not be asked. `limited` is not "no access": someone whose
+RoleBindings cover only their team's namespaces cannot list pods
+cluster-wide, and Kubernetes has no cheap way to ask which namespaces a
+person may read. So limited clusters are listed after the ones readable
+cluster-wide, and still chosen and suggested when there is nothing
+better; on those, pass the namespace you work in. Only unreachable
+clusters are never chosen.
 
 **A call that names no cluster** reads, in order: `--default-cluster`
-when the caller can read it; their only readable cluster in
-`--default-project`; their only readable cluster at all. Otherwise it is
-answered with a short list of readable clusters to choose from, and a
-client that supports elicitation (on a stateful session) asks the person
-instead. A name that is not in the caller's set is answered with the
-closest readable names, so a model chooses rather than guesses; a bare
-name repeated across projects resolves to `--default-project`'s, when
-there is exactly one there.
+unless it is unreachable; the caller's only cluster in
+`--default-project`; their only cluster at all, counting the clusters
+they can read cluster-wide when there are any and the limited ones when
+there are not. Otherwise it is answered with a short list of clusters to
+choose from, and a client that supports elicitation (on a stateful
+session) asks the person instead. A name that is not in the caller's set
+is answered with the closest names, so a model chooses rather than
+guesses; a bare name repeated across projects resolves to
+`--default-project`'s, when there is exactly one there.
 
 - **A call reads one cluster.** To compare three clusters, the agent
   makes three calls, which MCP clients run in parallel; each answer's

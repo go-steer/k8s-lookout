@@ -24,9 +24,14 @@ package mcpserver
 // about "my cluster", a model picked one of 48 the caller could list and
 // got a scorecard of nothing but permission refusals. So each discovery
 // also asks, once per cluster and as the same identity, whether it may
-// list pods cluster-wide, and the set records the answer: readable
-// clusters are listed first, are the only ones chosen on a caller's
-// behalf, and are the ones suggested.
+// list pods cluster-wide, and the set records the answer.
+//
+// A "no" there is not "no access": a RoleBinding can grant a team its own
+// namespaces and nothing else, and Kubernetes has no cheap way to ask
+// which namespaces a caller may read. So a cluster the caller cannot read
+// cluster-wide is "limited", not unreadable: ranked after the clusters
+// they can read everywhere, but still chosen and suggested when there is
+// nothing better. Only a cluster the check could not reach is left out.
 
 import (
 	"context"
@@ -147,9 +152,15 @@ func (c *Clusters) projectRank(e clusterEntry) int {
 	return 1
 }
 
-// readable reports whether a call may be pointed at e on a caller's
-// behalf: checked and readable, or unchecked.
+// readable reports whether the caller may read e cluster-wide (or it was
+// not checked, which gives no reason to rank it lower).
 func (e clusterEntry) readable() bool { return e.access == accessRead || e.access == "" }
+
+// eligible reports whether a call may be pointed at e on a caller's
+// behalf at all: anything but a cluster the check could not reach. A
+// limited cluster is eligible, since the caller may read some of its
+// namespaces.
+func (e clusterEntry) eligible() bool { return e.access != accessUnreachable }
 
 // SetDefaults sets the cluster a call that names none reads (a name or
 // canonical name in the caller's set), and the project preferred when a
@@ -175,10 +186,12 @@ func (e *choiceError) Is(target error) bool { return e.unknown && target == errU
 // Choose picks the cluster a call reads. A named cluster resolves as in
 // Resolve, except that a bare name repeated across projects resolves to
 // the default project's when there is exactly one there. With no name:
-// the default cluster when the caller can read it, else the caller's only
-// readable cluster in the default project, else their only readable
-// cluster. Anything else is a choiceError naming the best candidates, so
-// a model can choose rather than guess.
+// the default cluster unless it is unreachable, else the caller's only
+// cluster in the default project, else their only cluster, counting the
+// clusters they can read cluster-wide when there are any and the limited
+// ones (perhaps some namespaces) when there are not. Anything else is a
+// choiceError naming the best candidates, so a model can choose rather
+// than guess.
 func (c *Clusters) Choose(ctx context.Context, caller, name string) (clusterEntry, error) {
 	if name != "" {
 		e, err := c.Resolve(ctx, caller, name)
@@ -208,16 +221,27 @@ func (c *Clusters) Choose(ctx context.Context, caller, name string) (clusterEntr
 		return clusterEntry{}, err
 	}
 	if c.defaultCluster != "" {
-		if i, ok := set.byName[c.defaultCluster]; ok && set.entries[i].readable() {
+		if i, ok := set.byName[c.defaultCluster]; ok && set.entries[i].eligible() {
 			return set.entries[i], nil
 		}
 	}
-	var readable, inProject []clusterEntry
+	var readable, limited []clusterEntry
 	for _, e := range set.entries {
-		if !e.readable() {
-			continue
+		switch {
+		case e.readable():
+			readable = append(readable, e)
+		case e.eligible():
+			limited = append(limited, e)
 		}
-		readable = append(readable, e)
+	}
+	// The clusters the caller can read everywhere decide when there are
+	// any; otherwise the limited ones, where they may have namespaces.
+	tier := readable
+	if len(tier) == 0 {
+		tier = limited
+	}
+	var inProject []clusterEntry
+	for _, e := range tier {
 		if c.defaultProject != "" && e.ref.Project == c.defaultProject {
 			inProject = append(inProject, e)
 		}
@@ -225,15 +249,17 @@ func (c *Clusters) Choose(ctx context.Context, caller, name string) (clusterEntr
 	switch {
 	case len(inProject) == 1:
 		return inProject[0], nil
-	case len(readable) == 1:
-		return readable[0], nil
+	case len(tier) == 1:
+		return tier[0], nil
 	}
 	cands := suggest(set, "")
 	msg := fmt.Sprintf("this endpoint serves %d clusters and this call names none", len(set.entries))
-	if len(readable) == 0 {
-		msg += "; you cannot read any of them cluster-wide"
-	} else {
-		msg += fmt.Sprintf("; pass cluster, e.g. %s (%d you can read)", strings.Join(cands, ", "), len(readable))
+	switch {
+	case len(cands) == 0:
+		msg += "; lookout could not reach any of them"
+	default:
+		msg += fmt.Sprintf("; pass cluster, e.g. %s (%d you can read cluster-wide, %d where you may have access to some namespaces: pass namespace there)",
+			strings.Join(cands, ", "), len(readable), len(limited))
 	}
 	return clusterEntry{}, &choiceError{msg: msg + "; k8s_list_clusters lists them all", candidates: elicitChoices(set, cands)}
 }
@@ -256,16 +282,16 @@ func (c *Clusters) inDefaultProject(set *clusterSet, name string) (clusterEntry,
 	return clusterEntry{}, false
 }
 
-// suggest names up to maxSuggestions clusters for a wrong or missing
-// name, readable ones only: every cluster whose name contains it (which
-// is how a bare name repeated across projects is offered), else the
-// nearest names, else (no name at all) the set's first readable ones,
-// already ordered default project first.
+// suggest names up to maxSuggestions reachable clusters for a wrong or
+// missing name, in the set's order (readable cluster-wide first, then
+// limited; the default project leading each): every cluster whose name
+// contains it (which is how a bare name repeated across projects is
+// offered), else the nearest names, else (no name at all) the first ones.
 func suggest(set *clusterSet, name string) []string {
-	var readable []clusterEntry
+	var pool []clusterEntry
 	for _, e := range set.entries {
-		if e.readable() {
-			readable = append(readable, e)
+		if e.eligible() {
+			pool = append(pool, e)
 		}
 	}
 	pick := func(es []clusterEntry) []string {
@@ -279,11 +305,11 @@ func suggest(set *clusterSet, name string) []string {
 		return out
 	}
 	if name == "" {
-		return pick(readable)
+		return pick(pool)
 	}
 	lower := strings.ToLower(name)
 	var contains []clusterEntry
-	for _, e := range readable {
+	for _, e := range pool {
 		if strings.Contains(strings.ToLower(e.canonical), lower) || strings.Contains(strings.ToLower(e.name), lower) {
 			contains = append(contains, e)
 		}
@@ -291,7 +317,7 @@ func suggest(set *clusterSet, name string) []string {
 	if len(contains) > 0 {
 		return pick(contains)
 	}
-	near := slices.Clone(readable)
+	near := slices.Clone(pool)
 	slices.SortStableFunc(near, func(a, b clusterEntry) int {
 		return editDistance(lower, strings.ToLower(a.ref.Name)) - editDistance(lower, strings.ToLower(b.ref.Name))
 	})
@@ -357,14 +383,15 @@ func askForCluster(tool string, choice *choiceError) *mcp.CallToolResult {
 }
 
 // elicitChoices is what to offer when the client can be asked: the
-// suggestions first, then the rest of the readable set, capped.
+// suggestions first, then the rest of the reachable set in its order,
+// capped.
 func elicitChoices(set *clusterSet, first []string) []string {
 	out := slices.Clone(first)
 	for _, e := range set.entries {
 		if len(out) >= maxElicitChoices {
 			break
 		}
-		if e.readable() && !slices.Contains(out, e.name) {
+		if e.eligible() && !slices.Contains(out, e.name) {
 			out = append(out, e.name)
 		}
 	}

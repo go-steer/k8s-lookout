@@ -86,9 +86,11 @@ func TestChooseWithoutAName(t *testing.T) {
 	}{
 		{name: "default cluster", defCluster: "payments", want: "proj-a/us-east1/payments"},
 		{name: "default cluster by canonical name", defCluster: "proj-b/europe-west1/checkout", want: "proj-b/europe-west1/checkout"},
-		{name: "unreadable default is not used", defCluster: "ap", wantErr: "names none"},
+		// A namespace-scoped caller may still use the operator's default.
+		{name: "limited default is used", defCluster: "ap", want: "proj-c/us-central1/ap"},
+		{name: "unreachable default is not used", defCluster: "gone", wantErr: "names none"},
 		{name: "only readable cluster in the default project", defProject: "proj-b", want: "proj-b/europe-west1/checkout"},
-		{name: "two readable in the default project", defProject: "proj-a", wantErr: "pass cluster, e.g. checkout@proj-a, payments, checkout@proj-b (3 you can read)"},
+		{name: "two readable in the default project", defProject: "proj-a", wantErr: "pass cluster, e.g. checkout@proj-a, payments, checkout@proj-b, ap (3 you can read cluster-wide, 1 where you may have access to some namespaces"},
 		{name: "no defaults", wantErr: "serves 5 clusters and this call names none"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,8 +101,8 @@ func TestChooseWithoutAName(t *testing.T) {
 				if !errors.As(err, &ce) || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want a choiceError containing %q", err, tc.wantErr)
 				}
-				if len(ce.candidates) == 0 || strings.Contains(strings.Join(ce.candidates, ","), "ap") {
-					t.Errorf("candidates %v: want readable clusters only", ce.candidates)
+				if len(ce.candidates) == 0 || strings.Contains(strings.Join(ce.candidates, ","), "gone") {
+					t.Errorf("candidates %v: want reachable clusters only", ce.candidates)
 				}
 				return
 			}
@@ -125,14 +127,42 @@ func TestChooseOnlyReadableCluster(t *testing.T) {
 	}
 }
 
-func TestChooseNoneReadable(t *testing.T) {
-	refs := []cloud.ClusterRef{gref("p", "l", "a"), gref("q", "l", "b")}
+// TestChooseNamespaceScopedCaller: a caller whose RoleBindings cover
+// only some namespaces cannot list pods cluster-wide anywhere. Their
+// clusters are limited, not unreadable: the only one is theirs, and
+// several are offered (with the advice to pass a namespace) rather than
+// refused.
+func TestChooseNamespaceScopedCaller(t *testing.T) {
+	refs := []cloud.ClusterRef{gref("p", "l", "team-a"), gref("q", "l", "gone")}
 	c, _ := newTestClusters(&fakeFleet{sequence: [][]cloud.ClusterRef{refs}}, false)
-	c.access = accessByHost(nil)
+	c.access = accessByHost(map[string]string{host(refs[1]): accessUnreachable}) // team-a: limited
 	if _, _, err := c.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Choose(t.Context(), "", ""); err == nil || !strings.Contains(err.Error(), "you cannot read any of them cluster-wide") {
+	if e, err := c.Choose(t.Context(), "", ""); err != nil || e.ref.Name != "team-a" {
+		t.Errorf("chose %+v (%v), want their only reachable cluster, team-a", e, err)
+	}
+
+	refs = []cloud.ClusterRef{gref("p", "l", "a"), gref("q", "l", "b")}
+	c, _ = newTestClusters(&fakeFleet{sequence: [][]cloud.ClusterRef{refs}}, false)
+	c.access = accessByHost(nil) // both limited
+	if _, _, err := c.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Choose(t.Context(), "", "")
+	if err == nil || !strings.Contains(err.Error(), "pass cluster, e.g. a, b (0 you can read cluster-wide, 2 where you may have access to some namespaces: pass namespace there)") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestChooseNothingReachable(t *testing.T) {
+	refs := []cloud.ClusterRef{gref("p", "l", "a"), gref("q", "l", "b")}
+	c, _ := newTestClusters(&fakeFleet{sequence: [][]cloud.ClusterRef{refs}}, false)
+	c.access = func(context.Context, *rest.Config) string { return accessUnreachable }
+	if _, _, err := c.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Choose(t.Context(), "", ""); err == nil || !strings.Contains(err.Error(), "lookout could not reach any of them") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -191,8 +221,8 @@ func TestElicitationPicksTheCluster(t *testing.T) {
 	if out := text(t, res); !strings.Contains(out, "target_name=payments") {
 		t.Errorf("the elicited cluster was not read:\n%s", out)
 	}
-	if strings.Contains(strings.Join(offered, ","), "ap") || len(offered) != 3 {
-		t.Errorf("offered %v, want the three readable clusters", offered)
+	if want := []string{"checkout@proj-a", "checkout@proj-b", "payments", "ap"}; !reflect.DeepEqual(offered, want) {
+		t.Errorf("offered %v, want %v: readable cluster-wide first, then limited, never unreachable", offered, want)
 	}
 
 	decline := func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
