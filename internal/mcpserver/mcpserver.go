@@ -381,16 +381,24 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				record(emit.ExitUsage, err.Error())
 				return nil, invalidParams(err.Error())
 			}
-			if name == "" {
-				msg := "argument \"cluster\" is required: this endpoint serves several clusters, and k8s_list_clusters lists the names you can pass"
-				record(emit.ExitUsage, msg)
-				return nil, invalidParams(msg)
+			entry, err := cfg.clusters.Choose(ctx, caller, name)
+			var choice *choiceError
+			if errors.As(err, &choice) {
+				// Ask the person when the client can be asked (a session
+				// that advertised elicitation), and read their answer on
+				// the retry; otherwise the error names the candidates, so
+				// the model can choose rather than guess.
+				if picked, answered := clusterAnswer(req); answered {
+					if picked != "" {
+						entry, err = cfg.clusters.Choose(ctx, caller, picked)
+					}
+				} else if len(choice.candidates) > 0 && clientCanBeAsked(req.Session) {
+					return askForCluster(c.Name, choice), nil
+				}
 			}
-			entry, err := cfg.clusters.Resolve(ctx, caller, name)
-			if errors.Is(err, errUnknownCluster) {
-				msg := err.Error() + ": k8s_list_clusters lists the clusters you can pass"
-				record(emit.ExitUsage, msg)
-				return nil, invalidParams(msg)
+			if errors.As(err, &choice) {
+				record(emit.ExitUsage, choice.msg)
+				return nil, invalidParams(choice.msg)
 			}
 			if err != nil {
 				return toolError("lookout " + c.Name + ": " + err.Error()), nil

@@ -179,16 +179,37 @@ lookout mcp --listen=0.0.0.0:8383 --allow-non-loopback \
   --clusters-from=organizations/123456789012
 ```
 
-Every tool then takes a required `cluster` argument, and one more tool,
-`k8s_list_clusters`, lists the clusters a caller can name:
+Every tool then takes a `cluster` argument, and one more tool,
+`k8s_list_clusters`, lists the clusters a caller can name, and whether
+they can read each one:
 
 ```
-cluster=checkout project=shop-prod location=us-central1 canonical=shop-prod/us-central1/checkout dns_endpoint=true
-cluster=prod@shop-prod project=shop-prod location=europe-west1 canonical=shop-prod/europe-west1/prod dns_endpoint=true
-cluster=prod@shop-stage project=shop-stage location=us-central1 canonical=shop-stage/us-central1/prod dns_endpoint=true
+cluster=checkout project=shop-prod location=us-central1 canonical=shop-prod/us-central1/checkout access=read dns_endpoint=true
+cluster=prod@shop-prod project=shop-prod location=europe-west1 canonical=shop-prod/europe-west1/prod access=read dns_endpoint=true
+cluster=prod@shop-stage project=shop-stage location=us-central1 canonical=shop-stage/us-central1/prod access=limited dns_endpoint=true
 scope=organizations/123456789012 via=asset clusters=3
 scanned=3 findings=0 elapsed=1.2s clusters=3
 ```
+
+**Seeing a cluster is not reading it.** Discovery finds the clusters a
+caller may *list*, which a folder- or organization-level role grants
+widely; reading inside one takes Kubernetes RBAC, or IAM such as
+`roles/container.viewer`, in that cluster. So each discovery also asks
+every cluster, as the caller, whether they may list pods cluster-wide:
+`access=read` if so, `limited` if not (they may still read some
+namespaces), `unreachable` if the cluster could not be asked. Readable
+clusters are listed first and are the only ones chosen on a caller's
+behalf.
+
+**A call that names no cluster** reads, in order: `--default-cluster`
+when the caller can read it; their only readable cluster in
+`--default-project`; their only readable cluster at all. Otherwise it is
+answered with a short list of readable clusters to choose from, and a
+client that supports elicitation (on a stateful session) asks the person
+instead. A name that is not in the caller's set is answered with the
+closest readable names, so a model chooses rather than guesses; a bare
+name repeated across projects resolves to `--default-project`'s, when
+there is exactly one there.
 
 - **A call reads one cluster.** To compare three clusters, the agent
   makes three calls, which MCP clients run in parallel; each answer's
@@ -206,7 +227,10 @@ scanned=3 findings=0 elapsed=1.2s clusters=3
   endpoints must be control-plane DNS endpoints (`*.gke.goog`). Without it,
   lookout discovers once at startup, as itself, and again every
   `--rediscover` (default 10m); an unknown name triggers a rediscovery,
-  at most once a minute.
+  at most once a minute. For a folder or organization, discovery uses
+  Cloud Asset Inventory and falls back to a Resource Manager walk;
+  `--folder-discovery=resourcemanager` never calls Cloud Asset
+  Inventory, and `--folder-discovery=asset` never falls back.
 - **Cloud-backed checks follow the cluster:** `audit cluster`,
   `cloud ipspace` and the rest answer for the named cluster and its
   project, never for the cluster lookout runs in.

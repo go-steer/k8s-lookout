@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
 	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -158,6 +159,26 @@ Flags:
                         sessions.
   --rediscover=<dur>    how often the shared cluster set is refreshed
                         without Google-token mode (default 10m).
+  --default-cluster=<name>
+                        on a multi-cluster endpoint, the cluster a call
+                        that names none reads, when the caller can read
+                        it. Without it, such a call reads the caller's
+                        only readable cluster in --default-project, or
+                        their only readable cluster at all, and
+                        otherwise is answered with candidates (or, for a
+                        client that supports elicitation, the person is
+                        asked). Discovery checks each cluster once per
+                        caller: listing a cluster is not reading it.
+  --default-project=<project>
+                        the project preferred when a call names no
+                        cluster, or a bare name that repeats across
+                        projects; its clusters are listed first.
+  --folder-discovery=auto|asset|resourcemanager
+                        how folders/<id> and organizations/<id> scopes
+                        are searched: Cloud Asset Inventory, falling
+                        back to a Resource Manager walk (auto, the
+                        default); Cloud Asset Inventory only; or never
+                        Cloud Asset Inventory.
   --max-concurrency-per-cluster=<n>
                         cap each cluster's calls in flight, so one slow
                         API server cannot hold every slot; a call past
@@ -281,6 +302,9 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	clustersFrom := fs.String("clusters-from", "", "serve several clusters, discovered from these scopes")
 	rediscover := fs.Duration("rediscover", mcpserver.DefaultRediscover, "how often the shared cluster set is refreshed")
 	maxPerCluster := fs.Int("max-concurrency-per-cluster", 0, "cap each cluster's calls in flight on a multi-cluster endpoint")
+	defaultCluster := fs.String("default-cluster", "", "the cluster a call that names none reads, when the caller can read it")
+	defaultProject := fs.String("default-project", "", "the project preferred when a call names no cluster or a repeated name")
+	folderDiscovery := fs.String("folder-discovery", "", "how folder and organization scopes are searched: auto, asset or resourcemanager")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -354,6 +378,25 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	multiCluster := *clustersFlag != "" || *clustersFrom != ""
+	if !multiCluster {
+		for _, f := range []struct {
+			name string
+			set  bool
+		}{
+			{"--default-cluster", *defaultCluster != ""},
+			{"--default-project", *defaultProject != ""},
+			{"--folder-discovery", *folderDiscovery != ""},
+		} {
+			if f.set {
+				fmt.Fprintf(stderr, "lookout mcp: %s only applies to a multi-cluster endpoint; pass --clusters or --clusters-from as well\nRun 'lookout mcp --help' for usage.\n", f.name)
+				return 2
+			}
+		}
+	}
+	if err := fleet.ValidFolderSearch(*folderDiscovery); err != nil {
+		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
+		return 2
+	}
 	if !multiCluster && *maxPerCluster != 0 {
 		fmt.Fprintf(stderr, "lookout mcp: --max-concurrency-per-cluster only applies to a multi-cluster endpoint; pass --clusters or --clusters-from as well\nRun 'lookout mcp --help' for usage.\n")
 		return 2
@@ -433,7 +476,8 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		local    string
 	)
 	if multiCluster {
-		c, code := startClusters(ctx, *clustersFlag, *clustersFrom, googleMode, *rediscover, stderr)
+		c, code := startClusters(ctx, fleet.Spec{Clusters: *clustersFlag, ClustersFrom: *clustersFrom, FolderSearch: *folderDiscovery},
+			googleMode, *rediscover, *defaultCluster, *defaultProject, stderr)
 		if c == nil {
 			return code
 		}

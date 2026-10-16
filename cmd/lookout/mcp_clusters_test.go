@@ -39,6 +39,10 @@ func TestMCPMultiClusterFlags(t *testing.T) {
 		{"bad pairs", []string{"--clusters=a="}, "no endpoint"},
 		{"rediscover alone", []string{"--rediscover=5m"}, "--rediscover only applies"},
 		{"rediscover zero", []string{"--clusters-from=p", "--rediscover=0s"}, "must be positive"},
+		{"default cluster alone", []string{"--default-cluster=a"}, "--default-cluster only applies to a multi-cluster endpoint"},
+		{"default project alone", []string{"--default-project=p"}, "--default-project only applies to a multi-cluster endpoint"},
+		{"folder discovery alone", []string{"--folder-discovery=asset"}, "--folder-discovery only applies to a multi-cluster endpoint"},
+		{"bad folder discovery", []string{"--clusters-from=folders/1", "--folder-discovery=cai"}, `--folder-discovery="cai"`},
 		{"google kubeconfig fleet", append(googleFlags(), "--clusters-from=kubeconfig:/k"), "only GKE clusters"},
 		{"google non-GKE endpoint", append(googleFlags(), "--clusters=eks=eks.example.com"), "only GKE clusters"},
 	} {

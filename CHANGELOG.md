@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A multi-cluster endpoint chooses the cluster with the caller, not
+  for them (#700).** In a live test a model asked about "my cluster"
+  picked one of 48 the caller could list but not read, and got nothing
+  but permission refusals. Now each discovery also checks, once per
+  cluster and as the caller, whether they may list pods cluster-wide;
+  `k8s_list_clusters` shows `access=read|limited|unreachable`, readable
+  clusters first. `cluster` becomes optional: a call that names none
+  reads `--default-cluster` (when readable), else the caller's only
+  readable cluster in `--default-project`, else their only readable
+  cluster, and is otherwise answered with readable candidates. An
+  unknown name is answered with the closest readable names, and a bare
+  name repeated across projects resolves to `--default-project`'s.
+  Clients that support elicitation on a stateful session are asked which
+  cluster (MCP multi-round-trip requests). `--folder-discovery=auto|
+  asset|resourcemanager` decides whether folder and organization scopes
+  use Cloud Asset Inventory.
+
 - **`deploy-mcp-gemini` can serve many clusters (#700).** `CLUSTERS_FROM`
   in `config.yaml` (empty by default: the cluster lookout runs in) takes
   the `--clusters-from` scopes; each Gemini Enterprise caller then sees,

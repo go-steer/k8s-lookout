@@ -114,13 +114,14 @@ func localClusterName(ctx context.Context) string {
 // startClusters resolves the fleet and, outside Google-token mode,
 // discovers it, logging what each scope found. It returns nil and the
 // exit code on failure.
-func startClusters(ctx context.Context, clusters, clustersFrom string, perCaller bool, rediscover time.Duration, stderr io.Writer) (*mcpserver.Clusters, int) {
-	src, err := fleet.Resolve(ctx, fleet.Spec{Clusters: clusters, ClustersFrom: clustersFrom})
+func startClusters(ctx context.Context, spec fleet.Spec, perCaller bool, rediscover time.Duration, defaultCluster, defaultProject string, stderr io.Writer) (*mcpserver.Clusters, int) {
+	src, err := fleet.Resolve(ctx, spec)
 	if err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return nil, 2
 	}
 	dir := mcpserver.NewClusters(src, perCaller, rediscover)
+	dir.SetDefaults(defaultCluster, defaultProject)
 	scopes, n, err := dir.Start(ctx)
 	for _, note := range (fleet.Result{Scopes: scopes}).Notes() {
 		fmt.Fprintf(stderr, "lookout mcp: multi-cluster: %s\n", note)

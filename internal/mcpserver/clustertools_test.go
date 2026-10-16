@@ -112,8 +112,8 @@ func TestMultiClusterToolList(t *testing.T) {
 			t.Fatal(err)
 		}
 		schema := string(raw)
-		if !strings.Contains(schema, `"required":["cluster"]`) {
-			t.Errorf("%s: cluster is not required: %s", tool.Name, schema)
+		if !strings.Contains(schema, `"cluster":{`) || strings.Contains(schema, `"required":["cluster"]`) {
+			t.Errorf("%s: cluster should be an optional property: %s", tool.Name, schema)
 		}
 		if tool.Name == "k8s_echo_labelled" && (strings.Contains(schema, "store_cluster") || strings.Contains(schema, `"cluster label"`)) {
 			t.Errorf("%s: the server's store_cluster or cluster label leaked into the schema: %s", tool.Name, schema)
@@ -176,8 +176,8 @@ func TestMultiClusterCallErrors(t *testing.T) {
 		args map[string]any
 		want []string
 	}{
-		{"missing", map[string]any{}, []string{`argument "cluster" is required`, "k8s_list_clusters"}},
-		{"ambiguous short name", map[string]any{"cluster": "prod"}, []string{`unknown cluster "prod"`, "k8s_list_clusters"}},
+		{"missing", map[string]any{}, []string{"serves 3 clusters and this call names none", "pass cluster, e.g. dev, prod@proj-a, prod@proj-b", "k8s_list_clusters"}},
+		{"ambiguous short name", map[string]any{"cluster": "prod"}, []string{`unknown cluster "prod"; did you mean prod@proj-a, prod@proj-b?`, "k8s_list_clusters lists all 3"}},
 		{"unknown", map[string]any{"cluster": "nope"}, []string{`unknown cluster "nope"`}},
 		{"not a string", map[string]any{"cluster": 7}, []string{"cluster"}},
 		{"unknown argument lists cluster", map[string]any{"cluster": "dev", "bogus": "x"}, []string{"(accepts: cluster, "}},
@@ -254,7 +254,9 @@ func TestGoogleModeMultiClusterDiscoversAsTheCaller(t *testing.T) {
 	}}
 	reg := checks.NewRegistry()
 	reg.Register(targetEchoCommand("triage echotarget", "k8s_echo_target", false))
-	server := New(reg, "test", WithGoogleAuth(g), WithClusters(NewClusters(src, true, 0)))
+	dir := NewClusters(src, true, 0)
+	dir.access = nil
+	server := New(reg, "test", WithGoogleAuth(g), WithClusters(dir))
 	ctx, cancel := context.WithCancel(context.Background())
 	ready, done := make(chan string, 1), make(chan error, 1)
 	go func() { done <- Serve(ctx, server, ServeOptions{Listen: "127.0.0.1:0", Google: g, Ready: ready}) }()

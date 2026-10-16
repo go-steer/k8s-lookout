@@ -65,9 +65,10 @@ func toolSchema(c checks.Command, multi bool) *jsonschema.Schema {
 	s.Properties[clusterProperty] = &jsonschema.Schema{
 		Type: "string",
 		Description: "the cluster to read, as k8s_list_clusters names it: its name, " +
-			"name@project when names repeat across projects, or project/location/name",
+			"name@project when names repeat across projects, or project/location/name. " +
+			"Leave it out when the user did not name one: the server picks their default " +
+			"or only readable cluster, or answers with the clusters to choose from. Never invent a name",
 	}
-	s.Required = append(s.Required, clusterProperty)
 	return s
 }
 
@@ -116,10 +117,12 @@ func commandHasFlag(c checks.Command, name string) bool {
 func listClustersTool() *mcp.Tool {
 	return &mcp.Tool{
 		Name: listClustersName,
-		Description: "List the clusters this endpoint serves that you can read, and the name to pass as the " +
-			"cluster argument of every other tool. Call it first when you do not know the cluster's name, " +
-			"or when a tool says a cluster is unknown. One line per cluster (cluster, project, location, " +
-			"canonical name, whether its control plane has a DNS endpoint), then one line per discovery scope.",
+		Description: "List the clusters this endpoint serves, and the name to pass as the cluster argument of " +
+			"every other tool. Call it when the user asks which clusters exist or names one you cannot match. " +
+			"One line per cluster: its name, project, location, canonical name, access (read: the user can " +
+			"read it cluster-wide; limited: they can see it exists but not read it cluster-wide, so most " +
+			"checks will be refused; unreachable: lookout could not reach it), and whether its control plane " +
+			"has a DNS endpoint. Readable clusters come first; prefer them. Then one line per discovery scope.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -216,13 +219,16 @@ func listClustersFilter(raw json.RawMessage) (string, error) {
 func renderClusters(entries []clusterEntry, scopes []fleet.ScopeResult, total int, elapsed time.Duration) string {
 	var b bytes.Buffer
 	for _, e := range entries {
-		b.Write(emit.EncodeLogfmt([]emit.Field{
+		fields := []emit.Field{
 			{Key: "cluster", Value: e.name},
 			{Key: "project", Value: e.ref.Project},
 			{Key: "location", Value: e.ref.Location},
 			{Key: "canonical", Value: e.canonical},
-			{Key: "dns_endpoint", Value: fmt.Sprint(e.ref.Endpoint != "")},
-		}))
+		}
+		if e.access != "" {
+			fields = append(fields, emit.Field{Key: "access", Value: e.access})
+		}
+		b.Write(emit.EncodeLogfmt(append(fields, emit.Field{Key: "dns_endpoint", Value: fmt.Sprint(e.ref.Endpoint != "")})))
 	}
 	for _, s := range scopes {
 		fields := []emit.Field{

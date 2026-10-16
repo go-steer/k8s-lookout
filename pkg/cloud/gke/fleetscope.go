@@ -179,6 +179,17 @@ func discoverUnder(ctx context.Context, s cloud.Scope, d scopeDeps) (cloud.Disco
 	}
 	parent := s.String()
 	var projects []string
+	if s.Search == cloud.SearchResourceManager {
+		// The operator turned Cloud Asset Inventory off for this endpoint.
+		disc.Via = viaResourceManager
+		projects, err := walkProjects(ctx, parent, d.walker, &disc)
+		if err != nil {
+			return disc, fmt.Errorf("listing the projects under %s: %w", parent, classifyPermission(err, "resourcemanager.projects.list"))
+		}
+		refs, err := listInProjects(ctx, projects, d.clusters, &disc)
+		disc.Clusters = refs
+		return disc, err
+	}
 	names, err := d.asset.SearchClusters(ctx, parent)
 	switch {
 	case err == nil:
@@ -187,7 +198,7 @@ func discoverUnder(ctx context.Context, s cloud.Scope, d scopeDeps) (cloud.Disco
 				projects = append(projects, project)
 			}
 		}
-	case assetUnavailable(err):
+	case assetUnavailable(err) && s.Search != cloud.SearchAsset:
 		disc.Via = viaResourceManager
 		disc.Fallback = "Cloud Asset Inventory could not answer: " + shortReason(err)
 		projects, err = walkProjects(ctx, parent, d.walker, &disc)
