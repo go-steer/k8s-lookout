@@ -25,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deploy-mcp-gemini-gateway/` serves the same pods behind a GKE Gateway
   with a Certificate Manager map instead. Rollouts keep a serving pod
   behind the load balancer (preStop sleep, `maxUnavailable: 0`). The new
-  "Gemini Enterprise" page walks from OAuth client to data store. Its
-  image pin is checked against deploy/51 by `verify-helm-parity`, which
+  "Gemini Enterprise" page walks from OAuth client to data store. It runs
+  the `-gke` image, since the cloud checks call Cloud APIs with the
+  caller's token (an `images:` entry swaps it). Its image pin is checked
+  against deploy/51 plus `-gke` by `verify-helm-parity`, which
   also checks the Gateway overlay drops the whole Ingress path, and the
   release checklist bumps it.
 

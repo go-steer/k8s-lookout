@@ -117,6 +117,21 @@ The metadata names `https://accounts.google.com` as the authorization
 server. `curl -X POST https://lookout.example.com/mcp` gets a `401`: no
 token.
 
+### A different image
+
+The overlay runs `ghcr.io/go-steer/lookout:vX.Y.Z-gke`, the build with
+the Google Cloud provider: the cloud checks call Cloud APIs with the
+caller's token, and the GCP-free `:vX.Y.Z` answers them
+`read.unavailable`. To run another flavor, a mirror, or your own build,
+add an `images:` entry to your kustomization:
+
+```yaml
+images:
+  - name: ghcr.io/go-steer/lookout
+    newName: us-docker.pkg.dev/my-project/mirror/lookout
+    newTag: vX.Y.Z-gke        # or digest: sha256:...
+```
+
 ### Behind a Gateway instead
 
 If the cluster already serves through the Gateway API with a
