@@ -171,6 +171,14 @@ stem, and each cluster reads its own suffixed file
 paths"). A multi-cluster endpoint next to a multi-cluster watch therefore
 reads the files that watch writes.
 
+As built, the stem rule applies without Google-token mode only. Store
+files are named by a cluster's bare name, which `watch` writes only when
+the name is unique in its fleet; in Google-token mode each caller has
+their own set, which cannot prove a bare name unique across the fleet, so
+`--store`/`--report` are refused there rather than risk reading one
+cluster's rows for another. A name that repeats in the server's set gets
+no file, as `watch` writes none.
+
 If no store exists for a cluster (the usual case when each cluster runs its
 own sentinel), the store-backed parts degrade the way an absent store
 already does: `health` drops the sentinel-findings merge, `triage status`

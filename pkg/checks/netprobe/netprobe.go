@@ -158,6 +158,7 @@ func New(deps Deps) checks.Command {
 		Name:    "net probe",
 		MCPName: "k8s_net_probe",
 		Summary: "Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever lookout runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.",
+		Local:   true,
 		Flags:   probeFlags(),
 		Kinds:   probeKinds(),
 		Output: append([]checks.OutputField{

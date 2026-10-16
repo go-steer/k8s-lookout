@@ -171,9 +171,16 @@ func newCallerLimit(max int) *callerLimit {
 // acquire takes a slot for caller, or reports false if caller already has
 // max calls in flight. release must be called exactly once after a true.
 func (l *callerLimit) acquire(caller string) (release func(), ok bool) {
+	return l.acquireUpTo(caller, l.max)
+}
+
+// acquireUpTo is acquire with this call's own cap, for a limit whose
+// size depends on the call (the per-cluster limit follows the size of the
+// caller's cluster set).
+func (l *callerLimit) acquireUpTo(caller string, max int) (release func(), ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.inflight[caller] >= l.max {
+	if l.inflight[caller] >= max {
 		return nil, false
 	}
 	l.inflight[caller]++

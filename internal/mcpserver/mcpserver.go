@@ -81,6 +81,40 @@ type config struct {
 	// clusters, when non-nil, is multi-cluster mode (#700): every tool
 	// takes a cluster argument, resolved here per call.
 	clusters *Clusters
+	// localCluster is the canonical name of the cluster lookout runs in,
+	// the one cluster a Local command may target; "" when unknown.
+	localCluster string
+	// maxPerCluster caps one cluster's calls in flight; 0 derives it from
+	// the global limit and the size of the cluster set.
+	maxPerCluster int
+	perCluster    *callerLimit
+}
+
+// WithLocalCluster names the cluster lookout runs in (project/location/
+// name), the only one a Local command such as net probe may target on a
+// multi-cluster endpoint. Without it, Local commands are refused there.
+func WithLocalCluster(canonical string) Option {
+	return func(c *config) { c.localCluster = canonical }
+}
+
+// WithMaxConcurrencyPerCluster caps each cluster's calls in flight on a
+// multi-cluster endpoint, so one slow or wedged API server cannot hold
+// every global slot. Zero (the default) is the global limit divided by
+// the number of clusters, at least 2.
+func WithMaxConcurrencyPerCluster(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.maxPerCluster = n
+		}
+	}
+}
+
+// clusterLimit is the per-cluster cap for a set of n clusters.
+func (c config) clusterLimit(n int) int {
+	if c.maxPerCluster > 0 {
+		return c.maxPerCluster
+	}
+	return max(2, c.maxConcurrency/max(1, n))
 }
 
 // WithClusters serves several clusters: every tool gains a required
@@ -160,6 +194,9 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 	sem := make(chan struct{}, cfg.maxConcurrency)
 	if cfg.google != nil {
 		cfg.perCaller = newCallerLimit(defaultMaxConcurrentPerCaller)
+	}
+	if cfg.clusters != nil {
+		cfg.perCluster = newCallerLimit(cfg.maxConcurrency)
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
 	multi := cfg.clusters != nil
@@ -284,6 +321,11 @@ func pinnedArgs(c checks.Command, cfg config) []string {
 	if cfg.exemptions != "" {
 		out = append(out, "--exemptions="+cfg.exemptions)
 	}
+	// On a multi-cluster endpoint --store and --report are stems, and the
+	// handler pins each call's cluster's own file instead.
+	if cfg.clusters != nil {
+		return out
+	}
 	if cfg.store != "" && commandAcceptsStore(c) {
 		out = append(out, "--store="+cfg.store)
 	}
@@ -354,6 +396,30 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				return toolError("lookout " + c.Name + ": " + err.Error()), nil
 			}
 			cluster = entry.canonical
+			if c.Local && entry.canonical != cfg.localCluster {
+				where := "a cluster this server cannot identify"
+				if cfg.localCluster != "" {
+					where = cfg.localCluster
+				}
+				return toolError(fmt.Sprintf("lookout %s measures from where lookout runs, which is %s, not %s: its answer would describe the wrong network. lookout net probe-from probes from a pod inside the cluster", c.Name, where, entry.canonical)), nil
+			}
+			releaseCluster, ok := cfg.perCluster.acquireUpTo(entry.canonical, cfg.clusterLimit(entry.setSize))
+			if !ok {
+				return toolError(fmt.Sprintf("lookout %s: cluster %s already has %d calls in flight on this endpoint; retry when one finishes",
+					c.Name, entry.name, cfg.clusterLimit(entry.setSize))), nil
+			}
+			defer releaseCluster()
+			// Each cluster's store and report are its own files, named the
+			// way a multi-cluster watch names them; a cluster whose name
+			// repeats in the set has none.
+			if entry.storeName != "" {
+				if cfg.store != "" && commandAcceptsStore(c) {
+					clusterArgs = append(clusterArgs, "--store="+emit.PerClusterPath(cfg.store, entry.storeName))
+				}
+				if cfg.report != "" && commandAcceptsReport(c) {
+					clusterArgs = append(clusterArgs, "--report="+emit.PerClusterPath(cfg.report, entry.storeName))
+				}
+			}
 			restCfg, err := cfg.clusters.Config(ctx, entry)
 			if err != nil {
 				return toolError(fmt.Sprintf("lookout %s: cluster %s: %v", c.Name, entry.name, err)), nil

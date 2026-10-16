@@ -147,9 +147,23 @@ Flags:
                         name unique in the caller's set is used bare;
                         a repeated one is name@project (then
                         name@project/location); project/location/name
-                        always works. Not yet with --store or --report.
+                        always works. --store and --report become stems:
+                        each call reads its cluster's own file, named
+                        the way a multi-cluster watch names it (not in
+                        Google-token mode, where file names cannot be
+                        proven unique). net probe, which measures from
+                        lookout's own pod, is refused for every
+                        cluster but the one lookout runs in. Serves
+                        stateless HTTP, so replicas need no sticky
+                        sessions.
   --rediscover=<dur>    how often the shared cluster set is refreshed
                         without Google-token mode (default 10m).
+  --max-concurrency-per-cluster=<n>
+                        cap each cluster's calls in flight, so one slow
+                        API server cannot hold every slot; a call past
+                        it is turned away at once. Default: the global
+                        limit (8) divided by the number of clusters, at
+                        least 2.
   --exemptions=<path>   path to an exemption YAML file pinned for all
                         MCP tool invocations.
   --store=<path>        path to a sentinel SQLite store pinned for MCP
@@ -266,6 +280,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	clustersFlag := fs.String("clusters", "", "serve several clusters: comma-separated name=endpoint pairs")
 	clustersFrom := fs.String("clusters-from", "", "serve several clusters, discovered from these scopes")
 	rediscover := fs.Duration("rediscover", mcpserver.DefaultRediscover, "how often the shared cluster set is refreshed")
+	maxPerCluster := fs.Int("max-concurrency-per-cluster", 0, "cap each cluster's calls in flight on a multi-cluster endpoint")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -339,6 +354,14 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	multiCluster := *clustersFlag != "" || *clustersFrom != ""
+	if !multiCluster && *maxPerCluster != 0 {
+		fmt.Fprintf(stderr, "lookout mcp: --max-concurrency-per-cluster only applies to a multi-cluster endpoint; pass --clusters or --clusters-from as well\nRun 'lookout mcp --help' for usage.\n")
+		return 2
+	}
+	if *maxPerCluster < 0 {
+		fmt.Fprintf(stderr, "lookout mcp: --max-concurrency-per-cluster must not be negative\nRun 'lookout mcp --help' for usage.\n")
+		return 2
+	}
 	if problem := multiClusterProblem(multiCluster, googleMode, *clustersFlag, *clustersFrom, *kubeconfig, *contextName, *store, *report, *rediscover, fs); problem != "" {
 		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
 		return 2
@@ -405,17 +428,23 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		google = g
 	}
 
-	var clusters *mcpserver.Clusters
+	var (
+		clusters *mcpserver.Clusters
+		local    string
+	)
 	if multiCluster {
 		c, code := startClusters(ctx, *clustersFlag, *clustersFrom, googleMode, *rediscover, stderr)
 		if c == nil {
 			return code
 		}
 		clusters = c
+		local = localClusterName(ctx)
 	}
 
 	server := mcpserver.New(reg, version.Semver(),
 		mcpserver.WithClusters(clusters),
+		mcpserver.WithLocalCluster(local),
+		mcpserver.WithMaxConcurrencyPerCluster(*maxPerCluster),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),
 		mcpserver.WithSelection(*kubeconfig, *contextName),
@@ -431,6 +460,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Google:           google,
 		Announce:         stderr,
 		AccessLogPath:    *accessLog,
+		Stateless:        multiCluster,
 	}); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1

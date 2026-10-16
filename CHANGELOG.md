@@ -25,8 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rediscovers at most once a minute. Each call's Kubernetes clients and
   cloud provider identity follow the named cluster, its summary line
   says which (`context=<canonical>`), and the access log records it
-  (`cluster=`). Single-cluster schemas and behavior are unchanged.
-  `--store`/`--report` are refused in this mode for now.
+  (`cluster=`). `--store` and `--report` become per-cluster stems,
+  reading the files a multi-cluster `watch` writes (not in Google-token
+  mode, whose per-caller sets cannot prove a bare file name unique);
+  `net probe`, which measures from lookout's own pod, is refused for any
+  cluster but the one lookout runs in; each cluster's calls in flight
+  are capped (`--max-concurrency-per-cluster`, default the global limit
+  over the number of clusters, at least 2); and the endpoint serves
+  stateless HTTP, so replicas need no sticky sessions. Single-cluster
+  schemas and behavior are unchanged.
 
 - **`--clusters-from` discovers across projects, fleets, folders and
   organizations (#700).** `lookout watch --clusters-from` takes a

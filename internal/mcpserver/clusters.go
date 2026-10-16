@@ -130,6 +130,14 @@ type clusterEntry struct {
 	// name is the one to use in this set; canonical is the stable one.
 	name      string
 	canonical string
+	// storeName is the name a multi-cluster watch gives this cluster's
+	// store file (its bare name), or "" when that name repeats in the
+	// set: watch watches neither of two same-named clusters, so neither
+	// has a file, and guessing would read another cluster's rows.
+	storeName string
+	// setSize is how many clusters the set holds, for the per-cluster
+	// concurrency limit.
+	setSize int
 }
 
 // Start discovers the shared set, so a server with no reachable cluster
@@ -358,7 +366,10 @@ func nameClusters(refs []cloud.ClusterRef) *clusterSet {
 	}
 	set := &clusterSet{byName: map[string]int{}}
 	for _, r := range refs {
-		e := clusterEntry{ref: r, canonical: canonicalName(r)}
+		e := clusterEntry{ref: r, canonical: canonicalName(r), setSize: len(refs)}
+		if bare[r.Name] == 1 {
+			e.storeName = r.Name
+		}
 		switch {
 		case bare[r.Name] == 1 || r.Project == "":
 			e.name = r.Name
