@@ -205,6 +205,64 @@ the clusters are, not how many there are, so this design sets no cluster
 cap. The mitigations are a narrow role in each cluster (the shipped view
 role degrades cleanly, with permission hints) and Part 2.
 
+### Many projects
+
+Decided 2026-10-16. One endpoint can serve clusters across many projects;
+nothing below changes a single-project endpoint.
+
+**Scope.** `--clusters-from` takes a comma-separated list of scopes,
+which may be mixed:
+
+| Scope | Discovered through |
+|---|---|
+| `my-project`, `my-project/us-central1` | Container API `ListClusters` (today's form) |
+| `fleet:<host-project>` | GKE Hub memberships of that fleet, which can span projects; each GKE membership resolves to its cluster, and non-GKE memberships (attached clusters) are skipped and counted |
+| `folders/<id>`, `organizations/<id>` | Cloud Asset Inventory `searchAllResources` for `container.googleapis.com/Cluster` under the folder or organization: one call for hundreds of projects |
+| `kubeconfig[:<path>]` | unchanged, and not combinable with the cloud scopes |
+
+When Cloud Asset Inventory cannot answer (the API is not enabled in the
+scope, or the discovering identity may not search it), a folder or
+organization scope falls back to Resource Manager: list the projects under
+it, then `ListClusters` in each, with bounded concurrency. Slower, needs
+nothing extra, and never silent: `k8s_list_clusters` reports
+`discovery=asset` or `discovery=resourcemanager` (and why), and the
+endpoint logs the fallback once per scope.
+
+**Who discovers.** In Google-token mode lookout has no identity of its
+own (Part 2), so discovery runs **as the caller**. `k8s_list_clusters`
+lists, with the caller's token, the clusters in scope that this person can
+see, cached per caller for five minutes. Two consequences, both wanted:
+lookout still needs no IAM at all, and nobody learns that a cluster they
+cannot access exists. A `cluster` argument is checked against the
+caller's own set; an unknown name triggers at most one rediscovery per
+caller per minute, then a usage error naming `k8s_list_clusters`. Without
+Google-token mode, discovery runs as lookout's identity, as it does for
+one project today, and the configured set is the same for every caller.
+`watch` gets the same scope forms through the shared resolver, always as
+its own identity.
+
+**Names.** A cluster's name is unique only within a project and location.
+A call names a cluster by its bare name when that is unique in the
+caller's set, as `name@project` when it is not, and as
+`name@project/location` when even that collides. The canonical
+`project/location/name` is always accepted. `k8s_list_clusters` prints
+the name to use, so a model copies it rather than composing it. The set a
+name is unique in is the caller's, so two callers may see different short
+names for the same cluster; each call is checked against its own caller's
+set.
+
+**Project-scoped answers.** `cloud quota`, `cloud orphans` and
+`cloud ipspace` answer for the selected cluster's project
+(`ClusterRef.Project`, as in single-cluster mode since #696). A project
+with no cluster in scope is not addressable: the unit of a call stays one
+cluster.
+
+**What can still fail per cluster.** A VPC Service Controls perimeter can
+refuse a cross-project call that IAM allows, and a private cluster's DNS
+endpoint can be disabled. Either is that cluster's `read.unavailable`,
+with the API's reason, never a silent omission and never another
+cluster's answer.
+
 ## Part 2 — one endpoint, many callers
 
 ### Decision: act as the user, with their own Google token
@@ -470,7 +528,10 @@ case that matters now and it does not need more than one cluster.
    in the access log and per-caller limits; a Gateway overlay with a
    managed certificate; and a runbook for the Custom MCP Server data
    store. `--auth-token-file` keeps working.
-5. **Part 1, many clusters (#700):** cluster flags, `cluster` argument,
+5. **Part 1, many clusters and projects (#700):** cluster flags with
+   multi-project scopes (project lists, GKE fleets, folders and
+   organizations), discovery as the caller in Google-token mode, the
+   `cluster` argument with collision-qualified names,
    `k8s_list_clusters`, `Command.Local`, per-cluster store stems and
    concurrency, stateless HTTP, rediscovery. It reuses phase 4's seam.
 6. **Callers as workloads (#701):** purser mTLS/SPIFFE in front of the HTTP
@@ -489,6 +550,12 @@ attribution (lookout writes, `recorded_by` names the caller).
 - **A multi-cluster argument on each tool:** breaks the one-scan output
   contract and is fleet rollup by another name (Part 1).
 - **A cluster enum in the schema:** schema cost grows with the fleet (Part 1).
+- **Discovery as lookout's identity in Google-token mode:** would give
+  lookout IAM it otherwise never needs, and would show every caller the
+  names of clusters they cannot read (Part 1, Many projects).
+- **Always fully qualified cluster names:** never ambiguous, but long, and
+  models copy long identifiers wrong more often than short ones (Part 1,
+  Many projects).
 - **Kubernetes impersonation:** needs the `impersonate` verb on lookout's
   identity, the largest grant lookout would hold. steward gives the user's
   own identity without it.
