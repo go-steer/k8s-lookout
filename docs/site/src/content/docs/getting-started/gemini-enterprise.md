@@ -73,8 +73,29 @@ $EDITOR config.yaml        # DOMAIN, GOOGLE_CLIENT_ID, GOOGLE_ALLOW, GOOGLE_ALLO
 kubectl apply -k .
 ```
 
-Or keep the overlay remote and patch `config.yaml` from your own
-kustomization. Either way it creates, in `agent-triage`:
+Or keep the overlay remote and set the values from your own
+kustomization. Set them with a `configMapGenerator` merge, not a patch,
+and list the `domain` component: the overlay copies `DOMAIN` into the
+certificate and the Ingress host when it is built, and only a merge
+lands early enough for the component to copy your value instead.
+
+```yaml
+resources:
+  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini?ref=vX.Y.Z
+components:
+  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini/domain?ref=vX.Y.Z
+configMapGenerator:
+  - name: lookout-mcp
+    namespace: agent-triage
+    behavior: merge
+    literals:
+      - DOMAIN=lookout.example.com
+      - GOOGLE_CLIENT_ID=123456789012-abc.apps.googleusercontent.com
+      - GOOGLE_ALLOW=@example.com
+      - GOOGLE_ALLOW_WRITE=
+```
+
+Either way it creates, in `agent-triage`:
 
 - a `lookout-mcp` ServiceAccount, with no RBAC and no Workload Identity;
 - two stateless `lookout mcp` replicas in Google-token mode, serving the
@@ -95,6 +116,50 @@ curl -s https://lookout.example.com/.well-known/oauth-protected-resource/mcp
 The metadata names `https://accounts.google.com` as the authorization
 server. `curl -X POST https://lookout.example.com/mcp` gets a `401`: no
 token.
+
+### Behind a Gateway instead
+
+If the cluster already serves through the Gateway API with a
+Certificate Manager map (one wildcard certificate for many hosts), use
+`deploy-mcp-gemini-gateway` in place of `deploy-mcp-gemini`. It runs the
+same pods from the same `config.yaml`, and swaps the Ingress,
+`ManagedCertificate` and `BackendConfig` for a
+`gke-l7-global-external-managed` Gateway, an HTTPRoute for `DOMAIN`, a
+health check on the metadata path and a 300 s backend timeout.
+
+Two names in `deploy-mcp-gemini-gateway/gateway.yaml` are yours: the
+static IP (`NamedAddress`, default `lookout-mcp-ip`) and the certificate
+map (the `networking.gke.io/certmap` annotation, default `lookout-mcp`),
+which must hold a certificate covering `DOMAIN`. From your own
+kustomization, set them with a patch:
+
+```yaml
+resources:
+  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini-gateway?ref=vX.Y.Z
+components:
+  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini/domain?ref=vX.Y.Z
+configMapGenerator:
+  - name: lookout-mcp
+    namespace: agent-triage
+    behavior: merge
+    literals:
+      - DOMAIN=lookout.example.com
+      # ... the other config.yaml values
+patches:
+  - target: {kind: Gateway, name: lookout-mcp}
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/networking.gke.io~1certmap
+        value: my-cert-map
+      - op: replace
+        path: /spec/addresses/0/value
+        value: my-static-ip
+```
+
+There is no certificate to wait for; once
+`kubectl -n agent-triage get gateway lookout-mcp` shows `PROGRAMMED
+True`, allow a minute or two for the load balancer to start answering
+HTTPS.
 
 ## 4. Give people access
 

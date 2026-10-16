@@ -28,12 +28,16 @@
 #   - ServiceAccount lookout-mcp, with NO RBAC and no Workload Identity:
 #     lookout's own identity reads nothing.
 #   - Deployment lookout-mcp: two stateless replicas of
-#     `lookout mcp --google-client-id ...` on :8383, the triage tool
-#     profile minus findings diff (it needs a store), the access log on
-#     stdout.
+#     `lookout mcp --google-client-id ...` on :8383, the triage and
+#     audit tool profiles plus six incident reads, minus findings diff
+#     (it needs a store), the access log on stdout.
 #   - Service, BackendConfig, ManagedCertificate and Ingress: a GKE
 #     external HTTPS load balancer on the reserved global static IP
 #     lookout-mcp-ip, with a Google-managed certificate for DOMAIN.
+#
+# To serve behind a Gateway with a Certificate Manager map rather than an
+# Ingress, apply deploy-mcp-gemini-gateway/: it builds on this one and
+# takes the same config.yaml.
 #
 # Not included: the sentinel store. Store-backed tools (triage status,
 # history via --at) need --store on a file this pod can read; with the
@@ -46,20 +50,6 @@ resources:
   - mcp.yaml
 
 # DOMAIN, set once in config.yaml, is also the certificate's domain and
-# the Ingress host.
-replacements:
-  - source:
-      kind: ConfigMap
-      name: lookout-mcp
-      fieldPath: data.DOMAIN
-    targets:
-      - select:
-          kind: ManagedCertificate
-          name: lookout-mcp
-        fieldPaths:
-          - spec.domains.0
-      - select:
-          kind: Ingress
-          name: lookout-mcp
-        fieldPaths:
-          - spec.rules.0.host
+# the Ingress host (domain/).
+components:
+  - domain

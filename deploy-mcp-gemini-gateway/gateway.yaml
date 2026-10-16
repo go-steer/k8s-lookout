@@ -1,0 +1,93 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A global external Application Load Balancer, HTTPS only, for the
+# lookout-mcp Service. TLS comes from a Certificate Manager map, so one
+# wildcard certificate can serve this and its neighbours.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lookout-mcp
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-mcp
+    app.kubernetes.io/component: mcp
+  annotations:
+    # A Certificate Manager map holding a certificate for DOMAIN.
+    networking.gke.io/certmap: lookout-mcp
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    # The reserved global static IP DOMAIN's A record points at.
+    - type: NamedAddress
+      value: lookout-mcp-ip
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lookout-mcp
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-mcp
+    app.kubernetes.io/component: mcp
+spec:
+  parentRefs:
+    - name: lookout-mcp
+  hostnames:
+    - DOMAIN # replaced from config.yaml
+  rules:
+    - backendRefs:
+        - name: lookout-mcp
+          port: 80
+---
+# The RFC 9728 metadata is the one unauthenticated 200 this server
+# answers; the load balancer's default probe (GET /) would get a 404.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: lookout-mcp
+  namespace: agent-triage
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8383
+        requestPath: /.well-known/oauth-protected-resource/mcp
+  targetRef:
+    group: ""
+    kind: Service
+    name: lookout-mcp
+---
+# A tool call can run for minutes; the load balancer's default 30 s
+# backend timeout would cut it off.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: lookout-mcp
+  namespace: agent-triage
+spec:
+  default:
+    timeoutSec: 300
+  targetRef:
+    group: ""
+    kind: Service
+    name: lookout-mcp
