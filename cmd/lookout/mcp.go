@@ -92,17 +92,30 @@ Flags:
                         /.well-known/oauth-protected-resource/<path>.
                         The cluster must be GKE and reached over https:
                         the caller's token is never sent over plaintext
-                        or unverified TLS. --store and --report are not
-                        yet available in this mode.
+                        or unverified TLS. Tools whose answers are rows
+                        lookout reads as itself (triage status, findings
+                        diff/ack, history via --at) show a row only if
+                        the caller may list pods in its namespace (all
+                        namespaces for a cluster-scoped row), and count
+                        the rest as hidden=<n>; live reads are already
+                        the caller's own. Callers cannot choose
+                        store_cluster, a caller's findings diff never
+                        persists, and an ack is recorded as the caller.
+                        Upgrade the sentinel first: a write migrates
+                        the store, which older binaries then refuse.
   --google-allow=<list> who is let in, comma-separated: exact emails, or
                         "@domain" for every account Google says belongs
                         to that Workspace domain (never matched on the
                         email suffix alone).
   --google-allow-write=<list>
                         who may call tools that change state, same
-                        syntax. Empty: no caller may. While --store is
-                        unavailable in this mode, that is only
-                        k8s_net_probe_from (with --probe-from-image).
+                        syntax: the triage-status write and findings
+                        diff/ack (they update the store; the gate also
+                        covers their read modes), and k8s_net_probe_from
+                        when served. Empty: no caller may. A caller
+                        writes triage records only for namespaces they
+                        can see, and each record names them
+                        (recorded_by).
   --resource-url=<url>  this server's MCP URL exactly as clients reach
                         it (e.g. https://lookout.example.com/mcp); named
                         in the RFC 9728 metadata and every 401.
@@ -265,12 +278,6 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			problem = "--google-client-id needs --google-allow: an empty allow-list would admit no one"
 		case *resourceURL == "":
 			problem = "--google-client-id needs --resource-url, this server's MCP URL as clients reach it (e.g. https://lookout.example.com/mcp)"
-		case *store != "" || *report != "":
-			// The store and reports are files lookout reads as itself, so
-			// they would show a caller rows their own RBAC hides. Refused
-			// until rows are filtered by the caller's access (#699).
-			problem = "--store and --report are not yet available in Google-token mode: they are read as lookout, " +
-				"not as the caller, so they would bypass the caller's own RBAC (#699)"
 		}
 		if problem != "" {
 			fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)

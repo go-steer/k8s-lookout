@@ -237,6 +237,10 @@ const triageSchemaVersion = 4
 // canonical_reason and cluster columns on triage_status (migration v10, #659).
 const triageReasonSchemaVersion = 10
 
+// triageRecordedBySchemaVersion is the first schema version carrying
+// triage_status.recorded_by (migration v11, #699).
+const triageRecordedBySchemaVersion = 11
+
 // UpsertTriageStatus implements memory.TriageWriter on the sentinel
 // store: the §9.4 record for (fingerprint, resource_key) is REPLACED
 // — it is current state, not a journal. Updated is assigned here.
@@ -263,8 +267,8 @@ func (s *Store) UpsertTriageStatus(ctx context.Context, rec memory.TriageStatusR
 	rec.Updated = s.clock().UTC()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO triage_status (
 		fingerprint, resource_key, session, status,
-		root_cause_hypothesis, severity_override, action, canonical_reason, cluster, updated
-	) VALUES (?,?,?,?,?,?,?,?,?,?)
+		root_cause_hypothesis, severity_override, action, canonical_reason, cluster, recorded_by, updated
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT (fingerprint, resource_key) DO UPDATE SET
 		session = excluded.session,
 		status = excluded.status,
@@ -273,9 +277,10 @@ func (s *Store) UpsertTriageStatus(ctx context.Context, rec memory.TriageStatusR
 		action = excluded.action,
 		canonical_reason = excluded.canonical_reason,
 		cluster = excluded.cluster,
+		recorded_by = excluded.recorded_by,
 		updated = excluded.updated`,
 		rec.Fingerprint, rec.ResourceKey, rec.Session, string(rec.Status),
-		rec.RootCauseHypothesis, rec.SeverityOverride, rec.Action, rec.CanonicalReason, rec.Cluster, rec.Updated.UnixNano(),
+		rec.RootCauseHypothesis, rec.SeverityOverride, rec.Action, rec.CanonicalReason, rec.Cluster, rec.RecordedBy, rec.Updated.UnixNano(),
 	)
 	if err != nil {
 		return memory.TriageStatusRecord{}, fmt.Errorf("store: upsert triage status (%s, %s): %w", rec.Fingerprint, rec.ResourceKey, err)
@@ -339,23 +344,24 @@ func (s *Store) TriageStatuses(ctx context.Context, q memory.TriageQuery) ([]mem
 	if !q.UpdatedSince.IsZero() {
 		sinceNs = q.UpdatedSince.UTC().UnixNano()
 	}
+	// Columns by schema version: a read-only open of an older store reads
+	// what it has (v10 added canonical_reason and cluster, v11
+	// recorded_by), and the missing fields stay empty.
 	hasReasonCols := s.schemaVersion >= triageReasonSchemaVersion
-	query := `SELECT fingerprint, resource_key, session, status,
-		root_cause_hypothesis, severity_override, action, updated
-		FROM triage_status
-		WHERE (?1 = '' OR fingerprint = ?1)
-		  AND (?2 = 0 OR status != 'resolved')
-		  AND (?3 = 0 OR updated >= ?3)
-		ORDER BY updated DESC, fingerprint ASC, resource_key ASC, session ASC`
+	hasRecordedBy := s.schemaVersion >= triageRecordedBySchemaVersion
+	cols := "fingerprint, resource_key, session, status, root_cause_hypothesis, severity_override, action"
 	if hasReasonCols {
-		query = `SELECT fingerprint, resource_key, session, status,
-		root_cause_hypothesis, severity_override, action, canonical_reason, cluster, updated
+		cols += ", canonical_reason, cluster"
+	}
+	if hasRecordedBy {
+		cols += ", recorded_by"
+	}
+	query := `SELECT ` + cols + `, updated
 		FROM triage_status
 		WHERE (?1 = '' OR fingerprint = ?1)
 		  AND (?2 = 0 OR status != 'resolved')
 		  AND (?3 = 0 OR updated >= ?3)
 		ORDER BY updated DESC, fingerprint ASC, resource_key ASC, session ASC`
-	}
 	rows, err := s.db.QueryContext(ctx, query, q.Fingerprint, openOnly, sinceNs)
 	if err != nil {
 		return nil, err
@@ -368,21 +374,18 @@ func (s *Store) TriageStatuses(ctx context.Context, q memory.TriageQuery) ([]mem
 			status  string
 			updated int64
 		)
+		dest := []any{
+			&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
+			&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action,
+		}
 		if hasReasonCols {
-			if err := rows.Scan(
-				&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
-				&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action,
-				&rec.CanonicalReason, &rec.Cluster, &updated,
-			); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := rows.Scan(
-				&rec.Fingerprint, &rec.ResourceKey, &rec.Session, &status,
-				&rec.RootCauseHypothesis, &rec.SeverityOverride, &rec.Action, &updated,
-			); err != nil {
-				return nil, err
-			}
+			dest = append(dest, &rec.CanonicalReason, &rec.Cluster)
+		}
+		if hasRecordedBy {
+			dest = append(dest, &rec.RecordedBy)
+		}
+		if err := rows.Scan(append(dest, &updated)...); err != nil {
+			return nil, err
 		}
 		rec.Status = memory.TriageStatus(status)
 		rec.Updated = time.Unix(0, updated).UTC()

@@ -20,9 +20,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,16 +106,78 @@ func googleRegistry() *checks.Registry {
 		Kinds: []checks.KindField{checks.Kind("fake.whoami", "synthetic; test scaffolding only", emit.SeverityInfo)},
 		Run:   report,
 	})
+	// k8s_storerows stands in for a command whose findings are rows
+	// lookout read as itself (triage status, findings diff): filtered by
+	// the caller's access. It takes store_cluster like the real ones.
+	reg.Register(checks.Command{
+		Name: "storerows", MCPName: "k8s_storerows", Summary: "Emits stored rows; test scaffolding only.", CallerFiltered: true,
+		Flags: []emit.FlagSpec{emit.StoreClusterFlag()},
+		Kinds: []checks.KindField{checks.Kind("fake.whoami", "synthetic; test scaffolding only", emit.SeverityInfo)},
+		Run:   report,
+	})
 	return reg
 }
 
 type googleServer struct {
-	url string
-	log *bytes.Buffer
-	mu  *sync.Mutex
+	url     string
+	log     *bytes.Buffer
+	mu      *sync.Mutex
+	reviews func() []string
+}
+
+// fakeAPIServer answers SelfSubjectAccessReviews the way the caller
+// visibility check asks them ("may this caller list pods in namespace
+// ns?", "" meaning every namespace), allowing cluster-wide read only when
+// clusterRead is set, and records the bearer token each review carried.
+// It returns a kubeconfig that reaches it over verified TLS.
+func fakeAPIServer(t *testing.T, clusterRead bool) (kubeconfig string, reviewTokens func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var tokens []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		tokens = append(tokens, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		mu.Unlock()
+		var review struct {
+			Spec struct {
+				ResourceAttributes struct {
+					Namespace string `json:"namespace"`
+				} `json:"resourceAttributes"`
+			} `json:"spec"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&review)
+		allowed := clusterRead || review.Spec.ResourceAttributes.Namespace != ""
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+			"status": map[string]any{"allowed": allowed},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	ca := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kc := filepath.Join(dir, "kubeconfig")
+	cfg := "apiVersion: v1\nkind: Config\ncurrent-context: c\nclusters:\n- name: c\n  cluster:\n    server: " + srv.URL +
+		"\n    certificate-authority: " + ca + "\ncontexts:\n- name: c\n  context:\n    cluster: c\n    user: u\n" +
+		"users:\n- name: u\n  user:\n    token: lookout-own-token\n"
+	if err := os.WriteFile(kc, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return kc, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), tokens...) }
 }
 
 func startGoogleServer(t *testing.T) googleServer {
+	return startGoogleServerWith(t, true)
+}
+
+func startGoogleServerWith(t *testing.T, clusterRead bool) googleServer {
 	t.Helper()
 	base := fakeGoogle(t)
 	g, err := NewGoogleAuth(GoogleOptions{
@@ -122,10 +187,11 @@ func startGoogleServer(t *testing.T) googleServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	kc, reviews := fakeAPIServer(t, clusterRead)
 	var mu sync.Mutex
 	var logBuf bytes.Buffer
 	al := NewAccessLog(lockedWriter{&mu, &logBuf})
-	server := New(googleRegistry(), "test", WithGoogleAuth(g), WithAccessLog(al))
+	server := New(googleRegistry(), "test", WithGoogleAuth(g), WithAccessLog(al), WithSelection(kc, ""))
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan string, 1)
 	done := make(chan error, 1)
@@ -133,7 +199,7 @@ func startGoogleServer(t *testing.T) googleServer {
 		done <- Serve(ctx, server, ServeOptions{Listen: "127.0.0.1:0", Google: g, Ready: ready})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return googleServer{url: "http://" + <-ready, log: &logBuf, mu: &mu}
+	return googleServer{url: "http://" + <-ready, log: &logBuf, mu: &mu, reviews: reviews}
 }
 
 type lockedWriter struct {
@@ -359,6 +425,69 @@ func TestGoogleServerWithoutGoogleServeFailsClosed(t *testing.T) {
 	}
 	if got := text(t, res); !res.IsError || !strings.Contains(got, "refusing to run it as lookout") {
 		t.Errorf("a call with no caller ran, or was refused for the wrong reason: %s", got)
+	}
+}
+
+// TestGoogleModeHidesWhatTheCallerCannotSee: a finding the caller is not
+// authorized to see (here cluster-scoped, and the caller lacks
+// cluster-wide read) is withheld and counted as hidden=1, and the access
+// review that decided it ran as the caller, not as lookout.
+func TestGoogleModeHidesWhatTheCallerCannotSee(t *testing.T) {
+	s := startGoogleServerWith(t, false)
+	_, body := s.post(t, "/mcp", "alice-token", callBody("k8s_storerows"))
+	if strings.Contains(body, "caller-token-fingerprint") {
+		t.Errorf("a finding the caller may not see was shown: %s", body)
+	}
+	if !strings.Contains(body, "findings=0") || !strings.Contains(body, "hidden=1") {
+		t.Errorf("the summary does not count the withheld row: %s", body)
+	}
+	reviews := s.reviews()
+	if len(reviews) == 0 {
+		t.Fatal("no access review reached the API server")
+	}
+	for _, tok := range reviews {
+		if tok != "alice-token" {
+			t.Errorf("an access review carried %q, want the caller's own token", tok)
+		}
+	}
+}
+
+// TestGoogleModeShowsWhatTheCallerCanSee: with cluster-wide read the same
+// finding is shown and the summary reports hidden=0.
+func TestGoogleModeShowsWhatTheCallerCanSee(t *testing.T) {
+	s := startGoogleServerWith(t, true)
+	_, body := s.post(t, "/mcp", "alice-token", callBody("k8s_storerows"))
+	if !strings.Contains(body, "caller-token-fingerprint="+tokenFingerprint("alice-token")) || !strings.Contains(body, "hidden=0") {
+		t.Errorf("a visible finding, or its hidden=0 summary, is missing: %s", body)
+	}
+}
+
+// TestGoogleModeLiveReadsAreNotFiltered: a live-read command's findings
+// were already filtered by the API server applying the caller's RBAC, so
+// none is withheld (not even a cluster-scoped one from a caller without
+// cluster-wide read, such as a read.unavailable refusal) and no access
+// review is spent.
+func TestGoogleModeLiveReadsAreNotFiltered(t *testing.T) {
+	s := startGoogleServerWith(t, false)
+	_, body := s.post(t, "/mcp", "alice-token", callBody("k8s_whoami"))
+	if !strings.Contains(body, "caller-token-fingerprint="+tokenFingerprint("alice-token")) || strings.Contains(body, "hidden=") {
+		t.Errorf("a live read was filtered: %s", body)
+	}
+	if n := len(s.reviews()); n != 0 {
+		t.Errorf("%d access reviews for a live read, want none", n)
+	}
+}
+
+// TestGoogleModeRefusesStoreCluster: which cluster's store a call reads
+// is the operator's choice; a caller cannot point a call at another
+// cluster's rows, which the access check (asking this cluster) could not
+// vouch for.
+func TestGoogleModeRefusesStoreCluster(t *testing.T) {
+	s := startGoogleServerWith(t, true)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"k8s_storerows","arguments":{"store_cluster":"other"}}}`
+	_, out := s.post(t, "/mcp", "alice-token", body)
+	if !strings.Contains(out, "store_cluster is not accepted") || strings.Contains(out, "caller-token-fingerprint") {
+		t.Errorf("store_cluster was accepted: %s", out)
 	}
 }
 

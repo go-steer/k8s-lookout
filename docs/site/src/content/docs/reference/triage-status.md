@@ -63,6 +63,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `triage_action` | the recorded action / paper trail |
 | `triage_session` | the incident session that wrote the record |
 | `severity_override` | the recorded severity judgment (critical\|warning\|info), when one is set |
+| `recorded_by` | who asked for the write, when `lookout` knows: the caller's email in `lookout` mcp's Google-token mode (`lookout` remains the writer of record) |
 | `updated` | when the record last changed, RFC 3339 |
 
 ## Output contract

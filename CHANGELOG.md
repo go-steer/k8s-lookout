@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured OAuth client and carry `cloud-platform`; `--google-allow`
   admits exact emails or `@domain` (matched on Google's Workspace domain,
   never the email suffix), and `--google-allow-write` gates tools that
-  change state (today `k8s_net_probe_from`, when served). The mode serves
+  change state (the triage-status write, `findings diff`/`ack`, and
+  `k8s_net_probe_from` when served). The mode serves
   stateless HTTP only at the `--resource-url` path (Gemini Enterprise
   opens a session per interaction and closes none) and RFC 9728 metadata
   at the URL given by `--resource-url`, counts as authentication for an
@@ -28,8 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `https` API server with verified TLS. Underneath, every Kubernetes and
   Google API client the read path builds now takes the caller's token
   when one is present (#707), guarded by a test that fails on any Google
-  client built without it. `--store` and `--report` are refused in this
-  mode until rows from them are filtered by the caller's access. Built on
+  client built without it. Tools that answer from rows lookout reads as
+  itself (`triage status`, `findings diff`/`ack`, and graph history in
+  `triage changes`/`radius`) show a row only if the caller may list pods
+  in its namespace (all namespaces for a cluster-scoped object), checked
+  with the caller's own token under the call's `--timeout`; withheld rows
+  are counted on the summary line as `hidden=<n>`, a failed check hides
+  the row, and a history target in a namespace the caller cannot see is
+  refused before lookup. Live reads are not filtered: the API server
+  already applied the caller's RBAC. Callers cannot pass `store_cluster`;
+  a caller's `findings diff` never persists; `findings ack` is limited to
+  visible namespaces and recorded as the caller. A triage-status write is
+  refused for a namespace the caller cannot see, and records gain
+  `recorded_by` (the caller's email; store migration v11, empty for writes
+  with no authenticated caller; upgrade the sentinel first, since older
+  binaries refuse a migrated store). Built on
   [steward](https://github.com/go-steer/steward) v0.1.0; the approach was
   proven against a real Gemini Enterprise app first (#698).
 

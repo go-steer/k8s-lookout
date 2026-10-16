@@ -235,6 +235,20 @@ func targetRefused(cluster *state.Cluster, wl emit.WorkloadRef, err error) error
 
 // historicalSnapshot opens the sentinel store read-only and resolves
 // the topology as of at (§6.6 nearest-snapshot + replay-forward).
+// callerMaySee refuses a target in a namespace the caller cannot see when
+// the invocation runs as its caller (#699). It runs before the target is
+// looked up, so that neither answer, "not in history" or a result with
+// hidden rows, reveals whether an object exists there.
+func callerMaySee(ctx context.Context, wl emit.WorkloadRef) error {
+	if _, asCaller := kube.CallerTokenFrom(ctx); !asCaller {
+		return nil
+	}
+	if !kube.NewCallerVisibility(ctx).Visible(wl.Namespace) {
+		return fmt.Errorf("refusing to look up %s/%s/%s: you cannot list pods in its namespace", wl.Kind, wl.Namespace, wl.Name)
+	}
+	return nil
+}
+
 func historicalSnapshot(ctx context.Context, path string, at time.Time) (*graph.Snapshot, error) {
 	st, err := store.OpenRead(path)
 	if err != nil {

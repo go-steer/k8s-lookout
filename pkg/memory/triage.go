@@ -101,6 +101,13 @@ type TriageStatusRecord struct {
 	CanonicalReason string `json:"canonical_reason,omitempty"`
 	// Cluster scopes triage status joins when multi-cluster records share a store (#659).
 	Cluster string `json:"cluster,omitempty"`
+	// RecordedBy is who asked for the write, when lookout knows: the
+	// caller's email in Google-token mode (#699). lookout stays the
+	// writer of record; this names the person behind it. Empty for
+	// writes with no authenticated caller (the CLI, the sentinel) and for
+	// records written before it existed. Additive and omitted when empty,
+	// like CanonicalReason and Cluster.
+	RecordedBy string `json:"recorded_by,omitempty"`
 	// Updated is when the record last changed. Assigned by the
 	// store on write.
 	Updated time.Time `json:"updated"`

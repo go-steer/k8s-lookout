@@ -95,6 +95,9 @@ func runRadius(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 	if err != nil {
 		return 0, err
 	}
+	if err := callerMaySee(ctx, wl); err != nil {
+		return 0, err
+	}
 
 	var (
 		snap    *graph.Snapshot

@@ -98,6 +98,11 @@ type RunConfig struct {
 	// commands leave it false and reject --at as an unknown flag
 	// (§4.2: graph-backed commands ADDITIONALLY accept --at).
 	GraphBacked bool
+	// CallerFiltered makes an invocation that runs as its caller (#699,
+	// kube.WithCallerToken) show each finding only if the caller may see
+	// its namespace. For commands whose findings are rows lookout reads
+	// as itself (store, report); see checks.Command.CallerFiltered.
+	CallerFiltered bool
 	// TimeoutDefault overrides the --timeout default (DefaultTimeout)
 	// for this command. Zero keeps the shared default. A composition
 	// that runs a dozen checks in one invocation raises it; the value
@@ -213,21 +218,35 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		}
 	}
 
+	// The cluster selection rides the context rather than the
+	// Invocation because the code that consumes it — every check
+	// group's client accessor — already takes a context and takes
+	// nothing else. See pkg/kube/selection.go.
+	ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
+
+	// The deadline starts here, before the Writer exists, so that the
+	// caller access reviews a filtering Writer makes are bounded by
+	// --timeout like every other call the invocation makes (§4.2).
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var writerOpts []WriterOption
 	if exemptions != nil {
 		writerOpts = append(writerOpts, WithExemptions(exemptions))
+	}
+	if _, ok := kube.CallerTokenFrom(ctx); ok && cfg.CallerFiltered {
+		// Running as its caller (#699), a command whose findings are rows
+		// from lookout's own store or a report file: the caller's RBAC
+		// never vetted them, so each passes the caller's access check
+		// before it is written. Live-read commands are not filtered: the
+		// API server already applied the caller's RBAC to what they read.
+		writerOpts = append(writerOpts, WithVisibility(kube.NewCallerVisibility(ctx)))
 	}
 	writer, err := NewWriter(stdout, format, writerOpts...)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime
 	}
-
-	// The cluster selection rides the context rather than the
-	// Invocation because the code that consumes it — every check
-	// group's client accessor — already takes a context and takes
-	// nothing else. See pkg/kube/selection.go.
-	ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
 	if scope.Context != "" {
 		// Stamped whether or not the check ends up building a client:
 		// the caller named a cluster, and a stream that says which
@@ -239,9 +258,6 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 			return ExitRuntime
 		}
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	start := now()
 	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, In: stdin, Out: writer, Exemptions: exemptions})

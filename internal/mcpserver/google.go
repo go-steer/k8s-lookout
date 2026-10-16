@@ -56,10 +56,10 @@ type GoogleOptions struct {
 	// Allow admits callers: exact emails, or "@domain" (matched on the
 	// account's Google Workspace domain, never on the email suffix).
 	Allow []string
-	// AllowWrite admits callers to tools that change state. Empty means
-	// no caller may. While the mode refuses --store, the one such tool it
-	// can serve is k8s_net_probe_from (with --probe-from-image); the
-	// triage-status write joins it once --store is allowed.
+	// AllowWrite admits callers to tools that change state (the
+	// triage-status write, findings diff and ack, which update the store,
+	// and k8s_net_probe_from when served). The gate is per tool, so it
+	// also covers their read modes. Empty means no caller may.
 	AllowWrite []string
 	// Resource is this server's MCP URL as clients reach it, e.g.
 	// https://lookout.example.com/mcp. https, except on loopback.

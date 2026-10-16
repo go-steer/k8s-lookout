@@ -67,6 +67,20 @@ type Exempter interface {
 	Exempt(kind, namespace, name string) (reason, expires string, ok bool)
 }
 
+// Visibility answers whether the caller of an invocation may see a
+// finding about an object in a namespace ("" for a cluster-scoped
+// object). It exists for invocations that run as their caller (#699): a
+// check that reads lookout's own store or a report file reads data the
+// caller's RBAC never vetted, and this is the seam that withholds it.
+//
+// Unlike an Exempter, it DROPS: a row the caller is not authorized to see
+// is not theirs to read, annotated or not. It is never silent, though:
+// the summary line reports hidden=<n> whenever a Visibility is in force,
+// so a short answer cannot be mistaken for a complete one.
+type Visibility interface {
+	Visible(namespace string) bool
+}
+
 // Writer encodes sanitized findings to one output stream and counts
 // them for the summary line. Not safe for concurrent use; checks are
 // single-goroutine emitters by design (deterministic output order).
@@ -75,8 +89,10 @@ type Writer struct {
 	format   Format
 	sanitize Sanitizer
 	exempt   Exempter
+	visible  Visibility
 	findings int
 	exempted int
+	hidden   int
 	notes    []Field
 	stamps   []Field
 	watchers []func(Finding)
@@ -102,6 +118,13 @@ func WithExemptions(e Exempter) WriterOption {
 	return func(w *Writer) { w.exempt = e }
 }
 
+// WithVisibility makes the Writer withhold findings the caller may not
+// see, and report how many on the summary line (hidden=<n>). A nil
+// Visibility is the same as not passing one.
+func WithVisibility(v Visibility) WriterOption {
+	return func(w *Writer) { w.visible = v }
+}
+
 // NewWriter returns a Writer emitting the given format to out.
 func NewWriter(out io.Writer, format Format, opts ...WriterOption) (*Writer, error) {
 	if _, err := ParseFormat(string(format)); err != nil {
@@ -123,6 +146,12 @@ func NewWriter(out io.Writer, format Format, opts ...WriterOption) (*Writer, err
 // finding does.
 func (w *Writer) Emit(f Finding) error {
 	f = w.sanitize(f)
+	if w.visible != nil && !w.visible.Visible(f.Namespace) {
+		// Not the caller's to read: not written, not counted, and no
+		// watcher sees it (a watcher feeds data back to the caller too).
+		w.hidden++
+		return nil
+	}
 	f = w.stamp(f)
 	exempted := false
 	if w.exempt != nil {
@@ -306,6 +335,9 @@ func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
 	pairs = append(pairs, w.notes...)
 	if w.exempt != nil {
 		pairs = append(pairs, Field{Key: "exempt", Value: strconv.Itoa(w.exempted)})
+	}
+	if w.visible != nil {
+		pairs = append(pairs, Field{Key: "hidden", Value: strconv.Itoa(w.hidden)})
 	}
 	var line []byte
 	switch w.format {
