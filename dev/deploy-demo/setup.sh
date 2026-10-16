@@ -67,11 +67,24 @@ if ! gcloud iam service-accounts describe "$sa" --project="$PROJECT" >/dev/null 
     --display-name="lookout demo deploy (GitHub Actions)"
 fi
 
-# The workflow may act as the service account; nothing else may.
+# The workflow may act as the service account; nothing else may. Bound
+# by the repository's numeric ID, not by the token's subject: GitHub's
+# subject format varies per repository (this one uses the immutable
+# form, repo:<owner>@<id>/<repo>@<id>:environment:<env>), and the
+# provider's condition above already admits only this repository's jobs
+# in the deployment environment. Only this provider maps repository_id,
+# so the other repositories' providers in the shared pool cannot match.
+pool_path="projects/$number/locations/global/workloadIdentityPools/$POOL"
 gcloud iam service-accounts add-iam-policy-binding "$sa" --project="$PROJECT" \
   --role=roles/iam.workloadIdentityUser \
-  --member="principal://iam.googleapis.com/projects/$number/locations/global/workloadIdentityPools/$POOL/subject/repo:$REPO:environment:$ENVIRONMENT" \
+  --member="principalSet://iam.googleapis.com/$pool_path/attribute.repository_id/$repo_id" \
   --condition=None >/dev/null
+# The subject-form binding an earlier version of this script made never
+# matched an immutable-subject token; drop it if it is there.
+gcloud iam service-accounts remove-iam-policy-binding "$sa" --project="$PROJECT" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principal://iam.googleapis.com/$pool_path/subject/repo:$REPO:environment:$ENVIRONMENT" \
+  --condition=None >/dev/null 2>&1 || true
 
 # Enough to fetch the cluster's endpoint and credentials; it grants no
 # access to any Kubernetes object. That comes from the namespace Role.

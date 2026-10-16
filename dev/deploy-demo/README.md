@@ -47,8 +47,11 @@ It creates (or reuses):
 - the `github-actions` Workload Identity pool, and a `k8s-lookout-demo`
   provider in it that accepts only this repository (by numeric ID) in
   the `demo` environment;
-- the `lookout-demo-deploy` service account, which only that provider's
-  `demo` subject may act as;
+- the `lookout-demo-deploy` service account, which only identities with
+  this repository's numeric ID may act as (and the provider admits
+  those only from the `demo` environment). The binding uses the ID, not
+  the token's subject, because GitHub's subject format varies per
+  repository;
 - `roles/container.clusterViewer` for it: cluster credentials, no
   Kubernetes object access;
 - the namespace, and in it the `lookout-demo-deploy` Role and
