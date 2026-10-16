@@ -19,10 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the access log on stdout, and an HTTPS-only Ingress with a
   Google-managed certificate on a reserved static IP. One file to edit
   (`config.yaml`: domain, OAuth client, allow-lists); the domain reaches
-  the certificate, Ingress host and `--resource-url` by kustomize
-  replacement. The new "Gemini Enterprise" page walks from OAuth client to
-  data store. Its image pin is checked against deploy/51 by
-  `verify-helm-parity`, and the release checklist bumps it.
+  the certificate, Ingress host and `--resource-url` by the `domain`
+  component, which a kustomization setting the values from outside lists
+  itself (with a `configMapGenerator` merge, so the copy sees its value).
+  `deploy-mcp-gemini-gateway/` serves the same pods behind a GKE Gateway
+  with a Certificate Manager map instead. Rollouts keep a serving pod
+  behind the load balancer (preStop sleep, `maxUnavailable: 0`). The new
+  "Gemini Enterprise" page walks from OAuth client to data store. Its
+  image pin is checked against deploy/51 by `verify-helm-parity`, which
+  also checks the Gateway overlay drops the whole Ingress path, and the
+  release checklist bumps it.
 
 - **`lookout mcp` can read as each caller instead of as itself (#699).**
   With `--google-client-id`, a Gemini Enterprise app calling lookout as a

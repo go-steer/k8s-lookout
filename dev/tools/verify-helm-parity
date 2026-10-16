@@ -96,6 +96,20 @@ if [[ "$mcppinned" != "$pinned" ]]; then
   exit 1
 fi
 
+# deploy-mcp-gemini-gateway/ builds on deploy-mcp-gemini/ and must leave
+# none of its Ingress path behind: a stray BackendConfig annotation or
+# Ingress beside the Gateway is a second load balancer.
+gw="$(kustomize build deploy-mcp-gemini-gateway/)"
+if grep -qE '^kind: (Ingress|ManagedCertificate|BackendConfig)$|cloud\.google\.com/(neg|backend-config)' <<<"$gw"; then
+  echo "✗ deploy-mcp-gemini-gateway still carries part of the Ingress path" >&2
+  exit 1
+fi
+if ! grep -qE '^  - lookout\.example\.com$' <<<"$gw"; then
+  echo "✗ deploy-mcp-gemini-gateway HTTPRoute hostname is not DOMAIN from config.yaml" >&2
+  exit 1
+fi
+echo "✓ deploy-mcp-gemini-gateway swaps the Ingress path for a Gateway on DOMAIN"
+
 chartversion="$(grep -E '^version:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^version: *"?([^"]*)"?/\1/')"
 if [[ "$chartversion" != "${appversion#v}" ]]; then
   echo "✗ Chart.yaml version ($chartversion) != appVersion without the v (${appversion#v})" >&2

@@ -39,6 +39,14 @@ metadata:
 spec:
   # Stateless HTTP: any replica answers any request.
   replicas: 2
+  # A rollout must not leave the load balancer without a serving pod:
+  # bring the new one up and let it settle before an old one goes.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  minReadySeconds: 15
   selector:
     matchLabels:
       app.kubernetes.io/name: lookout-mcp
@@ -50,6 +58,8 @@ spec:
         app.kubernetes.io/component: mcp
     spec:
       serviceAccountName: lookout-mcp
+      # Covers the preStop sleep plus the server's 5 s drain.
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -114,6 +124,16 @@ spec:
               port: mcp
             initialDelaySeconds: 10
             periodSeconds: 30
+          # lookout closes its listener on SIGTERM, but the load balancer
+          # keeps sending a terminating pod requests until it is out of the
+          # backend group, tens of seconds later; without this every
+          # rollout answered 503 for up to a minute and a half. The sleep
+          # action, not an exec: the image has no shell or sleep binary
+          # (needs Kubernetes 1.30+).
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 30
 ---
 apiVersion: v1
 kind: Service

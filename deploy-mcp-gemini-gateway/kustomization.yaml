@@ -1,0 +1,70 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deploy-mcp-gemini behind a GKE Gateway with a Certificate Manager map,
+# in place of the Ingress + ManagedCertificate. Same pods, same
+# config.yaml (deploy-mcp-gemini/config.yaml); only the load balancer differs.
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-mcp-gemini-gateway?ref=vX.Y.Z"
+#
+# Two names in gateway.yaml are yours to set, as lookout-mcp-ip is on the
+# Ingress path: the reserved global static IP (NamedAddress, default
+# lookout-mcp-ip) and the Certificate Manager map (the
+# networking.gke.io/certmap annotation, default lookout-mcp), which must
+# hold a certificate for DOMAIN. The cluster needs the Gateway API
+# enabled (Autopilot has it; Standard: --gateway-api=standard).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy-mcp-gemini
+  - gateway.yaml
+
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: lookout-mcp
+        namespace: agent-triage
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.gke.io/v1
+      kind: ManagedCertificate
+      metadata:
+        name: lookout-mcp
+        namespace: agent-triage
+  - patch: |-
+      $patch: delete
+      apiVersion: cloud.google.com/v1
+      kind: BackendConfig
+      metadata:
+        name: lookout-mcp
+        namespace: agent-triage
+  # The Gateway controller manages the Service's NEGs itself, and the
+  # HealthCheckPolicy and GCPBackendPolicy in gateway.yaml replace the
+  # BackendConfig.
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: lookout-mcp
+        namespace: agent-triage
+        annotations:
+          cloud.google.com/neg: null
+          cloud.google.com/backend-config: null
+
+# DOMAIN, set once in config.yaml, is also the route's hostname.
+components:
+  - ../deploy-mcp-gemini/domain
