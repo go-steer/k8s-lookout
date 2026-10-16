@@ -234,14 +234,14 @@ func New(deps Deps) checks.Command {
 		Name:        "scan",
 		MCPName:     "k8s_scan",
 		MCPProfiles: []string{"triage", "audit"},
-		Summary:     "Start here when you know something is wrong but not what: one call runs every target-free incident check across the cluster — broken workloads, dead admission webhooks, stuck volumes and PVCs, rejected Gateway routes, config drift — then drills into the dependency edges of whatever it flagged. Needs no target; `--include=audit` adds the posture sweep.",
+		Summary:     "Start here when you know something is wrong but not what: one call runs every target-free incident check across the cluster — broken workloads, dead admission webhooks, stuck volumes and PVCs, rejected Gateway routes, config drift — then drills into the dependency edges of whatever it flagged. Needs no target. Opt-in groups answer other questions: `--include=cloud` for quota headroom, zone capacity stockouts, subnet IP space and orphaned disks or static IPs; `--include=audit` for security and reliability posture; `--include=perf` for control-plane latency.",
 		// One invocation is a dozen checks and two List passes; the
 		// single-check budget would abort a healthy scan of a large
 		// cluster.
 		TimeoutDefault: 60 * time.Second,
 		Flags: []emit.FlagSpec{
 			{Name: "include", Type: emit.FlagString, Default: "",
-				Help: "additionally run these opt-in groups: " + strings.Join(optionalGroups, ",") + ". Comma-separated, 'all' for every one, '-' to subtract (all,-cloud). Left out by default because they answer a different question (audit = posture, no incident) or need a provider build (cloud, perf)"},
+				Help: "additionally run these opt-in groups: " + strings.Join(optionalGroups, ",") + ". cloud = quota headroom, zone capacity stockouts, subnet IP space, orphaned disks and static IPs; audit = security and reliability posture; perf = API server, APF, etcd and pod-startup latency. Comma-separated, 'all' for every one, '-' to subtract (all,-cloud). Left out by default because they answer a different question than what is broken; where the build or the credentials cannot reach the cloud, cloud and perf report an explicit unavailable finding rather than nothing"},
 			{Name: "max-drilldown", Type: emit.FlagInt, Default: "20",
 				Help: "cap the stage-2 dependency-edge drill-down at this many workloads, worst severity first (0 disables it); the number dropped is reported as truncated= in the summary"},
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",

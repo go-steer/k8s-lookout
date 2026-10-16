@@ -86,6 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLOUDSDK_CORE_PROJECT` still set the project. Without a selection nothing
   changes.
 
+### Changed
+
+- **`scan` says what each opt-in group answers (#717).** The summary and
+  the `--include` help name the questions behind `cloud` (quota
+  headroom, zone stockouts, subnet IP space, orphaned disks and static
+  IPs), `audit` and `perf`, so an agent asked about quota or capacity
+  reaches `--include=cloud`. In a live test it had answered from
+  `triage delta` instead. "Need a provider build" is now what actually
+  happens: an explicit unavailable finding where the cloud can't be
+  reached.
+
 ## [0.36.0] - 2026-10-12
 
 **This release completes a repository-wide architecture, reliability, and security hardening sweep alongside GKE cloud provider resilience, cross-cluster AX TLS authentication, storm topology isolation, and watchboard session recovery.** Informer handlers now decouple event delivery from downstream processing through non-blocking queues, graph ingress and snapshot compaction stay lock-contention-free at 100k-pod scale, and repeat incident followups coalesce onto their canonical bound session without dropping first-lapse material changes. On the cloud and sink boundary, broken GKE Workload Identity bindings, regional/global HTTP(S) load balancers in `cloud orphans`, managed control-plane `perf probe --pack=etcd` 404s, off-cluster `gke_` kubeconfig contexts, and `compute.instances.insert` stockout operations now degrade cleanly and preserve full diagnostic fidelity; `lookout watch` verifies cross-cluster AX server certificates (`--ax-ca-file`), refreshes per-RPC bearer credentials (`--ax-token-env`), ignores auto-published `kube-root-ca.crt` ConfigMap ancestors during storm correlation, and automatically reopens and retries warning digests on a new watchboard session when a prior session disappears (`404`/`410`).
