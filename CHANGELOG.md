@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`deploy-mcp-gemini/` is now the Gateway overlay; the Ingress variant
+  is gone.** It serves through a `gke-l7-global-external-managed`
+  Gateway with TLS from a Certificate Manager map (static IP
+  `lookout-mcp-ip` and map `lookout-mcp` by default; the guide shows how
+  to create both, or point at your own). `deploy-mcp-gemini-gateway/`,
+  which shipped as the Gateway variant in 0.37.0, remains as a
+  deprecated alias building exactly the same objects. Replicas now
+  spread one per zone: behind a Gateway a zone reaches the load
+  balancer only minutes after its first pod, and GKE counts a pod in a
+  not-yet-attached zone as ready. The first automated deploy answered
+  503 for three and a half minutes for exactly that reason.
+- **Deploy demo fails a deploy that dropped requests.** It probes the
+  endpoint throughout the rollout and fails on any answer but `200`,
+  rather than passing once the endpoint recovered. It uses server-side
+  apply, so an unchanged HTTPRoute no longer reports changed on every
+  run.
+
 ## [0.37.0] - 2026-10-16
 
 **This release lets a Gemini Enterprise app call lookout with every read running as the signed-in person: their own Google token, their own Kubernetes RBAC and Cloud IAM, nothing on lookout's identity.** `lookout mcp --google-client-id` verifies each caller's Google token per request (via go-steer `steward`), passes it to every Kubernetes and Google Cloud client the read path builds, filters rows read from lookout's own files by the caller's access (`hidden=<n>`), and records who wrote triage records (`recorded_by`, store migration v11: upgrade the sentinel with or before the MCP server). Two ready-to-apply GKE deployments ship with it, `deploy-mcp-gemini/` (Ingress and managed certificate) and `deploy-mcp-gemini-gateway/` (Gateway and Certificate Manager map), both on the `-gke` image with zero-downtime rollouts, plus a "Gemini Enterprise" getting-started guide. Verified live end to end, including Cloud API reads as the caller. Cloud-backed checks now answer for the cluster selected with `--context`/`--kubeconfig` rather than the one lookout runs in; `scan` says what `--include=cloud` covers; and GKE's deliberately empty addon Services are no longer reported as critical.

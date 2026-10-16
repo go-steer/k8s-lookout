@@ -2,10 +2,12 @@
 
 `.github/workflows/deploy-demo.yml` keeps the project's demo Gemini
 Enterprise endpoint on the latest release. After **Release images**
-succeeds for a tag, it applies `deploy-mcp-gemini-gateway/` at that tag
+succeeds for a tag, it applies `deploy-mcp-gemini/` at that tag
 with the signed `:<tag>-gke` image, then checks the two answers Gemini
 Enterprise depends on: the RFC 9728 metadata and a `401` for a call
-without a token. Run it by hand (**Actions → Deploy demo → Run
+without a token. It probes the endpoint every couple of seconds through
+the rollout and fails the run if any probe gets anything but a `200`,
+so a deploy that dropped requests shows as failed. Run it by hand (**Actions → Deploy demo → Run
 workflow**, with a tag) to redeploy or to pick up a changed variable.
 A manual run can also name an `image` (`repo:tag` or
 `repo@sha256:…`) to run in place of the release's, with that tag's
@@ -103,17 +105,19 @@ gh variable set DEMO_ENABLED --body true
 
 ### 3. First deploy
 
-Run the workflow by hand with the current release tag. A release
-earlier than the first one that ships `deploy-mcp-gemini-gateway/`
-cannot be deployed this way.
+Run the workflow by hand with the current release tag. v0.37.0 is the
+earliest release it can deploy (it shipped the overlay as
+`deploy-mcp-gemini-gateway/`, which the workflow picks for that tag).
 
 ## Changing a value
 
 Edit the environment variable and run the workflow by hand with the
 current release tag. A change to the static IP or the certificate map
 reprograms the load balancer, which can drop requests for a few
-seconds; a change to the allow-lists or the client ID only rolls the
-pods, which the overlay does without dropping any.
+seconds, and the run then fails on the dropped probes: expected for
+that change, so check the probe timeline in the log. A change to the
+allow-lists or the client ID only rolls the pods, which should drop
+nothing.
 
 ## Taking it down
 

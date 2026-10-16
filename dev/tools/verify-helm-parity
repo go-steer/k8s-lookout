@@ -97,19 +97,25 @@ if [[ "$mcppinned" != "$pinned-gke" ]]; then
   exit 1
 fi
 
-# deploy-mcp-gemini-gateway/ builds on deploy-mcp-gemini/ and must leave
-# none of its Ingress path behind: a stray BackendConfig annotation or
-# Ingress beside the Gateway is a second load balancer.
-gw="$(kustomize build deploy-mcp-gemini-gateway/)"
+# deploy-mcp-gemini/ serves through a Gateway only. A stray Ingress-path
+# object or a NEG annotation of ours beside it is a second load balancer
+# (the Gateway controller owns the Service's NEG annotation), and the
+# route must carry DOMAIN from config.yaml. The deprecated
+# deploy-mcp-gemini-gateway/ alias must build exactly the same.
+gw="$(kustomize build deploy-mcp-gemini/)"
 if grep -qE '^kind: (Ingress|ManagedCertificate|BackendConfig)$|cloud\.google\.com/(neg|backend-config)' <<<"$gw"; then
-  echo "✗ deploy-mcp-gemini-gateway still carries part of the Ingress path" >&2
+  echo "✗ deploy-mcp-gemini carries part of an Ingress path" >&2
   exit 1
 fi
-if ! grep -qE '^  - lookout\.example\.com$' <<<"$gw"; then
-  echo "✗ deploy-mcp-gemini-gateway HTTPRoute hostname is not DOMAIN from config.yaml" >&2
+if ! grep -qE '^kind: Gateway$' <<<"$gw" || ! grep -qE '^  - lookout\.example\.com$' <<<"$gw"; then
+  echo "✗ deploy-mcp-gemini has no Gateway, or its HTTPRoute hostname is not DOMAIN from config.yaml" >&2
   exit 1
 fi
-echo "✓ deploy-mcp-gemini-gateway swaps the Ingress path for a Gateway on DOMAIN"
+if [[ "$(kustomize build deploy-mcp-gemini-gateway/)" != "$gw" ]]; then
+  echo "✗ the deploy-mcp-gemini-gateway alias no longer builds exactly deploy-mcp-gemini/" >&2
+  exit 1
+fi
+echo "✓ deploy-mcp-gemini serves through a Gateway on DOMAIN; its old -gateway alias matches"
 
 chartversion="$(grep -E '^version:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^version: *"?([^"]*)"?/\1/')"
 if [[ "$chartversion" != "${appversion#v}" ]]; then

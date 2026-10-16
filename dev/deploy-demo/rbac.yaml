@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # What the Deploy demo workflow may do, in the demo namespace only:
-# apply deploy-mcp-gemini-gateway's objects and watch the rollout.
+# apply deploy-mcp-gemini's objects and watch the rollout.
 # No delete (the workflow does not prune) and nothing cluster-scoped;
 # setup.sh creates the namespace once. DEPLOY_SA is replaced by
 # setup.sh with the deploy service account's email, which is how GKE

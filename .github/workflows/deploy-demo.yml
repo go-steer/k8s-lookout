@@ -15,7 +15,7 @@
 name: Deploy demo
 
 # Deploys a released lookout to the project's demo Gemini Enterprise
-# endpoint: deploy-mcp-gemini-gateway/ at the release tag, the signed
+# endpoint: deploy-mcp-gemini/ at the release tag, the signed
 # :<tag>-gke image (the provider build: caller-token Cloud API reads
 # need it), and the endpoint's real values from the `demo` environment.
 # Nothing deployment-specific lives in the repo.
@@ -132,13 +132,18 @@ jobs:
             exit 1
           fi
           echo "image: $image"
+          # v0.37.0 shipped the Gateway overlay as deploy-mcp-gemini-gateway/;
+          # from v0.38.0 it is deploy-mcp-gemini/ itself.
+          overlay=deploy-mcp-gemini
+          [[ -f deploy-mcp-gemini/gateway.yaml ]] || overlay=deploy-mcp-gemini-gateway
+          echo "overlay: $overlay"
           mkdir .deploy-demo
           cat > .deploy-demo/kustomization.yaml <<EOF
           apiVersion: kustomize.config.k8s.io/v1beta1
           kind: Kustomization
           namespace: "${NAMESPACE}"
           resources:
-            - ../deploy-mcp-gemini-gateway
+            - ../${overlay}
           components:
             - ../deploy-mcp-gemini/domain
           images:
@@ -167,17 +172,54 @@ jobs:
           kubectl kustomize .deploy-demo > .deploy-demo/rendered.yaml
           grep -E '^kind:|image:|hostnames' -A1 .deploy-demo/rendered.yaml
 
+      # Probes the endpoint every ~2 s from before the apply until the old
+      # pods have finished draining, and fails the run on any answer but
+      # 200: a deploy that dropped requests is a failed deploy, even if
+      # the endpoint is healthy by the time the smoke test looks. (The
+      # first deploy, with nothing serving yet, has nothing to drop.)
+      # Server-side apply: a client-side apply re-sends the HTTPRoute's
+      # rules list, which the API server has defaulted, and so reports
+      # it changed on every run.
       - name: Apply
         env:
           NAMESPACE: ${{ vars.NAMESPACE }}
+          DOMAIN: ${{ vars.DOMAIN }}
         run: |
-          kubectl apply -f .deploy-demo/rendered.yaml
+          url="https://${DOMAIN}/.well-known/oauth-protected-resource/mcp"
+          before="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$url" || true)"
+          probe() {
+            while :; do
+              printf '%s %s\n' "$(date -u +%T)" "$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$url" || true)"
+              sleep 2
+            done
+          }
+          probe > /tmp/probe.log &
+          probe_pid=$!
+
+          kubectl apply --server-side --force-conflicts --field-manager=lookout-deploy-demo \
+            -f .deploy-demo/rendered.yaml
           kubectl -n "$NAMESPACE" rollout status deploy/lookout-mcp --timeout=5m
+          # rollout status returns once the new pods are ready; the old
+          # ones still serve through their 30 s preStop sleep, and the
+          # load balancer takes a while to stop routing to them.
+          sleep 75
+          kill "$probe_pid"
+
+          echo "endpoint during the rollout (status, consecutive probes):"
+          awk '{print $2}' /tmp/probe.log | uniq -c | awk '{print "  " $2 " x" $1}'
+          failed="$(grep -cv ' 200$' /tmp/probe.log || true)"
+          if [[ "$before" != 200 ]]; then
+            echo "endpoint answered $before before the apply: a first deploy, nothing to drop"
+          elif [[ "$failed" -gt 0 ]]; then
+            echo "::error::the endpoint failed $failed of $(wc -l < /tmp/probe.log) probes during the rollout"
+            grep -v ' 200$' /tmp/probe.log | head -20
+            exit 1
+          fi
 
       # The two answers Gemini Enterprise depends on: the RFC 9728
       # metadata naming this resource, and a 401 for a call without a
-      # token. A config-only change can reprogram the load balancer, so
-      # allow it a few minutes.
+      # token. Retried for a first deploy, which waits on the load
+      # balancer; after a clean rollout it answers at once.
       - name: Smoke test
         env:
           DOMAIN: ${{ vars.DOMAIN }}

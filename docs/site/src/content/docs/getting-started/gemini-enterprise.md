@@ -16,8 +16,7 @@ Cloud **as the person who asked**, with their own Google access token:
 - Each tool call in the access log names the person who made it.
 
 How it works is on the [MCP setup](/getting-started/mcp/#each-caller-reads-as-themselves-google-token-mode)
-page. This page is the walk-through, about an hour the first time, most of
-it waiting for a certificate.
+page. This page is the walk-through, under an hour the first time.
 
 ## What you need
 
@@ -25,8 +24,8 @@ it waiting for a certificate.
   server with verified TLS, which in-cluster lookout satisfies.
 - A **Gemini Enterprise** app in the same Google Workspace organization,
   and permission to add data stores to it.
-- A **hostname** you control (`lookout.example.com` below), for the
-  load balancer's managed certificate.
+- A **hostname** you control (`lookout.example.com` below), and a
+  certificate for it in Certificate Manager (step 2 creates one).
 - `gcloud` and `kubectl` pointed at the project and cluster.
 
 ```bash
@@ -52,15 +51,38 @@ If your organization restricts Google Cloud scopes, sign-in will fail
 with "Access blocked: your institution's admin needs to review" until a
 Workspace admin marks this client **Trusted**.
 
-## 2. A static IP and DNS
+## 2. A static IP, DNS and a certificate
+
+lookout serves through a GKE Gateway (a global external Application
+Load Balancer) whose TLS comes from a Certificate Manager map.
 
 ```bash
 gcloud compute addresses create lookout-mcp-ip --global
 gcloud compute addresses describe lookout-mcp-ip --global --format='value(address)'
 ```
 
-Point an `A` record for your hostname at that address. The managed
-certificate is only issued once the name resolves to it.
+Point an `A` record for your hostname at that address.
+
+If you already have a certificate map covering the hostname (a wildcard
+for the domain, say), use it and skip the rest of this step. Otherwise
+create a Google-managed certificate, authorized through DNS, and a map
+holding it:
+
+```bash
+gcloud certificate-manager dns-authorizations create lookout-mcp --domain=lookout.example.com
+gcloud certificate-manager dns-authorizations describe lookout-mcp \
+  --format='value(dnsResourceRecord.name,dnsResourceRecord.type,dnsResourceRecord.data)'
+# add that CNAME record to your DNS, then:
+gcloud certificate-manager certificates create lookout-mcp \
+  --domains=lookout.example.com --dns-authorizations=lookout-mcp
+gcloud certificate-manager maps create lookout-mcp
+gcloud certificate-manager maps entries create lookout-mcp \
+  --map=lookout-mcp --certificates=lookout-mcp --hostname=lookout.example.com
+```
+
+The certificate is issued once the CNAME resolves, usually within
+minutes; `gcloud certificate-manager certificates describe lookout-mcp`
+shows `ACTIVE`.
 
 ## 3. Deploy
 
@@ -73,10 +95,16 @@ $EDITOR config.yaml        # DOMAIN, GOOGLE_CLIENT_ID, GOOGLE_ALLOW, GOOGLE_ALLO
 kubectl apply -k .
 ```
 
-Or keep the overlay remote and set the values from your own
-kustomization. Set them with a `configMapGenerator` merge, not a patch,
-and list the `domain` component: the overlay copies `DOMAIN` into the
-certificate and the Ingress host when it is built, and only a merge
+Two names in `gateway.yaml` are yours too, if they differ from the
+defaults above: the static IP (`NamedAddress`, `lookout-mcp-ip`) and the
+certificate map (the `networking.gke.io/certmap` annotation,
+`lookout-mcp`). The cluster needs the Gateway API (Autopilot has it;
+on Standard, `--gateway-api=standard`).
+
+Or keep the overlay remote and set everything from your own
+kustomization. Set the `config.yaml` values with a `configMapGenerator`
+merge, not a patch, and list the `domain` component: the overlay copies
+`DOMAIN` into the route's hostname when it is built, and only a merge
 lands early enough for the component to copy your value instead.
 
 ```yaml
@@ -93,29 +121,48 @@ configMapGenerator:
       - GOOGLE_CLIENT_ID=123456789012-abc.apps.googleusercontent.com
       - GOOGLE_ALLOW=@example.com
       - GOOGLE_ALLOW_WRITE=
+patches:
+  - target: {kind: Gateway, name: lookout-mcp}
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/networking.gke.io~1certmap
+        value: my-cert-map
+      - op: replace
+        path: /spec/addresses/0/value
+        value: my-static-ip
 ```
 
 Either way it creates, in `agent-triage`:
 
 - a `lookout-mcp` ServiceAccount, with no RBAC and no Workload Identity;
-- two stateless `lookout mcp` replicas in Google-token mode, serving the
-  `triage` and `audit` tool profiles plus six incident reads (cluster
-  health, recent changes, event timeline, resource spec, blast radius,
-  resource top) — minus `findings diff`, which needs a store — with
-  the access log on stdout;
-- a GKE external HTTPS load balancer (Ingress, `ManagedCertificate`,
-  `BackendConfig`) on `lookout-mcp-ip`, HTTPS only.
+- two stateless `lookout mcp` replicas in Google-token mode, one per
+  zone, serving the `triage` and `audit` tool profiles plus six
+  incident reads (cluster health, recent changes, event timeline,
+  resource spec, blast radius, resource top) — minus `findings diff`,
+  which needs a store — with the access log on stdout;
+- a `gke-l7-global-external-managed` Gateway on `lookout-mcp-ip`, HTTPS
+  only, an HTTPRoute for `DOMAIN`, a health check on the metadata path
+  and a 300 s backend timeout.
 
-The certificate takes 15 to 60 minutes after DNS resolves. Watch it:
+Once `kubectl -n agent-triage get gateway lookout-mcp` shows
+`PROGRAMMED True`, allow a minute or two for the load balancer to start
+answering HTTPS:
 
 ```bash
-kubectl -n agent-triage get managedcertificate lookout-mcp -w   # wait for Active
 curl -s https://lookout.example.com/.well-known/oauth-protected-resource/mcp
 ```
 
 The metadata names `https://accounts.google.com` as the authorization
 server. `curl -X POST https://lookout.example.com/mcp` gets a `401`: no
 token.
+
+Rollouts keep a serving pod behind the load balancer (a `preStop` drain,
+`maxUnavailable: 0`). One gap remains: the Gateway attaches a zone to
+the load balancer only minutes after the first pod lands there, and
+GKE counts a pod in a not-yet-attached zone as ready. If a rollout moves
+every replica into zones the load balancer has never served, requests
+fail until the attach completes. Spreading replicas across zones makes
+that unlikely, and it stops once each zone has been attached.
 
 ### A different image
 
@@ -131,50 +178,6 @@ images:
     newName: us-docker.pkg.dev/my-project/mirror/lookout
     newTag: vX.Y.Z-gke        # or digest: sha256:...
 ```
-
-### Behind a Gateway instead
-
-If the cluster already serves through the Gateway API with a
-Certificate Manager map (one wildcard certificate for many hosts), use
-`deploy-mcp-gemini-gateway` in place of `deploy-mcp-gemini`. It runs the
-same pods from the same `config.yaml`, and swaps the Ingress,
-`ManagedCertificate` and `BackendConfig` for a
-`gke-l7-global-external-managed` Gateway, an HTTPRoute for `DOMAIN`, a
-health check on the metadata path and a 300 s backend timeout.
-
-Two names in `deploy-mcp-gemini-gateway/gateway.yaml` are yours: the
-static IP (`NamedAddress`, default `lookout-mcp-ip`) and the certificate
-map (the `networking.gke.io/certmap` annotation, default `lookout-mcp`),
-which must hold a certificate covering `DOMAIN`. From your own
-kustomization, set them with a patch:
-
-```yaml
-resources:
-  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini-gateway?ref=vX.Y.Z
-components:
-  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini/domain?ref=vX.Y.Z
-configMapGenerator:
-  - name: lookout-mcp
-    namespace: agent-triage
-    behavior: merge
-    literals:
-      - DOMAIN=lookout.example.com
-      # ... the other config.yaml values
-patches:
-  - target: {kind: Gateway, name: lookout-mcp}
-    patch: |-
-      - op: replace
-        path: /metadata/annotations/networking.gke.io~1certmap
-        value: my-cert-map
-      - op: replace
-        path: /spec/addresses/0/value
-        value: my-static-ip
-```
-
-There is no certificate to wait for; once
-`kubectl -n agent-triage get gateway lookout-mcp` shows `PROGRAMMED
-True`, allow a minute or two for the load balancer to start answering
-HTTPS.
 
 ## 4. Give people access
 

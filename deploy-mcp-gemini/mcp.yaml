@@ -60,6 +60,24 @@ spec:
       serviceAccountName: lookout-mcp
       # Covers the preStop sleep plus the server's 5 s drain.
       terminationGracePeriodSeconds: 45
+      # One replica per zone. Behind a Gateway the load balancer reaches a
+      # zone only once the controller attaches that zone's NEG, minutes
+      # after the first pod lands there, and GKE's readiness gate calls a
+      # pod in a not-yet-attached NEG ready. Two zones means losing one,
+      # or the node under one replica, never empties the backend. Per
+      # revision (pod-template-hash), so a rollout's new pods are not
+      # pushed toward the emptiest zone, which is the one most likely to
+      # have no NEG yet.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: lookout-mcp
+              app.kubernetes.io/component: mcp
+          matchLabelKeys:
+            - pod-template-hash
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -147,9 +165,9 @@ metadata:
   labels:
     app.kubernetes.io/name: lookout-mcp
     app.kubernetes.io/component: mcp
-  annotations:
-    cloud.google.com/neg: '{"ingress": true}'
-    cloud.google.com/backend-config: '{"default": "lookout-mcp"}'
+  # No cloud.google.com/neg annotation: the Gateway controller writes and
+  # owns it (and rewrites any other value, zones pre-provisioning
+  # included). The health check and timeout are in gateway.yaml.
 spec:
   type: ClusterIP
   selector:
@@ -160,55 +178,3 @@ spec:
       port: 80
       targetPort: mcp
       protocol: TCP
----
-# The load balancer's health check targets the metadata path too (the
-# default, GET /, is a 404 here), and its backend timeout covers long
-# tool calls (scan's default --timeout is minutes, not seconds).
-apiVersion: cloud.google.com/v1
-kind: BackendConfig
-metadata:
-  name: lookout-mcp
-  namespace: agent-triage
-spec:
-  timeoutSec: 300
-  healthCheck:
-    type: HTTP
-    requestPath: /.well-known/oauth-protected-resource/mcp
-    port: 8383
----
-apiVersion: networking.gke.io/v1
-kind: ManagedCertificate
-metadata:
-  name: lookout-mcp
-  namespace: agent-triage
-spec:
-  domains:
-    - lookout.example.com # replaced with DOMAIN from config.yaml
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: lookout-mcp
-  namespace: agent-triage
-  labels:
-    app.kubernetes.io/name: lookout-mcp
-    app.kubernetes.io/component: mcp
-  annotations:
-    kubernetes.io/ingress.class: gce
-    # Reserve it first: gcloud compute addresses create lookout-mcp-ip --global
-    kubernetes.io/ingress.global-static-ip-name: lookout-mcp-ip
-    networking.gke.io/managed-certificates: lookout-mcp
-    # HTTPS only: Gemini Enterprise sends each person's Google token.
-    kubernetes.io/ingress.allow-http: "false"
-spec:
-  rules:
-    - host: lookout.example.com # replaced with DOMAIN from config.yaml
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: lookout-mcp
-                port:
-                  name: http
