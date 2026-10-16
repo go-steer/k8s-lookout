@@ -222,7 +222,17 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	// Invocation because the code that consumes it — every check
 	// group's client accessor — already takes a context and takes
 	// nothing else. See pkg/kube/selection.go.
-	ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
+	//
+	// A multi-cluster endpoint puts the caller's chosen cluster in the
+	// context before calling Run (kube.WithTarget). It stays: the flags
+	// cannot name a second cluster for the same call.
+	if sel := kube.SelectionFrom(ctx); sel.Target != nil {
+		if scope.Kubeconfig != "" || scope.Context != "" {
+			return usageError(stderr, cfg.Name, fmt.Errorf("--kubeconfig and --context do not apply: this call's cluster is %q", sel.Target.Name))
+		}
+	} else {
+		ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
+	}
 
 	// The deadline starts here, before the Writer exists, so that the
 	// caller access reviews a filtering Writer makes are bounded by
@@ -247,13 +257,23 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 		return ExitRuntime
 	}
-	if scope.Context != "" {
+	clusterNote := scope.Context
+	if t := kube.SelectionFrom(ctx).Target; t != nil {
+		// A multi-cluster endpoint's per-call cluster, by its canonical
+		// name: an agent fanning one question out over several clusters
+		// needs each answer to say which cluster gave it.
+		clusterNote = t.Name
+		if t.Project != "" {
+			clusterNote = t.Project + "/" + t.Location + "/" + t.Name
+		}
+	}
+	if clusterNote != "" {
 		// Stamped whether or not the check ends up building a client:
 		// the caller named a cluster, and a stream that says which
 		// cluster it was asked about is what makes several of them
 		// mergeable. The note is Writer-owned, so no check can
 		// contradict it.
-		if err := writer.note("context", scope.Context); err != nil {
+		if err := writer.note("context", clusterNote); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
 			return ExitRuntime
 		}

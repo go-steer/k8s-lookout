@@ -78,6 +78,17 @@ type config struct {
 	// caller, and perCaller bounds each caller's calls in flight.
 	google    *GoogleAuth
 	perCaller *callerLimit
+	// clusters, when non-nil, is multi-cluster mode (#700): every tool
+	// takes a cluster argument, resolved here per call.
+	clusters *Clusters
+}
+
+// WithClusters serves several clusters: every tool gains a required
+// cluster argument, and k8s_list_clusters names the clusters a caller
+// may pass (#700). The server pins no kubeconfig or context in this
+// mode; each call reaches its cluster through the directory.
+func WithClusters(c *Clusters) Option {
+	return func(cfg *config) { cfg.clusters = c }
 }
 
 // WithGoogleAuth runs every tool call as its caller, with the caller's own
@@ -151,11 +162,15 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 		cfg.perCaller = newCallerLimit(defaultMaxConcurrentPerCaller)
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
+	multi := cfg.clusters != nil
+	if multi {
+		server.AddTool(listClustersTool(), listClustersHandler(cfg, sem))
+	}
 	for _, c := range Advertised(reg, cfg.tools) {
 		server.AddTool(&mcp.Tool{
 			Name:        c.MCPName,
 			Description: toolDescription(c),
-			InputSchema: inputSchema(c),
+			InputSchema: toolSchema(c, multi),
 			// Most of this surface is the read path (§4.3) and stays
 			// ReadOnlyHint:true. A command that mutates state (c.Writes
 			// — the §9.4 triage-status upsert) is advertised
@@ -291,9 +306,9 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		start := cfg.log.now()
 		remote := remoteAddrFromContext(ctx)
-		caller := ""
+		caller, cluster := "", ""
 		record := func(exit int, text string) {
-			cfg.log.RecordAs(caller, c.MCPName, exit, start, len(text), remote)
+			cfg.log.RecordFor(caller, cluster, c.MCPName, exit, start, len(text), remote)
 		}
 		toolError := func(msg string) *mcp.CallToolResult {
 			record(emit.ExitRuntime, msg)
@@ -316,17 +331,63 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			defer release()
 			ctx = kube.WithCallerName(kube.WithCallerToken(ctx, ts), caller)
 		}
-		args, err := argv(c, req.Params.Arguments)
-		if err != nil {
-			record(emit.ExitUsage, err.Error())
-			return nil, invalidParams(err.Error())
+		rawArgs := req.Params.Arguments
+		var clusterArgs []string
+		if cfg.clusters != nil {
+			rest, name, err := takeCluster(rawArgs)
+			if err != nil {
+				record(emit.ExitUsage, err.Error())
+				return nil, invalidParams(err.Error())
+			}
+			if name == "" {
+				msg := "argument \"cluster\" is required: this endpoint serves several clusters, and k8s_list_clusters lists the names you can pass"
+				record(emit.ExitUsage, msg)
+				return nil, invalidParams(msg)
+			}
+			entry, err := cfg.clusters.Resolve(ctx, caller, name)
+			if errors.Is(err, errUnknownCluster) {
+				msg := err.Error() + ": k8s_list_clusters lists the clusters you can pass"
+				record(emit.ExitUsage, msg)
+				return nil, invalidParams(msg)
+			}
+			if err != nil {
+				return toolError("lookout " + c.Name + ": " + err.Error()), nil
+			}
+			cluster = entry.canonical
+			restCfg, err := cfg.clusters.Config(ctx, entry)
+			if err != nil {
+				return toolError(fmt.Sprintf("lookout %s: cluster %s: %v", c.Name, entry.name, err)), nil
+			}
+			ctx = kube.WithTarget(ctx, kube.Target{
+				Name:     entry.ref.Name,
+				Project:  entry.ref.Project,
+				Location: entry.ref.Location,
+				Config:   restCfg,
+			})
+			// A command that labels what it stores by cluster (findings
+			// diff) is given the canonical name, which does not change
+			// with who is asking.
+			if commandHasFlag(c, "cluster") {
+				clusterArgs = append(clusterArgs, "--cluster="+entry.canonical)
+			}
+			rawArgs = rest
 		}
-		if cfg.google != nil && slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--store-cluster") }) {
+		args, err := argv(c, rawArgs)
+		if err != nil {
+			msg := err.Error()
+			if cfg.clusters != nil {
+				msg = withClusterAccepted(msg)
+			}
+			record(emit.ExitUsage, msg)
+			return nil, invalidParams(msg)
+		}
+		if (cfg.google != nil || cfg.clusters != nil) && slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--store-cluster") }) {
 			// Which cluster's store a call reads is the operator's choice:
 			// the caller access check asks the cluster this server reads,
 			// so it cannot vouch for rows from another cluster's store
-			// (namespace names repeat across clusters).
-			msg := "store_cluster is not accepted in Google-token mode: the store this server reads is fixed by its operator"
+			// (namespace names repeat across clusters). On a multi-cluster
+			// endpoint the cluster argument already says which.
+			msg := "store_cluster is not accepted here: the store a call reads is fixed by the server's operator"
 			record(emit.ExitUsage, msg)
 			return nil, invalidParams(msg)
 		}
@@ -341,7 +402,10 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 			}, nil
 		}
-		fullArgs := append(pinnedArgs(c, cfg), args...)
+		// Server-supplied flags go before the caller's: a positional
+		// target ends the caller's argv, and flags after it would not
+		// parse.
+		fullArgs := append(append(pinnedArgs(c, cfg), clusterArgs...), args...)
 		var stdout, stderr bytes.Buffer
 		rc := c.RunConfig(&stdout, &stderr)
 		rc.Stdin = errReader{}

@@ -124,6 +124,32 @@ Flags:
                         ~/.kube/config).
   --context=<name>      kubeconfig context pinned for all MCP tool
                         invocations.
+  --clusters=<pairs>    serve several clusters (#700): comma-separated
+                        name=endpoint pairs, reached with the GKE
+                        provider's credentials (-tags gke). Every tool
+                        then takes a required "cluster" argument, and
+                        k8s_list_clusters lists the names a caller may
+                        pass. Exclusive with --clusters-from,
+                        --kubeconfig and --context.
+  --clusters-from=<scopes>
+                        serve several clusters, discovered: the same
+                        scopes as lookout watch, comma-separated and
+                        mixable — project[/location], fleet:<host>,
+                        folders/<id>, organizations/<id> — or alone,
+                        kubeconfig[:<path>] (one cluster per context).
+                        With --google-client-id, discovery runs as each
+                        caller, with their token, cached five minutes:
+                        a caller sees only the clusters they can read,
+                        and lookout needs no IAM; GKE clusters only, so
+                        no kubeconfig fleet and only *.gke.goog
+                        --clusters endpoints. Otherwise it runs as
+                        lookout at startup and every --rediscover. A
+                        name unique in the caller's set is used bare;
+                        a repeated one is name@project (then
+                        name@project/location); project/location/name
+                        always works. Not yet with --store or --report.
+  --rediscover=<dur>    how often the shared cluster set is refreshed
+                        without Google-token mode (default 10m).
   --exemptions=<path>   path to an exemption YAML file pinned for all
                         MCP tool invocations.
   --store=<path>        path to a sentinel SQLite store pinned for MCP
@@ -237,6 +263,9 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	googleAllow := fs.String("google-allow", "", "Google-token mode: who is let in (comma-separated emails or @domain)")
 	googleAllowWrite := fs.String("google-allow-write", "", "Google-token mode: who may call tools that change state (comma-separated emails or @domain)")
 	resourceURL := fs.String("resource-url", "", "Google-token mode: this server's MCP URL as clients reach it")
+	clustersFlag := fs.String("clusters", "", "serve several clusters: comma-separated name=endpoint pairs")
+	clustersFrom := fs.String("clusters-from", "", "serve several clusters, discovered from these scopes")
+	rediscover := fs.Duration("rediscover", mcpserver.DefaultRediscover, "how often the shared cluster set is refreshed")
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -309,6 +338,11 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 2
 	}
+	multiCluster := *clustersFlag != "" || *clustersFrom != ""
+	if problem := multiClusterProblem(multiCluster, googleMode, *clustersFlag, *clustersFrom, *kubeconfig, *contextName, *store, *report, *rediscover, fs); problem != "" {
+		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
+		return 2
+	}
 	selected, err := mcpserver.ResolveTools(reg, *profile, *tools)
 	if err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
@@ -322,7 +356,11 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if *listTools {
-		fmt.Fprint(stdout, mcpserver.ToolListing(reg, selected))
+		if multiCluster {
+			fmt.Fprint(stdout, mcpserver.MultiClusterToolListing(reg, selected))
+		} else {
+			fmt.Fprint(stdout, mcpserver.ToolListing(reg, selected))
+		}
 		return 0
 	}
 
@@ -367,7 +405,17 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		google = g
 	}
 
+	var clusters *mcpserver.Clusters
+	if multiCluster {
+		c, code := startClusters(ctx, *clustersFlag, *clustersFrom, googleMode, *rediscover, stderr)
+		if c == nil {
+			return code
+		}
+		clusters = c
+	}
+
 	server := mcpserver.New(reg, version.Semver(),
+		mcpserver.WithClusters(clusters),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),
 		mcpserver.WithSelection(*kubeconfig, *contextName),

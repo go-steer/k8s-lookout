@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One `lookout mcp` endpoint serves many clusters, across projects
+  (#700).** `--clusters` (name=endpoint pairs) or `--clusters-from` (the
+  same mixed scopes as `watch`: projects, GKE fleets, folders,
+  organizations, or a kubeconfig) turn on multi-cluster mode. Every tool
+  gains a required `cluster` argument, a string checked on the server
+  rather than an enum (whose cost would grow with the fleet), and
+  `k8s_list_clusters` lists the names a caller can pass, with a filter.
+  Names are bare where unique, `name@project` (then
+  `name@project/location`) where they repeat, and `project/location/name`
+  always works. In Google-token mode discovery runs as each caller, with
+  their token, cached five minutes, so a caller sees only clusters they
+  can read and lookout needs no IAM; otherwise it runs as lookout at
+  startup and every `--rediscover` (default 10m), and an unknown name
+  rediscovers at most once a minute. Each call's Kubernetes clients and
+  cloud provider identity follow the named cluster, its summary line
+  says which (`context=<canonical>`), and the access log records it
+  (`cluster=`). Single-cluster schemas and behavior are unchanged.
+  `--store`/`--report` are refused in this mode for now.
+
 - **`--clusters-from` discovers across projects, fleets, folders and
   organizations (#700).** `lookout watch --clusters-from` takes a
   comma-separated list of scopes that may be mixed:

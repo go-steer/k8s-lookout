@@ -164,6 +164,56 @@ What the mode guarantees:
   is store migration v11: upgrade the sentinel before (or with) the MCP
   server, because older binaries refuse a store migrated past them.
 
+## One endpoint, many clusters
+
+One `lookout mcp` can serve several clusters, in several projects. Name
+them with `--clusters` (`name=endpoint` pairs) or discover them with
+`--clusters-from`, which takes the same scopes as
+[`lookout watch`](/reference/watch/): projects, GKE fleets,
+folders and organizations, comma-separated and mixable, or a kubeconfig.
+
+```sh
+lookout mcp --listen=0.0.0.0:8383 --allow-non-loopback \
+  --access-log=/dev/stdout --google-client-id=... --google-allow=@example.com \
+  --resource-url=https://lookout.example.com/mcp \
+  --clusters-from=organizations/123456789012
+```
+
+Every tool then takes a required `cluster` argument, and one more tool,
+`k8s_list_clusters`, lists the clusters a caller can name:
+
+```
+cluster=checkout project=shop-prod location=us-central1 canonical=shop-prod/us-central1/checkout dns_endpoint=true
+cluster=prod@shop-prod project=shop-prod location=europe-west1 canonical=shop-prod/europe-west1/prod dns_endpoint=true
+cluster=prod@shop-stage project=shop-stage location=us-central1 canonical=shop-stage/us-central1/prod dns_endpoint=true
+scope=organizations/123456789012 via=asset clusters=3
+scanned=3 findings=0 elapsed=1.2s clusters=3
+```
+
+- **A call reads one cluster.** To compare three clusters, the agent
+  makes three calls, which MCP clients run in parallel; each answer's
+  summary line says which cluster it came from (`context=<canonical>`).
+  lookout never merges answers across clusters.
+- **Names are short where they can be:** the bare name when it is
+  unique, `name@project` when it repeats across projects
+  (`name@project/location` when it repeats within one), and
+  `project/location/name` always works.
+- **With Google-token mode, discovery runs as each caller,** with their
+  own token, cached for five minutes. A caller sees only the clusters
+  they can read, and lookout needs no IAM of its own. Because each
+  caller's Google token goes to the cluster's API server, this mode
+  serves GKE clusters only: no kubeconfig fleet, and `--clusters`
+  endpoints must be control-plane DNS endpoints (`*.gke.goog`). Without it,
+  lookout discovers once at startup, as itself, and again every
+  `--rediscover` (default 10m); an unknown name triggers a rediscovery,
+  at most once a minute.
+- **Cloud-backed checks follow the cluster:** `audit cluster`,
+  `cloud ipspace` and the rest answer for the named cluster and its
+  project, never for the cluster lookout runs in.
+- The access log names each call's cluster (`cluster=<canonical>`).
+- Not yet: `--store` and `--report` (each cluster needs its own), and
+  `--kubeconfig`/`--context`, which pin one cluster.
+
 ## Wiring into a core-agent daemon
 
 Register `lookout mcp` in the daemon's MCP server configuration as a

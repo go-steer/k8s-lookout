@@ -255,6 +255,28 @@ contexts:
 		t.Errorf("non-GKE selection: identity = %q/%q/%q, want empty (never the pod's)", p, l, c)
 	}
 
+	// A cluster named per call on a multi-cluster endpoint (#700) is the
+	// identity, over the environment, the metadata server and the
+	// kubeconfig alike; a kubeconfig-fleet target, which knows no
+	// project, borrows none.
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+	targetIdentity := func(tg kube.Target) (string, string, string) {
+		t.Helper()
+		p, err := New(kube.WithTarget(context.Background(), tg), cloud.Config{})
+		if err != nil {
+			t.Fatalf("New error: %v", err)
+		}
+		g := p.(*Provider)
+		return g.Project(), g.Location(), g.Cluster()
+	}
+	if p, l, c := targetIdentity(kube.Target{Name: "fleet-c", Project: "fleet-p", Location: "asia-east1"}); p != "fleet-p" || l != "asia-east1" || c != "fleet-c" {
+		t.Errorf("target: identity = %q/%q/%q, want fleet-p/asia-east1/fleet-c", p, l, c)
+	}
+	if p, l, c := targetIdentity(kube.Target{Name: "kind-local"}); p != "" || l != "" || c != "kind-local" {
+		t.Errorf("kubeconfig-fleet target: identity = %q/%q/%q, want only its name", p, l, c)
+	}
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
 	n := 0
 	mdCalls.Range(func(any, any) bool { n++; return true })
 	if n != 0 {

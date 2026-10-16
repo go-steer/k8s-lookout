@@ -33,13 +33,33 @@ import (
 // `--profile=triage --list-tools` sees the actual number the model
 // pays on every turn, not an assurance that it went down.
 func ToolListing(reg *checks.Registry, tools map[string]bool) string {
+	return toolListing(reg, tools, false)
+}
+
+// MultiClusterToolListing is ToolListing for a multi-cluster endpoint
+// (#700): every schema carries the cluster argument, and
+// k8s_list_clusters is advertised too.
+func MultiClusterToolListing(reg *checks.Registry, tools map[string]bool) string {
+	return toolListing(reg, tools, true)
+}
+
+func toolListing(reg *checks.Registry, tools map[string]bool, multi bool) string {
 	var b strings.Builder
 	cmds := Advertised(reg, tools)
+	total, count := 0, len(cmds)
+	if multi {
+		n := marshaledBytes(listClustersTool())
+		fmt.Fprintf(&b, "%-26s %7d  %s\n", listClustersName, n, listClustersCommand.Name)
+		total += n
+		count++
+	}
 	for _, c := range cmds {
-		fmt.Fprintf(&b, "%-26s %7d  %s\n", c.MCPName, toolBytes(c), c.Name)
+		n := toolBytes(c, multi)
+		fmt.Fprintf(&b, "%-26s %7d  %s\n", c.MCPName, n, c.Name)
+		total += n
 	}
 	fmt.Fprintf(&b, "%-26s %7d  advertised on every model call\n",
-		fmt.Sprintf("%d tools", len(cmds)), SchemaBytes(reg, tools))
+		fmt.Sprintf("%d tools", count), total)
 	return b.String()
 }
 
@@ -50,7 +70,7 @@ func ToolListing(reg *checks.Registry, tools map[string]bool) string {
 func SchemaBytes(reg *checks.Registry, tools map[string]bool) int {
 	total := 0
 	for _, c := range Advertised(reg, tools) {
-		total += toolBytes(c)
+		total += toolBytes(c, false)
 	}
 	return total
 }
@@ -60,13 +80,16 @@ func SchemaBytes(reg *checks.Registry, tools map[string]bool) int {
 // annotations. Marshaling the real mcp.Tool rather than measuring the
 // pieces means the number tracks the wire shape even if the SDK
 // changes it.
-func toolBytes(c checks.Command) int {
-	tool := &mcp.Tool{
+func toolBytes(c checks.Command, multi bool) int {
+	return marshaledBytes(&mcp.Tool{
 		Name:        c.MCPName,
 		Description: toolDescription(c),
-		InputSchema: inputSchema(c),
+		InputSchema: toolSchema(c, multi),
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: !c.Writes},
-	}
+	})
+}
+
+func marshaledBytes(tool *mcp.Tool) int {
 	raw, err := json.Marshal(tool)
 	if err != nil {
 		// Every field is a string, a bool, or a schema the same
