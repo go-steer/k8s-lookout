@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`deploy-mcp-gemini` can serve many clusters (#700).** `CLUSTERS_FROM`
+  in `config.yaml` (empty by default: the cluster lookout runs in) takes
+  the `--clusters-from` scopes; each Gemini Enterprise caller then sees,
+  and can name, only the clusters they can read. The Deploy demo
+  workflow passes an optional `CLUSTERS_FROM` environment variable
+  through.
+
 - **One `lookout mcp` endpoint serves many clusters, across projects
   (#700).** `--clusters` (name=endpoint pairs) or `--clusters-from` (the
   same mixed scopes as `watch`: projects, GKE fleets, folders,

@@ -23,9 +23,10 @@ metadata:
     app.kubernetes.io/component: mcp
 data:
   # The hostname Gemini Enterprise reaches lookout at. Its DNS A record
-  # must point at the static IP named in mcp.yaml (lookout-mcp-ip). It
-  # also becomes the managed certificate's domain, the Ingress host, and
-  # --resource-url (https://<DOMAIN>/mcp), via kustomization.yaml.
+  # must point at the static IP named in gateway.yaml (lookout-mcp-ip),
+  # and the certificate map there must cover it. It also becomes the
+  # HTTPRoute's hostname (the domain component) and --resource-url
+  # (https://<DOMAIN>/mcp).
   DOMAIN: lookout.example.com
   # The OAuth client the Gemini Enterprise data store is configured with
   # (Web application, redirect URI
@@ -37,3 +38,10 @@ data:
   # Who may call tools that change state (triage status, findings
   # diff/ack). Empty: no one.
   GOOGLE_ALLOW_WRITE: ""
+  # Serve many clusters instead of the one lookout runs in (#700):
+  # comma-separated scopes, mixable — a project or project/location,
+  # fleet:<host-project>, folders/<id>, organizations/<id>. Each caller
+  # sees, and can name, only the clusters they can read: discovery runs
+  # with their own token. Every tool then takes a cluster argument, and
+  # k8s_list_clusters lists the names. Empty: the cluster lookout runs in.
+  CLUSTERS_FROM: ""
