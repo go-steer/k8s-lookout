@@ -124,6 +124,13 @@ type Command struct {
 	// `bundle`, the sentinel) runs one. A privileged command must
 	// also declare Writes.
 	Privileged bool
+	// Local marks a command whose answer is measured from where lookout
+	// runs, not read from the cluster: `net probe` sends its packets from
+	// lookout's own pod. On a multi-cluster endpoint (#700) it is refused
+	// for every cluster but the one lookout runs in, because a probe from
+	// here says nothing about another cluster's network, and an agent
+	// reads a clean result as evidence against a fault there.
+	Local bool
 }
 
 // OutputField documents one Details key a command may emit.

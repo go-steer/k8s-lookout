@@ -19,11 +19,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // multiClusterProblem checks the multi-cluster flags of `lookout mcp`
@@ -46,8 +48,12 @@ func multiClusterProblem(multi, googleMode bool, clusters, clustersFrom, kubecon
 		return "--clusters and --clusters-from are mutually exclusive: list endpoints OR discover them, not both"
 	case kubeconfig != "" || contextName != "":
 		return "--kubeconfig and --context pin one cluster; a multi-cluster endpoint reaches each call's cluster through --clusters or --clusters-from (a kubeconfig fleet is --clusters-from=kubeconfig:<path>)"
-	case store != "" || report != "":
-		return "--store and --report are not yet supported on a multi-cluster endpoint: each cluster needs its own"
+	case googleMode && (store != "" || report != ""):
+		// Store files are keyed by a cluster's bare name, which only a
+		// discovery of the whole set can prove unique; each caller here
+		// sees their own set, and a caller's rows would be access-checked
+		// against a cluster that may not be the one they came from.
+		return "--store and --report are not supported on a multi-cluster endpoint in Google-token mode: a store file is named by the cluster's bare name, which each caller's own cluster set cannot prove unique"
 	case rediscover <= 0:
 		return "--rediscover must be positive"
 	}
@@ -78,6 +84,31 @@ func multiClusterProblem(multi, googleMode bool, clusters, clustersFrom, kubecon
 		}
 	}
 	return ""
+}
+
+// localClusterName is the canonical name of the cluster lookout runs in,
+// for the one command (net probe) that measures from here. It is trusted
+// only inside a pod, where the provider's identity comes from the
+// metadata server: on a workstation the provider falls back to the
+// kubeconfig's current context, and a probe from a laptop is from no
+// cluster at all.
+func localClusterName(ctx context.Context) string {
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return ""
+	}
+	p, err := cloud.New(ctx, cloud.Config{})
+	if err != nil {
+		return ""
+	}
+	id, ok := p.(interface {
+		Project() string
+		Location() string
+		Cluster() string
+	})
+	if !ok || id.Project() == "" || id.Location() == "" || id.Cluster() == "" {
+		return ""
+	}
+	return id.Project() + "/" + id.Location() + "/" + id.Cluster()
 }
 
 // startClusters resolves the fleet and, outside Google-token mode,

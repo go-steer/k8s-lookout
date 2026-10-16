@@ -211,8 +211,23 @@ scanned=3 findings=0 elapsed=1.2s clusters=3
   `cloud ipspace` and the rest answer for the named cluster and its
   project, never for the cluster lookout runs in.
 - The access log names each call's cluster (`cluster=<canonical>`).
-- Not yet: `--store` and `--report` (each cluster needs its own), and
-  `--kubeconfig`/`--context`, which pin one cluster.
+- **`--store` and `--report` become stems:** each call reads its
+  cluster's own file, named the way a multi-cluster `lookout watch`
+  names it, so an endpoint beside a multi-cluster watch reads what the
+  watch writes. A cluster whose bare name repeats in the set has no file
+  (watch skips such clusters too). Not in Google-token mode: file names
+  are bare cluster names, which each caller's own set cannot prove
+  unique.
+- **`net probe` is refused for other clusters:** it sends its packets
+  from lookout's own pod, so it answers only for the cluster lookout
+  runs in; `net probe-from` probes from inside any cluster.
+- **One cluster cannot take every slot:** each cluster's calls in flight
+  are capped (the global limit divided by the number of clusters, at
+  least 2; `--max-concurrency-per-cluster` overrides).
+- **Stateless HTTP:** any replica answers any request, so the endpoint
+  scales as a Deployment behind a Service with no sticky sessions.
+- `--kubeconfig`/`--context` pin one cluster and are refused here; a
+  kubeconfig fleet is `--clusters-from=kubeconfig:<path>`.
 
 ## Wiring into a core-agent daemon
 

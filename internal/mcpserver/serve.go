@@ -58,6 +58,12 @@ type ServeOptions struct {
 	// Ready, if non-nil, receives the bound address once the HTTP
 	// listener is accepting connections (tests bind port 0).
 	Ready chan<- string
+	// Stateless serves HTTP without sessions, as Google-token mode
+	// always does: any replica can answer any request, so an endpoint
+	// runs as several replicas behind a Service with no sticky sessions
+	// (#700). lookout keeps no per-session state and sends no
+	// server-to-client notifications, so it loses nothing.
+	Stateless bool
 }
 
 // Serve runs the server until ctx is canceled or the peer
@@ -119,7 +125,11 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 			&mcp.StreamableHTTPOptions{Stateless: true})))
 		handler = wrapHTTPHandler(mux)
 	} else {
-		handler = opts.Auth.Wrap(wrapHTTPHandler(mcp.NewStreamableHTTPHandler(getServer, nil)))
+		var httpOpts *mcp.StreamableHTTPOptions
+		if opts.Stateless {
+			httpOpts = &mcp.StreamableHTTPOptions{Stateless: true}
+		}
+		handler = opts.Auth.Wrap(wrapHTTPHandler(mcp.NewStreamableHTTPHandler(getServer, httpOpts)))
 	}
 	httpServer := &http.Server{
 		Handler: handler,
