@@ -1,0 +1,183 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Deploy demo
+
+# Deploys a released lookout to the project's demo Gemini Enterprise
+# endpoint: deploy-mcp-gemini-gateway/ at the release tag, the signed
+# :<tag>-gke image (the provider build: caller-token Cloud API reads
+# need it), and the endpoint's real values from the `demo` environment.
+# Nothing deployment-specific lives in the repo.
+#
+# Runs after Release images succeeds for a tag (a release the workflow
+# token creates starts no workflows, so `release: published` would
+# never fire), or by hand for a redeploy or a config change. It never
+# gates a PR and runs no tests: it ships a released artifact.
+#
+# One-time setup (Workload Identity Federation, the deploy service
+# account, its namespace Role, the environment's variables):
+# dev/deploy-demo/README.md. Unconfigured, the job is skipped.
+on:
+  workflow_run:
+    workflows: ['Release images']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to deploy (e.g. v0.37.0)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy-demo:
+    name: deploy-demo
+    runs-on: ubuntu-latest
+    # A Release images run for a tag that succeeded, or a manual run;
+    # and only once the environment is configured.
+    if: >-
+      vars.DEMO_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        startsWith(github.event.workflow_run.head_branch, 'v')))
+    environment:
+      name: demo
+      url: https://${{ vars.DOMAIN }}/.well-known/oauth-protected-resource/mcp
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation
+    env:
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - name: Check the tag
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release tag: $TAG"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_LOCATION }}
+
+      # The same shape the Gemini Enterprise guide gives anyone setting
+      # the values from their own kustomization: a configMapGenerator
+      # merge plus the domain component, so DOMAIN reaches the route.
+      - name: Write the deployment's kustomization
+        env:
+          NAMESPACE: ${{ vars.NAMESPACE }}
+          DOMAIN: ${{ vars.DOMAIN }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_ALLOW: ${{ vars.GOOGLE_ALLOW }}
+          GOOGLE_ALLOW_WRITE: ${{ vars.GOOGLE_ALLOW_WRITE }}
+          STATIC_IP_NAME: ${{ vars.STATIC_IP_NAME }}
+          CERT_MAP: ${{ vars.CERT_MAP }}
+        run: |
+          for v in NAMESPACE DOMAIN GOOGLE_CLIENT_ID GOOGLE_ALLOW STATIC_IP_NAME CERT_MAP; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::environment variable $v is not set (dev/deploy-demo/README.md)"
+              exit 1
+            fi
+            if [[ "${!v}" == *'"'* || "${!v}" == *$'\n'* ]]; then
+              echo "::error::$v must not contain a quote or a newline"
+              exit 1
+            fi
+          done
+          mkdir .deploy-demo
+          cat > .deploy-demo/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          namespace: "${NAMESPACE}"
+          resources:
+            - ../deploy-mcp-gemini-gateway
+          components:
+            - ../deploy-mcp-gemini/domain
+          images:
+            - name: ghcr.io/go-steer/lookout
+              newTag: "${TAG}-gke"
+          configMapGenerator:
+            - name: lookout-mcp
+              namespace: agent-triage
+              behavior: merge
+              literals:
+                - "DOMAIN=${DOMAIN}"
+                - "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+                - "GOOGLE_ALLOW=${GOOGLE_ALLOW}"
+                - "GOOGLE_ALLOW_WRITE=${GOOGLE_ALLOW_WRITE}"
+          patches:
+            - target: {kind: Gateway, name: lookout-mcp}
+              patch: |-
+                - op: replace
+                  path: /metadata/annotations/networking.gke.io~1certmap
+                  value: "${CERT_MAP}"
+                - op: replace
+                  path: /spec/addresses/0/value
+                  value: "${STATIC_IP_NAME}"
+          EOF
+          kubectl kustomize .deploy-demo > .deploy-demo/rendered.yaml
+          grep -E '^kind:|image:|hostnames' -A1 .deploy-demo/rendered.yaml
+
+      - name: Apply
+        env:
+          NAMESPACE: ${{ vars.NAMESPACE }}
+        run: |
+          kubectl apply -f .deploy-demo/rendered.yaml
+          kubectl -n "$NAMESPACE" rollout status deploy/lookout-mcp --timeout=5m
+
+      # The two answers Gemini Enterprise depends on: the RFC 9728
+      # metadata naming this resource, and a 401 for a call without a
+      # token. A config-only change can reprogram the load balancer, so
+      # allow it a few minutes.
+      - name: Smoke test
+        env:
+          DOMAIN: ${{ vars.DOMAIN }}
+        run: |
+          url="https://${DOMAIN}"
+          for i in $(seq 1 30); do
+            code="$(curl -s -m 10 -o /tmp/meta.json -w '%{http_code}' "$url/.well-known/oauth-protected-resource/mcp" || true)"
+            [[ "$code" == 200 ]] && break
+            sleep 10
+          done
+          if [[ "$code" != 200 ]]; then
+            echo "::error::metadata answered $code, not 200"
+            exit 1
+          fi
+          if ! grep -qF "\"resource\":\"$url/mcp\"" /tmp/meta.json; then
+            echo "::error::metadata does not name $url/mcp"
+            cat /tmp/meta.json
+            exit 1
+          fi
+          code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$url/mcp")"
+          if [[ "$code" != 401 ]]; then
+            echo "::error::POST /mcp without a token answered $code, not 401"
+            exit 1
+          fi
+          echo "metadata 200 for $url/mcp; POST /mcp without a token 401"

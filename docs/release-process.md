@@ -52,6 +52,11 @@ wrong flavor with nothing to catch it.
    - GitHub Release created with the CHANGELOG section + image
      footer (`dev/release/compose-release-notes.sh`), binaries
      attached as assets.
+
+   When it succeeds, **Deploy demo** (`.github/workflows/deploy-demo.yml`)
+   moves the demo Gemini Enterprise endpoint to the new `:<tag>-gke`
+   image and smoke-tests it (`dev/deploy-demo/README.md`). A failure
+   there is the demo's, not the release's: the release is already out.
 4. **Post-release bump**: on main, set
    `internal/version/version.go` `Version = "vX.(Y+1).0-dev"`.
    `dev/ci/presubmits/verify-version-fallback` fails CI until done.
