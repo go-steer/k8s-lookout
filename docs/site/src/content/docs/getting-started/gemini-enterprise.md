@@ -179,6 +179,27 @@ images:
     newTag: vX.Y.Z-gke        # or digest: sha256:...
 ```
 
+### Many clusters
+
+By default lookout reads the cluster it runs in. Set `CLUSTERS_FROM` in
+`config.yaml` to serve many clusters, across projects, from the same
+endpoint:
+
+```yaml
+  CLUSTERS_FROM: "organizations/123456789012"   # or folders/<id>, fleet:<host-project>, my-project,...
+```
+
+Each caller then sees only the clusters they can read: lookout discovers
+them with the caller's own token (through Cloud Asset Inventory for a
+folder or organization, or a Resource Manager walk where that API is
+off), so it still needs no IAM of its own. Every tool takes a `cluster`
+argument, and `k8s_list_clusters` lists the names. Ask Gemini about a
+cluster by name ("is anything broken in checkout?"), or let it list them
+first. The clusters must have their control-plane DNS endpoint enabled,
+the only way lookout reaches a cluster it does not run in. See
+[MCP setup](/getting-started/mcp/#one-endpoint-many-clusters) for the
+details.
+
 ## 4. Give people access
 
 lookout reads as each person, so each person needs read access to what
@@ -189,6 +210,11 @@ they will ask about, granted as usual:
   `roles/container.viewer`.
 - **Cloud APIs** used by the cloud checks (Compute, Monitoring, Logging):
   their IAM roles in the project.
+- **With `CLUSTERS_FROM`:** permission to list the clusters they should
+  see (`container.clusters.list` in each project, which
+  `roles/container.viewer` includes) and, for a folder or organization,
+  to search Cloud Asset Inventory (`cloudasset.assets.searchAllResources`)
+  or list its projects.
 
 Someone with access to only some namespaces sees only those. Rows lookout
 reads from its own files (triage records, history) are filtered the same

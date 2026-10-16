@@ -114,6 +114,8 @@ spec:
             - "--google-allow=$(GOOGLE_ALLOW)"
             - "--google-allow-write=$(GOOGLE_ALLOW_WRITE)"
             - "--resource-url=https://$(DOMAIN)/mcp"
+            # Empty (the default) serves the cluster lookout runs in.
+            - "--clusters-from=$(CLUSTERS_FROM)"
             # The triage and audit profiles plus the incident reads a chat
             # user asks for (health, changes, events, spec, radius, top), not
             # everything: every advertised tool costs schema tokens on every

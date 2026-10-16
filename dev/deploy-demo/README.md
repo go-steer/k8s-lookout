@@ -82,7 +82,8 @@ Its variables:
 | `DOMAIN` | the endpoint's hostname |
 | `GOOGLE_CLIENT_ID` | the data store's OAuth client ID |
 | `GOOGLE_ALLOW` | who may call: emails and `@domain`s, comma-separated |
-| `GOOGLE_ALLOW_WRITE` | who may write; empty for no one |
+| `GOOGLE_ALLOW_WRITE` | who may write; unset for no one |
+| `CLUSTERS_FROM` | optional: serve many clusters, discovered per caller (`organizations/<id>`, `folders/<id>`, `fleet:<host>`, projects); unset for the one lookout runs in |
 | `STATIC_IP_NAME` | the reserved global static IP's name |
 | `CERT_MAP` | the Certificate Manager map's name |
 
