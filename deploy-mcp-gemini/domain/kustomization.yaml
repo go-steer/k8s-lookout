@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DOMAIN, set once in config.yaml, is also the certificate's domain, the
-# Ingress host and the HTTPRoute hostname; whichever of them the build
-# has. A replacement resolves where it runs, so a kustomization that
-# patches the ConfigMap from outside must list this component itself,
-# or those copies keep the DOMAIN it was built with:
+# DOMAIN, set once in config.yaml, is also the HTTPRoute's hostname. A
+# replacement resolves where it runs, so a kustomization that sets the
+# ConfigMap from outside must list this component itself (and set the
+# values with a configMapGenerator merge, which lands before components
+# run; a patch lands after), or the route keeps the DOMAIN the overlay
+# was built with:
 #
 #   components:
 #     - github.com/go-steer/k8s-lookout/deploy-mcp-gemini/domain?ref=vX.Y.Z
@@ -28,16 +29,6 @@ replacements:
       name: lookout-mcp
       fieldPath: data.DOMAIN
     targets:
-      - select:
-          kind: ManagedCertificate
-          name: lookout-mcp
-        fieldPaths:
-          - spec.domains.0
-      - select:
-          kind: Ingress
-          name: lookout-mcp
-        fieldPaths:
-          - spec.rules.0.host
       - select:
           kind: HTTPRoute
           name: lookout-mcp

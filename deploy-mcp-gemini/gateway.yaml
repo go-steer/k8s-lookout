@@ -30,6 +30,7 @@ spec:
   gatewayClassName: gke-l7-global-external-managed
   addresses:
     # The reserved global static IP DOMAIN's A record points at.
+    # Reserve it first: gcloud compute addresses create lookout-mcp-ip --global
     - type: NamedAddress
       value: lookout-mcp-ip
   listeners:

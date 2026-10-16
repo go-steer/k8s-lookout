@@ -19,8 +19,9 @@
 #
 #   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-mcp-gemini?ref=vX.Y.Z"
 #
-# Edit config.yaml first (domain, OAuth client ID, allow-lists), or patch
-# it from your own kustomization. The full walk-through, from OAuth client
+# Edit config.yaml first (domain, OAuth client ID, allow-lists), or set
+# the values from your own kustomization (a configMapGenerator merge plus
+# the domain component; see domain/). The full walk-through, from OAuth client
 # to the Gemini Enterprise data store, is the "Gemini Enterprise" page of
 # the docs site.
 #
@@ -28,16 +29,15 @@
 #   - ServiceAccount lookout-mcp, with NO RBAC and no Workload Identity:
 #     lookout's own identity reads nothing.
 #   - Deployment lookout-mcp: two stateless replicas of
-#     `lookout mcp --google-client-id ...` on :8383, the triage and
-#     audit tool profiles plus six incident reads, minus findings diff
-#     (it needs a store), the access log on stdout.
-#   - Service, BackendConfig, ManagedCertificate and Ingress: a GKE
-#     external HTTPS load balancer on the reserved global static IP
-#     lookout-mcp-ip, with a Google-managed certificate for DOMAIN.
-#
-# To serve behind a Gateway with a Certificate Manager map rather than an
-# Ingress, apply deploy-mcp-gemini-gateway/: it builds on this one and
-# takes the same config.yaml.
+#     `lookout mcp --google-client-id ...` on :8383, one per zone, the
+#     triage and audit tool profiles plus six incident reads, minus
+#     findings diff (it needs a store), the access log on stdout.
+#   - Service, Gateway, HTTPRoute, HealthCheckPolicy and GCPBackendPolicy:
+#     a GKE global external Application Load Balancer, HTTPS only, on the
+#     reserved global static IP lookout-mcp-ip, with TLS from the
+#     Certificate Manager map lookout-mcp (gateway.yaml names both; set
+#     your own there or patch them). The cluster needs the Gateway API
+#     (Autopilot has it; Standard: --gateway-api=standard).
 #
 # Not included: the sentinel store. Store-backed tools (triage status,
 # history via --at) need --store on a file this pod can read; with the
@@ -48,8 +48,9 @@ kind: Kustomization
 resources:
   - config.yaml
   - mcp.yaml
+  - gateway.yaml
 
-# DOMAIN, set once in config.yaml, is also the certificate's domain and
-# the Ingress host (domain/).
+# DOMAIN, set once in config.yaml, is also the route's hostname
+# (domain/).
 components:
   - domain
