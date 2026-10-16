@@ -1,0 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The one file to edit. Every value here is a placeholder.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lookout-mcp
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-mcp
+    app.kubernetes.io/component: mcp
+data:
+  # The hostname Gemini Enterprise reaches lookout at. Its DNS A record
+  # must point at the static IP named in mcp.yaml (lookout-mcp-ip). It
+  # also becomes the managed certificate's domain, the Ingress host, and
+  # --resource-url (https://<DOMAIN>/mcp), via kustomization.yaml.
+  DOMAIN: lookout.example.com
+  # The OAuth client the Gemini Enterprise data store is configured with
+  # (Web application, redirect URI
+  # https://vertexaisearch.cloud.google.com/oauth-redirect).
+  GOOGLE_CLIENT_ID: 123456789012-replace-me.apps.googleusercontent.com
+  # Who may call lookout: comma-separated emails, or @domain for every
+  # account of that Google Workspace domain.
+  GOOGLE_ALLOW: "@example.com"
+  # Who may call tools that change state (triage status, findings
+  # diff/ack). Empty: no one.
+  GOOGLE_ALLOW_WRITE: ""

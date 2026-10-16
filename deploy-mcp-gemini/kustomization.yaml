@@ -1,0 +1,65 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# lookout mcp for a Gemini Enterprise app (#699): every tool call reads
+# as the person who made it, with their own Google token, so what they
+# see is what their own Kubernetes RBAC and Cloud IAM allow. Standalone:
+# use it beside deploy/ (or without it), not on top of it.
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-mcp-gemini?ref=vX.Y.Z"
+#
+# Edit config.yaml first (domain, OAuth client ID, allow-lists), or patch
+# it from your own kustomization. The full walk-through, from OAuth client
+# to the Gemini Enterprise data store, is the "Gemini Enterprise" page of
+# the docs site.
+#
+# What it creates in agent-triage:
+#   - ServiceAccount lookout-mcp, with NO RBAC and no Workload Identity:
+#     lookout's own identity reads nothing.
+#   - Deployment lookout-mcp: two stateless replicas of
+#     `lookout mcp --google-client-id ...` on :8383, the triage tool
+#     profile minus findings diff (it needs a store), the access log on
+#     stdout.
+#   - Service, BackendConfig, ManagedCertificate and Ingress: a GKE
+#     external HTTPS load balancer on the reserved global static IP
+#     lookout-mcp-ip, with a Google-managed certificate for DOMAIN.
+#
+# Not included: the sentinel store. Store-backed tools (triage status,
+# history via --at) need --store on a file this pod can read; with the
+# sentinel's store on a ReadWriteOnce volume, that means running lookout
+# mcp in the sentinel's pod instead.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - config.yaml
+  - mcp.yaml
+
+# DOMAIN, set once in config.yaml, is also the certificate's domain and
+# the Ingress host.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: lookout-mcp
+      fieldPath: data.DOMAIN
+    targets:
+      - select:
+          kind: ManagedCertificate
+          name: lookout-mcp
+        fieldPaths:
+          - spec.domains.0
+      - select:
+          kind: Ingress
+          name: lookout-mcp
+        fieldPaths:
+          - spec.rules.0.host
