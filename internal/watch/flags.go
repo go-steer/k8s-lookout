@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	clusterfleet "github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -459,7 +460,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// over the control-plane DNS endpoint), so they need a Fleet-capable
 	// provider (-tags gke); on a default build they fail loudly.
 	fs.StringVar(&f.clusters, "clusters", "", "Multi-cluster: comma-separated name=endpoint pairs to watch from one process, e.g. prod-us=abc.us-central1.gke.goog,prod-eu=def.europe-west1.gke.goog. A bare endpoint derives a short name from its first DNS label. Mutually exclusive with --clusters-from; needs a Fleet-capable provider (-tags gke). Leave empty for the one-sentinel-per-cluster default.")
-	fs.StringVar(&f.clustersFrom, "clusters-from", "", "Multi-cluster: discover the clusters to watch instead of listing them. A project, or project/location, queried via the cloud provider's cluster API (GKE: Container API ListClusters over the project; needs a Fleet-capable provider, -tags gke). Or the reserved value kubeconfig (optionally kubeconfig:<path>) to watch one cluster per context in a kubeconfig instead — no cloud API and no build tag, so EKS, on-prem and kind fleets work; with no path it follows client-go's search ($KUBECONFIG, colon-separated and merged, else ~/.kube/config), which is also how you select a subset. Mutually exclusive with --clusters.")
+	fs.StringVar(&f.clustersFrom, "clusters-from", "", "Multi-cluster: discover the clusters to watch instead of listing them. A comma-separated list of scopes, which may be mixed: a project or project/location (GKE: Container API ListClusters), fleet:<host-project> (a GKE fleet's member clusters, across projects), folders/<id> or organizations/<id> (every cluster beneath, found through Cloud Asset Inventory, or a Resource Manager walk of the folder tree when that API is off or unsearchable, which is logged). Cloud scopes need a Fleet-capable provider (-tags gke) and run as its identity; clusters found twice are watched once. Or the reserved value kubeconfig (optionally kubeconfig:<path>) to watch one cluster per context in a kubeconfig instead — no cloud API and no build tag, so EKS, on-prem and kind fleets work; with no path it follows client-go's search ($KUBECONFIG, colon-separated and merged, else ~/.kube/config), which is also how you select a subset. Mutually exclusive with --clusters.")
 
 	// Deployment identity (§8). ADDITIVE flags: zone/project complete
 	// the (fingerprint, cluster/project/zone) fleet-rollup join on
@@ -618,7 +619,12 @@ func (f *flags) validate() error {
 			return errors.New("--in-cluster is not used in multi-cluster mode: clusters are reached with the cloud provider's own credentials or a kubeconfig context's, not the local service account")
 		}
 		if f.clusters != "" {
-			if _, err := parseClusters(f.clusters); err != nil {
+			if _, err := clusterfleet.ParseClusters(f.clusters); err != nil {
+				return err
+			}
+		}
+		if f.clustersFrom != "" {
+			if _, err := clusterfleet.ParseScopes(f.clustersFrom); err != nil {
 				return err
 			}
 		}

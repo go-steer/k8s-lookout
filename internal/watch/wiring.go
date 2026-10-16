@@ -42,6 +42,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/go-steer/k8s-lookout/internal/axsink"
+	clusterfleet "github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
 	"github.com/go-steer/k8s-lookout/internal/version"
 
@@ -242,7 +243,7 @@ func realMain(argv []string) error {
 // neither --clusters nor --clusters-from — is a single runner for
 // --cluster-name, byte-identical to the pre-multi-cluster wiring. In
 // multi-cluster mode (issue #208) it resolves a cluster fleet (a
-// Fleet-capable cloud provider, or a kubeconfig — see resolveFleet),
+// Fleet-capable cloud provider, or a kubeconfig — see internal/fleet),
 // enumerates the target clusters (explicit --clusters pairs or
 // --clusters-from discovery), resolves each cluster's rest.Config, and
 // returns one runner apiece — deduping the project-tier sources to one
@@ -262,25 +263,20 @@ func resolveRunners(ctx context.Context, f *flags, sink inject.Sink, token strin
 		return []*runner{newRunner(f, f.clusterName, sink, token, reg)}, nil
 	}
 
-	fleet, err := resolveFleet(ctx, f)
+	fleet, err := clusterfleet.Resolve(ctx, clusterfleet.Spec{Clusters: f.clusters, ClustersFrom: f.clustersFrom, Project: f.project})
 	if err != nil {
 		return nil, err
 	}
-
-	var refs []cloud.ClusterRef
-	if f.clustersFrom != "" {
-		refs, err = fleet.DiscoverClusters(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("multi-cluster discovery (%s): %w", fleet.Describe(), err)
-		}
-		if len(refs) == 0 {
-			return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters in %s", f.clustersFrom, fleet.Describe())
-		}
-	} else {
-		refs, err = parseClusters(f.clusters)
-		if err != nil {
-			return nil, err
-		}
+	found, err := fleet.Discover(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("multi-cluster discovery (%s): %w", fleet.Describe(), err)
+	}
+	for _, note := range found.Notes() {
+		log.Printf("multi-cluster: %s", note) //nolint:gosec // G706: Notes quotes every outside value (scope names, API messages)
+	}
+	refs := found.Clusters
+	if f.clustersFrom != "" && len(refs) == 0 {
+		return nil, fmt.Errorf("multi-cluster: --clusters-from=%q matched no clusters in %s", f.clustersFrom, fleet.Describe())
 	}
 	log.Printf("multi-cluster: %d cluster(s) from %s", len(refs), fleet.Describe())
 
@@ -446,62 +442,6 @@ func dropProjectTierSources(sources string) string {
 		kept = append(kept, name)
 	}
 	return strings.Join(kept, ",")
-}
-
-// parseClustersFrom splits --clusters-from into project and optional
-// location: "my-proj" → ("my-proj", ""), "my-proj/us-central1" →
-// ("my-proj", "us-central1"). An empty location discovers every location.
-func parseClustersFrom(s string) (project, location string) {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '/'); i >= 0 {
-		return s[:i], s[i+1:]
-	}
-	return s, ""
-}
-
-// parseClusters parses --clusters: comma-separated name=endpoint pairs
-// (or a bare endpoint, whose short name is its first DNS label). Refs
-// come back in listed order; a duplicate name, empty endpoint, or empty
-// name is a loud config error.
-func parseClusters(s string) ([]cloud.ClusterRef, error) {
-	items := splitCSV(s)
-	if len(items) == 0 {
-		return nil, errors.New("--clusters is empty")
-	}
-	refs := make([]cloud.ClusterRef, 0, len(items))
-	seen := map[string]bool{}
-	for _, it := range items {
-		var name, endpoint string
-		if i := strings.IndexByte(it, '='); i >= 0 {
-			name = strings.TrimSpace(it[:i])
-			endpoint = strings.TrimSpace(it[i+1:])
-		} else {
-			endpoint = strings.TrimSpace(it)
-			name = shortClusterName(endpoint)
-		}
-		if endpoint == "" {
-			return nil, fmt.Errorf("--clusters: entry %q has no endpoint", it)
-		}
-		if name == "" {
-			return nil, fmt.Errorf("--clusters: entry %q has no cluster name", it)
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("--clusters: duplicate cluster name %q", name)
-		}
-		seen[name] = true
-		refs = append(refs, cloud.ClusterRef{Name: name, Endpoint: endpoint})
-	}
-	return refs, nil
-}
-
-// shortClusterName derives a runner name from a bare endpoint: its first
-// DNS label (uid.us-central1.gke.goog → "uid"), or the whole string when
-// there's no dot. Use name=endpoint for a friendly name.
-func shortClusterName(endpoint string) string {
-	if i := strings.IndexByte(endpoint, '.'); i > 0 {
-		return endpoint[:i]
-	}
-	return endpoint
 }
 
 // newRunner builds a cluster runner and its metrics bundle. The bundle

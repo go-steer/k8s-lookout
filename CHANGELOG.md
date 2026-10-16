@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--clusters-from` discovers across projects, fleets, folders and
+  organizations (#700).** `lookout watch --clusters-from` takes a
+  comma-separated list of scopes that may be mixed:
+  `project[/location]` as before, `fleet:<host-project>` (a GKE fleet's
+  member clusters, which can span projects), and `folders/<id>` /
+  `organizations/<id>` (every cluster beneath, through Cloud Asset
+  Inventory, or a Resource Manager walk of the folder tree when that API
+  is off or unsearchable). Each scope logs what it found and how,
+  including a fallback and what it skipped (projects with the API off,
+  projects whose clusters cannot be listed, non-GKE fleet members), and
+  a cluster found by two scopes is watched once. One scope failing among
+  several is logged, not fatal. The resolver now lives in
+  `internal/fleet`, ready for `lookout mcp` to share. `kubeconfig`,
+  `fleet:`, `folders/` and `organizations/` are reserved and cannot name
+  a project.
+
 ### Changed
 
 - **`deploy-mcp-gemini/` is now the Gateway overlay; the Ingress variant

@@ -67,3 +67,77 @@ type Fleet interface {
 	// cluster (docs/multi-cluster-design.md: authN ≠ authZ).
 	RESTConfig(ctx context.Context, ref ClusterRef) (*rest.Config, error)
 }
+
+// ScopeKind is what a discovery Scope names.
+type ScopeKind string
+
+// The discovery scopes (docs/mcp-multi-tenant-design.md, "Many projects").
+const (
+	// ScopeProject is one project's clusters, in one location or all.
+	ScopeProject ScopeKind = "project"
+	// ScopeFleet is a fleet's member clusters, which can span projects
+	// (GKE: the Hub memberships of the fleet host project).
+	ScopeFleet ScopeKind = "fleet"
+	// ScopeFolder is every cluster under a folder, at any depth.
+	ScopeFolder ScopeKind = "folder"
+	// ScopeOrganization is every cluster under an organization.
+	ScopeOrganization ScopeKind = "organization"
+)
+
+// Scope is one place to discover clusters in.
+type Scope struct {
+	Kind ScopeKind
+	// Project is the project of a ScopeProject, or the host project of
+	// a ScopeFleet.
+	Project string
+	// Location narrows a ScopeProject to one location; empty is all.
+	Location string
+	// ID is the folder or organization number.
+	ID string
+}
+
+// String is the scope as it is spelled on --clusters-from.
+func (s Scope) String() string {
+	switch s.Kind {
+	case ScopeFleet:
+		return "fleet:" + s.Project
+	case ScopeFolder:
+		return "folders/" + s.ID
+	case ScopeOrganization:
+		return "organizations/" + s.ID
+	default:
+		if s.Location != "" {
+			return s.Project + "/" + s.Location
+		}
+		return s.Project
+	}
+}
+
+// Discovery is what one Scope yielded, and how it was found.
+type Discovery struct {
+	Clusters []ClusterRef
+	// Via names the API the clusters were found through, for the
+	// operator and the caller to see (GKE: "container", "hub", "asset",
+	// "resourcemanager").
+	Via string
+	// Fallback says why the preferred API was not used, when it was not;
+	// empty otherwise. A fallback is never silent.
+	Fallback string
+	// Skipped counts what the scope held but could not yield, by reason
+	// (a fleet's non-GKE member, a project with the cluster API off, a
+	// project the identity may not list clusters in).
+	Skipped map[string]int
+}
+
+// ScopedFleet is the OPTIONAL Fleet surface for discovery beyond the
+// provider's own project: other projects, fleets, folders and
+// organizations. Discovery and credentials both run as the identity in
+// the context, so for an invocation running as its caller
+// (kube.WithCallerToken) a scope yields only what that caller can see.
+type ScopedFleet interface {
+	Fleet
+	// Discover lists the clusters in one scope. A scope the identity may
+	// not read at all is an error; parts of a scope it may not read are
+	// counted in Skipped.
+	Discover(ctx context.Context, s Scope) (Discovery, error)
+}
