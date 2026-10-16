@@ -112,6 +112,10 @@ type Spec struct {
 	Clusters     string
 	ClustersFrom string
 	Project      string
+	// FolderSearch is how folder and organization scopes are searched
+	// (cloud.SearchAuto, SearchAsset or SearchResourceManager; "" is
+	// auto).
+	FolderSearch string
 }
 
 // KubeconfigScope is the reserved --clusters-from value that selects the
@@ -139,6 +143,14 @@ func Resolve(ctx context.Context, spec Spec) (Source, error) {
 			return kubeconfigSource{path: parsed.KubeconfigPath}, nil
 		}
 		scopes = parsed.Scopes
+		if err := ValidFolderSearch(spec.FolderSearch); err != nil {
+			return nil, err
+		}
+		for i := range scopes {
+			if scopes[i].Kind == cloud.ScopeFolder || scopes[i].Kind == cloud.ScopeOrganization {
+				scopes[i].Search = spec.FolderSearch
+			}
+		}
 	} else {
 		refs, err := ParseClusters(spec.Clusters)
 		if err != nil {
@@ -166,6 +178,16 @@ func Resolve(ctx context.Context, spec Spec) (Source, error) {
 		return nil, fmt.Errorf("multi-cluster: provider %q discovers only its own project; %q needs a provider that can search other projects, fleets and folders", provider.Name(), spec.ClustersFrom)
 	}
 	return src, nil
+}
+
+// ValidFolderSearch checks a --folder-discovery value.
+func ValidFolderSearch(s string) error {
+	switch s {
+	case "", cloud.SearchAuto, cloud.SearchAsset, cloud.SearchResourceManager:
+		return nil
+	}
+	return fmt.Errorf("--folder-discovery=%q: want %s (Cloud Asset Inventory, else a Resource Manager walk), %s (Cloud Asset Inventory only) or %s (never Cloud Asset Inventory)",
+		s, cloud.SearchAuto, cloud.SearchAsset, cloud.SearchResourceManager)
 }
 
 // needsScoped reports whether scopes ask for more than one project's

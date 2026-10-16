@@ -64,13 +64,24 @@ current flags, schemas and behavior, byte for byte.
 ### Decision: a `cluster` argument per call, not several clusters per call
 
 In multi-cluster mode, every tool gains one argument, `cluster`, naming a
-configured cluster. It is required: with more than one cluster configured,
-there is no default for a call to fall back to without saying so. As
-built it is required even when the set holds one cluster, because the set
-is discovered (in Google-token mode, per caller) after the schema is
-fixed at startup. Each answer's summary line names its cluster
+configured cluster. Each answer's summary line names its cluster
 (`context=<project/location/name>`), so answers from parallel calls stay
 attributable.
+
+Amended 2026-10-16, after a live Gemini Enterprise test. The argument
+was first required, with no default. A model asked about "my cluster"
+then guessed names, and once it could list them, picked one of 48 the
+caller could list but not read. Two lessons. Listing is not reading:
+each discovery now also checks, as the caller, whether they may list
+pods cluster-wide, and `k8s_list_clusters` reports `access=`. And "no
+default" made the model choose blind. The argument is now optional, and
+a call that names none reads an operator-chosen `--default-cluster` (if
+the caller can read it), else the caller's only readable cluster in
+`--default-project`, else their only readable cluster. Anything else is
+answered with readable candidates, or, for a client that supports
+elicitation on a stateful session, by asking the person (MCP
+multi-round-trip requests). Nothing is chosen silently: every answer's
+`context=` names its cluster.
 
 A tool call reads exactly one cluster. To cover three clusters, the client
 makes three calls, and MCP clients already issue parallel tool calls. A

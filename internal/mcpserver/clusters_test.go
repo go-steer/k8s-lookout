@@ -116,6 +116,7 @@ func TestNameClusters(t *testing.T) {
 
 func newTestClusters(src *fakeFleet, perCaller bool) (*Clusters, *time.Time) {
 	c := NewClusters(src, perCaller, time.Hour)
+	c.access = nil // no API server behind the fakes; tests that need access set it
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	c.now = func() time.Time { return now }
 	return c, &now
@@ -324,6 +325,7 @@ func TestConcurrentCallsShareOneDiscovery(t *testing.T) {
 		started:   make(chan struct{}, 8),
 	}
 	c := NewClusters(src, true, time.Hour)
+	c.access = nil
 	ctx := withToken(t.Context(), "tok")
 	var wg sync.WaitGroup
 	errs := make(chan error, 4)

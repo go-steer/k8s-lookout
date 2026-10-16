@@ -79,6 +79,14 @@ type Clusters struct {
 	// endpoint, and each call starting its own discovery would multiply
 	// the API calls by the fan-out.
 	inflight map[string]*pendingDiscovery
+
+	// access checks whether the identity in ctx may read a cluster
+	// (clusterchoice.go); nil skips the check, leaving access unknown.
+	access accessFunc
+	// defaultCluster and defaultProject steer the choice when a call
+	// names no cluster, or an ambiguous one (clusterchoice.go).
+	defaultCluster string
+	defaultProject string
 }
 
 type pendingDiscovery struct {
@@ -108,6 +116,7 @@ func NewClusters(src fleet.Source, perCaller bool, refresh time.Duration) *Clust
 		lastMiss:  map[string]time.Time{},
 		configs:   map[string]*rest.Config{},
 		inflight:  map[string]*pendingDiscovery{},
+		access:    reviewAccess,
 	}
 }
 
@@ -138,6 +147,9 @@ type clusterEntry struct {
 	// setSize is how many clusters the set holds, for the per-cluster
 	// concurrency limit.
 	setSize int
+	// access is what the set's identity may do there (accessRead,
+	// accessLimited, accessUnreachable), or "" when unchecked.
+	access string
 }
 
 // Start discovers the shared set, so a server with no reachable cluster
@@ -250,6 +262,7 @@ func (c *Clusters) discover(ctx context.Context) (*clusterSet, error) {
 	set := nameClusters(res.Clusters)
 	set.scopes = res.Scopes
 	set.at = c.now()
+	c.checkAccess(ctx, set)
 	return set, nil
 }
 

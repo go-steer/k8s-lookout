@@ -245,6 +245,27 @@ func TestDiscoverScopeOrganizationFallback(t *testing.T) {
 	}
 }
 
+// TestDiscoverScopeSearchModes: an operator can turn Cloud Asset
+// Inventory off (never called), or require it (no fallback).
+func TestDiscoverScopeSearchModes(t *testing.T) {
+	walker := &fakeWalker{projects: map[string][]string{"folders/1": {"p1"}}}
+	lister := &perProjectLister{clusters: map[string][]*container.Cluster{"p1": {withDNS("a", "us-central1", "a.gke.goog")}}}
+
+	asset := &fakeAsset{names: []string{"//container.googleapis.com/projects/p9/locations/l/clusters/z"}}
+	disc, err := discoverScope(context.Background(), cloud.Scope{Kind: cloud.ScopeFolder, ID: "1", Search: cloud.SearchResourceManager}, scopeDeps{clusters: lister, asset: asset, walker: walker})
+	if err != nil || disc.Via != viaResourceManager || disc.Fallback != "" || asset.scope != "" {
+		t.Errorf("resourcemanager: via %q fallback %q asset asked %q err %v", disc.Via, disc.Fallback, asset.scope, err)
+	}
+	if got := names(disc.Clusters); !reflect.DeepEqual(got, []string{"p1/us-central1/a"}) {
+		t.Errorf("resourcemanager clusters = %v", got)
+	}
+
+	denied := &fakeAsset{err: forbidden("SERVICE_DISABLED", "Cloud Asset API has not been used")}
+	if _, err := discoverScope(context.Background(), cloud.Scope{Kind: cloud.ScopeFolder, ID: "1", Search: cloud.SearchAsset}, scopeDeps{clusters: lister, asset: denied, walker: walker}); err == nil {
+		t.Error("asset-only fell back to Resource Manager")
+	}
+}
+
 func TestDiscoverScopeAssetOutageIsNotPaperedOver(t *testing.T) {
 	asset := &fakeAsset{err: &googleapi.Error{Code: http.StatusInternalServerError, Message: "backend error"}}
 	walker := &fakeWalker{}

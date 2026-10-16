@@ -94,7 +94,19 @@ type Scope struct {
 	Location string
 	// ID is the folder or organization number.
 	ID string
+	// Search is how a folder or organization scope is searched: "" or
+	// SearchAuto (Cloud Asset Inventory, else a Resource Manager walk),
+	// SearchAsset (Cloud Asset Inventory only) or SearchResourceManager
+	// (never Cloud Asset Inventory). Ignored for other scopes.
+	Search string
 }
+
+// The ways a folder or organization scope can be searched.
+const (
+	SearchAuto            = "auto"
+	SearchAsset           = "asset"
+	SearchResourceManager = "resourcemanager"
+)
 
 // String is the scope as it is spelled on --clusters-from.
 func (s Scope) String() string {
