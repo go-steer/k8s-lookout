@@ -26,6 +26,6 @@ MISSING_GSA="lookout-uat-does-not-exist"
 LABELS="purpose=lookout-uat,issue=179-180"
 # The published -gke image (T3 is defined on it) and the default image
 # (the GCP-free refusal path).
-IMAGE_GKE="${IMAGE_GKE:-ghcr.io/go-steer/lookout:v0.36.0-gke}"
-IMAGE_DEFAULT="${IMAGE_DEFAULT:-ghcr.io/go-steer/lookout:v0.36.0}"
+IMAGE_GKE="${IMAGE_GKE:-ghcr.io/go-steer/lookout:v0.37.0-gke}"
+IMAGE_DEFAULT="${IMAGE_DEFAULT:-ghcr.io/go-steer/lookout:v0.37.0}"
 OUT="${OUT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/out}"
