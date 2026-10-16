@@ -7,6 +7,10 @@ with the signed `:<tag>-gke` image, then checks the two answers Gemini
 Enterprise depends on: the RFC 9728 metadata and a `401` for a call
 without a token. Run it by hand (**Actions → Deploy demo → Run
 workflow**, with a tag) to redeploy or to pick up a changed variable.
+A manual run can also name an `image` (`repo:tag` or
+`repo@sha256:…`) to run in place of the release's, with that tag's
+overlay: a hotfix build, say. The deploy identity needs nothing new for
+it, but the cluster's nodes must be able to pull the image.
 
 Nothing about the deployment is in the repository. The endpoint's
 values are variables of the `demo` GitHub environment, and the workflow
