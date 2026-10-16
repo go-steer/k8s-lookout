@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-16
+
+**This release lets a Gemini Enterprise app call lookout with every read running as the signed-in person: their own Google token, their own Kubernetes RBAC and Cloud IAM, nothing on lookout's identity.** `lookout mcp --google-client-id` verifies each caller's Google token per request (via go-steer `steward`), passes it to every Kubernetes and Google Cloud client the read path builds, filters rows read from lookout's own files by the caller's access (`hidden=<n>`), and records who wrote triage records (`recorded_by`, store migration v11: upgrade the sentinel with or before the MCP server). Two ready-to-apply GKE deployments ship with it, `deploy-mcp-gemini/` (Ingress and managed certificate) and `deploy-mcp-gemini-gateway/` (Gateway and Certificate Manager map), both on the `-gke` image with zero-downtime rollouts, plus a "Gemini Enterprise" getting-started guide. Verified live end to end, including Cloud API reads as the caller. Cloud-backed checks now answer for the cluster selected with `--context`/`--kubeconfig` rather than the one lookout runs in; `scan` says what `--include=cloud` covers; and GKE's deliberately empty addon Services are no longer reported as critical.
+
 ### Added
 
 - **`deploy-mcp-gemini/`: lookout mcp for a Gemini Enterprise app (#699).** A
