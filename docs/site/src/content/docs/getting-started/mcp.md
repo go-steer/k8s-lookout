@@ -95,6 +95,9 @@ Google access token. Every tool call then reads the cluster and Google
 Cloud **as the person who made it**: what they see is what their own
 Kubernetes RBAC and Cloud IAM allow (on GKE, IAM roles grant Kubernetes
 access too). lookout's own identity reads nothing on their behalf.
+The [Gemini Enterprise](/getting-started/gemini-enterprise/) page walks
+through deploying it (the `deploy-mcp-gemini/` overlay) and wiring up the
+data store.
 
 ```sh
 lookout mcp \

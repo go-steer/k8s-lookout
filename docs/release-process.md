@@ -17,6 +17,9 @@ wrong flavor with nothing to catch it.
    - `deploy/51-deployment-watcher.yaml`: bump the image pin to
      `vX.Y.Z`. The release workflow's preflight guard refuses to tag
      on a stale pin.
+   - `deploy-mcp-gemini/mcp.yaml`: the same image pin (a standalone
+     overlay, so it has its own). `dev/tools/verify-helm-parity` fails
+     CI if it disagrees with deploy/51.
    - `deploy/chart/Chart.yaml`: `appVersion: "vX.Y.Z"` and
      `version: X.Y.Z` (the chart version tracks the app version, no
      leading `v`). `dev/tools/verify-helm-parity` fails CI on any

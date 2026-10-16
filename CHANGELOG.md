@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`deploy-mcp-gemini/`: lookout mcp for a Gemini Enterprise app (#699).** A
+  standalone overlay running `lookout mcp` in Google-token mode behind a GKE
+  external HTTPS load balancer: two stateless replicas, a ServiceAccount
+  with no RBAC and no Workload Identity (every read is the caller's own),
+  the `triage` tool profile (minus `findings diff`, which needs a store),
+  the access log on stdout, and an HTTPS-only Ingress with a
+  Google-managed certificate on a reserved static IP. One file to edit
+  (`config.yaml`: domain, OAuth client, allow-lists); the domain reaches
+  the certificate, Ingress host and `--resource-url` by kustomize
+  replacement. The new "Gemini Enterprise" page walks from OAuth client to
+  data store. Its image pin is checked against deploy/51 by
+  `verify-helm-parity`, and the release checklist bumps it.
+
 - **`lookout mcp` can read as each caller instead of as itself (#699).**
   With `--google-client-id`, a Gemini Enterprise app calling lookout as a
   Custom MCP Server sends each person's own Google access token, and every

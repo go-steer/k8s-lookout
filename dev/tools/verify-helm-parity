@@ -86,6 +86,16 @@ if [[ "$pinned" != "$appversion" ]]; then
   exit 1
 fi
 
+# deploy-mcp-gemini/ is a standalone overlay (it does not build on
+# deploy/), so it carries its own image pin; the release cut bumps it
+# with deploy/51, and this keeps the two from drifting.
+mcppinned="$(kustomize build deploy-mcp-gemini/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
+if [[ "$mcppinned" != "$pinned" ]]; then
+  echo "✗ deploy-mcp-gemini image pin ($mcppinned) != deploy/51 image pin ($pinned)" >&2
+  echo "  The release cut bumps both — see docs/release-process.md." >&2
+  exit 1
+fi
+
 chartversion="$(grep -E '^version:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^version: *"?([^"]*)"?/\1/')"
 if [[ "$chartversion" != "${appversion#v}" ]]; then
   echo "✗ Chart.yaml version ($chartversion) != appVersion without the v (${appversion#v})" >&2
