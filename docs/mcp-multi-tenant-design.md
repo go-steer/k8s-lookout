@@ -73,11 +73,17 @@ was first required, with no default. A model asked about "my cluster"
 then guessed names, and once it could list them, picked one of 48 the
 caller could list but not read. Two lessons. Listing is not reading:
 each discovery now also checks, as the caller, whether they may list
-pods cluster-wide, and `k8s_list_clusters` reports `access=`. And "no
-default" made the model choose blind. The argument is now optional, and
-a call that names none reads an operator-chosen `--default-cluster` (if
-the caller can read it), else the caller's only readable cluster in
-`--default-project`, else their only readable cluster. Anything else is
+pods cluster-wide, and `k8s_list_clusters` reports `access=`. A "no"
+there is `limited`, not unreadable: namespace-scoped RoleBindings are
+common, and there is no cheap way to ask which namespaces a caller may
+read, so limited clusters rank after the readable ones but stay
+eligible (the first cut excluded them, which told namespace-scoped users
+they could read nothing). And "no default" made the model choose blind.
+The argument is now optional, and a call that names none reads an
+operator-chosen `--default-cluster` (unless unreachable), else the
+caller's only cluster in `--default-project`, else their only cluster,
+counting readable clusters when there are any and limited ones when
+there are not. Anything else is
 answered with readable candidates, or, for a client that supports
 elicitation on a stateful session, by asking the person (MCP
 multi-round-trip requests). Nothing is chosen silently: every answer's

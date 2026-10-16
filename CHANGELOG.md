@@ -14,13 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picked one of 48 the caller could list but not read, and got nothing
   but permission refusals. Now each discovery also checks, once per
   cluster and as the caller, whether they may list pods cluster-wide;
-  `k8s_list_clusters` shows `access=read|limited|unreachable`, readable
-  clusters first. `cluster` becomes optional: a call that names none
-  reads `--default-cluster` (when readable), else the caller's only
-  readable cluster in `--default-project`, else their only readable
-  cluster, and is otherwise answered with readable candidates. An
-  unknown name is answered with the closest readable names, and a bare
-  name repeated across projects resolves to `--default-project`'s.
+  `k8s_list_clusters` shows `access=read|limited|unreachable`, clusters
+  readable cluster-wide first. `limited` is not "no access": a caller
+  whose RoleBindings cover only some namespaces cannot list pods
+  cluster-wide, and Kubernetes has no cheap way to ask which namespaces
+  they may read, so those clusters rank after the readable ones but are
+  still chosen and suggested; only unreachable ones are left out.
+  `cluster` becomes optional: a call that names none reads
+  `--default-cluster` (unless unreachable), else the caller's only
+  cluster in `--default-project`, else their only cluster (counting
+  clusters readable cluster-wide when there are any, limited ones when
+  there are not), and is otherwise answered with candidates. An unknown
+  name is answered with the closest names, and a bare name repeated
+  across projects resolves to `--default-project`'s.
   Clients that support elicitation on a stateful session are asked which
   cluster (MCP multi-round-trip requests). `--folder-discovery=auto|
   asset|resourcemanager` decides whether folder and organization scopes
