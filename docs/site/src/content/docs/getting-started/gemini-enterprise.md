@@ -78,8 +78,9 @@ kustomization. Either way it creates, in `agent-triage`:
 
 - a `lookout-mcp` ServiceAccount, with no RBAC and no Workload Identity;
 - two stateless `lookout mcp` replicas in Google-token mode, serving the
-  `triage` and `audit` tool profiles (minus `findings diff`, which needs a
-  store), with
+  `triage` and `audit` tool profiles plus six incident reads (cluster
+  health, recent changes, event timeline, resource spec, blast radius,
+  resource top) — minus `findings diff`, which needs a store — with
   the access log on stdout;
 - a GKE external HTTPS load balancer (Ingress, `ManagedCertificate`,
   `BackendConfig`) on `lookout-mcp-ip`, HTTPS only.

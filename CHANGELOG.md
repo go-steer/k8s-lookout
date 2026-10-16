@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   standalone overlay running `lookout mcp` in Google-token mode behind a GKE
   external HTTPS load balancer: two stateless replicas, a ServiceAccount
   with no RBAC and no Workload Identity (every read is the caller's own),
-  the `triage` and `audit` tool profiles (minus `findings diff`, which
-  needs a store),
+  the `triage` and `audit` tool profiles plus six incident reads (health,
+  recent changes, events, spec, blast radius, top; 19 tools, minus
+  `findings diff`, which needs a store),
   the access log on stdout, and an HTTPS-only Ingress with a
   Google-managed certificate on a reserved static IP. One file to edit
   (`config.yaml`: domain, OAuth client, allow-lists); the domain reaches

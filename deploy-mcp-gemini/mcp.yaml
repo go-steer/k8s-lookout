@@ -82,12 +82,14 @@ spec:
             - "--google-allow=$(GOOGLE_ALLOW)"
             - "--google-allow-write=$(GOOGLE_ALLOW_WRITE)"
             - "--resource-url=https://$(DOMAIN)/mcp"
-            # The triage and audit profiles, not everything: every advertised
-            # tool costs schema tokens on every model call. Widen with --tools
-            # if callers need more. findings diff is left out: it needs
-            # --report and --store, which this overlay does not provide.
+            # The triage and audit profiles plus the incident reads a chat
+            # user asks for (health, changes, events, spec, radius, top), not
+            # everything: every advertised tool costs schema tokens on every
+            # model call. Widen with --tools if callers need more. findings
+            # diff is left out: it needs --report and --store, which this
+            # overlay does not provide.
             - "--profile=triage"
-            - "--tools=audit,-k8s_findings_diff"
+            - "--tools=audit,k8s_cluster_health,k8s_recent_changes,k8s_event_timeline,k8s_resource_spec,k8s_blast_radius,k8s_resource_top,-k8s_findings_diff"
           ports:
             - name: mcp
               containerPort: 8383
