@@ -595,6 +595,23 @@ func TestWebhooksCategoryLineStable(t *testing.T) {
 	t.Fatal("webhooks category line not found")
 }
 
+// TestInfoOnlyCategoryScoresHealthy: a live webhook whose only finding
+// is the info-severity slow_risk (timeout 10s, failurePolicy Fail) is
+// standing configuration, not a fault — the category scores healthy and
+// still names it, and its detail line still follows.
+func TestInfoOnlyCategoryScoresHealthy(t *testing.T) {
+	slow := webhook("gated", "infra", "policy")
+	slow.Webhooks[0].TimeoutSeconds = ptr(int32(10))
+	res := checktest.Run(t, testCommand(slow, service("infra", "policy"), readySlice("infra", "policy")))
+	want := `kind=health.category severity=info category=webhooks status=healthy total=1 top="webhook.slow_risk gated"`
+	if !strings.Contains(res.Stdout, want+"\n") {
+		t.Errorf("want %s in:\n%s", want, res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "kind=webhook.slow_risk") {
+		t.Errorf("the info finding's detail line must still follow:\n%s", res.Stdout)
+	}
+}
+
 // --- control-plane delegation (perf apiserver pack) -------------------------
 
 // statusesAndKinds runs cmd and splits the output into per-category

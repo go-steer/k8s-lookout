@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A `health` category with only info findings scores healthy.** It
+  still names them (`total=`, `top=`) and prints their detail lines,
+  but no longer reads as `degraded`. Every GKE cluster carries info
+  `webhook.slow_risk` findings for GKE's own URL-backed webhooks, so the
+  webhooks category was degraded everywhere and a model answering "is
+  this cluster healthy?" had to explain a non-problem.
+
 ## [0.38.0] - 2026-10-17
 
 **This release lets one `lookout mcp` endpoint serve many clusters across projects, with each caller choosing among only the clusters they can read.** `--clusters-from` takes projects, GKE fleets, folders and organizations (Cloud Asset Inventory, with a Resource Manager fallback); in Google-token mode discovery runs as each caller, every tool takes an optional `cluster` argument, and a call that names none is answered from the caller's access (readable clusters first, namespace-only access still counted), a default, or an elicitation. `deploy-mcp-gemini/` is now the Gateway overlay (the Ingress variant is gone, `deploy-mcp-gemini-gateway/` is a deprecated alias), spreads replicas one per zone, and can serve many clusters (`CLUSTERS_FROM`). Unschedulable pods now come with the reason no node is coming (`autoscaler.scaleup_blocked`), and an idle Autopilot cluster, at 0 nodes by design, is reported as one info finding by `triage delta`, `scan` and `health` instead of an outage. Verified live on Gemini Enterprise across an organization of 48 clusters.
