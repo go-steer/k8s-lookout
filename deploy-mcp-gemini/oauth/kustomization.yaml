@@ -1,0 +1,80 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optional: generic MCP clients (Claude Code, gemini-cli) sign in too.
+#
+# Gemini Enterprise runs the Google sign-in itself and needs none of
+# this. Generic clients register with an authorization server and sign
+# the person in there, which Google's server does not allow, so this
+# component makes lookout serve its own in front of Google sign-in
+# (`--oauth-issuer`, docs/site/.../getting-started/mcp.md, "Generic MCP
+# clients"). Gemini Enterprise keeps working on the same endpoint.
+#
+# Before enabling it, in the namespace:
+#   - Secret lookout-oauth-client, key client.json: the Google OAuth
+#     client's JSON from the Cloud console (the same client as
+#     GOOGLE_CLIENT_ID), with https://<DOMAIN>/callback among its
+#     authorized redirect URIs.
+#   - Secret lookout-oauth-keys, key keyring: one
+#     "<id> <base64 of 32 random bytes>" line. Never replace it: that
+#     invalidates every token lookout has issued.
+# and in config.yaml OAUTH_CUSTODY (vault or sealed) and, for vault,
+# OAUTH_VAULT_AUTH_PROVIDER. Then add `- oauth` to components.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: lookout-mcp
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-issuer=https://$(DOMAIN)"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--google-client-secret-file=/etc/lookout/oauth/client/client.json"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-keys-file=/etc/lookout/oauth/keys/keyring"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-custody=$(OAUTH_CUSTODY)"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-vault-auth-provider=$(OAUTH_VAULT_AUTH_PROVIDER)"
+      # Claude Code and gemini-cli register themselves; each still goes
+      # through Google sign-in, the GOOGLE_ALLOW list and a consent page.
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-open-registration"
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: oauth-client
+            mountPath: /etc/lookout/oauth/client
+            readOnly: true
+          # A directory mount, not subPath: lookout re-reads the keyring
+          # as the kubelet updates it, which is how a key rotates.
+          - name: oauth-keys
+            mountPath: /etc/lookout/oauth/keys
+            readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes
+        value:
+          - name: oauth-client
+            secret:
+              secretName: lookout-oauth-client
+          - name: oauth-keys
+            secret:
+              secretName: lookout-oauth-keys

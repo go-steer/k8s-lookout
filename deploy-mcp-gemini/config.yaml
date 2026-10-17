@@ -45,3 +45,9 @@ data:
   # with their own token. Every tool then takes a cluster argument, and
   # k8s_list_clusters lists the names. Empty: the cluster lookout runs in.
   CLUSTERS_FROM: ""
+  # Read only with the optional oauth component (generic MCP clients
+  # sign in through lookout's own authorization server): who holds each
+  # person's Google grant, vault or sealed, and for vault the Agent
+  # Identity auth provider, projects/<p>/locations/<l>/authProviders/<n>.
+  OAUTH_CUSTODY: ""
+  OAUTH_VAULT_AUTH_PROVIDER: ""
