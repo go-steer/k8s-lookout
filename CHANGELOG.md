@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-17
+
+**This release completes the shared MCP endpoint: besides Gemini Enterprise users, people on generic MCP clients and machine callers can now use it, each with their own identity.** Claude Code, gemini-cli and IDEs sign people in with Google through lookout's own OAuth authorization server (`--oauth-issuer`, built on steward v0.2.0), and every call reads as that person, exactly as for Gemini Enterprise, on the same endpoint; the person's Google grant can be held by the Agent Identity credential vault. Workloads (core-agent daemons, incident sessions) authenticate with a SPIFFE or CA-issued client certificate on a separate mTLS listener, or with OAuth client credentials, governed by a `--workload-rules` file of tools, clusters, write grants and an optional service account to read as. `deploy-mcp-gemini/oauth` turns generic-client sign-in on for the Gemini Enterprise deployment. And a `health` category holding only info findings now scores healthy, so GKE's own webhook posture no longer marks every GKE cluster's webhooks degraded.
+
 ### Added
 
 - **`deploy-mcp-gemini/oauth`: an optional component that lets generic
