@@ -569,6 +569,17 @@ case that matters now and it does not need more than one cluster.
 6. **Callers as workloads (#701):** purser mTLS/SPIFFE in front of the HTTP
    endpoint, for core-agent daemons and watch-opened sessions; still
    reads as lookout or a configured service account.
+   As built: a second listener, `--mtls-listen`, beside `--listen`. purser's
+   mTLS profiles require the client certificate in the handshake, and
+   people reach `--listen` through a Gateway that terminates TLS and has no
+   certificate of theirs, so one listener cannot serve both without making
+   the certificate optional; each listener has exactly one way in. Workload
+   rules (`--workload-rules`) are lookout's, built from purser `authz`
+   matchers: tools, `write: true` for the state-changing ones, clusters,
+   and an optional `service_account` minted through `generateAccessToken`
+   (`cloud.Impersonate`, behind the `gke` tag). Workload reads of the store
+   are not row-filtered (`kube.CallerFiltered` is false for them), as
+   decided above, including when they read as a service account.
 7. **Callers as people, through generic MCP clients (#702):** steward Path B.
 
 ## Open questions

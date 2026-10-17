@@ -18,6 +18,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -39,5 +40,16 @@ func TestDefaultBuildNewDetectsNone(t *testing.T) {
 	}
 	if p != NoProvider {
 		t.Errorf("New in default build = %v, want the NoProvider sentinel", p)
+	}
+}
+
+// TestDefaultBuildCannotImpersonate: impersonating a service account is a
+// GKE capability; the vanilla build says so instead of reading as lookout.
+func TestDefaultBuildCannotImpersonate(t *testing.T) {
+	if CanImpersonate() {
+		t.Error("the default build reports it can impersonate")
+	}
+	if _, err := Impersonate(context.Background(), "sa@example-project.iam.gserviceaccount.com"); !errors.Is(err, ErrNoImpersonator) {
+		t.Errorf("Impersonate = %v, want ErrNoImpersonator", err)
 	}
 }

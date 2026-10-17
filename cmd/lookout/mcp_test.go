@@ -188,6 +188,26 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
 			"--resource-url=http://l.example/mcp",
 		}, 2, "--resource-url"},
+		// #701: workload callers on the mTLS listener.
+		{"workload flags without the mTLS listener", []string{"--workload-rules=/dev/null"}, 2, "--mtls-listen"},
+		{"a client CA without the mTLS listener", []string{"--client-ca-file=/dev/null"}, 2, "--mtls-listen"},
+		{"the mTLS listener needs rules", []string{"--mtls-listen=127.0.0.1:0", "--spiffe-trust-domain=example.test"}, 2, "--workload-rules"},
+		{"the mTLS listener needs a way to verify", []string{"--mtls-listen=127.0.0.1:0", "--workload-rules=/dev/null"}, 2, "--spiffe-trust-domain"},
+		{"two profiles", []string{
+			"--mtls-listen=127.0.0.1:0", "--workload-rules=/dev/null", "--spiffe-trust-domain=example.test", "--client-ca-file=/dev/null",
+		}, 2, "exclusive"},
+		{"a credentials dir needs its trust domain", []string{
+			"--mtls-listen=127.0.0.1:0", "--workload-rules=/dev/null", "--spiffe-credentials-dir=/tmp",
+		}, 2, "--spiffe-trust-domain"},
+		{"a routable mTLS listener needs the opt-in", []string{
+			"--mtls-listen=0.0.0.0:8443", "--workload-rules=/dev/null", "--spiffe-trust-domain=example.test", "--access-log=/dev/null",
+		}, 2, "--mtls-listen=\"0.0.0.0:8443\": refusing"},
+		{"a routable mTLS listener needs the access log", []string{
+			"--mtls-listen=0.0.0.0:8443", "--allow-non-loopback", "--workload-rules=/dev/null", "--spiffe-trust-domain=example.test",
+		}, 2, "--access-log"},
+		{"the two listeners need two addresses", []string{
+			"--listen=127.0.0.1:8383", "--mtls-listen=127.0.0.1:8383", "--workload-rules=/dev/null", "--spiffe-trust-domain=example.test",
+		}, 2, "different addresses"},
 		{"google mode counts as authentication for the bind", []string{
 			"--listen=0.0.0.0:8383", "--allow-non-loopback", "--google-client-id=c", "--google-allow=@x.example",
 			"--resource-url=https://l.example/mcp",

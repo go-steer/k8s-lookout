@@ -244,7 +244,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	if exemptions != nil {
 		writerOpts = append(writerOpts, WithExemptions(exemptions))
 	}
-	if _, ok := kube.CallerTokenFrom(ctx); ok && cfg.CallerFiltered {
+	if kube.CallerFiltered(ctx) && cfg.CallerFiltered {
 		// Running as its caller (#699), a command whose findings are rows
 		// from lookout's own store or a report file: the caller's RBAC
 		// never vetted them, so each passes the caller's access check

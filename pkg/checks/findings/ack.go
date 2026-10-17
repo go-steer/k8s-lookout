@@ -101,17 +101,18 @@ func runAck(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	}
 
 	by := inv.Flags.String("by")
-	if _, asCaller := kube.CallerTokenFrom(ctx); asCaller {
+	if kube.CallerFiltered(ctx) {
 		// Running as its caller (#699): ack only subjects in namespaces the
 		// caller can see, checked before the store is touched so that an
-		// unseen subject's existence is not revealed either way; and the
-		// ack is recorded as the caller, not whatever --by says.
+		// unseen subject's existence is not revealed either way.
 		if !kube.NewCallerVisibility(ctx).Visible(subjectNamespace(subjectKey)) {
 			return 0, fmt.Errorf("refusing to change the ack on %s: you cannot list pods in its namespace", subjectKey)
 		}
-		if name := kube.CallerNameFrom(ctx); name != "" {
-			by = name
-		}
+	}
+	// An authenticated MCP caller, a person (#699) or a workload (#701), is
+	// recorded as themselves, not as whatever --by says.
+	if name := kube.CallerNameFrom(ctx); name != "" {
+		by = name
 	}
 
 	st, err := openStore(emit.StorePath(inv.Flags))

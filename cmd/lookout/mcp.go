@@ -75,7 +75,8 @@ Flags:
                         request; 401 otherwise. One shared token, no
                         authorization — every caller presenting it
                         gets the full advertised surface. Compared in
-                        constant time. mTLS is out of scope.
+                        constant time. For per-workload identity and
+                        authorization, see --mtls-listen.
   --google-client-id=<ids>
                         Google-token mode (#699): every tool call reads
                         as the person who made it, with their own Google
@@ -120,6 +121,55 @@ Flags:
   --resource-url=<url>  this server's MCP URL exactly as clients reach
                         it (e.g. https://lookout.example.com/mcp); named
                         in the RFC 9728 metadata and every 401.
+  --mtls-listen=<host:port>
+                        serve workload callers (#701): core-agent
+                        daemons, watch-opened incident sessions. A
+                        second listener beside --listen (either may run
+                        alone) that terminates TLS itself and requires a
+                        client certificate in the handshake: a missing
+                        or untrusted one is a refused connection. The
+                        caller is the certificate's SPIFFE ID (or URI
+                        SAN), and --workload-rules decides what it may
+                        call. People keep using --listen (through a
+                        Gateway, with --google-client-id or
+                        --auth-token-file). Routable addresses need
+                        --allow-non-loopback and --access-log, like
+                        --listen. Verify workloads with one of:
+  --tls-cert-file=<p>, --tls-key-file=<p>, --client-ca-file=<p>
+                        a standard CA: lookout's own certificate and key
+                        (re-read when they change), and the CA bundle
+                        client certificates must chain to. The caller's
+                        identity is its certificate's single URI SAN.
+  --spiffe-trust-domain=<td>
+                        SPIFFE: verify each caller's X509-SVID against
+                        this trust domain's bundle (GKE workload
+                        identity: <project>.svc.id.goog), presenting
+                        lookout's own SVID. Credentials and bundle are
+                        re-read as they rotate.
+  --spiffe-credentials-dir=<dir>
+                        where lookout's SVID and the bundle live, in
+                        GKE's layout (certificates.pem, private_key.pem,
+                        ca_certificates.pem). Default: the GKE managed
+                        workload identity mount,
+                        /var/run/secrets/workload-spiffe-credentials.
+  --workload-rules=<path>
+                        YAML rules for workload callers; required with
+                        --mtls-listen. Each rule matches callers
+                        (identities: exact IDs; or trust_domain with an
+                        optional path_prefix, SPIFFE only), and grants
+                        tools (the --tools syntax), write: true for the
+                        tools that change state (refused otherwise, even
+                        when named), clusters (required on, and only
+                        for, a multi-cluster endpoint; "*" for all), and
+                        optionally service_account: the call then reads
+                        as that service account through IAM Credentials
+                        generateAccessToken (-tags gke; lookout's
+                        identity needs Service Account Token Creator on
+                        it), never falling back to lookout's own. Rules
+                        only grant, and a call needs one rule granting
+                        its tool (and cluster). The access log and
+                        triage records (recorded_by) name the workload;
+                        its store reads are not filtered.
   --kubeconfig=<path>   path to a kubeconfig file pinned for all MCP
                         tool invocations (instead of $KUBECONFIG /
                         ~/.kube/config).
@@ -305,6 +355,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defaultCluster := fs.String("default-cluster", "", "the cluster a call that names none reads, when the caller can read it")
 	defaultProject := fs.String("default-project", "", "the project preferred when a call names no cluster or a repeated name")
 	folderDiscovery := fs.String("folder-discovery", "", "how folder and organization scopes are searched: auto, asset or resourcemanager")
+	wf := registerWorkloadFlags(fs)
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -352,13 +403,17 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	if problem := wf.problem(*listen, *allowNonLoopback, *accessLog); problem != "" {
+		fmt.Fprintf(stderr, "lookout mcp: %s\n", problem)
+		return 2
+	}
 	if *listen == "" {
 		for _, f := range []struct {
 			name string
 			set  bool
 		}{
 			{"--auth-token-file", *authTokenFile != ""},
-			{"--allow-non-loopback", *allowNonLoopback},
+			{"--allow-non-loopback", *allowNonLoopback && *wf.listen == ""},
 			{"--google-client-id", googleMode},
 		} {
 			if f.set {
@@ -471,6 +526,12 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		google = g
 	}
 
+	workloads, code := wf.build(reg, multiCluster, stderr)
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = workloads.Close() }()
+
 	var (
 		clusters *mcpserver.Clusters
 		local    string
@@ -496,6 +557,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mcpserver.WithStore(*store),
 		mcpserver.WithReport(*report),
 		mcpserver.WithGoogleAuth(google),
+		mcpserver.WithWorkloadAuth(workloads),
 	)
 	if err := mcpserver.Serve(ctx, server, mcpserver.ServeOptions{
 		Listen:           *listen,
@@ -505,6 +567,8 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Announce:         stderr,
 		AccessLogPath:    *accessLog,
 		Stateless:        multiCluster,
+		MTLSListen:       *wf.listen,
+		Workloads:        workloads,
 	}); err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 1

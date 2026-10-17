@@ -192,3 +192,22 @@ func writeTokenKubeconfig(t *testing.T, server, token string, ca []byte) string 
 	}
 	return path
 }
+
+// TestCallerFiltered: only a person's caller token filters store rows; a
+// workload's (an impersonated service account, #701) does not, and no
+// caller token filters nothing.
+func TestCallerFiltered(t *testing.T) {
+	ctx := context.Background()
+	if CallerFiltered(ctx) {
+		t.Error("no caller token, yet filtered")
+	}
+	if !CallerFiltered(WithCallerToken(ctx, callerSource())) {
+		t.Error("a person's token is not filtered")
+	}
+	if CallerFiltered(WithWorkloadCaller(WithCallerToken(ctx, callerSource()))) {
+		t.Error("a workload's service-account token is filtered")
+	}
+	if _, ok := CallerTokenFrom(WithWorkloadCaller(WithCallerToken(ctx, callerSource()))); !ok {
+		t.Error("marking the caller a workload dropped its token")
+	}
+}

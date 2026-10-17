@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Workload callers authenticate to `lookout mcp` with their workload
+  identity (#701).** `--mtls-listen` opens a second listener, beside
+  `--listen`, that terminates TLS and requires a client certificate in
+  the handshake, verified by purser's mTLS authenticators: SPIFFE
+  (`--spiffe-trust-domain`, reading GKE managed workload identity's
+  rotating credentials by default, or `--spiffe-credentials-dir`) or a
+  standard CA (`--tls-cert-file`, `--tls-key-file`, `--client-ca-file`;
+  the identity is the certificate's URI SAN). A missing or untrusted
+  certificate is a refused connection. `--workload-rules` (YAML, strict
+  keys) grants each workload, matched by exact identity or by SPIFFE
+  trust domain and path prefix, its tools (the `--tools` syntax), the
+  tools that change state only with `write: true`, its clusters on a
+  multi-cluster endpoint, and optionally a `service_account` it reads as
+  through IAM Credentials `generateAccessToken` (`-tags gke`); a failed
+  impersonation fails the call, never falling back to lookout's
+  identity. The access log names the workload (`caller=<SPIFFE ID>`),
+  per-caller limits apply, triage records and acks name it
+  (`recorded_by`), and its store reads are not filtered. People keep
+  reaching `--listen` through a Gateway; existing flags are unchanged.
+
 ### Changed
 
 - **A `health` category with only info findings scores healthy.** It

@@ -138,7 +138,8 @@ func runDiff(ctx context.Context, inv emit.Invocation, deps Deps) (int, error) {
 	// Running as its caller (#699), it never persists: the stored state is
 	// the whole cluster's, advanced by the operator's own runs, and one
 	// caller's request must not rewrite it for namespaces they cannot see.
-	_, asCaller := kube.CallerTokenFrom(ctx)
+	// A workload caller (#701) persists, as an operator's run does.
+	asCaller := kube.CallerFiltered(ctx)
 	if !inv.Flags.Bool("dry-run") && !asCaller {
 		if err := st.ReplaceFindingStates(ctx, cluster, res.Next); err != nil {
 			return 0, err

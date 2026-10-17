@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-steer/purser"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -153,7 +154,19 @@ func listClustersHandler(cfg config, sem chan struct{}) mcp.ToolHandler {
 			record(emit.ExitRuntime, msg)
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: emit.MaskString(msg)}}}
 		}
-		if cfg.google != nil {
+		var workload *purser.Caller
+		if wc, ok := workloadCallerOf(req); ok {
+			caller = wc.Identity
+			if cfg.workloads == nil || !cfg.workloads.matchesAny(wc) {
+				return toolError("lookout list clusters: " + caller + " is not granted any cluster by the operator's --workload-rules"), nil
+			}
+			release, ok := cfg.perCaller.acquire(caller)
+			if !ok {
+				return toolError(fmt.Sprintf("lookout list clusters: %s already has %d calls in flight; retry when one finishes", caller, cfg.perCaller.max)), nil
+			}
+			defer release()
+			workload = &wc
+		} else if cfg.google != nil {
 			id, ts, err := cfg.google.caller(req, listClustersCommand)
 			caller = id.Email
 			if err != nil {
@@ -182,11 +195,25 @@ func listClustersHandler(cfg config, sem chan struct{}) mcp.ToolHandler {
 		if err != nil {
 			return toolError("lookout list clusters: " + err.Error()), nil
 		}
+		// A workload sees only the clusters its rules let it call.
+		allowed := func(es []clusterEntry) []clusterEntry {
+			if workload == nil {
+				return es
+			}
+			var out []clusterEntry
+			for _, e := range es {
+				if cfg.workloads.listsCluster(*workload, e) {
+					out = append(out, e)
+				}
+			}
+			return out
+		}
+		entries = allowed(entries)
 		total := len(entries)
 		if filter != "" {
 			all, _, err := cfg.clusters.List(ctx, caller, "")
 			if err == nil {
-				total = len(all)
+				total = len(allowed(all))
 			}
 		}
 		out := renderClusters(entries, scopes, total, cfg.log.now().Sub(start))
