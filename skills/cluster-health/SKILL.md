@@ -39,11 +39,19 @@ kind=health.category severity=critical category=certs status=degraded total=1 to
 kind=pod.crashloop severity=critical namespace=prod kind_of_object=Pod name=api-0 reason=CrashLoopBackOff fingerprint=sha256:e2957792a0b3ad9e29db2051dbc69ff01dfe3a52da8dbb6d1331aa44fe946f8b category=crashloops container=app restarts=12 last_state=Error exit_code=1
 kind=cert.expired severity=critical namespace=prod kind_of_object=Secret name=old-tls reason=CertificateExpired message="certificate expired 16d ago" fingerprint=sha256:dd1c9738112cd7229a73b1920b06122bccee7bb0e7867c93752fa0b0e522557d category=certs subject=old.example.com not_after=2026-06-15T00:00:00Z days_left=-16
 …
-scanned=15 findings=24 elapsed=100ms
+scanned=15 findings=24 elapsed=100ms autoscaler="unavailable: provider \"none\" cannot read node pool configuration"
 ```
 
 - A fully healthy cluster is 12 `status=healthy`/`unavailable` scorecard
   lines and a summary — nothing else.
+- A leading `cluster.autopilot_idle` (info) means an Autopilot cluster
+  with no workloads of its own, scaled to 0 nodes by design. Categories
+  with `idle_folded=N` are healthy: their findings are GKE's system pods
+  waiting for a first workload. Report "healthy, idle, nothing
+  deployed" — not an outage, and never advise scaling node pools.
+- `autoscaler.scaleup_blocked` in `pending` says why no node is coming
+  for unschedulable pods (pools with autoscaling off, at max, or stocked
+  out); lead with it, the `pod.pending` lines are its consequences.
 - The last two categories are not pod health. `services` is a Service
   whose selector matches no pod (`edge.selector_empty`), or an Ingress
   in front of one: it routes nowhere while every pod behind the

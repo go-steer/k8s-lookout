@@ -125,6 +125,10 @@ const (
 	statusHealthy     = "healthy"
 	statusDegraded    = "degraded"
 	statusUnavailable = "unavailable"
+
+	// noteAutoscaler is triage delta's summary note: why unschedulable
+	// pods could not be explained.
+	noteAutoscaler = "autoscaler"
 )
 
 // categoryOrder is the fixed scorecard order (§5 health row).
@@ -182,6 +186,7 @@ func New(deps Deps) checks.Command {
 			{Name: "total", Doc: "findings in a degraded category"},
 			{Name: "top", Doc: "worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top"},
 			{Name: "unverified", Doc: "on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message"},
+			{Name: "idle_folded", Doc: "on a healthy scorecard line of an idle Autopilot cluster: the findings in this category the leading cluster.autopilot_idle finding explains — GKE's own pods and webhooks waiting, by design, for a first workload to bring a node up — counted rather than reported (#735)"},
 			{Name: "subject", Doc: "TLS certificate subject (CN when set); never key material"},
 			{Name: "not_after", Doc: "TLS certificate NotAfter (a cert-manager Certificate's status.notAfter), RFC 3339"},
 			{Name: "secret", Doc: "on a cert-manager Certificate finding: the TLS Secret it writes (spec.secretName), which is not judged again as a Secret"},
@@ -230,7 +235,7 @@ var perfFields = map[string]bool{
 func delegatedOutput() []checks.OutputField {
 	seen := map[string]bool{
 		"category": true, "status": true, "total": true, "top": true,
-		"unverified": true, "subject": true, "not_after": true, "days_left": true, "secret": true,
+		"unverified": true, "idle_folded": true, "subject": true, "not_after": true, "days_left": true, "secret": true,
 		"phase": true, "webhook": true, "service": true,
 		"backend": true, "gates": true, "rules": true,
 		"object_selector": true, "timeout": true,
@@ -322,10 +327,27 @@ type scorecard struct {
 	// could not check and why (#546) — a healthy line with a known
 	// blind spot says so rather than reading as a clean bill.
 	unverified map[string]string
+	// idle is the cluster.autopilot_idle finding when the cluster is an
+	// idle Autopilot one (#735); folded counts, per category, the
+	// findings it explains in place of reporting them.
+	idle   *emit.Finding
+	folded map[string]int
 }
 
 func (s *scorecard) add(category string, f emit.Finding) {
 	s.findings[category] = append(s.findings[category], f)
+}
+
+// addWebhooks adds the webhook audit's findings, counting under an idle
+// Autopilot cluster the GKE-managed ones it explains instead.
+func (s *scorecard) addWebhooks(fs []emit.Finding) {
+	for _, f := range fs {
+		if s.idle != nil && delta.IdleWebhook(f) {
+			s.folded["webhooks"]++
+			continue
+		}
+		s.add("webhooks", f)
+	}
 }
 
 // run is the CheckFunc.
@@ -351,7 +373,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	now := deps.now()
 	ns := inv.Scope.Namespace // "" (default and -A) = whole cluster
 
-	card := &scorecard{findings: map[string][]emit.Finding{}, unavailable: map[string]string{}, unverified: map[string]string{}}
+	card := &scorecard{findings: map[string][]emit.Finding{}, unavailable: map[string]string{}, unverified: map[string]string{}, folded: map[string]int{}}
 	scanned := 0
 
 	// Delta-backed categories: nodes, crashloops, pending, rollouts,
@@ -360,16 +382,28 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	// Tolerant (#546, #649): a part whose List is refused by RBAC or
 	// fails with a transient API error while ctx is still live drops
 	// out alone and its categories answer unavailable with the reason.
-	dScanned, dFindings, dUnavailable, err := delta.ScanClusterPartial(ctx, client, ns, now,
+	d, err := delta.ScanClusterPartial(ctx, client, ns, now,
 		delta.Config{TolerateTransient: true},
 		"pods", "nodes", "pdb", "system", "quota")
 	if err != nil {
 		return 0, err
 	}
-	scanned += dScanned
-	for _, f := range dFindings {
-		card.add(deltaCategory(f.Kind), f)
+	scanned += d.Scanned
+
+	// The provider serves two categories: control-plane reads its
+	// metrics, and unschedulable pods its cluster record.
+	provider, providerErr := deps.provider(ctx)
+	if providerErr != nil && ctx.Err() != nil {
+		return 0, providerErr
 	}
+	if providerErr == nil {
+		defer func() { _ = provider.Close() }()
+	}
+
+	if err := scoreDelta(ctx, inv, card, d, provider, providerErr, now); err != nil {
+		return 0, err
+	}
+	dUnavailable := d.Unavailable
 	if ns != "" {
 		card.unavailable["nodes"] = "Nodes are cluster-scoped; run without --namespace"
 		if ns != metav1.NamespaceSystem {
@@ -436,9 +470,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			}
 		} else {
 			scanned += n
-			for _, f := range state.CheckWebhooks(in, certWarn, now) {
-				card.add("webhooks", f)
-			}
+			card.addWebhooks(state.CheckWebhooks(in, certWarn, now))
 		}
 	} else {
 		card.unavailable["webhooks"] = "webhook configurations are cluster-scoped; run without --namespace"
@@ -489,12 +521,8 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 	// control-plane: delegated to the shipped perf apiserver pack when
 	// the provider serves Metrics.
-	provider, err := deps.provider(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			return 0, err
-		}
-		card.unavailable["control-plane"] = err.Error()
+	if providerErr != nil {
+		card.unavailable["control-plane"] = providerErr.Error()
 	} else if backend, ok := provider.Metrics(); ok {
 		findings, n, absent, err := perf.ControlPlaneProbe(ctx, backend, now)
 		fix, noToken := cloud.DegradableCredentials(ctx, err)
@@ -565,8 +593,17 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		})
 	}
 
-	// Scorecard block first — every category answers — then the
-	// degraded categories' details, in the same fixed order.
+	// An idle Autopilot cluster leads with the finding that says so,
+	// before the scorecard it explains. Then the scorecard block —
+	// every category answers — then the degraded categories' details,
+	// in the same fixed order.
+	if card.idle != nil {
+		f := *card.idle
+		f.Fingerprint = engine.ScanFingerprint(f.Reason, f.KindOfObject, "")
+		if err := inv.Out.Emit(f); err != nil {
+			return 0, err
+		}
+	}
 	for _, cat := range categoryOrder {
 		if err := inv.Out.Emit(categoryFinding(cat, card, top)); err != nil {
 			return 0, err
@@ -594,6 +631,39 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 	}
 	return scanned, nil
+}
+
+// scoreDelta buckets the delta pass's findings into the card, with
+// unschedulable pods answered as triage delta answers them: an idle
+// Autopilot cluster is one benign state, led by the
+// cluster.autopilot_idle finding, the categories its findings would
+// have degraded scoring healthy and counting them (#735); otherwise
+// pending gains the scale-up explanation (#733).
+func scoreDelta(ctx context.Context, inv emit.Invocation, card *scorecard, d delta.Partial, provider cloud.Provider, providerErr error, now time.Time) error {
+	findings, note := d.Findings, ""
+	if d.Unschedulable() > 0 {
+		if providerErr != nil {
+			note = "unavailable: " + providerErr.Error()
+		} else {
+			findings, note = d.ExplainUnschedulable(ctx, provider, now)
+		}
+	}
+	if note != "" {
+		if err := inv.Out.Note(noteAutoscaler, note); err != nil {
+			return err
+		}
+	}
+	if len(findings) == 1 && findings[0].Kind == delta.KindAutopilotIdle {
+		card.idle = &findings[0]
+		for _, f := range d.Findings {
+			card.folded[deltaCategory(f.Kind)]++
+		}
+		return nil
+	}
+	for _, f := range findings {
+		card.add(deltaCategory(f.Kind), f)
+	}
+	return nil
 }
 
 // serviceLists is what the edge sweep reads: Services and the pods
@@ -643,7 +713,7 @@ var deltaParts = []struct {
 // category.
 func deltaCategory(kind string) string {
 	switch {
-	case kind == "pod.pending":
+	case kind == "pod.pending", strings.HasPrefix(kind, "autoscaler."):
 		return "pending"
 	case strings.HasPrefix(kind, "pdb."):
 		return "disruption"
@@ -692,6 +762,11 @@ func categoryFinding(cat string, card *scorecard, top int) emit.Finding {
 	}
 	if len(fs) == 0 {
 		status(statusHealthy)
+		if n := card.folded[cat]; n > 0 {
+			f.Reason = "AutopilotIdle"
+			f.Message = fmt.Sprintf("idle Autopilot cluster: %d finding(s) here are its by-design state at 0 nodes, explained by %s", n, delta.KindAutopilotIdle)
+			f.Details = append(f.Details, emit.Field{Key: "idle_folded", Value: strconv.Itoa(n)})
+		}
 		unverified()
 		return f
 	}

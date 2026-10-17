@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an idle cluster's 42 criticals and warnings plus 4 critical webhooks
   became one info line; a Standard cluster at 0 nodes still reports
   `NoPoolCanGrow`.
+- **`health` recognizes an idle Autopilot cluster too (#735).** The
+  scorecard leads with the `cluster.autopilot_idle` finding, and the
+  categories its findings would have degraded (pending, rollouts,
+  add-ons, disruption, GKE-managed webhooks) score healthy with
+  `idle_folded=N`. Elsewhere the `pending` category now carries
+  `autoscaler.scaleup_blocked` (#733), with delta's `autoscaler=`
+  summary note when the provider cannot answer. Live, Gemini Enterprise
+  had called the idle demo cluster "not healthy" from this tool.
 
 ### Fixed
 
