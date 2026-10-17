@@ -41,7 +41,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 
 | Kind | Severity | Claim |
 | --- | --- | --- |
-| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: the admissions its rules match are rejected (the message names them; requests it does not match are unaffected) |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
 | `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |

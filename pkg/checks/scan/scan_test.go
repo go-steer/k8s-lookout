@@ -628,6 +628,44 @@ func TestScan_EdgeSweepZeroReplicasDoesNotExcuseARunningMatch(t *testing.T) {
 	}
 }
 
+// TestScan_FoldsGKEWebhooksUnderAnIdleAutopilotCluster: once triage
+// delta has called the cluster idle Autopilot, a GKE-managed webhook
+// failing closed for want of the node GKE scaled away is that state, not
+// a second critical; it is folded and counted. A user's webhook is not.
+func TestScan_FoldsGKEWebhooksUnderAnIdleAutopilotCluster(t *testing.T) {
+	idle := emit.Finding{Kind: "cluster.autopilot_idle", Severity: emit.SeverityInfo, KindOfObject: "Cluster", Name: "ap", Reason: "AutopilotIdle"}
+	webhook := func(name, service string) emit.Finding {
+		return emit.Finding{Kind: "webhook.failing_closed", Severity: emit.SeverityCritical, KindOfObject: "ValidatingWebhookConfiguration", Name: name, Reason: "FailingClosed",
+			Details: []emit.Field{{Key: "service", Value: service}}}
+	}
+	c := newScan(t, nil,
+		stage("triage delta", emits(idle)),
+		stage("state webhooks", emits(webhook("gmp-operator", "gke-gmp-system/gmp-operator"), webhook("payments", "infra/payments-webhook"))),
+	)
+	res := checktest.Run(t, c, "--max-drilldown=0")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d: %s", res.Code, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "name=gmp-operator") {
+		t.Errorf("the GKE webhook was not folded:\n%s", res.Stdout)
+	}
+	for _, want := range []string{"kind=cluster.autopilot_idle", "name=payments", "autopilot_idle_folded=1"} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("missing %q:\n%s", want, res.Stdout)
+		}
+	}
+
+	// Without the idle finding, nothing is folded.
+	c = newScan(t, nil,
+		stage("triage delta", emits()),
+		stage("state webhooks", emits(webhook("gmp-operator", "gke-gmp-system/gmp-operator"))),
+	)
+	res = checktest.Run(t, c, "--max-drilldown=0")
+	if !strings.Contains(res.Stdout, "name=gmp-operator") || strings.Contains(res.Stdout, "autopilot_idle_folded") {
+		t.Errorf("folded without an idle cluster:\n%s", res.Stdout)
+	}
+}
+
 // TestScan_MaxDrilldownZeroDisablesTheSweepToo: stage 2 now runs even
 // when stage 1 found nothing, so --max-drilldown=0 is the only way to
 // opt out of its List pass. It has to keep meaning that.

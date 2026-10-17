@@ -184,6 +184,22 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 
 	if p.project == "" || p.location == "" || p.cluster == "" {
 		md := newMetadataClient()
+		mdCluster := md.lookup(ctx, "instance/attributes/cluster-name")
+		if mdCluster == "" {
+			// A GCE VM that is not a GKE node (a Cloud Workstation, a
+			// bastion) answers the metadata server for ITS project, not
+			// the cluster's. Taking that project and the kubeconfig's
+			// cluster name would ask for the cluster in the wrong
+			// project (#735: "container-days-ap-demo" looked up in the
+			// workstation's project, a 404). The kubeconfig's GKE
+			// context names all three; the VM's project is only the
+			// fallback for project-scoped capabilities.
+			p.fillFromKubeconfig(ctx)
+			if p.project == "" {
+				p.project = md.lookup(ctx, "project/project-id")
+			}
+			return p, nil
+		}
 		if p.project == "" {
 			p.project = md.lookup(ctx, "project/project-id")
 		}
@@ -191,7 +207,7 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 			p.location = md.lookup(ctx, "instance/attributes/cluster-location")
 		}
 		if p.cluster == "" {
-			p.cluster = md.lookup(ctx, "instance/attributes/cluster-name")
+			p.cluster = mdCluster
 		}
 	}
 	p.fillFromKubeconfig(ctx)

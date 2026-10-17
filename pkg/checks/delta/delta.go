@@ -119,6 +119,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("quota.exhausted", "a ResourceQuota resource is at its hard limit: the next create is rejected", emit.SeverityCritical),
 			checks.Kind("hpa.scale_failed", "an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale", emit.SeverityWarning),
 			checks.Kind("hpa.scaling_inactive", "an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count", emit.SeverityWarning),
+			checks.Kind(KindAutopilotIdle, "an Autopilot cluster with no workloads of its own, scaled to 0 nodes by design: its GKE system pods wait for the first workload, and this one finding replaces every finding that state causes in GKE-managed namespaces", emit.SeverityInfo),
 			checks.Kind(kindScaleUpBlocked, "pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause)", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
 			checks.UnreadKind(),
 		},
@@ -154,12 +155,14 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "scale_target", Doc: "an HPA's scaleTargetRef as Kind/name"},
 			{Name: "replicas", Doc: "an HPA's current replica count, where the failure holds it"},
 			{Name: "audit_reason", Doc: "the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one"},
-			{Name: "nodes", Doc: "on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read"},
-			{Name: "autopilot", Doc: "on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages"},
+			{Name: "nodes", Doc: "on autoscaler.scaleup_blocked and cluster.autopilot_idle: Ready/total Nodes in the cluster, when nodes were read"},
+			{Name: "autopilot", Doc: "on autoscaler.scaleup_blocked and cluster.autopilot_idle: true for a GKE Autopilot cluster, whose capacity the provider manages"},
 			{Name: "pools", Doc: "on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow)"},
 			{Name: "no_scale_up", Doc: "on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first"},
 			{Name: "window", Doc: "on autoscaler.scaleup_blocked: how far back autoscaler decisions were read"},
 			{Name: "decisions", Doc: "on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not"},
+			{Name: "folded", Doc: "on cluster.autopilot_idle: how many findings the idle state explains, replaced by this one"},
+			{Name: "namespaces", Doc: "on cluster.autopilot_idle: the GKE-managed namespaces those findings were in"},
 			{Name: "autoscaler", Doc: "summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools)"},
 		},
 		Examples: []string{
@@ -261,12 +264,13 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 				return 0, err
 			}
 		} else {
-			f, note, ok := explainScaleUp(ctx, p, n, s.nodes, s.nodesRead, d.now())
+			var note string
+			findings, note = explainUnschedulable(ctx, p, findings, n, s.nodes, s.nodesRead, d.now())
 			_ = p.Close()
-			if ok {
-				findings = append(findings, f)
-			} else if err := inv.Out.Note(noteAutoscaler, note); err != nil {
-				return 0, err
+			if note != "" {
+				if err := inv.Out.Note(noteAutoscaler, note); err != nil {
+					return 0, err
+				}
 			}
 		}
 	}

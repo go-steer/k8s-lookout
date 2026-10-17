@@ -76,7 +76,7 @@ func WebhooksCommand(deps Deps) checks.Command {
 				Help: "report webhook CA bundles expiring within this window"},
 		},
 		Kinds: []checks.KindField{
-			checks.Kind("webhook.failing_closed", "the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide", emit.SeverityCritical),
+			checks.Kind("webhook.failing_closed", "the webhook has no working backend and failurePolicy=Fail: the admissions its rules match are rejected (the message names them; requests it does not match are unaffected)", emit.SeverityCritical),
 			checks.Kind("webhook.dead_backend", "the webhook's service backend is missing, has no ready endpoints, or does not serve the named port", emit.SeverityWarning),
 			checks.Kind("webhook.slow_risk", "the webhook's timeout is long enough to slow every gated write if the backend degrades", emit.SeverityInfo),
 			checks.Kind("webhook.ca_expired", "the webhook's caBundle has expired: the API server cannot verify it", emit.SeverityCritical),
@@ -364,7 +364,7 @@ func checkWebhookEntry(in WebhookInputs, e webhookEntry, certWarn time.Duration,
 				KindOfObject: e.configKind,
 				Name:         e.configName,
 				Reason:       "FailingClosed",
-				Message:      deadMsg + " — matching admissions are REJECTED (failurePolicy Fail)",
+				Message:      deadMsg + " — " + rejectedScope(renderRules(e.rules)),
 				Details: scopeDetails(append(baseDetails(),
 					emit.Field{Key: "backend", Value: dead})),
 			})
@@ -520,6 +520,17 @@ func renderGates(nsSel *metav1.LabelSelector, namespaces []*corev1.Namespace) st
 // operations and resources are deduped across rules, resources render
 // as <resource>.<group> (core group bare, "*" stays *), and the
 // resource list is capped like the gates namespace list.
+// rejectedScope says what a failing-closed webhook actually blocks: the
+// requests its rules match, and nothing else (#735). An agent told only
+// "admissions are rejected" read a webhook gating one CRD as an API
+// server lockout.
+func rejectedScope(rules string) string {
+	if rules == "" {
+		return "matching admissions are REJECTED (failurePolicy Fail)"
+	}
+	return "these admissions are REJECTED (failurePolicy Fail): " + rules + "; requests it does not match are unaffected"
+}
+
 func renderRules(rules []admissionv1.RuleWithOperations) string {
 	ops := map[string]bool{}
 	res := map[string]bool{}

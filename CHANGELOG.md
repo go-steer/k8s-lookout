@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An idle Autopilot cluster is not reported as an outage (#735).** An
+  Autopilot cluster with no workloads of its own scales to 0 nodes by
+  design, leaving GKE's system pods Pending. `triage delta` now
+  recognizes it (the provider says Autopilot, the Node list is empty,
+  and every finding is in a GKE-managed namespace) and reports one info
+  finding, `cluster.autopilot_idle`, in place of the findings that state
+  causes. `scan` also folds the GKE-managed webhooks whose backend
+  cannot run for the same reason, counted in `autopilot_idle_folded=`.
+  One finding in a user namespace keeps the full incident path. Live,
+  an idle cluster's 42 criticals and warnings plus 4 critical webhooks
+  became one info line; a Standard cluster at 0 nodes still reports
+  `NoPoolCanGrow`.
+
+### Fixed
+
+- **`webhook.failing_closed` says what it blocks (#735).** The message
+  names the operations and resources the webhook's rules match, and that
+  other requests are unaffected; an agent had read a webhook gating one
+  CRD as an API server lockout.
+- **The GKE provider no longer borrows a workstation's project (#735).**
+  On a GCE VM that is not a GKE node (a Cloud Workstation), the metadata
+  server answered the VM's project, which was combined with the
+  kubeconfig's cluster name and location, so cloud reads asked for the
+  cluster in the wrong project. The kubeconfig's GKE context now
+  supplies all three; the VM's project is only a fallback.
+
 - **`triage delta` says why the autoscaler didn't add a node (#733).**
   When pods are unschedulable it consults the cloud provider once and
   emits `autoscaler.scaleup_blocked` for the cluster: each node pool with

@@ -56,6 +56,7 @@ Every abnormal object in one scan — the first call for "anything wrong in this
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `cluster.autopilot_idle` | info | an Autopilot cluster with no workloads of its own, scaled to 0 nodes by design: its GKE system pods wait for the first workload, and this one finding replaces every finding that state causes in GKE-managed namespaces |
 | `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
@@ -65,7 +66,7 @@ When creates/updates hang or fail cluster-wide with "failed calling webhook", or
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
-| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: the admissions its rules match are rejected (the message names them; requests it does not match are unaffected) |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
 | `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
