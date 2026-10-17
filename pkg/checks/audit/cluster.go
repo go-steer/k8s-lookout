@@ -32,6 +32,7 @@ const (
 	kindWorkloadIdentityOff = "audit.workload_identity_off"
 	kindLegacyMetadata      = "audit.legacy_metadata"
 	kindPublicControlPlane  = "audit.public_control_plane"
+	kindNodePoolCannotGrow  = "audit.nodepool_cannot_grow"
 )
 
 const (
@@ -41,6 +42,7 @@ const (
 	reasonPublicEndpointOpen       = "PublicEndpointUnrestricted"
 	reasonAuthorizedNetworksAll    = "AuthorizedNetworksAllowAll"
 	reasonAuthorizedNetworksGCP    = "AuthorizedNetworksAllowProviderCIDRs"
+	reasonAutoscalingMaxZero       = "AutoscalingMaxZero"
 )
 
 // anyIPv4 is the CIDR that makes an allow-list allow everything.
@@ -99,11 +101,12 @@ func ClusterCommand(deps Deps) checks.Command {
 		Name:        "audit cluster",
 		MCPName:     "k8s_audit_cluster",
 		MCPProfiles: []string{"audit"},
-		Summary:     "Cluster-level security configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, and a control-plane endpoint the internet can reach with nothing narrowing it. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
+		Summary:     "Cluster-level configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, a control-plane endpoint the internet can reach with nothing narrowing it, and a node pool whose autoscaler can never add a node. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
 		Kinds: []checks.KindField{
 			checks.Kind(kindWorkloadIdentityOff, "Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node", emit.SeverityWarning),
 			checks.Kind(kindLegacyMetadata, "a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read", emit.SeverityWarning),
 			checks.Kind(kindPublicControlPlane, "the control-plane endpoint is reachable from the internet; info when authorized networks narrow it", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindNodePoolCannotGrow, "a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever", emit.SeverityWarning),
 			checks.CloudUnavailableKind(),
 		},
 		Output: []checks.OutputField{
@@ -154,6 +157,7 @@ func runCluster(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 
 	findings := append(workloadIdentityFindings(cfg), legacyMetadataFindings(cfg)...)
 	findings = append(findings, controlPlaneFindings(cfg)...)
+	findings = append(findings, cannotGrowFindings(cfg)...)
 	sortFindings(findings)
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
@@ -219,6 +223,32 @@ func legacyMetadataFindings(cfg cloud.ClusterConfig) []emit.Finding {
 			Details: []emit.Field{
 				{Key: "disable_legacy_endpoints", Value: string(np.LegacyEndpoints)},
 			},
+		}))
+	}
+	return out
+}
+
+// cannotGrowFindings names the pools whose autoscaler may never add a
+// node: autoscaling on, both the per-zone and the pool-wide maximum 0
+// (#733). Autoscaling off is not judged here: a fixed-size pool is a
+// common, deliberate choice, and its size is in the cluster's Node
+// objects, not this record (triage delta judges it when pods are
+// waiting). Autopilot pools are the provider's own.
+func cannotGrowFindings(cfg cloud.ClusterConfig) []emit.Finding {
+	if cfg.Autopilot {
+		return nil
+	}
+	var out []emit.Finding
+	for _, np := range cfg.NodePools {
+		a := np.Autoscaling
+		if !a.Enabled || a.MaxNodeCount != 0 || a.TotalMaxNodeCount != 0 {
+			continue
+		}
+		out = append(out, nodePoolFinding(cfg, np, emit.Finding{
+			Kind:     kindNodePoolCannotGrow,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonAutoscalingMaxZero,
+			Message:  "the node pool has autoscaling on with a maximum of 0 nodes, so the autoscaler can never add one: a pod that only this pool could host stays Pending, and the autoscaler's refusal names the limit, not a fault",
 		}))
 	}
 	return out

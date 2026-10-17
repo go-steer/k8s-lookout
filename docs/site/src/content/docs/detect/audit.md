@@ -25,13 +25,14 @@ nothing deployed — a kubeconfig is the whole setup.
 
 ## [`lookout audit cluster`](/reference/audit-cluster/)
 
-Cluster-level security configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, and a control-plane endpoint the internet can reach with nothing narrowing it. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
+Cluster-level configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, a control-plane endpoint the internet can reach with nothing narrowing it, and a node pool whose autoscaler can never add a node. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
+| `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
 
 ## [`lookout audit exemptions`](/reference/audit-exemptions/)

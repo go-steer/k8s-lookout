@@ -66,6 +66,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 
 ## Output fields
@@ -105,6 +106,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `replicas` | an HPA's current replica count, where the failure holds it |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
+| `nodes` | on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read |
+| `autopilot` | on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages |
+| `pools` | on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow) |
+| `no_scale_up` | on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first |
+| `window` | on autoscaler.scaleup_blocked: how far back autoscaler decisions were read |
+| `decisions` | on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not |
+| `autoscaler` | summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools) |
 
 ## Output contract
 

@@ -70,6 +70,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
@@ -141,6 +142,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `replicas` | an HPA's current replica count, where the failure holds it |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
+| `nodes` | on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read |
+| `autopilot` | on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages |
+| `pools` | on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow) |
+| `no_scale_up` | on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first |
+| `window` | on autoscaler.scaleup_blocked: how far back autoscaler decisions were read |
+| `decisions` | on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not |
+| `autoscaler` | summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools) |
 | `workload` | the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
 | `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
 | `scaled_to_zero` | on an info edge.selector_empty (reason BackendScaledToZero): the Deployments or StatefulSets the selector matches, as <Kind>/<name>, every one of them asking for zero replicas. The Service routes nowhere until one scales up, but nothing is misconfigured |
@@ -165,7 +173,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `observed` | the worst (maximum) aligned value in the window, in the query's unit — the breach basis |
 | `latest` | the newest aligned value in the window |
 | `threshold` | the crossed threshold: the critical one when severity=critical, else the warning one |
-| `window` | the lookback the series cover (--since, or the pack default); also a summary-line note |
 
 ## Output contract
 

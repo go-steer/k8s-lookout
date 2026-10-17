@@ -175,6 +175,39 @@ func TestClusterNodePoolBypassesWorkloadIdentity(t *testing.T) {
 // A pool that states no metadata mode is not judged: the provider
 // resolves an unset mode from cluster-level defaults this read cannot
 // see, so a claim either way would be a guess.
+// A pool whose autoscaler may never add a node is named (#733); a
+// fixed-size pool, a pool with any maximum, and Autopilot's pools are
+// not.
+func TestClusterNodePoolCannotGrow(t *testing.T) {
+	clean := cloud.ToggleDisabled
+	cfg := exposedCluster()
+	cfg.NodePools = []cloud.NodePoolConfig{
+		{Name: "dead", LegacyEndpoints: clean, MetadataServerMode: cloud.MetadataModeProviderServer, Autoscaling: cloud.NodePoolAutoscaling{Enabled: true}},
+		{Name: "fixed", LegacyEndpoints: clean, MetadataServerMode: cloud.MetadataModeProviderServer},
+		{Name: "zonal", LegacyEndpoints: clean, MetadataServerMode: cloud.MetadataModeProviderServer, Autoscaling: cloud.NodePoolAutoscaling{Enabled: true, MaxNodeCount: 3}},
+		{Name: "total", LegacyEndpoints: clean, MetadataServerMode: cloud.MetadataModeProviderServer, Autoscaling: cloud.NodePoolAutoscaling{Enabled: true, TotalMaxNodeCount: 10}},
+	}
+	res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+	var named []string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.nodepool_cannot_grow" {
+			named = append(named, r["name"])
+			if r["severity"] != "warning" || r["reason"] != "AutoscalingMaxZero" {
+				t.Errorf("record %v", r)
+			}
+		}
+	}
+	if len(named) != 1 || named[0] != "dead" {
+		t.Errorf("named %v, want only the pool with autoscaling on and a maximum of 0", named)
+	}
+
+	cfg.Autopilot = true
+	res = checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+	if strings.Contains(res.Stdout, "audit.nodepool_cannot_grow") {
+		t.Errorf("an Autopilot pool was judged:\n%s", res.Stdout)
+	}
+}
+
 func TestClusterUnsetMetadataModeMakesNoClaim(t *testing.T) {
 	cfg := exposedCluster()
 	cfg.NodePools = []cloud.NodePoolConfig{

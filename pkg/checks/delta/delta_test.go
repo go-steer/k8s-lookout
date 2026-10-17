@@ -605,7 +605,9 @@ func TestGoldenMixedCluster(t *testing.T) {
 		`kind=job.failed severity=warning namespace=prod kind_of_object=Job name=etl reason=BackoffLimitExceeded message="Job has reached the specified backoff limit" fingerprint=sha256:45a13f2c2b0345dd176dbd913f958634ef940a94aa8e64dcb3b36a71bddf9d47 failed=4`,
 		`kind=hpa.scaling_inactive severity=warning namespace=prod kind_of_object=HorizontalPodAutoscaler name=web reason=FailedGetResourceMetric message="replicas held at 3: the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API" fingerprint=sha256:8763ddae5819cb82984b15a7c933b78cccf5e4733eeadb4d8d3e82ef7f704f62 condition="ScalingActive=False" scale_target=Deployment/web replicas=3 age=20m0s`,
 		`kind=workload.rollout severity=warning namespace=prod kind_of_object=Deployment name=web reason=RolloutIncomplete fingerprint=sha256:f954cac01a76847aa7e59722fb0e7f2f85cfe25d1c8dfd610432742cb1b0fc43 desired=3 ready=1 updated=1 available=1`,
-		`scanned=12 findings=10 elapsed=100ms`,
+		// The untagged build has no cloud provider, so the unschedulable
+		// pod is not explained, and the summary says so (#733).
+		`scanned=12 findings=10 elapsed=100ms autoscaler="unavailable: provider \"none\" cannot read node pool configuration"`,
 	}, "\n") + "\n"
 	if res.Stdout != want {
 		t.Errorf("golden mismatch\ngot:\n%s\nwant:\n%s", res.Stdout, want)

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`triage delta` says why the autoscaler didn't add a node (#733).**
+  When pods are unschedulable it consults the cloud provider once and
+  emits `autoscaler.scaleup_blocked` for the cluster: each node pool with
+  its autoscaling bounds and node count, the pools that cannot grow
+  (autoscaling off, maximum 0), and the autoscaler's own `noScaleUp`
+  refusals of the last hour, per pool. Critical when no pool can grow or
+  no node is Ready; info when nothing blocks, pointing at the pods' own
+  constraints. Without a provider or permission, the summary says so
+  (`autoscaler=unavailable: …`). `scan` includes it. Live, it answered a
+  cluster idle at 0 nodes for eleven hours in one line: all three pools
+  had autoscaling off. `audit cluster` also flags a pool with autoscaling
+  on and a maximum of 0 (`audit.nodepool_cannot_grow`).
+
 - **A multi-cluster endpoint chooses the cluster with the caller, not
   for them (#700).** In a live test a model asked about "my cluster"
   picked one of 48 the caller could list but not read, and got nothing

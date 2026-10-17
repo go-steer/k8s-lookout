@@ -56,6 +56,7 @@ Every abnormal object in one scan — the first call for "anything wrong in this
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ### [`lookout state webhooks`](/reference/state-webhooks/)
@@ -182,7 +183,7 @@ property of the whole group. `--include=all` takes every one; `-` subtracts
 
 Best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group
 
-Its 29 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
+Its 30 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
 
 ### `--include=cloud`
 
