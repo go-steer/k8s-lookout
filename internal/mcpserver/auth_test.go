@@ -314,12 +314,12 @@ func TestServe_AuthenticatedHTTPRoundTrip(t *testing.T) {
 // like the loopback one.
 func TestAnnounceIsLoudOffHost(t *testing.T) {
 	var loopback, routable strings.Builder
-	announce(ServeOptions{Listen: "127.0.0.1:8383", Announce: &loopback}, "127.0.0.1:8383")
+	announce(ServeOptions{Listen: "127.0.0.1:8383", Announce: &loopback}, []servedListener{{addr: "127.0.0.1:8383"}})
 	announce(ServeOptions{
 		Listen:        "0.0.0.0:8383",
 		Announce:      &routable,
 		AccessLogPath: "/var/log/lookout/mcp-access.log",
-	}, "0.0.0.0:8383")
+	}, []servedListener{{addr: "0.0.0.0:8383"}})
 
 	if !strings.Contains(loopback.String(), "loopback") {
 		t.Errorf("loopback banner = %q", loopback.String())

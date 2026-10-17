@@ -240,7 +240,7 @@ func targetRefused(cluster *state.Cluster, wl emit.WorkloadRef, err error) error
 // looked up, so that neither answer, "not in history" or a result with
 // hidden rows, reveals whether an object exists there.
 func callerMaySee(ctx context.Context, wl emit.WorkloadRef) error {
-	if _, asCaller := kube.CallerTokenFrom(ctx); !asCaller {
+	if !kube.CallerFiltered(ctx) {
 		return nil
 	}
 	if !kube.NewCallerVisibility(ctx).Visible(wl.Namespace) {

@@ -54,3 +54,30 @@ func CallerTokenFrom(ctx context.Context) (oauth2.TokenSource, bool) {
 	ts, ok := ctx.Value(callerTokenKey{}).(oauth2.TokenSource)
 	return ts, ok && ts != nil
 }
+
+// A caller token is either a person's own Google token (Google-token mode,
+// #699) or a service account's token minted for a workload caller (#701,
+// docs/mcp-multi-tenant-design.md "Caller kinds"). Both make every client
+// read as that identity, but only a person's reads of lookout's own store
+// and report files are filtered by their access: workload callers are not
+// row-filtered, by design ("The store is not behind RBAC"), and their
+// writes persist the way an operator's do.
+type workloadCallerKey struct{}
+
+// WithWorkloadCaller marks the invocation as running for a workload
+// caller: a caller token it carries is a service account's, not a
+// person's, so CallerFiltered is false.
+func WithWorkloadCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, workloadCallerKey{}, true)
+}
+
+// CallerFiltered reports whether the invocation runs as a person whose
+// rows from lookout's store and reports must pass their own access check:
+// a caller token is present and the caller is not a workload.
+func CallerFiltered(ctx context.Context) bool {
+	if _, ok := CallerTokenFrom(ctx); !ok {
+		return false
+	}
+	workload, _ := ctx.Value(workloadCallerKey{}).(bool)
+	return !workload
+}

@@ -83,9 +83,9 @@ lookout mcp: bearer-token authentication is REQUIRED; every call is recorded to 
 **What this is not.** There is no authorization: every caller
 presenting the token gets the full advertised tool surface. Narrow it
 with [`--profile`](#profiles-dont-advertise-what-the-agent-will-never-call)
-if a caller should not reach everything. mTLS is out of scope — it is
-the right answer for a production deployment and a much larger piece of
-work (cert distribution, rotation, a CA story).
+if a caller should not reach everything. For per-workload identity and
+authorization, give workloads certificates instead:
+[workload callers](#workload-callers-mtls).
 
 ## Each caller reads as themselves (Google-token mode)
 
@@ -258,13 +258,124 @@ guesses; a bare name repeated across projects resolves to
 - `--kubeconfig`/`--context` pin one cluster and are refused here; a
   kubeconfig fleet is `--clusters-from=kubeconfig:<path>`.
 
+## Workload callers (mTLS)
+
+Machine callers (core-agent daemons, watch-opened incident sessions)
+authenticate with their **workload identity**, a client certificate,
+instead of a shared token. `--mtls-listen` opens a second listener that
+terminates TLS itself and requires a client certificate in the
+handshake; the caller is the certificate's SPIFFE ID, and a rules file
+says which tools (and, on a multi-cluster endpoint, which clusters)
+each workload may call, and whose identity it reads as.
+
+```sh
+lookout mcp \
+  --listen=0.0.0.0:8383 --allow-non-loopback \
+  --access-log=/var/log/lookout/mcp-access.log \
+  --google-client-id=123-abc.apps.googleusercontent.com --google-allow=@example.com \
+  --resource-url=https://lookout.example.com/mcp \
+  --mtls-listen=0.0.0.0:8443 \
+  --spiffe-trust-domain=example-project.svc.id.goog \
+  --workload-rules=/etc/lookout/workload-rules.yaml
+```
+
+**Two listeners, two kinds of caller.** People reach `--listen` through a
+Gateway that terminates TLS with a public certificate and forwards
+plaintext, carrying their Google token (or the shared bearer token). A
+workload inside the cluster dials the lookout Service's `--mtls-listen`
+port directly, and lookout terminates that TLS itself, because only the
+endpoint that terminates TLS sees the client certificate. purser's mTLS
+authenticators demand the certificate in the handshake, so one listener
+cannot also admit people who have none; each listener has exactly one way
+in, and nothing falls through from one to the other. A missing or
+untrusted certificate is a refused connection, never a request served as
+somebody else, and the reason is logged on stderr
+(`lookout mcp: --mtls-listen: …`). Either listener may run alone.
+
+Verify workload certificates one of two ways:
+
+- **SPIFFE** (`--spiffe-trust-domain`, optionally
+  `--spiffe-credentials-dir`): each caller presents an X509-SVID that
+  must chain to the trust domain's bundle, and lookout presents its own
+  SVID. The defaults read GKE managed workload identity's mount
+  (`/var/run/secrets/workload-spiffe-credentials`: `certificates.pem`,
+  `private_key.pem`, `ca_certificates.pem`), re-read as it rotates. On GKE
+  the trust domain is `<project>.svc.id.goog` and a pod's ID is
+  `spiffe://<project>.svc.id.goog/ns/<namespace>/sa/<ksa>`. Clients
+  verify lookout by its SPIFFE ID, not a DNS name.
+- **A standard CA** (`--tls-cert-file`, `--tls-key-file`,
+  `--client-ca-file`): lookout's own certificate and key (re-read when
+  they change, e.g. a cert-manager Secret), and the CA bundle client
+  certificates must chain to. The caller's identity is its certificate's
+  single URI SAN (a mesh certificate's SPIFFE ID, say). Restart to rotate
+  the client CA bundle.
+
+A routable `--mtls-listen` needs `--allow-non-loopback` and
+`--access-log`, like `--listen`; the certificate is its authentication.
+
+### The rules file
+
+```yaml
+rules:
+  - name: incident-agents
+    # exact identities (SPIFFE IDs, or URI SANs under a standard CA)
+    identities:
+      - spiffe://example-project.svc.id.goog/ns/agents/sa/core-agent
+    tools: [triage, k8s_triage_status]   # the --tools syntax
+    write: true                          # k8s_triage_status changes state
+  - name: watch-sessions
+    # SPIFFE only: every ID in a trust domain, under a path prefix
+    trust_domain: example-project.svc.id.goog
+    path_prefix: /ns/lookout
+    tools: [triage]
+    service_account: lookout-sessions@example-project.iam.gserviceaccount.com
+```
+
+- **Rules only grant.** A call needs one rule that matches the caller and
+  grants the tool; a verified workload no rule names may call nothing.
+  Order does not matter. Keys are strict: a misspelt one is a startup
+  error.
+- **`tools`** takes the [`--tools`](#profiles-dont-advertise-what-the-agent-will-never-call)
+  syntax: tool names, profile names, `all`, and `-name`.
+  `k8s_net_probe_from` is named exactly when served.
+- **`write: true`** is required for the tools that change state (the
+  triage-status write, `findings diff`/`ack`, `k8s_net_probe_from`):
+  naming them is not enough, the same split as `--google-allow-write` for
+  people.
+- **`clusters`** is required on a multi-cluster endpoint and refused on a
+  single-cluster one: cluster names, canonical `project/location/name`,
+  or `"*"`. `k8s_list_clusters` lists only the clusters a workload may
+  call.
+- **`service_account`**: by default a workload reads as lookout. Name a
+  service account and the call reads as it instead, with a token lookout
+  mints through IAM Credentials `generateAccessToken` (a `-tags gke`
+  build; lookout's own identity needs Service Account Token Creator on
+  that account). If impersonation fails, the call fails with the reason;
+  it never falls back to lookout's identity. On a multi-cluster endpoint
+  the token goes only to GKE control-plane DNS endpoints. Two rules
+  granting one call must agree on the service account.
+
+What else applies to a workload call:
+
+- **The access log names it** (`caller=spiffe://…`), never a token.
+- **Per-caller limits**: at most four calls in flight per workload.
+- **Triage records name it**: `recorded_by=<SPIFFE ID>`, and an ack is
+  recorded as the workload.
+- **Its store reads are not filtered.** Workloads read lookout's store
+  and reports as lookout does, by design (people's rows are filtered by
+  their own access); a `findings diff` it runs persists, as an
+  operator's does.
+
 ## Wiring into a core-agent daemon
 
 Register `lookout mcp` in the daemon's MCP server configuration as a
 stdio server (spawned command: `lookout`, args: `["mcp"]`), or — when the
 daemon image cannot exec at all — run `lookout` as a second container in
 the daemon's pod with `--listen=127.0.0.1:<port>` and register the HTTP
-endpoint. In-cluster, the pod's ServiceAccount needs read RBAC covering
+endpoint. A daemon calling a shared lookout endpoint elsewhere in the
+cluster authenticates with its workload certificate instead of a shared
+token: see [workload callers](#workload-callers-mtls). In-cluster, the
+pod's ServiceAccount needs read RBAC covering
 the checks you expect agents to call; the sentinel's shipped ClusterRole
 (`deploy/12-clusterrole-watcher.yaml`) is a working superset for the
 common ones.

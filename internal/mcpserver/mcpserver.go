@@ -78,6 +78,9 @@ type config struct {
 	// caller, and perCaller bounds each caller's calls in flight.
 	google    *GoogleAuth
 	perCaller *callerLimit
+	// workloads, when non-nil, admits workload callers from the mTLS
+	// listener (#701), each limited to what the --workload-rules grant.
+	workloads *WorkloadAuth
 	// clusters, when non-nil, is multi-cluster mode (#700): every tool
 	// takes a cluster argument, resolved here per call.
 	clusters *Clusters
@@ -130,6 +133,13 @@ func WithClusters(c *Clusters) Option {
 // which puts the token on each request.
 func WithGoogleAuth(g *GoogleAuth) Option {
 	return func(c *config) { c.google = g }
+}
+
+// WithWorkloadAuth applies w's rules to workload callers, who arrive on
+// the mTLS listener (#701). Serve it with ServeOptions.Workloads set to
+// the same w.
+func WithWorkloadAuth(w *WorkloadAuth) Option {
+	return func(c *config) { c.workloads = w }
 }
 
 // WithTools restricts the advertised surface to the named tools.
@@ -192,7 +202,7 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 		o(&cfg)
 	}
 	sem := make(chan struct{}, cfg.maxConcurrency)
-	if cfg.google != nil {
+	if cfg.google != nil || cfg.workloads != nil {
 		cfg.perCaller = newCallerLimit(defaultMaxConcurrentPerCaller)
 	}
 	if cfg.clusters != nil {
@@ -220,6 +230,11 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 		// Serve checks this before putting the Google HTTP layer in front
 		// of a server: only this one reads each caller's token.
 		cfg.google.server = server
+	}
+	if cfg.workloads != nil {
+		// Likewise for the mTLS listener: only this server applies the
+		// workload rules.
+		cfg.workloads.server = server
 	}
 	return server
 }
@@ -356,7 +371,31 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			record(emit.ExitRuntime, msg)
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
 		}
-		if cfg.google != nil {
+		// A workload caller (#701) arrived on the mTLS listener with a
+		// verified client certificate; the rules say what it may call.
+		var wl *workloadCall
+		if wc, ok := workloadCallerOf(req); ok {
+			caller = wc.Identity
+			if cfg.workloads == nil {
+				// Unreachable through Serve, which refuses the mismatch;
+				// never run such a call as lookout without its rules.
+				return toolError("lookout " + c.Name + ": internal: a workload caller reached a server built without --workload-rules"), nil
+			}
+			call, err := cfg.workloads.allowTool(wc, c)
+			if err != nil {
+				return toolError("lookout " + c.Name + ": " + err.Error()), nil
+			}
+			wl = call
+			release, ok := cfg.perCaller.acquire(caller)
+			if !ok {
+				return toolError(fmt.Sprintf("lookout %s: %s already has %d calls in flight; retry when one finishes",
+					c.Name, caller, cfg.perCaller.max)), nil
+			}
+			defer release()
+			// Records the call writes (triage status recorded_by, acks)
+			// name the workload.
+			ctx = kube.WithCallerName(ctx, caller)
+		} else if cfg.google != nil {
 			// Read the caller from the request, not the context: the
 			// token is the one this HTTP request carried
 			// (mcpauth.TokenSource).
@@ -375,6 +414,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 		}
 		rawArgs := req.Params.Arguments
 		var clusterArgs []string
+		endpoint := ""
 		if cfg.clusters != nil {
 			rest, name, err := takeCluster(rawArgs)
 			if err != nil {
@@ -404,6 +444,12 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				return toolError("lookout " + c.Name + ": " + err.Error()), nil
 			}
 			cluster = entry.canonical
+			if wl != nil {
+				if err := cfg.workloads.allowCluster(wl, entry); err != nil {
+					return toolError("lookout " + c.Name + ": " + err.Error()), nil
+				}
+				endpoint = entry.ref.Endpoint
+			}
 			if c.Local && entry.canonical != cfg.localCluster {
 				where := "a cluster this server cannot identify"
 				if cfg.localCluster != "" {
@@ -445,6 +491,15 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				clusterArgs = append(clusterArgs, "--cluster="+entry.canonical)
 			}
 			rawArgs = rest
+		}
+		if wl != nil {
+			// After the cluster is chosen: discovery and the cluster's
+			// cached config are lookout's, and only the reads this call
+			// makes run as the rule's service account, if it names one.
+			var err error
+			if ctx, err = cfg.workloads.readAs(ctx, wl, endpoint); err != nil {
+				return toolError("lookout " + c.Name + ": " + err.Error()), nil
+			}
 		}
 		args, err := argv(c, rawArgs)
 		if err != nil {

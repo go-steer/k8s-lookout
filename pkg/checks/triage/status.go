@@ -143,7 +143,7 @@ func writeStatus(ctx context.Context, inv emit.Invocation, storePath, fingerprin
 	if ov := inv.Flags.String("severity-override"); ov != "" && ov != "critical" && ov != "warning" && ov != "info" {
 		return 0, emit.UsageErrorf("--severity-override=%q is not a §7.7 class (critical|warning|info)", ov)
 	}
-	if _, asCaller := kube.CallerTokenFrom(ctx); asCaller {
+	if kube.CallerFiltered(ctx) {
 		// Running as its caller (#699): the write allow-list says who may
 		// write at all, and this says where. A caller writes records only
 		// for objects in namespaces they can see.

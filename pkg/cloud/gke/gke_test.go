@@ -38,6 +38,11 @@ func TestGKERegisteredUnderTag(t *testing.T) {
 	if !slices.Contains(cloud.Registered(), Name) {
 		t.Errorf("Registered() = %v, want it to contain %q", cloud.Registered(), Name)
 	}
+	// And so must its service-account impersonator (lookout mcp workload
+	// callers, #701).
+	if !cloud.CanImpersonate() {
+		t.Error("the GKE build cannot impersonate a service account")
+	}
 }
 
 func TestNewSelectsGKEAsSingleRegisteredProvider(t *testing.T) {
