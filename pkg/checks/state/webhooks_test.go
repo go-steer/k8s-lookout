@@ -161,21 +161,21 @@ func TestWebhooksFailurePolicyMatrix(t *testing.T) {
 			name: "Fail + missing service",
 			objs: []runtime.Object{whConfig(nil)},
 			want: []string{
-				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — matching admissions are REJECTED (failurePolicy Fail)"` + scope + ` backend="service missing" gates="all namespaces" rules="CREATE,UPDATE pods"`,
+				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — these admissions are REJECTED (failurePolicy Fail): CREATE,UPDATE pods; requests it does not match are unaffected"` + scope + ` backend="service missing" gates="all namespaces" rules="CREATE,UPDATE pods"`,
 			},
 		},
 		{
 			name: "Fail + no ready endpoints",
 			objs: []runtime.Object{whConfig(nil), whService(), whEndpointSlice(false)},
 			want: []string{
-				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook has no ready endpoints — matching admissions are REJECTED (failurePolicy Fail)"` + scope + ` backend="no ready endpoints" gates="all namespaces" rules="CREATE,UPDATE pods"`,
+				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook has no ready endpoints — these admissions are REJECTED (failurePolicy Fail): CREATE,UPDATE pods; requests it does not match are unaffected"` + scope + ` backend="no ready endpoints" gates="all namespaces" rules="CREATE,UPDATE pods"`,
 			},
 		},
 		{
 			name: "Fail + port mismatch",
 			objs: []runtime.Object{whConfig(nil), whService(8443), whEndpointSlice(true)},
 			want: []string{
-				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook does not expose port 443 — matching admissions are REJECTED (failurePolicy Fail)"` + scope + ` backend="port 443 not on service" gates="all namespaces" rules="CREATE,UPDATE pods"`,
+				`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook does not expose port 443 — these admissions are REJECTED (failurePolicy Fail): CREATE,UPDATE pods; requests it does not match are unaffected"` + scope + ` backend="port 443 not on service" gates="all namespaces" rules="CREATE,UPDATE pods"`,
 			},
 		},
 		{
@@ -218,14 +218,14 @@ func TestWebhooksScopeAnalysis(t *testing.T) {
 		})
 		got := whFindings(t, append([]runtime.Object{cfg}, namespaces...))
 		wantFindings(t, got, []string{
-			`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — matching admissions are REJECTED (failurePolicy Fail)" webhook=policy/validate.example.com service=infra/policy-webhook backend="service missing" gates="2/4 namespaces: team-a, team-b" rules="CREATE,UPDATE pods" object_selector="app=payments"`,
+			`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — these admissions are REJECTED (failurePolicy Fail): CREATE,UPDATE pods; requests it does not match are unaffected" webhook=policy/validate.example.com service=infra/policy-webhook backend="service missing" gates="2/4 namespaces: team-a, team-b" rules="CREATE,UPDATE pods" object_selector="app=payments"`,
 		})
 	})
 
 	t.Run("nil selector gates all namespaces", func(t *testing.T) {
 		got := whFindings(t, append([]runtime.Object{whConfig(nil)}, namespaces...))
 		wantFindings(t, got, []string{
-			`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — matching admissions are REJECTED (failurePolicy Fail)" webhook=policy/validate.example.com service=infra/policy-webhook backend="service missing" gates="all namespaces" rules="CREATE,UPDATE pods"`,
+			`kind=webhook.failing_closed severity=critical kind_of_object=ValidatingWebhookConfiguration name=policy reason=FailingClosed message="backend service infra/policy-webhook not found — these admissions are REJECTED (failurePolicy Fail): CREATE,UPDATE pods; requests it does not match are unaffected" webhook=policy/validate.example.com service=infra/policy-webhook backend="service missing" gates="all namespaces" rules="CREATE,UPDATE pods"`,
 		})
 	})
 }

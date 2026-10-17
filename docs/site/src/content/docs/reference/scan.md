@@ -71,9 +71,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `cluster.autopilot_idle` | info | an Autopilot cluster with no workloads of its own, scaled to 0 nodes by design: its GKE system pods wait for the first workload, and this one finding replaces every finding that state causes in GKE-managed namespaces |
 | `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
-| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
+| `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: the admissions its rules match are rejected (the message names them; requests it does not match are unaffected) |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
 | `webhook.slow_risk` | info | the webhook's timeout is long enough to slow every gated write if the backend degrades |
 | `webhook.ca_expired` | critical | the webhook's caBundle has expired: the API server cannot verify it |
@@ -176,6 +177,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `skipped` | summary-line note: opt-in groups this scan did NOT run (switch one on with --include=\<group>) — stated so a quiet scan is never mistaken for a complete one |
 | `drilldown` | summary-line note: workloads the stage-2 dependency-edge drill-down covered |
 | `truncated` | summary-line note: drill-down candidates dropped by --max-drilldown |
+| `autopilot_idle_folded` | summary-line note: webhook findings folded under cluster.autopilot_idle — GKE-managed webhooks whose backend cannot run because the idle Autopilot cluster has, by design, no node |
 | `drilldown_skipped` | summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one. Kept concise on purpose: each listed resource needs `list` granted via a ClusterRole (`lookout`'s shipped ClusterRole grants every one), and `lookout state edges --workload=<a flagged workload>` prints the full reason per resource — refused verb, scope, whether the built-in view role grants it, and the grant that fixes it — as read.unavailable records |
 | `container` | container the finding is about (init containers prefixed init:) |
 | `image` | image reference that failed to pull |
@@ -208,12 +210,14 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `replicas` | an HPA's current replica count, where the failure holds it |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
-| `nodes` | on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read |
-| `autopilot` | on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages |
+| `nodes` | on autoscaler.scaleup_blocked and cluster.autopilot_idle: Ready/total Nodes in the cluster, when nodes were read |
+| `autopilot` | on autoscaler.scaleup_blocked and cluster.autopilot_idle: true for a GKE Autopilot cluster, whose capacity the provider manages |
 | `pools` | on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow) |
 | `no_scale_up` | on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first |
 | `window` | on autoscaler.scaleup_blocked: how far back autoscaler decisions were read |
 | `decisions` | on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not |
+| `folded` | on cluster.autopilot_idle: how many findings the idle state explains, replaced by this one |
+| `namespaces` | on cluster.autopilot_idle: the GKE-managed namespaces those findings were in |
 | `autoscaler` | summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools) |
 | `webhook` | admission webhook as \<configuration>/\<webhook name> |
 | `service` | service backend the webhook points at, as \<namespace>/\<name> |
@@ -306,7 +310,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_warn` | its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run |
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
 | `workloads` | pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one |
-| `namespaces` | summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover |
 | `policies` | NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one |
 | `total_policies` | NetworkPolicies in the namespace in either direction, so an egress-only namespace does not read as an empty one |
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |

@@ -76,15 +76,45 @@ type poolView struct {
 // explainScaleUp builds the finding, or returns the note to record when
 // it cannot be built (no provider, no permission). ok reports a finding.
 func explainScaleUp(ctx context.Context, provider cloud.Provider, pending int, nodes []corev1.Node, nodesRead bool, now time.Time) (f emit.Finding, note string, ok bool) {
+	cfg, note := clusterConfig(ctx, provider)
+	if note != "" {
+		return emit.Finding{}, note, false
+	}
+	return scaleUpFinding(ctx, provider, cfg, pending, nodes, nodesRead, now), "", true
+}
+
+// clusterConfig reads the cluster record, or says why it cannot.
+func clusterConfig(ctx context.Context, provider cloud.Provider) (cloud.ClusterConfig, string) {
 	cc, has := provider.ClusterConfig()
 	if !has {
-		return emit.Finding{}, fmt.Sprintf("unavailable: provider %q cannot read node pool configuration", provider.Name()), false
+		return cloud.ClusterConfig{}, fmt.Sprintf("unavailable: provider %q cannot read node pool configuration", provider.Name())
 	}
 	cfg, err := cc.Config(ctx)
 	if err != nil {
-		return emit.Finding{}, "unavailable: node pool configuration: " + err.Error(), false
+		return cloud.ClusterConfig{}, "unavailable: node pool configuration: " + err.Error()
 	}
+	return cfg, ""
+}
 
+// explainUnschedulable is what triage delta does with unschedulable
+// pods: an idle Autopilot cluster folds into one finding saying so
+// (autopilot.go); anything else gains the scale-up explanation. It
+// returns the findings to emit, or the summary note when the provider
+// could not be read.
+func explainUnschedulable(ctx context.Context, provider cloud.Provider, findings []emit.Finding, pending int, nodes []corev1.Node, nodesRead bool, now time.Time) ([]emit.Finding, string) {
+	cfg, note := clusterConfig(ctx, provider)
+	if note != "" {
+		return findings, note
+	}
+	if autopilotIdle(cfg, findings, nodes, nodesRead) {
+		return foldAutopilotIdle(cfg, findings, pending), ""
+	}
+	return append(findings, scaleUpFinding(ctx, provider, cfg, pending, nodes, nodesRead, now)), ""
+}
+
+// scaleUpFinding builds the explanation from a cluster record already
+// read.
+func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.ClusterConfig, pending int, nodes []corev1.Node, nodesRead bool, now time.Time) emit.Finding {
 	byPool := map[string]int{}
 	ready := 0
 	for _, n := range nodes {
@@ -175,7 +205,7 @@ func explainScaleUp(ctx context.Context, provider cloud.Provider, pending int, n
 		Reason:       scaleUpReason(severity, allBlocked, nodesRead && ready == 0),
 		Message:      scaleUpMessage(pending, pools, reasons, cfg.Autopilot, nodesRead, ready),
 		Details:      details,
-	}, "", true
+	}
 }
 
 func scaleUpReason(severity string, allBlocked, noReadyNodes bool) string {

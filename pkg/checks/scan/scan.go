@@ -86,6 +86,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/delta"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -266,6 +267,7 @@ func ownFields() []checks.OutputField {
 		{Name: "skipped", Doc: "summary-line note: opt-in groups this scan did NOT run (switch one on with --include=<group>) — stated so a quiet scan is never mistaken for a complete one"},
 		{Name: "drilldown", Doc: "summary-line note: workloads the stage-2 dependency-edge drill-down covered"},
 		{Name: "truncated", Doc: "summary-line note: drill-down candidates dropped by --max-drilldown"},
+		{Name: "autopilot_idle_folded", Doc: "summary-line note: webhook findings folded under cluster.autopilot_idle — GKE-managed webhooks whose backend cannot run because the idle Autopilot cluster has, by design, no node"},
 		{Name: "drilldown_skipped", Doc: "summary-line note: comma-separated resources the drill-down's List pass was refused (RBAC forbidden — under the built-in view role: nodes, secrets and the RBAC kinds, plus ingressclasses and storageclasses) or found not served. The edge checks that need them did not run and stay silent rather than calling every reference missing, so a quiet drill-down under this note is not a clean one. Kept concise on purpose: each listed resource needs `list` granted via a ClusterRole (lookout's shipped ClusterRole grants every one), and `lookout state edges --workload=<a flagged workload>` prints the full reason per resource — refused verb, scope, whether the built-in view role grants it, and the grant that fixes it — as read.unavailable records"},
 	}
 }
@@ -434,6 +436,34 @@ type scanner struct {
 	failed     int   // stages that errored (usage declines are not failures)
 	productive int   // stages that returned cleanly having actually read something
 	firstErr   error // the first real failure, which is the one worth reporting
+
+	// autopilotIdle is set when triage delta (the first stage) reported
+	// an idle Autopilot cluster; idleFolded counts the later findings
+	// folded under it (foldIntoIdle).
+	autopilotIdle bool
+	idleFolded    int
+}
+
+// foldIntoIdle folds, under an idle-Autopilot finding already emitted,
+// the webhook findings it explains: a GKE-managed webhook whose backend
+// cannot run because the cluster has, by design, no node (#735). Left
+// in, they contradict the finding before them with criticals about a
+// state it has just called normal. A webhook backed by a service outside
+// the GKE-managed namespaces is never folded.
+func (s *scanner) foldIntoIdle(f emit.Finding) bool {
+	if !s.autopilotIdle || !strings.HasPrefix(f.Kind, "webhook.") {
+		return false
+	}
+	for _, d := range f.Details {
+		if d.Key == "service" {
+			ns, _, _ := strings.Cut(d.Value, "/")
+			if delta.GKEManagedNamespace(ns) {
+				s.idleFolded++
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // stageResult is one deferred bookkeeping finding — a check_failed or
@@ -458,6 +488,9 @@ type stageResult struct {
 func (s *scanner) observe(f emit.Finding) {
 	if s.stage == "" {
 		return // scan's own bookkeeping findings
+	}
+	if f.Kind == delta.KindAutopilotIdle {
+		s.autopilotIdle = true
 	}
 	// `cloud.unavailable` / `crd.unavailable`: the stage ran but could
 	// not answer. Roll them up into one summary note so the coverage
@@ -512,6 +545,7 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 	s := &scanner{}
 	inv.Out.Watch(s.observe)
+	inv.Out.Fold(s.foldIntoIdle)
 
 	ctx = kube.WithListCache(ctx)
 	scanned, ran, notRun, err := runStages(ctx, reg, inv, s, stages)
@@ -548,6 +582,11 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	if len(s.unavailable) > 0 {
 		if err := inv.Out.Note("unavailable", strings.Join(s.unavailable, ",")); err != nil {
+			return scanned, err
+		}
+	}
+	if s.idleFolded > 0 {
+		if err := inv.Out.Note("autopilot_idle_folded", strconv.Itoa(s.idleFolded)); err != nil {
 			return scanned, err
 		}
 	}

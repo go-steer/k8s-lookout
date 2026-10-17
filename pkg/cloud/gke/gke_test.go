@@ -290,6 +290,62 @@ contexts:
 	}
 }
 
+// On a GCE VM that is not a GKE node (a Cloud Workstation), the
+// metadata server answers a project and no cluster: the VM's project,
+// not the cluster's. The kubeconfig's GKE context must supply all three,
+// or the cluster is looked up in the workstation's project (#735).
+func TestWorkstationMetadataDoesNotLendItsProject(t *testing.T) {
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Metadata-Flavor", "Google")
+		if strings.TrimPrefix(r.URL.Path, "/computeMetadata/v1/") == "project/project-id" {
+			_, _ = w.Write([]byte("workstation-project"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer md.Close()
+	t.Setenv(metadataHostEnv, strings.TrimPrefix(md.URL, "http://"))
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+
+	kcPath := filepath.Join(t.TempDir(), "kubeconfig")
+	const kcYAML = `apiVersion: v1
+kind: Config
+current-context: gke_container-days_us-central1_container-days-ap-demo
+clusters:
+- name: gke_container-days_us-central1_container-days-ap-demo
+  cluster:
+    server: https://10.0.0.2
+contexts:
+- name: gke_container-days_us-central1_container-days-ap-demo
+  context:
+    cluster: gke_container-days_us-central1_container-days-ap-demo
+`
+	if err := os.WriteFile(kcPath, []byte(kcYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", kcPath)
+
+	p, err := New(context.Background(), cloud.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := p.(*Provider)
+	if g.Project() != "container-days" || g.Location() != "us-central1" || g.Cluster() != "container-days-ap-demo" {
+		t.Errorf("identity = %q/%q/%q, want the kubeconfig's container-days/us-central1/container-days-ap-demo", g.Project(), g.Location(), g.Cluster())
+	}
+
+	// No GKE context: the VM's project still serves project-scoped reads.
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
+	p, err = New(context.Background(), cloud.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := p.(*Provider); g.Project() != "workstation-project" || g.Cluster() != "" {
+		t.Errorf("identity = %q/%q/%q, want only the VM's project", g.Project(), g.Location(), g.Cluster())
+	}
+}
+
 func TestCapabilityAvailability(t *testing.T) {
 	t.Setenv(metadataHostEnv, "localhost:1")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")

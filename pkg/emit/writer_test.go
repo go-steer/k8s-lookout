@@ -199,3 +199,24 @@ func TestNewWriterRejectsUnknownFormat(t *testing.T) {
 		t.Error("ParseFormat should reject unknown formats")
 	}
 }
+
+// TestWriterFold: a folded finding is not written, not counted, and no
+// watcher sees it; the rest pass untouched.
+func TestWriterFold(t *testing.T) {
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, FormatLogfmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var watched []string
+	w.Watch(func(f Finding) { watched = append(watched, f.Name) })
+	w.Fold(func(f Finding) bool { return f.Name == "folded" })
+	for _, name := range []string{"kept", "folded"} {
+		if err := w.Emit(Finding{Kind: "pod.crashloop", Severity: SeverityCritical, KindOfObject: "Pod", Name: name, Reason: "R"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.Findings() != 1 || strings.Contains(buf.String(), "name=folded") || len(watched) != 1 || watched[0] != "kept" {
+		t.Errorf("findings=%d watched=%v out=%q", w.Findings(), watched, buf.String())
+	}
+}

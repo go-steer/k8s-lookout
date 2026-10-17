@@ -96,6 +96,7 @@ type Writer struct {
 	notes    []Field
 	stamps   []Field
 	watchers []func(Finding)
+	folds    []func(Finding) bool
 }
 
 // WriterOption customizes a Writer.
@@ -153,6 +154,11 @@ func (w *Writer) Emit(f Finding) error {
 		return nil
 	}
 	f = w.stamp(f)
+	for _, fold := range w.folds {
+		if fold(f) {
+			return nil
+		}
+	}
 	exempted := false
 	if w.exempt != nil {
 		if reason, expires, ok := w.exempt.Exempt(f.Kind, f.Namespace, f.Name); ok {
@@ -260,6 +266,23 @@ func (w *Writer) stamp(f Finding) Finding {
 func (w *Writer) Watch(fn func(Finding)) {
 	if fn != nil {
 		w.watchers = append(w.watchers, fn)
+	}
+}
+
+// Fold registers a predicate for findings a composition has already
+// explained with a finding of its own: one it reports true for is not
+// written, not counted, and no watcher sees it.
+//
+// It is the one exception to the Writer's annotate-never-drop rule, and
+// it carries the same obligation as Visibility: never silent. The
+// predicate is the composition's, so it counts what it folds and reports
+// the count on the summary line itself (scan's autopilot_idle_folded).
+// Its use is a consequence that would contradict the finding explaining
+// it: an idle Autopilot cluster's GKE webhooks "failing closed" for want
+// of a node the cluster has, by design, scaled away (#735).
+func (w *Writer) Fold(fn func(Finding) bool) {
+	if fn != nil {
+		w.folds = append(w.folds, fn)
 	}
 }
 
