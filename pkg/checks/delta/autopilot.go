@@ -58,6 +58,23 @@ func GKEManagedNamespace(ns string) bool {
 	return strings.HasPrefix(ns, "gke-") || strings.HasPrefix(ns, "gmp-")
 }
 
+// IdleWebhook reports a webhook finding the idle-Autopilot finding also
+// explains: a GKE-managed webhook whose backend cannot run because the
+// cluster has, by design, no node. A webhook backed by a Service outside
+// the GKE-managed namespaces is never explained away.
+func IdleWebhook(f emit.Finding) bool {
+	if !strings.HasPrefix(f.Kind, "webhook.") {
+		return false
+	}
+	for _, d := range f.Details {
+		if d.Key == "service" {
+			ns, _, _ := strings.Cut(d.Value, "/")
+			return GKEManagedNamespace(ns)
+		}
+	}
+	return false
+}
+
 // autopilotIdle reports an Autopilot cluster with no nodes whose every
 // finding is in a GKE-managed namespace.
 func autopilotIdle(cfg cloud.ClusterConfig, findings []emit.Finding, nodes []corev1.Node, nodesRead bool) bool {

@@ -23,8 +23,10 @@ package delta
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -104,22 +106,59 @@ type Objects struct {
 // scorecard categories here. Returns the scanned count for the
 // caller's summary line and the findings, sorted critical-first.
 func ScanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (int, []emit.Finding, error) {
-	scanned, findings, _, err := scanCluster(ctx, client, ns, now, cfg, false, classes)
-	return scanned, findings, err
+	p, err := scanCluster(ctx, client, ns, now, cfg, false, classes)
+	return p.Scanned, p.Findings, err
 }
 
 // ScanClusterPartial is ScanCluster for a least-privilege credential
 // (#546): a part whose List the API server refuses (Forbidden) is
-// dropped instead of failing the pass, and returned in unavailable as
-// part (PartPods, PartWorkloads, PartNodes, …) → reason, the shared
-// checks.Refusal wording ("forbidden: list nodes — cluster-scoped, not
-// granted by the built-in view role; grant list on nodes …"). Under the built-in `view` role, which grants no Nodes,
+// dropped instead of failing the pass, and named in
+// Partial.Unavailable as part (PartPods, PartWorkloads, PartNodes, …)
+// → reason, the shared checks.Refusal wording ("forbidden: list nodes
+// — cluster-scoped, not granted by the built-in view role; grant list
+// on nodes …"). Under the built-in `view` role, which grants no Nodes,
 // the nodes part is the one that drops. Any other error still fails.
-func ScanClusterPartial(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (scanned int, findings []emit.Finding, unavailable map[string]string, err error) {
+func ScanClusterPartial(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, classes ...string) (Partial, error) {
 	return scanCluster(ctx, client, ns, now, cfg, true, classes)
 }
 
-func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, tolerate bool, classes []string) (int, []emit.Finding, map[string]string, error) {
+// Partial is one ScanClusterPartial pass.
+type Partial struct {
+	// Scanned is the count for the caller's summary line.
+	Scanned int
+	// Findings are sorted critical-first.
+	Findings []emit.Finding
+	// Unavailable maps each dropped part to why.
+	Unavailable map[string]string
+	// nodes and nodesRead are the Node list, for ExplainUnschedulable.
+	nodes     []corev1.Node
+	nodesRead bool
+}
+
+// ExplainUnschedulable is what `triage delta` does with unschedulable
+// pods, for a composition that ran the pass itself: an idle Autopilot
+// cluster's findings fold into the one KindAutopilotIdle finding that
+// explains them (#735); otherwise they gain the
+// autoscaler.scaleup_blocked explanation (#733). With no unschedulable
+// pod the findings come back unchanged. note, when set, says why the
+// provider could not answer (delta's `autoscaler` summary note), and
+// the findings are then unchanged too.
+func (p Partial) ExplainUnschedulable(ctx context.Context, provider cloud.Provider, now time.Time) (findings []emit.Finding, note string) {
+	n := unschedulable(p.Findings)
+	if n == 0 {
+		return p.Findings, ""
+	}
+	findings, note = explainUnschedulable(ctx, provider, slices.Clone(p.Findings), n, p.nodes, p.nodesRead, now)
+	sortFindings(findings)
+	return findings, note
+}
+
+// Unschedulable counts the pods only a new node can help: when it is
+// zero, ExplainUnschedulable has nothing to explain and needs no
+// provider.
+func (p Partial) Unschedulable() int { return unschedulable(p.Findings) }
+
+func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, cfg Config, tolerate bool, classes []string) (Partial, error) {
 	sel := map[string]bool{}
 	if len(classes) == 0 {
 		classes = allClasses
@@ -130,7 +169,7 @@ func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 	}
 	for _, c := range classes {
 		if !known[c] {
-			return 0, nil, nil, fmt.Errorf("unknown delta class %q", c)
+			return Partial{}, fmt.Errorf("unknown delta class %q", c)
 		}
 		sel[c] = true
 	}
@@ -145,10 +184,10 @@ func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 	}
 	scanned, findings, err := s.scan(ctx)
 	if err != nil {
-		return 0, nil, nil, err
+		return Partial{}, err
 	}
 	sortFindings(findings)
-	return scanned, findings, s.unavailable, nil
+	return Partial{Scanned: scanned, Findings: findings, Unavailable: s.unavailable, nodes: s.nodes, nodesRead: s.nodesRead}, nil
 }
 
 // ScanObjects derives the delta findings from objs at time now,

@@ -451,19 +451,11 @@ type scanner struct {
 // state it has just called normal. A webhook backed by a service outside
 // the GKE-managed namespaces is never folded.
 func (s *scanner) foldIntoIdle(f emit.Finding) bool {
-	if !s.autopilotIdle || !strings.HasPrefix(f.Kind, "webhook.") {
+	if !s.autopilotIdle || !delta.IdleWebhook(f) {
 		return false
 	}
-	for _, d := range f.Details {
-		if d.Key == "service" {
-			ns, _, _ := strings.Cut(d.Value, "/")
-			if delta.GKEManagedNamespace(ns) {
-				s.idleFolded++
-				return true
-			}
-		}
-	}
-	return false
+	s.idleFolded++
+	return true
 }
 
 // stageResult is one deferred bookkeeping finding — a check_failed or
