@@ -100,7 +100,7 @@ spec:
           # this pin (docs/release-process.md), and the release
           # workflow's preflight guard refuses to tag when it is
           # stale.
-          image: ghcr.io/go-steer/lookout:v0.37.0
+          image: ghcr.io/go-steer/lookout:v0.38.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

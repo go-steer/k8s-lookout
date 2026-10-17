@@ -91,7 +91,7 @@ spec:
           # the caller's token, and only the provider build links them.
           # The GCP-free :vX.Y.Z answers them read.unavailable. Another
           # image or registry: an `images:` entry in your kustomization.
-          image: ghcr.io/go-steer/lookout:v0.37.0-gke
+          image: ghcr.io/go-steer/lookout:v0.38.0-gke
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
