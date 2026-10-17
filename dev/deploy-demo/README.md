@@ -84,6 +84,8 @@ Its variables:
 | `GOOGLE_ALLOW` | who may call: emails and `@domain`s, comma-separated |
 | `GOOGLE_ALLOW_WRITE` | who may write; unset for no one |
 | `CLUSTERS_FROM` | optional: serve many clusters, discovered per caller (`organizations/<id>`, `folders/<id>`, `fleet:<host>`, projects); unset for the one lookout runs in |
+| `OAUTH_CUSTODY` | optional: `vault` or `sealed` lets generic MCP clients (Claude Code, gemini-cli) sign in too, through lookout's own authorization server (the `deploy-mcp-gemini/oauth` component, v0.39.0 and later); unset for Gemini Enterprise only. Needs the Secrets `lookout-oauth-client` (key `client.json`) and `lookout-oauth-keys` (key `keyring`) in the namespace, and `https://<DOMAIN>/callback` on the OAuth client |
+| `OAUTH_VAULT_AUTH_PROVIDER` | with `OAUTH_CUSTODY=vault`: the Agent Identity auth provider, `projects/<p>/locations/<l>/authProviders/<name>`, which lookout's principal may use (`roles/agentidentity.user`) |
 | `STATIC_IP_NAME` | the reserved global static IP's name |
 | `CERT_MAP` | the Certificate Manager map's name |
 

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`deploy-mcp-gemini/oauth`: an optional component that lets generic
+  MCP clients sign in to the Gemini Enterprise endpoint too.** It adds
+  the `--oauth-*` flags (open registration, issuer at the domain) and
+  mounts two Secrets, `lookout-oauth-client` (the OAuth client JSON) and
+  `lookout-oauth-keys` (the token keyring); custody comes from
+  `OAUTH_CUSTODY` / `OAUTH_VAULT_AUTH_PROVIDER` in `config.yaml`. Deploy
+  demo turns it on when the `OAUTH_CUSTODY` environment variable is set.
+  Without it the overlay renders as before.
+
 - **Generic MCP clients (Claude Code, gemini-cli, IDEs) sign people in
   to `lookout mcp` through lookout's own OAuth authorization server
   (#702).** `--oauth-issuer` mounts steward's authorization server on the
