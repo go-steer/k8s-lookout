@@ -7,90 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-17
+
+**This release lets one `lookout mcp` endpoint serve many clusters across projects, with each caller choosing among only the clusters they can read.** `--clusters-from` takes projects, GKE fleets, folders and organizations (Cloud Asset Inventory, with a Resource Manager fallback); in Google-token mode discovery runs as each caller, every tool takes an optional `cluster` argument, and a call that names none is answered from the caller's access (readable clusters first, namespace-only access still counted), a default, or an elicitation. `deploy-mcp-gemini/` is now the Gateway overlay (the Ingress variant is gone, `deploy-mcp-gemini-gateway/` is a deprecated alias), spreads replicas one per zone, and can serve many clusters (`CLUSTERS_FROM`). Unschedulable pods now come with the reason no node is coming (`autoscaler.scaleup_blocked`), and an idle Autopilot cluster, at 0 nodes by design, is reported as one info finding by `triage delta`, `scan` and `health` instead of an outage. Verified live on Gemini Enterprise across an organization of 48 clusters.
+
 ### Added
-
-- **An idle Autopilot cluster is not reported as an outage (#735).** An
-  Autopilot cluster with no workloads of its own scales to 0 nodes by
-  design, leaving GKE's system pods Pending. `triage delta` now
-  recognizes it (the provider says Autopilot, the Node list is empty,
-  and every finding is in a GKE-managed namespace) and reports one info
-  finding, `cluster.autopilot_idle`, in place of the findings that state
-  causes. `scan` also folds the GKE-managed webhooks whose backend
-  cannot run for the same reason, counted in `autopilot_idle_folded=`.
-  One finding in a user namespace keeps the full incident path. Live,
-  an idle cluster's 42 criticals and warnings plus 4 critical webhooks
-  became one info line; a Standard cluster at 0 nodes still reports
-  `NoPoolCanGrow`.
-- **`health` recognizes an idle Autopilot cluster too (#735).** The
-  scorecard leads with the `cluster.autopilot_idle` finding, and the
-  categories its findings would have degraded (pending, rollouts,
-  add-ons, disruption, GKE-managed webhooks) score healthy with
-  `idle_folded=N`. Elsewhere the `pending` category now carries
-  `autoscaler.scaleup_blocked` (#733), with delta's `autoscaler=`
-  summary note when the provider cannot answer. Live, Gemini Enterprise
-  had called the idle demo cluster "not healthy" from this tool.
-
-### Fixed
-
-- **`webhook.failing_closed` says what it blocks (#735).** The message
-  names the operations and resources the webhook's rules match, and that
-  other requests are unaffected; an agent had read a webhook gating one
-  CRD as an API server lockout.
-- **The GKE provider no longer borrows a workstation's project (#735).**
-  On a GCE VM that is not a GKE node (a Cloud Workstation), the metadata
-  server answered the VM's project, which was combined with the
-  kubeconfig's cluster name and location, so cloud reads asked for the
-  cluster in the wrong project. The kubeconfig's GKE context now
-  supplies all three; the VM's project is only a fallback.
-
-- **`triage delta` says why the autoscaler didn't add a node (#733).**
-  When pods are unschedulable it consults the cloud provider once and
-  emits `autoscaler.scaleup_blocked` for the cluster: each node pool with
-  its autoscaling bounds and node count, the pools that cannot grow
-  (autoscaling off, maximum 0), and the autoscaler's own `noScaleUp`
-  refusals of the last hour, per pool. Critical when no pool can grow or
-  no node is Ready; info when nothing blocks, pointing at the pods' own
-  constraints. Without a provider or permission, the summary says so
-  (`autoscaler=unavailable: …`). `scan` includes it. Live, it answered a
-  cluster idle at 0 nodes for eleven hours in one line: all three pools
-  had autoscaling off. `audit cluster` also flags a pool with autoscaling
-  on and a maximum of 0 (`audit.nodepool_cannot_grow`).
-
-- **A multi-cluster endpoint chooses the cluster with the caller, not
-  for them (#700).** In a live test a model asked about "my cluster"
-  picked one of 48 the caller could list but not read, and got nothing
-  but permission refusals. Now each discovery also checks, once per
-  cluster and as the caller, whether they may list pods cluster-wide;
-  `k8s_list_clusters` shows `access=read|limited|unreachable`, clusters
-  readable cluster-wide first. `limited` is not "no access": a caller
-  whose RoleBindings cover only some namespaces cannot list pods
-  cluster-wide, and Kubernetes has no cheap way to ask which namespaces
-  they may read, so those clusters rank after the readable ones but are
-  still chosen and suggested; only unreachable ones are left out.
-  `cluster` becomes optional: a call that names none reads
-  `--default-cluster` (unless unreachable), else the caller's only
-  cluster in `--default-project`, else their only cluster (counting
-  clusters readable cluster-wide when there are any, limited ones when
-  there are not), and is otherwise answered with candidates. An unknown
-  name is answered with the closest names, and a bare name repeated
-  across projects resolves to `--default-project`'s.
-  Clients that support elicitation on a stateful session are asked which
-  cluster (MCP multi-round-trip requests). `--folder-discovery=auto|
-  asset|resourcemanager` decides whether folder and organization scopes
-  use Cloud Asset Inventory.
-
-- **`deploy-mcp-gemini` can serve many clusters (#700).** `CLUSTERS_FROM`
-  in `config.yaml` (empty by default: the cluster lookout runs in) takes
-  the `--clusters-from` scopes; each Gemini Enterprise caller then sees,
-  and can name, only the clusters they can read. The Deploy demo
-  workflow passes an optional `CLUSTERS_FROM` environment variable
-  through.
 
 - **One `lookout mcp` endpoint serves many clusters, across projects
   (#700).** `--clusters` (name=endpoint pairs) or `--clusters-from` (the
   same mixed scopes as `watch`: projects, GKE fleets, folders,
   organizations, or a kubeconfig) turn on multi-cluster mode. Every tool
-  gains a required `cluster` argument, a string checked on the server
+  gains a `cluster` argument, a string checked on the server
   rather than an enum (whose cost would grow with the fleet), and
   `k8s_list_clusters` lists the names a caller can pass, with a filter.
   Names are bare where unique, `name@project` (then
@@ -128,6 +55,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fleet:`, `folders/` and `organizations/` are reserved and cannot name
   a project.
 
+- **A multi-cluster endpoint chooses the cluster with the caller, not
+  for them (#700).** In a live test a model asked about "my cluster"
+  picked one of 48 the caller could list but not read, and got nothing
+  but permission refusals. Now each discovery also checks, once per
+  cluster and as the caller, whether they may list pods cluster-wide;
+  `k8s_list_clusters` shows `access=read|limited|unreachable`, clusters
+  readable cluster-wide first. `limited` is not "no access": a caller
+  whose RoleBindings cover only some namespaces cannot list pods
+  cluster-wide, and Kubernetes has no cheap way to ask which namespaces
+  they may read, so those clusters rank after the readable ones but are
+  still chosen and suggested; only unreachable ones are left out.
+  `cluster` becomes optional: a call that names none reads
+  `--default-cluster` (unless unreachable), else the caller's only
+  cluster in `--default-project`, else their only cluster (counting
+  clusters readable cluster-wide when there are any, limited ones when
+  there are not), and is otherwise answered with candidates. An unknown
+  name is answered with the closest names, and a bare name repeated
+  across projects resolves to `--default-project`'s.
+  Clients that support elicitation on a stateful session are asked which
+  cluster (MCP multi-round-trip requests). `--folder-discovery=auto|
+  asset|resourcemanager` decides whether folder and organization scopes
+  use Cloud Asset Inventory.
+
+- **`deploy-mcp-gemini` can serve many clusters (#700).** `CLUSTERS_FROM`
+  in `config.yaml` (empty by default: the cluster lookout runs in) takes
+  the `--clusters-from` scopes; each Gemini Enterprise caller then sees,
+  and can name, only the clusters they can read. The Deploy demo
+  workflow passes an optional `CLUSTERS_FROM` environment variable
+  through.
+
+- **`triage delta` says why the autoscaler didn't add a node (#733).**
+  When pods are unschedulable it consults the cloud provider once and
+  emits `autoscaler.scaleup_blocked` for the cluster: each node pool with
+  its autoscaling bounds and node count, the pools that cannot grow
+  (autoscaling off, maximum 0), and the autoscaler's own `noScaleUp`
+  refusals of the last hour, per pool. Critical when no pool can grow or
+  no node is Ready; info when nothing blocks, pointing at the pods' own
+  constraints. Without a provider or permission, the summary says so
+  (`autoscaler=unavailable: …`). `scan` includes it. Live, it answered a
+  cluster idle at 0 nodes for eleven hours in one line: all three pools
+  had autoscaling off. `audit cluster` also flags a pool with autoscaling
+  on and a maximum of 0 (`audit.nodepool_cannot_grow`).
+
+- **An idle Autopilot cluster is not reported as an outage (#735).** An
+  Autopilot cluster with no workloads of its own scales to 0 nodes by
+  design, leaving GKE's system pods Pending. `triage delta` now
+  recognizes it (the provider says Autopilot, the Node list is empty,
+  and every finding is in a GKE-managed namespace) and reports one info
+  finding, `cluster.autopilot_idle`, in place of the findings that state
+  causes. `scan` also folds the GKE-managed webhooks whose backend
+  cannot run for the same reason, counted in `autopilot_idle_folded=`.
+  One finding in a user namespace keeps the full incident path. Live,
+  an idle cluster's 42 criticals and warnings plus 4 critical webhooks
+  became one info line; a Standard cluster at 0 nodes still reports
+  `NoPoolCanGrow`.
+
+- **`health` recognizes an idle Autopilot cluster too (#735).** The
+  scorecard leads with the `cluster.autopilot_idle` finding, and the
+  categories its findings would have degraded (pending, rollouts,
+  add-ons, disruption, GKE-managed webhooks) score healthy with
+  `idle_folded=N`. Elsewhere the `pending` category now carries
+  `autoscaler.scaleup_blocked` (#733), with delta's `autoscaler=`
+  summary note when the provider cannot answer. Live, Gemini Enterprise
+  had called the idle demo cluster "not healthy" from this tool.
+
 ### Changed
 
 - **`deploy-mcp-gemini/` is now the Gateway overlay; the Ingress variant
@@ -141,11 +133,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   balancer only minutes after its first pod, and GKE counts a pod in a
   not-yet-attached zone as ready. The first automated deploy answered
   503 for three and a half minutes for exactly that reason.
+
 - **Deploy demo fails a deploy that dropped requests.** It probes the
   endpoint throughout the rollout and fails on any answer but `200`,
   rather than passing once the endpoint recovered. It uses server-side
   apply, so an unchanged HTTPRoute no longer reports changed on every
   run.
+
+### Fixed
+
+- **`webhook.failing_closed` says what it blocks (#735).** The message
+  names the operations and resources the webhook's rules match, and that
+  other requests are unaffected; an agent had read a webhook gating one
+  CRD as an API server lockout.
+
+- **The GKE provider no longer borrows a workstation's project (#735).**
+  On a GCE VM that is not a GKE node (a Cloud Workstation), the metadata
+  server answered the VM's project, which was combined with the
+  kubeconfig's cluster name and location, so cloud reads asked for the
+  cluster in the wrong project. The kubeconfig's GKE context now
+  supplies all three; the VM's project is only a fallback.
 
 ## [0.37.0] - 2026-10-16
 
