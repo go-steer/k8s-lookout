@@ -33,6 +33,8 @@ import (
 	"github.com/go-steer/purser/authn"
 	"github.com/go-steer/purser/authn/mtls"
 	"github.com/go-steer/purser/authz"
+	"github.com/go-steer/steward/authserver"
+	"github.com/go-steer/steward/mcpauth"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -89,6 +91,11 @@ type WorkloadOptions struct {
 	Impersonate cloud.Impersonator
 	// Logger receives credential-reload failures. Nil means slog.Default().
 	Logger *slog.Logger
+	// ClientCredentialsOnly builds the rules with no mTLS listener: the
+	// only workloads are OAuth client-credentials clients of lookout's
+	// authorization server (Path B, #702), whose identity is
+	// client:<client_id>. The certificate options must then be empty.
+	ClientCredentialsOnly bool
 }
 
 // WorkloadAuth is a configured set of workload callers: the TLS config
@@ -163,6 +170,21 @@ func NewWorkloadAuth(opts WorkloadOptions) (*WorkloadAuth, error) {
 	}
 	pki := opts.CertFile != "" || opts.KeyFile != "" || opts.ClientCAFile != ""
 	spiffe := opts.SPIFFETrustDomain != ""
+	if opts.ClientCredentialsOnly {
+		if pki || spiffe || opts.SPIFFEDir != "" {
+			return nil, errors.New("internal: certificate options without the mTLS listener")
+		}
+		w := &WorkloadAuth{multi: opts.MultiCluster, impersonate: opts.Impersonate, sources: map[string]oauth2.TokenSource{}, closer: func() error { return nil }}
+		if w.impersonate == nil {
+			w.impersonate = cloud.Impersonate
+		}
+		rules, err := loadWorkloadRules(opts.RulesFile, opts.Registry, opts.MultiCluster, false)
+		if err != nil {
+			return nil, err
+		}
+		w.rules = rules
+		return w, nil
+	}
 	switch {
 	case pki && spiffe:
 		return nil, errors.New("--tls-cert-file/--tls-key-file/--client-ca-file and --spiffe-trust-domain are exclusive: pick one way to verify workload certificates")
@@ -491,15 +513,25 @@ func (w *WorkloadAuth) middleware(next http.Handler) http.Handler {
 
 type workloadCallerKey struct{}
 
-// workloadCallerOf returns the workload caller of a tool call that came
-// through the mTLS listener.
+// workloadCallerOf returns the workload caller of a tool call: one that
+// came through the mTLS listener, or an OAuth client-credentials client of
+// lookout's authorization server (Path B, #702), whose identity is
+// client:<client_id>. The latter is told apart from a person by steward's
+// Principal.Workload, never by the purser auth source (every steward token
+// reports oidc).
 func workloadCallerOf(req mcp.Request) (purser.Caller, bool) {
 	ti := tokenInfoOf(req)
 	if ti == nil {
 		return purser.Caller{}, false
 	}
-	c, ok := ti.Extra[extraWorkload].(purser.Caller)
-	return c, ok && !c.IsZero()
+	if c, ok := ti.Extra[extraWorkload].(purser.Caller); ok && !c.IsZero() {
+		return c, true
+	}
+	if p, ok := mcpauth.Principal(req); ok && p.Workload {
+		c := p.Caller()
+		return c, !c.IsZero()
+	}
+	return purser.Caller{}, false
 }
 
 func tokenInfoOf(req mcp.Request) *auth.TokenInfo {
@@ -534,6 +566,10 @@ func (w *WorkloadAuth) allowTool(c purser.Caller, cmd checks.Command) (*workload
 		}
 	}
 	switch {
+	case len(granted) > 0 && cmd.Writes && c.Label(authserver.LabelKind) == authserver.KindWorkload && !hasStewardScope(c, ScopeWrite):
+		// A client-credentials token (Path B) carries scopes as well: a
+		// tool that changes state needs lookout:write on top of the rule.
+		return nil, fmt.Errorf("%s changes state, and the access token of %s was not granted the %s scope", cmd.MCPName, c.Identity, ScopeWrite)
 	case len(granted) > 0:
 		return &workloadCall{caller: c, rules: granted}, nil
 	case len(named) > 0:

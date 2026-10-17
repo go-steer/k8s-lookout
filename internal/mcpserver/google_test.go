@@ -123,6 +123,7 @@ type googleServer struct {
 	log     *bytes.Buffer
 	mu      *sync.Mutex
 	reviews func() []string
+	banner  *bytes.Buffer
 }
 
 // fakeAPIServer answers SelfSubjectAccessReviews the way the caller

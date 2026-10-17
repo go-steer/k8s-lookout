@@ -581,6 +581,36 @@ case that matters now and it does not need more than one cluster.
    are not row-filtered (`kube.CallerFiltered` is false for them), as
    decided above, including when they read as a service account.
 7. **Callers as people, through generic MCP clients (#702):** steward Path B.
+   As built (steward v0.2.0): `--oauth-issuer` mounts steward's
+   `authserver` on the `--listen` handler, and one `httpauth.Protector`
+   takes both Gemini Enterprise's Google tokens and steward's own, so Path B
+   is an extension of Google-token mode and needs its flags; one
+   `allow.Admitter` built from `--google-allow` serves both paths. Persons
+   look the same on either path (`mcpauth.Identity`/`TokenSource`), so
+   every Path A rule applies unchanged: their own token, row filtering,
+   `recorded_by`, the access log. Scopes are `lookout:read` (the default,
+   and required on every steward token: a token without it is a 403
+   step-up) and `lookout:write`, which a state-changing tool needs on top of
+   `--google-allow-write`. Custody is an explicit choice (`--oauth-custody`,
+   no default, so a default can be added later without changing meaning);
+   the vault and Secret Manager are called as lookout through
+   `cloud.ServiceClient`, behind the `gke` tag. Open registration (DCR and
+   CIMD) is opt-in (`--oauth-open-registration`), steward's default:
+   pre-registered clients (`--oauth-clients-file`) need nothing open to the
+   internet, and self-registered ones still pass Google sign-in, the
+   allow-list and a consent page. Client-credentials clients are workloads
+   with identity `client:<id>`, told apart by steward's `Principal.Workload`
+   (never the purser auth source, `oidc` for every steward token), and are
+   governed by the same `--workload-rules` as mTLS workloads, which then
+   stand without `--mtls-listen`. A workload's service account is set only
+   on its rule (impersonated per call through `cloud.Impersonate`); a static
+   client naming `service_account` is refused, so one file says what a
+   workload reads as whichever way it authenticates. Writes need the rule's
+   `write: true` and the token's `lookout:write`. The replay cache is
+   steward's in-memory default, so refresh-token reuse detection is per
+   replica; a shared `authserver.ReplayCache` is future work, as are
+   `group:` allow-list entries (they need a Cloud Identity lookup as
+   lookout).
 
 ## Open questions
 

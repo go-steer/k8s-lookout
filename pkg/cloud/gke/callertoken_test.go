@@ -74,7 +74,10 @@ func importName(spec *ast.ImportSpec) string {
 // A construction is any call X.New…(ctx, …) where X is a Google client
 // library import (under any alias): NewService, NewClient, NewMetricClient,
 // NewInstancesRESTClient. Its last argument must be clientOptions(ctx)...
-// And no file but fleet.go may reach for google.Default* credentials.
+// And no file but fleet.go may reach for google.Default* credentials, besides
+// serviceclient.go, whose client is lookout's own identity by definition: it
+// calls the credential vault and Secret Manager for lookout mcp's
+// authorization server (#702), never a Google API on a caller's behalf.
 func TestEveryClientUsesClientOptions(t *testing.T) {
 	t.Parallel()
 	entries, err := os.ReadDir(".")
@@ -105,7 +108,7 @@ func TestEveryClientUsesClientOptions(t *testing.T) {
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
-			if ok && oauthGoogle != "" && name != "fleet.go" {
+			if ok && oauthGoogle != "" && name != "fleet.go" && name != "serviceclient.go" {
 				if x, ok := sel.X.(*ast.Ident); ok && x.Name == oauthGoogle && strings.HasPrefix(sel.Sel.Name, "Default") {
 					t.Errorf("%s: %s.%s uses lookout's own credentials; use clientOptions(ctx)", fset.Position(sel.Pos()), x.Name, sel.Sel.Name)
 				}
