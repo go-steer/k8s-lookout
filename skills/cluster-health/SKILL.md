@@ -43,7 +43,11 @@ scanned=15 findings=24 elapsed=100ms autoscaler="unavailable: provider \"none\" 
 ```
 
 - A fully healthy cluster is 12 `status=healthy`/`unavailable` scorecard
-  lines and a summary — nothing else.
+  lines and a summary — nothing else, except info findings. A category
+  whose findings are all `severity=info` (a webhook's timeout posture, a
+  Service scaled to zero on purpose) scores `healthy` and still names
+  them in `total=`/`top=` and a detail line: mention them as notes, not
+  problems.
 - A leading `cluster.autopilot_idle` (info) means an Autopilot cluster
   with no workloads of its own, scaled to 0 nodes by design. Categories
   with `idle_folded=N` are healthy: their findings are GKE's system pods

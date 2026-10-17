@@ -91,9 +91,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | Field | Meaning |
 | --- | --- |
 | `category` | scorecard category the finding belongs to (on health.category: which category this line scores) |
-| `status` | category status: healthy\|degraded\|unavailable (the scorecard always answers — healthy is explicit) |
-| `total` | findings in a degraded category |
-| `top` | worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top |
+| `status` | category status: healthy\|degraded\|unavailable (the scorecard always answers — healthy is explicit). A category whose findings are all info scores healthy and still names them in total/top |
+| `total` | findings in a category: degraded, or healthy with only info findings |
+| `top` | worst findings of a category inline, as kind[ namespace/name]; capped by --top |
 | `unverified` | on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message |
 | `idle_folded` | on a healthy scorecard line of an idle Autopilot cluster: the findings in this category the leading cluster.autopilot_idle finding explains — GKE's own pods and webhooks waiting, by design, for a first workload to bring a node up — counted rather than reported (#735) |
 | `subject` | TLS certificate subject (CN when set); never key material |

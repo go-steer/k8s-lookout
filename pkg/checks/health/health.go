@@ -182,9 +182,9 @@ func New(deps Deps) checks.Command {
 		}, delegatedKinds()...),
 		Output: append([]checks.OutputField{
 			{Name: "category", Doc: "scorecard category the finding belongs to (on health.category: which category this line scores)"},
-			{Name: "status", Doc: "category status: healthy|degraded|unavailable (the scorecard always answers — healthy is explicit)"},
-			{Name: "total", Doc: "findings in a degraded category"},
-			{Name: "top", Doc: "worst findings of a degraded category inline, as kind[ namespace/name]; capped by --top"},
+			{Name: "status", Doc: "category status: healthy|degraded|unavailable (the scorecard always answers — healthy is explicit). A category whose findings are all info scores healthy and still names them in total/top"},
+			{Name: "total", Doc: "findings in a category: degraded, or healthy with only info findings"},
+			{Name: "top", Doc: "worst findings of a category inline, as kind[ namespace/name]; capped by --top"},
 			{Name: "unverified", Doc: "on a healthy or degraded scorecard line: the part of the category that could not be checked and why, e.g. Ingress TLS secret references when list secrets is forbidden — the verdict covers everything else. A category whose core read is refused answers unavailable instead, with the reason as its message"},
 			{Name: "idle_folded", Doc: "on a healthy scorecard line of an idle Autopilot cluster: the findings in this category the leading cluster.autopilot_idle finding explains — GKE's own pods and webhooks waiting, by design, for a first workload to bring a node up — counted rather than reported (#735)"},
 			{Name: "subject", Doc: "TLS certificate subject (CN when set); never key material"},
@@ -770,8 +770,14 @@ func categoryFinding(cat string, card *scorecard, top int) emit.Finding {
 		unverified()
 		return f
 	}
-	status(statusDegraded)
-	f.Severity = worstSeverity(fs)
+	// Only info findings (standing configuration, a Service scaled to
+	// zero on purpose) is not degraded: the category still names them,
+	// but scores healthy, so a reader is not sent looking for a fault.
+	if f.Severity = worstSeverity(fs); f.Severity == emit.SeverityInfo {
+		status(statusHealthy)
+	} else {
+		status(statusDegraded)
+	}
 	f.Details = append(f.Details, emit.Field{Key: "total", Value: strconv.Itoa(len(fs))})
 	names := make([]string, 0, top)
 	for i := 0; i < len(fs) && i < top; i++ {
