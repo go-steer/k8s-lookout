@@ -46,9 +46,11 @@ func registerWorkloadFlags(fs *flag.FlagSet) workloadFlags {
 const usageHint = "\nRun 'lookout mcp --help' for usage."
 
 // problem checks the workload flags against the rest, returning a usage
-// problem or "". The workload flags configure the mTLS listener and mean
-// nothing without it.
-func (w workloadFlags) problem(listen string, allowNonLoopback bool, accessLog string) string {
+// problem or "". The certificate flags configure the mTLS listener and
+// mean nothing without it; --workload-rules also governs the
+// client-credentials clients of lookout's authorization server (pathB,
+// #702), so it stands alone with --oauth-issuer.
+func (w workloadFlags) problem(listen string, allowNonLoopback bool, accessLog string, pathB bool) string {
 	if *w.listen == "" {
 		for _, f := range []struct {
 			name string
@@ -59,7 +61,7 @@ func (w workloadFlags) problem(listen string, allowNonLoopback bool, accessLog s
 			{"--client-ca-file", *w.clientCAFile != ""},
 			{"--spiffe-trust-domain", *w.spiffeTrustDomain != ""},
 			{"--spiffe-credentials-dir", *w.spiffeDir != ""},
-			{"--workload-rules", *w.rules != ""},
+			{"--workload-rules", *w.rules != "" && !pathB},
 		} {
 			if f.set {
 				return f.name + " configures the mTLS listener for workload callers; pass --mtls-listen=<host:port> as well." + usageHint
@@ -89,22 +91,25 @@ func (w workloadFlags) problem(listen string, allowNonLoopback bool, accessLog s
 	return ""
 }
 
-// build loads the rules and credentials. It returns nil and 0 when the
-// mTLS listener is not configured, and nil and the exit code on failure.
+// build loads the rules and credentials. It returns nil and 0 when there
+// are no workload rules, and nil and the exit code on failure. Without the
+// mTLS listener, the rules govern only the client-credentials clients of
+// lookout's authorization server.
 func (w workloadFlags) build(reg *checks.Registry, multiCluster bool, stderr io.Writer) (*mcpserver.WorkloadAuth, int) {
-	if *w.listen == "" {
+	if *w.rules == "" {
 		return nil, 0
 	}
 	wa, err := mcpserver.NewWorkloadAuth(mcpserver.WorkloadOptions{
-		CertFile:          *w.certFile,
-		KeyFile:           *w.keyFile,
-		ClientCAFile:      *w.clientCAFile,
-		SPIFFETrustDomain: *w.spiffeTrustDomain,
-		SPIFFEDir:         *w.spiffeDir,
-		RulesFile:         *w.rules,
-		Registry:          reg,
-		MultiCluster:      multiCluster,
-		Logger:            slog.New(slog.NewTextHandler(stderr, nil)),
+		CertFile:              *w.certFile,
+		KeyFile:               *w.keyFile,
+		ClientCAFile:          *w.clientCAFile,
+		SPIFFETrustDomain:     *w.spiffeTrustDomain,
+		SPIFFEDir:             *w.spiffeDir,
+		RulesFile:             *w.rules,
+		Registry:              reg,
+		MultiCluster:          multiCluster,
+		Logger:                slog.New(slog.NewTextHandler(stderr, nil)),
+		ClientCredentialsOnly: *w.listen == "",
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v%s\n", err, usageHint)

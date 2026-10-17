@@ -377,9 +377,11 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 		if wc, ok := workloadCallerOf(req); ok {
 			caller = wc.Identity
 			if cfg.workloads == nil {
-				// Unreachable through Serve, which refuses the mismatch;
-				// never run such a call as lookout without its rules.
-				return toolError("lookout " + c.Name + ": internal: a workload caller reached a server built without --workload-rules"), nil
+				// Unreachable for the mTLS listener, which Serve refuses
+				// without rules; a client-credentials client is refused at
+				// startup without them. Never run such a call as lookout
+				// without its rules.
+				return toolError("lookout " + c.Name + ": " + caller + " is not granted " + c.MCPName + ": this server has no --workload-rules"), nil
 			}
 			call, err := cfg.workloads.allowTool(wc, c)
 			if err != nil {

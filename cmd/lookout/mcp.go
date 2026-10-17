@@ -121,6 +121,62 @@ Flags:
   --resource-url=<url>  this server's MCP URL exactly as clients reach
                         it (e.g. https://lookout.example.com/mcp); named
                         in the RFC 9728 metadata and every 401.
+  --oauth-issuer=<url>  also serve lookout's own OAuth 2.1 authorization
+                        server (#702) for generic MCP clients (Claude
+                        Code, gemini-cli, IDEs), which discover an
+                        authorization server and register with it. Its
+                        endpoints share --listen; the value is its
+                        public base URL as clients reach it (e.g.
+                        https://lookout.example.com). People sign in
+                        with Google through it, are admitted by
+                        --google-allow, and read as themselves exactly
+                        as with a Gemini Enterprise token, which keeps
+                        working beside it. Its tokens carry
+                        lookout:read (granted unless a client asks for
+                        more) and lookout:write: a tool that changes
+                        state needs lookout:write as well as
+                        --google-allow-write. Requires Google-token
+                        mode and:
+  --google-client-secret-file=<p>
+                        the JSON file the Cloud console downloads for
+                        the Google OAuth client people sign in through
+                        (usually the --google-client-id client). Its
+                        authorized redirect URIs must include
+                        <issuer>/callback (printed at startup).
+  --oauth-custody=vault|sealed
+                        who holds each person's Google grant: the Agent
+                        Identity credential vault (vault; -tags gke) or
+                        lookout's own refresh token, sealed (sealed).
+  --oauth-vault-auth-provider=<name>
+                        with vault: the auth provider's resource name,
+                        projects/<p>/locations/<l>/authProviders/<n>;
+                        lookout's identity needs roles/agentidentity.user
+                        on it.
+  --oauth-keys-file=<p>, --oauth-keys-secret=<version>
+                        exactly one: the keyring that seals every token,
+                        code and registered client (one "<id> <base64 of
+                        32 random bytes>" line per key, the sealing key
+                        first), from a file re-read as it changes, or
+                        from a Secret Manager version
+                        (projects/<p>/secrets/<s>/versions/latest;
+                        -tags gke; secretAccessor for lookout). Every
+                        replica needs the same keyring.
+  --oauth-clients-file=<p>
+                        JSON array of pre-registered clients (client_id,
+                        client_secret, redirect_uris, scopes). A
+                        client_credentials client is a workload: its
+                        identity is client:<client_id>, and
+                        --workload-rules (required then) grants it
+                        tools, clusters and a service_account.
+  --oauth-open-registration
+                        let clients register themselves (Dynamic Client
+                        Registration and Client ID Metadata Documents),
+                        as Claude Code and gemini-cli expect. Off by
+                        default: only --oauth-clients-file clients. A
+                        self-registered client still signs people in
+                        with Google, past --google-allow, after a
+                        consent page naming it. Refresh-token reuse is
+                        detected per replica.
   --mtls-listen=<host:port>
                         serve workload callers (#701): core-agent
                         daemons, watch-opened incident sessions. A
@@ -154,7 +210,9 @@ Flags:
                         /var/run/secrets/workload-spiffe-credentials.
   --workload-rules=<path>
                         YAML rules for workload callers; required with
-                        --mtls-listen. Each rule matches callers
+                        --mtls-listen, and for --oauth-clients-file
+                        client-credentials clients (identity
+                        client:<client_id>). Each rule matches callers
                         (identities: exact IDs; or trust_domain with an
                         optional path_prefix, SPIFFE only), and grants
                         tools (the --tools syntax), write: true for the
@@ -356,6 +414,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defaultProject := fs.String("default-project", "", "the project preferred when a call names no cluster or a repeated name")
 	folderDiscovery := fs.String("folder-discovery", "", "how folder and organization scopes are searched: auto, asset or resourcemanager")
 	wf := registerWorkloadFlags(fs)
+	of := registerOAuthFlags(fs)
 	reg := checks.Default()
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -403,7 +462,11 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	if problem := wf.problem(*listen, *allowNonLoopback, *accessLog); problem != "" {
+	if problem := of.problem(googleMode); problem != "" {
+		fmt.Fprintf(stderr, "lookout mcp: %s\n", problem)
+		return 2
+	}
+	if problem := wf.problem(*listen, *allowNonLoopback, *accessLog, of.enabled()); problem != "" {
 		fmt.Fprintf(stderr, "lookout mcp: %s\n", problem)
 		return 2
 	}
@@ -512,12 +575,24 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	var google *mcpserver.GoogleAuth
 	if googleMode {
+		logger := slog.New(slog.NewTextHandler(stderr, nil))
+		pathB, err := of.build(ctx, logger)
+		if err != nil {
+			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
+			return 2
+		}
+		if pathB != nil && hasClientCredentials(pathB.Clients) && *wf.rules == "" {
+			fmt.Fprintf(stderr, "lookout mcp: --oauth-clients-file has client-credentials clients (workloads), and without --workload-rules they may call nothing; "+
+				"grant each one tools with a rule naming identities: [client:<client_id>]%s\n", usageHint)
+			return 2
+		}
 		g, err := mcpserver.NewGoogleAuth(mcpserver.GoogleOptions{
+			AuthServer: pathB,
 			ClientIDs:  splitList(*googleClientID),
 			Allow:      splitList(*googleAllow),
 			AllowWrite: splitList(*googleAllowWrite),
 			Resource:   *resourceURL,
-			Logger:     slog.New(slog.NewTextHandler(stderr, nil)),
+			Logger:     logger,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)

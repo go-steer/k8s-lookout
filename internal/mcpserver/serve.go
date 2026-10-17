@@ -67,8 +67,9 @@ type ServeOptions struct {
 	// reaching Listen through a Gateway do not have.
 	MTLSListen string
 	// Workloads authenticates and authorizes workload callers on the
-	// MTLSListen listener. The server must be built WithWorkloadAuth with
-	// the same value.
+	// MTLSListen listener, and authorizes the client-credentials clients
+	// of Google's Path B authorization server on Listen (#702). The server
+	// must be built WithWorkloadAuth with the same value.
 	Workloads *WorkloadAuth
 	// MTLSReady, if non-nil, receives the mTLS listener's bound address.
 	MTLSReady chan<- string
@@ -105,8 +106,13 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 		return errors.New("internal: workload callers served in front of a server not built WithWorkloadAuth with the same WorkloadAuth; " +
 			"its tools would not apply the --workload-rules")
 	}
-	if (opts.MTLSListen != "") != (opts.Workloads != nil) {
+	if opts.MTLSListen != "" && (opts.Workloads == nil || opts.Workloads.tlsConfig == nil) {
 		return errors.New("internal: --mtls-listen and the workload configuration go together")
+	}
+	if opts.Workloads != nil && opts.MTLSListen == "" && !opts.Google.HasAuthServer() {
+		// Rules with no way in: neither the mTLS listener nor lookout's
+		// authorization server's client-credentials clients.
+		return errors.New("internal: workload rules served with neither --mtls-listen nor --oauth-issuer")
 	}
 	if opts.Listen == "" && opts.MTLSListen == "" {
 		if opts.Google != nil {
@@ -153,6 +159,14 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 			// RFC 9728 metadata, unauthenticated: a client reads it to learn
 			// where to sign in before it has a token.
 			mux.Handle(g.protector.MetadataPath(), g.protector.MetadataHandler())
+			if g.as != nil {
+				// Path B (#702): lookout's own authorization server, at the
+				// paths its issuer implies (RFC 8414 metadata, authorize,
+				// callback, token, and register with open registration).
+				// Unauthenticated by nature: it is where a client gets a
+				// token.
+				g.as.Register(mux)
+			}
 			// MCP only at the --resource-url path, the resource the metadata
 			// describes; anything else is a 404.
 			mux.Handle(g.path, mcpauth.Middleware(g.protector)(mcp.NewStreamableHTTPHandler(getServer,
@@ -266,6 +280,14 @@ func announce(opts ServeOptions, listeners []servedListener) {
 	if opts.Google != nil {
 		fmt.Fprintf(opts.Announce, "lookout mcp: Google-token mode: every call reads as its caller, "+
 			"with their own token (RFC 9728 metadata at %s)\n", opts.Google.protector.MetadataURL())
+		if as := opts.Google.as; as != nil {
+			fmt.Fprintf(opts.Announce, "lookout mcp: authorization server for generic MCP clients at %s "+
+				"(the Google OAuth client must list %s as a redirect URI)\n", as.Issuer(), as.CallbackURL())
+			if opts.Workloads != nil && opts.MTLSListen == "" {
+				fmt.Fprintf(opts.Announce, "lookout mcp: workload callers: %d rule(s) in --workload-rules decide what each client-credentials client may call\n",
+					opts.Workloads.RuleCount())
+			}
+		}
 	}
 	for _, l := range listeners {
 		addr := l.addr

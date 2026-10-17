@@ -18,16 +18,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 
+	"github.com/go-steer/purser"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 
 	"github.com/go-steer/steward/allow"
+	"github.com/go-steer/steward/authserver"
 	"github.com/go-steer/steward/googletoken"
 	"github.com/go-steer/steward/httpauth"
 	"github.com/go-steer/steward/mcpauth"
+	"github.com/go-steer/steward/seal"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 )
@@ -69,6 +75,56 @@ type GoogleOptions struct {
 	Logger *slog.Logger
 	// TokenInfoURL and UserInfoURL replace Google's endpoints (tests).
 	TokenInfoURL, UserInfoURL string
+	// AuthServer, when non-nil, adds Path B (#702): lookout's own OAuth
+	// authorization server, for generic MCP clients (Claude Code,
+	// gemini-cli, IDEs) that discover an authorization server and register
+	// with it. People sign in with Google through it and read as
+	// themselves exactly as Path A callers do; the same Allow list admits
+	// them.
+	AuthServer *AuthServerOptions
+}
+
+// Path B scopes: lookout's own, carried by every token its authorization
+// server issues. A client is granted read unless it asks for more; a tool
+// that changes state needs write as well as the --google-allow-write
+// admission (docs/mcp-multi-tenant-design.md, "Three layers of
+// authorization"). Google tokens (Path A) carry neither, and there the
+// allow-lists alone decide.
+const (
+	ScopeRead  = "lookout:read"
+	ScopeWrite = "lookout:write"
+)
+
+// AuthServerOptions configures Path B, lookout's OAuth 2.1 authorization
+// server (steward authserver), mounted on the --listen handler.
+type AuthServerOptions struct {
+	// Issuer is the authorization server's public base URL, exactly as
+	// clients reach it (e.g. https://lookout.example.com). https, except
+	// on loopback. Its endpoints are served on the same listener as MCP.
+	Issuer string
+	// Google is lookout's own confidential OAuth client at Google, which
+	// people sign in through. Its redirect URIs must include the server's
+	// callback URL (CallbackURL).
+	Google authserver.GoogleClient
+	// Custody holds each person's Google grant: *authserver.VaultCustody
+	// or authserver.SealedCustody.
+	Custody authserver.Custody
+	// Keys seals every token, code and registered client the server hands
+	// out.
+	Keys seal.KeyProvider
+	// Clients are pre-registered clients. A client-credentials client is a
+	// workload, governed by the --workload-rules (identity client:<id>);
+	// it may not name a service_account here, since a workload's service
+	// account is set in one place, its rule.
+	Clients []authserver.StaticClient
+	// OpenRegistration accepts clients that register themselves (DCR, or a
+	// Client ID Metadata Document). Off: only Clients.
+	OpenRegistration bool
+	// Replay spends codes and tracks refresh-token families. Nil is an
+	// in-memory cache, per replica.
+	Replay authserver.ReplayCache
+	// HTTPClient and CIMDClient replace steward's clients (tests).
+	HTTPClient, CIMDClient *http.Client
 }
 
 // GoogleAuth is a configured Google-token mode: the protector for the HTTP
@@ -76,6 +132,8 @@ type GoogleOptions struct {
 type GoogleAuth struct {
 	protector *httpauth.Protector
 	write     *allow.List
+	// as is Path B's authorization server, nil without it.
+	as *authserver.Server
 	// path is the --resource-url path, the one path MCP is served at.
 	path string
 	// server is the server built WithGoogleAuth(g). Serve refuses to put
@@ -101,11 +159,21 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--google-client-id: %w", err)
 	}
-	admit, err := allow.Parse(opts.Allow)
+	list, err := allow.Parse(opts.Allow)
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow: %w", err)
 	}
-	a, err := googletoken.NewAuthenticator(v, admit)
+	if len(list.Groups()) > 0 {
+		// Groups need a directory lookup as lookout (Cloud Identity), which
+		// is not wired up; refused rather than never matching.
+		return nil, errors.New("--google-allow: group: entries are not supported; list emails or @domain")
+	}
+	// One admitter for both paths, so the same people get in either way.
+	admit, err := allow.NewAdmitter(list, nil)
+	if err != nil {
+		return nil, fmt.Errorf("--google-allow: %w", err)
+	}
+	a, err := googletoken.NewAdmittingAuthenticator(v, admit)
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow: %w", err)
 	}
@@ -113,13 +181,31 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow-write: %w", err)
 	}
-	p, err := httpauth.New(httpauth.Options{
+	if len(write.Groups()) > 0 {
+		return nil, errors.New("--google-allow-write: group: entries are not supported; list emails or @domain")
+	}
+	popts := httpauth.Options{
 		Authenticator: a,
 		Resource:      opts.Resource,
 		Scopes:        []string{"openid", "email", cloudPlatformScope},
 		ResourceName:  "lookout",
 		Logger:        logger,
-	})
+	}
+	var as *authserver.Server
+	if b := opts.AuthServer; b != nil {
+		as, err = newAuthServer(*b, opts.Resource, admit, logger)
+		if err != nil {
+			return nil, err
+		}
+		popts.AuthServer = as
+		// The metadata names lookout's own authorization server and its
+		// scopes; the 401 challenge asks for read only.
+		popts.Scopes = nil
+		// Every steward token must carry read; one without it is a 403
+		// insufficient_scope, which starts a client's step-up.
+		popts.RequiredScopes = []string{ScopeRead}
+	}
+	p, err := httpauth.New(popts)
 	if err != nil {
 		return nil, fmt.Errorf("--resource-url: %w", err)
 	}
@@ -131,8 +217,58 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if path == "" {
 		path = "/"
 	}
-	return &GoogleAuth{protector: p, write: write, path: path}, nil
+	return &GoogleAuth{protector: p, write: write, as: as, path: path}, nil
 }
+
+// newAuthServer builds Path B's authorization server.
+func newAuthServer(b AuthServerOptions, resource string, admit *allow.Admitter, logger *slog.Logger) (*authserver.Server, error) {
+	for _, c := range b.Clients {
+		if c.ServiceAccount != "" {
+			// steward could seal the account's token into the client's
+			// access tokens, but a workload's identity is set in one place:
+			// its --workload-rules rule, the same rule that grants it tools
+			// and clusters whichever way it authenticates.
+			return nil, fmt.Errorf("--oauth-clients-file: client %q names a service_account; in lookout a workload's service account is set on its --workload-rules rule (identities: [%s])",
+				c.ID, authserver.WorkloadSubject(c.ID))
+		}
+	}
+	if len(b.Clients) == 0 && !b.OpenRegistration {
+		return nil, errors.New("--oauth-issuer: no client could sign in: pre-register clients with --oauth-clients-file, or pass --oauth-open-registration")
+	}
+	as, err := authserver.New(authserver.Config{
+		Issuer:           b.Issuer,
+		Resource:         resource,
+		Scopes:           []string{ScopeRead, ScopeWrite},
+		DefaultScopes:    []string{ScopeRead},
+		Google:           b.Google,
+		Custody:          b.Custody,
+		Admit:            admit,
+		Keys:             b.Keys,
+		Clients:          b.Clients,
+		OpenRegistration: b.OpenRegistration,
+		Replay:           b.Replay,
+		ServiceName:      "lookout",
+		HTTPClient:       b.HTTPClient,
+		CIMDClient:       b.CIMDClient,
+		Logger:           logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("--oauth-issuer: %w", err)
+	}
+	return as, nil
+}
+
+// CallbackURL is Path B's Google redirect URI, which the operator registers
+// on the Google OAuth client; "" without Path B.
+func (g *GoogleAuth) CallbackURL() string {
+	if g == nil || g.as == nil {
+		return ""
+	}
+	return g.as.CallbackURL()
+}
+
+// HasAuthServer reports whether Path B is configured.
+func (g *GoogleAuth) HasAuthServer() bool { return g != nil && g.as != nil }
 
 // errNoCaller is a call in Google-token mode that carries no verified
 // caller. The HTTP layer refuses those before the SDK sees them, so this
@@ -141,7 +277,7 @@ var errNoCaller = errors.New("no verified caller on this request; refusing to ru
 
 // caller returns who made req, and the token to read with, for a call to
 // c. It refuses a write tool to a caller the write allow-list does not
-// admit.
+// admit, and, for a Path B token, to one not granted lookout:write.
 func (g *GoogleAuth) caller(req *mcp.CallToolRequest, c checks.Command) (googletoken.Identity, oauth2.TokenSource, error) {
 	id, ok := mcpauth.Identity(req)
 	ts, ok2 := mcpauth.TokenSource(req)
@@ -151,7 +287,17 @@ func (g *GoogleAuth) caller(req *mcp.CallToolRequest, c checks.Command) (googlet
 	if c.Writes && !g.write.Admits(id.Email, id.HD) {
 		return id, nil, fmt.Errorf("%s changes state, and %s is not admitted to tools that do (the operator's --google-allow-write)", c.MCPName, id.Email)
 	}
+	if p, ok := mcpauth.Principal(req); ok && c.Writes && !p.HasScope(ScopeWrite) {
+		return id, nil, fmt.Errorf("%s changes state, and this sign-in was not granted the %s scope; sign in again asking for scope %q",
+			c.MCPName, ScopeWrite, ScopeRead+" "+ScopeWrite)
+	}
 	return id, ts, nil
+}
+
+// hasStewardScope reports whether a steward-token caller's labels grant
+// scope.
+func hasStewardScope(c purser.Caller, scope string) bool {
+	return slices.Contains(strings.Fields(c.Label(authserver.LabelScope)), scope)
 }
 
 // callerLimit bounds each caller's calls in flight. A caller over the

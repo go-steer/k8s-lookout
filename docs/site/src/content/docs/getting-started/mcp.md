@@ -164,6 +164,153 @@ What the mode guarantees:
   is store migration v11: upgrade the sentinel before (or with) the MCP
   server, because older binaries refuse a store migrated past them.
 
+## Generic MCP clients (Claude Code, gemini-cli)
+
+Gemini Enterprise runs the Google sign-in itself and sends lookout the
+person's Google token. Generic MCP clients (Claude Code, gemini-cli,
+IDEs) work differently: they read lookout's metadata, discover an
+authorization server, register with it, and sign the person in there.
+Google's authorization server does not let clients register, so
+`--oauth-issuer` makes lookout serve its own OAuth 2.1 authorization
+server ([steward](https://github.com/go-steer/steward)'s, on the same
+`--listen` as MCP) in front of Google sign-in. The person still signs in
+with Google, is admitted by the same `--google-allow` list, and every
+tool call reads as them, with their own Google token, exactly as in
+[Google-token mode](#each-caller-reads-as-themselves-google-token-mode).
+Gemini Enterprise keeps working on the same endpoint.
+
+```sh
+lookout mcp \
+  --listen=0.0.0.0:8383 --allow-non-loopback \
+  --access-log=/var/log/lookout/mcp-access.log \
+  --google-client-id=123-abc.apps.googleusercontent.com \
+  --google-allow=@example.com \
+  --google-allow-write=sre-lead@example.com \
+  --resource-url=https://lookout.example.com/mcp \
+  --oauth-issuer=https://lookout.example.com \
+  --google-client-secret-file=/etc/lookout/oauth/client.json \
+  --oauth-custody=sealed \
+  --oauth-keys-file=/etc/lookout/oauth/keyring \
+  --oauth-open-registration
+```
+
+Then, in Claude Code:
+
+```sh
+claude mcp add --transport http lookout https://lookout.example.com/mcp
+```
+
+and run `/mcp` to sign in. In gemini-cli, add the server to
+`settings.json` (`"mcpServers": {"lookout": {"httpUrl":
+"https://lookout.example.com/mcp"}}`) and run `/mcp auth lookout`. A
+browser opens on Google's sign-in, then on lookout's consent page naming
+the client.
+
+### What to set up in Google Cloud
+
+- **The OAuth client.** Use a *Web application* OAuth client
+  (usually the same one as `--google-client-id`) and download its JSON
+  from the console: that file is `--google-client-secret-file` (mount it
+  from a Secret; it is never a flag value). Add
+  `<issuer>/callback` (for example `https://lookout.example.com/callback`)
+  to its **Authorized redirect URIs**; lookout prints the exact URL at
+  startup. Like Path A, the client asks for
+  `https://www.googleapis.com/auth/cloud-platform`, so in an org that
+  restricts Google Cloud scopes a Workspace admin must trust it.
+- **The keyring** that seals every token, code and registered client.
+  lookout stores nothing, so any replica holding the keyring verifies any
+  token. One key per line, `<id> <base64 of 32 random bytes>`, the
+  sealing key first:
+
+  ```sh
+  printf 'k1 %s\n' "$(head -c32 /dev/urandom | base64)" > keyring
+  ```
+
+  Mount it as a file (`--oauth-keys-file`, re-read as it changes), or put
+  it in Secret Manager and pass the version
+  (`--oauth-keys-secret=projects/<p>/secrets/<s>/versions/latest`, a
+  `-tags gke` build; lookout's own identity needs
+  `roles/secretmanager.secretAccessor` on the secret). To rotate, add the
+  new key second, wait for every replica to reload (five minutes), move
+  it first, and drop the old key after 30 days, the refresh-token
+  lifetime.
+- **Custody of each person's Google grant** (`--oauth-custody`, no
+  default):
+  - `sealed` — the Google refresh token travels sealed inside lookout's
+    own refresh token, held by the client. Nothing else to set up.
+  - `vault` — the Agent Identity credential vault holds it
+    (`--oauth-vault-auth-provider=projects/<p>/locations/<l>/authProviders/<name>`,
+    a `-tags gke` build). Create the auth provider for the same OAuth
+    client, add its `oauthcallback` URL to the client's redirect URIs as
+    well, and grant lookout's own identity `roles/agentidentity.user` on
+    it. Every token the vault returns is checked against the signed-in
+    person before use.
+
+### Clients and registration
+
+- **`--oauth-open-registration`** lets clients register themselves
+  (Dynamic Client Registration, or a Client ID Metadata Document), which
+  is what Claude Code and gemini-cli do with no other configuration. It
+  is off by default. A self-registered client still has to send the
+  person through Google sign-in, past `--google-allow`, and then a
+  consent page that names it; it gets nothing the person could not read
+  themselves.
+- **`--oauth-clients-file`** pre-registers clients instead (or as well):
+  a JSON array of `{"client_id", "client_secret", "redirect_uris",
+  "scopes"}`. Pre-registered clients skip the consent page. A client
+  that cannot do either kind of registration needs one of these, with a
+  fixed loopback redirect URI.
+
+### Scopes and writes
+
+lookout's tokens carry its own scopes. A client is granted
+`lookout:read` unless it asks for more, and a token without it is
+refused (`403 insufficient_scope`). A tool that changes state needs
+**both** `--google-allow-write` and a token granted `lookout:write`:
+the person signs in again asking for `lookout:read lookout:write`.
+Gemini Enterprise tokens carry no lookout scopes, so there
+`--google-allow-write` alone decides, as before.
+
+### Workloads with client credentials
+
+A client in `--oauth-clients-file` with `"client_credentials": true` is
+a workload, not a person: it gets tokens with its secret alone. Its
+identity is `client:<client_id>`, and the same
+[`--workload-rules`](#the-rules-file) that govern mTLS workloads decide
+what it may call (required when such a client exists; `--mtls-listen` is
+not needed):
+
+```json
+[{"client_id": "incident-bot", "client_secret": "…", "client_credentials": true}]
+```
+
+```yaml
+rules:
+  - name: incident-bot
+    identities: [client:incident-bot]
+    tools: [triage, k8s_triage_status]
+    write: true
+    service_account: incident-bot@example-project.iam.gserviceaccount.com
+```
+
+It reads as lookout, or as the rule's `service_account` (impersonated
+through `generateAccessToken`; a failure fails the call), and its store
+reads are not filtered, exactly like an mTLS workload. A state-changing
+tool needs `write: true` on the rule **and** a token requested with
+`scope=lookout:read lookout:write`. The service account is set only on
+the rule: a client entry naming `service_account` is refused, so there is
+one place that says what a workload reads as.
+
+### Limits of this release
+
+- **Refresh-token reuse is detected per replica.** Each replica keeps its
+  own record of spent codes and rotated refresh tokens, in memory. With
+  several replicas, a stolen refresh token can go on being used on a
+  replica that never saw its family revoked. PKCE still binds every code
+  to its client.
+- **No `group:` entries** in `--google-allow` or `--google-allow-write`
+  yet; they are refused at startup.
+
 ## One endpoint, many clusters
 
 One `lookout mcp` can serve several clusters, in several projects. Name
@@ -318,7 +465,8 @@ A routable `--mtls-listen` needs `--allow-non-loopback` and
 ```yaml
 rules:
   - name: incident-agents
-    # exact identities (SPIFFE IDs, or URI SANs under a standard CA)
+    # exact identities (SPIFFE IDs, URI SANs under a standard CA, or
+    # client:<client_id> for client-credentials clients of --oauth-issuer)
     identities:
       - spiffe://example-project.svc.id.goog/ns/agents/sa/core-agent
     tools: [triage, k8s_triage_status]   # the --tools syntax

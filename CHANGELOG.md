@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generic MCP clients (Claude Code, gemini-cli, IDEs) sign people in
+  to `lookout mcp` through lookout's own OAuth authorization server
+  (#702).** `--oauth-issuer` mounts steward's authorization server on the
+  `--listen` handler beside Google-token mode, whose flags it requires:
+  clients discover it from the RFC 9728 metadata, register (pre-registered
+  in `--oauth-clients-file`, or by themselves with
+  `--oauth-open-registration`, off by default), and send the person
+  through Google sign-in (`--google-client-secret-file`, whose redirect
+  URIs must include `<issuer>/callback`, printed at startup). The same
+  `--google-allow` list admits them, and each call reads as the person
+  with their own Google token, exactly as with a Gemini Enterprise token,
+  which keeps working on the same endpoint. `--oauth-custody` picks who
+  holds each person's Google grant: `vault` (the Agent Identity credential
+  vault, `--oauth-vault-auth-provider`, `-tags gke`) or `sealed`. Tokens
+  are sealed with a keyring from `--oauth-keys-file` (re-read as it
+  changes) or `--oauth-keys-secret` (Secret Manager, `-tags gke`), so any
+  replica verifies them. Tokens carry `lookout:read` (the default) and
+  `lookout:write`: a state-changing tool needs `lookout:write` as well as
+  `--google-allow-write`. Client-credentials clients are workloads
+  (`client:<id>`) governed by `--workload-rules`, which no longer needs
+  `--mtls-listen` for them; a write needs `write: true` and
+  `lookout:write`. Refresh-token reuse is detected per replica. steward is
+  bumped to v0.2.0.
 - **Workload callers authenticate to `lookout mcp` with their workload
   identity (#701).** `--mtls-listen` opens a second listener, beside
   `--listen`, that terminates TLS and requires a client certificate in
