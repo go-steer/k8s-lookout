@@ -53,6 +53,11 @@ type scanner struct {
 	refusals map[string]checks.Refusal
 
 	findings []emit.Finding
+
+	// nodes are the listed Nodes, kept for the scale-up explanation's
+	// per-pool counts; nodesRead says the list ran and was not refused.
+	nodes     []corev1.Node
+	nodesRead bool
 }
 
 // scan runs one paged List pass per resource kind needed by the
@@ -173,6 +178,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 		} else {
 			scanned += len(nodes)
 			s.checkNodes(nodes, pods)
+			s.nodes, s.nodesRead = nodes, true
 		}
 	}
 

@@ -66,6 +66,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
 | `hpa.scale_failed` | warning | an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale |
 | `hpa.scaling_inactive` | warning | an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count |
+| `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence (§11) |
 | `webhook.failing_closed` | critical | the webhook has no working backend and failurePolicy=Fail: every gated write is rejected cluster-wide |
 | `webhook.dead_backend` | warning | the webhook's service backend is missing, has no ready endpoints, or does not serve the named port |
@@ -104,6 +105,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
+| `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
 | `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
 | `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
 | `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
@@ -201,6 +203,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `replicas` | an HPA's current replica count, where the failure holds it |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
+| `nodes` | on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read |
+| `autopilot` | on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages |
+| `pools` | on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow) |
+| `no_scale_up` | on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first |
+| `window` | on autoscaler.scaleup_blocked: how far back autoscaler decisions were read |
+| `decisions` | on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not |
+| `autoscaler` | summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools) |
 | `webhook` | admission webhook as <configuration>/<webhook name> |
 | `service` | service backend the webhook points at, as <namespace>/<name> |
 | `backend` | why the backend is dead: service missing, no ready endpoints, or port <p> not on service |
@@ -211,7 +220,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `subject` | CA-bundle certificate subject (CN when set); never key material |
 | `not_after` | CA-bundle certificate NotAfter, RFC 3339 |
 | `days_left` | whole days until NotAfter (negative = expired) |
-| `nodes` | distinct nodes those pods are scheduled on, sorted |
 | `access_modes` | the claim's declared access modes |
 | `pv` | PersistentVolume behind the claim or attachment |
 | `pvc` | PersistentVolumeClaim the pod mounts (same namespace as the pod) |
@@ -320,7 +328,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scope` | how much of the upgrade stream that exclusion holds back: all-upgrades, minor-upgrades or minor-and-node-upgrades |
 | `ends` | when the exclusion lifts, or `end-of-support` for one that runs until the cluster's version leaves support |
 | `days_remaining` | how much longer the exclusion has left to run |
-| `autoscaler` | the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load |
 | `namespace_pdbs` | PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed |
 | `min_replicas` | the HPA's spec.minReplicas (nil defaults to 1, matching the API server) |
 | `max_replicas` | the HPA's spec.maxReplicas |
@@ -365,7 +372,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `first_seen` | earliest event in the window (RFC3339) |
 | `last_seen` | latest event in the window (RFC3339) |
 | `reroute` | same-region zones active in the window with no stockout for this machine type, comma-separated; omitted when the window offers no clean candidate |
-| `window` | summary-line note: the lookback the events cover |
 | `pack` | the pack this finding belongs to; also the summary-line note naming the pack that ran |
 | `verb` | apiserver request verb for this series (apiserver pack) |
 | `priority_level` | APF priority level for this series (apf pack) |

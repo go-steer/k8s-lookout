@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
@@ -118,6 +119,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("quota.exhausted", "a ResourceQuota resource is at its hard limit: the next create is rejected", emit.SeverityCritical),
 			checks.Kind("hpa.scale_failed", "an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale", emit.SeverityWarning),
 			checks.Kind("hpa.scaling_inactive", "an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count", emit.SeverityWarning),
+			checks.Kind(kindScaleUpBlocked, "pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause)", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
 			checks.UnreadKind(),
 		},
 		Output: []checks.OutputField{
@@ -152,6 +154,13 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "scale_target", Doc: "an HPA's scaleTargetRef as Kind/name"},
 			{Name: "replicas", Doc: "an HPA's current replica count, where the failure holds it"},
 			{Name: "audit_reason", Doc: "the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one"},
+			{Name: "nodes", Doc: "on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read"},
+			{Name: "autopilot", Doc: "on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages"},
+			{Name: "pools", Doc: "on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow)"},
+			{Name: "no_scale_up", Doc: "on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first"},
+			{Name: "window", Doc: "on autoscaler.scaleup_blocked: how far back autoscaler decisions were read"},
+			{Name: "decisions", Doc: "on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not"},
+			{Name: "autoscaler", Doc: "summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools)"},
 		},
 		Examples: []string{
 			"lookout triage delta",
@@ -166,6 +175,16 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 type delta struct {
 	source kube.ClientSource
 	now    func() time.Time
+	// provider yields the cloud provider, consulted only to explain
+	// unschedulable pods (scaleup.go); nil means cloud.New.
+	provider func(ctx context.Context) (cloud.Provider, error)
+}
+
+func (d *delta) cloudProvider(ctx context.Context) (cloud.Provider, error) {
+	if d.provider != nil {
+		return d.provider(ctx)
+	}
+	return cloud.New(ctx, cloud.Config{})
 }
 
 // run is the CheckFunc: parse flags, list once per resource kind,
@@ -229,6 +248,26 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	for _, f := range s.unreadFindings() {
 		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
+		}
+	}
+
+	// Pods only a new node can help: say why the autoscaler has not
+	// added one (#733). The provider is asked only when there are such
+	// pods, and an answer it cannot give is a summary note, never
+	// silence.
+	if n := unschedulable(findings); n > 0 {
+		if p, err := d.cloudProvider(ctx); err != nil {
+			if err := inv.Out.Note(noteAutoscaler, "unavailable: "+err.Error()); err != nil {
+				return 0, err
+			}
+		} else {
+			f, note, ok := explainScaleUp(ctx, p, n, s.nodes, s.nodesRead, d.now())
+			_ = p.Close()
+			if ok {
+				findings = append(findings, f)
+			} else if err := inv.Out.Note(noteAutoscaler, note); err != nil {
+				return 0, err
+			}
 		}
 	}
 

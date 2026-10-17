@@ -77,6 +77,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `addon.degraded` | critical, warning | a kube-system add-on (dns, proxy, cni, csi, metrics, connectivity) is short of replicas; critical when none are available |
 | `quota.near` | warning | a ResourceQuota resource is at or past --quota-warn percent of its hard limit |
 | `quota.exhausted` | critical | a ResourceQuota resource is at its hard limit: the next create is rejected |
+| `autoscaler.scaleup_blocked` | critical, warning, info | pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause) |
 | `event.warning` | warning | one collapsed timeline entry for a Warning-type event family on a subject |
 | `event.normal` | info | one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own |
 | `log.template` | critical, warning, info | one distilled template and how many lines collapsed into it; severity is the guessed level — critical at fatal, warning for error-ish, info otherwise |
@@ -173,13 +174,19 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pct` | quota usage as percent of the hard limit |
 | `scale_target` | an HPA's scaleTargetRef as Kind/name |
 | `audit_reason` | the audit.hpa_cannot_scale reason (HPATargetMissing, HPATargetMissingRequests) that is the structural cause of this failure, when the controller's message identifies one |
+| `nodes` | on autoscaler.scaleup_blocked: Ready/total Nodes in the cluster, when nodes were read |
+| `autopilot` | on autoscaler.scaleup_blocked: true for a GKE Autopilot cluster, whose capacity the provider manages |
+| `pools` | on autoscaler.scaleup_blocked: every node pool as name (autoscaling bounds, node count, why it cannot grow) |
+| `no_scale_up` | on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first |
+| `window` | on autoscaler.scaleup_blocked: how far back autoscaler decisions were read |
+| `decisions` | on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not |
+| `autoscaler` | summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools) |
 | `count` | events collapsed into this timeline entry: k8s per-event repeat counts summed across the entry's reason family |
 | `first_seen` | RFC3339 timestamp of the entry's oldest activity |
 | `last_seen` | RFC3339 timestamp of the entry's newest activity (the timeline sort key) |
 | `source` | reporting component (kubelet, horizontal-pod-autoscaler, …) |
 | `variants` | raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one) |
 | `flips` | event.hpa_thrash: most scale-direction changes observed inside one --hpa-window |
-| `window` | event.hpa_thrash: the --hpa-window the flips were counted in |
 | `target` | event.hpa_thrash: the HPA's scaleTargetRef as Kind/name (when the HPA object was readable) |
 | `template` | log template; \<*> marks positions that varied across merged lines |
 | `level` | guessed log level (fatal\|error\|warn\|info\|debug) from token/field match |
