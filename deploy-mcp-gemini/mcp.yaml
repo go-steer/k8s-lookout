@@ -67,7 +67,9 @@ spec:
       # or the node under one replica, never empties the backend. Per
       # revision (pod-template-hash), so a rollout's new pods are not
       # pushed toward the emptiest zone, which is the one most likely to
-      # have no NEG yet.
+      # have no NEG yet. Once attached, a zone's NEG stays attached while
+      # empty (observed for over a day), so the delay is paid once per
+      # zone, not once per rollout.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
