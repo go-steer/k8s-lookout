@@ -132,6 +132,14 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 	out.PublicEndpoint = publicEndpoint(c)
 	out.AuthorizedNetworks = authorizedNetworks(c)
 	out.Autopilot = c.Autopilot != nil && c.Autopilot.Enabled
+	switch {
+	case c.Autoscaling == nil:
+		out.NodeAutoprovisioning = cloud.ToggleUnset
+	case c.Autoscaling.EnableNodeAutoprovisioning:
+		out.NodeAutoprovisioning = cloud.ToggleEnabled
+	default:
+		out.NodeAutoprovisioning = cloud.ToggleDisabled
+	}
 
 	for _, np := range c.NodePools {
 		if np == nil {
