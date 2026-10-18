@@ -80,7 +80,7 @@ func explainScaleUp(ctx context.Context, provider cloud.Provider, pending int, n
 	if note != "" {
 		return emit.Finding{}, note, false
 	}
-	return scaleUpFinding(ctx, provider, cfg, pending, nodes, nodesRead, now), "", true
+	return scaleUpFinding(ctx, provider, cfg, nil, pending, clusterView{nodes: nodes, nodesRead: nodesRead}, now), "", true
 }
 
 // clusterConfig reads the cluster record, or says why it cannot.
@@ -101,20 +101,23 @@ func clusterConfig(ctx context.Context, provider cloud.Provider) (cloud.ClusterC
 // (autopilot.go); anything else gains the scale-up explanation. It
 // returns the findings to emit, or the summary note when the provider
 // could not be read.
-func explainUnschedulable(ctx context.Context, provider cloud.Provider, findings []emit.Finding, pending int, nodes []corev1.Node, nodesRead bool, now time.Time) ([]emit.Finding, string) {
+func explainUnschedulable(ctx context.Context, provider cloud.Provider, findings []emit.Finding, pending int, v clusterView, now time.Time) ([]emit.Finding, string) {
 	cfg, note := clusterConfig(ctx, provider)
 	if note != "" {
 		return findings, note
 	}
-	if autopilotIdle(cfg, findings, nodes, nodesRead) {
+	if autopilotIdle(cfg, findings, v.nodes, v.nodesRead) {
 		return foldAutopilotIdle(cfg, findings, pending), ""
 	}
-	return append(findings, scaleUpFinding(ctx, provider, cfg, pending, nodes, nodesRead, now)), ""
+	return append(findings, scaleUpFinding(ctx, provider, cfg, findings, pending, v, now)), ""
 }
 
 // scaleUpFinding builds the explanation from a cluster record already
-// read.
-func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.ClusterConfig, pending int, nodes []corev1.Node, nodesRead bool, now time.Time) emit.Finding {
+// read, with the capacity-squeeze account (squeeze.go) when the pass
+// read what it needs.
+func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.ClusterConfig, findings []emit.Finding, pending int, v clusterView, now time.Time) emit.Finding {
+	nodes, nodesRead := v.nodes, v.nodesRead
+	sq, haveSqueeze := explainSqueeze(findings, v, now)
 	byPool := map[string]int{}
 	ready := 0
 	for _, n := range nodes {
@@ -145,6 +148,25 @@ func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.Clus
 		pools = append(pools, p)
 	}
 
+	// A pool that can grow but whose every node is closed to these pods
+	// (a compute class's pool, for pods that select no class) would not
+	// place them, and with node auto-provisioning off nothing else
+	// would: as stuck as when no pool can grow (#748).
+	var closed []string
+	stuck := haveSqueeze && !cfg.Autopilot && !allBlocked && len(pools) > 0 &&
+		cfg.NodeAutoprovisioning != cloud.ToggleEnabled
+	for _, p := range pools {
+		if !stuck || p.blocked != "" {
+			continue
+		}
+		if sq.poolHelps(p.name) {
+			stuck = false
+			closed = nil
+			continue
+		}
+		closed = append(closed, p.name)
+	}
+
 	// The autoscaler's own word, when the provider has it.
 	reasons := map[string]int{}
 	var decisionNote string
@@ -169,7 +191,7 @@ func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.Clus
 
 	severity := emit.SeverityInfo
 	switch {
-	case nodesRead && ready == 0, allBlocked:
+	case nodesRead && ready == 0, allBlocked, stuck:
 		severity = emit.SeverityCritical
 	case len(reasons) > 0 || slices.ContainsFunc(pools, func(p poolView) bool { return p.blocked != "" }):
 		severity = emit.SeverityWarning
@@ -192,25 +214,53 @@ func scaleUpFinding(ctx context.Context, provider cloud.Provider, cfg cloud.Clus
 	if decisionNote != "" {
 		details = append(details, emit.Field{Key: "decisions", Value: decisionNote})
 	}
+	if !cfg.Autopilot && cfg.NodeAutoprovisioning != "" && cfg.NodeAutoprovisioning != cloud.ToggleUnset {
+		details = append(details, emit.Field{Key: "auto_provisioning", Value: string(cfg.NodeAutoprovisioning)})
+	}
+	if haveSqueeze {
+		details = appendNonEmpty(details,
+			emit.Field{Key: "taints", Value: sq.taints},
+			emit.Field{Key: "full_nodes", Value: sq.fullNodes},
+			emit.Field{Key: "largest_requests", Value: sq.largest},
+			emit.Field{Key: "new_daemonsets", Value: sq.newDaemonSetsText(now)},
+		)
+	}
 
 	name := cfg.Name
 	if name == "" {
 		name = "cluster"
+	}
+	msg := scaleUpMessage(pending, pools, reasons, cfg.Autopilot, nodesRead, ready, haveSqueeze)
+	if stuck {
+		msg += fmt.Sprintf("; the pools that can grow (%s) have no node these pods could use, and node auto-provisioning is off, so none will be added for them", strings.Join(closed, ", "))
+	}
+	if haveSqueeze {
+		msg += "; " + sq.summary(now)
 	}
 	return emit.Finding{
 		Kind:         kindScaleUpBlocked,
 		Severity:     severity,
 		KindOfObject: "Cluster",
 		Name:         name,
-		Reason:       scaleUpReason(severity, allBlocked, nodesRead && ready == 0),
-		Message:      scaleUpMessage(pending, pools, reasons, cfg.Autopilot, nodesRead, ready),
+		Reason:       scaleUpReason(severity, allBlocked || stuck, nodesRead && ready == 0),
+		Message:      msg,
 		Details:      details,
 	}
 }
 
-func scaleUpReason(severity string, allBlocked, noReadyNodes bool) string {
+// appendNonEmpty appends the fields that carry a value.
+func appendNonEmpty(details []emit.Field, fs ...emit.Field) []emit.Field {
+	for _, f := range fs {
+		if f.Value != "" {
+			details = append(details, f)
+		}
+	}
+	return details
+}
+
+func scaleUpReason(severity string, noPoolHelps, noReadyNodes bool) string {
 	switch {
-	case allBlocked:
+	case noPoolHelps:
 		return "NoPoolCanGrow"
 	case noReadyNodes:
 		return "NoReadyNodes"
@@ -220,7 +270,7 @@ func scaleUpReason(severity string, allBlocked, noReadyNodes bool) string {
 	return "ScaleUpNotRefused"
 }
 
-func scaleUpMessage(pending int, pools []poolView, reasons map[string]int, autopilot, nodesRead bool, ready int) string {
+func scaleUpMessage(pending int, pools []poolView, reasons map[string]int, autopilot, nodesRead bool, ready int, accounted bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d pod(s) are unschedulable", pending)
 	if nodesRead {
@@ -242,8 +292,10 @@ func scaleUpMessage(pending int, pools []poolView, reasons map[string]int, autop
 	}
 	if len(reasons) > 0 {
 		fmt.Fprintf(&b, "; the autoscaler refused to scale up in the last %s: %s", scaleUpWindow, reasonsText(reasons))
-	} else if len(blocked) < len(pools) || autopilot {
+	} else if (len(blocked) < len(pools) || autopilot) && !accounted {
 		fmt.Fprintf(&b, "; no autoscaler refusal in the last %s, so the pods' own constraints (requests, selectors, taints, affinity) are the likelier cause", scaleUpWindow)
+	} else if len(blocked) < len(pools) || autopilot {
+		fmt.Fprintf(&b, "; no autoscaler refusal in the last %s", scaleUpWindow)
 	}
 	return b.String()
 }

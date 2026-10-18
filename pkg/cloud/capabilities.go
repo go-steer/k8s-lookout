@@ -643,6 +643,13 @@ type ClusterConfig struct {
 	// bills per pod rather than per node (GKE Autopilot): its node pools
 	// are not the operator's to size, so no node-pool cost claim applies.
 	Autopilot bool
+	// NodeAutoprovisioning reports whether the autoscaler may create
+	// new node pools for pending pods no existing pool fits (GKE:
+	// autoscaling.enableNodeAutoprovisioning). Off, a pod nothing
+	// selects a compute class for can only land in the pools that
+	// exist; pools a compute class created still take only pods that
+	// select that class.
+	NodeAutoprovisioning Toggle
 
 	// NodePools are the cluster's node pools in the provider's order.
 	NodePools []NodePoolConfig

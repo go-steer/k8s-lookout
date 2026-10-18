@@ -130,9 +130,8 @@ type Partial struct {
 	Findings []emit.Finding
 	// Unavailable maps each dropped part to why.
 	Unavailable map[string]string
-	// nodes and nodesRead are the Node list, for ExplainUnschedulable.
-	nodes     []corev1.Node
-	nodesRead bool
+	// view is what the pass listed, for ExplainUnschedulable.
+	view clusterView
 }
 
 // ExplainUnschedulable is what `triage delta` does with unschedulable
@@ -148,7 +147,7 @@ func (p Partial) ExplainUnschedulable(ctx context.Context, provider cloud.Provid
 	if n == 0 {
 		return p.Findings, ""
 	}
-	findings, note = explainUnschedulable(ctx, provider, slices.Clone(p.Findings), n, p.nodes, p.nodesRead, now)
+	findings, note = explainUnschedulable(ctx, provider, slices.Clone(p.Findings), n, p.view, now)
 	sortFindings(findings)
 	return findings, note
 }
@@ -187,7 +186,7 @@ func scanCluster(ctx context.Context, client kubernetes.Interface, ns string, no
 		return Partial{}, err
 	}
 	sortFindings(findings)
-	return Partial{Scanned: scanned, Findings: findings, Unavailable: s.unavailable, nodes: s.nodes, nodesRead: s.nodesRead}, nil
+	return Partial{Scanned: scanned, Findings: findings, Unavailable: s.unavailable, view: s.view()}, nil
 }
 
 // ScanObjects derives the delta findings from objs at time now,

@@ -120,7 +120,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("hpa.scale_failed", "an HPA's AbleToScale condition has been False past --hpa-grace: the controller cannot read or write its target's scale", emit.SeverityWarning),
 			checks.Kind("hpa.scaling_inactive", "an HPA's ScalingActive condition has been False past --hpa-grace (a failed metric fetch, an invalid selector; not a deliberate scale-to-zero): it cannot compute a replica count", emit.SeverityWarning),
 			checks.Kind(KindAutopilotIdle, "an Autopilot cluster with no workloads of its own, scaled to 0 nodes by design: its GKE system pods wait for the first workload, and this one finding replaces every finding that state causes in GKE-managed namespaces", emit.SeverityInfo),
-			checks.Kind(kindScaleUpBlocked, "pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow or no node is Ready, warning when a pool is blocked or the autoscaler refused, info when neither (the pods' own constraints are then the likelier cause)", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindScaleUpBlocked, "pods are unschedulable and this says why the cluster autoscaler has not added a node: the node pools that cannot grow (autoscaling off, maximum 0) and the autoscaler's own recent refusals, from the cloud provider; critical when no pool can grow, when the only pools that can grow have no node the pods could use (a compute class's pools, for pods that select no class) and node auto-provisioning is off, or when no node is Ready; warning when a pool is blocked or the autoscaler refused; info when neither. With Nodes and Pods read cluster-wide it also accounts for each node against the pending pods: the taints they do not tolerate (one set on a node alone, with who set it and when), the room left where they could go, the largest requests there, and DaemonSets created in the last 7 days", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
 			checks.UnreadKind(),
 		},
 		Output: []checks.OutputField{
@@ -161,6 +161,11 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "no_scale_up", Doc: "on autoscaler.scaleup_blocked: the autoscaler's noScaleUp refusals in the window, as [pool: ]reason ×count, most frequent first"},
 			{Name: "window", Doc: "on autoscaler.scaleup_blocked: how far back autoscaler decisions were read"},
 			{Name: "decisions", Doc: "on autoscaler.scaleup_blocked: why the autoscaler's decisions could not be read, when they could not"},
+			{Name: "auto_provisioning", Doc: "on autoscaler.scaleup_blocked: enabled|disabled, whether the autoscaler may create new node pools for pods no pool fits (GKE node auto-provisioning). Disabled, pods that select no compute class can only land in the pools that exist; a compute class's pools take only pods that select it"},
+			{Name: "taints", Doc: "on autoscaler.scaleup_blocked: the node taints no pending pod tolerates, as key=value:effect on the nodes carrying it, operator-set taints first; a compute class's taint says only pods selecting the class may use those nodes. The message names a taint set on a node alone rather than by its pool, with the managedFields manager and time that last wrote the node's taints"},
+			{Name: "full_nodes", Doc: "on autoscaler.scaleup_blocked: nodes the pending pods could otherwise use but lack room on, with CPU and memory free of allocatable by requests, and the smallest pending request"},
+			{Name: "largest_requests", Doc: "on autoscaler.scaleup_blocked: the largest CPU requests on those full nodes, a DaemonSet named once (marked when created within the last 7 days)"},
+			{Name: "new_daemonsets", Doc: "on autoscaler.scaleup_blocked: DaemonSets created within the last 7 days, with their per-pod request, node count and age — capacity taken from every node"},
 			{Name: "folded", Doc: "on cluster.autopilot_idle: how many findings the idle state explains, replaced by this one"},
 			{Name: "namespaces", Doc: "on cluster.autopilot_idle: the GKE-managed namespaces those findings were in"},
 			{Name: "autoscaler", Doc: "summary note: why unschedulable pods could not be explained (no cloud provider, or no permission to read node pools)"},
@@ -265,7 +270,7 @@ func (d *delta) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			}
 		} else {
 			var note string
-			findings, note = explainUnschedulable(ctx, p, findings, n, s.nodes, s.nodesRead, d.now())
+			findings, note = explainUnschedulable(ctx, p, findings, n, s.view(), d.now())
 			_ = p.Close()
 			if note != "" {
 				if err := inv.Out.Note(noteAutoscaler, note); err != nil {

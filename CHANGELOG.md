@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`autoscaler.scaleup_blocked` says why unschedulable pods fit on no
+  node (#748).** With Nodes and Pods read cluster-wide (`triage delta`,
+  `scan`, `health`), it accounts for each Ready node against the pending
+  pods from what the pass already listed, with no extra API calls:
+  - the taints the pods do not tolerate (`taints=`), and in the message
+    a taint set on a node alone rather than by its pool, with the
+    managedFields manager and time that last wrote it;
+  - the room left on the nodes they could use against the smallest
+    request (`full_nodes=`), and the largest requests there
+    (`largest_requests=`);
+  - DaemonSets created in the last 7 days (`new_daemonsets=`).
+
+  It is critical (`NoPoolCanGrow`) when the only pools that can grow are
+  ones whose nodes the pods cannot use (a compute class's pools, for pods
+  that select no class) and node auto-provisioning is off
+  (`auto_provisioning=`, read from the cluster record), because nothing
+  will be added for them. Sidecar init containers now count toward a
+  pod's request. Live, a cluster whose two pods had been Pending for
+  hours went from "the pods' own constraints are the likelier cause" to
+  naming a sandbox taint added with `kubectl taint` nine days earlier on
+  one of three generic nodes, the 27m and 22m CPU left on the other two,
+  and the DaemonSet created two days earlier that requests 130m on every
+  node.
+
 ## [0.39.0] - 2026-10-17
 
 **This release completes the shared MCP endpoint: besides Gemini Enterprise users, people on generic MCP clients and machine callers can now use it, each with their own identity.** Claude Code, gemini-cli and IDEs sign people in with Google through lookout's own OAuth authorization server (`--oauth-issuer`, built on steward v0.2.0), and every call reads as that person, exactly as for Gemini Enterprise, on the same endpoint; the person's Google grant can be held by the Agent Identity credential vault. Workloads (core-agent daemons, incident sessions) authenticate with a SPIFFE or CA-issued client certificate on a separate mTLS listener, or with OAuth client credentials, governed by a `--workload-rules` file of tools, clusters, write grants and an optional service account to read as. `deploy-mcp-gemini/oauth` turns generic-client sign-in on for the Gemini Enterprise deployment. And a `health` category holding only info findings now scores healthy, so GKE's own webhook posture no longer marks every GKE cluster's webhooks degraded.

@@ -58,6 +58,17 @@ type scanner struct {
 	// per-pool counts; nodesRead says the list ran and was not refused.
 	nodes     []corev1.Node
 	nodesRead bool
+	// pods and daemonSets are the listed Pods and DaemonSets, kept for
+	// the capacity-squeeze account of unschedulable pods (#748): what
+	// each node's requests add up to, and which DaemonSets are new.
+	// Nil when their list was not issued or was refused.
+	pods       []corev1.Pod
+	daemonSets []appsv1.DaemonSet
+}
+
+// view is what the pass listed, for explaining unschedulable pods.
+func (s *scanner) view() clusterView {
+	return clusterView{nodes: s.nodes, nodesRead: s.nodesRead, pods: s.pods, daemonSets: s.daemonSets}
 }
 
 // scan runs one paged List pass per resource kind needed by the
@@ -112,6 +123,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 		if !podsRefused {
 			scanned += len(pods)
 			s.checkPods(pods)
+			s.pods = pods
 		}
 
 		var (
@@ -131,6 +143,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 		switch {
 		case err == nil:
 			scanned += len(deps) + len(stss) + len(dss) + len(jobs) + len(cjs)
+			s.daemonSets = dss
 			s.checkWorkloads(deps, stss, dss, systemOn)
 			s.checkJobs(jobs)
 			s.checkCronJobs(cjs)
