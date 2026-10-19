@@ -189,6 +189,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `last_seen` | RFC3339 timestamp of the entry's newest activity (the timeline sort key) |
 | `source` | reporting component (kubelet, horizontal-pod-autoscaler, …) |
 | `variants` | raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one) |
+| `objects` | on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then <owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count |
+| `examples` | on a rolled-up entry: the newest member objects' names, comma-separated (3; 5 for warnings); --per-object or --workload lists every object |
 | `flips` | event.hpa_thrash: most scale-direction changes observed inside one --hpa-window |
 | `target` | event.hpa_thrash: the HPA's scaleTargetRef as Kind/name (when the HPA object was readable) |
 | `template` | log template; <*> marks positions that varied across merged lines |

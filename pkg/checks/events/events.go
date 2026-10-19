@@ -87,12 +87,14 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 	return checks.Command{
 		Name:    "triage events",
 		MCPName: "k8s_event_timeline",
-		Summary: "Deduped chronological event timeline: kubectl get events, but collapsed by (object, reason family) over a workload's whole owner-reference tree, with HPA rescale-oscillation (thrash) detection.",
+		Summary: "Deduped chronological event timeline: kubectl get events, but collapsed by (object, reason family) over a workload's whole owner-reference tree, with HPA rescale-oscillation (thrash) detection. Namespace and -A timelines roll a pod owner's (or the Nodes') shared reason up into one entry with objects= and examples=, so a busy cluster's hour stays readable; --per-object lists every object.",
 		Flags: []emit.FlagSpec{
 			{Name: "hpa-window", Type: emit.FlagDuration, Default: "30m",
 				Help: "report event.hpa_thrash when enough scale-direction changes fall inside a window this long"},
 			{Name: "hpa-flips", Type: emit.FlagInt, Default: "2",
 				Help: "scale-direction changes within --hpa-window that count as thrash (2 = up→down→up)"},
+			{Name: "per-object", Type: emit.FlagBool, Default: "false",
+				Help: "namespace and -A timelines: one entry per object instead of rolling up a pod owner's (or the Nodes') shared reason at 3+ objects (5+ for warnings); --workload timelines are always per object"},
 		},
 		Kinds: []checks.KindField{
 			checks.Kind("event.warning", "one collapsed timeline entry for a Warning-type event family on a subject", emit.SeverityWarning),
@@ -106,6 +108,8 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "last_seen", Doc: "RFC3339 timestamp of the entry's newest activity (the timeline sort key)"},
 			{Name: "source", Doc: "reporting component (kubelet, horizontal-pod-autoscaler, …)"},
 			{Name: "variants", Doc: "raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one)"},
+			{Name: "objects", Doc: "on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then <owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count"},
+			{Name: "examples", Doc: "on a rolled-up entry: the newest member objects' names, comma-separated (3; 5 for warnings); --per-object or --workload lists every object"},
 			{Name: "replicas", Doc: "event.hpa_thrash: the chronological replica sequence recovered from SuccessfulRescale events, e.g. 2->6->2->6"},
 			{Name: "flips", Doc: "event.hpa_thrash: most scale-direction changes observed inside one --hpa-window"},
 			{Name: "window", Doc: "event.hpa_thrash: the --hpa-window the flips were counted in"},
@@ -238,8 +242,19 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		}
 	}
 
-	for _, en := range chronological(timeline) {
-		if err := inv.Out.Emit(en.finding()); err != nil {
+	// A namespace or -A timeline rolls up per owner and reason
+	// (rollup.go, #747); a workload's never does.
+	entries := chronological(timeline)
+	var rows []emit.Finding
+	if match == nil && !inv.Flags.Bool("per-object") {
+		rows = rollup(entries)
+	} else {
+		for _, en := range entries {
+			rows = append(rows, en.finding())
+		}
+	}
+	for _, f := range rows {
+		if err := inv.Out.Emit(f); err != nil {
 			return 0, err
 		}
 	}
