@@ -86,11 +86,23 @@ type groupKey struct {
 	warning                        bool
 }
 
+// podStartReasons are the Normal events every pod start emits, in
+// order. A rolled-up owner's are one fact, its pods started, so they
+// fold into one entry with reason reasonPodsStarted and the folded
+// reasons in variants= (#754). Only rollups fold: --per-object and
+// --workload timelines, and owners under the threshold, keep each.
+var podStartReasons = map[string]bool{"Scheduled": true, "Pulling": true, "Pulled": true, "Created": true, "Started": true}
+
+const reasonPodsStarted = "PodsStarted"
+
 func keyOf(en *entry) (groupKey, bool) {
 	k := groupKey{namespace: en.namespace, kind: en.kind, reason: en.reason, warning: en.warning}
 	switch en.kind {
 	case "Pod":
 		k.owner = podOwner(en.name)
+		if !en.warning && podStartReasons[en.reason] {
+			k.reason = reasonPodsStarted
+		}
 		return k, k.owner != ""
 	case "Node":
 		return k, true
@@ -121,7 +133,7 @@ func rollup(entries []*entry) []emit.Finding {
 		if en.warning {
 			minimum = rollupWarningMin
 		}
-		if !ok || len(members) < minimum {
+		if !ok || len(objectsOf(members)) < minimum {
 			rows = append(rows, row{en.last, en.finding()})
 			continue
 		}
@@ -166,20 +178,33 @@ func merged(k groupKey, members []*entry) (emit.Finding, time.Time) {
 	}
 	f := sum.finding()
 
-	byNewest := append([]*entry(nil), members...)
-	sort.SliceStable(byNewest, func(i, j int) bool { return byNewest[i].last.After(byNewest[j].last) })
+	objects := objectsOf(members)
 	keep := examplesNormal
 	if k.warning {
 		keep = examplesWarning
 	}
-	names := make([]string, 0, keep)
-	for i := 0; i < len(byNewest) && i < keep; i++ {
-		names = append(names, byNewest[i].name)
-	}
+	names := objects[:min(keep, len(objects))]
 	f.Details = append(f.Details,
-		emit.Field{Key: "objects", Value: strconv.Itoa(len(members))},
+		emit.Field{Key: "objects", Value: strconv.Itoa(len(objects))},
 		emit.Field{Key: "examples", Value: strings.Join(names, ",")},
 	)
-	f.Message = fmt.Sprintf("%d %ss: %s", len(members), strings.ToLower(k.kind), f.Message)
+	f.Message = fmt.Sprintf("%d %ss: %s", len(objects), strings.ToLower(k.kind), f.Message)
 	return f, sum.last
+}
+
+// objectsOf names a group's distinct objects, newest activity first: a
+// pod contributes one entry per reason when its start reasons fold, but
+// counts once.
+func objectsOf(members []*entry) []string {
+	byNewest := append([]*entry(nil), members...)
+	sort.SliceStable(byNewest, func(i, j int) bool { return byNewest[i].last.After(byNewest[j].last) })
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range byNewest {
+		if !seen[m.name] {
+			seen[m.name] = true
+			out = append(out, m.name)
+		}
+	}
+	return out
 }

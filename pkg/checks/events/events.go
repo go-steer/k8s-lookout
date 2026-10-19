@@ -109,7 +109,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "last_seen", Doc: "RFC3339 timestamp of the entry's newest activity (the timeline sort key)"},
 			{Name: "source", Doc: "reporting component (kubelet, horizontal-pod-autoscaler, …)"},
 			{Name: "variants", Doc: "raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one)"},
-			{Name: "objects", Doc: "on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then <owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count"},
+			{Name: "objects", Doc: "on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then <owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count. A pod owner's Normal start events (Scheduled, Pulling, Pulled, Created, Started) fold into one entry with reason PodsStarted and the folded reasons in variants; objects counts distinct pods"},
 			{Name: "examples", Doc: "on a rolled-up entry: the newest member objects' names, comma-separated (3; 5 for warnings); --per-object or --workload lists every object"},
 			{Name: "replicas", Doc: "event.hpa_thrash: the chronological replica sequence recovered from SuccessfulRescale events, e.g. 2->6->2->6"},
 			{Name: "flips", Doc: "event.hpa_thrash: most scale-direction changes observed inside one --hpa-window"},

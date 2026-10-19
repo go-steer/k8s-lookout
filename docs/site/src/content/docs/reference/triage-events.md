@@ -59,7 +59,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `last_seen` | RFC3339 timestamp of the entry's newest activity (the timeline sort key) |
 | `source` | reporting component (kubelet, horizontal-pod-autoscaler, …) |
 | `variants` | raw Event.Reason values collapsed into this entry, comma-separated (present only when a reason family merged more than one) |
-| `objects` | on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then \<owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count |
+| `objects` | on a rolled-up entry (namespace and -A timelines): how many objects share this owner and reason; the name is then \<owner>-* for pods (the owner their generated names encode) or * for Nodes, and the message is the newest member's, prefixed with the count. A pod owner's Normal start events (Scheduled, Pulling, Pulled, Created, Started) fold into one entry with reason PodsStarted and the folded reasons in variants; objects counts distinct pods |
 | `examples` | on a rolled-up entry: the newest member objects' names, comma-separated (3; 5 for warnings); --per-object or --workload lists every object |
 | `replicas` | event.hpa_thrash: the chronological replica sequence recovered from SuccessfulRescale events, e.g. 2->6->2->6 |
 | `flips` | event.hpa_thrash: most scale-direction changes observed inside one --hpa-window |

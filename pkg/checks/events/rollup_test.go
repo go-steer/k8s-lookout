@@ -78,15 +78,18 @@ func TestNamespaceTimelineRollsUpAnOwner(t *testing.T) {
 	for _, r := range recs {
 		byName[r["name"]+"/"+r["reason"]] = append(byName[r["name"]+"/"+r["reason"]], r)
 	}
-	pulled := byName["anetd-*/Pulled"]
-	if len(pulled) != 1 {
-		t.Fatalf("want one rolled-up Pulled entry, got %d:\n%v", len(pulled), recs)
+	// Pulled and Started fold into one PodsStarted entry (#754): five
+	// pods, ten events, both reasons in variants.
+	started := byName["anetd-*/PodsStarted"]
+	if len(started) != 1 || len(byName["anetd-*/Pulled"])+len(byName["anetd-*/Started"]) != 0 {
+		t.Fatalf("want one folded PodsStarted entry and no separate Pulled/Started:\n%v", recs)
 	}
-	r := pulled[0]
+	r := started[0]
 	for k, want := range map[string]string{
-		"kind": "event.normal", "kind_of_object": "Pod", "objects": "5", "count": "5",
+		"kind": "event.normal", "kind_of_object": "Pod", "objects": "5", "count": "10",
+		"variants": "Pulled,Started",
 		"examples": "anetd-bxg2q,anetd-c4kzp,anetd-d7wmn",
-		"message":  "5 pods: Successfully pulled image anetd:1.2",
+		"message":  "5 pods: Started container anetd",
 	} {
 		if r[k] != want {
 			t.Errorf("rolled-up %s = %q, want %q", k, r[k], want)
@@ -138,6 +141,30 @@ func TestPerObjectAndWorkloadTimelinesDoNotRollUp(t *testing.T) {
 	}
 	if got := countReason(recs, "Pulled"); got != 5 {
 		t.Errorf("want 5 per-pod Pulled entries, got %d", got)
+	}
+}
+
+// TestWarningStartReasonsDoNotFold: a warning with a start reason (a
+// pull that failed, say) is a problem, not the routine start, and is
+// never folded into PodsStarted.
+func TestWarningStartReasonsDoNotFold(t *testing.T) {
+	objs := dsChurn()
+	for _, p := range []string{"anetd-bxg2q", "anetd-c4kzp", "anetd-d7wmn", "anetd-fh2ls", "anetd-gq9tv"} {
+		ref := objRef("Pod", "kube-system", p, "uid-"+p)
+		objs = append(objs, event("kube-system", p+".pullwarn", ref, corev1.EventTypeWarning, "Pulled", "pulled after retries", 1, 3*time.Minute, 3*time.Minute))
+	}
+	recs, _ := runRecords(t, testCommand(objs...), "--namespace=kube-system")
+	var folded, warned bool
+	for _, r := range recs {
+		if r["reason"] == "PodsStarted" && r["severity"] == emit.SeverityInfo {
+			folded = true
+		}
+		if r["reason"] == "Pulled" && r["severity"] == emit.SeverityWarning && r["objects"] == "5" {
+			warned = true
+		}
+	}
+	if !folded || !warned {
+		t.Errorf("want the Normal starts folded and the warnings kept as their own rollup:\n%v", recs)
 	}
 }
 
