@@ -137,11 +137,30 @@ func (e *StatusError) Error() string {
 // negligible overhead. Retries are deliberately absent for every
 // sink: one attempt, errors surface to the caller whose metrics and
 // logs count them.
+//
+// The connection pool is the sink's own (sinkBaseTransport), never
+// http.DefaultTransport's: anything else in the process that calls
+// CloseIdleConnections on the default transport — httptest.Server.Close
+// does, for one — can otherwise tear down a connection a sink POST is
+// in the middle of using, and a POST is not retried, so the inject
+// fails with "transport connection broken: http: CloseIdleConnections
+// called" (#759).
 func newSinkHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: otelhttp.NewTransport(http.DefaultTransport),
+		Transport: otelhttp.NewTransport(sinkBaseTransport()),
 	}
+}
+
+// sinkBaseTransport is a private copy of http.DefaultTransport — same
+// proxy, dial, TLS and idle settings, separate connection pool. Falls
+// back to the shared default only if something replaced it with a
+// RoundTripper that is not an *http.Transport.
+func sinkBaseTransport() http.RoundTripper {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return http.DefaultTransport
 }
 
 // RedactedURL returns raw with any URL userinfo stripped completely, for log
