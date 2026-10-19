@@ -383,6 +383,7 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecentByObject: %v", err)
 		}
+		joined = joined[:0]
 		for _, r := range rows {
 			if r.Kind == capacity.KindQuotaBlocked {
 				joined = append(joined, r)
@@ -401,20 +402,27 @@ func TestDrill_QuotaExhaustion_CorrelatedIncidentWithDraft(t *testing.T) {
 	// forecast session) is no longer silent — the FIRST join routes as
 	// a compact followup into the bound session; further duplicates
 	// stay suppressed (max 1 per source per incident per window).
-	if joined[0].Route != store.RouteFollowup {
-		t.Errorf("quota_blocked route = %q, want %q (cross-source join announced into the open incident, M4 observation 4)", joined[0].Route, store.RouteFollowup)
+	//
+	// The first join is the OLDEST row: RecentByObject is newest-first,
+	// and the capacity source re-fires quota_blocked every 200ms, so a
+	// poll that wakes late (a loaded CI runner) already sees the
+	// suppressed repeats recorded on top of the followup. Reading
+	// rows[0] asserted on whichever repeat was newest (#720).
+	first := joined[len(joined)-1]
+	if first.Route != store.RouteFollowup {
+		t.Errorf("quota_blocked route = %q, want %q (cross-source join announced into the open incident, M4 observation 4)", first.Route, store.RouteFollowup)
 	}
-	if joined[0].SessionID != criticalSid {
-		t.Errorf("quota_blocked recorded against session %q, want the open quota session %q", joined[0].SessionID, criticalSid)
+	if first.SessionID != criticalSid {
+		t.Errorf("quota_blocked recorded against session %q, want the open quota session %q", first.SessionID, criticalSid)
 	}
-	if joined[0].CanonicalReason != "QuotaExhausted" {
-		t.Errorf("quota_blocked canonical reason = %q, want QuotaExhausted", joined[0].CanonicalReason)
+	if first.CanonicalReason != "QuotaExhausted" {
+		t.Errorf("quota_blocked canonical reason = %q, want QuotaExhausted", first.CanonicalReason)
 	}
 	if sid, _ := dedup.LookupSession(engine.EventKey{UID: "quota:CPUS/us-east1", Reason: "quota_blocked"}); sid != criticalSid {
 		t.Errorf("dedup routes quota_blocked to %q, want %q (the family join)", sid, criticalSid)
 	}
 	t.Logf("drill step 3 — quota_blocked joined session %s: route=%s canonical_reason=%s message=%q",
-		joined[0].SessionID, joined[0].Route, joined[0].CanonicalReason, joined[0].Message)
+		first.SessionID, first.Route, first.CanonicalReason, first.Message)
 
 	// --- Step 4: hysteresis — the next critical poll (same state)
 	// must not re-fire. Exactly THREE injects: the warning digest,
