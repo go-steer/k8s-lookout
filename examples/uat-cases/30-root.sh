@@ -219,11 +219,13 @@ uat_root_watch_runtime() {
   # injected six minutes ago is deep in a 5m backoff and produces
   # nothing at all inside a dry-run window measured in seconds. That is
   # exactly what happened the first time a CI run was slow enough to
-  # reach this case late. Restarting the pod resets the backoff to 10s;
-  # the state-based assertions elsewhere need none of this.
+  # reach this case late. Restarting the pod resets the backoff to 10s.
   #
-  # One restart, not the fixture's four: the event lands on the very
-  # first backoff, and nothing below reads a restart count.
+  # One restart, not the fixture's four: nothing below reads a restart
+  # count, and a loop that has already backed off four times is back to
+  # emitting its event too rarely. The cost is that the pod is handed
+  # back younger than the fixture promised its other readers, so the
+  # case restores it on the way out (_uat_root_restore_faulty).
   refresh_crashloop "$UAT_ROOT_NS" faulty 1
 
   # --storm=off is not a convenience: with correlation on, three
@@ -386,11 +388,32 @@ uat_root_watch_runtime() {
   # webhook CA bundle, say) is in scope by construction and routinely
   # lands first. Waiting on it and then reading the set 5s later closes
   # the window before the crash loop's own inject is even routed.
-  if ! uat_watch_await 180 grep -q "\"namespace\": \"$UAT_ROOT_NS\"" "$UAT_WATCH_OUT"; then
+  #
+  # And not for ANY payload from the fixture either, but for the one the
+  # assertions below are about: the crash loop's k8s-event/BackOff. The
+  # fixture has faster signals — deleting the pod above empties the
+  # Service's endpoints, and objectstate.endpoints_empty can be on stdout
+  # within two seconds — while the BackOff inject waits for the event's
+  # count to reach --backoff-min-count (3), which on a refreshed loop is
+  # some 30-60s of kubelet backoff, and an event already counted when the
+  # informer listed is dropped (k8s-events never replays its initial
+  # LIST). Waiting on the first fixture payload and reading the set 5s
+  # later failed the BackOff checks whenever endpoints_empty won (#706).
+  _fixture_backoff_seen() {
+    grep -v '^--- dry-run payload' "$UAT_WATCH_OUT" 2>/dev/null |
+      jq -e -s --arg ns "$UAT_ROOT_NS" \
+        'any(.[]; .namespace == $ns and .kind == "k8s-event" and .reason == "BackOff" and ((.name // "") | startswith("faulty-")))' \
+        >/dev/null 2>&1
+  }
+  # A timeout is not reported here: the subjects check below names what
+  # did arrive, which is the useful half of the failure.
+  uat_watch_await 180 _fixture_backoff_seen || true
+  if ! grep -q "\"namespace\": \"$UAT_ROOT_NS\"" "$UAT_WATCH_OUT"; then
     uat_bad "watch --dry-run → prints an inject payload" \
       "nothing from $UAT_ROOT_NS on stdout after 180s with a crash-looping and an unschedulable workload there" \
       "$(tail -n 5 "$UAT_WATCH_ERR" | tr '\n' '|')"
     uat_watch_stop
+    _uat_root_restore_faulty
     return 0
   fi
   uat_ok "watch --dry-run → prints an inject payload, with no --daemon-url given"
@@ -482,6 +505,27 @@ uat_root_watch_runtime() {
   else
     uat_bad "watch --dry-run → the attached bundle carries its delta section" \
       "bundle: ${bundle:0:300}"
+  fi
+
+  _uat_root_restore_faulty
+}
+
+# _uat_root_restore_faulty — hand `faulty` back with the restart count
+# broken-workloads/inject promised every other case that reads it.
+#
+# The watch case's refresh_crashloop leaves a ONE-restart loop behind,
+# and the cases that run next (bundle delta, health, triage delta in
+# 40-toplevel.sh) assert pod.crashloop on it. Below two restarts a
+# container that is down or briefly running again is deliberately not
+# called a crash loop (pkg/checks/delta, #403/#522), so a run that got
+# there within a few seconds of the refresh read pod.restarts /
+# pod.notready instead and failed five checks that have nothing to do
+# with the watch path (#706). Four, not two: it is the fixture's own
+# number, and the one its comments explain.
+_uat_root_restore_faulty() {
+  if ! await_crashloop "$UAT_ROOT_NS" faulty 4; then
+    uat_bad "watch --dry-run → faulty is handed back at the fixture's 4 restarts" \
+      "the refreshed pod did not reach 4 restarts; later cases read a younger loop than broken-workloads promised"
   fi
 }
 

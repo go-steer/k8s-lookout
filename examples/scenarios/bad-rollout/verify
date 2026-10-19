@@ -19,7 +19,19 @@ require_examples_context
 echo "▸ verify bad-rollout"
 
 # The Deployment-altitude signal (examples --rollout-observe=90s).
-await_inject bad-rollout 360 'kind=rollout.stall' 'web'
+#
+# Its own kind=rollout.stall session, OR the same incident routed into a
+# storm: crashloop and failed-mount run just before this in the same
+# namespace, and when their incidents and web's first crash-looping pod
+# land inside one --storm-window (1m), the correlator forms a Namespace
+# storm and the stall ~80s later attaches to it as kind=storm.member
+# (reason rollout_stall, name web) rather than opening a session — run
+# 38927835094 (#706), where the 720s wait for a bare kind=rollout.stall
+# timed out with the stall already on the wire. That is the documented
+# storm behavior (README § Re-runs, dedup, and storm absorption), and
+# the revert's kind=resolved still reaches whichever session owns it.
+# kind=storm covers the stall being one of the founding incidents.
+await_inject bad-rollout 360 'kind=(rollout\.stall|storm\.member|storm) ' 'rollout_stall' 'web'
 
 # The exit-criterion half most worth capturing: NO user-visible
 # failure while the stall is open — old pods keep serving.
