@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Rolled-up timelines also fold pod stop events and roll up
+  controller events (#760).** A rolled-up owner's Normal Killing,
+  ScaleDown and Preempting events become one `PodsStopped` entry, as
+  start events became `PodsStarted`. Normal events on DaemonSets,
+  ReplicaSets, Jobs and StatefulSets (`SuccessfulCreate` and the like)
+  roll up across objects of the kind, as Node events do; their warnings
+  stay per object. Live, a busy cluster's hour went from 2,807 entries
+  (860 KB) to 124 (47 KB).
+
 - **A rolled-up timeline folds a pod owner's start events into one
   entry (#754).** In namespace and `-A` timelines, an owner's Normal
   Scheduled, Pulling, Pulled, Created and Started events become one

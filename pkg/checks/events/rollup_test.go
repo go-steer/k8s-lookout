@@ -168,6 +168,49 @@ func TestWarningStartReasonsDoNotFold(t *testing.T) {
 	}
 }
 
+// TestStopEventsFold: a rolled-up owner's Killing and ScaleDown become
+// one PodsStopped entry (#760).
+func TestStopEventsFold(t *testing.T) {
+	var objs []runtime.Object
+	for i, p := range []string{"fluentbit-bxg2q", "fluentbit-c4kzp", "fluentbit-d7wmn"} {
+		ref := objRef("Pod", "kube-system", p, "uid-"+p)
+		age := time.Duration(10+i) * time.Minute
+		objs = append(objs,
+			event("kube-system", p+".kill", ref, corev1.EventTypeNormal, "Killing", "Stopping container fluentbit", 1, age, age),
+			event("kube-system", p+".sd", ref, corev1.EventTypeNormal, "ScaleDown", "deleting pod for node scale down", 1, age, age),
+		)
+	}
+	recs, _ := runRecords(t, testCommand(objs...), "--namespace=kube-system")
+	if len(recs) != 1 || recs[0]["reason"] != "PodsStopped" || recs[0]["objects"] != "3" || recs[0]["count"] != "6" || recs[0]["variants"] != "Killing,ScaleDown" {
+		t.Fatalf("want one PodsStopped entry over 3 pods:\n%v", recs)
+	}
+}
+
+// TestControllerEventsRollUpAcrossObjects: SuccessfulCreate on three
+// DaemonSets is one entry; a FailedCreate warning stays on its own
+// DaemonSet.
+func TestControllerEventsRollUpAcrossObjects(t *testing.T) {
+	var objs []runtime.Object
+	for i, ds := range []string{"anetd", "netd", "fluentbit"} {
+		age := time.Duration(10+i) * time.Minute
+		objs = append(objs, event("kube-system", ds+".sc", objRef("DaemonSet", "kube-system", ds, "uid-"+ds), corev1.EventTypeNormal, "SuccessfulCreate", "Created pod: "+ds+"-xxxxx", 1, age, age))
+	}
+	objs = append(objs, event("kube-system", "netd.fc", objRef("DaemonSet", "kube-system", "netd", "uid-netd"), corev1.EventTypeWarning, "FailedCreate", "quota exceeded", 1, time.Minute, time.Minute))
+	recs, _ := runRecords(t, testCommand(objs...), "--namespace=kube-system")
+	var rolled, failed bool
+	for _, r := range recs {
+		if r["kind_of_object"] == "DaemonSet" && r["name"] == "*" && r["reason"] == "SuccessfulCreate" && r["objects"] == "3" {
+			rolled = true
+		}
+		if r["name"] == "netd" && r["reason"] == "FailedCreate" && r["objects"] == "" {
+			failed = true
+		}
+	}
+	if !rolled || !failed || len(recs) != 2 {
+		t.Fatalf("want one rolled SuccessfulCreate and the per-object FailedCreate:\n%v", recs)
+	}
+}
+
 // TestNodeEventsRollUpByReason: Node events group by reason alone.
 func TestNodeEventsRollUpByReason(t *testing.T) {
 	var objs []runtime.Object
