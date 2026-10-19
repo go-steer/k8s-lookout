@@ -93,19 +93,39 @@ type groupKey struct {
 // --workload timelines, and owners under the threshold, keep each.
 var podStartReasons = map[string]bool{"Scheduled": true, "Pulling": true, "Pulled": true, "Created": true, "Started": true}
 
-const reasonPodsStarted = "PodsStarted"
+// podStopReasons are their counterpart when pods go away: the kubelet
+// stopping containers and the autoscaler or scheduler removing the pod.
+// A rolled-up owner's fold into reasonPodsStopped (#760).
+var podStopReasons = map[string]bool{"Killing": true, "ScaleDown": true, "Preempting": true}
+
+const (
+	reasonPodsStarted = "PodsStarted"
+	reasonPodsStopped = "PodsStopped"
+)
+
+// controllerKinds are the objects that create and delete pods. Their
+// Normal events (SuccessfulCreate, SuccessfulDelete, Completed) roll up
+// across objects of a kind, as Nodes do, rather than per controller
+// (#760); their warnings (FailedCreate) stay per controller.
+var controllerKinds = map[string]bool{"DaemonSet": true, "ReplicaSet": true, "Job": true, "StatefulSet": true}
 
 func keyOf(en *entry) (groupKey, bool) {
 	k := groupKey{namespace: en.namespace, kind: en.kind, reason: en.reason, warning: en.warning}
-	switch en.kind {
-	case "Pod":
+	switch {
+	case en.kind == "Pod":
 		k.owner = podOwner(en.name)
-		if !en.warning && podStartReasons[en.reason] {
+		switch {
+		case en.warning:
+		case podStartReasons[en.reason]:
 			k.reason = reasonPodsStarted
+		case podStopReasons[en.reason]:
+			k.reason = reasonPodsStopped
 		}
 		return k, k.owner != ""
-	case "Node":
+	case en.kind == "Node":
 		return k, true
+	case controllerKinds[en.kind]:
+		return k, !en.warning
 	}
 	return k, false
 }
@@ -173,7 +193,7 @@ func merged(k groupKey, members []*entry) (emit.Finding, time.Time) {
 		}
 	}
 	sum.name = k.owner + "-*"
-	if k.kind == "Node" {
+	if k.owner == "" { // Nodes and controllers group by kind alone
 		sum.name = "*"
 	}
 	f := sum.finding()
