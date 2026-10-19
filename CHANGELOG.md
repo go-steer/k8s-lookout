@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--per-object` and `--workload` timelines keep every reason. Live, a
   busy cluster's hour went from 1,616 entries (495 KB) to 159 (57 KB);
   the start events alone went from about 90 entries to 15.
+- **`lookout mcp --max-response-bytes` now covers `k8s_list_clusters`
+  (#755).** An oversize cluster list keeps its first clusters (those
+  readable cluster-wide come first), whole lines only, every
+  discovery-scope line and the summary, with `clusters=` set to the
+  clusters returned, `response_truncated=` to those left out, and a
+  `response_hint` that points at `filter`. The access log records the
+  bytes returned and `truncated=` as for every other tool.
+
+### Fixed
+
+- **The truncation hint offers `since` only for tools that read a time
+  window (#756).** `response_hint` suggested `since` for every tool,
+  though most ignore it, so a model that followed it got the same
+  oversize answer back. Commands now declare whether they honour
+  `--since` (`UsesSince` on the command: `triage events`, `triage
+  changes`, `triage logs`, `bundle`, `perf probe`, `cloud stockout`),
+  and a contract test holds the declaration to the code.
 
 ## [0.40.0] - 2026-10-19
 

@@ -63,6 +63,7 @@ func New(deps Deps) checks.Command {
 		Name:        "triage logs",
 		MCPName:     "k8s_triage_logs",
 		MCPProfiles: []string{"triage"},
+		UsesSince:   true, // the log lookback
 		Summary:     "kubectl logs, distilled: Drain-clusters raw lines into templates with counts (probe noise stripped, stack traces collapsed to top frames) — reach for this instead of reading logs whole.",
 		Flags: []emit.FlagSpec{
 			{Name: "pod", Type: emit.FlagString, Default: "", Help: "read one pod by name (requires --namespace)"},

@@ -156,7 +156,9 @@ func SummaryNoteFields() []string {
 // ResponseNoteFields returns the summary-line note keys `lookout mcp`
 // appends when it cuts a tool result to --max-response-bytes
 // (internal/mcpserver): how many findings were dropped, how many of
-// them at each severity, and what to narrow the call with. They are
+// them at each severity, and what to narrow the call with
+// (k8s_list_clusters, which is not a command, uses response_truncated
+// for the clusters dropped and response_hint, with no severity). They are
 // reserved here, beside the Writer's keys, so no command can emit or
 // declare one and a cut answer cannot pass for a complete one.
 // `truncated` itself is not among them: scan and inventory already use

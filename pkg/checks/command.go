@@ -140,6 +140,16 @@ type Command struct {
 	// so it keeps the tail instead. Output on every other surface is
 	// unaffected. Plain additive field: the zero value keeps the head.
 	NewestLast bool
+	// UsesSince marks a command that honours --since: its answer reads
+	// inv.Scope.Since, directly or by handing it to a part it runs
+	// (`bundle` passes it to its events and logs sections). Every
+	// command accepts the flag, but most ignore it, so when `lookout
+	// mcp` cuts an answer to --max-response-bytes its hint offers since
+	// as a way to narrow the call only for a command that declares
+	// this (#756). pkg/checks/all's TestUsesSinceMatchesTheSource holds
+	// the declaration to the code. Plain additive field: the zero value
+	// is "ignores --since".
+	UsesSince bool
 }
 
 // OutputField documents one Details key a command may emit.

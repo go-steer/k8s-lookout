@@ -65,6 +65,7 @@ func ChangesCommand(deps Deps) checks.Command {
 		MCPName:     "k8s_recent_changes",
 		GraphBacked: true,
 		NewestLast:  true, // emitted oldest first: a cut answer keeps the newest changes
+		UsesSince:   true, // the window before onset
 		Summary:     "What changed around one workload in the window before onset — rollouts, config/secret updates, rescales, node ops — chronological, scoped to the target's graph neighborhood; full fidelity from a sentinel store, best-effort live otherwise.",
 		Positional: &checks.Positional{
 			Meta: "<Kind>/[<namespace>/]<name>",

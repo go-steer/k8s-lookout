@@ -107,18 +107,7 @@ func fitResponse(c checks.Command, args []string, out string, limit int) (string
 	hint := responseHint(c, args, total, total, limit)
 	budget := limit - len(sum.cut(total, total, total, all, hint))
 
-	keep, size := 0, 0
-	for keep < total {
-		i := keep
-		if c.NewestLast {
-			i = total - 1 - keep
-		}
-		if size+len(findings[i]) > budget {
-			break
-		}
-		size += len(findings[i])
-		keep++
-	}
+	keep, size := fitLines(findings, budget, c.NewestLast)
 	if keep == total {
 		return out, 0
 	}
@@ -145,6 +134,24 @@ func fitResponse(c checks.Command, args []string, out string, limit int) (string
 	}
 	b.WriteString(sum.cut(keep, total-keep, exempt, bySeverity, responseHint(c, args, keep, total, limit)))
 	return b.String(), total - keep
+}
+
+// fitLines counts how many whole lines, taken from the head (or from
+// the tail when fromEnd is set) and never split, fit in budget bytes,
+// and how many bytes they take.
+func fitLines(lines []string, budget int, fromEnd bool) (keep, size int) {
+	for keep < len(lines) {
+		i := keep
+		if fromEnd {
+			i = len(lines) - 1 - keep
+		}
+		if size+len(lines[i]) > budget {
+			break
+		}
+		size += len(lines[i])
+		keep++
+	}
+	return keep, size
 }
 
 // record is what the cut needs to know about one finding line.
@@ -239,20 +246,22 @@ func (s summary) findings() int {
 	return n
 }
 
+// count returns the integer value of key, and whether the summary
+// carries it as one.
+func (s summary) count(key string) (int, bool) {
+	for _, p := range s.pairs {
+		if p.key == key {
+			n, err := strconv.Atoi(p.value)
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
 // cut renders the summary of a cut stream: findings= set to the lines
 // returned, exempt= (when present) to the returned lines it covers, the
 // remaining notes as they were, and the response_* notes last.
 func (s summary) cut(returned, dropped, exempt int, bySeverity map[string]int, hint string) string {
-	pairs := make([]summaryPair, 0, len(s.pairs)+3)
-	for _, p := range s.pairs {
-		switch p.key {
-		case "findings":
-			p.value = strconv.Itoa(returned)
-		case "exempt":
-			p.value = strconv.Itoa(exempt)
-		}
-		pairs = append(pairs, p)
-	}
 	sev := make([]string, 0, 4)
 	for _, level := range emit.Severities() {
 		sev = append(sev, fmt.Sprintf("%s:%d", level, bySeverity[level]))
@@ -260,11 +269,25 @@ func (s summary) cut(returned, dropped, exempt int, bySeverity map[string]int, h
 	if n := bySeverity["other"]; n > 0 {
 		sev = append(sev, fmt.Sprintf("other:%d", n))
 	}
-	pairs = append(pairs,
+	return s.rewrite(map[string]int{"findings": returned, "exempt": exempt},
 		summaryPair{key: "response_truncated", value: strconv.Itoa(dropped)},
 		summaryPair{key: "response_truncated_severity", value: strings.Join(sev, ",")},
 		summaryPair{key: "response_hint", value: hint},
 	)
+}
+
+// rewrite renders the summary with the keys in set that it already
+// carries given new counts (a key it lacks is not added), every other
+// pair as it was and in place, and notes appended last.
+func (s summary) rewrite(set map[string]int, notes ...summaryPair) string {
+	pairs := make([]summaryPair, 0, len(s.pairs)+len(notes))
+	for _, p := range s.pairs {
+		if n, ok := set[p.key]; ok {
+			p.value = strconv.Itoa(n)
+		}
+		pairs = append(pairs, p)
+	}
+	pairs = append(pairs, notes...)
 	if !s.json {
 		fields := make([]emit.Field, len(pairs))
 		for i, p := range pairs {
@@ -335,18 +358,34 @@ func parseJSONObject(line string) ([]summaryPair, bool) {
 
 // responseHint is the response_hint note: which end of the stream was
 // kept, why, and what would narrow the call. It names the MCP arguments
-// the model can pass (namespace, workload, since; every tool takes
-// them), leaving out the ones this call has already narrowed by.
+// the model can pass (namespace and workload, which every tool takes,
+// and since for a command that declares checks.Command.UsesSince),
+// leaving out the ones this call has already narrowed by.
 func responseHint(c checks.Command, args []string, kept, total, limit int) string {
 	end := "first"
 	if c.NewestLast {
 		end = "newest"
 	}
-	return fmt.Sprintf("kept the %s %d of %d findings to fit the server's %d-byte response limit; narrow the call with %s",
-		end, kept, total, limit, narrowing(c, args))
+	return keptHint(end, kept, total, "findings", limit, narrowing(c, args))
+}
+
+// keptHint is the wording every response_hint shares: what was kept,
+// of how many, under which limit, and what would narrow the call.
+// An empty narrow means no argument the call has not already used
+// would help, and the hint says that instead of naming one.
+func keptHint(end string, kept, total int, what string, limit int, narrow string) string {
+	next := "narrow the call with " + narrow
+	if narrow == "" {
+		next = "the call already uses every argument that would narrow it"
+	}
+	return fmt.Sprintf("kept the %s %d of %d %s to fit the server's %d-byte response limit; %s",
+		end, kept, total, what, limit, next)
 }
 
 // narrowing lists the arguments that would shrink this call's answer.
+// since is offered only to a command that declares UsesSince: every
+// tool accepts the argument, but one that ignores it would return the
+// same oversize answer to a model that followed the hint (#756).
 func narrowing(c checks.Command, args []string) string {
 	set := func(flag string) bool {
 		for _, a := range args {
@@ -371,13 +410,103 @@ func narrowing(c checks.Command, args []string) string {
 	if !set("workload") && !target {
 		opts = append(opts, "workload")
 	}
-	if set("since") {
-		opts = append(opts, "a shorter since")
-	} else {
-		opts = append(opts, "since")
+	if c.UsesSince {
+		if set("since") {
+			opts = append(opts, "a shorter since")
+		} else {
+			opts = append(opts, "since")
+		}
 	}
-	if len(opts) == 1 {
+	return orList(opts)
+}
+
+// orList joins options as prose: "a", "a or b", "a, b or c"; "" for
+// none.
+func orList(opts []string) string {
+	switch len(opts) {
+	case 0:
+		return ""
+	case 1:
 		return opts[0]
 	}
 	return strings.Join(opts[:len(opts)-1], ", ") + " or " + opts[len(opts)-1]
+}
+
+// fitClusterList cuts a k8s_list_clusters result (renderClusters) to at
+// most limit bytes, the way fitResponse cuts a command's, and returns
+// it with the number of cluster lines it dropped (#755).
+//
+// The shape differs from a finding stream, so fitResponse cannot take
+// it as it is: one line per cluster (readable cluster-wide first, so
+// the head is the end worth keeping), then one line per discovery
+// scope, then a summary line whose findings= is 0 (an inventory, not a
+// judgment) and whose clusters= counts the cluster lines. Only cluster
+// lines are dropped, whole, from the tail. The scope lines are kept:
+// there are a handful, and they carry the discovery errors that explain
+// a short list. The summary is kept with clusters= set to the lines
+// returned and scanned= (every cluster the caller could list) as it
+// was, and gains response_truncated=<n> (the clusters dropped) and a
+// response_hint that points at filter. There is no
+// response_truncated_severity: clusters have no severity.
+//
+// As with fitResponse, output not of this shape is returned untouched,
+// and when not even the scope lines and summary fit, they are returned
+// alone, over the budget.
+func fitClusterList(out string, filtered bool, limit int) (string, int) {
+	if limit <= 0 || len(out) <= limit || !strings.HasSuffix(out, "\n") {
+		return out, 0
+	}
+	lines := strings.SplitAfter(out, "\n")
+	lines = lines[:len(lines)-1] // SplitAfter leaves "" after the final newline
+	sum, ok := parseSummary(lines[len(lines)-1])
+	if !ok {
+		return out, 0
+	}
+	body := lines[:len(lines)-1]
+	total := 0
+	for total < len(body) && strings.HasPrefix(body[total], "cluster=") {
+		total++
+	}
+	entries, scopes := body[:total], body[total:]
+	for _, line := range scopes {
+		if !strings.HasPrefix(line, "scope=") {
+			return out, 0
+		}
+	}
+	listed, ok := sum.count("clusters")
+	if !ok || listed != total || total == 0 {
+		return out, 0
+	}
+
+	scopeBytes := 0
+	for _, line := range scopes {
+		scopeBytes += len(line)
+	}
+	narrow := "filter"
+	if filtered {
+		narrow = "a narrower filter"
+	}
+	render := func(kept, dropped int) string {
+		return sum.rewrite(map[string]int{"clusters": kept},
+			summaryPair{key: "response_truncated", value: strconv.Itoa(dropped)},
+			summaryPair{key: "response_hint", value: keptHint("first", kept, total, "clusters", limit, narrow)},
+		)
+	}
+	// As in fitResponse: every count the cut summary carries is at
+	// most total, so rendering each as total bounds the real one.
+	longest := len(render(total, total))
+	keep, size := fitLines(entries, limit-scopeBytes-longest, false)
+	if keep == total {
+		return out, 0
+	}
+	var b strings.Builder
+	b.Grow(size + scopeBytes + longest)
+	for _, line := range entries[:keep] {
+		b.WriteString(line)
+	}
+	for _, line := range scopes {
+		b.WriteString(line)
+	}
+	b.WriteString(render(keep, total-keep))
+	return b.String(), total - keep
 }

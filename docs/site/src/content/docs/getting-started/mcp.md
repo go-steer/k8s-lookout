@@ -589,11 +589,21 @@ scanned=4210 findings=212 elapsed=2.1s response_truncated=3911 response_truncate
 `response_truncated` is how many findings were dropped, and
 `response_truncated_severity` how bad they were. `response_hint` names
 the arguments that would narrow the call, leaving out the ones the
-call already used. Every other note on the line (`exempt=`, `context=`,
-a command's own) stays where it was, and `exempt=` counts only the
-findings returned. `--format=json` results are cut the same way, one
-object per line, with the summary still a JSON object. The CLI never
-cuts anything: the limit is a property of the MCP surface.
+call already used. It offers `since` only for tools that read a time
+window (`triage events`, `triage changes`, `triage logs`,
+`k8s_triage_workload`, `perf probe`, `cloud stockout`): every tool
+accepts it, but the rest ignore it. Every other note on the line
+(`exempt=`, `context=`, a command's own) stays where it was, and
+`exempt=` counts only the findings returned. `--format=json` results
+are cut the same way, one object per line, with the summary still a
+JSON object. The CLI never cuts anything: the limit is a property of
+the MCP surface.
+
+`k8s_list_clusters` is cut the same way: it keeps the first clusters
+(those readable cluster-wide come first), every discovery-scope line
+and the summary, with `clusters=` set to the clusters returned,
+`response_truncated=` to those left out, and a `response_hint` that
+points at `filter`.
 
 100,000 bytes is about that 25k-token cap: Claude Code estimates four
 characters a token, and lookout's logfmt measures at roughly 3.4 to

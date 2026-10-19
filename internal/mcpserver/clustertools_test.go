@@ -20,8 +20,11 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -234,6 +237,46 @@ func TestListClustersTool(t *testing.T) {
 	if _, err := callTool(t, cs, listClustersName, map[string]any{"cluster": "dev"}); err == nil || !strings.Contains(err.Error(), "accepts: filter") {
 		t.Errorf("unknown argument: %v", err)
 	}
+}
+
+// TestListClustersToolIsCutAndLogged: k8s_list_clusters honours
+// --max-response-bytes like every other tool (#755), and the access log
+// records the bytes returned and how many clusters were left out.
+func TestListClustersToolIsCutAndLogged(t *testing.T) {
+	_, dir, reg := multiClusterServer(t, nil)
+	full := text(t, mustCall(t, connect(t, New(reg(), "test", WithClusters(dir))), listClustersName))
+	if strings.Contains(full, "response_truncated") {
+		t.Fatalf("the default limit cut a three-cluster list:\n%s", full)
+	}
+
+	log, buf := testLog(t, 0)
+	cs := connect(t, New(reg(), "test", WithClusters(dir), WithAccessLog(log), WithMaxResponseBytes(len(full)-1)))
+	got := text(t, mustCall(t, cs, listClustersName))
+	if len(got) >= len(full) {
+		t.Fatalf("list of %d bytes not cut under a %d-byte limit:\n%s", len(got), len(full)-1, got)
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	f := summaryFields(t, lines[len(lines)-1]+"\n")
+	dropped := f["response_truncated"]
+	if dropped == "" || dropped == "0" || f["scanned"] != "3" || !strings.HasSuffix(f["response_hint"], "narrow the call with filter") {
+		t.Fatalf("summary %q", lines[len(lines)-1])
+	}
+	if !strings.Contains(got, "scope=p via=container clusters=3\n") {
+		t.Errorf("the scope line was dropped:\n%s", got)
+	}
+	recs := records(t, buf)
+	if len(recs) != 1 || recs[0]["tool"] != listClustersName || recs[0]["bytes"] != strconv.Itoa(len(got)) || recs[0]["truncated"] != dropped {
+		t.Errorf("access log = %v, want bytes=%d truncated=%s", recs, len(got), dropped)
+	}
+}
+
+func mustCall(t *testing.T, cs *mcp.ClientSession, name string) *mcp.CallToolResult {
+	t.Helper()
+	res, err := callTool(t, cs, name, map[string]any{})
+	if err != nil || res.IsError {
+		t.Fatalf("tools/call %s: %v %v", name, err, res)
+	}
+	return res
 }
 
 // TestGoogleModeMultiClusterDiscoversAsTheCaller: in Google-token mode

@@ -334,7 +334,11 @@ Flags:
                         response_truncated=<n> and
                         response_truncated_severity= count what was
                         left out, and response_hint names the
-                        arguments that narrow the call.
+                        arguments that narrow the call (since only
+                        for tools that read a time window).
+                        k8s_list_clusters is cut the same way,
+                        keeping the first clusters and pointing at
+                        filter.
   --access-log=<path>   append one logfmt line per tool call:
                         ts, tool, exit code, duration, response
                         bytes (plus remote peer address on HTTP,

@@ -56,10 +56,11 @@ const defaultStockoutSince = 24 * time.Hour
 // fake provider.
 func StockoutCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "cloud stockout",
-		MCPName: "k8s_cloud_stockout",
-		Summary: "GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h; long windows like --since=720h scan up to 20 audit-log pages in ~15–25s, so pass --timeout=60s), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.",
-		Flags:   []emit.FlagSpec{},
+		Name:      "cloud stockout",
+		MCPName:   "k8s_cloud_stockout",
+		UsesSince: true, // the audit-log window
+		Summary:   "GCE capacity stockouts (ZONE_RESOURCE_POOL_EXHAUSTED) per zone/machine-type over --since (default 24h; long windows like --since=720h scan up to 20 audit-log pages in ~15–25s, so pass --timeout=60s), with event-derived reroute candidates — the cloud-side why behind pods stuck Pending on failed scale-ups.",
+		Flags:     []emit.FlagSpec{},
 		Kinds: []checks.KindField{
 			checks.Kind("stockout.zone", "the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending", emit.SeverityWarning),
 			checks.CloudUnavailableKind(),
