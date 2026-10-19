@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Changed
+
+- **Namespace and cluster-wide event timelines roll up (#747).**
+  `triage events --namespace`/`-A` (`k8s_event_timeline`) merges a pod
+  owner's shared reason into one entry: pods group by the owner their
+  generated names encode (DaemonSet, Deployment, StatefulSet, CronJob),
+  Nodes by reason. A group rolls up at 3 or more objects for Normal
+  events and 5 for warnings. The entry keeps the kind, summed count and
+  first/last seen, and adds `objects=` and the newest names in
+  `examples=` (3, or 5 for warnings, so a warning group at the threshold
+  still names every object). Its name is `<owner>-*` or `*`. Smaller
+  groups, `--workload` timelines and the new `--per-object` flag list
+  every object as before; event kinds are unchanged. Live, a busy
+  Autopilot cluster's hour went from 1,830 entries (561 KB) to 202
+  (76 KB) with every reason, owner and warning kept.
 
 - **`autoscaler.scaleup_blocked` says why unschedulable pods fit on no
   node (#748).** With Nodes and Pods read cluster-wide (`triage delta`,
