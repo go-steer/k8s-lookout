@@ -31,6 +31,7 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/mcpserver"
 	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // commonProperties are the §4.2 common flags as MCP schema property
@@ -187,6 +188,24 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=x.example",
 			"--resource-url=https://l.example/mcp",
 		}, 2, "--google-allow"},
+		// Group entries need the service account they are checked as.
+		{"a group entry without the groups service account", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=group:sre@x.example",
+			"--resource-url=https://l.example/mcp",
+		}, 2, "--google-groups-service-account"},
+		{"a group write entry without the groups service account", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--google-allow-write=group:sre@x.example", "--resource-url=https://l.example/mcp",
+		}, 2, "--google-groups-service-account"},
+		{"the groups service account without group entries", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+			"--google-groups-service-account=g@p.iam.gserviceaccount.com", "--resource-url=https://l.example/mcp",
+		}, 2, "neither --google-allow nor --google-allow-write"},
+		{"a groups service account that is not one", []string{
+			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=group:sre@x.example",
+			"--google-groups-service-account=dana@x.example", "--resource-url=https://l.example/mcp",
+		}, 2, "not a service account email"},
+		{"the groups service account without google mode", []string{"--google-groups-service-account=g@p.iam.gserviceaccount.com"}, 2, "--google-client-id"},
 		{"a plaintext resource URL", []string{
 			"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
 			"--resource-url=http://l.example/mcp",
@@ -249,6 +268,23 @@ func TestMCPGoogleModeServes(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Google-token mode") {
 		t.Errorf("no Google-token banner: %s", stderr.String())
+	}
+}
+
+// TestMCPGoogleGroupsNeedTheGKEBuild: group entries are checked as an
+// impersonated service account, which a build without the GKE provider
+// cannot do; it refuses them at startup rather than never matching.
+func TestMCPGoogleGroupsNeedTheGKEBuild(t *testing.T) {
+	if cloud.CanImpersonate() {
+		t.Skip("this build can impersonate")
+	}
+	var stdout, stderr bytes.Buffer
+	code := mcpMain(t.Context(), []string{
+		"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=group:sre@x.example",
+		"--google-groups-service-account=g@p.iam.gserviceaccount.com", "--resource-url=https://l.example/mcp",
+	}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "-tags gke") || !strings.Contains(stderr.String(), "group: entries") {
+		t.Errorf("exit %d, stderr: %s", code, stderr.String())
 	}
 }
 

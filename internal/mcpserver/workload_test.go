@@ -202,7 +202,7 @@ type errTokenSource struct{ err error }
 func (e errTokenSource) Token() (*oauth2.Token, error) { return nil, e.err }
 
 // fakeImpersonate stands in for IAM Credentials generateAccessToken.
-func fakeImpersonate(_ context.Context, sa string) (oauth2.TokenSource, error) {
+func fakeImpersonate(_ context.Context, sa string, _ ...string) (oauth2.TokenSource, error) {
 	switch sa {
 	case saReader:
 		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: saSentinelToken}), nil

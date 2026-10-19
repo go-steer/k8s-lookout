@@ -115,14 +115,20 @@ lookout mcp \
   refused, as is one without the `cloud-platform` scope. Tokens are
   checked with Google ([steward](https://github.com/go-steer/steward)),
   and a result is cached for at most ten minutes.
-- **`--google-allow`** — who is let in: exact emails, or `@domain` for
-  every account Google says belongs to that Workspace domain. An email
+- **`--google-allow`** — who is let in: exact emails, `@domain` for
+  every account Google says belongs to that Workspace domain, or
+  `group:<group email>` for every member of a Google group, directly or
+  through nested groups ([Google groups](#google-groups)). An email
   suffix alone never matches, because a personal Google account can carry
   a company address.
 - **`--google-allow-write`** — who may call tools that change state: the
   triage-status write and `findings diff`/`ack` (they update the store;
   the gate is per tool, so it covers their read modes too), and
-  `k8s_net_probe_from` when served. Empty means nobody.
+  `k8s_net_probe_from` when served. Same entries as `--google-allow`.
+  Empty means nobody.
+- **`--google-groups-service-account`** — the service account `group:`
+  entries are checked as. Required when either list has one; see
+  [Google groups](#google-groups).
 - **`--resource-url`** — this server's MCP URL as clients reach it. It is
   named in the RFC 9728 metadata served at
   `/.well-known/oauth-protected-resource/<path>` and in every `401`.
@@ -163,6 +169,79 @@ What the mode guarantees:
   `recorded_by=<email>`; lookout stays the writer of record. That column
   is store migration v11: upgrade the sentinel before (or with) the MCP
   server, because older binaries refuse a store migrated past them.
+
+### Google groups
+
+A `group:` entry admits every member of a Google group, directly or
+through nested groups, in either list:
+
+```sh
+  --google-allow=group:sre@example.com,@example.com \
+  --google-allow-write=group:sre-oncall@example.com \
+  --google-groups-service-account=lookout-groups@example-project.iam.gserviceaccount.com
+```
+
+lookout checks membership with the Cloud Identity Groups API. The
+identity that asks needs the **Groups Reader** admin role in the
+group's Workspace, and admin roles are assigned to an email address,
+which lookout's Workload Identity principal does not have. So lookout
+asks as a dedicated service account, `--google-groups-service-account`,
+which it impersonates for those calls only (IAM Credentials
+`generateAccessToken`), with the read-only groups scope
+(`cloud-identity.groups.readonly`) and nothing else. The callers' own
+tokens never reach Cloud Identity, and the account needs no project
+roles. It takes a `-tags gke` build (the `-gke` images); other builds
+refuse `group:` entries at startup.
+
+Set it up once:
+
+```sh
+gcloud services enable cloudidentity.googleapis.com
+gcloud iam service-accounts create lookout-groups
+gcloud iam service-accounts add-iam-policy-binding \
+  lookout-groups@<PROJECT_ID>.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountTokenCreator --member=<lookout's principal>
+```
+
+lookout's principal is whatever its Application Default Credentials
+are: for the `lookout-mcp` Kubernetes service account on GKE,
+`principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<PROJECT_ID>.svc.id.goog/subject/ns/<NAMESPACE>/sa/lookout-mcp`.
+Then, in each Workspace whose groups you list, as a super admin in the
+Admin console: **Account > Admin roles**, point to **Groups Reader**,
+**Assign admin > Assign service accounts**, enter the service account's
+email, **Add**, **Assign role**. Don't limit the assignment to security
+groups unless all your groups are.
+
+At startup lookout mints one token for the account and warns on stderr
+if it cannot (the token-creator grant missing, or still propagating);
+it keeps serving, and callers admitted only through a group are turned
+away until it works. A `group:` entry without
+`--google-groups-service-account`, or the flag without a `group:` entry,
+is a usage error.
+
+How a check behaves:
+
+- **Email and domain entries are tried first**, so an account they
+  admit costs no directory call.
+- **Workspace editions.** The one-call transitive membership check is
+  available on Google Workspace Enterprise and Cloud Identity Premium.
+  Other editions (Business Starter, Standard, Plus) answer it with a
+  `403`, and lookout then walks the group and its nested groups with the
+  membership list, which every edition has. Users and service accounts
+  match by email; devices, shared drives and "everyone in the
+  organization" entries are not expanded. If part of the tree cannot be
+  read, members found elsewhere still get in, and an account found
+  nowhere is turned away as a failed check, not a refusal.
+- **Caching.** A verdict for an account and group is reused for five
+  minutes, and so is a group's membership list on editions that walk it.
+  Removing someone from a group therefore takes effect within about ten
+  minutes on Gemini Enterprise and for writes, which are checked on
+  every call. A generic MCP client's sign-in is checked at sign-in and
+  at every refresh of its access token (which lives at most 15 minutes),
+  so its reads stop within about 25.
+- **A failed check is not a refusal.** If Cloud Identity does not answer,
+  the call is turned away without being cached, the detail goes to
+  lookout's stderr, and a write-gate failure tells the caller to retry.
 
 ## Generic MCP clients (Claude Code, gemini-cli)
 
@@ -308,8 +387,6 @@ one place that says what a workload reads as.
   several replicas, a stolen refresh token can go on being used on a
   replica that never saw its family revoked. PKCE still binds every code
   to its client.
-- **No `group:` entries** in `--google-allow` or `--google-allow-write`
-  yet; they are refused at startup.
 
 ## One endpoint, many clusters
 

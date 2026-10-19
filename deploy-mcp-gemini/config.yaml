@@ -32,12 +32,19 @@ data:
   # (Web application, redirect URI
   # https://vertexaisearch.cloud.google.com/oauth-redirect).
   GOOGLE_CLIENT_ID: 123456789012-replace-me.apps.googleusercontent.com
-  # Who may call lookout: comma-separated emails, or @domain for every
-  # account of that Google Workspace domain.
+  # Who may call lookout: comma-separated emails, @domain for every
+  # account of that Google Workspace domain, or group:<group email> for
+  # every member of a Google group (needs GOOGLE_GROUPS_SERVICE_ACCOUNT).
   GOOGLE_ALLOW: "@example.com"
   # Who may call tools that change state (triage status, findings
-  # diff/ack). Empty: no one.
+  # diff/ack), same syntax. Empty: no one.
   GOOGLE_ALLOW_WRITE: ""
+  # Only with group: entries above: the service account their
+  # membership is checked as (it holds the Groups Reader admin role;
+  # lookout-mcp's principal needs roles/iam.serviceAccountTokenCreator
+  # on it), e.g. lookout-groups@<project>.iam.gserviceaccount.com.
+  # Empty: no group entries.
+  GOOGLE_GROUPS_SERVICE_ACCOUNT: ""
   # Serve many clusters instead of the one lookout runs in (#700):
   # comma-separated scopes, mixable — a project or project/location,
   # fleet:<host-project>, folders/<id>, organizations/<id>. Each caller

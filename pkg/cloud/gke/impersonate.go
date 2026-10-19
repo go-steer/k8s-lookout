@@ -30,19 +30,23 @@ func init() {
 	cloud.RegisterImpersonator(impersonateServiceAccount)
 }
 
-// impersonateServiceAccount mints cloud-platform access tokens for
-// serviceAccount through the IAM Credentials API (generateAccessToken),
-// with Application Default Credentials as the impersonating identity:
+// impersonateServiceAccount mints access tokens for serviceAccount, with
+// scopes (none: cloud-platform), through the IAM Credentials API
+// (generateAccessToken), with Application Default Credentials as the
+// impersonating identity:
 // lookout's own service account needs roles/iam.serviceAccountTokenCreator
 // on serviceAccount. The source refreshes itself, and is detached from
 // ctx because it outlives the call that created it.
 //
 // It never falls back to lookout's own credentials: a failed mint is the
 // token source's error, which the caller's call reports.
-func impersonateServiceAccount(ctx context.Context, serviceAccount string) (oauth2.TokenSource, error) {
+func impersonateServiceAccount(ctx context.Context, serviceAccount string, scopes ...string) (oauth2.TokenSource, error) {
+	if len(scopes) == 0 {
+		scopes = []string{"https://www.googleapis.com/auth/cloud-platform"}
+	}
 	ts, err := impersonate.CredentialsTokenSource(context.WithoutCancel(ctx), impersonate.CredentialsConfig{
 		TargetPrincipal: serviceAccount,
-		Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
+		Scopes:          scopes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("impersonating %s: %w", serviceAccount, err)

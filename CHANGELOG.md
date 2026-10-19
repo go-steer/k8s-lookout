@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Google groups in `lookout mcp`'s allow-lists.** `--google-allow`
+  and `--google-allow-write` take `group:<group email>` entries,
+  admitting every member directly or through nested groups, for Gemini
+  Enterprise tokens and for sign-ins through lookout's own authorization
+  server alike. Membership is checked in the Cloud Identity Groups API
+  as the new `--google-groups-service-account`, which lookout
+  impersonates for those calls only with the read-only groups scope (it
+  holds the Groups Reader admin role; lookout's principal needs
+  `roles/iam.serviceAccountTokenCreator` on it; `-tags gke`). Editions
+  without the transitive check get a nested-group walk. A verdict is
+  reused for five minutes, so a removal takes effect within about ten
+  (a generic client's reads within about 25, at its next token
+  refresh). A group entry without the flag, or the flag without one, is
+  a usage error; a failed mint at startup is a warning. The
+  `deploy-mcp-gemini` overlay gains `GOOGLE_GROUPS_SERVICE_ACCOUNT`
+  (empty: off), and the Deploy demo workflow passes it through.
+
 ### Changed
 
 - **A rolled-up timeline folds a pod owner's start events into one

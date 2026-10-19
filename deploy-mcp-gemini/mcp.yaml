@@ -115,6 +115,8 @@ spec:
             - "--google-client-id=$(GOOGLE_CLIENT_ID)"
             - "--google-allow=$(GOOGLE_ALLOW)"
             - "--google-allow-write=$(GOOGLE_ALLOW_WRITE)"
+            # Empty (the default) means no group: entries.
+            - "--google-groups-service-account=$(GOOGLE_GROUPS_SERVICE_ACCOUNT)"
             - "--resource-url=https://$(DOMAIN)/mcp"
             # Empty (the default) serves the cluster lookout runs in.
             - "--clusters-from=$(CLUSTERS_FROM)"
