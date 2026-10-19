@@ -102,6 +102,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			checks.Kind("event.hpa_thrash", "an HPA changed scale direction at least --hpa-flips times inside --hpa-window: the autoscaler is fighting itself", emit.SeverityWarning),
 			checks.UnreadKind(),
 		},
+		NewestLast: true, // a timeline: a cut MCP answer keeps the newest end
 		Output: append([]checks.OutputField{
 			{Name: "count", Doc: "events collapsed into this timeline entry: k8s per-event repeat counts summed across the entry's reason family"},
 			{Name: "first_seen", Doc: "RFC3339 timestamp of the entry's oldest activity"},

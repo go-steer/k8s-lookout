@@ -64,6 +64,7 @@ func ChangesCommand(deps Deps) checks.Command {
 		Name:        "triage changes",
 		MCPName:     "k8s_recent_changes",
 		GraphBacked: true,
+		NewestLast:  true, // emitted oldest first: a cut answer keeps the newest changes
 		Summary:     "What changed around one workload in the window before onset — rollouts, config/secret updates, rescales, node ops — chronological, scoped to the target's graph neighborhood; full fidelity from a sentinel store, best-effort live otherwise.",
 		Positional: &checks.Positional{
 			Meta: "<Kind>/[<namespace>/]<name>",

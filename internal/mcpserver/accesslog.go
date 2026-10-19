@@ -34,6 +34,10 @@ import (
 //
 //	ts=2026-08-18T14:03:21Z tool=k8s_scan exit=0 dur=1.204s bytes=4096
 //
+// bytes= is what the caller was sent; when --max-response-bytes cut the
+// answer (#747), truncated=<n> at the end of the line counts the
+// findings left out.
+//
 // Not the arguments, and not the response body. The §6.5 sanitizer
 // guarantees no secret value reaches an output surface; a log that
 // copied payloads would be a second place that guarantee has to hold,
@@ -122,30 +126,60 @@ func (l *AccessLog) RecordAs(caller, tool string, exit int, start time.Time, byt
 // caller=, for the same reason caller= follows remote=. An empty cluster
 // is omitted, so a single-cluster log line is unchanged.
 func (l *AccessLog) RecordFor(caller, cluster, tool string, exit int, start time.Time, bytes int, remote ...string) {
+	r := callRecord{caller: caller, cluster: cluster, tool: tool, exit: exit, start: start, bytes: bytes}
+	if len(remote) > 0 {
+		r.remote = remote[0]
+	}
+	l.record(r)
+}
+
+// callRecord is one access-log line's worth of a tool call.
+type callRecord struct {
+	caller, cluster, tool string
+	exit                  int
+	start                 time.Time
+	// bytes is the size of the response actually returned, after any
+	// --max-response-bytes cut.
+	bytes  int
+	remote string
+	// truncated is how many findings the --max-response-bytes cut left
+	// out of the response (#747); 0 when it was returned whole.
+	truncated int
+}
+
+// record writes one call. truncated= is the last field, after
+// cluster=, for the same reason each field before it was appended last:
+// a parser written before it sees every field it knew in the place it
+// knew it. It is omitted when nothing was cut, so most lines are
+// unchanged.
+func (l *AccessLog) record(r callRecord) {
 	if l == nil {
 		return
 	}
-	dur := l.clock().Sub(start)
+	dur := l.clock().Sub(r.start)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	fields := []emit.Field{
-		{Key: "ts", Value: start.UTC().Format(time.RFC3339)},
-		{Key: "tool", Value: tool},
-		{Key: "exit", Value: fmt.Sprint(exit)},
+		{Key: "ts", Value: r.start.UTC().Format(time.RFC3339)},
+		{Key: "tool", Value: r.tool},
+		{Key: "exit", Value: fmt.Sprint(r.exit)},
 		// Truncated to milliseconds for the same reason the summary
 		// line's elapsed= is: a short token, and nobody tunes an agent
 		// on nanoseconds.
 		{Key: "dur", Value: dur.Truncate(time.Millisecond).String()},
-		{Key: "bytes", Value: fmt.Sprint(bytes)},
+		{Key: "bytes", Value: fmt.Sprint(r.bytes)},
 	}
-	if len(remote) > 0 && remote[0] != "" {
-		fields = append(fields, emit.Field{Key: "remote", Value: remote[0]})
+	if r.remote != "" {
+		fields = append(fields, emit.Field{Key: "remote", Value: r.remote})
 	}
-	if caller != "" {
-		fields = append(fields, emit.Field{Key: "caller", Value: caller})
+	if r.caller != "" {
+		fields = append(fields, emit.Field{Key: "caller", Value: r.caller})
 	}
-	if cluster != "" {
-		fields = append(fields, emit.Field{Key: "cluster", Value: cluster})
+	if r.cluster != "" {
+		fields = append(fields, emit.Field{Key: "cluster", Value: r.cluster})
+	}
+	if r.truncated > 0 {
+		fields = append(fields, emit.Field{Key: "truncated", Value: fmt.Sprint(r.truncated)})
 	}
 	line := emit.EncodeLogfmt(fields)
 	_, _ = l.out.Write(line)

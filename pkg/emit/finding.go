@@ -144,11 +144,25 @@ func EnvelopeFields() []string {
 	return []string{"kind", "severity", "namespace", "kind_of_object", "name", "reason", "message", "fingerprint", "exempt_reason", "exempt_expires"}
 }
 
-// SummaryNoteFields returns the summary-line note keys the Writer
-// owns. Like EnvelopeFields these are implicitly declared for every
-// command, and a command may not redeclare them.
+// SummaryNoteFields returns the summary-line note keys the envelope
+// owns: the Writer's (exempt, context, hidden) and the MCP response
+// limit's (ResponseNoteFields). Like EnvelopeFields these are
+// implicitly declared for every command, and a command may neither set
+// nor redeclare them.
 func SummaryNoteFields() []string {
-	return []string{"exempt", "context", "hidden"}
+	return append([]string{"exempt", "context", "hidden"}, ResponseNoteFields()...)
+}
+
+// ResponseNoteFields returns the summary-line note keys `lookout mcp`
+// appends when it cuts a tool result to --max-response-bytes
+// (internal/mcpserver): how many findings were dropped, how many of
+// them at each severity, and what to narrow the call with. They are
+// reserved here, beside the Writer's keys, so no command can emit or
+// declare one and a cut answer cannot pass for a complete one.
+// `truncated` itself is not among them: scan and inventory already use
+// it for their own --max caps.
+func ResponseNoteFields() []string {
+	return []string{"response_truncated", "response_truncated_severity", "response_hint"}
 }
 
 // pairs flattens the finding into its ordered key=value records,

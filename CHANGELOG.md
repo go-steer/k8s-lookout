@@ -7,21 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Namespace and cluster-wide event timelines roll up (#747).**
-  `triage events --namespace`/`-A` (`k8s_event_timeline`) merges a pod
-  owner's shared reason into one entry: pods group by the owner their
-  generated names encode (DaemonSet, Deployment, StatefulSet, CronJob),
-  Nodes by reason. A group rolls up at 3 or more objects for Normal
-  events and 5 for warnings. The entry keeps the kind, summed count and
-  first/last seen, and adds `objects=` and the newest names in
-  `examples=` (3, or 5 for warnings, so a warning group at the threshold
-  still names every object). Its name is `<owner>-*` or `*`. Smaller
-  groups, `--workload` timelines and the new `--per-object` flag list
-  every object as before; event kinds are unchanged. Live, a busy
-  Autopilot cluster's hour went from 1,830 entries (561 KB) to 202
-  (76 KB) with every reason, owner and warning kept.
+### Added
 
 - **`autoscaler.scaleup_blocked` says why unschedulable pods fit on no
   node (#748).** With Nodes and Pods read cluster-wide (`triage delta`,
@@ -46,6 +32,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of three generic nodes, the 27m and 22m CPU left on the other two,
   and the DaemonSet created two days earlier that requests 130m on every
   node.
+- **`lookout mcp --max-response-bytes` cuts oversize tool results
+  deliberately (#747).** Default 100000 bytes, about the 25k-token cap
+  MCP clients such as Claude Code apply; `0` disables it. A result over
+  the limit loses whole finding lines, never part of one, and keeps its
+  summary line: the first findings for commands that emit the worst
+  first, the newest for the timelines `triage events` and `triage
+  changes` (declared per command with the new `checks.Command.NewestLast`).
+  The summary's `findings=` counts what was returned, so the output
+  contract still holds, and new notes say what was left out:
+  `response_truncated=<n>`,
+  `response_truncated_severity=critical:<n>,warning:<n>,info:<n>`, and a
+  `response_hint` naming which end was kept and the `namespace`,
+  `workload` or `since` arguments that would narrow the call. Both
+  logfmt and `--format=json` results are cut. The access log's `bytes=`
+  is what was returned, plus `truncated=<n>` when a result was cut. The
+  CLI is unchanged. Previously a fan-out over about 20 clusters returned
+  answers of up to 1.04 MB, which the client cut or rejected wherever it
+  liked, and the model never knew.
+
+### Changed
+
+- **Namespace and cluster-wide event timelines roll up (#747).**
+  `triage events --namespace`/`-A` (`k8s_event_timeline`) merges a pod
+  owner's shared reason into one entry: pods group by the owner their
+  generated names encode (DaemonSet, Deployment, StatefulSet, CronJob),
+  Nodes by reason. A group rolls up at 3 or more objects for Normal
+  events and 5 for warnings. The entry keeps the kind, summed count and
+  first/last seen, and adds `objects=` and the newest names in
+  `examples=` (3, or 5 for warnings, so a warning group at the threshold
+  still names every object). Its name is `<owner>-*` or `*`. Smaller
+  groups, `--workload` timelines and the new `--per-object` flag list
+  every object as before; event kinds are unchanged. Live, a busy
+  Autopilot cluster's hour went from 1,830 entries (561 KB) to 202
+  (76 KB) with every reason, owner and warning kept.
 
 ## [0.39.0] - 2026-10-17
 

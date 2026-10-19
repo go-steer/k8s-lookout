@@ -29,7 +29,9 @@
 // Tool calls run the command in-process through the same emit.Run
 // envelope as the CLI: identical flag parsing, --timeout enforcement,
 // summary line, and the §6.5 sanitizer on every emitted finding —
-// nothing on this surface bypasses it. Exit codes map per §4.2:
+// nothing on this surface bypasses it. The one difference is size: a
+// result over --max-response-bytes is cut at a finding-line boundary
+// with its summary line rewritten to say so (fitResponse, #747). Exit codes map per §4.2:
 // 0 → the stdout payload as the tool result text, 1 → a tool error
 // carrying the stderr diagnostics, 2 → a JSON-RPC invalid-params
 // error.
@@ -91,6 +93,9 @@ type config struct {
 	// the global limit and the size of the cluster set.
 	maxPerCluster int
 	perCluster    *callerLimit
+	// maxResponseBytes caps a successful tool result (#747); 0 means
+	// no cap. See fitResponse.
+	maxResponseBytes int
 }
 
 // WithLocalCluster names the cluster lookout runs in (project/location/
@@ -197,7 +202,7 @@ func WithMaxConcurrency(n int) Option {
 // at construction time. WithTools narrows that to a profile or an
 // explicit list (issue #280).
 func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
-	cfg := config{maxConcurrency: defaultMaxConcurrentCalls}
+	cfg := config{maxConcurrency: defaultMaxConcurrentCalls, maxResponseBytes: DefaultMaxResponseBytes}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -542,9 +547,15 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 		rc.Stdin = errReader{}
 		switch code := emit.Run(ctx, rc, fullArgs); code {
 		case emit.ExitData:
-			record(emit.ExitData, stdout.String())
+			// Cut an oversize answer here, at a line boundary with the
+			// summary rewritten, rather than leave the client to cut it
+			// mid-line or refuse it (#747). The access log records what
+			// was returned, and how many findings it left out.
+			text, dropped := fitResponse(c, args, stdout.String(), cfg.maxResponseBytes)
+			cfg.log.record(callRecord{caller: caller, cluster: cluster, tool: c.MCPName, exit: emit.ExitData,
+				start: start, bytes: len(text), remote: remote, truncated: dropped})
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil
 		case emit.ExitUsage:
 			msg := diagnostics(c, &stderr)

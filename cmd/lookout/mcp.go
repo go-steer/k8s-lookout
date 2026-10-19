@@ -323,9 +323,22 @@ Flags:
                         takes no image argument. The identity also
                         needs the deploy-probe/ grant
                         (docs/in-pod-probe-design.md).
+  --max-response-bytes=<n>
+                        cap each tool result at n bytes (default
+                        100000, about the 25k-token cap MCP clients
+                        such as Claude Code apply; 0 disables). A
+                        larger answer is cut at a finding-line
+                        boundary, keeping the first findings (the
+                        newest, for a timeline), and its summary line
+                        says so: findings= is what was returned,
+                        response_truncated=<n> and
+                        response_truncated_severity= count what was
+                        left out, and response_hint names the
+                        arguments that narrow the call.
   --access-log=<path>   append one logfmt line per tool call:
                         ts, tool, exit code, duration, response
-                        bytes (plus remote peer address on HTTP).
+                        bytes (plus remote peer address on HTTP,
+                        and truncated=<n> when a result was cut).
                         Created if absent, appended if not, mode 0600.
                         Deliberately not the arguments or the response
                         body — the log is an operational record, not a
@@ -410,6 +423,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	clustersFrom := fs.String("clusters-from", "", "serve several clusters, discovered from these scopes")
 	rediscover := fs.Duration("rediscover", mcpserver.DefaultRediscover, "how often the shared cluster set is refreshed")
 	maxPerCluster := fs.Int("max-concurrency-per-cluster", 0, "cap each cluster's calls in flight on a multi-cluster endpoint")
+	maxResponseBytes := fs.Int("max-response-bytes", mcpserver.DefaultMaxResponseBytes, "cap each tool result at this many bytes, cut at a finding-line boundary; 0 disables")
 	defaultCluster := fs.String("default-cluster", "", "the cluster a call that names none reads, when the caller can read it")
 	defaultProject := fs.String("default-project", "", "the project preferred when a call names no cluster or a repeated name")
 	folderDiscovery := fs.String("folder-discovery", "", "how folder and organization scopes are searched: auto, asset or resourcemanager")
@@ -523,6 +537,10 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: --max-concurrency-per-cluster must not be negative\nRun 'lookout mcp --help' for usage.\n")
 		return 2
 	}
+	if *maxResponseBytes < 0 {
+		fmt.Fprintf(stderr, "lookout mcp: --max-response-bytes must not be negative (0 disables the cap)\nRun 'lookout mcp --help' for usage.\n")
+		return 2
+	}
 	if problem := multiClusterProblem(multiCluster, googleMode, *clustersFlag, *clustersFrom, *kubeconfig, *contextName, *store, *report, *rediscover, fs); problem != "" {
 		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
 		return 2
@@ -625,6 +643,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mcpserver.WithClusters(clusters),
 		mcpserver.WithLocalCluster(local),
 		mcpserver.WithMaxConcurrencyPerCluster(*maxPerCluster),
+		mcpserver.WithMaxResponseBytes(*maxResponseBytes),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),
 		mcpserver.WithSelection(*kubeconfig, *contextName),
