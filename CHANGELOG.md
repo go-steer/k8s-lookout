@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-19
+
+**This release makes lookout's answers fit a model: they explain more and are much smaller.** When pods are unschedulable, `autoscaler.scaleup_blocked` (in `triage delta`, `scan` and `health`) now accounts for every node against them, from objects the pass already read: the taints they do not tolerate (one set on a node alone, with who set it and when), the room left where they could go, the largest requests there, and DaemonSets created in the last week. It is critical when the only pools that can grow are ones whose nodes the pods cannot use and node auto-provisioning is off. On a live cluster this took a model from a wrong story to the right answer in three small calls. Namespace and cluster-wide event timelines roll each pod owner's repeated events into one entry (a busy cluster's hour: 561 KB to 76 KB, every reason and warning kept; `--per-object` restores the old output). And `lookout mcp --max-response-bytes` (default 100000) caps any tool result at whole lines, keeping the summary and saying what was dropped, by severity, with a hint to narrow the call.
+
 ### Added
 
 - **`autoscaler.scaleup_blocked` says why unschedulable pods fit on no
