@@ -167,7 +167,7 @@ func listClustersHandler(cfg config, sem chan struct{}) mcp.ToolHandler {
 			defer release()
 			workload = &wc
 		} else if cfg.google != nil {
-			id, ts, err := cfg.google.caller(req, listClustersCommand)
+			id, ts, err := cfg.google.caller(ctx, req, listClustersCommand)
 			caller = id.Email
 			if err != nil {
 				return toolError("lookout list clusters: " + err.Error()), nil

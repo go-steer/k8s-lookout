@@ -15,6 +15,7 @@
 package mcpserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +37,7 @@ import (
 	"github.com/go-steer/steward/seal"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // Google-token mode (#699, docs/mcp-multi-tenant-design.md Part 2): every
@@ -59,14 +61,29 @@ type GoogleOptions struct {
 	// ClientIDs are the OAuth client IDs the Gemini Enterprise data store
 	// is configured with. A token issued to any other client is refused.
 	ClientIDs []string
-	// Allow admits callers: exact emails, or "@domain" (matched on the
-	// account's Google Workspace domain, never on the email suffix).
+	// Allow admits callers: exact emails, "@domain" (matched on the
+	// account's Google Workspace domain, never on the email suffix), or
+	// "group:<group email>" (every member, directly or through nested
+	// groups; needs GroupsServiceAccount).
 	Allow []string
 	// AllowWrite admits callers to tools that change state (the
 	// triage-status write, findings diff and ack, which update the store,
-	// and k8s_net_probe_from when served). The gate is per tool, so it
-	// also covers their read modes. Empty means no caller may.
+	// and k8s_net_probe_from when served), with the same entries as
+	// Allow. The gate is per tool, so it also covers their read modes.
+	// Empty means no caller may.
 	AllowWrite []string
+	// GroupsServiceAccount is the service account group entries are
+	// checked as, in the Cloud Identity Groups API: it holds the Groups
+	// Reader admin role, and lookout impersonates it for those calls
+	// only, with the read-only groups scope. Required when Allow or
+	// AllowWrite has a group entry, refused when neither has one.
+	GroupsServiceAccount string
+	// Impersonate mints GroupsServiceAccount's tokens. Nil means
+	// cloud.Impersonate (the GKE provider, -tags gke; without it, group
+	// entries are refused).
+	Impersonate cloud.Impersonator
+	// CloudIdentityEndpoint replaces the Cloud Identity API's (tests).
+	CloudIdentityEndpoint string
 	// Resource is this server's MCP URL as clients reach it, e.g.
 	// https://lookout.example.com/mcp. https, except on loopback.
 	Resource string
@@ -131,7 +148,14 @@ type AuthServerOptions struct {
 // layer and the write allow-list for the tool layer.
 type GoogleAuth struct {
 	protector *httpauth.Protector
-	write     *allow.List
+	// write admits callers to tools that change state; nil when
+	// --google-allow-write is empty, and no caller may.
+	write *allow.Admitter
+	// logger receives the detail of a write-gate group check that failed.
+	logger *slog.Logger
+	// groupsProbed is closed when the startup token mint for the groups
+	// service account has finished (tests); nil without group entries.
+	groupsProbed chan struct{}
 	// as is Path B's authorization server, nil without it.
 	as *authserver.Server
 	// path is the --resource-url path, the one path MCP is served at.
@@ -163,13 +187,17 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow: %w", err)
 	}
-	if len(list.Groups()) > 0 {
-		// Groups need a directory lookup as lookout (Cloud Identity), which
-		// is not wired up; refused rather than never matching.
-		return nil, errors.New("--google-allow: group: entries are not supported; list emails or @domain")
+	writeList, err := allow.Parse(opts.AllowWrite)
+	if err != nil {
+		return nil, fmt.Errorf("--google-allow-write: %w", err)
+	}
+	// One checker for both lists, so they share its membership cache.
+	groups, probe, err := groupChecker(opts, list, writeList, logger)
+	if err != nil {
+		return nil, err
 	}
 	// One admitter for both paths, so the same people get in either way.
-	admit, err := allow.NewAdmitter(list, nil)
+	admit, err := allow.NewAdmitter(list, groups)
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow: %w", err)
 	}
@@ -177,12 +205,11 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--google-allow: %w", err)
 	}
-	write, err := allow.Parse(opts.AllowWrite)
-	if err != nil {
-		return nil, fmt.Errorf("--google-allow-write: %w", err)
-	}
-	if len(write.Groups()) > 0 {
-		return nil, errors.New("--google-allow-write: group: entries are not supported; list emails or @domain")
+	var write *allow.Admitter
+	if !writeList.Empty() {
+		if write, err = allow.NewAdmitter(writeList, groups); err != nil {
+			return nil, fmt.Errorf("--google-allow-write: %w", err)
+		}
 	}
 	popts := httpauth.Options{
 		Authenticator: a,
@@ -217,7 +244,12 @@ func NewGoogleAuth(opts GoogleOptions) (*GoogleAuth, error) {
 	if path == "" {
 		path = "/"
 	}
-	return &GoogleAuth{protector: p, write: write, as: as, path: path}, nil
+	g := &GoogleAuth{protector: p, write: write, logger: logger, as: as, path: path}
+	if probe != nil {
+		g.groupsProbed = make(chan struct{})
+		go probeGroupsAccount(probe, logger, g.groupsProbed)
+	}
+	return g, nil
 }
 
 // newAuthServer builds Path B's authorization server.
@@ -278,20 +310,40 @@ var errNoCaller = errors.New("no verified caller on this request; refusing to ru
 // caller returns who made req, and the token to read with, for a call to
 // c. It refuses a write tool to a caller the write allow-list does not
 // admit, and, for a Path B token, to one not granted lookout:write.
-func (g *GoogleAuth) caller(req *mcp.CallToolRequest, c checks.Command) (googletoken.Identity, oauth2.TokenSource, error) {
+func (g *GoogleAuth) caller(ctx context.Context, req *mcp.CallToolRequest, c checks.Command) (googletoken.Identity, oauth2.TokenSource, error) {
 	id, ok := mcpauth.Identity(req)
 	ts, ok2 := mcpauth.TokenSource(req)
 	if !ok || !ok2 {
 		return googletoken.Identity{}, nil, errNoCaller
 	}
-	if c.Writes && !g.write.Admits(id.Email, id.HD) {
-		return id, nil, fmt.Errorf("%s changes state, and %s is not admitted to tools that do (the operator's --google-allow-write)", c.MCPName, id.Email)
+	if c.Writes {
+		if err := g.admitWrite(ctx, id); err != nil {
+			return id, nil, fmt.Errorf("%s changes state, and %w", c.MCPName, err)
+		}
 	}
 	if p, ok := mcpauth.Principal(req); ok && c.Writes && !p.HasScope(ScopeWrite) {
 		return id, nil, fmt.Errorf("%s changes state, and this sign-in was not granted the %s scope; sign in again asking for scope %q",
 			c.MCPName, ScopeWrite, ScopeRead+" "+ScopeWrite)
 	}
 	return id, ts, nil
+}
+
+// admitWrite asks the write allow-list about id. A group lookup that
+// failed is not a refusal: the caller is told to retry, and the detail
+// goes to the operator's log rather than to the caller.
+func (g *GoogleAuth) admitWrite(ctx context.Context, id googletoken.Identity) error {
+	notAdmitted := fmt.Errorf("%s is not admitted to tools that do (the operator's --google-allow-write)", id.Email)
+	if g.write == nil {
+		return notAdmitted
+	}
+	switch err := g.write.Admit(ctx, id.Email, id.HD); {
+	case errors.Is(err, allow.ErrNotAdmitted):
+		return notAdmitted
+	case err != nil:
+		g.logger.WarnContext(ctx, "lookout mcp: --google-allow-write group check failed", "caller", id.Email, "err", err)
+		return fmt.Errorf("whether %s may call tools that do could not be checked (a --google-allow-write group lookup failed); retry shortly", id.Email)
+	}
+	return nil
 }
 
 // hasStewardScope reports whether a steward-token caller's labels grant

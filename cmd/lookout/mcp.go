@@ -105,10 +105,13 @@ Flags:
                         persists, and an ack is recorded as the caller.
                         Upgrade the sentinel first: a write migrates
                         the store, which older binaries then refuse.
-  --google-allow=<list> who is let in, comma-separated: exact emails, or
+  --google-allow=<list> who is let in, comma-separated: exact emails,
                         "@domain" for every account Google says belongs
                         to that Workspace domain (never matched on the
-                        email suffix alone).
+                        email suffix alone), or "group:<group email>"
+                        for every member of a Google group, directly or
+                        through nested groups (needs
+                        --google-groups-service-account).
   --google-allow-write=<list>
                         who may call tools that change state, same
                         syntax: the triage-status write and findings
@@ -118,6 +121,21 @@ Flags:
                         writes triage records only for namespaces they
                         can see, and each record names them
                         (recorded_by).
+  --google-groups-service-account=<email>
+                        the service account group: entries are checked
+                        as, in the Cloud Identity Groups API (-tags
+                        gke). It holds the Groups Reader admin role in
+                        the groups' Workspace, and lookout's identity
+                        needs roles/iam.serviceAccountTokenCreator on
+                        it: lookout impersonates it for those calls
+                        only, with the read-only groups scope. Required
+                        when either list has a group: entry. A verdict
+                        is reused for 5 minutes (a group's membership
+                        list too, where the edition has no transitive
+                        check), so a removal from a group takes effect
+                        within about 10 minutes; a Path B sign-in is
+                        re-checked when its access token (15 minutes
+                        at most) is refreshed.
   --resource-url=<url>  this server's MCP URL exactly as clients reach
                         it (e.g. https://lookout.example.com/mcp); named
                         in the RFC 9728 metadata and every 401.
@@ -420,8 +438,9 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	store := fs.String("store", "", "path to a sentinel SQLite store pinned for MCP tool calls that read one")
 	report := fs.String("report", "", "path to a findings report pinned for MCP tool calls that read one")
 	googleClientID := fs.String("google-client-id", "", "Google-token mode: the OAuth client ID(s) callers' tokens must be issued to (comma-separated)")
-	googleAllow := fs.String("google-allow", "", "Google-token mode: who is let in (comma-separated emails or @domain)")
-	googleAllowWrite := fs.String("google-allow-write", "", "Google-token mode: who may call tools that change state (comma-separated emails or @domain)")
+	googleAllow := fs.String("google-allow", "", "Google-token mode: who is let in (comma-separated emails, @domain or group:<email>)")
+	googleAllowWrite := fs.String("google-allow-write", "", "Google-token mode: who may call tools that change state (comma-separated emails, @domain or group:<email>)")
+	googleGroupsSA := fs.String("google-groups-service-account", "", "Google-token mode: the service account group: entries are checked as (impersonated; it holds Groups Reader)")
 	resourceURL := fs.String("resource-url", "", "Google-token mode: this server's MCP URL as clients reach it")
 	clustersFlag := fs.String("clusters", "", "serve several clusters: comma-separated name=endpoint pairs")
 	clustersFrom := fs.String("clusters-from", "", "serve several clusters, discovered from these scopes")
@@ -457,6 +476,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}{
 			{"--google-allow", *googleAllow != ""},
 			{"--google-allow-write", *googleAllowWrite != ""},
+			{"--google-groups-service-account", *googleGroupsSA != ""},
 			{"--resource-url", *resourceURL != ""},
 		} {
 			if f.set {
@@ -615,6 +635,8 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			AllowWrite: splitList(*googleAllowWrite),
 			Resource:   *resourceURL,
 			Logger:     logger,
+
+			GroupsServiceAccount: *googleGroupsSA,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "lookout mcp: %v\n", err)

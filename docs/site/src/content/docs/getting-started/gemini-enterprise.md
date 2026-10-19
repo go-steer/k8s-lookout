@@ -91,7 +91,7 @@ Fetch the overlay, edit `config.yaml`, and apply it:
 ```bash
 git clone --depth 1 --branch vX.Y.Z https://github.com/go-steer/k8s-lookout
 cd k8s-lookout/deploy-mcp-gemini
-$EDITOR config.yaml        # DOMAIN, GOOGLE_CLIENT_ID, GOOGLE_ALLOW, GOOGLE_ALLOW_WRITE
+$EDITOR config.yaml        # DOMAIN, GOOGLE_CLIENT_ID, GOOGLE_ALLOW, GOOGLE_ALLOW_WRITE (+ GOOGLE_GROUPS_SERVICE_ACCOUNT for groups)
 kubectl apply -k .
 ```
 
@@ -220,6 +220,56 @@ Someone with access to only some namespaces sees only those. Rows lookout
 reads from its own files (triage records, history) are filtered the same
 way, and the summary line counts the rest as `hidden=<n>`.
 
+### Admitting a Google group
+
+`GOOGLE_ALLOW` and `GOOGLE_ALLOW_WRITE` take `group:<group email>` as well
+as emails and `@domain`s: every member of the group, directly or through
+nested groups. lookout checks membership in Cloud Identity as a
+dedicated service account that it impersonates for those calls only,
+because the Workspace role it needs is assigned by email and lookout's
+own principal has none:
+
+1. Enable the Cloud Identity API and create the account:
+
+   ```bash
+   gcloud services enable cloudidentity.googleapis.com
+   gcloud iam service-accounts create lookout-groups
+   ```
+
+2. Let lookout impersonate it. lookout's principal is the
+   `lookout-mcp` Kubernetes service account's:
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     lookout-groups@<PROJECT_ID>.iam.gserviceaccount.com \
+     --role=roles/iam.serviceAccountTokenCreator \
+     --member=principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<PROJECT_ID>.svc.id.goog/subject/ns/agent-triage/sa/lookout-mcp
+   ```
+
+3. In the Google Admin console, as a super admin of each Workspace whose
+   groups you list: **Account > Admin roles**, point to **Groups
+   Reader**, **Assign admin > Assign service accounts**, enter the
+   service account's email, **Add**, **Assign role**. The account needs
+   no project roles; lookout asks only for the read-only groups scope.
+
+4. In `config.yaml`:
+
+   ```yaml
+     GOOGLE_ALLOW: "group:sre@example.com"
+     GOOGLE_ALLOW_WRITE: "group:sre-oncall@example.com"
+     GOOGLE_GROUPS_SERVICE_ACCOUNT: "lookout-groups@<PROJECT_ID>.iam.gserviceaccount.com"
+   ```
+
+At startup lookout mints one token for the account and logs a warning
+if it cannot, for example while the grant from step 2 is still
+propagating. On Google Workspace Enterprise and Cloud Identity Premium
+one call answers a membership check, nested groups included; other
+editions walk the group's nested groups instead, which works the same
+but costs more calls the first time. A verdict is reused for five
+minutes (a group's membership list too, on the walk), so removing
+someone from a group takes effect within about ten. Details:
+[MCP setup](/getting-started/mcp/#google-groups).
+
 ## 5. The Custom MCP Server data store
 
 1. Gemini Enterprise → your app → **Data stores → Create data store →
@@ -266,7 +316,8 @@ again mid-conversation.
 
 - **Who may call lookout:** `GOOGLE_ALLOW` in `config.yaml`, then
   `kubectl apply -k .` and `kubectl -n agent-triage rollout restart
-  deploy/lookout-mcp`.
+  deploy/lookout-mcp`. With a `group:` entry, changing the group's
+  members needs no redeploy: it takes effect within about ten minutes.
 - **Who may change state** (triage-status records, findings acks):
   `GOOGLE_ALLOW_WRITE`, the same way. Empty means nobody.
 - **Which tools are offered:** the `--profile`/`--tools` arguments in

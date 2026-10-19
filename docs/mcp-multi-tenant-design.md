@@ -608,9 +608,13 @@ case that matters now and it does not need more than one cluster.
    workload reads as whichever way it authenticates. Writes need the rule's
    `write: true` and the token's `lookout:write`. The replay cache is
    steward's in-memory default, so refresh-token reuse detection is per
-   replica; a shared `authserver.ReplayCache` is future work, as are
-   `group:` allow-list entries (they need a Cloud Identity lookup as
-   lookout).
+   replica; a shared `authserver.ReplayCache` is future work.
+   `group:` allow-list entries came after: steward's
+   `allow.CloudIdentityGroups` checks them as a dedicated
+   `--google-groups-service-account` that lookout impersonates per check
+   (`cloud.Impersonate` with the read-only groups scope), because the
+   Groups Reader admin role is assigned by email and a Workload Identity
+   principal has none. One checker backs both lists and both paths.
 
 ## Open questions
 

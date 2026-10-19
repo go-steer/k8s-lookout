@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,6 +125,7 @@ type googleServer struct {
 	mu      *sync.Mutex
 	reviews func() []string
 	banner  *bytes.Buffer
+	auth    *GoogleAuth
 }
 
 // fakeAPIServer answers SelfSubjectAccessReviews the way the caller
@@ -179,18 +181,27 @@ func startGoogleServer(t *testing.T) googleServer {
 }
 
 func startGoogleServerWith(t *testing.T, clusterRead bool) googleServer {
+	return startGoogleServerOpts(t, clusterRead, func(*GoogleOptions) {})
+}
+
+// startGoogleServerOpts is startGoogleServerWith with the options adjusted
+// by mutate. steward's diagnostics go to the banner buffer.
+func startGoogleServerOpts(t *testing.T, clusterRead bool, mutate func(*GoogleOptions)) googleServer {
 	t.Helper()
 	base := fakeGoogle(t)
-	g, err := NewGoogleAuth(GoogleOptions{
+	var mu sync.Mutex
+	var logBuf, banner bytes.Buffer
+	opts := GoogleOptions{
 		ClientIDs: []string{googleClientID}, Allow: []string{"@cymbal.example"}, AllowWrite: []string{"alice@cymbal.example"},
 		Resource: "http://127.0.0.1/mcp", TokenInfoURL: base + "/tokeninfo", UserInfoURL: base + "/userinfo",
-	})
+		Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &banner}, nil)),
+	}
+	mutate(&opts)
+	g, err := NewGoogleAuth(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	kc, reviews := fakeAPIServer(t, clusterRead)
-	var mu sync.Mutex
-	var logBuf bytes.Buffer
 	al := NewAccessLog(lockedWriter{&mu, &logBuf})
 	server := New(googleRegistry(), "test", WithGoogleAuth(g), WithAccessLog(al), WithSelection(kc, ""))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -200,7 +211,7 @@ func startGoogleServerWith(t *testing.T, clusterRead bool) googleServer {
 		done <- Serve(ctx, server, ServeOptions{Listen: "127.0.0.1:0", Google: g, Ready: ready})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return googleServer{url: "http://" + <-ready, log: &logBuf, mu: &mu, reviews: reviews}
+	return googleServer{url: "http://" + <-ready, log: &logBuf, mu: &mu, reviews: reviews, banner: &banner, auth: g}
 }
 
 type lockedWriter struct {

@@ -102,6 +102,7 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           GOOGLE_ALLOW: ${{ vars.GOOGLE_ALLOW }}
           GOOGLE_ALLOW_WRITE: ${{ vars.GOOGLE_ALLOW_WRITE }}
+          GOOGLE_GROUPS_SERVICE_ACCOUNT: ${{ vars.GOOGLE_GROUPS_SERVICE_ACCOUNT }}
           CLUSTERS_FROM: ${{ vars.CLUSTERS_FROM }}
           OAUTH_CUSTODY: ${{ vars.OAUTH_CUSTODY }}
           OAUTH_VAULT_AUTH_PROVIDER: ${{ vars.OAUTH_VAULT_AUTH_PROVIDER }}
@@ -118,7 +119,7 @@ jobs:
               exit 1
             fi
           done
-          for v in GOOGLE_ALLOW_WRITE CLUSTERS_FROM OAUTH_CUSTODY OAUTH_VAULT_AUTH_PROVIDER; do
+          for v in GOOGLE_ALLOW_WRITE GOOGLE_GROUPS_SERVICE_ACCOUNT CLUSTERS_FROM OAUTH_CUSTODY OAUTH_VAULT_AUTH_PROVIDER; do
             if [[ "${!v}" == *'"'* || "${!v}" == *$'\n'* ]]; then
               echo "::error::$v must not contain a quote or a newline"
               exit 1
@@ -158,6 +159,16 @@ jobs:
             components="${components}"$'\n'"  - ../deploy-mcp-gemini/oauth"
             echo "sign-in for generic MCP clients: custody=${OAUTH_CUSTODY}"
           fi
+          # GOOGLE_GROUPS_SERVICE_ACCOUNT set: group: entries in the
+          # allow-lists are checked as it. An older overlay would drop it
+          # and its binary refuse the group entries at startup.
+          if [[ -n "$GOOGLE_GROUPS_SERVICE_ACCOUNT" ]]; then
+            if ! grep -q -- '--google-groups-service-account=' deploy-mcp-gemini/mcp.yaml; then
+              echo "::error::GOOGLE_GROUPS_SERVICE_ACCOUNT is set but ${TAG}'s overlay does not pass --google-groups-service-account"
+              exit 1
+            fi
+            echo "group allow-list entries checked as ${GOOGLE_GROUPS_SERVICE_ACCOUNT}"
+          fi
           mkdir .deploy-demo
           cat > .deploy-demo/kustomization.yaml <<EOF
           apiVersion: kustomize.config.k8s.io/v1beta1
@@ -180,6 +191,7 @@ jobs:
                 - "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
                 - "GOOGLE_ALLOW=${GOOGLE_ALLOW}"
                 - "GOOGLE_ALLOW_WRITE=${GOOGLE_ALLOW_WRITE}"
+                - "GOOGLE_GROUPS_SERVICE_ACCOUNT=${GOOGLE_GROUPS_SERVICE_ACCOUNT}"
                 - "CLUSTERS_FROM=${CLUSTERS_FROM}"
                 - "OAUTH_CUSTODY=${OAUTH_CUSTODY}"
                 - "OAUTH_VAULT_AUTH_PROVIDER=${OAUTH_VAULT_AUTH_PROVIDER}"

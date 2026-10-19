@@ -146,6 +146,8 @@ type pathBConfig struct {
 	rules       string // --workload-rules YAML; "" for none
 	impersonate cloud.Impersonator
 	clusterRead bool
+	// mutate adjusts the Google options (nil: none).
+	mutate func(*GoogleOptions)
 }
 
 func startPathBServer(t *testing.T, pc pathBConfig) pathBServer {
@@ -161,14 +163,18 @@ func startPathBServer(t *testing.T, pc pathBConfig) pathBServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := NewGoogleAuth(GoogleOptions{
+	opts := GoogleOptions{
 		ClientIDs: []string{googleClientID}, Allow: []string{"@cymbal.example"}, AllowWrite: []string{"alice@cymbal.example"},
 		Resource: pathBResource, TokenInfoURL: base + "/tokeninfo", UserInfoURL: base + "/userinfo", Logger: diag,
 		AuthServer: &AuthServerOptions{
 			Issuer: pathBIssuer, Google: signIn.google(), Custody: authserver.SealedCustody{}, Keys: keys,
 			Clients: pc.clients, OpenRegistration: true,
 		},
-	})
+	}
+	if pc.mutate != nil {
+		pc.mutate(&opts)
+	}
+	g, err := NewGoogleAuth(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +458,7 @@ func TestPathBWorkloads(t *testing.T) {
 	var mu sync.Mutex
 	var impersonated []string
 	failSA := "broken@p.iam.gserviceaccount.com"
-	imp := func(_ context.Context, sa string) (oauth2.TokenSource, error) {
+	imp := func(_ context.Context, sa string, _ ...string) (oauth2.TokenSource, error) {
 		mu.Lock()
 		impersonated = append(impersonated, sa)
 		mu.Unlock()
@@ -577,8 +583,8 @@ func TestNewGoogleAuthPathBRefuses(t *testing.T) {
 			o.AuthServer.Clients = []authserver.StaticClient{{ID: "bot", Secret: "s", ClientCredentials: true, ServiceAccount: "sa@p.iam.gserviceaccount.com"}}
 		}, "client:bot"},
 		"plaintext issuer":  {func(o *GoogleOptions) { o.AuthServer.Issuer = "http://l.example" }, "--oauth-issuer"},
-		"group allow entry": {func(o *GoogleOptions) { o.Allow = []string{"group:eng@x.example"} }, "group"},
-		"group write entry": {func(o *GoogleOptions) { o.AllowWrite = []string{"group:eng@x.example"} }, "group"},
+		"group allow entry": {func(o *GoogleOptions) { o.Allow = []string{"group:eng@x.example"} }, "--google-groups-service-account"},
+		"group write entry": {func(o *GoogleOptions) { o.AllowWrite = []string{"group:eng@x.example"} }, "--google-groups-service-account"},
 		"no Google client":  {func(o *GoogleOptions) { o.AuthServer.Google = authserver.GoogleClient{} }, "--oauth-issuer"},
 		"no keys":           {func(o *GoogleOptions) { o.AuthServer.Keys = nil }, "--oauth-issuer"},
 		"no custody":        {func(o *GoogleOptions) { o.AuthServer.Custody = nil }, "--oauth-issuer"},

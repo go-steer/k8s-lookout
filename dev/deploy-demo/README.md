@@ -81,8 +81,9 @@ Its variables:
 | `NAMESPACE` | as given to `setup.sh` |
 | `DOMAIN` | the endpoint's hostname |
 | `GOOGLE_CLIENT_ID` | the data store's OAuth client ID |
-| `GOOGLE_ALLOW` | who may call: emails and `@domain`s, comma-separated |
-| `GOOGLE_ALLOW_WRITE` | who may write; unset for no one |
+| `GOOGLE_ALLOW` | who may call: emails, `@domain`s and `group:<group email>`s, comma-separated |
+| `GOOGLE_ALLOW_WRITE` | who may write, same syntax; unset for no one |
+| `GOOGLE_GROUPS_SERVICE_ACCOUNT` | optional, needed for `group:` entries: the service account lookout checks group membership as (holds the Groups Reader admin role; lookout's principal has `roles/iam.serviceAccountTokenCreator` on it; Cloud Identity API enabled). Setup: the docs site's Gemini Enterprise page, "Admitting a Google group". Unset for no group entries; a release whose overlay predates the flag fails the run |
 | `CLUSTERS_FROM` | optional: serve many clusters, discovered per caller (`organizations/<id>`, `folders/<id>`, `fleet:<host>`, projects); unset for the one lookout runs in |
 | `OAUTH_CUSTODY` | optional: `vault` or `sealed` lets generic MCP clients (Claude Code, gemini-cli) sign in too, through lookout's own authorization server (the `deploy-mcp-gemini/oauth` component, v0.39.0 and later); unset for Gemini Enterprise only. Needs the Secrets `lookout-oauth-client` (key `client.json`) and `lookout-oauth-keys` (key `keyring`) in the namespace, and `https://<DOMAIN>/callback` on the OAuth client |
 | `OAUTH_VAULT_AUTH_PROVIDER` | with `OAUTH_CUSTODY=vault`: the Agent Identity auth provider, `projects/<p>/locations/<l>/authProviders/<name>`, which lookout's principal may use (`roles/agentidentity.user`) |

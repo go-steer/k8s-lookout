@@ -406,7 +406,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			// Read the caller from the request, not the context: the
 			// token is the one this HTTP request carried
 			// (mcpauth.TokenSource).
-			id, ts, err := cfg.google.caller(req, c)
+			id, ts, err := cfg.google.caller(ctx, req, c)
 			caller = id.Email
 			if err != nil {
 				return toolError("lookout " + c.Name + ": " + err.Error()), nil

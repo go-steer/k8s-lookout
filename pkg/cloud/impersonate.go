@@ -26,12 +26,15 @@ import (
 // process's own credentials (Application Default Credentials on GKE) as
 // the impersonating identity. lookout mcp uses it to let a workload
 // caller read as a service account configured for it (#701), rather than
-// as lookout's own identity.
+// as lookout's own identity, and to check "group:" allow-list entries as
+// the --google-groups-service-account.
+//
+// The tokens carry scopes; none means the cloud-platform scope.
 //
 // The returned token source refreshes itself and must outlive the call
 // that asked for it, so an implementation must not tie it to ctx's
 // cancellation.
-type Impersonator func(ctx context.Context, serviceAccount string) (oauth2.TokenSource, error)
+type Impersonator func(ctx context.Context, serviceAccount string, scopes ...string) (oauth2.TokenSource, error)
 
 // ErrNoImpersonator is returned by Impersonate in a build with no cloud
 // provider compiled in that can impersonate a service account.
@@ -65,14 +68,15 @@ func CanImpersonate() bool {
 	return impersonator != nil
 }
 
-// Impersonate returns a token source for serviceAccount, minted with the
-// process's own credentials, or ErrNoImpersonator.
-func Impersonate(ctx context.Context, serviceAccount string) (oauth2.TokenSource, error) {
+// Impersonate returns a token source for serviceAccount carrying scopes
+// (none: cloud-platform), minted with the process's own credentials, or
+// ErrNoImpersonator.
+func Impersonate(ctx context.Context, serviceAccount string, scopes ...string) (oauth2.TokenSource, error) {
 	impersonatorMu.RLock()
 	f := impersonator
 	impersonatorMu.RUnlock()
 	if f == nil {
 		return nil, ErrNoImpersonator
 	}
-	return f(ctx, serviceAccount)
+	return f(ctx, serviceAccount, scopes...)
 }
