@@ -22,6 +22,7 @@ package cloudcheck_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,15 +94,37 @@ type fakeOrphans struct {
 
 	addrs []cloud.OrphanAddress
 
+	// dnsRecords is every record the fake's DNS holds, served
+	// filtered to the addresses asked about; dnsErr fails the check.
+	dnsRecords []cloud.DNSRecord
+	dnsErr     error
+	// dnsAsked records the addresses the DNS check was asked about.
+	dnsAsked []string
+
 	// Per-class sweep errors (the command must ignore results on error).
 	disksErr, lbsErr, addrsErr error
 
-	disksCalled, lbsCalled, addrsCalled bool
+	disksCalled, lbsCalled, addrsCalled, dnsCalled bool
 }
 
 func (f *fakeOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, error) {
 	f.addrsCalled = true
 	return f.addrs, f.addrsErr
+}
+
+func (f *fakeOrphans) AddressDNSRecords(_ context.Context, addresses []string) ([]cloud.DNSRecord, error) {
+	f.dnsCalled = true
+	f.dnsAsked = append([]string(nil), addresses...)
+	if f.dnsErr != nil {
+		return nil, f.dnsErr
+	}
+	var out []cloud.DNSRecord
+	for _, r := range f.dnsRecords {
+		if slices.Contains(addresses, r.Address) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeOrphans) OrphanDisks(context.Context) ([]cloud.OrphanDisk, error) {

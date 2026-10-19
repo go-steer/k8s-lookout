@@ -42,6 +42,10 @@ func (refusingOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, 
 	return nil, &cloud.PermissionDeniedError{Permission: "compute.addresses.list", Err: context.Canceled}
 }
 
+func (refusingOrphans) AddressDNSRecords(context.Context, []string) ([]cloud.DNSRecord, error) {
+	return nil, nil
+}
+
 type orphanProvider struct{ cloud.Provider }
 
 func (orphanProvider) Orphans() (cloud.OrphanAPI, bool) { return refusingOrphans{}, true }

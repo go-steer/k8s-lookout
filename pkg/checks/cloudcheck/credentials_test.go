@@ -73,6 +73,11 @@ func (f *noTokenOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress
 	return nil, errNoToken
 }
 
+func (f *noTokenOrphans) AddressDNSRecords(context.Context, []string) ([]cloud.DNSRecord, error) {
+	f.calls++
+	return nil, errNoToken
+}
+
 // assertCredentialsUnavailable: exit 0, exactly one
 // CredentialsUnavailable record naming what could not run, the
 // unavailable= note, and no raw error text on stdout.
@@ -200,6 +205,10 @@ func (blockingOrphans) OrphanLoadBalancers(context.Context) (cloud.LoadBalancerS
 }
 
 func (blockingOrphans) OrphanAddresses(context.Context) ([]cloud.OrphanAddress, error) {
+	return nil, nil
+}
+
+func (blockingOrphans) AddressDNSRecords(context.Context, []string) ([]cloud.DNSRecord, error) {
 	return nil, nil
 }
 

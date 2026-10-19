@@ -139,7 +139,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
-| `orphan.address` | warning | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing |
+| `orphan.address` | warning, info | an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing — warning when no Cloud DNS record in the project resolves to it (or the DNS check could not run, which the record says); info, reason=ReferencedByDNS, when DNS records still point at it, because releasing it would leave those names dangling |
 | `orphan.nodepool` | info | --only=nodepools: a node pool has at least one node and no workload pod scheduled on any of them (DaemonSet-owned and mirror/static pods do not count), judged on this one observation — info, because a batch pool between runs looks the same; the reason names the autoscaler case and so the remedy |
 | `quota.pressure` | critical, warning, info | a cloud quota is at or above --quota-warn percent of its limit; critical from 95%, info for an --all row below the line |
 | `stockout.zone` | warning | the cloud had no capacity for a machine type in this zone during the window — the reason a scale-up failed and pods stayed Pending |
@@ -366,6 +366,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `network_tier` | orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none |
 | `reserved_since` | orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable |
 | `reserved_for` | orphan.address: how long ago the address was reserved; "unknown" when undatable |
+| `dns_check` | orphan.address: the Cloud DNS cross-check run before recommending release — referenced (records in the project's Cloud DNS zones resolve to the address: reason=ReferencedByDNS, severity info, see dns_records), none_found (no record in the project's Cloud DNS resolves to it; DNS hosted elsewhere is not checked), or unavailable (the check could not run, see dns_unavailable — verify DNS by hand before releasing) |
+| `dns_records` | orphan.address (dns_check=referenced): the records resolving to the address, "\<name> \<type> in zone \<zone>" comma-separated — A/AAAA data and routing-policy targets, or CNAME chains through the project's records, wildcards included — the first 5, then "and N more" |
+| `dns_unavailable` | orphan.address (dns_check=unavailable): why the Cloud DNS check could not run — the permission it needs (dns.managedZones.list or dns.resourceRecordSets.list, both in roles/dns.reader), a disabled Cloud DNS API, or the provider's error (masked, cut to 200 characters) |
 | `node_count` | orphan.nodepool: the pool's current nodes, counted from the cluster's Nodes by their cloud.google.com/gke-nodepool label (the provider record carries no live count); never 0 — a pool at zero nodes costs nothing and is not reported |
 | `excluded_pods` | orphan.nodepool: running DaemonSet-owned and mirror (static) pods on the pool's nodes — present, but not workload; 0 when the nodes run nothing at all |
 | `machine_type` | orphan.nodepool: the pool's machine type, what each idle node bills as; omitted when the provider record names none |

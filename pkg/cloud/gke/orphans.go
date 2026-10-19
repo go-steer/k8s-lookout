@@ -173,10 +173,12 @@ func backendGroupShape(group string) (collection string, ok bool) {
 // orphanAPI implements cloud.OrphanAPI.
 type orphanAPI struct {
 	gce orphanComputeAPI
+	// dns is the Cloud DNS reader behind AddressDNSRecords (#716).
+	dns orphanDNSAPI
 }
 
 func newOrphanAPI(p *Provider) *orphanAPI {
-	return &orphanAPI{gce: newGCEOrphanClient(p.project)}
+	return &orphanAPI{gce: newGCEOrphanClient(p.project), dns: newCloudDNSClient(p.project)}
 }
 
 // OrphanDisks implements cloud.OrphanAPI: unattached READY disks,

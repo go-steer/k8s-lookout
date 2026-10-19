@@ -417,7 +417,11 @@ findings=1` — assert that at T0). The real cloud assertions need the
 - **Assert:** the billing-active leftover is listed (the address as
   `orphan.address`; an internal reservation never is; the empty pool as
   info `orphan.nodepool reason=IdleMinNodeCount min_node_count=1`, and
-  never under the default `--only`);
+  never under the default `--only`); an idle address a Cloud DNS A
+  record points at is info `reason=ReferencedByDNS` naming the record in
+  `dns_records` (never a release candidate), and without
+  `roles/dns.reader` every address stays a warning with
+  `dns_check=unavailable` and the `addresses: DNS check not run` note;
   `--only=disks|lbs|addresses|nodepools` filters; recently-created resources under
   `--min-age` are excluded.
 

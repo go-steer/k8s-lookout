@@ -217,6 +217,11 @@ func (c credsOrphans) OrphanAddresses(ctx context.Context) ([]cloud.OrphanAddres
 	return a, classify(ctx, err)
 }
 
+func (c credsOrphans) AddressDNSRecords(ctx context.Context, addresses []string) ([]cloud.DNSRecord, error) {
+	r, err := c.inner.AddressDNSRecords(ctx, addresses)
+	return r, classify(ctx, err)
+}
+
 type credsIPSpace struct{ inner cloud.IPSpaceAPI }
 
 func (c credsIPSpace) SubnetUtilization(ctx context.Context) ([]cloud.SubnetUtilization, error) {

@@ -38,6 +38,18 @@ package cloudcheck
 //     ago from a two-year-old reservation is reported, and one
 //     reserved an hour ago for a load balancer about to be created is
 //     not. The same undatable rule as disks: reported, age unknown.
+//     Before recommending release, each reported address is
+//     cross-checked against the project's Cloud DNS records (#716): a
+//     record resolving to it means releasing it would dangle those
+//     names (whoever is next assigned the IP receives their traffic),
+//     so it stays visible but as info, reason=ReferencedByDNS, naming
+//     the records — not a cleanup candidate. A DNS check that cannot
+//     run (permission, API disabled, any provider error) keeps the
+//     warning and says so on the record and in the unavailable=
+//     note, softening the advice to "verify before releasing"; it
+//     never reads as "nothing points at it". DNS hosted outside the
+//     project's Cloud DNS is not checked, and the message says that
+//     too.
 //   - nodepools (#557, the fleet-audit `idle-nodepool` slug): node
 //     pools with at least one node and no workload pod on any of them.
 //     OPT-IN — not in the default --only — because unlike the three
@@ -125,7 +137,7 @@ func OrphansCommand(deps Deps) checks.Command {
 		Kinds: []checks.KindField{
 			checks.Kind("orphan.disk", "a GCE disk has been unattached for at least --min-age and is still billing", emit.SeverityWarning),
 			checks.Kind("orphan.lb", "a forwarding rule or load balancer routes to zero endpoints and is still billing", emit.SeverityWarning),
-			checks.Kind("orphan.address", "an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing", emit.SeverityWarning),
+			checks.Kind("orphan.address", "an external static IP has been reserved for at least --min-age, nothing uses it, and it is still billing — warning when no Cloud DNS record in the project resolves to it (or the DNS check could not run, which the record says); info, reason=ReferencedByDNS, when DNS records still point at it, because releasing it would leave those names dangling", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindIdleNodePool, "--only=nodepools: a node pool has at least one node and no workload pod scheduled on any of them (DaemonSet-owned and mirror/static pods do not count), judged on this one observation — info, because a batch pool between runs looks the same; the reason names the autoscaler case and so the remedy", emit.SeverityInfo),
 			checks.CloudUnavailableKind(),
 			checks.UnreadKind(),
@@ -142,6 +154,9 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "network_tier", Doc: "orphan.address: the address's network tier (PREMIUM or STANDARD); omitted when the provider records none"},
 			{Name: "reserved_since", Doc: "orphan.address: when the address was reserved, RFC3339 — the provider records no release time, so this bounds the idle time from above; omitted when undatable"},
 			{Name: "reserved_for", Doc: "orphan.address: how long ago the address was reserved; \"unknown\" when undatable"},
+			{Name: "dns_check", Doc: "orphan.address: the Cloud DNS cross-check run before recommending release — referenced (records in the project's Cloud DNS zones resolve to the address: reason=ReferencedByDNS, severity info, see dns_records), none_found (no record in the project's Cloud DNS resolves to it; DNS hosted elsewhere is not checked), or unavailable (the check could not run, see dns_unavailable — verify DNS by hand before releasing)"},
+			{Name: "dns_records", Doc: "orphan.address (dns_check=referenced): the records resolving to the address, \"<name> <type> in zone <zone>\" comma-separated — A/AAAA data and routing-policy targets, or CNAME chains through the project's records, wildcards included — the first 5, then \"and N more\""},
+			{Name: "dns_unavailable", Doc: "orphan.address (dns_check=unavailable): why the Cloud DNS check could not run — the permission it needs (dns.managedZones.list or dns.resourceRecordSets.list, both in roles/dns.reader), a disabled Cloud DNS API, or the provider's error (masked, cut to 200 characters)"},
 			{Name: "node_count", Doc: "orphan.nodepool: the pool's current nodes, counted from the cluster's Nodes by their cloud.google.com/gke-nodepool label (the provider record carries no live count); never 0 — a pool at zero nodes costs nothing and is not reported"},
 			{Name: "excluded_pods", Doc: "orphan.nodepool: running DaemonSet-owned and mirror (static) pods on the pool's nodes — present, but not workload; 0 when the nodes run nothing at all"},
 			{Name: "machine_type", Doc: "orphan.nodepool: the pool's machine type, what each idle node bills as; omitted when the provider record names none"},
@@ -157,7 +172,7 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
 			{Name: "capability", Doc: "cloud.unavailable: the provider capability a selected class needed (orphans for disks, lbs and addresses; cluster-config for nodepools)"},
 			{Name: "provider", Doc: "cloud.unavailable: the provider that was asked"},
-			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — \"sweep failed\" — or a forbidden Node/Pod List for nodepools), plus \"lbs: N rules unresolved\" when some forwarding rules could not be judged (\"(20 listed)\" when the RuleUnresolved records were capped)"},
+			{Name: "unavailable", Doc: "summary-line note (§2 marker): why the cloud read could not be served — the capability reason when no selected class could run, else one class: cause fragment per class that could not (a missing capability, a refused permission, a failed provider call — \"sweep failed\" — or a forbidden Node/Pod List for nodepools), plus \"lbs: N rules unresolved\" when some forwarding rules could not be judged (\"(20 listed)\" when the RuleUnresolved records were capped), and \"addresses: DNS check not run (<why>)\" when addresses were reported without the Cloud DNS cross-check"},
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout cloud orphans",
@@ -209,7 +224,7 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		{"disks", "disk sweep", want.disks, cloud.CapabilityOrphans, hasOrphans,
 			plain(func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) })},
 		{"addresses", "address sweep", want.addresses, cloud.CapabilityOrphans, hasOrphans,
-			plain(func() (int, error) { return sweepAddresses(ctx, api, inv, now, minAge) })},
+			func() (int, string, error) { return sweepAddresses(ctx, api, inv, now, minAge) }},
 		{"nodepools", "node-pool sweep", want.nodepools, cloud.CapabilityClusterConfig, hasConfig,
 			func() (int, string, error) { return sweepNodePools(ctx, cc, deps, inv) }},
 		// Last, on a budget: see the package comment.
@@ -426,20 +441,21 @@ func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, n
 // emits; the summary note's count is never capped.
 const unresolvedRuleCap = 20
 
-// lbsReserveMax caps the reserve the lbs class leaves for the records
-// and summary after it: a tenth of the invocation's remaining time,
-// at most this.
-const lbsReserveMax = 5 * time.Second
+// reserveMax caps the reserve a budgeted call (the lbs class, the
+// address class's DNS check) leaves for the records and summary after
+// it: a tenth of the invocation's remaining time, at most this.
+const reserveMax = 5 * time.Second
 
-// lbsBudget derives the lbs class's context: it ends a reserve before
-// the invocation's deadline, so a slow lbs class degrades rather than
-// costing the run its summary and exit code. No deadline, no budget.
-func lbsBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+// reserveBudget derives a budgeted call's context: it ends a reserve
+// before the invocation's deadline, so a slow call degrades rather
+// than costing the run its summary and exit code. No deadline, no
+// budget.
+func reserveBudget(ctx context.Context) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	reserve := min(time.Until(deadline)/10, lbsReserveMax)
+	reserve := min(time.Until(deadline)/10, reserveMax)
 	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
@@ -448,7 +464,7 @@ func lbsBudget(ctx context.Context) (context.Context, context.CancelFunc) {
 // many orphaned rules the provider judged and the summary-note
 // fragment for unresolved rules.
 func sweepLBs(ctx context.Context, api cloud.OrphanAPI, p cloud.Provider, inv emit.Invocation) (int, string, error) {
-	lbCtx, cancel := lbsBudget(ctx)
+	lbCtx, cancel := reserveBudget(ctx)
 	defer cancel()
 	sweep, err := api.OrphanLoadBalancers(lbCtx)
 	if err != nil {
@@ -506,11 +522,13 @@ func unresolvedFinding(p cloud.Provider, u cloud.UnresolvedLoadBalancer) emit.Fi
 }
 
 // sweepAddresses reports idle external static IPs reserved at least
-// minAge; it returns how many idle addresses it examined.
-func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
+// minAge, each judged against the Cloud DNS cross-check; it returns
+// how many idle addresses it examined and the summary-note fragment
+// when the DNS check could not run.
+func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, string, error) {
 	addrs, err := api.OrphanAddresses(ctx)
 	if err != nil {
-		return 0, providerFailure(err)
+		return 0, "", providerFailure(err)
 	}
 	var old []cloud.OrphanAddress
 	for _, a := range addrs {
@@ -526,12 +544,94 @@ func sweepAddresses(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocatio
 		}
 		return old[i].Name < old[j].Name
 	})
+	check, err := checkAddressDNS(ctx, api, old)
+	if err != nil {
+		return 0, "", err
+	}
 	for _, a := range old {
-		if err := inv.Out.Emit(addressFinding(a, now)); err != nil {
-			return 0, err
+		if err := inv.Out.Emit(addressFinding(a, now, check)); err != nil {
+			return 0, "", err
 		}
 	}
-	return len(addrs), nil
+	note := ""
+	if check.unavailable != "" {
+		note = "addresses: DNS check not run (" + check.unavailable + ")"
+	}
+	return len(addrs), note, nil
+}
+
+// addressDNS is the Cloud DNS cross-check's answer for one sweep.
+type addressDNS struct {
+	// records are the DNS records resolving to each address, keyed by
+	// the address as the provider reported it.
+	records map[string][]cloud.DNSRecord
+	// unavailable says why the check could not run; "" when it ran
+	// (or had no address to check).
+	unavailable string
+}
+
+// dnsErrorCap bounds the provider error an address record carries
+// when the DNS check failed: every reported address repeats it.
+const dnsErrorCap = 200
+
+// checkAddressDNS asks the provider which DNS records resolve to the
+// addresses about to be reported (#716). It never fails the class: a
+// refusal or any other provider error becomes addressDNS.unavailable.
+// The one error it returns is the invocation itself ending
+// (--timeout), the runtime error every class shares.
+func checkAddressDNS(ctx context.Context, api cloud.OrphanAPI, addrs []cloud.OrphanAddress) (addressDNS, error) {
+	if len(addrs) == 0 {
+		return addressDNS{}, nil
+	}
+	ips := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ips = append(ips, a.Address)
+	}
+	dnsCtx, cancel := reserveBudget(ctx)
+	defer cancel()
+	recs, err := api.AddressDNSRecords(dnsCtx, ips)
+	if err != nil {
+		if ctx.Err() != nil {
+			return addressDNS{}, fmt.Errorf("DNS check: %w", err)
+		}
+		var why string
+		switch permission, denied := cloud.PermissionDenied(err); {
+		case denied && permission != "":
+			why = "needs " + permission
+		case denied:
+			why = "permission denied"
+		case dnsCtx.Err() != nil:
+			why = "ran out of its share of --timeout"
+		default:
+			why = emit.MaskString(err.Error())
+			if r := []rune(why); len(r) > dnsErrorCap {
+				why = string(r[:dnsErrorCap]) + "…"
+			}
+		}
+		return addressDNS{unavailable: why}, nil
+	}
+	byAddr := map[string][]cloud.DNSRecord{}
+	for _, r := range recs {
+		byAddr[r.Address] = append(byAddr[r.Address], r)
+	}
+	return addressDNS{records: byAddr}, nil
+}
+
+// dnsRecordsListed caps the records one address finding names; the
+// count of the rest follows.
+const dnsRecordsListed = 5
+
+// formatDNSRecords renders records as "<name> <type> in zone <zone>",
+// comma-separated, the first dnsRecordsListed of them.
+func formatDNSRecords(recs []cloud.DNSRecord) string {
+	parts := make([]string, 0, min(len(recs), dnsRecordsListed)+1)
+	for _, r := range recs[:min(len(recs), dnsRecordsListed)] {
+		parts = append(parts, fmt.Sprintf("%s %s in zone %s", r.Name, r.Type, r.Zone))
+	}
+	if extra := len(recs) - dnsRecordsListed; extra > 0 {
+		parts = append(parts, fmt.Sprintf("and %d more", extra))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // orphanClasses is the parsed --only selection.
@@ -563,7 +663,7 @@ func parseOnly(only string) (orphanClasses, error) {
 	return want, nil
 }
 
-func addressFinding(a cloud.OrphanAddress, now time.Time) emit.Finding {
+func addressFinding(a cloud.OrphanAddress, now time.Time, check addressDNS) emit.Finding {
 	age, when := "unknown", "reservation time unknown"
 	if !a.ReservedSince.IsZero() {
 		age = now.Sub(a.ReservedSince).Truncate(time.Minute).String()
@@ -575,11 +675,26 @@ func addressFinding(a cloud.OrphanAddress, now time.Time) emit.Finding {
 		KindOfObject: "Address",
 		Name:         a.Name,
 		Reason:       "ReservedUnusedAddress",
-		Message:      fmt.Sprintf("external static IP %s is reserved and attached to nothing (%s) — billed until released", a.Address, when),
 		Details: []emit.Field{
 			{Key: "region", Value: a.Region},
 			{Key: "address", Value: a.Address},
 		},
+	}
+	idle := fmt.Sprintf("external static IP %s is reserved and attached to nothing (%s)", a.Address, when)
+	var dnsDetails []emit.Field
+	switch recs := check.records[a.Address]; {
+	case check.unavailable != "":
+		f.Message = idle + " — billed until released, but the Cloud DNS check could not run (" + check.unavailable + "): verify no DNS record points at it before releasing, or those names would dangle"
+		dnsDetails = []emit.Field{{Key: "dns_check", Value: "unavailable"}, {Key: "dns_unavailable", Value: check.unavailable}}
+	case len(recs) > 0:
+		names := formatDNSRecords(recs)
+		f.Severity = emit.SeverityInfo
+		f.Reason = "ReferencedByDNS"
+		f.Message = idle + ", but Cloud DNS still resolves names to it (" + names + ") — not a cleanup candidate: releasing it would leave those names dangling, sending their traffic to whoever is next assigned the IP; retire the records first if the names are unused"
+		dnsDetails = []emit.Field{{Key: "dns_check", Value: "referenced"}, {Key: "dns_records", Value: names}}
+	default:
+		f.Message = idle + " — billed until released; no Cloud DNS record in the project resolves to it (DNS hosted elsewhere is not checked)"
+		dnsDetails = []emit.Field{{Key: "dns_check", Value: "none_found"}}
 	}
 	if a.Tier != "" {
 		f.Details = append(f.Details, emit.Field{Key: "network_tier", Value: a.Tier})
@@ -588,6 +703,7 @@ func addressFinding(a cloud.OrphanAddress, now time.Time) emit.Finding {
 		f.Details = append(f.Details, emit.Field{Key: "reserved_since", Value: fmtTime(a.ReservedSince)})
 	}
 	f.Details = append(f.Details, emit.Field{Key: "reserved_for", Value: age})
+	f.Details = append(f.Details, dnsDetails...)
 	return f
 }
 

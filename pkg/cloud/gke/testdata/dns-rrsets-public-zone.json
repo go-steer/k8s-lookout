@@ -1,0 +1,20 @@
+{
+  "//": "Recorded-shape fixture: dns.googleapis.com/dns/v1 resourceRecordSets.list response for public-zone (one page). Authored from the Cloud DNS ResourceRecordSets:list and RRSetRoutingPolicy API reference — not captured from a live project (§13). Addresses match compute-addresses-aggregated.json: old-ingress-ip 34.120.10.20, spare-egress-ip 35.196.1.2.",
+  "kind": "dns#resourceRecordSetsListResponse",
+  "rrsets": [
+    {"kind": "dns#resourceRecordSet", "name": "example.test.", "type": "NS", "ttl": 21600, "rrdatas": ["ns-cloud-a1.googledomains.com."]},
+    {"kind": "dns#resourceRecordSet", "name": "example.test.", "type": "SOA", "ttl": 21600, "rrdatas": ["ns-cloud-a1.googledomains.com. cloud-dns-hostmaster.google.com. 1 21600 3600 259200 300"]},
+    {"kind": "dns#resourceRecordSet", "name": "*.example.test.", "type": "A", "ttl": 300, "rrdatas": ["34.120.10.20"]},
+    {"kind": "dns#resourceRecordSet", "name": "www.example.test.", "type": "CNAME", "ttl": 300, "rrdatas": ["web.example.test."]},
+    {"kind": "dns#resourceRecordSet", "name": "other.example.test.", "type": "A", "ttl": 300, "rrdatas": ["203.0.113.7"]},
+    {"kind": "dns#resourceRecordSet", "name": "geo.example.test.", "type": "A", "ttl": 300,
+      "routingPolicy": {"geo": {"items": [
+        {"location": "us-east1", "rrdatas": ["35.196.1.2"]},
+        {"location": "europe-west1", "rrdatas": ["203.0.113.8"]}
+      ]}}},
+    {"kind": "dns#resourceRecordSet", "name": "v6.example.test.", "type": "AAAA", "ttl": 300, "rrdatas": ["2001:db8:0:0:0:0:0:1"]},
+    {"kind": "dns#resourceRecordSet", "name": "loop-a.example.test.", "type": "CNAME", "ttl": 300, "rrdatas": ["loop-b.example.test."]},
+    {"kind": "dns#resourceRecordSet", "name": "loop-b.example.test.", "type": "CNAME", "ttl": 300, "rrdatas": ["loop-a.example.test."]},
+    {"kind": "dns#resourceRecordSet", "name": "mail.example.test.", "type": "TXT", "ttl": 300, "rrdatas": ["\"35.196.1.2\""]}
+  ]
+}

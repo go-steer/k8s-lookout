@@ -44,6 +44,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--since` (`UsesSince` on the command: `triage events`, `triage
   changes`, `triage logs`, `bundle`, `perf probe`, `cloud stockout`),
   and a contract test holds the declaration to the code.
+- **`cloud orphans` no longer recommends releasing an idle static IP
+  that DNS still points at (#716).** Releasing such an address leaves
+  every name that resolves to it dangling, and whoever is next given
+  the IP receives their traffic. Before reporting an address, the sweep
+  now reads the project's Cloud DNS zones (public and private): A/AAAA
+  records, routing-policy targets, wildcards and CNAME chains through
+  the project's own records. An address a record resolves to stays
+  listed as `orphan.address` at severity info, with `reason=ReferencedByDNS`,
+  the records in `dns_records=` (`<name> <type> in zone <zone>`), and a
+  message saying it is not a cleanup candidate. Every address record
+  carries `dns_check=` (`referenced`, `none_found` or `unavailable`).
+  When DNS cannot be read (no `dns.managedZones.list` /
+  `dns.resourceRecordSets.list`, the API disabled, any provider error),
+  the address keeps its warning, `dns_unavailable=` says why, the
+  message says to verify DNS before releasing, and the summary's
+  `unavailable=` note gains `addresses: DNS check not run (...)`. DNS
+  hosted outside the project's Cloud DNS is not checked, and the
+  message says so. The `-gke` image's IAM list gains `roles/dns.reader`.
 
 ## [0.40.0] - 2026-10-19
 
