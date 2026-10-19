@@ -50,6 +50,7 @@ for the runner's KSA:
 | Role | Used by |
 | --- | --- |
 | `roles/compute.viewer` | `cloud orphans` (disks, addresses, forwarding rules), `cloud ipspace` (subnetworks), `cloud quota` (project and region quotas) |
+| `roles/dns.reader` | `cloud orphans` address cross-check against Cloud DNS records |
 | `roles/container.clusterViewer` | `cloud ipspace` (clusters.get), `cloud orphans --only=nodepools` |
 | `roles/monitoring.viewer` | `perf probe`, `triage top --history` |
 | `roles/logging.viewer` | `stab drift --identity` (Admin Activity audit logs), `cloud stockout` |

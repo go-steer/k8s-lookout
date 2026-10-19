@@ -1,0 +1,27 @@
+{
+  "//": "Recorded-shape fixture: dns.googleapis.com/dns/v1 managedZones.list response (one page). Authored from the Cloud DNS ManagedZones:list API reference — not captured from a live project (§13). gone-zone is deleted between this list and its record read (the test server answers 404 for it).",
+  "kind": "dns#managedZonesListResponse",
+  "managedZones": [
+    {
+      "kind": "dns#managedZone",
+      "name": "public-zone",
+      "dnsName": "example.test.",
+      "visibility": "public",
+      "id": "1111111111111111111"
+    },
+    {
+      "kind": "dns#managedZone",
+      "name": "private-zone",
+      "dnsName": "internal.example.test.",
+      "visibility": "private",
+      "id": "2222222222222222222"
+    },
+    {
+      "kind": "dns#managedZone",
+      "name": "gone-zone",
+      "dnsName": "gone.example.test.",
+      "visibility": "public",
+      "id": "3333333333333333333"
+    }
+  ]
+}

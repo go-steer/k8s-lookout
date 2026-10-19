@@ -226,6 +226,28 @@ type OrphanAddress struct {
 	ReservedSince time.Time
 }
 
+// DNSRecord is a DNS record the provider hosts that resolves to an
+// address the caller asked about (AddressDNSRecords). An address with
+// no attached user can still be what DNS points at — the wildcard
+// target of a whole domain is exactly that between deploys — and
+// releasing it would leave every such name dangling, routing its
+// traffic to whoever is next assigned the IP (#716).
+type DNSRecord struct {
+	// Name is the record's owner name as the provider stores it: fully
+	// qualified with its trailing dot, possibly a wildcard
+	// ("*.example.com.").
+	Name string
+	// Type is A or AAAA for a record whose data names the address, or
+	// CNAME for one that reaches it through a chain of the provider's
+	// own records.
+	Type string
+	// Zone is the name of the zone holding the record.
+	Zone string
+	// Address is the address the record resolves to, exactly as the
+	// caller passed it.
+	Address string
+}
+
 // OrphanAPI sweeps for orphaned cloud resources (`cloud orphans`).
 //
 // OrphanDisks returns EVERY unattached billing-active disk with its
@@ -237,10 +259,21 @@ type OrphanAddress struct {
 // provider already judged orphaned, plus the rules it could not judge
 // (LoadBalancerSweep.Unresolved); its error is reserved for failures
 // that cost the whole class — the rule list itself, or the context.
+//
+// AddressDNSRecords is the address class's cross-check (#716): every
+// record in the project's provider-hosted DNS zones that resolves to
+// one of addresses (A/AAAA data, routing-policy targets included, and
+// CNAME chains through the same records). It reads DNS only — names
+// hosted elsewhere are invisible to it, and callers must say so. A
+// nil error with no records means none was found; an error means the
+// check could not run (a refusal wrapped as for a class, see
+// PermissionDenied), and callers must then report the address with
+// that caveat rather than assume nothing points at it.
 type OrphanAPI interface {
 	OrphanDisks(ctx context.Context) ([]OrphanDisk, error)
 	OrphanLoadBalancers(ctx context.Context) (LoadBalancerSweep, error)
 	OrphanAddresses(ctx context.Context) ([]OrphanAddress, error)
+	AddressDNSRecords(ctx context.Context, addresses []string) ([]DNSRecord, error)
 }
 
 // SubnetUtilization is IP usage for one subnet range (`cloud ipspace`).

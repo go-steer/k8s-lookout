@@ -197,11 +197,12 @@ GCP IAM roles. When running the **`-gke` image** (`lookout-gke` / Helm
 bind the Kubernetes ServiceAccount (`lookout-watch`) to a read-only Google
 Service Account via Workload Identity (`roles/iam.workloadIdentityUser` on the
 GSA + `iam.gke.io/gcp-service-account` annotation on the KSA) and grant the GSA
-these seven **read-only** project roles (matching `dev/drills/uat-gke/grant-iam`):
+these eight **read-only** project roles (matching `dev/drills/uat-gke/grant-iam`):
 
 | GCP IAM Role | What it enables |
 | --- | --- |
 | `roles/compute.viewer` | `cloud orphans` (unattached disks, static addresses, forwarding rules) and `cloud ipspace` (subnetworks) |
+| `roles/dns.reader` | `cloud orphans` address cross-check: lists Cloud DNS managed zones and record sets (`dns.managedZones.list`, `dns.resourceRecordSets.list`) so an idle static IP that DNS still points at is not recommended for release; without it the address is still reported, with the DNS check marked unavailable |
 | `roles/container.clusterViewer` | `cloud ipspace` (`clusters.get`), `cloud orphans --only=nodepools`, `audit cluster`, and `state wi` node-pool checks |
 | `roles/monitoring.viewer` | `perf probe` control-plane/startup query packs, `triage top --history`, and `cloud quota` usage/limit history |
 | `roles/logging.viewer` | `cloud stockout` (GCE Admin Activity audit logs and CA visibility logs) and `stab drift --identity` (Kubernetes Admin Activity audit logs) |

@@ -1,0 +1,16 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the error body a Google API returns when it is not enabled in the project (reason accessNotConfigured). dnsrecords.go maps it to a short apiDisabledError, never to a permission to grant.",
+  "error": {
+    "code": 403,
+    "message": "Cloud DNS API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/dns.googleapis.com/overview?project=123456789012 then retry.",
+    "errors": [
+      {
+        "message": "Cloud DNS API has not been used in project 123456789012 before or it is disabled.",
+        "domain": "usageLimits",
+        "reason": "accessNotConfigured",
+        "extendedHelp": "https://console.developers.google.com"
+      }
+    ],
+    "status": "PERMISSION_DENIED"
+  }
+}

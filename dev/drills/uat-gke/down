@@ -37,9 +37,9 @@ gcloud compute addresses delete uat-orphan-ext uat-internal --region "$REGION" -
 
 runner_email="$RUNNER_GSA@$PROJECT.iam.gserviceaccount.com"
 log "removing the runner's project role bindings"
-for role in roles/compute.viewer roles/container.clusterViewer roles/monitoring.viewer \
-            roles/logging.viewer roles/cloudquotas.viewer roles/iam.securityReviewer \
-            roles/serviceusage.serviceUsageConsumer; do
+for role in roles/compute.viewer roles/dns.reader roles/container.clusterViewer \
+            roles/monitoring.viewer roles/logging.viewer roles/cloudquotas.viewer \
+            roles/iam.securityReviewer roles/serviceusage.serviceUsageConsumer; do
   gcloud projects remove-iam-policy-binding "$PROJECT" --member "serviceAccount:$runner_email" \
     --role "$role" --condition None --quiet >/dev/null 2>&1
 done

@@ -1,0 +1,14 @@
+{
+  "_comment": "Recorded-format fixture, AUTHORED FROM API DOCS (DESIGN.md §13). Shape: the Cloud DNS v1 error body for managedZones.list when the caller lacks dns.managedZones.list. dnsrecords.go maps it to cloud.ErrPermissionDenied, naming the permission from the hint (the message names none).",
+  "error": {
+    "code": 403,
+    "message": "Forbidden",
+    "errors": [
+      {
+        "message": "Forbidden",
+        "domain": "global",
+        "reason": "forbidden"
+      }
+    ]
+  }
+}
