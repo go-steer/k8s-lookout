@@ -274,12 +274,18 @@ YAML
 # says 70s took 155s and then began timing out in CI. Nothing needs
 # the reason any more: lookout reports the same incident from either
 # sub-phase as of #403.
+#
+# Only a pod that is not being deleted counts. refresh_crashloop deletes
+# with --wait=false, so for a while the label matches the dying pod as
+# well as its replacement, and the dying one still carries the old, high
+# restart count: reading `.items[0]` returned at once — "(0s)" — whenever
+# the dying pod's name sorted first, and the caller carried on against a
+# replacement that had not crashed yet (#706).
 await_crashloop() {
   local ns="$1" app="$2" want="$3"
   _crashlooping() {
     local restarts
-    restarts="$(kubectl -n "$ns" get pods -l "app.kubernetes.io/name=$app" \
-      -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null)"
+    restarts="$(kubectl -n "$ns" get pods -l "app.kubernetes.io/name=$app" -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{range .status.containerStatuses}}{{.restartCount}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null | head -n1)"
     [[ -n "$restarts" && "$restarts" -ge "$want" ]]
   }
   # Generous, because what it is waiting on is the kubelet's own
@@ -299,6 +305,11 @@ await_crashloop() {
 # has been running for ten minutes produces one event every five, and a
 # caller watching a short window sees none at all. Anything asserting
 # on the event rather than the state has to start from a young loop.
+#
+# It leaves the replacement at <min-restarts>, younger than the loop it
+# replaced: a caller that shares the pod with later cases restores
+# whatever restart count those cases were promised (see the watch case
+# in uat-cases/30-root.sh).
 refresh_crashloop() {
   local ns="$1" app="$2" want="$3"
   echo "▸ restarting $ns/$app so its backoff (and its BackOff events) start over"
