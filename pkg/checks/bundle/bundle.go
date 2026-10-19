@@ -115,6 +115,7 @@ func New(deps Deps) checks.Command {
 		Name:        "bundle",
 		MCPName:     "k8s_triage_workload",
 		MCPProfiles: []string{"triage"},
+		UsesSince:   true, // the events and logs sections' lookback
 		Summary:     "The first call of every incident: one correlated snapshot of a workload — sanitized spec, everything abnormal, event timeline, broken dependency edges, blast radius, distilled logs — sectioned into a single payload instead of 5–6 separate reads.",
 		Flags: []emit.FlagSpec{
 			{Name: "incident", Type: emit.FlagString, Default: "",

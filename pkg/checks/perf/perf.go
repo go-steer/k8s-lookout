@@ -84,9 +84,10 @@ func (d Deps) now() time.Time {
 // Command builds the `perf probe` declaration around deps.
 func Command(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "perf probe",
-		MCPName: "k8s_perf_probe",
-		Summary: "Control-plane and startup performance via metrics query packs: --pack=apiserver (p99 latency by verb/resource), apf (queue saturation + 429 rejects), etcd (WAL fsync p99 + DB size), startup (pod-first-ready p95 trend); apf/etcd need GKE control-plane metrics enabled — absence degrades to an explicit pack_unavailable finding.",
+		Name:      "perf probe",
+		MCPName:   "k8s_perf_probe",
+		UsesSince: true, // the metrics window
+		Summary:   "Control-plane and startup performance via metrics query packs: --pack=apiserver (p99 latency by verb/resource), apf (queue saturation + 429 rejects), etcd (WAL fsync p99 + DB size), startup (pod-first-ready p95 trend); apf/etcd need GKE control-plane metrics enabled — absence degrades to an explicit pack_unavailable finding.",
 		Flags: []emit.FlagSpec{
 			{Name: "pack", Type: emit.FlagString, Default: "",
 				Help: "which query pack to run (required): " + packNames()},

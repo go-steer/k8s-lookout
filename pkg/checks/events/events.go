@@ -96,6 +96,7 @@ func newCommand(source kube.ClientSource, now func() time.Time) checks.Command {
 			{Name: "per-object", Type: emit.FlagBool, Default: "false",
 				Help: "namespace and -A timelines: one entry per object instead of rolling up a pod owner's (or the Nodes') shared reason at 3+ objects (5+ for warnings); --workload timelines are always per object"},
 		},
+		UsesSince: true, // the event lookback
 		Kinds: []checks.KindField{
 			checks.Kind("event.warning", "one collapsed timeline entry for a Warning-type event family on a subject", emit.SeverityWarning),
 			checks.Kind("event.normal", "one collapsed timeline entry for a Normal-type event family — context for the warnings around it, not a problem on its own", emit.SeverityInfo),

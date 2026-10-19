@@ -216,8 +216,12 @@ func listClustersHandler(cfg config, sem chan struct{}) mcp.ToolHandler {
 				total = len(allowed(all))
 			}
 		}
-		out := renderClusters(entries, scopes, total, cfg.log.now().Sub(start))
-		record(emit.ExitData, out)
+		// The same --max-response-bytes cut as every command's result
+		// (#755): a large organization's list, or a broad filter, can
+		// exceed what a client accepts.
+		out, dropped := fitClusterList(renderClusters(entries, scopes, total, cfg.log.now().Sub(start)), filter != "", cfg.maxResponseBytes)
+		cfg.log.record(callRecord{caller: caller, tool: listClustersName, exit: emit.ExitData,
+			start: start, bytes: len(out), remote: remote, truncated: dropped})
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out}}}, nil
 	}
 }

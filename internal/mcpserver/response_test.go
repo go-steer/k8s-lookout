@@ -18,11 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
@@ -327,25 +330,45 @@ func TestFitResponse_LeavesNonStreamsAlone(t *testing.T) {
 }
 
 // The hint names the arguments that would narrow THIS call: the ones it
-// already narrowed by are left out, and a target already names one
-// workload.
+// already narrowed by are left out, a target already names one
+// workload, and since is offered only to a command that declares
+// UsesSince (#756).
 func TestNarrowingHintIsTailoredToTheCall(t *testing.T) {
 	plain := floodCommand(false)
+	timed := floodCommand(false)
+	timed.UsesSince = true
 	positional := fakeSpecCommand()
+	timedPositional := fakeSpecCommand()
+	timedPositional.UsesSince = true
 	for _, tc := range []struct {
 		c    checks.Command
 		args []string
 		want string
 	}{
-		{plain, nil, "namespace, workload or since"},
-		{plain, []string{"--A=true"}, "namespace, workload or since"},
-		{plain, []string{"--namespace=prod"}, "workload or since"},
-		{plain, []string{"--workload=Deployment/prod/api", "--since=2h"}, "a shorter since"},
-		{positional, []string{"--namespace=prod", "Pod/api"}, "since"},
+		{timed, nil, "namespace, workload or since"},
+		{timed, []string{"--A=true"}, "namespace, workload or since"},
+		{timed, []string{"--namespace=prod"}, "workload or since"},
+		{timed, []string{"--workload=Deployment/prod/api", "--since=2h"}, "a shorter since"},
+		{timedPositional, []string{"--namespace=prod", "Pod/api"}, "since"},
+		// A command that ignores --since is never told to use it, even
+		// when the call passed it.
+		{plain, nil, "namespace or workload"},
+		{plain, []string{"--namespace=prod"}, "workload"},
+		{plain, []string{"--since=2h"}, "namespace or workload"},
+		{positional, []string{"--namespace=prod", "Pod/api"}, ""},
 	} {
 		if got := narrowing(tc.c, tc.args); got != tc.want {
-			t.Errorf("narrowing(%s, %v) = %q, want %q", tc.c.MCPName, tc.args, got, tc.want)
+			t.Errorf("narrowing(%s UsesSince=%v, %v) = %q, want %q", tc.c.MCPName, tc.c.UsesSince, tc.args, got, tc.want)
 		}
+	}
+}
+
+// With nothing left to offer, the hint says so rather than naming an
+// argument that would not help.
+func TestResponseHintWithNothingLeftToNarrow(t *testing.T) {
+	got := responseHint(fakeSpecCommand(), []string{"--namespace=prod", "Pod/api"}, 10, 50, 1000)
+	if want := "kept the first 10 of 50 findings to fit the server's 1000-byte response limit; the call already uses every argument that would narrow it"; got != want {
+		t.Errorf("responseHint = %q, want %q", got, want)
 	}
 }
 
@@ -404,5 +427,112 @@ func TestCallTool_MaxResponseBytesZeroReturnsEverything(t *testing.T) {
 	}
 	if recs := records(t, buf); len(recs) != 1 || recs[0]["truncated"] != "" {
 		t.Errorf("an uncut answer logged truncated=: %v", recs)
+	}
+}
+
+// clusterList renders a k8s_list_clusters result of n clusters (out of
+// scanned listable) and two discovery scopes, one of them failed.
+func clusterList(n, scanned int) string {
+	entries := make([]clusterEntry, n)
+	for i := range entries {
+		ref := gref("proj-"+strconv.Itoa(i%7), "us-central1", "cluster-"+strconv.Itoa(i))
+		entries[i] = clusterEntry{ref: ref, name: ref.Name, canonical: ref.Project + "/" + ref.Location + "/" + ref.Name, access: accessRead}
+	}
+	scopes := []fleet.ScopeResult{
+		{Scope: "folders/1", Via: "asset", Clusters: n},
+		{Scope: "projects/missing", Via: "container", Err: errors.New("permission denied")},
+	}
+	return renderClusters(entries, scopes, scanned, 1200*time.Millisecond)
+}
+
+// An oversize cluster list keeps its first clusters (readable ones come
+// first), whole lines only, every scope line and the summary, which
+// says how many were left out and points at filter (#755).
+func TestFitClusterList_KeepsTheFirstClusters(t *testing.T) {
+	full := clusterList(200, 250)
+	all, _ := splitStream(full)
+	entries, scopes := all[:200], all[200:]
+	for _, filtered := range []bool{false, true} {
+		limit := len(full) / 3
+		got, dropped := fitClusterList(full, filtered, limit)
+		if len(got) > limit {
+			t.Fatalf("cut list is %d bytes, over the %d-byte limit", len(got), limit)
+		}
+		lines, summary := splitStream(got)
+		kept := len(lines) - len(scopes)
+		if kept <= 0 || dropped != 200-kept {
+			t.Fatalf("kept %d clusters, reported %d dropped", kept, dropped)
+		}
+		for i := range kept {
+			if lines[i] != entries[i] {
+				t.Fatalf("line %d is not the original's line %d:\n got %q\nwant %q", i, i, lines[i], entries[i])
+			}
+		}
+		if !slices.Equal(lines[kept:], scopes) {
+			t.Errorf("scope lines changed:\n got %q\nwant %q", lines[kept:], scopes)
+		}
+		f := summaryFields(t, summary)
+		if f["scanned"] != "250" || f["findings"] != "0" || f["elapsed"] != "1.2s" || f["clusters"] != strconv.Itoa(kept) {
+			t.Errorf("summary lost or miscounted a key: %q", summary)
+		}
+		if f["response_truncated"] != strconv.Itoa(dropped) {
+			t.Errorf("response_truncated = %q, want %d", f["response_truncated"], dropped)
+		}
+		narrow := "narrow the call with filter"
+		if filtered {
+			narrow = "narrow the call with a narrower filter"
+		}
+		if want := "kept the first " + strconv.Itoa(kept) + " of 200 clusters to fit the server's " + strconv.Itoa(limit) + "-byte response limit; " + narrow; f["response_hint"] != want {
+			t.Errorf("response_hint = %q, want %q", f["response_hint"], want)
+		}
+		if keys := strings.Join(summaryKeys(t, summary), ","); keys != "scanned,findings,elapsed,clusters,response_truncated,response_hint" {
+			t.Errorf("summary keys = %s", keys)
+		}
+	}
+}
+
+func TestFitClusterList_AListThatFitsIsUntouched(t *testing.T) {
+	full := clusterList(40, 40)
+	if got, dropped := fitClusterList(full, false, len(full)); got != full || dropped != 0 {
+		t.Errorf("a list exactly at the limit was changed (%d dropped)", dropped)
+	}
+	if got, dropped := fitClusterList(full, false, len(full)-1); got == full || dropped == 0 {
+		t.Error("a list one byte over the limit was not cut")
+	}
+}
+
+func TestFitClusterList_ZeroDisablesTheLimit(t *testing.T) {
+	full := clusterList(200, 200)
+	if got, dropped := fitClusterList(full, false, 0); got != full || dropped != 0 {
+		t.Errorf("limit 0 changed the list (%d dropped)", dropped)
+	}
+}
+
+// When not even the scope lines and summary leave room for a cluster,
+// they are returned alone, saying every cluster was left out.
+func TestFitClusterList_TooSmallKeepsScopesAndSummary(t *testing.T) {
+	full := clusterList(5, 5)
+	got, dropped := fitClusterList(full, false, 50)
+	lines, summary := splitStream(got)
+	if dropped != 5 || len(lines) != 2 || !strings.HasPrefix(lines[0], "scope=") {
+		t.Fatalf("dropped %d, kept:\n%s", dropped, got)
+	}
+	if f := summaryFields(t, summary); f["clusters"] != "0" || f["response_truncated"] != "5" {
+		t.Errorf("summary %q", summary)
+	}
+}
+
+// Output not shaped like renderClusters' is returned as it was.
+func TestFitClusterList_LeavesOtherShapesAlone(t *testing.T) {
+	line := "cluster=a project=p location=l canonical=p/l/a dns_endpoint=true\n"
+	for name, out := range map[string]string{
+		"count mismatch":    strings.Repeat(line, 50) + "scanned=50 findings=0 elapsed=1s clusters=49\n",
+		"no clusters key":   strings.Repeat(line, 50) + "scanned=50 findings=0 elapsed=1s\n",
+		"scope before rows": "scope=p via=container clusters=50\n" + strings.Repeat(line, 50) + "scanned=50 findings=0 elapsed=1s clusters=50\n",
+		"no final newline":  strings.Repeat(line, 50) + "scanned=50 findings=0 elapsed=1s clusters=50",
+	} {
+		if got, dropped := fitClusterList(out, false, 200); got != out || dropped != 0 {
+			t.Errorf("%s: rewritten (%d dropped):\n%s", name, dropped, got)
+		}
 	}
 }
