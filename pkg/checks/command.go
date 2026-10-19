@@ -131,6 +131,15 @@ type Command struct {
 	// here says nothing about another cluster's network, and an agent
 	// reads a clean result as evidence against a fault there.
 	Local bool
+	// NewestLast marks a command whose findings are a timeline, oldest
+	// first and newest last (`triage events`, `triage changes`), rather
+	// than the usual most-important-first order. When `lookout mcp`
+	// cuts an answer to --max-response-bytes it keeps the head of the
+	// stream, which for most commands is the worst of it; for a
+	// NewestLast command the head is the oldest, least relevant part,
+	// so it keeps the tail instead. Output on every other surface is
+	// unaffected. Plain additive field: the zero value keeps the head.
+	NewestLast bool
 }
 
 // OutputField documents one Details key a command may emit.

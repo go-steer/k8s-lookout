@@ -220,3 +220,46 @@ func TestWriterFold(t *testing.T) {
 		t.Errorf("findings=%d watched=%v out=%q", w.Findings(), watched, buf.String())
 	}
 }
+
+// ParseLogfmt is the exact inverse of EncodeLogfmt: every golden
+// finding, quoting and escaping included, round-trips pair for pair.
+func TestParseLogfmtInvertsEncodeLogfmt(t *testing.T) {
+	for _, f := range goldenFindings {
+		pairs := f.pairs()
+		got, err := ParseLogfmt(string(EncodeLogfmt(pairs)))
+		if err != nil {
+			t.Fatalf("ParseLogfmt(%v): %v", pairs, err)
+		}
+		if len(got) != len(pairs) {
+			t.Fatalf("round trip: got %v, want %v", got, pairs)
+		}
+		for i := range pairs {
+			if got[i] != pairs[i] {
+				t.Errorf("pair %d: got %v, want %v", i, got[i], pairs[i])
+			}
+		}
+	}
+	for _, bad := range []string{"no pairs here", `k="unterminated`, `k="v"x=1`, "=v", "Key=v"} {
+		if _, err := ParseLogfmt(bad); err == nil {
+			t.Errorf("ParseLogfmt(%q) accepted a line EncodeLogfmt cannot write", bad)
+		}
+	}
+}
+
+// The MCP response limit's notes are envelope-owned: no command may set
+// them, and none of them is the `truncated` key scan and inventory
+// already use for their own caps.
+func TestResponseNotesAreReserved(t *testing.T) {
+	w, err := NewWriter(&bytes.Buffer{}, FormatLogfmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range ResponseNoteFields() {
+		if key == "truncated" {
+			t.Errorf("%q is a command note key already", key)
+		}
+		if err := w.Note(key, "1"); err == nil {
+			t.Errorf("Note(%q) should be rejected: the MCP response limit owns that key", key)
+		}
+	}
+}

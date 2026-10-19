@@ -104,7 +104,10 @@ uat_case_mcp() {
     tool_of["$cli"]="$tool"
   done < <(uat_tool_names)
 
-  if ! uat_mcp_start --store="$UAT_STORE" --exemptions="$UAT_EXEMPTIONS" --report="$UAT_REPORT"; then
+  # --max-response-bytes=0: parity compares whole payloads, and on a big
+  # cluster the default limit would cut the tool result (#747) and fail
+  # a comparison the CLI was never going to match.
+  if ! uat_mcp_start --store="$UAT_STORE" --exemptions="$UAT_EXEMPTIONS" --report="$UAT_REPORT" --max-response-bytes=0; then
     uat_bad "mcp server starts on loopback" "no session id after 10s" "$(cat "$UAT_MCP_LOG" 2>/dev/null)"
     return 1
   fi

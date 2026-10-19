@@ -164,6 +164,9 @@ func TestMCPCommand_UsagePaths(t *testing.T) {
 		{"auth token without listen", []string{"--auth-token-file=/dev/null"}, 2, "stdio transport"},
 		{"allow-non-loopback without listen", []string{"--allow-non-loopback"}, 2, "stdio transport"},
 
+		// #747: 0 disables the response cap; below that is a mistake.
+		{"negative response cap", []string{"--max-response-bytes=-1"}, 2, "--max-response-bytes must not be negative"},
+
 		// #699: Google-token mode.
 		{"google mode without listen", []string{
 			"--google-client-id=c", "--google-allow=@x.example", "--resource-url=https://l.example/mcp",
@@ -307,7 +310,7 @@ func TestMCPCommand_Help(t *testing.T) {
 		"--listen", "stdio", "loopback", "--access-log",
 		"--allow-non-loopback", "--auth-token-file",
 		"--kubeconfig", "--context", "--exemptions", "--store", "--report",
-		"reverse proxy",
+		"reverse proxy", "--max-response-bytes",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help does not mention %q:\n%s", want, stdout.String())

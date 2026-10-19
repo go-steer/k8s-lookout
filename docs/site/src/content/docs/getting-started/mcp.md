@@ -560,6 +560,46 @@ command's Reference page names the profiles it belongs to. Membership
 is declared on the command itself, so a new check joins a profile in
 the same edit that creates it.
 
+## Response size limit
+
+An unscoped call on a busy cluster can answer in megabytes: an event
+timeline over a whole namespace, or the same tool fanned over twenty
+clusters. MCP clients cap what they hand the model (Claude Code at
+about 25,000 tokens by default), and a client given more cuts the text
+wherever it cuts it, summary line included, or refuses it, and the
+model never learns what it lost. So `lookout mcp` cuts first,
+deliberately and visibly:
+
+```sh
+lookout mcp --max-response-bytes=100000   # the default; 0 disables
+```
+
+A tool result over the limit loses whole finding lines, never part of
+one, and always keeps its summary line. Most commands emit the worst
+findings first, so the first ones are kept; a timeline (`triage
+events`, `triage changes`) is oldest first, so the newest ones are
+kept. The rewritten summary line still obeys the output contract, so
+`findings=` counts the lines actually returned, and it says what was
+left out:
+
+```
+scanned=4210 findings=212 elapsed=2.1s response_truncated=3911 response_truncated_severity=critical:0,warning:40,info:3871 response_hint="kept the newest 212 of 4123 findings to fit the server's 100000-byte response limit; narrow the call with namespace, workload or since"
+```
+
+`response_truncated` is how many findings were dropped, and
+`response_truncated_severity` how bad they were. `response_hint` names
+the arguments that would narrow the call, leaving out the ones the
+call already used. Every other note on the line (`exempt=`, `context=`,
+a command's own) stays where it was, and `exempt=` counts only the
+findings returned. `--format=json` results are cut the same way, one
+object per line, with the summary still a JSON object. The CLI never
+cuts anything: the limit is a property of the MCP surface.
+
+100,000 bytes is about that 25k-token cap: Claude Code estimates four
+characters a token, and lookout's logfmt measures at roughly 3.4 to
+3.8 bytes a token. Lower it for a client with a smaller budget, or
+set `0` for one that pages large results itself.
+
 ## The access log
 
 `lookout mcp` is silent by default: it writes nothing but protocol
@@ -580,7 +620,10 @@ ts=2026-08-18T14:03:33Z tool=k8s_triage_logs exit=2 dur=0s bytes=64
 `exit` is the §4.2 code the tool call mapped from — `0` a payload, `1`
 a tool error the model can see, `2` a rejected argument. Calls the
 schema layer rejects before the command ever runs are logged too;
-those are exactly the ones worth noticing.
+those are exactly the ones worth noticing. `bytes` is what the caller
+was sent; when the [response size limit](#response-size-limit) cut a
+result, `truncated=<n>` at the end of the line counts the findings
+left out.
 
 The file is created if absent, **appended** if present (a supervisor
 restart must not erase the evidence from the run that caused it), and

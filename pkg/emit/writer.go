@@ -415,6 +415,58 @@ func EncodeLogfmt(pairs []Field) []byte {
 	return b.Bytes()
 }
 
+// ParseLogfmt splits one line written by EncodeLogfmt back into its
+// ordered pairs: space-separated key=value, values Go-quoted when they
+// were quoted on the way out. A trailing newline is ignored. It
+// rejects what EncodeLogfmt could not have produced, so a caller that
+// rewrites a line (the MCP response limit rewrites the summary) can
+// tell a summary line from something that only resembles one.
+func ParseLogfmt(line string) ([]Field, error) {
+	rest := strings.TrimSuffix(line, "\n")
+	var out []Field
+	for rest != "" {
+		eq := strings.IndexByte(rest, '=')
+		if eq <= 0 || !keyPattern.MatchString(rest[:eq]) {
+			return nil, fmt.Errorf("no key=value at %q", clip(rest))
+		}
+		key := rest[:eq]
+		rest = rest[eq+1:]
+		var val string
+		if strings.HasPrefix(rest, `"`) {
+			q, err := strconv.QuotedPrefix(rest)
+			if err != nil {
+				return nil, fmt.Errorf("bad quoted value after %s=: %w", key, err)
+			}
+			if val, err = strconv.Unquote(q); err != nil {
+				return nil, fmt.Errorf("bad quoted value after %s=: %w", key, err)
+			}
+			rest = rest[len(q):]
+		} else if sp := strings.IndexByte(rest, ' '); sp >= 0 {
+			val, rest = rest[:sp], rest[sp:]
+		} else {
+			val, rest = rest, ""
+		}
+		out = append(out, Field{Key: key, Value: val})
+		if rest != "" {
+			if rest[0] != ' ' {
+				return nil, fmt.Errorf("expected a space after %s=", key)
+			}
+			rest = rest[1:]
+		}
+	}
+	return out, nil
+}
+
+// clip bounds a fragment quoted in an error message: a malformed
+// megabyte line should not become a megabyte error.
+func clip(s string) string {
+	const max = 80
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
 func logfmtNeedsQuoting(v string) bool {
 	if strings.ContainsAny(v, " =\"") {
 		return true
