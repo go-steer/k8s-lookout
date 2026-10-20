@@ -109,10 +109,10 @@ github.com/go-openapi/testify/enable/yaml/v2 v2.6.0 h1:gGHwAJ0R/5jU8BEGDbfRNR3hL
 github.com/go-openapi/testify/enable/yaml/v2 v2.6.0/go.mod h1:tY+St1SGq4NFl0QIqdTY4aEdbChAHxhyB77XQi9iJCo=
 github.com/go-openapi/testify/v2 v2.6.0 h1:5PKH2HE7YJ/LuRPQGvSxBRlFXNQhSetBLlGAgUEu3ug=
 github.com/go-openapi/testify/v2 v2.6.0/go.mod h1:SgsVHtfooshd0tublTtJ50FPKhujf47YRqauXXOUxfw=
-github.com/go-steer/purser v0.2.0 h1:n/VYDNTnGZWX+DR1SsjXWdJl5Nr2d3Pp8W9AX0jZUxY=
-github.com/go-steer/purser v0.2.0/go.mod h1:ooV1N/6pdpNzKK7bLcl8zcADjY8AlK7zFfme6kO8Ags=
-github.com/go-steer/steward v0.2.0 h1:Z5/P6eGbxsjCWQ12bMDsiRGljXbtQzMS56ZnhBnMLgI=
-github.com/go-steer/steward v0.2.0/go.mod h1:ct0z/8kRWZ6GX2RV5Ue0OGfWoQi/f1jFJDRsODts/P0=
+github.com/go-steer/purser v0.3.1 h1:Tq3Tk+SsFEwqQXc27oeNQKPEhTbQe/F7dob4r47JYw0=
+github.com/go-steer/purser v0.3.1/go.mod h1:ooV1N/6pdpNzKK7bLcl8zcADjY8AlK7zFfme6kO8Ags=
+github.com/go-steer/steward v0.3.0 h1:9RCXFhU+941SCwg/+EiUzO14/3aTojaLffyF5RnzdD8=
+github.com/go-steer/steward v0.3.0/go.mod h1:4CbHW3yXeFbQrLcX54uC+1UMJOPL7fVgBeTssa/RFtM=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=

@@ -222,19 +222,17 @@ func TestGoogleGroupsEmailEntriesSkipTheDirectory(t *testing.T) {
 }
 
 // TestGoogleGroupsDirectoryDown: a group check that fails is not a
-// refusal. A Path A call is turned away (purser's enforcing middleware
-// answers 401 to any authentication error) without the "no valid
-// credential" of a refusal, the operator's log says why, and the failure
-// is not cached: once the directory answers, the caller gets in. The
-// write gate tells the caller to retry and keeps the detail for the
+// refusal. A Path A call is turned away with 503 and Retry-After, no
+// sign-in challenge (purser#23), the operator's log says why, and the
+// failure is not cached: once the directory answers, the caller gets in.
+// The write gate tells the caller to retry and keeps the detail for the
 // operator's log.
 func TestGoogleGroupsDirectoryDown(t *testing.T) {
 	ci := newFakeCloudIdentity(t, map[string][]string{writersGroup: {"alice@cymbal.example"}})
 	s := startGoogleServerOpts(t, true, withGroups(ci, &groupsImpersonator{}, []string{"group:" + writersGroup}, []string{"group:" + writersGroup}))
 	ci.down.Store(true)
-	if resp, body := s.post(t, "/mcp", "alice-token", callBody("k8s_whoami")); resp.StatusCode == http.StatusOK || strings.Contains(body, "no valid credential") {
-		t.Errorf("admission with the directory down: %d %s", resp.StatusCode, body)
-	}
+	resp, body := s.post(t, "/mcp", "alice-token", callBody("k8s_whoami"))
+	assertUnavailable(t, "admission with the directory down", resp, body)
 	s.mu.Lock()
 	diag := s.banner.String()
 	s.mu.Unlock()
@@ -250,7 +248,7 @@ func TestGoogleGroupsDirectoryDown(t *testing.T) {
 	ci2 := newFakeCloudIdentity(t, map[string][]string{writersGroup: {"alice@cymbal.example"}})
 	s2 := startGoogleServerOpts(t, true, withGroups(ci2, &groupsImpersonator{}, []string{"@cymbal.example"}, []string{"group:" + writersGroup}))
 	ci2.down.Store(true)
-	_, body := s2.post(t, "/mcp", "alice-token", callBody("k8s_write"))
+	_, body = s2.post(t, "/mcp", "alice-token", callBody("k8s_write"))
 	if !strings.Contains(body, `"isError":true`) || !strings.Contains(body, "retry") || strings.Contains(body, "HTTP 500") {
 		t.Errorf("the write gate with the directory down: %s", body)
 	}
@@ -270,9 +268,9 @@ func TestGoogleGroupsDirectoryDown(t *testing.T) {
 
 // TestGoogleGroupsImpersonationFails: lookout cannot mint the groups
 // service account's token (no token-creator grant yet). Startup warns,
-// naming the account; a caller only a group admits is turned away (not
-// as a refusal), and the operator's log says why; nothing reads as
-// lookout.
+// naming the account; a caller only a group admits is turned away with
+// 503 and Retry-After (not as a refusal), and the operator's log says
+// why; nothing reads as lookout.
 func TestGoogleGroupsImpersonationFails(t *testing.T) {
 	ci := newFakeCloudIdentity(t, map[string][]string{sreGroup: {"alice@cymbal.example"}})
 	imp := &groupsImpersonator{fail: true}
@@ -286,8 +284,9 @@ func TestGoogleGroupsImpersonationFails(t *testing.T) {
 		t.Errorf("no startup warning naming the account:\n%s", diag)
 	}
 	resp, body := s.post(t, "/mcp", "alice-token", callBody("k8s_whoami"))
-	if resp.StatusCode == http.StatusOK || strings.Contains(body, "no valid credential") || strings.Contains(body, "caller-token-fingerprint") {
-		t.Errorf("a group member while impersonation fails: %d %s", resp.StatusCode, body)
+	assertUnavailable(t, "a group member while impersonation fails", resp, body)
+	if strings.Contains(body, "caller-token-fingerprint") {
+		t.Errorf("a group member while impersonation fails read as lookout: %s", body)
 	}
 	if n := len(ci.tokens()); n != 0 {
 		t.Errorf("%d Cloud Identity requests went out without the account's token", n)
