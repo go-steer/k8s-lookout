@@ -240,8 +240,13 @@ How a check behaves:
   at every refresh of its access token (which lives at most 15 minutes),
   so its reads stop within about 25.
 - **A failed check is not a refusal.** If Cloud Identity does not answer,
-  the call is turned away without being cached, the detail goes to
-  lookout's stderr, and a write-gate failure tells the caller to retry.
+  or lookout cannot mint the groups service account's token, the call
+  gets `503` with `Retry-After` and no sign-in challenge, so an MCP
+  client retries with the credential it holds instead of signing in
+  again. Nothing is cached, the detail goes to lookout's stderr, and a
+  write-gate failure tells the caller to retry. The same holds when
+  Google itself cannot verify a token: an outage is a `503`, a bad,
+  expired or unadmitted credential is a `401`.
 
 ## Generic MCP clients (Claude Code, gemini-cli)
 

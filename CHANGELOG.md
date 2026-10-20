@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An authentication outage is a 503, not a 401 (purser#23).** lookout
+  now builds on purser v0.3.1 and steward v0.3.0. On `lookout mcp`, when
+  Google can't verify a token, the Cloud Identity directory doesn't
+  answer a group check, or lookout can't mint the groups service
+  account's token, the caller gets `503` with `Retry-After` and no
+  sign-in challenge, where it used to get `401`. MCP clients answer a
+  401 by signing in again, so an outage on Google's side sent every user
+  back through sign-in for a credential that was fine. Bad, expired or
+  unadmitted credentials are still `401`. purser now logs each outage at
+  Warn, with the caller's credential scrubbed from the message.
+
 ## [0.41.0] - 2026-10-19
 
 **This release lets a shared MCP endpoint admit people by Google group, keeps timelines short on busy clusters, and stops `cloud orphans` from recommending the release of an IP that DNS still points at.** `--google-allow` and `--google-allow-write` accept `group:<email>` entries for both Gemini Enterprise and generic MCP clients, checked through Cloud Identity as a dedicated service account. Rolled-up event timelines fold a pod owner's start and stop events into `PodsStarted` and `PodsStopped` and roll up controller events across objects: a busy cluster's hour is now about 120 entries (47 KB) where it was 2,800 (860 KB). The response-size limit now also covers `k8s_list_clusters`, and its hint suggests `since` only for tools that use a time window. `orphan.address` reads the project's Cloud DNS records first: an address a record still resolves to is reported as info (`ReferencedByDNS`) with the records named, not as a cleanup candidate. Sink HTTP clients get their own connection pool, and three intermittent test failures are fixed at the root.
