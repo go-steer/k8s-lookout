@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-20
+
+**This release closes an SSRF in `lookout mcp`'s authorization server and stops authentication outages from looking like bad credentials.** steward v0.3.0 refuses zoned IPv6 literals when it fetches a client's metadata document, so a self-registering client can no longer point the server at an internal address. When Google, the Cloud Identity directory or the groups service account can't answer, callers now get a 503 with `Retry-After` instead of a 401, so MCP clients retry rather than send every user back through sign-in.
+
+### Security
+
+- **`lookout mcp --oauth-issuer`: client metadata fetches refuse zoned IPv6
+  addresses (steward v0.3.0, steward#12).** With `--oauth-open-registration`,
+  a client registers by naming a metadata URL that lookout's authorization
+  server fetches. steward's fetch filter compared addresses against its
+  special-purpose ranges in a way that a zoned IPv6 literal such as
+  `https://[64:ff9b::a9fe:a9fe%25eth0]/c.json` slipped past. An
+  unauthenticated caller could then make the server connect to a NAT64,
+  6to4 or Teredo address embedding an internal IPv4 one (for example
+  169.254.169.254) on networks that route them. A zoned address is now
+  never public, and the filter refuses several more reserved ranges.
+  Endpoints without `--oauth-issuer` were not affected.
+
 ### Fixed
 
 - **An authentication outage is a 503, not a 401 (purser#23).** lookout

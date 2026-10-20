@@ -20,7 +20,7 @@ Like every runbook here it is human-run and never gates a PR.
 
 Every lookout invocation runs **inside the cluster**, as a pod under a
 Workload-Identity service account, on the published images
-(`IMAGE_GKE`, default `ghcr.io/go-steer/lookout:v0.41.0-gke`, and
+(`IMAGE_GKE`, default `ghcr.io/go-steer/lookout:v0.42.0-gke`, and
 `IMAGE_DEFAULT` for the GCP-free checks). That is how the `-gke` image is
 deployed, and it is also the only place it can resolve the cluster's
 location and name: the read commands take them from the GKE metadata
