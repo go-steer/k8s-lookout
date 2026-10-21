@@ -39,6 +39,7 @@ const (
 	kindHostPath       = "audit.hostpath_mount"
 	kindDefaultSAMount = "audit.default_sa_automount"
 	kindPodSecurity    = "audit.podsecurity_gaps"
+	// kindImageFloatingTag lives in images.go.
 )
 
 // The reasons. Two kinds carry more than one because the condition has
@@ -120,6 +121,7 @@ func HardeningCommand(deps Deps) checks.Command {
 			checks.Kind(kindHostPath, "the pod mounts a host path; warning when it is writable, info when read-only", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindDefaultSAMount, "the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it", emit.SeverityWarning),
 			checks.Kind(kindPodSecurity, "the namespace enforces no Pod Security Admission level, so none of the above is prevented", emit.SeverityWarning),
+			checks.Kind(kindImageFloatingTag, "a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record", emit.SeverityWarning),
 			checks.UnreadKind(),
 		},
 		Output: append([]checks.OutputField{
@@ -289,6 +291,7 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 func (ix *hardeningIndex) judgeTemplate(t podTemplate) []emit.Finding {
 	out := append(privilegeFindings(t.spec), hostNamespaceFindings(t.spec)...)
 	out = append(out, hostPathFindings(t.spec)...)
+	out = append(out, imageTagFindings(t.spec)...)
 	for i := range out {
 		out[i].Namespace = t.namespace
 		out[i].KindOfObject = t.kind

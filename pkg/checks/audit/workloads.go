@@ -80,7 +80,7 @@ func WorkloadsCommand(deps Deps) checks.Command {
 		Name:        "audit workloads",
 		MCPName:     "k8s_audit_workloads",
 		MCPProfiles: []string{"audit"},
-		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, and standalone Jobs left suspended past a maintenance window. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, standalone Jobs left suspended past a maintenance window, and the rollout-safety claims for Service-backed workloads: liveness probes that fire before readiness on the same handler, serving containers with no preStop hook, and Deployment strategies that permit zero surviving pods. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "cron-suspended", Type: emit.FlagDuration, Default: defaultCronSuspended.String(),
 				Help: "how long a CronJob must have been suspended before it reads as forgotten rather than as maintenance in progress; it must also have skipped at least one activation, so the claim scales to the schedule"},
@@ -97,6 +97,9 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by", emit.SeverityWarning),
 			checks.Kind(kindSuspendedCron, "a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that", emit.SeverityWarning),
 			checks.Kind(kindSuspendedJob, "a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening", emit.SeverityInfo),
+			checks.Kind(kindLivenessPreempts, "liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindRolloutDrops, "a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets", emit.SeverityWarning),
+			checks.Kind(kindRecreate, "a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports", emit.SeverityWarning),
 			checks.UnreadKind(),
 		},
 		Output: append([]checks.OutputField{
@@ -119,6 +122,10 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "suspended_since", Doc: "when the suspension is estimated to have started, RFC 3339"},
 			{Name: "anchor", Doc: "the evidence that estimate came from: condition (a Job's Suspended condition), managed_field (the managedFields entry owning spec.suspend), last_schedule (CronJobs only), or creation"},
 			{Name: "missed_runs", Doc: "activations skipped since then; ≥N when the walk was capped, unknown when the schedule does not parse"},
+			{Name: "services", Doc: "Services routing to the workload whose ports are not all scrape endpoints — the count that makes it \"serving\" for the rollout claims"},
+			{Name: "service_names", Doc: "their names, capped at 8 with a +N more tail"},
+			{Name: "termination_grace", Doc: "the pod template's terminationGracePeriodSeconds (the API default of 30s when unset), the ceiling any preStop hook would run inside"},
+			{Name: "strategy", Doc: "the Deployment strategy setting that permits zero surviving pods: strategy.type=Recreate, or rollingUpdate.maxUnavailable=<value>"},
 			{Name: "pdbs", Doc: "summary note: PodDisruptionBudgets seen in scope"},
 			{Name: "hpas", Doc: "summary note: HorizontalPodAutoscalers seen in scope"},
 			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against; omitted when the node List was refused (a read.unavailable record says so, and no placement claim is made)"},
@@ -261,6 +268,12 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	}
 
 	sortFindings(findings)
+	if ix.servicesRefused != nil {
+		if err := inv.Out.Emit(checks.RefusedFinding(*ix.servicesRefused,
+			"audit.rollout_drops_traffic and audit.recreate_strategy not judged: \"Service-backed\" is decided from the Service objects")); err != nil {
+			return 0, err
+		}
+	}
 	if ix.nodesRefused != nil {
 		if err := inv.Out.Emit(checks.RefusedFinding(*ix.nodesRefused,
 			"audit.rigid_scheduling not judged: a placement constraint is resolved against the Node objects")); err != nil {
@@ -326,6 +339,9 @@ type workload struct {
 	// node count and is therefore not a spec property to judge.
 	replicas *int32
 	template corev1.PodTemplateSpec
+	// strategy is the Deployment's update strategy; nil on the other
+	// kinds, whose rollouts have no "take them all down" setting.
+	strategy *appsv1.DeploymentStrategy
 }
 
 // wantReplicas resolves spec.replicas the way the API server does: a
@@ -387,6 +403,12 @@ type workloadIndex struct {
 	// placement claim is then skipped rather than resolved against an
 	// empty node set (#546).
 	nodesRefused *checks.Refusal
+	// services back the rollout claims (rollout.go): "Service-backed"
+	// is the qualifier that keeps them from firing on every workload.
+	// Read through the shared Snapshot so a co-scheduled detector does
+	// not list them again; servicesRefused skips those claims.
+	services        []*corev1.Service
+	servicesRefused *checks.Refusal
 	// kindsRefused, pdbsRefused and hpasRefused are the same for a
 	// custom role that refuses a read the built-in `view` grants
 	// (#584): a refused workload kind is not audited, refused PDBs
@@ -403,6 +425,11 @@ type workloadIndex struct {
 
 func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
 	ix := &workloadIndex{pdbsByNS: map[string]int{}, kindsRefused: map[string]checks.Refusal{}}
+	services, servicesRefused, err := snapshotFor(ctx, client, ns).Services(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ix.services, ix.servicesRefused = services, servicesRefused
 	steps := []func() error{
 		func() error {
 			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
@@ -412,9 +439,11 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 				}
 				return l.Items, l.Continue, nil
 			}, func(d *appsv1.Deployment) {
+				strategy := d.Spec.Strategy
 				ix.workloads = append(ix.workloads, workload{
 					kind: "Deployment", namespace: d.Namespace, name: d.Name,
 					replicas: d.Spec.Replicas, template: d.Spec.Template,
+					strategy: &strategy,
 				})
 			})
 		},
@@ -561,6 +590,7 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 func (ix *workloadIndex) judge(w workload) []emit.Finding {
 	out := append(ix.availability(w), probeFindings(w)...)
 	out = append(out, ix.placement(w)...)
+	out = append(out, ix.rollout(w)...)
 	for i := range out {
 		out[i].Namespace = w.namespace
 		out[i].KindOfObject = w.kind
