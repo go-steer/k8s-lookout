@@ -183,3 +183,14 @@ rules:
 		t.Fatalf("err=%v", err)
 	}
 }
+
+// How much compiling the built-in file costs at startup.
+func BenchmarkNewBuiltin(b *testing.B) {
+	set := rules.Builtin()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := rules.New(set); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
