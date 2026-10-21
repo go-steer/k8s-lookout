@@ -1,0 +1,520 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# kube-agents check slug -> lookout finding kinds that answer the same
+# question. crosswalk.py joins the two sides' findings on this map, per
+# (cluster, namespace, object).
+#
+#   kinds      lookout `kind=` values that count as the same finding
+#   reasons    optional: only these `reason=` values count (else any)
+#   claim      the pre-run expectation from the 2026-10-18 source review:
+#              covered | partial | gap | intentional | out-of-scope
+#              -- the live run grades this, it does not trust it
+#   match      how objects are joined: object (default) | namespace |
+#              cluster | project | none
+#   note       why, briefly
+#
+# Objects: a kube-agents candidate names `object` as `Kind/name` in
+# `namespace`; a lookout record names `kind_of_object`, `name`,
+# `namespace`. Cluster-scoped checks (`match: cluster`) join on the
+# cluster alone, since the two sides name the cluster differently
+# (gcloud's `<project>/<location>/<name>` vs the kubeconfig context).
+
+# ---------------------------------------------------------------- obtainability
+no-requests:
+  kinds: [top.unrequested_container]
+  lookout_names: pods
+  claim: covered
+  note: surfaced per pod by `triage top --show-unrequested` (needs metrics.k8s.io), not by `audit workloads`; joined on the owner name
+no-memory-limit:
+  kinds: [top.unlimited_container]
+  lookout_names: pods
+  claim: covered
+  note: surfaced per pod by `triage top --show-unlimited` (needs metrics.k8s.io); joined on the owner name
+no-pdb:
+  kinds: [audit.no_pdb]
+  claim: covered
+blocking-pdb:
+  kinds: [drain.pdb_gridlock, pdb.gridlocked]
+  claim: covered
+  note: "`stab drain` and `triage delta`; kube-agents names the PDB, lookout may name the PDB or the workload"
+no-hpa:
+  kinds: []
+  claim: intentional
+  note: flagging every fixed-size service is noise; lookout validates HPAs that exist
+hpa-cannot-scale:
+  kinds: [audit.hpa_cannot_scale]
+  reasons: [HPAMinEqualsMax, HPATargetMissingRequests, HPATargetMissing]
+  claim: covered
+rigid-scheduling:
+  kinds: [audit.rigid_scheduling]
+  claim: covered
+no-spread:
+  kinds: [audit.no_spread]
+  claim: covered
+probes-readiness:
+  kinds: [audit.no_readiness_probe]
+  claim: covered
+probes-liveness:
+  kinds: [audit.no_liveness_probe]
+  claim: covered
+single-replica:
+  kinds: [audit.single_replica, drain.singleton]
+  claim: covered
+schedule-never-succeeds:
+  kinds: [cron.missed, job.failed, audit.rigid_scheduling]
+  claim: partial
+  note: kube-agents reads lastScheduleTime vs lastSuccessfulTime on the CronJob; lookout sees missed schedules and failed Jobs live
+rollout-drops-traffic:
+  kinds: []
+  claim: gap
+  note: static maxUnavailable-vs-replicas check; lookout watches live rollouts instead
+strategy-causes-downtime:
+  kinds: []
+  claim: gap
+  note: Deployment strategy Recreate
+cronjob-runs-overlap:
+  kinds: []
+  claim: gap
+  note: concurrencyPolicy Allow
+service-selects-nothing:
+  kinds: [edge.selector_empty, edge.endpoints_missing]
+  claim: covered
+service-port-unresolved:
+  kinds: [edge.backend_missing, route.backend_port]
+  claim: covered
+liveness-preempts-readiness:
+  kinds: []
+  claim: gap
+spread-not-achieved:
+  kinds: [leeway.contract_violated, leeway.placement_drift, leeway.baseline_breach]
+  claim: covered
+  note: "`leeway report`"
+prestop-outlives-grace:
+  kinds: []
+  claim: gap
+rwo-claim-contended:
+  kinds: [volume.multi_attach, volume.zone_conflict]
+  claim: covered
+hpa-floors-at-one:
+  kinds: []
+  claim: gap
+pdb-overlapping:
+  kinds: []
+  claim: gap
+untargeted-compute-class-workload:
+  kinds: [leeway.rank_unknown, compute.fallback_sustained]
+  claim: partial
+  note: lookout tracks ComputeClass placement/fallback, not the static nodeSelector omission
+
+# ------------------------------------------------------------------- compliance
+privileged-container:
+  kinds: [audit.privileged_container]
+  claim: covered
+host-namespace:
+  kinds: [audit.host_namespace]
+  claim: covered
+hostpath-mount:
+  kinds: [audit.hostpath_mount]
+  claim: covered
+cluster-admin-binding:
+  kinds: [audit.cluster_admin_binding]
+  claim: covered
+wildcard-rbac:
+  kinds: [audit.wildcard_rbac]
+  claim: covered
+netpol-missing:
+  kinds: [audit.netpol_missing, audit.netpol_absent, audit.netpol_selects_nothing]
+  match: namespace
+  claim: covered
+default-sa-automount:
+  kinds: [audit.default_sa_automount]
+  objects_from: mounting_workload_names
+  claim: covered
+  note: lookout names the ServiceAccount and lists the mounting workloads in a field; collect.py names each workload
+workload-identity-off:
+  kinds: [audit.workload_identity_off]
+  match: cluster
+  claim: covered
+legacy-metadata:
+  kinds: [audit.legacy_metadata, audit.workload_identity_off]
+  reasons: [LegacyMetadataEndpoints, NodePoolMetadataServerOff, WorkloadIdentityDisabled]
+  match: cluster
+  claim: covered
+  note: collect.py 2.9 reads workloadMetadataConfig.mode per node pool (empty = legacy metadata reachable); lookout reports the same condition as the cluster's Workload Identity being off
+public-control-plane:
+  kinds: [audit.public_control_plane]
+  match: cluster
+  claim: covered
+podsecurity-gaps:
+  kinds: [audit.podsecurity_gaps]
+  match: namespace
+  claim: partial
+  note: different question in the same place — collect.py grades each workload's containers against the restricted profile (runAsNonRoot, seccompProfile, allowPrivilegeEscalation, capabilities.drop); lookout grades the namespace's PSA enforce label. Joined on namespace, so a match means both flagged the namespace, not the same fact
+kcc-object-wedged:
+  kinds: []
+  claim: gap
+  note: Config Connector CRs with Ready=False
+image-floating-tag:
+  kinds: []
+  claim: gap
+unbound-sa-automount:
+  kinds: []
+  claim: gap
+  note: lookout checks the default SA only
+lb-world-open:
+  kinds: []
+  claim: gap
+anonymous-rbac-binding:
+  kinds: []
+  claim: gap
+  note: lookout's rbac audit does not single out system:anonymous / system:unauthenticated subjects (they surface only if bound to cluster-admin or a wildcard role)
+
+# ------------------------------------------------------------------ ai-security
+inference-endpoint-public:
+  kinds: []
+  claim: gap
+model-remote-code-trusted:
+  kinds: []
+  claim: gap
+weights-mount-writable:
+  kinds: []
+  claim: gap
+model-artifact-unpinned-source:
+  kinds: []
+  claim: gap
+model-credential-plaintext-env:
+  kinds: []
+  claim: gap
+  note: lookout redacts such values on output; it does not audit their presence
+model-image-floating-tag:
+  kinds: []
+  claim: gap
+
+# ------------------------------------------------------- security-patch (weekly)
+master-behind:
+  kinds: [audit.version_behind]
+  reasons: [ControlPlaneMinorBehind, ControlPlanePatchBehind]
+  match: cluster
+  claim: covered
+pool-skew:
+  kinds: [audit.version_behind]
+  reasons: [NodePoolVersionSkew]
+  match: cluster
+  claim: covered
+fleet-spread:
+  kinds: []
+  match: none
+  claim: out-of-scope
+  note: a fleet-level roll-up over per-cluster version findings; belongs to the fleet layer by design
+no-channel:
+  kinds: [audit.upgrade_unmanaged]
+  reasons: [NoReleaseChannel]
+  match: cluster
+  claim: covered
+no-autoupgrade:
+  kinds: [audit.upgrade_unmanaged]
+  reasons: [NodeAutoUpgradeOff]
+  match: cluster
+  claim: covered
+no-autorepair:
+  kinds: [audit.upgrade_unmanaged]
+  reasons: [NodeAutoRepairOff]
+  match: cluster
+  claim: covered
+no-maintenance-window:
+  kinds: [audit.upgrade_unattended]
+  reasons: [NoMaintenanceWindow]
+  match: cluster
+  claim: covered
+blocking-exclusion:
+  kinds: [audit.upgrade_blocked]
+  reasons: [MaintenanceExclusionActive, MaintenanceExclusionBlocksPatches]
+  match: cluster
+  claim: covered
+stale-image-type:
+  kinds: [audit.upgrade_unmanaged, audit.version_behind]
+  reasons: [StaleNodeImageType]
+  match: cluster
+  claim: covered
+no-notifications:
+  kinds: [audit.upgrade_unattended]
+  reasons: [NoUpgradeNotifications]
+  match: cluster
+  claim: covered
+upgrade-blocked:
+  kinds: [audit.upgrade_blocked, drain.pdb_gridlock, webhook.failing_closed, webhook.dead_backend]
+  match: cluster
+  claim: covered
+
+# ------------------------------------------------------------ cost/waste (weekly)
+overrequest:
+  kinds: [top.saturation]
+  claim: partial
+  note: kube-agents compares a week of Cloud Monitoring peaks with requests; `triage top --history` is the nearest read
+orphan-pv:
+  kinds: [storage.pv_released, storage.pv_failed]
+  claim: covered
+unconsumed-pvc:
+  kinds: [volume.unconsumed_pvc]
+  claim: covered
+unattached-disk:
+  kinds: [orphan.disk]
+  match: project
+  claim: covered
+idle-address:
+  kinds: [orphan.address]
+  match: project
+  claim: covered
+orphan-lb:
+  kinds: [orphan.lb]
+  match: project
+  claim: covered
+idle-nodepool:
+  kinds: [orphan.nodepool]
+  match: cluster
+  claim: covered
+scaledown-blocked:
+  kinds: [drain.bare_pod, drain.local_storage, drain.pdb_gridlock, drain.node]
+  claim: covered
+  note: "`stab scaledown`"
+terminal-pods:
+  kinds: [pod.failed, job.failed]
+  claim: partial
+  note: lookout reports failed pods/jobs live; TTL-less Job spec is not a posture finding
+idle-namespace:
+  kinds: []
+  claim: gap
+underrequest:
+  kinds: [top.saturation]
+  claim: partial
+unsized-workload:
+  kinds: [top.unrequested_container]
+  lookout_names: pods
+  claim: covered
+idle-workload:
+  kinds: [edge.endpoints_missing, edge.selector_empty]
+  claim: partial
+  note: kube-agents uses traffic metrics; lookout sees Services with no ready endpoints
+registry-no-cleanup:
+  kinds: []
+  match: none
+  claim: out-of-scope
+  note: Artifact Registry policy, not a cluster question
+
+# ------------------------------------------------- consistency drift (weekly)
+# Every facet is a GKE control-plane / node-pool setting read through
+# `gcloud container clusters describe`. lookout reads the same object via
+# pkg/cloud and emits per-cluster posture findings for the facets that
+# are security-relevant; the *cohort outlier* judgement (is this cluster
+# different from its peers?) is a fleet-level join lookout leaves to the
+# fleet layer by design. The facets below are graded on whether lookout
+# surfaces the underlying setting at all.
+release-channel:
+  kinds: [audit.upgrade_unmanaged]
+  reasons: [NoReleaseChannel]
+  match: cluster
+  claim: partial
+shielded-nodes:
+  kinds: []
+  match: cluster
+  claim: gap
+secure-boot:
+  kinds: []
+  match: cluster
+  claim: gap
+integrity-monitoring:
+  kinds: []
+  match: cluster
+  claim: gap
+network-policy:
+  kinds: [audit.netpol_missing, audit.netpol_absent]
+  match: cluster
+  claim: partial
+  note: lookout audits policies present; it does not read the GKE enforcement flag / Dataplane V2 setting
+private-nodes:
+  kinds: []
+  match: cluster
+  claim: gap
+private-endpoint:
+  kinds: [audit.public_control_plane]
+  match: cluster
+  claim: covered
+authorized-networks:
+  kinds: [audit.public_control_plane]
+  reasons: [AuthorizedNetworksAllowAll, AuthorizedNetworksAllowProviderCIDRs, PublicEndpointUnrestricted]
+  match: cluster
+  claim: covered
+logging-components:
+  kinds: []
+  match: cluster
+  claim: gap
+monitoring-components:
+  kinds: []
+  match: cluster
+  claim: gap
+managed-prometheus:
+  kinds: []
+  match: cluster
+  claim: gap
+binary-authorization:
+  kinds: []
+  match: cluster
+  claim: gap
+node-autoprovisioning:
+  kinds: [audit.nodepool_cannot_grow]
+  match: cluster
+  claim: partial
+pool-autoscaling:
+  kinds: [audit.nodepool_cannot_grow]
+  reasons: [AutoscalingMaxZero]
+  match: cluster
+  claim: partial
+intra-node-visibility:
+  kinds: []
+  match: cluster
+  claim: gap
+datapath-provider:
+  kinds: []
+  match: cluster
+  claim: gap
+label-keys:
+  kinds: []
+  match: none
+  claim: out-of-scope
+  note: fleet cohort labelling convention
+image-type:
+  kinds: [audit.upgrade_unmanaged, audit.version_behind]
+  reasons: [StaleNodeImageType]
+  match: cluster
+  claim: partial
+database-encryption:
+  kinds: []
+  match: cluster
+  claim: gap
+no-environment-label:
+  kinds: []
+  match: none
+  claim: out-of-scope
+
+# ---------------------------------------------------------------- stockout
+ccc-missing-fallbacks:
+  kinds: [leeway.rank_unknown]
+  claim: partial
+  note: ComputeClass spec lint vs lookout's live fallback tracking
+ccc-no-ondemand-floor:
+  kinds: []
+  claim: gap
+ccc-large-vm-scarcity:
+  kinds: []
+  claim: gap
+ccc-priority-starvation:
+  kinds: []
+  claim: gap
+ccc-mixed-disk-generations:
+  kinds: []
+  claim: gap
+ccc-hyperdisk-incompatible:
+  kinds: []
+  claim: gap
+quota-exhaustion-risk:
+  kinds: [quota.near, quota.exhausted, quota.pressure]
+  match: project
+  claim: covered
+spot-scarcity-risk:
+  kinds: [stockout.zone]
+  match: cluster
+  claim: partial
+single-zone-nodepool:
+  kinds: [audit.nodepool_cannot_grow]
+  match: cluster
+  claim: partial
+  note: lookout flags pools at their ceiling; single-zone-ness is read by leeway, not audit
+reservation-mismatch-risk:
+  kinds: []
+  match: cluster
+  claim: gap
+autoscaler-out-of-resources:
+  kinds: [stockout.zone, pod.pending]
+  match: cluster
+  claim: covered
+dangling-compute-class:
+  kinds: []
+  claim: gap
+
+# ------------------------------------------------------------- networking
+subnet-ip-exhaustion:
+  kinds: [ipspace.range]
+  match: cluster
+  claim: partial
+  note: lookout reads the cluster's own pod/service/node ranges, not every VPC subnet
+cloud-nat-exhaustion:
+  kinds: []
+  match: none
+  claim: out-of-scope
+psc-routing-deadlock:
+  kinds: []
+  match: none
+  claim: out-of-scope
+mtu-packet-fragmentation:
+  kinds: []
+  match: none
+  claim: out-of-scope
+cloud-armor-false-positive:
+  kinds: []
+  match: none
+  claim: out-of-scope
+firewall-world-open-ingress:
+  kinds: []
+  match: none
+  claim: out-of-scope
+
+# ------------------------------------------------------------ gce compute
+gce-startup-script-status:
+  kinds: []
+  match: none
+  claim: out-of-scope
+mig-convergence-stalled:
+  kinds: []
+  match: none
+  claim: out-of-scope
+sole-tenant-headroom:
+  kinds: []
+  match: none
+  claim: out-of-scope
+orphaned-snapshots:
+  kinds: []
+  match: none
+  claim: out-of-scope
+
+# ------------------------------------------------ startup inventory SOP (prose)
+inventory-no-resourcequota:
+  kinds: []
+  match: namespace
+  claim: gap
+inventory-no-limitrange:
+  kinds: []
+  match: namespace
+  claim: gap
+inventory-no-startup-probe:
+  kinds: []
+  claim: gap
+inventory-writable-rootfs:
+  kinds: []
+  claim: gap
+inventory-added-capabilities:
+  kinds: [audit.privileged_container]
+  reasons: [DangerousCapability]
+  claim: partial
+  note: lookout flags the dangerous set; the SOP flags any added capability but SYS_ADMIN
