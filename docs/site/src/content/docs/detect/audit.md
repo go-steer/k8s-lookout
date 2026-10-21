@@ -90,7 +90,7 @@ Upgrade and patch readiness, read from the cloud provider: how far the control p
 
 ## [`lookout audit workloads`](/reference/audit-workloads/)
 
-Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, and standalone Jobs left suspended past a maintenance window. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
+Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, standalone Jobs left suspended past a maintenance window, and the rollout-safety claims for Service-backed workloads: liveness probes that fire before readiness on the same handler, serving containers with no preStop hook, and Deployment strategies that permit zero surviving pods. Answers "what has no safety net", as against `stab drain`, which answers "what breaks if I drain THIS node now". Scope with --namespace, -A, or --workload; scanned counts workloads examined.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
@@ -103,6 +103,9 @@ Workload reliability posture for workloads that are healthy right now: no PodDis
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
+| `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## See also

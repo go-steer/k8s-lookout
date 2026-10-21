@@ -50,16 +50,20 @@ func ptr[T any](v T) *T { return &v }
 // their existence is.
 func container(name string, readiness, liveness bool) corev1.Container {
 	c := corev1.Container{Name: name, Image: "example.com/" + name + ":v1"}
-	probe := func() *corev1.Probe {
+	// Readiness tighter than liveness, as a well-formed manifest has
+	// it; a pair on one handler with identical timings is itself a
+	// finding (audit.liveness_preempts_readiness), tested in
+	// rollout_test.go.
+	probe := func(period int32) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: &corev1.TCPSocketAction{},
-		}}
+		}, PeriodSeconds: period}
 	}
 	if readiness {
-		c.ReadinessProbe = probe()
+		c.ReadinessProbe = probe(5)
 	}
 	if liveness {
-		c.LivenessProbe = probe()
+		c.LivenessProbe = probe(10)
 	}
 	return c
 }

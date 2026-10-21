@@ -131,6 +131,9 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
+| `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
 | `orphan.lb` | warning | a forwarding rule or load balancer routes to zero endpoints and is still billing |
@@ -345,6 +348,10 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `constraint` | the label and field keys that narrow placement, sorted and capped at 8 |
 | `suspended_for` | how long spec.suspend has been true, rounded to whole days |
 | `suspended_since` | when the suspension is estimated to have started, RFC 3339 |
+| `services` | Services routing to the workload whose ports are not all scrape endpoints — the count that makes it "serving" for the rollout claims |
+| `service_names` | their names, capped at 8 with a +N more tail |
+| `termination_grace` | the pod template's terminationGracePeriodSeconds (the API default of 30s when unset), the ceiling any preStop hook would run inside |
+| `strategy` | the Deployment strategy setting that permits zero surviving pods: strategy.type=Recreate, or rollingUpdate.maxUnavailable=<value> |
 | `pdbs` | summary note: PodDisruptionBudgets seen in scope |
 | `hpas` | summary note: HorizontalPodAutoscalers seen in scope |
 | `jobs` | summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads` |
