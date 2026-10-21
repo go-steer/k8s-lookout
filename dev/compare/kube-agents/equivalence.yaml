@@ -157,6 +157,7 @@ public-control-plane:
   kinds: [audit.public_control_plane]
   match: cluster
   claim: covered
+  note: collect.py also flags dnsEndpointConfig.allowExternalTraffic, which only says the IAM-gated DNS endpoint serves user traffic; a ka-only hit on that arm is not an access-control finding
 podsecurity-gaps:
   kinds: [audit.podsecurity_gaps]
   match: namespace
@@ -208,6 +209,7 @@ master-behind:
   reasons: [ControlPlaneMinorBehind, ControlPlanePatchBehind]
   match: cluster
   claim: covered
+  note: collect.py compares with the channel defaultVersion (what a new cluster gets), so it fires on every cluster earlier in a rollout; lookout compares with GKE's upgradeTargetVersion for this cluster. A ka-only hit here is a rollout-window artefact, not a lookout miss
 pool-skew:
   kinds: [audit.version_behind]
   reasons: [NodePoolVersionSkew]
