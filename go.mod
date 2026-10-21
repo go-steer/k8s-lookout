@@ -1,6 +1,6 @@
 module github.com/go-steer/k8s-lookout
 
-go 1.26.9
+go 1.26.10
 
 require (
 	cloud.google.com/go/auth v0.23.3
