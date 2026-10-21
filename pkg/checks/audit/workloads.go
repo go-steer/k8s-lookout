@@ -424,6 +424,18 @@ type workloadIndex struct {
 }
 
 func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
+	return listIndex(ctx, client, ns, false)
+}
+
+// listTemplateOwners is listWorkloadIndex for a caller whose claims
+// read only the pod-template owners and the Services: Deployments,
+// StatefulSets, DaemonSets. Nothing else is listed, so nothing else
+// can be refused.
+func listTemplateOwners(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
+	return listIndex(ctx, client, ns, true)
+}
+
+func listIndex(ctx context.Context, client kubernetes.Interface, ns string, templateOwnersOnly bool) (*workloadIndex, error) {
 	ix := &workloadIndex{pdbsByNS: map[string]int{}, kindsRefused: map[string]checks.Refusal{}}
 	services, servicesRefused, err := snapshotFor(ctx, client, ns).Services(ctx)
 	if err != nil {
@@ -532,6 +544,9 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 			})
 		},
 	}
+	if templateOwnersOnly {
+		steps = steps[:3]
+	}
 	for i, step := range steps {
 		err := step()
 		if err == nil {
@@ -548,7 +563,7 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 			return nil, err
 		}
 		switch i {
-		case len(steps) - 1:
+		case 7:
 			ix.nodesRefused = &r
 		case 5:
 			ix.pdbsRefused = &r

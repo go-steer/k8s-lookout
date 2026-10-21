@@ -354,6 +354,7 @@ func viewCases() []viewCase {
 		{"audit hardening", []string{"-A"}, func(v *viewClients) checks.Command { return audit.HardeningCommand(auditDeps(v)) }},
 		{"audit netpol", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NetpolCommand(auditDeps(v)) }},
 		{"audit rbac", []string{"-A"}, func(v *viewClients) checks.Command { return audit.RBACCommand(auditDeps(v)) }},
+		{"audit rules", []string{"-A"}, func(v *viewClients) checks.Command { return audit.RulesCommand(auditDeps(v)) }},
 		{"audit upgrades", nil, func(v *viewClients) checks.Command { return audit.UpgradesCommand(auditDeps(v)) }},
 		{"audit workloads", []string{"-A"}, func(v *viewClients) checks.Command { return audit.WorkloadsCommand(auditDeps(v)) }},
 		// The one privileged command: under `view` it must change

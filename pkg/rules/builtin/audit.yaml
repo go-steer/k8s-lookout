@@ -1,0 +1,298 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The built-in posture rules: the CEL arm of the rules pilot.
+#
+# Each rule here has a Go twin (pkg/checks/audit/rollout.go, images.go)
+# and must produce the same finding, byte for byte, over the same
+# cluster — rules_test.go holds the two side by side. Expressions see
+# `object` (the workload as an unstructured map, with spec.replicas
+# already resolved the way the API server does: nil is 1; absent on a
+# DaemonSet), `kind`, `services` (every Service in scope) and
+# `thresholds`; plus handler(probe), deadline(probe) and capped(list).
+
+thresholds:
+  # Injected containers whose probes and hooks are the mesh's or the
+  # platform's business, not the workload owner's.
+  self_health_sidecars: [istio-proxy, cloud-sql-proxy, gke-metadata-server]
+  # Service port names that mark a scrape endpoint: a workload whose
+  # only Services expose these is not "serving".
+  metrics_port_names: [metrics, http-metrics, https-metrics, telemetry]
+  # Tag names that by convention move.
+  floating_tags: [latest, main, master, dev, nightly, stable, edge]
+
+# Shared sub-expressions, evaluated once per workload.
+locals:
+  - name: containers
+    expr: object.spec.template.spec.containers
+  - name: all_containers
+    expr: >-
+      (has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : [])
+      + containers
+  - name: labels
+    expr: >-
+      has(object.spec.template.metadata.labels) ? object.spec.template.metadata.labels : {}
+  # The Services selecting this template whose ports are not all scrape
+  # endpoints. ExternalName Services and Services with no selector route
+  # to nothing in the cluster.
+  - name: serving
+    expr: >-
+      services.filter(s,
+        s.metadata.namespace == object.metadata.namespace
+        && !(has(s.spec.type) && s.spec.type == "ExternalName")
+        && has(s.spec.selector) && s.spec.selector.size() > 0
+        && s.spec.selector.all(k, k in labels && labels[k] == s.spec.selector[k])
+        && has(s.spec.ports)
+        && s.spec.ports.exists(p, !(has(p.name) && p.name in thresholds.metrics_port_names)))
+  # The containers one of those Services routes to, by targetPort name
+  # or number (a port with no targetPort routes to the same number).
+  - name: behind
+    expr: >-
+      containers.filter(c, has(c.ports) && serving.exists(s, s.spec.ports.exists(p,
+        !(has(p.name) && p.name in thresholds.metrics_port_names)
+        && c.ports.exists(cp,
+          (has(p.targetPort) && type(p.targetPort) == string)
+            ? (has(cp.name) && cp.name == p.targetPort)
+            : cp.containerPort == ((has(p.targetPort) && p.targetPort != 0) ? p.targetPort : p.port)))))
+
+rules:
+  - id: liveness_preempts_readiness
+    kind: audit.liveness_preempts_readiness
+    doc: >-
+      liveness and readiness probe the same handler and liveness gives up no
+      later than readiness: the kubelet restarts the container before
+      readiness can take it out of the Service, so the readiness probe is
+      decoration; info when the two deadlines tie, warning when liveness is
+      strictly earlier
+    subjects: [Deployment, StatefulSet, DaemonSet]
+    reason: LivenessFiresFirst
+    severities: [warning, info]
+    severity_expr: >-
+      preempted.exists(c, deadline(c.livenessProbe) < deadline(c.readinessProbe)) ? "warning" : "info"
+    locals:
+      - name: preempted
+        expr: >-
+          containers.filter(c,
+            !(c.name in thresholds.self_health_sidecars)
+            && has(c.livenessProbe) && has(c.readinessProbe)
+            && handler(c.livenessProbe) != ""
+            && handler(c.livenessProbe) == handler(c.readinessProbe)
+            && c.livenessProbe[handler(c.livenessProbe)] == c.readinessProbe[handler(c.readinessProbe)]
+            && deadline(c.livenessProbe) <= deadline(c.readinessProbe))
+    match: preempted.size() > 0
+    message: >-
+      "liveness and readiness probe the same handler and liveness gives up first on "
+      + string(preempted.size()) + " of " + string(containers.size())
+      + " containers: the kubelet restarts the container before readiness can take it out of the Service, so every slow start or dependency blip is a restart with traffic still routed to it — "
+      + preempted.map(c, c.name + ": " + handler(c.livenessProbe) + " is both probes; liveness fails at ~"
+          + string(deadline(c.livenessProbe)) + "s, readiness at ~" + string(deadline(c.readinessProbe)) + "s").join("; ")
+    details:
+      - name: containers
+        expr: preempted.size()
+        doc: containers whose liveness probe fires no later than their readiness probe on the same handler
+      - name: container_names
+        expr: capped(preempted.map(c, c.name))
+        doc: their names, capped at 8 with a +N more tail
+      - name: total_containers
+        expr: containers.size()
+        doc: containers in the pod template, so `containers` reads as a fraction
+
+  - id: rollout_drops_traffic
+    kind: audit.rollout_drops_traffic
+    doc: >-
+      a Service-backed, multi-replica workload (or a Service-backed DaemonSet)
+      whose serving container has no preStop hook: SIGTERM races endpoint
+      removal on every rollout, drain and scale-down, and in-flight requests
+      get connection resets
+    subjects: [Deployment, StatefulSet, DaemonSet]
+    reason: NoPreStopOnServingContainer
+    severity: warning
+    locals:
+      - name: missing
+        expr: >-
+          behind.filter(c, !(c.name in thresholds.self_health_sidecars)
+            && !(has(c.lifecycle) && has(c.lifecycle.preStop))).map(c, c.name)
+      - name: grace
+        expr: >-
+          has(object.spec.template.spec.terminationGracePeriodSeconds)
+            ? object.spec.template.spec.terminationGracePeriodSeconds : 30
+    match: (kind == "DaemonSet" || object.spec.replicas > 1) && serving.size() > 0 && missing.size() > 0
+    message: >-
+      string(serving.size()) + " Service" + (serving.size() == 1 ? " routes" : "s route")
+      + " to this workload and " + string(missing.size()) + " of its " + string(behind.size())
+      + " serving container" + (behind.size() == 1 ? "" : "s") + (missing.size() == 1 ? " has" : " have")
+      + " no preStop hook: on every rollout, drain or scale-down the kubelet sends SIGTERM while endpoint removal is still propagating, and in-flight requests are answered with connection resets — a preStop sleep of a few seconds is the only thing in the pod lifecycle that delays SIGTERM"
+    details:
+      - name: containers
+        expr: missing.size()
+        doc: serving containers with no preStop hook
+      - name: container_names
+        expr: capped(missing)
+        doc: their names, capped at 8 with a +N more tail
+      - name: total_containers
+        expr: containers.size()
+        doc: containers in the pod template, so `containers` reads as a fraction
+      - name: services
+        expr: serving.size()
+        doc: Services routing to the workload whose ports are not all scrape endpoints
+      - name: service_names
+        expr: capped(serving.map(s, s.metadata.name))
+        doc: their names, capped at 8 with a +N more tail
+      - name: termination_grace
+        expr: string(grace) + "s"
+        doc: the pod template's terminationGracePeriodSeconds (the API default of 30s when unset)
+
+  - id: recreate_strategy
+    kind: audit.recreate_strategy
+    doc: >-
+      a Service-backed, multi-replica Deployment whose strategy permits zero
+      surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above
+      the replica count — so every rollout is an outage the Deployment never
+      reports
+    subjects: [Deployment]
+    reason: RecreateServiceBacked
+    severity: warning
+    match: >-
+      object.spec.replicas > 1 && serving.size() > 0
+      && has(object.spec.strategy.type) && object.spec.strategy.type == "Recreate"
+    message: >-
+      "strategy.type=Recreate with replicas=" + string(object.spec.replicas) + " and "
+      + string(serving.size()) + " Service" + (serving.size() == 1 ? "" : "s")
+      + " routing to it: the controller may take every pod down before the first replacement is Ready, so each rollout is an outage lasting an image pull plus a cold start — invisible afterwards, because the Deployment reports Available between rollouts"
+    details:
+      - name: replicas
+        expr: object.spec.replicas
+        doc: the Deployment's spec.replicas
+      - name: strategy
+        expr: '"strategy.type=Recreate"'
+        doc: the strategy setting that permits zero surviving pods
+      - name: services
+        expr: serving.size()
+        doc: Services routing to the workload whose ports are not all scrape endpoints
+      - name: service_names
+        expr: capped(serving.map(s, s.metadata.name))
+        doc: their names, capped at 8 with a +N more tail
+
+  - id: max_unavailable_is_all
+    kind: audit.recreate_strategy
+    doc: >-
+      a Service-backed, multi-replica Deployment whose strategy permits zero
+      surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above
+      the replica count — so every rollout is an outage the Deployment never
+      reports
+    subjects: [Deployment]
+    reason: MaxUnavailableIsAll
+    severity: warning
+    locals:
+      - name: mu
+        expr: >-
+          has(object.spec.strategy.rollingUpdate) && has(object.spec.strategy.rollingUpdate.maxUnavailable)
+            ? object.spec.strategy.rollingUpdate.maxUnavailable : null
+      # maxUnavailable resolved against the replica count the way the
+      # controller does: a percentage rounds down.
+      - name: unavailable
+        expr: >-
+          mu == null ? 0
+          : type(mu) == string
+            ? (mu.endsWith("%") ? int(mu.substring(0, mu.size() - 1)) * object.spec.replicas / 100 : 0)
+            : mu
+    match: >-
+      object.spec.replicas > 1 && serving.size() > 0
+      && !(has(object.spec.strategy.type) && object.spec.strategy.type == "Recreate")
+      && mu != null && unavailable >= object.spec.replicas
+    message: >-
+      "rollingUpdate.maxUnavailable=" + string(mu) + " with replicas=" + string(object.spec.replicas) + " and "
+      + string(serving.size()) + " Service" + (serving.size() == 1 ? "" : "s")
+      + " routing to it: the controller may take every pod down before the first replacement is Ready, so each rollout is an outage lasting an image pull plus a cold start — invisible afterwards, because the Deployment reports Available between rollouts"
+    details:
+      - name: replicas
+        expr: object.spec.replicas
+        doc: the Deployment's spec.replicas
+      - name: strategy
+        expr: '"rollingUpdate.maxUnavailable=" + string(mu)'
+        doc: the strategy setting that permits zero surviving pods
+      - name: services
+        expr: serving.size()
+        doc: Services routing to the workload whose ports are not all scrape endpoints
+      - name: service_names
+        expr: capped(serving.map(s, s.metadata.name))
+        doc: their names, capped at 8 with a +N more tail
+
+  - id: image_floating_tag
+    kind: audit.image_floating_tag
+    doc: >-
+      a container image reference names no particular bytes — a tag that by
+      convention moves (latest, main, master, dev, nightly, stable, edge) or no
+      tag at all, with no digest: the next pull may run different code with no
+      deploy and no record
+    subjects: [Deployment, StatefulSet, DaemonSet]
+    reason: FloatingTag
+    severity: warning
+    locals:
+      # The tag is the part after the last ':' of the part after the last
+      # '/', because a registry host may carry a port.
+      - name: refs
+        expr: >-
+          all_containers.map(c, {"name": c.name, "image": c.image,
+            "last": c.image.substring(c.image.lastIndexOf("/") + 1)})
+      - name: floating
+        expr: >-
+          refs.filter(r, r.image != "" && !r.image.contains("@sha256:") && r.last.contains(":")
+            && r.last.substring(r.last.lastIndexOf(":") + 1) in thresholds.floating_tags).map(r, r.name)
+    match: floating.size() > 0
+    message: >-
+      string(floating.size()) + " of " + string(all_containers.size())
+      + " containers run an image on a tag that moves (" + floating.join(", ")
+      + ") with no digest: what runs after the next pull is whatever the registry serves under that tag then, and a rollback resolves the same reference"
+    details:
+      - name: containers
+        expr: floating.size()
+        doc: containers whose image reference is on a moving tag with no digest
+      - name: container_names
+        expr: capped(floating)
+        doc: their names, capped at 8 with a +N more tail
+      - name: total_containers
+        expr: all_containers.size()
+        doc: containers in the pod template, init containers included
+
+  - id: image_no_tag
+    kind: audit.image_floating_tag
+    doc: >-
+      a container image reference names no particular bytes — a tag that by
+      convention moves (latest, main, master, dev, nightly, stable, edge) or no
+      tag at all, with no digest: the next pull may run different code with no
+      deploy and no record
+    subjects: [Deployment, StatefulSet, DaemonSet]
+    reason: NoTag
+    severity: warning
+    locals:
+      - name: untagged
+        expr: >-
+          all_containers.filter(c, c.image != "" && !c.image.contains("@sha256:")
+            && !c.image.substring(c.image.lastIndexOf("/") + 1).contains(":")).map(c, c.name)
+    match: untagged.size() > 0
+    message: >-
+      string(untagged.size()) + " of " + string(all_containers.size())
+      + " containers run an image with no tag at all (" + untagged.join(", ")
+      + "), which the runtime resolves to :latest: the reference names no particular bytes"
+    details:
+      - name: containers
+        expr: untagged.size()
+        doc: containers whose image reference carries no tag
+      - name: container_names
+        expr: capped(untagged)
+        doc: their names, capped at 8 with a +N more tail
+      - name: total_containers
+        expr: all_containers.size()
+        doc: containers in the pod template, init containers included

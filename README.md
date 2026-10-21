@@ -165,6 +165,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `audit hardening` | workload security posture: privileged containers, host namespaces, hostPath mounts, used default-SA tokens, namespaces with no PSA |
 | `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |
 | `audit rbac` | RBAC posture: bindings that grant cluster-admin (by name or by rules), roles with wildcard verbs or resources; platform-reconciled defaults excluded |
+| `audit rules` | PILOT: the rollout-safety and image-tag claims evaluated from the built-in CEL rule file; byte-identical to the Go detectors by test |
 | `audit cluster` † | GKE cluster security configuration: Workload Identity, legacy metadata endpoints, an internet-reachable control plane |
 | `audit upgrades` † | upgrade and patch readiness: how far behind the control plane and node pools are, and whether anything closes the gap on its own |
 | `audit exemptions` | the `--exemptions` file itself: which reviewed opt-outs have lapsed, and which are about to |
