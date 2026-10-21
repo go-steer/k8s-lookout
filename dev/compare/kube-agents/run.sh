@@ -18,7 +18,7 @@
 #
 # Usage:
 #   dev/compare/kube-agents/run.sh --kube-agents-dir DIR --project ID --out DIR \
-#       [--lookout BIN] [--leeway BIN] [--phase roster|ka|lookout|prose|watchers|crosswalk|all]
+#       [--lookout BIN] [--leeway BIN] [--phase roster|ka|lookout|prose|watchers|crosswalk|arm3|all]
 #       [--only-streams a,b] [--only-lookout stem,stem] [--exclude-clusters name,name] [--waste-timeout 45m] [--lookout-timeout 5m]
 #
 # Phases needing network + gcloud credentials: ka, lookout, prose,
@@ -90,5 +90,16 @@ fi
 if phase crosswalk; then
   log "▸ phase crosswalk"
   python3 "$HERE/crosswalk.py" --out "$COMPARE_OUT"
+fi
+if phase arm3; then
+  # Replays kube-agents' document pipeline with no model, from the collector
+  # manifests and from lookout's records, through kube-agents' own validator.
+  log "▸ phase arm3"
+  for audit in compliance-audit obtainability-audit; do
+    for src in collector lookout; do
+      python3 "$HERE/findings-adapter.py" --kube-agents-dir "$KUBE_AGENTS_DIR" --out "$COMPARE_OUT" --audit "$audit" --source "$src"
+    done
+    python3 "$HERE/findings-adapter.py" --kube-agents-dir "$KUBE_AGENTS_DIR" --out "$COMPARE_OUT" --audit "$audit" --source lookout --allow-lookout-binary
+  done
 fi
 log "done: $COMPARE_OUT"

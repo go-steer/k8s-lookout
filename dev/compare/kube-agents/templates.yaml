@@ -1,0 +1,325 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Per-check templates for the fields kube-agents' findings document makes
+# the model write: title, impact, recommendation.{action,rationale,risk},
+# remediation.{kind,note}. Placeholders: {object} {kind} {name} {namespace}
+# {cluster} {cluster_name} {project} {location} {excerpt} {reason}.
+#
+# These are deliberately plain. The question findings-adapter.py answers
+# is how much of the document is a function of the finding; whether a
+# templated rationale is as good as a model's is a separate (human) read.
+#
+# remediation.kind: `manual` (a note), `gcloud` (the exact command in note)
+# or `manifest` (needs a repo path, which an adapter without a GitOps
+# workspace cannot know -- so none here; collect.py's agent used `manual`
+# for 161 of its 180 findings and `gcloud` for the rest).
+
+_defaults: &defaults
+  risk: "Apply in a maintenance window and watch the workload's readiness and error rate for one rollout; roll back the change if either regresses."
+
+# ------------------------------------------------------------ compliance
+privileged-container:
+  <<: *defaults
+  title: "{object} in {namespace} runs a privileged or SYS_ADMIN-capable container"
+  impact: "A process escape from this container is a root shell on the node, with every other pod on it exposed."
+  action: "Remove `privileged: true` and the dangerous capabilities from {object}'s container securityContext; grant the one capability the process needs, if any, by name."
+  rationale: "Privileged mode disables every kernel isolation boundary at once; naming the needed capability keeps the workload running with the smallest surface."
+  remediation: {kind: manual, note: "Edit the workload's pod template: securityContext.privileged=false, capabilities.drop=[ALL], add back only what is required. Evidence: {excerpt}"}
+host-namespace:
+  <<: *defaults
+  title: "{object} in {namespace} shares a host namespace"
+  impact: "The container sees the node's processes, network or IPC, so a compromise reaches every other workload on the node."
+  action: "Set hostNetwork, hostPID and hostIPC to false on {object}; expose ports through a Service instead of the host network."
+  rationale: "Host namespaces are the node's, not the pod's; nothing short of removing the flag restores the isolation."
+  remediation: {kind: manual, note: "Remove hostNetwork/hostPID/hostIPC from the pod spec of {object}. Evidence: {excerpt}"}
+hostpath-mount:
+  <<: *defaults
+  title: "{object} in {namespace} mounts a hostPath"
+  impact: "A path on the node's filesystem is readable or writable from the container; a writable mount is a path to node compromise."
+  action: "Replace the hostPath volume on {object} with a PersistentVolumeClaim, ConfigMap or emptyDir; if a node path is genuinely required, mount it readOnly and pin it with an admission policy."
+  rationale: "hostPath bypasses the storage abstraction and the scheduler; the data it reaches is the node's."
+  remediation: {kind: manual, note: "Change the volume type in {object}'s pod template. Evidence: {excerpt}"}
+cluster-admin-binding:
+  <<: *defaults
+  title: "{object} grants cluster-admin to a non-system subject"
+  impact: "The bound subjects can do anything to any object in the cluster, including rewriting RBAC to keep that power."
+  action: "Replace the cluster-admin reference in {object} with a Role or ClusterRole scoped to the verbs and resources the subject uses."
+  rationale: "cluster-admin is the one role that cannot be narrowed later without an audit; least privilege has to be granted up front."
+  risk: "A narrower role can break an automation that relied on cluster-admin; take the subject's recent audit-log verbs as the starting rule set."
+  remediation: {kind: manual, note: "Rewrite the roleRef in {object}. Evidence: {excerpt}"}
+wildcard-rbac:
+  <<: *defaults
+  title: "{object} grants wildcard verbs or resources"
+  impact: "A '*' rule grants every present and future verb or resource in the API group, including ones added after the role was written."
+  action: "Enumerate the verbs and resources {object} needs and replace each '*' with that list."
+  rationale: "Wildcards grant what nobody reviewed; an explicit list is reviewable and does not grow with the API."
+  risk: "A missed verb breaks the binding's subject at its next call; test the narrowed role with `kubectl auth can-i --as` for the subject first."
+  remediation: {kind: manual, note: "Edit the rules of {object}. Evidence: {excerpt}"}
+netpol-missing:
+  <<: *defaults
+  title: "Namespace {namespace} on {cluster_name} has no NetworkPolicy"
+  impact: "Every pod in the namespace accepts traffic from every pod in the cluster; a compromised workload elsewhere reaches these directly."
+  action: "Apply a default-deny ingress (and egress) NetworkPolicy to {namespace}, then allow the known callers by namespace or pod selector."
+  rationale: "Default-deny at the namespace is the smallest change that closes the exposure; per-pod allow rules then document the real traffic."
+  risk: "Unlisted callers break on apply. Capture the namespace's current flows (Dataplane V2 flow logs or a day of connection metrics) before enforcing."
+  remediation: {kind: manual, note: "Add a default-deny NetworkPolicy to namespace {namespace} (policyTypes [Ingress, Egress], empty podSelector), then the allow rules. Evidence: {excerpt}"}
+default-sa-automount:
+  <<: *defaults
+  title: "{object} in {namespace} mounts the default ServiceAccount token"
+  impact: "A pod that calls no Kubernetes API still carries a credential; a code-execution bug in it becomes an API client."
+  action: "Set automountServiceAccountToken: false on the default ServiceAccount in {namespace} (or on {object}'s pod spec); give workloads that need the API their own ServiceAccount."
+  rationale: "A token nothing uses is pure exposure; turning automount off at the ServiceAccount covers every pod that falls back to it."
+  risk: "A workload that quietly used the default token (an operator's sidecar, a metrics exporter) loses API access; check its logs for 401s after the change."
+  remediation: {kind: manual, note: "Patch ServiceAccount default in {namespace}: automountServiceAccountToken=false. Evidence: {excerpt}"}
+workload-identity-off:
+  <<: *defaults
+  title: "Workload Identity is off on {cluster_name}"
+  impact: "Pods calling Google Cloud APIs use the node's service account; every workload on the node shares one identity and its permissions."
+  action: "Enable Workload Identity on the cluster and set workload-metadata=GKE_METADATA on every node pool; bind each workload's KSA to its own GSA."
+  rationale: "Per-workload identity is the only way to give a pod exactly the cloud permissions it needs."
+  risk: "Node pools are recreated to switch metadata mode; workloads relying on the node SA break until they have a bound KSA."
+  remediation: {kind: gcloud, note: "gcloud container clusters update {cluster_name} --location {location} --project {project} --workload-pool={project}.svc.id.goog\ngcloud container node-pools update <pool> --cluster {cluster_name} --location {location} --project {project} --workload-metadata=GKE_METADATA"}
+legacy-metadata:
+  <<: *defaults
+  title: "Node pool {name} on {cluster_name} exposes the legacy metadata endpoint"
+  impact: "Any pod can read the node's service-account token from the metadata server."
+  action: "Set the node pool's workload metadata mode to GKE_METADATA (which also disables the legacy v0.1/v1beta1 endpoints)."
+  rationale: "The legacy endpoints exist only for compatibility; nothing running on a current GKE node needs them."
+  risk: "The node pool is recreated; drain-sensitive workloads need a PodDisruptionBudget first."
+  remediation: {kind: gcloud, note: "gcloud container node-pools update {name} --cluster {cluster_name} --location {location} --project {project} --workload-metadata=GKE_METADATA"}
+public-control-plane:
+  <<: *defaults
+  title: "Control plane of {cluster_name} is reachable from the internet"
+  impact: "The API server accepts connections from any address; a leaked credential or an API-server CVE is exploitable from anywhere."
+  action: "Enable master authorized networks on {cluster_name} with the operator and CI egress CIDRs, or switch to a private endpoint; if the DNS endpoint is open, disable allow-external-traffic on it."
+  rationale: "Restricting the endpoint to known sources removes the network path an attacker needs before authentication even matters."
+  risk: "An incomplete CIDR list locks operators and CI out of the API; confirm VPN, NAT and runner egress ranges with the network owner first."
+  remediation: {kind: gcloud, note: "gcloud container clusters update {cluster_name} --location {location} --project {project} --enable-master-authorized-networks --master-authorized-networks=<CIDR[,CIDR...]>"}
+podsecurity-gaps:
+  <<: *defaults
+  title: "Namespace {namespace} on {cluster_name} enforces no Pod Security standard"
+  impact: "Nothing at admission stops a pod in this namespace asking for privileged mode, host namespaces or a hostPath."
+  action: "Label {namespace} with pod-security.kubernetes.io/enforce=baseline (restricted where the workloads allow it), after a dry run with the warn and audit labels."
+  rationale: "Admission is the only place the policy holds for every future pod, not just the ones audited today."
+  risk: "A workload that violates the profile is rejected at its next restart; the warn label for a week shows which ones first."
+  remediation: {kind: manual, note: "kubectl label ns {namespace} pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted, then enforce. Evidence: {excerpt}"}
+kcc-object-wedged:
+  <<: *defaults
+  title: "Config Connector object {object} in {namespace} is not reconciling"
+  impact: "The declared Google Cloud resource and the live one have diverged, and nothing is converging them."
+  action: "Read the object's status conditions and the Config Connector controller logs, fix the declared spec or the IAM the controller lacks, and confirm Ready=True."
+  rationale: "A wedged KCC object silently stops drift correction for the resource it owns."
+  remediation: {kind: manual, note: "kubectl -n {namespace} describe {object}. Evidence: {excerpt}"}
+image-floating-tag:
+  <<: *defaults
+  title: "{object} in {namespace} runs an image without a pinned tag or digest"
+  impact: "What runs after the next pull is whatever the registry serves under that tag; rollbacks and audits cannot name the bytes."
+  action: "Pin {object}'s image to an immutable tag or an @sha256 digest and let the deployment pipeline bump it."
+  rationale: "A floating tag makes the running software unreproducible and the supply chain unauditable."
+  remediation: {kind: manual, note: "Set the container image to <repo>:<version>@sha256:<digest> in {object}. Evidence: {excerpt}"}
+unbound-sa-automount:
+  <<: *defaults
+  title: "{object} in {namespace} mounts a token for a ServiceAccount nothing grants"
+  impact: "The pod carries a Kubernetes credential with no purpose; it adds attack surface and nothing else."
+  action: "Set automountServiceAccountToken: false on {object}'s ServiceAccount or pod spec; if the workload does call the API, bind the ServiceAccount to the Role it needs instead."
+  rationale: "A token with no binding can only be misused; either the grant or the token should go."
+  remediation: {kind: manual, note: "Patch the ServiceAccount used by {object}: automountServiceAccountToken=false. Evidence: {excerpt}"}
+lb-world-open:
+  <<: *defaults
+  title: "{object} in {namespace} publishes a management port to the internet"
+  impact: "An administrative or database port is reachable from any address, with only the application's own authentication in the way."
+  action: "Set loadBalancerSourceRanges on {object} to the operator CIDRs, or make the Service internal and reach it through a VPN or IAP."
+  rationale: "Management ports are the ones brute-forced first; source restriction removes the exposure without touching the application."
+  risk: "A CIDR list that misses a legitimate client breaks that client; confirm the ranges before applying."
+  remediation: {kind: manual, note: "Add spec.loadBalancerSourceRanges to {object} or annotate it as an internal load balancer. Evidence: {excerpt}"}
+anonymous-rbac-binding:
+  <<: *defaults
+  title: "{object} binds system:anonymous or system:unauthenticated"
+  impact: "Anyone who can reach the API server, authenticated or not, holds the bound role."
+  action: "Remove the anonymous or unauthenticated subject from {object}; if a discovery endpoint must stay open, bind system:public-info-viewer alone."
+  rationale: "A grant to everyone is a grant to the attacker; no workload needs it."
+  remediation: {kind: manual, note: "Edit the subjects of {object}. Evidence: {excerpt}"}
+
+# --------------------------------------------------------- obtainability
+no-requests:
+  <<: *defaults
+  title: "{object} in {namespace} sets no CPU or memory request"
+  impact: "The scheduler bin-packs the pod as zero; it lands on full nodes and is the first evicted under pressure."
+  action: "Set resources.requests for CPU and memory on every container of {object}, from its observed usage plus headroom."
+  rationale: "Requests are what the scheduler and the eviction manager read; without them placement and priority are accidents."
+  remediation: {kind: manual, note: "Add resources.requests to the containers of {object}. Evidence: {excerpt}"}
+no-memory-limit:
+  <<: *defaults
+  title: "{object} in {namespace} sets no memory limit"
+  impact: "A leak or a burst grows until the node is out of memory and the kubelet evicts whichever pod it chooses."
+  action: "Set resources.limits.memory on {object}'s containers at the request plus the headroom a known burst needs."
+  rationale: "A memory limit converts a node-wide incident into a single OOM-killed container."
+  remediation: {kind: manual, note: "Add resources.limits.memory to the containers of {object}. Evidence: {excerpt}"}
+no-pdb:
+  <<: *defaults
+  title: "{object} in {namespace} has replicas but no PodDisruptionBudget"
+  impact: "A node drain or an upgrade can evict every replica at once; the eviction API has nothing to refuse."
+  action: "Add a PodDisruptionBudget selecting {object}'s pods with minAvailable set to the number the service needs to stay up."
+  rationale: "The PDB is the only signal voluntary disruptions respect; without it replica count buys nothing during maintenance."
+  risk: "A PDB tighter than the replica count blocks drains and upgrades entirely; keep maxUnavailable at least 1."
+  remediation: {kind: manual, note: "Create a PodDisruptionBudget in {namespace} for {object}. Evidence: {excerpt}"}
+blocking-pdb:
+  <<: *defaults
+  title: "{object} in {namespace} blocks every disruption"
+  impact: "Node drains, upgrades and autoscaler scale-downs stall on this budget until someone intervenes."
+  action: "Loosen {object} so at least one pod may be evicted (maxUnavailable >= 1), or raise the replica count above minAvailable."
+  rationale: "A budget that permits zero disruptions is a maintenance outage waiting to happen, not protection."
+  remediation: {kind: manual, note: "Edit {object}: set maxUnavailable to 1 or lower minAvailable. Evidence: {excerpt}"}
+no-hpa:
+  <<: *defaults
+  title: "{object} in {namespace} runs several replicas with no autoscaler"
+  impact: "The replica count is a guess that is wrong whenever load is unusual, in either direction."
+  action: "Add a HorizontalPodAutoscaler for {object} targeting CPU or a request-rate metric, with the current replica count as the floor."
+  rationale: "Fixed replica counts cost money at the low end and availability at the high end."
+  remediation: {kind: manual, note: "Create an HPA for {object}. Evidence: {excerpt}"}
+hpa-cannot-scale:
+  <<: *defaults
+  title: "{object} in {namespace} is an autoscaler that cannot scale"
+  impact: "The HPA exists but can never change the replica count, so nothing will respond to load."
+  action: "Fix the condition the excerpt names on {object}: set minReplicas below maxReplicas, add requests to the target's containers, or point the HPA at a workload that exists."
+  rationale: "An inert autoscaler is worse than none, because it reports healthy."
+  remediation: {kind: manual, note: "Edit {object} or its target workload. Evidence: {excerpt}"}
+rigid-scheduling:
+  <<: *defaults
+  title: "{object} in {namespace} can schedule on few or no nodes"
+  impact: "A node loss or a drain leaves replicas Pending; the autoscaler cannot help because no pool satisfies the constraints."
+  action: "Relax {object}'s nodeSelector, affinity or tolerations to match more than one node, or add a node pool that matches them."
+  rationale: "Scheduling constraints are promises the cluster has to be able to keep under failure, not just on a good day."
+  remediation: {kind: manual, note: "Review the placement constraints of {object}. Evidence: {excerpt}"}
+no-spread:
+  <<: *defaults
+  title: "{object} in {namespace} has replicas with no spread constraint"
+  impact: "All replicas can land on one node or in one zone; a single failure takes the whole workload."
+  action: "Add topologySpreadConstraints (zone, then hostname) or pod anti-affinity to {object}'s pod template."
+  rationale: "Replica count only buys availability when the replicas are apart."
+  remediation: {kind: manual, note: "Add topologySpreadConstraints to {object}. Evidence: {excerpt}"}
+probes-readiness:
+  <<: *defaults
+  title: "{object} in {namespace} has no readiness probe"
+  impact: "Traffic reaches the pod the moment the container starts, including during warm-up and after it has wedged."
+  action: "Add a readinessProbe to {object}'s container that checks the dependency the service needs before serving."
+  rationale: "Readiness is the only way a pod can refuse traffic without dying."
+  remediation: {kind: manual, note: "Add readinessProbe to the containers of {object}. Evidence: {excerpt}"}
+probes-liveness:
+  <<: *defaults
+  title: "{object} in {namespace} has no liveness probe"
+  impact: "A hung process stays Running forever; nothing restarts it."
+  action: "Add a livenessProbe to {object}'s container that fails only when the process cannot recover on its own."
+  rationale: "Liveness is the automatic restart; without it a deadlock is a page."
+  risk: "An over-eager liveness probe restarts healthy pods under load; keep failureThreshold and period generous."
+  remediation: {kind: manual, note: "Add livenessProbe to the containers of {object}. Evidence: {excerpt}"}
+single-replica:
+  <<: *defaults
+  title: "{object} in {namespace} serves traffic from a single replica"
+  impact: "Any node drain, upgrade or crash takes the service fully down; no PodDisruptionBudget can prevent it."
+  action: "Raise {object} to at least 2 replicas with a spread constraint, or document it as a non-HA service."
+  rationale: "One replica is a single point of failure by definition."
+  remediation: {kind: manual, note: "Set spec.replicas >= 2 on {object}. Evidence: {excerpt}"}
+schedule-never-succeeds:
+  <<: *defaults
+  title: "{object} in {namespace} keeps firing without succeeding"
+  impact: "The job's work is not being done, and each run consumes resources and may leave partial state."
+  action: "Read the last failed Job's pod logs for {object}, fix the cause, and suspend the CronJob until it is fixed if runs have side effects."
+  rationale: "A CronJob that always fails is a silent outage of whatever it was supposed to do."
+  remediation: {kind: manual, note: "kubectl -n {namespace} logs job/<last-job>. Evidence: {excerpt}"}
+rollout-drops-traffic:
+  <<: *defaults
+  title: "{object} in {namespace} can take every replica down during a rollout"
+  impact: "The update strategy allows all pods to be unavailable at once; every deploy is a brief outage."
+  action: "Set rollingUpdate.maxUnavailable to 0 (or well under the replica count) and maxSurge >= 1 on {object}."
+  rationale: "A rolling update is only rolling when some replicas must stay up."
+  remediation: {kind: manual, note: "Edit strategy.rollingUpdate on {object}. Evidence: {excerpt}"}
+strategy-causes-downtime:
+  <<: *defaults
+  title: "{object} in {namespace} uses the Recreate strategy"
+  impact: "Every update stops all replicas before starting new ones; the service is down for the duration."
+  action: "Switch {object} to RollingUpdate unless the workload truly cannot run two versions at once."
+  rationale: "Recreate is for singletons that hold an exclusive resource, not for services."
+  remediation: {kind: manual, note: "Set strategy.type RollingUpdate on {object}. Evidence: {excerpt}"}
+cronjob-runs-overlap:
+  <<: *defaults
+  title: "{object} in {namespace} lets runs overlap"
+  impact: "A slow run is joined by the next; they compete for the same work and resources."
+  action: "Set concurrencyPolicy: Forbid (or Replace) on {object}."
+  rationale: "Overlap is almost never intended; Forbid makes the schedule honest."
+  remediation: {kind: manual, note: "Edit spec.concurrencyPolicy on {object}. Evidence: {excerpt}"}
+service-selects-nothing:
+  <<: *defaults
+  title: "{object} in {namespace} selects no pods"
+  impact: "Every client of the Service gets connection refused; nothing is behind it."
+  action: "Fix the selector on {object} to match the intended pods' labels, or delete the Service if nothing should be behind it."
+  rationale: "A Service with no endpoints is a broken edge that no probe on the workload will report."
+  remediation: {kind: manual, note: "Compare spec.selector of {object} with the pod labels. Evidence: {excerpt}"}
+service-port-unresolved:
+  <<: *defaults
+  title: "{object} in {namespace} targets a port no container declares"
+  impact: "Traffic to the Service is forwarded to a port nothing listens on."
+  action: "Align targetPort on {object} with a declared containerPort name or number."
+  rationale: "Named ports only resolve when both sides use the same name."
+  remediation: {kind: manual, note: "Edit spec.ports[].targetPort on {object}. Evidence: {excerpt}"}
+liveness-preempts-readiness:
+  <<: *defaults
+  title: "{object} in {namespace} has a liveness probe that fires before readiness can pass"
+  impact: "A slow start is killed before it finishes; the pod restarts in a loop under load or cold cache."
+  action: "Add a startupProbe to {object} or raise the liveness initialDelaySeconds/failureThreshold above the readiness window."
+  rationale: "Liveness must never be stricter than readiness or startup can never complete."
+  remediation: {kind: manual, note: "Adjust probe timings on {object}. Evidence: {excerpt}"}
+spread-not-achieved:
+  <<: *defaults
+  title: "{object} in {namespace} declares a spread it does not have"
+  impact: "The replicas sit in fewer domains than the constraint asks; the protection is nominal."
+  action: "Find what pins {object}'s pods (zonal volumes, capacity, affinity) and fix that; if the constraint is advisory, make it DoNotSchedule."
+  rationale: "ScheduleAnyway is a preference the scheduler drops under pressure."
+  remediation: {kind: manual, note: "Inspect pod placement of {object}. Evidence: {excerpt}"}
+prestop-outlives-grace:
+  <<: *defaults
+  title: "{object} in {namespace} has a preStop hook longer than its grace period"
+  impact: "The kubelet kills the container mid-hook; the graceful shutdown never completes."
+  action: "Raise terminationGracePeriodSeconds on {object} above the preStop duration, or shorten the hook."
+  rationale: "Grace period bounds the hook; a hook that exceeds it is a hard kill with extra steps."
+  remediation: {kind: manual, note: "Edit terminationGracePeriodSeconds or lifecycle.preStop on {object}. Evidence: {excerpt}"}
+rwo-claim-contended:
+  <<: *defaults
+  title: "{object} in {namespace} sends two pods to one ReadWriteOnce volume"
+  impact: "The second pod cannot attach; it stays ContainerCreating until the first releases the disk."
+  action: "Use a StatefulSet with volumeClaimTemplates, a ReadWriteMany class, or a Recreate strategy for {object}."
+  rationale: "RWO means one node at a time; a rolling update across nodes cannot satisfy it."
+  remediation: {kind: manual, note: "Change the storage or update strategy of {object}. Evidence: {excerpt}"}
+hpa-floors-at-one:
+  <<: *defaults
+  title: "{object} in {namespace} may scale a service to a single replica"
+  impact: "At low load the autoscaler removes the redundancy; the first drain or crash is an outage."
+  action: "Raise minReplicas on {object} to 2."
+  rationale: "The floor is where availability lives; the ceiling is where cost lives."
+  remediation: {kind: manual, note: "Set spec.minReplicas: 2 on {object}. Evidence: {excerpt}"}
+pdb-overlapping:
+  <<: *defaults
+  title: "{object} in {namespace} is covered by more than one PodDisruptionBudget"
+  impact: "The eviction API refuses evictions for pods matched by two budgets; drains stall."
+  action: "Narrow the selectors so each pod matches exactly one PodDisruptionBudget."
+  rationale: "Kubernetes treats overlapping budgets as a configuration error and blocks eviction."
+  remediation: {kind: manual, note: "Edit the selectors of the budgets in {namespace}. Evidence: {excerpt}"}
+untargeted-compute-class-workload:
+  <<: *defaults
+  title: "{object} in {namespace} does not select a ComputeClass"
+  impact: "The pod lands on whatever pool has room, outside the priority ladder the cluster was designed around."
+  action: "Add nodeSelector cloud.google.com/compute-class=<class> to {object}'s pod template."
+  rationale: "ComputeClasses only govern the pods that opt in."
+  remediation: {kind: manual, note: "Add the compute-class nodeSelector to {object}. Evidence: {excerpt}"}

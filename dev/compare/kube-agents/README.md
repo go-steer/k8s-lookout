@@ -54,6 +54,7 @@ dev/compare/kube-agents/run.sh \
 | `prose` | [`prose-run.sh`](prose-run.sh): the onboarding `cluster_inventory_audit_sop.md` recipes (the one audit kube-agents still runs as prose) as kubectl+jq | yes |
 | `watchers` | [`watchers-run.sh`](watchers-run.sh): the `no_agent` watchers' leaf scripts — `stall_report.py --json` per namespace, `fleet_upgrade_report.py --readiness` | yes |
 | `crosswalk` | [`crosswalk.py`](crosswalk.py): joins both sides on [`equivalence.yaml`](equivalence.yaml) and writes `report/{crosswalk,timing,cost}.md`, `summary.json`, `findings.json` | no |
+| `arm3` | [`findings-adapter.py`](findings-adapter.py): replays kube-agents' findings-document pipeline with no model — collector manifest or lookout records → kube-agents' own `draft_findings` → [`templates.yaml`](templates.yaml) for the fields the model writes → kube-agents' own `validate_findings` (what `finish` runs); writes `arm3/<audit>.<source>.{findings,result}.json`. `--allow-lookout-binary` adds `lookout` to the validator's `INSPECTION_BINARIES` allow-list, which otherwise rejects any lookout-sourced document. Measures validity, not quality. | no |
 
 `--only-streams a,b` limits the `ka` phase; `--waste-timeout` bounds
 `fleet_waste.py` (default 45m: it reads a week of Cloud Monitoring per
