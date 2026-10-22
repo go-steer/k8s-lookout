@@ -942,3 +942,72 @@ func TestGoldenCensus(t *testing.T) {
 	}
 	checktest.Golden(t, "testdata/top-census.golden", res.Stdout)
 }
+
+func TestMetricsUnavailableSpecFallback(t *testing.T) {
+	objs := []runtime.Object{
+		podRequesting("prod", "api-1", "node-1", "app", "1000m", "512Mi", "500m", "256Mi"),
+		podRequesting("prod", "worker-1", "node-2", "work", "2000m", "2Gi", "1500m", "1Gi"),
+		podRequesting("prod", "small-1", "node-1", "side", "500m", "4Gi", "100m", "2Gi"),
+	}
+	cs := fake.NewClientset(objs...)
+	deps := top.Deps{
+		Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+		Metrics: func(context.Context) (metricsv.Interface, error) {
+			return nil, errors.New("the server could not find the requested resource (get pods.metrics.k8s.io)")
+		},
+		Provider: func(context.Context) (cloud.Provider, error) { return cloud.NoProvider, nil },
+		Now:      func() time.Time { return fixedNow },
+	}
+	cmd := top.New(deps)
+
+	t.Run("default sort by cpu request", func(t *testing.T) {
+		res := checktest.Run(t, cmd, "--namespace=prod")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		recs := findingLines(t, res.Stdout)
+		if len(recs) != 4 {
+			t.Fatalf("records = %d, want 1 metrics.unavailable + 3 top.pod: %v", len(recs), recs)
+		}
+		if recs[0]["kind"] != "metrics.unavailable" || recs[0]["severity"] != emit.SeverityInfo {
+			t.Errorf("first record = %v, want info metrics.unavailable", recs[0])
+		}
+		var names []string
+		for _, r := range recs[1:] {
+			if r["kind"] != "top.pod" || r["source"] != "spec" {
+				t.Errorf("pod row = %v, want kind=top.pod source=spec", r)
+			}
+			names = append(names, r["name"])
+		}
+		if got := strings.Join(names, ","); got != "worker-1,api-1,small-1" {
+			t.Errorf("cpu-ranked pods = %q, want worker-1,api-1,small-1", got)
+		}
+		w := recs[1]
+		if w["cpu_request"] != "1500m" || w["memory_request"] != "1.0GiB" || w["cpu_limit"] != "2000m" || w["memory_limit"] != "2.0GiB" || w["node"] != "node-2" {
+			t.Errorf("worker-1 row = %v, want 1500m/1.0GiB request, 2000m/2.0GiB limit, node-2", w)
+		}
+		sum := summaryLine(t, res.Stdout)
+		if sum["scanned"] != "3" || sum["findings"] != "4" {
+			t.Errorf("summary = %v, want scanned=3 findings=4", sum)
+		}
+	})
+
+	t.Run("sort by memory request", func(t *testing.T) {
+		res := checktest.Run(t, cmd, "--namespace=prod", "--sort=memory")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		recs := findingLines(t, res.Stdout)
+		var names []string
+		for _, r := range recs[1:] {
+			names = append(names, r["name"])
+		}
+		if got := strings.Join(names, ","); got != "small-1,worker-1,api-1" {
+			t.Errorf("memory-ranked pods = %q, want small-1,worker-1,api-1", got)
+		}
+	})
+
+	t.Run("contract verification", func(t *testing.T) {
+		checktest.VerifyContract(t, cmd, "--namespace=prod")
+	})
+}

@@ -88,6 +88,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -192,6 +193,8 @@ func New(deps Deps) checks.Command {
 				Help: "exploratory dump: emit every sampled row regardless of --top-warn (info severity below it), sorted by pct descending; containers capped at --limit"},
 			{Name: "limit", Type: emit.FlagInt, Default: strconv.Itoa(defaultAllLimit),
 				Help: "row cap for the --all container dump"},
+			{Name: "sort", Type: emit.FlagString, Default: saturation.ResourceCPU,
+				Help: "sort dimension for spec-fallback pod rows when metrics.k8s.io is unavailable: cpu or memory"},
 			{Name: "show-unlimited", Type: emit.FlagBool, Default: "false",
 				Help: "list each container missing a cpu or memory limit individually (default: one aggregate count)"},
 			{Name: "show-unrequested", Type: emit.FlagBool, Default: "false",
@@ -206,6 +209,8 @@ func New(deps Deps) checks.Command {
 			checks.Kind("top.unlimited_container", "one container that sets no cpu/memory limit (--show-unlimited)", emit.SeverityInfo),
 			checks.Kind("top.unrequested", "how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero", emit.SeverityInfo),
 			checks.Kind("top.unrequested_container", "one container that sets no cpu/memory request (--show-unrequested)", emit.SeverityInfo),
+			checks.Kind("metrics.unavailable", "metrics.k8s.io could not be read — falling back to pod spec requests and limits", emit.SeverityInfo),
+			checks.Kind("top.pod", "pod spec requests and limits summary emitted when metrics.k8s.io is unavailable", emit.SeverityInfo),
 			checks.CloudUnavailableKind(),
 			checks.UnreadKind(),
 		},
@@ -216,7 +221,12 @@ func New(deps Deps) checks.Command {
 			{Name: "allocatable", Doc: "the node's allocatable capacity (top.node), same unit as usage"},
 			{Name: "pct", Doc: "usage as a percent of the limit/allocatable, one decimal"},
 			{Name: "container", Doc: "container name within the pod"},
-			{Name: "node", Doc: "node the pod runs on (top.saturation; top.node carries the node as name)"},
+			{Name: "node", Doc: "node the pod runs on (top.saturation, top.pod; top.node carries the node as name)"},
+			{Name: "source", Doc: "top.pod: data source for the row (spec when metrics.k8s.io is unavailable)"},
+			{Name: "cpu_request", Doc: "top.pod: sum of container CPU requests on the pod (millicores)"},
+			{Name: "memory_request", Doc: "top.pod: sum of container memory requests on the pod (IEC bytes)"},
+			{Name: "cpu_limit", Doc: "top.pod: sum of container CPU limits on the pod (millicores)"},
+			{Name: "memory_limit", Doc: "top.pod: sum of container memory limits on the pod (IEC bytes)"},
 			{Name: "pods", Doc: "top.unlimited/top.unrequested: pods in scope with at least one container missing a cpu or memory limit (resp. request)"},
 			{Name: "containers", Doc: "top.unlimited/top.unrequested: containers in scope missing a cpu or memory limit (resp. request)"},
 			{Name: "missing", Doc: "top.unlimited_container/top.unrequested_container: which dimensions are absent (cpu, memory, or both)"},
@@ -288,6 +298,13 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if limit < 1 {
 		return 0, emit.UsageErrorf("--limit must be at least 1, got %d", limit)
 	}
+	sortBy := inv.Flags.String("sort")
+	if sortBy == "" {
+		sortBy = saturation.ResourceCPU
+	}
+	if sortBy != saturation.ResourceCPU && sortBy != saturation.ResourceMemory {
+		return 0, emit.UsageErrorf("--sort must be cpu or memory, got %q", sortBy)
+	}
 	history := inv.Flags.Duration("history")
 	if history < 0 {
 		return 0, emit.UsageErrorf("--history must not be negative, got %s", history)
@@ -314,10 +331,6 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	client, err := deps.client(ctx)
-	if err != nil {
-		return 0, err
-	}
-	metrics, err := deps.metrics(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -363,20 +376,21 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 
 	// THE one metrics.k8s.io read over the scope (§5), through the
-	// saturation source's fetcher seam.
-	fetcher := saturation.NewScopedMetricsPodFetcher(metrics, client, listNS)
-	samples, err := fetcher.FetchPodUsage(ctx)
-	if err != nil {
-		// Every row is usage over a limit or allocatable, so a refused
-		// metrics read is the whole answer: one read.unavailable record
-		// (#546). The built-in `view` role does not grant
-		// metrics.k8s.io itself; metrics-server's aggregated role adds
-		// it to view on clusters that run metrics-server.
-		if ok, emitErr := checks.RefusedAnswer(inv.Out, err,
-			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
-			return scanned, emitErr
+	// saturation source's fetcher seam. When metrics.k8s.io is
+	// unavailable, degrade explicitly with metrics.unavailable and
+	// rank pods by their spec requests/limits instead of returning
+	// zero rows.
+	var samples []saturation.ContainerSample
+	metrics, metricsErr := deps.metrics(ctx)
+	if metricsErr == nil {
+		fetcher := saturation.NewScopedMetricsPodFetcher(metrics, client, listNS)
+		samples, metricsErr = fetcher.FetchPodUsage(ctx)
+	}
+	if metricsErr != nil {
+		if ctx.Err() != nil {
+			return 0, metricsErr
 		}
-		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", err)
+		return runSpecFallback(ctx, client, inv, listNS, podSet, sortBy, limit, scanned, metricsErr)
 	}
 
 	var entries []rated
@@ -558,6 +572,162 @@ func run(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if err := emitCensus(inv.Out, unrequestedCensus, noRequest, showUnrequested, limitRanges); err != nil {
 		return 0, err
 	}
+	return scanned, nil
+}
+
+// podSpecSummary holds one pod's summed container requests and limits
+// for the spec-fallback path when metrics.k8s.io is unavailable.
+type podSpecSummary struct {
+	namespace string
+	name      string
+	node      string
+	cpuReq    float64
+	memReq    float64
+	cpuLim    float64
+	memLim    float64
+}
+
+// runSpecFallback handles the case where metrics.k8s.io cannot be read:
+// it emits an explicit metrics.unavailable info finding and ranks active
+// pods in scope by their summed container requests/limits (source=spec).
+func runSpecFallback(
+	ctx context.Context,
+	client kubernetes.Interface,
+	inv emit.Invocation,
+	listNS string,
+	podSet map[string]bool,
+	sortBy string,
+	limit int,
+	scanned int,
+	metricsErr error,
+) (int, error) {
+	podList, err := client.CoreV1().Pods(listNS).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, err,
+			"no container or node was judged: neither metrics.k8s.io nor core pods could be listed"); ok {
+			return scanned, emitErr
+		}
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, metricsErr,
+			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
+			return scanned, emitErr
+		}
+		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", metricsErr)
+	}
+
+	var specs []podSpecSummary
+	for i := range podList.Items {
+		p := &podList.Items[i]
+		if podSet != nil && !podSet[p.Namespace+"/"+p.Name] {
+			continue
+		}
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		var s podSpecSummary
+		s.namespace = p.Namespace
+		s.name = p.Name
+		s.node = p.Spec.NodeName
+		for _, c := range p.Spec.Containers {
+			if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				s.cpuReq += float64(q.MilliValue())
+			}
+			if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				s.memReq += float64(q.Value())
+			}
+			if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+				s.cpuLim += float64(q.MilliValue())
+			}
+			if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+				s.memLim += float64(q.Value())
+			}
+		}
+		specs = append(specs, s)
+	}
+
+	if podSet == nil {
+		scanned += len(specs)
+	}
+
+	if len(specs) == 0 {
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, metricsErr,
+			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
+			return scanned, emitErr
+		}
+		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", metricsErr)
+	}
+
+	if r, ok := checks.ForbiddenRefusal(metricsErr); ok {
+		if err := inv.Out.Emit(checks.RefusedFinding(r,
+			"usage is read from metrics.k8s.io — falling back to pod spec requests and limits (source=spec)")); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := inv.Out.Emit(emit.Finding{
+			Kind:     "metrics.unavailable",
+			Severity: emit.SeverityInfo,
+			Reason:   "MetricsUnavailable",
+			Message:  fmt.Sprintf("metrics.k8s.io is unavailable (%s) — falling back to pod spec requests and limits (source=spec)", emit.MaskString(metricsErr.Error())),
+		}); err != nil {
+			return 0, err
+		}
+	}
+
+	sort.Slice(specs, func(i, j int) bool {
+		a, b := specs[i], specs[j]
+		if sortBy == saturation.ResourceMemory {
+			if a.memReq != b.memReq {
+				return a.memReq > b.memReq
+			}
+			if a.cpuReq != b.cpuReq {
+				return a.cpuReq > b.cpuReq
+			}
+		} else {
+			if a.cpuReq != b.cpuReq {
+				return a.cpuReq > b.cpuReq
+			}
+			if a.memReq != b.memReq {
+				return a.memReq > b.memReq
+			}
+		}
+		if a.namespace != b.namespace {
+			return a.namespace < b.namespace
+		}
+		return a.name < b.name
+	})
+
+	if len(specs) > limit {
+		specs = specs[:limit]
+	}
+
+	for _, s := range specs {
+		cpuReqStr := fmtValue(saturation.ResourceCPU, s.cpuReq)
+		memReqStr := fmtValue(saturation.ResourceMemory, s.memReq)
+		cpuLimStr := fmtValue(saturation.ResourceCPU, s.cpuLim)
+		memLimStr := fmtValue(saturation.ResourceMemory, s.memLim)
+		details := []emit.Field{
+			{Key: "source", Value: "spec"},
+			{Key: "cpu_request", Value: cpuReqStr},
+			{Key: "memory_request", Value: memReqStr},
+			{Key: "cpu_limit", Value: cpuLimStr},
+			{Key: "memory_limit", Value: memLimStr},
+		}
+		if s.node != "" {
+			details = append(details, emit.Field{Key: "node", Value: s.node})
+		}
+		if err := inv.Out.Emit(emit.Finding{
+			Kind:         "top.pod",
+			Severity:     emit.SeverityInfo,
+			Namespace:    s.namespace,
+			KindOfObject: "Pod",
+			Name:         s.name,
+			Reason:       "SpecFallback",
+			Message:      fmt.Sprintf("pod spec resources (metrics.k8s.io unavailable): request cpu=%s memory=%s, limit cpu=%s memory=%s", cpuReqStr, memReqStr, cpuLimStr, memLimStr),
+			Details:      details,
+		}); err != nil {
+			return 0, err
+		}
+	}
+
 	return scanned, nil
 }
 

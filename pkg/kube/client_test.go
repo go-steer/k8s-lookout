@@ -15,10 +15,16 @@
 package kube
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // twoContexts is a kubeconfig naming two clusters, with the SECOND as
@@ -137,5 +143,67 @@ func TestBuildConfigRateLimits(t *testing.T) {
 	}
 	if custom.QPS != 80 || custom.Burst != 160 {
 		t.Errorf("custom QPS/Burst = %v/%d, want 80/160", custom.QPS, custom.Burst)
+	}
+}
+
+func TestUnreachableEndpointFailsFast(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+
+	// Bind and immediately close a local listener to obtain a port that
+	// deterministically refuses connections.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	kc := fmt.Sprintf(`apiVersion: v1
+kind: Config
+current-context: dead
+clusters:
+- name: dead
+  cluster:
+    server: https://%s
+    insecure-skip-tls-verify: true
+contexts:
+- name: dead
+  context:
+    cluster: dead
+    user: u
+users:
+- name: u
+  user:
+    token: test-token
+`, addr)
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(path, []byte(kc), 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	client, err := BuildClient(Options{
+		Kubeconfig:  path,
+		DialTimeout: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("BuildClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	for i := range 5 {
+		_, err = client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+		if err == nil {
+			t.Fatalf("call %d succeeded against closed endpoint %s", i, addr)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("call %d burned context deadline instead of failing fast: %v", i, err)
+		}
+	}
+	elapsed := time.Since(start)
+	if elapsed >= 500*time.Millisecond {
+		t.Errorf("5 sequential calls to unreachable endpoint took %s, want < 500ms", elapsed)
 	}
 }

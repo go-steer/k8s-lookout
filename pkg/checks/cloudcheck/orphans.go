@@ -115,6 +115,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // defaultOrphanMinAge is the --min-age default: long enough that
@@ -133,6 +134,8 @@ func OrphansCommand(deps Deps) checks.Command {
 				Help: "resource classes to sweep, comma-separated: disks, lbs, addresses, nodepools (nodepools is opt-in: never in the default, judged on one observation, and reads cluster Nodes and Pods)"},
 			{Name: "min-age", Type: emit.FlagDuration, Default: defaultOrphanMinAge.String(),
 				Help: "report a disk only when unattached at least this long (age from last detach, else creation), and an address only when reserved at least this long; disks and addresses with no datable age are always reported"},
+			{Name: "project-wide", Type: emit.FlagBool, Default: "false",
+				Help: "sweep unattached disks across the entire GCP project instead of scoping to the target cluster's zone or region"},
 		},
 		Kinds: []checks.KindField{
 			checks.Kind("orphan.disk", "a GCE disk has been unattached for at least --min-age and is still billing", emit.SeverityWarning),
@@ -167,6 +170,7 @@ func OrphansCommand(deps Deps) checks.Command {
 			{Name: "total_max_node_count", Doc: "orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits"},
 			{Name: "autoprovisioned", Doc: "orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise"},
 			{Name: "nodepools_skipped", Doc: "summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod)"},
+			{Name: "scope", Doc: "summary-line note: disk sweep scope — cluster-zones when filtered to the target cluster's zone/region, or project when sweeping the whole GCP project (--project-wide or cluster location unknown)"},
 			{Name: "class", Doc: "cloud.unavailable (reason=PermissionDenied, SweepFailed or RuleUnresolved): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools), or that the unresolved rule belongs to (lbs); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission, \"sweep failed\", or its count of unresolved rules"},
 			{Name: "error", Doc: "cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API) — nothing from the failed class is reported, never a partial list; (reason=RuleUnresolved): the error on that one forwarding rule's backend chain (e.g. a 404 for a backend service deleted mid-sweep). Masked and cut to 300 characters"},
 			{Name: "permission", Doc: "cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it"},
@@ -206,6 +210,8 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	}
 	api, hasOrphans := provider.Orphans()
 	cc, hasConfig := provider.ClusterConfig()
+	projectWide := inv.Flags.Bool("project-wide")
+	clusterLoc := resolveClusterLocation(ctx, provider)
 
 	now := deps.now()
 	plain := func(fn func() (int, error)) func() (int, string, error) {
@@ -222,7 +228,7 @@ func runOrphans(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 		run          func() (int, string, error)
 	}{
 		{"disks", "disk sweep", want.disks, cloud.CapabilityOrphans, hasOrphans,
-			plain(func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge) })},
+			plain(func() (int, error) { return sweepDisks(ctx, api, inv, now, minAge, clusterLoc, projectWide) })},
 		{"addresses", "address sweep", want.addresses, cloud.CapabilityOrphans, hasOrphans,
 			func() (int, string, error) { return sweepAddresses(ctx, api, inv, now, minAge) }},
 		{"nodepools", "node-pool sweep", want.nodepools, cloud.CapabilityClusterConfig, hasConfig,
@@ -408,12 +414,52 @@ func emitClassFailed(inv emit.Invocation, p cloud.Provider, class string, capabi
 	return class + ": sweep failed", nil
 }
 
+// resolveClusterLocation returns the target cluster's zone or region when
+// known from the cloud provider identity or multi-cluster target selection.
+func resolveClusterLocation(ctx context.Context, p cloud.Provider) string {
+	if id, ok := p.(cloud.Identity); ok {
+		if loc := strings.TrimSpace(id.Location()); loc != "" {
+			return loc
+		}
+		if reg := strings.TrimSpace(id.Region()); reg != "" {
+			return reg
+		}
+	}
+	if sel := kube.SelectionFrom(ctx); sel.Target != nil {
+		if loc := strings.TrimSpace(sel.Target.Location); loc != "" {
+			return loc
+		}
+	}
+	return ""
+}
+
+// diskMatchesLocation reports whether a disk in zone belongs to a cluster
+// at loc (exact zone match for zonal clusters, or "<region>-*" prefix match
+// for regional clusters).
+func diskMatchesLocation(zone, loc string) bool {
+	return zone == loc || strings.HasPrefix(zone, loc+"-")
+}
+
 // sweepDisks reports unattached disks at least minAge idle; it
-// returns how many unattached disks it examined.
-func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration) (int, error) {
+// returns how many unattached disks in scope it examined.
+func sweepDisks(ctx context.Context, api cloud.OrphanAPI, inv emit.Invocation, now time.Time, minAge time.Duration, clusterLoc string, projectWide bool) (int, error) {
 	disks, err := api.OrphanDisks(ctx)
 	if err != nil {
 		return 0, providerFailure(err)
+	}
+	scope := "project"
+	if !projectWide && clusterLoc != "" {
+		scope = "cluster-zones"
+		filtered := disks[:0:0]
+		for _, d := range disks {
+			if diskMatchesLocation(d.Zone, clusterLoc) {
+				filtered = append(filtered, d)
+			}
+		}
+		disks = filtered
+	}
+	if err := inv.Out.Note("scope", scope); err != nil {
+		return 0, err
 	}
 	var old []cloud.OrphanDisk
 	for _, d := range disks {
