@@ -161,6 +161,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `cloud quota` † | per-project quota usage vs limit, ranked nearest-to-exhaustion |
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |
 | `net probe-from` § | the same checks from inside one named pod's network, for faults only that pod sees; adds an ephemeral container to the pod |
+| `audit all` | run every posture detector in one pass over a shared cluster snapshot, stamping `check=<subcommand>` |
 | `audit workloads` | healthy workloads with no safety net: no PDB, single replica, no probes, no spread, autoscalers that structurally cannot scale |
 | `audit hardening` | workload security posture: privileged containers, host namespaces, hostPath mounts, used default-SA tokens, namespaces with no PSA |
 | `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |

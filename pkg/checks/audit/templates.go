@@ -16,13 +16,9 @@ package audit
 
 import (
 	"context"
-	"fmt"
 	"sort"
 
-	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -72,100 +68,132 @@ type podTemplate struct {
 // the whole population, where a missing kind would make a live policy
 // read as selecting nothing.
 func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns string, tolerate bool) ([]podTemplate, []kindRefusal, error) {
+	snap := snapshotFor(ctx, client, ns)
 	var out []podTemplate
 	add := func(kind, namespace, name string, labels map[string]string, spec corev1.PodSpec) {
 		out = append(out, podTemplate{
 			kind: kind, namespace: namespace, name: name, labels: labels, spec: spec,
 		})
 	}
-	steps := []func() error{
-		func() error {
-			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
-				l, err := client.AppsV1().Deployments(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+	steps := []struct {
+		what string
+		kind string
+		run  func() (*checks.Refusal, error)
+	}{
+		{
+			what: "deployments",
+			kind: "Deployment",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.Deployments(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) {
-				add("Deployment", d.Namespace, d.Name, d.Spec.Template.Labels, d.Spec.Template.Spec)
-			})
+				for i := range items {
+					d := &items[i]
+					add("Deployment", d.Namespace, d.Name, d.Spec.Template.Labels, d.Spec.Template.Spec)
+				}
+				return nil, nil
+			},
 		},
-		func() error {
-			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
-				l, err := client.AppsV1().StatefulSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+		{
+			what: "statefulsets",
+			kind: "StatefulSet",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.StatefulSets(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(s *appsv1.StatefulSet) {
-				add("StatefulSet", s.Namespace, s.Name, s.Spec.Template.Labels, s.Spec.Template.Spec)
-			})
+				for i := range items {
+					s := &items[i]
+					add("StatefulSet", s.Namespace, s.Name, s.Spec.Template.Labels, s.Spec.Template.Spec)
+				}
+				return nil, nil
+			},
 		},
-		func() error {
-			return listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
-				l, err := client.AppsV1().DaemonSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+		{
+			what: "daemonsets",
+			kind: "DaemonSet",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.DaemonSets(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.DaemonSet) {
-				add("DaemonSet", d.Namespace, d.Name, d.Spec.Template.Labels, d.Spec.Template.Spec)
-			})
+				for i := range items {
+					d := &items[i]
+					add("DaemonSet", d.Namespace, d.Name, d.Spec.Template.Labels, d.Spec.Template.Spec)
+				}
+				return nil, nil
+			},
 		},
-		func() error {
-			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
-				l, err := client.BatchV1().CronJobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+		{
+			what: "cronjobs",
+			kind: "CronJob",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.CronJobs(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(c *batchv1.CronJob) {
-				t := c.Spec.JobTemplate.Spec.Template
-				add("CronJob", c.Namespace, c.Name, t.Labels, t.Spec)
-			})
+				for i := range items {
+					c := &items[i]
+					t := c.Spec.JobTemplate.Spec.Template
+					add("CronJob", c.Namespace, c.Name, t.Labels, t.Spec)
+				}
+				return nil, nil
+			},
 		},
-		func() error {
-			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
-				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+		{
+			what: "jobs",
+			kind: "unowned Job",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.Jobs(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(j *batchv1.Job) {
-				// A Job spawned by a CronJob repeats its owner's template;
-				// the CronJob is the object an operator edits.
-				if len(j.OwnerReferences) > 0 {
-					return
+				for i := range items {
+					j := &items[i]
+					// A Job spawned by a CronJob repeats its owner's template;
+					// the CronJob is the object an operator edits.
+					if len(j.OwnerReferences) > 0 {
+						continue
+					}
+					add("Job", j.Namespace, j.Name, j.Spec.Template.Labels, j.Spec.Template.Spec)
 				}
-				add("Job", j.Namespace, j.Name, j.Spec.Template.Labels, j.Spec.Template.Spec)
-			})
+				return nil, nil
+			},
 		},
-		func() error {
-			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-				l, err := client.CoreV1().Pods(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+		{
+			what: "pods",
+			kind: "unowned Pod",
+			run: func() (*checks.Refusal, error) {
+				items, r, err := snap.Pods(ctx)
+				if err != nil || r != nil {
+					return r, err
 				}
-				return l.Items, l.Continue, nil
-			}, func(p *corev1.Pod) {
-				// Every pod with an owner is a copy of a template judged
-				// above; only hand-rolled pods are their own subject.
-				if len(p.OwnerReferences) > 0 {
-					return
+				for i := range items {
+					p := &items[i]
+					// Every pod with an owner is a copy of a template judged
+					// above; only hand-rolled pods are their own subject.
+					if len(p.OwnerReferences) > 0 {
+						continue
+					}
+					add("Pod", p.Namespace, p.Name, p.Labels, p.Spec)
 				}
-				add("Pod", p.Namespace, p.Name, p.Labels, p.Spec)
-			})
+				return nil, nil
+			},
 		},
 	}
 	var refused []kindRefusal
-	for i, step := range steps {
-		err := step()
-		if r, ok := checks.ForbiddenRefusal(err); ok && tolerate {
-			refused = append(refused, kindRefusal{Refusal: r, kind: templateStepKinds[i]})
-			continue
-		}
+	for _, step := range steps {
+		r, err := step.run()
 		if err != nil {
 			return nil, nil, err
+		}
+		if r != nil {
+			if tolerate {
+				refused = append(refused, kindRefusal{Refusal: *r, kind: step.kind})
+				continue
+			}
+			return nil, nil, fatalRefusal(r, "listing "+step.what)
 		}
 	}
 
@@ -182,10 +210,6 @@ func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns strin
 	return out, refused, nil
 }
 
-// templateStepKinds names listPodTemplates' steps, in order, as the
-// subjects a refusal costs.
-var templateStepKinds = []string{"Deployment", "StatefulSet", "DaemonSet", "CronJob", "unowned Job", "unowned Pod"}
-
 // kindRefusal is one pod-template kind whose List RBAC refused.
 type kindRefusal struct {
 	checks.Refusal
@@ -197,28 +221,20 @@ type kindRefusal struct {
 // exactly the one asked for otherwise. A --namespace that does not
 // exist is an error, not an empty clean scan.
 func listNamespacesInScope(ctx context.Context, client kubernetes.Interface, ns string) ([]*corev1.Namespace, error) {
-	if ns != metav1.NamespaceAll {
-		got, err := client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("namespace %q not found", ns)
-			}
-			return nil, fmt.Errorf("getting namespace %s: %w", ns, err)
-		}
-		return []*corev1.Namespace{got}, nil
-	}
-	var out []*corev1.Namespace
-	err := listPages("namespaces", func(o metav1.ListOptions) ([]corev1.Namespace, string, error) {
-		l, err := client.CoreV1().Namespaces().List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(n *corev1.Namespace) {
-		out = append(out, n)
-	})
+	items, r, err := snapshotFor(ctx, client, ns).Namespaces(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if r != nil {
+		ctxWhat := "listing namespaces"
+		if ns != metav1.NamespaceAll {
+			ctxWhat = "getting namespace " + ns
+		}
+		return nil, fatalRefusal(r, ctxWhat)
+	}
+	out := make([]*corev1.Namespace, len(items))
+	for i := range items {
+		out[i] = &items[i]
 	}
 	return out, nil
 }

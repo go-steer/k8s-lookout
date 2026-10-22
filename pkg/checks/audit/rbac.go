@@ -24,7 +24,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
-	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
@@ -186,37 +185,42 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	snap := snapshotFor(ctx, client, listNS)
 	objs := rbacObjects{clusterScope: inv.Scope.AllNamespaces}
 	// Every claim joins bindings to the rules of the roles they point
 	// at, so a refused List leaves nothing that can be judged honestly:
 	// the answer is one read.unavailable record per refused kind
 	// (#546). The built-in `view` role grants no RBAC kind at all.
 	var refused []checks.Refusal
-	collect := func(err error) error {
-		if err == nil {
-			return nil
-		}
-		if r, ok := checks.ForbiddenRefusal(err); ok {
-			refused = append(refused, r)
-			return nil
-		}
-		return err
-	}
-	if err := collect(state.ListRoleBindings(ctx, client, listNS, func(r *rbacv1.RoleBinding) { objs.roleBindings = append(objs.roleBindings, *r) })); err != nil {
+	if items, r, err := snap.RoleBindings(ctx); err != nil {
 		return 0, err
+	} else if r != nil {
+		refused = append(refused, *r)
+	} else {
+		objs.roleBindings = items
 	}
-	if err := collect(state.ListRoles(ctx, client, listNS, func(r *rbacv1.Role) { objs.roles = append(objs.roles, *r) })); err != nil {
+	if items, r, err := snap.Roles(ctx); err != nil {
 		return 0, err
+	} else if r != nil {
+		refused = append(refused, *r)
+	} else {
+		objs.roles = items
 	}
 	if objs.clusterScope {
-		if err := collect(state.ListClusterRoleBindings(ctx, client, func(r *rbacv1.ClusterRoleBinding) {
-			objs.clusterRoleBindings = append(objs.clusterRoleBindings, *r)
-		})); err != nil {
+		if items, r, err := snap.ClusterRoleBindings(ctx); err != nil {
 			return 0, err
+		} else if r != nil {
+			refused = append(refused, *r)
+		} else {
+			objs.clusterRoleBindings = items
 		}
 	}
-	if err := collect(state.ListClusterRoles(ctx, client, func(r *rbacv1.ClusterRole) { objs.clusterRoles = append(objs.clusterRoles, *r) })); err != nil {
+	if items, r, err := snap.ClusterRoles(ctx); err != nil {
 		return 0, err
+	} else if r != nil {
+		refused = append(refused, *r)
+	} else {
+		objs.clusterRoles = items
 	}
 	if len(refused) > 0 {
 		for _, r := range refused {
