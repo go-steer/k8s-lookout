@@ -151,12 +151,13 @@ func EnvelopeFields() []string {
 }
 
 // SummaryNoteFields returns the summary-line note keys the envelope
-// owns: the Writer's (exempt, context, hidden, policy, suppressed) and
-// the MCP response limit's (ResponseNoteFields). Like EnvelopeFields
-// these are implicitly declared for every command, and a command may
-// neither set nor redeclare them.
+// owns: the Writer's (exempt, context, clusters, clusters_failed,
+// hidden, policy, suppressed) and the MCP response limit's
+// (ResponseNoteFields). Like EnvelopeFields these are implicitly
+// declared for every command, and a command may neither set nor
+// redeclare them.
 func SummaryNoteFields() []string {
-	return append([]string{"exempt", "context", "hidden", "policy", "suppressed"}, ResponseNoteFields()...)
+	return append([]string{"exempt", "context", "clusters", "clusters_failed", "hidden", "policy", "suppressed"}, ResponseNoteFields()...)
 }
 
 // ResponseNoteFields returns the summary-line note keys `lookout mcp`

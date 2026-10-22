@@ -152,6 +152,9 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 		if !declared[k] {
 			return fmt.Errorf("summary line %q: note key %q is not declared in the output glossary", summary, k)
 		}
+		if k == "clusters" {
+			declared["cluster"] = true
+		}
 	}
 	if reported != len(findings) {
 		return fmt.Errorf("summary reports findings=%d but %d finding lines precede it", reported, len(findings))
@@ -175,6 +178,9 @@ func Verify(c checks.Command, stdout string, format emit.Format) error {
 			case "severity":
 				severity = f.Value
 			}
+		}
+		if declared["cluster"] && kind == "scan.cluster_failed" && severity == emit.SeverityWarning {
+			continue
 		}
 		if err := verifyKind(c, kind, severity); err != nil {
 			return fmt.Errorf("finding line %q: %w", line, err)

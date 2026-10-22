@@ -34,7 +34,10 @@ MCP tool: `k8s_triage_workload` (MCP profile: `triage`)
 | `--format` | logfmt | output format: logfmt\|json (one record per line either way) |
 | `--timeout` | 30s | abort the invocation after this long (exit 1) |
 | `--kubeconfig` | — | path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config |
+| `--kubeconfig-dir` | — | directory of kubeconfig files to fan out across (mutually exclusive with --kubeconfig); each finding is stamped with cluster=<label> and the summary reports clusters=<n> |
 | `--context` | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line |
+| `--contexts` | — | comma-separated kubeconfig contexts to fan out across, or '*' for every context in the selected kubeconfig(s) (mutually exclusive with --context); each finding is stamped with cluster=<label> and the summary reports clusters=<n> |
+| `--concurrency` | 4 | maximum concurrent cluster executions when fanning out with --contexts or --kubeconfig-dir |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
 ## Finding kinds

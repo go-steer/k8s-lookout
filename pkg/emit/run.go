@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/exempt"
@@ -202,6 +204,26 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	if timeout <= 0 {
 		return usageError(stderr, cfg.Name, fmt.Errorf("--timeout must be positive, got %s", timeout))
 	}
+	concurrency := values.Int("concurrency")
+	if concurrency <= 0 {
+		return usageError(stderr, cfg.Name, fmt.Errorf("--concurrency must be positive, got %d", concurrency))
+	}
+	kubeconfigDir := strings.TrimSpace(values.String("kubeconfig-dir"))
+	if values.IsSet("kubeconfig-dir") && kubeconfigDir == "" {
+		return usageError(stderr, cfg.Name, errors.New("--kubeconfig-dir must not be empty"))
+	}
+	contextsRaw := strings.TrimSpace(values.String("contexts"))
+	if values.IsSet("contexts") {
+		if _, _, err := kube.ParseContextsList(contextsRaw); err != nil {
+			return usageError(stderr, cfg.Name, err)
+		}
+	}
+	if scope.Context != "" && (contextsRaw != "" || values.IsSet("contexts")) {
+		return usageError(stderr, cfg.Name, errors.New("--context and --contexts are mutually exclusive"))
+	}
+	if scope.Kubeconfig != "" && (kubeconfigDir != "" || values.IsSet("kubeconfig-dir")) {
+		return usageError(stderr, cfg.Name, errors.New("--kubeconfig and --kubeconfig-dir are mutually exclusive"))
+	}
 
 	// Exemptions load before the scan starts and are bound to one
 	// instant, so every finding in a run is judged against the same
@@ -227,11 +249,15 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	// context before calling Run (kube.WithTarget). It stays: the flags
 	// cannot name a second cluster for the same call.
 	if sel := kube.SelectionFrom(ctx); sel.Target != nil {
-		if scope.Kubeconfig != "" || scope.Context != "" {
+		if scope.Kubeconfig != "" || kubeconfigDir != "" || scope.Context != "" || contextsRaw != "" {
 			return usageError(stderr, cfg.Name, fmt.Errorf("--kubeconfig and --context do not apply: this call's cluster is %q", sel.Target.Name))
 		}
-	} else {
+	} else if kubeconfigDir == "" && contextsRaw == "" {
 		ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
+	}
+
+	if kubeconfigDir != "" || contextsRaw != "" {
+		return runFleet(ctx, cfg, scope, values, positionals, stdin, stdout, stderr, format, timeout, exemptions, kubeconfigDir, contextsRaw, concurrency, now)
 	}
 
 	// The deadline starts here, before the Writer exists, so that the
@@ -429,4 +455,236 @@ func (cfg RunConfig) helpText(fs *flag.FlagSet) string {
 	fs.PrintDefaults()
 	fs.SetOutput(io.Discard)
 	return b.String()
+}
+
+type targetOutcome struct {
+	buf        []byte
+	scanned    int
+	findings   int
+	exempted   int
+	suppressed int
+	hidden     int
+	policy     Policy
+	err        error
+	ctxErr     error
+	usageErr   error
+}
+
+func runFleet(
+	ctx context.Context,
+	cfg RunConfig,
+	scope Scope,
+	values FlagValues,
+	positionals []string,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	format Format,
+	timeout time.Duration,
+	exemptions *exempt.Set,
+	kubeconfigDir, contextsRaw string,
+	concurrency int,
+	now func() time.Time,
+) int {
+	targets, err := kube.ResolveFleetTargets(scope.Kubeconfig, kubeconfigDir, contextsRaw)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, MaskString(err.Error()))
+		return ExitRuntime
+	}
+
+	var stdinBytes []byte
+	if cfg.Stdin != nil && stdin != nil {
+		stdinBytes, _ = io.ReadAll(stdin)
+	}
+
+	start := now()
+	outcomes := make([]targetOutcome, len(targets))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, target := range targets {
+		wg.Add(1)
+		go func(idx int, t kube.FleetTarget) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			targetCtx := kube.WithSelection(ctx, kube.Selection{
+				Kubeconfig: t.Kubeconfig,
+				Context:    t.Context,
+			})
+			targetCtx, cancel := context.WithTimeout(targetCtx, timeout)
+			defer cancel()
+
+			var opts []WriterOption
+			if exemptions != nil {
+				opts = append(opts, WithExemptions(exemptions))
+			}
+			if kube.CallerFiltered(targetCtx) && cfg.CallerFiltered {
+				opts = append(opts, WithVisibility(kube.NewCallerVisibility(targetCtx)))
+			}
+
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, format, opts...)
+			if err != nil {
+				outcomes[idx] = targetOutcome{err: err}
+				return
+			}
+			if err := w.Stamp("cluster", t.Label); err != nil {
+				outcomes[idx] = targetOutcome{err: err}
+				return
+			}
+
+			targetScope := scope
+			targetScope.Kubeconfig = t.Kubeconfig
+			targetScope.Context = t.Context
+
+			scanned, err := cfg.Check(targetCtx, Invocation{
+				Scope:      targetScope,
+				Flags:      values,
+				Args:       positionals,
+				In:         bytes.NewReader(stdinBytes),
+				Out:        w,
+				Exemptions: exemptions,
+			})
+			if err != nil {
+				if IsUsageError(err) {
+					outcomes[idx] = targetOutcome{usageErr: err}
+					return
+				}
+				var failBuf bytes.Buffer
+				failWriter, wErr := NewWriter(&failBuf, format, opts...)
+				if wErr == nil {
+					_ = failWriter.Stamp("cluster", t.Label)
+					_ = failWriter.Emit(Finding{
+						Kind:     "scan.cluster_failed",
+						Severity: SeverityWarning,
+						Reason:   "ClusterFailed",
+						Message:  formatTargetError(targetCtx, timeout, err),
+					})
+				}
+				outcomes[idx] = targetOutcome{
+					buf:        failBuf.Bytes(),
+					scanned:    scanned,
+					findings:   failWriter.Findings(),
+					exempted:   failWriter.Exempted(),
+					suppressed: failWriter.Suppressed(),
+					hidden:     failWriter.hidden,
+					policy:     w.policy,
+					err:        err,
+					ctxErr:     targetCtx.Err(),
+				}
+				return
+			}
+			outcomes[idx] = targetOutcome{
+				buf:        buf.Bytes(),
+				scanned:    scanned,
+				findings:   w.Findings(),
+				exempted:   w.Exempted(),
+				suppressed: w.Suppressed(),
+				hidden:     w.hidden,
+				policy:     w.policy,
+			}
+		}(i, target)
+	}
+	wg.Wait()
+
+	for _, o := range outcomes {
+		if o.usageErr != nil {
+			return usageError(stderr, cfg.Name, o.usageErr)
+		}
+	}
+
+	var (
+		totalScanned    int
+		totalFindings   int
+		totalExempted   int
+		totalSuppressed int
+		totalHidden     int
+		clustersFailed  int
+		firstFailIdx    = -1
+		activePolicy    Policy
+	)
+	for i, o := range outcomes {
+		totalScanned += o.scanned
+		totalFindings += o.findings
+		totalExempted += o.exempted
+		totalSuppressed += o.suppressed
+		totalHidden += o.hidden
+		if activePolicy == nil && o.policy != nil {
+			activePolicy = o.policy
+		}
+		if o.err != nil {
+			clustersFailed++
+			if firstFailIdx < 0 {
+				firstFailIdx = i
+			}
+		}
+	}
+
+	if clustersFailed == len(targets) && totalScanned == 0 {
+		o := outcomes[firstFailIdx]
+		switch {
+		case errors.Is(o.err, context.DeadlineExceeded):
+			fmt.Fprintf(stderr, "%s: timed out after %s\n", cfg.Name, timeout)
+		case errors.Is(o.ctxErr, context.DeadlineExceeded), declinedForTheDeadline(o.err):
+			fmt.Fprintf(stderr, "%s: timed out after %s: %s\n", cfg.Name, timeout, MaskString(o.err.Error()))
+		default:
+			fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, MaskString(o.err.Error()))
+		}
+		return ExitRuntime
+	}
+
+	for _, o := range outcomes {
+		if len(o.buf) > 0 {
+			if _, err := stdout.Write(o.buf); err != nil {
+				fmt.Fprintf(stderr, "%s: writing output: %v\n", cfg.Name, err)
+				return ExitRuntime
+			}
+		}
+	}
+
+	elapsed := now().Sub(start).Truncate(time.Millisecond)
+	var summaryOpts []WriterOption
+	if exemptions != nil {
+		summaryOpts = append(summaryOpts, WithExemptions(exemptions))
+	}
+	if kube.CallerFiltered(ctx) && cfg.CallerFiltered {
+		summaryOpts = append(summaryOpts, WithVisibility(kube.NewCallerVisibility(ctx)))
+	}
+	summaryWriter, err := NewWriter(stdout, format, summaryOpts...)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+		return ExitRuntime
+	}
+	summaryWriter.findings = totalFindings
+	summaryWriter.exempted = totalExempted
+	summaryWriter.suppressed = totalSuppressed
+	summaryWriter.hidden = totalHidden
+	summaryWriter.policy = activePolicy
+	if err := summaryWriter.note("clusters", strconv.Itoa(len(targets))); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+		return ExitRuntime
+	}
+	if clustersFailed > 0 {
+		if err := summaryWriter.note("clusters_failed", strconv.Itoa(clustersFailed)); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cfg.Name, err)
+			return ExitRuntime
+		}
+	}
+	if err := summaryWriter.Summary(totalScanned, elapsed); err != nil {
+		fmt.Fprintf(stderr, "%s: writing summary: %v\n", cfg.Name, err)
+		return ExitRuntime
+	}
+	return ExitData
+}
+
+func formatTargetError(ctx context.Context, timeout time.Duration, err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("timed out after %s", timeout)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), declinedForTheDeadline(err):
+		return fmt.Sprintf("timed out after %s: %s", timeout, MaskString(err.Error()))
+	default:
+		return MaskString(err.Error())
+	}
 }

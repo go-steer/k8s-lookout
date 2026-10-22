@@ -119,3 +119,25 @@ func TestGroupHelpListsOnlyVisible(t *testing.T) {
 		t.Errorf("visible command missing from group help:\n%s", stdout.String())
 	}
 }
+
+func TestRunGroupFleetFanout(t *testing.T) {
+	reg := demoRegistry()
+	var stdout, stderr bytes.Buffer
+	code := runGroup(context.Background(), reg, "triage", []string{"demo", "--count=1", "--contexts=c1,c2"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 2 finding lines + 1 summary line, got:\n%s", stdout.String())
+	}
+	if !strings.Contains(lines[0], "cluster=c1") {
+		t.Errorf("line 0 missing cluster=c1: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "cluster=c2") {
+		t.Errorf("line 1 missing cluster=c2: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "scanned=10 findings=2") || !strings.Contains(lines[2], "clusters=2") {
+		t.Errorf("summary line = %q, want scanned=10 findings=2 ... clusters=2", lines[2])
+	}
+}

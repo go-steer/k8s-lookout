@@ -159,3 +159,98 @@ func TestConfigForContextIgnoresInCluster(t *testing.T) {
 		t.Errorf("host = %q — in-cluster credentials leaked into a kubeconfig context", cfg.Host)
 	}
 }
+
+func writeNamedKubeconfig(t *testing.T, dir, filename, currentCtx string, contexts ...string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("apiVersion: v1\nkind: Config\n")
+	if currentCtx != "" {
+		b.WriteString("current-context: " + currentCtx + "\n")
+	}
+	b.WriteString("clusters:\n")
+	for _, c := range contexts {
+		b.WriteString("- name: " + c + "\n  cluster:\n    server: https://" + c + ".example.test:443\n")
+	}
+	b.WriteString("contexts:\n")
+	for _, c := range contexts {
+		b.WriteString("- name: " + c + "\n  context:\n    cluster: " + c + "\n    user: u\n")
+	}
+	b.WriteString("users:\n- name: u\n  user:\n    token: t\n")
+	p := filepath.Join(dir, filename)
+	if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+	return p
+}
+
+func TestResolveFleetTargetsKubeconfigDirAndDisambiguation(t *testing.T) {
+	dir := t.TempDir()
+	// Out-of-order writes; discovery must sort lexicographically.
+	p3 := writeNamedKubeconfig(t, dir, "03-west", "default", "default")
+	p1 := writeNamedKubeconfig(t, dir, "01-east.yaml", "default", "default")
+	p2 := writeNamedKubeconfig(t, dir, "02-central.kubeconfig", "prod-central", "prod-central")
+	// Non-kubeconfig regular file and hidden file are ignored when extension is unknown.
+	if err := os.WriteFile(filepath.Join(dir, "README.txt"), []byte("not a kubeconfig\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hidden.yaml"), []byte("invalid: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	targets, err := ResolveFleetTargets("", dir, "")
+	if err != nil {
+		t.Fatalf("ResolveFleetTargets: %v", err)
+	}
+	want := []FleetTarget{
+		{Kubeconfig: p1, Context: "default", Label: "01-east.yaml:default"},
+		{Kubeconfig: p2, Context: "prod-central", Label: "prod-central"},
+		{Kubeconfig: p3, Context: "default", Label: "03-west:default"},
+	}
+	if len(targets) != len(want) {
+		t.Fatalf("got %d targets, want %d: %+v", len(targets), len(want), targets)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Errorf("target[%d] = %+v, want %+v", i, targets[i], want[i])
+		}
+	}
+}
+
+func TestResolveFleetTargetsContextsWildcardAndExplicit(t *testing.T) {
+	kc := writeFleetKubeconfig(t)
+
+	allTargets, err := ResolveFleetTargets(kc, "", "*")
+	if err != nil {
+		t.Fatalf("ResolveFleetTargets(*): %v", err)
+	}
+	wantAll := []FleetTarget{
+		{Kubeconfig: kc, Context: "prod-eu", Label: "prod-eu"},
+		{Kubeconfig: kc, Context: "prod-us", Label: "prod-us"},
+		{Kubeconfig: kc, Context: "stale", Label: "stale"},
+	}
+	if len(allTargets) != len(wantAll) {
+		t.Fatalf("got %+v, want %+v", allTargets, wantAll)
+	}
+	for i := range wantAll {
+		if allTargets[i] != wantAll[i] {
+			t.Errorf("allTargets[%d] = %+v, want %+v", i, allTargets[i], wantAll[i])
+		}
+	}
+
+	explicit, err := ResolveFleetTargets(kc, "", "prod-us,prod-eu,prod-us")
+	if err != nil {
+		t.Fatalf("ResolveFleetTargets(explicit): %v", err)
+	}
+	wantExplicit := []FleetTarget{
+		{Kubeconfig: kc, Context: "prod-us", Label: "prod-us"},
+		{Kubeconfig: kc, Context: "prod-eu", Label: "prod-eu"},
+	}
+	if len(explicit) != len(wantExplicit) {
+		t.Fatalf("got %+v, want %+v", explicit, wantExplicit)
+	}
+	for i := range wantExplicit {
+		if explicit[i] != wantExplicit[i] {
+			t.Errorf("explicit[%d] = %+v, want %+v", i, explicit[i], wantExplicit[i])
+		}
+	}
+}
