@@ -788,6 +788,7 @@ The current surface:
 | `k8s_audit_cluster` | [`audit cluster`](/reference/audit-cluster/) |
 | `k8s_audit_upgrades` | [`audit upgrades`](/reference/audit-upgrades/) |
 | `k8s_audit_exemptions` | [`audit exemptions`](/reference/audit-exemptions/) |
+| `k8s_audit_policy` | [`audit policy`](/reference/audit-policy/) |
 
 ### The one privileged tool
 

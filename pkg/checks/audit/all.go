@@ -39,8 +39,12 @@ func AllCommand(deps Deps) checks.Command {
 		MCPProfiles:    []string{"audit"},
 		TimeoutDefault: 60 * time.Second,
 		Summary:        "Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), provider cluster configuration (`audit cluster`) and upgrade readiness (`audit upgrades`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=<subcommand>. Scope with --namespace or -A.",
-		Kinds:          allKinds(deps),
-		Output:         allOutput(deps),
+		Flags: append([]emit.FlagSpec{
+			skipSystemNamespacesFlag(),
+			perWorkloadFlag(),
+		}, PolicyFlags()...),
+		Kinds:  allKinds(deps),
+		Output: allOutput(deps),
 		Examples: []string{
 			"lookout audit all -A",
 			"lookout audit all --namespace=prod",
@@ -139,6 +143,9 @@ func runAll(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if inv.Scope.Namespace == "" && !inv.Scope.AllNamespaces {
 		return 0, emit.UsageErrorf("no scope: pass --namespace=<ns> or -A")
 	}
+	if _, err := bindPolicy(inv); err != nil {
+		return 0, err
+	}
 	listNS := inv.Scope.Namespace
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
@@ -171,7 +178,7 @@ func runAll(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			_ = inv.Out.Stamp("check", "")
 			return scanned, ctx.Err()
 		}
-		flags, err := c.DefaultFlags()
+		flags, err := c.DefaultFlags(stageOverrides(c, inv.Flags)...)
 		if err != nil {
 			_ = inv.Out.Stamp("check", "")
 			return scanned, err
@@ -244,4 +251,36 @@ func runAll(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		return scanned, err
 	}
 	return scanned, nil
+}
+
+var allForwardedFlags = map[string]emit.FlagType{
+	"policy":                 emit.FlagString,
+	"profile":                emit.FlagString,
+	"only":                   emit.FlagString,
+	"skip":                   emit.FlagString,
+	"min-severity":           emit.FlagString,
+	"set":                    emit.FlagString,
+	"skip-system-namespaces": emit.FlagBool,
+	"per-workload":           emit.FlagBool,
+}
+
+func stageOverrides(c checks.Command, flags emit.FlagValues) []emit.Field {
+	var overrides []emit.Field
+	for _, spec := range c.Flags {
+		ft, ok := allForwardedFlags[spec.Name]
+		if !ok {
+			continue
+		}
+		switch ft {
+		case emit.FlagString:
+			if v := flags.String(spec.Name); v != "" {
+				overrides = append(overrides, emit.Field{Key: spec.Name, Value: v})
+			}
+		case emit.FlagBool:
+			if flags.Bool(spec.Name) {
+				overrides = append(overrides, emit.Field{Key: spec.Name, Value: "true"})
+			}
+		}
+	}
+	return overrides
 }

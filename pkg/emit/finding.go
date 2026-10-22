@@ -29,15 +29,21 @@ import (
 	"regexp"
 )
 
+// Severity is the finding severity domain ("info", "warning", "critical").
+// Defined as a type alias for string so existing callers and struct literals
+// remain source-compatible while Policy and Writer signatures can name the
+// type explicitly.
+type Severity = string
+
 // Severity* are the values checks stamp on Finding.Severity. They
 // match the sentinel's §7.7 routing levels ("critical" opens a
 // dedicated incident session; "warning" goes to the watchboard) so a
 // scan finding and a sentinel signal for the same symptom compare
 // directly.
 const (
-	SeverityInfo     = "info"
-	SeverityWarning  = "warning"
-	SeverityCritical = "critical"
+	SeverityInfo     Severity = "info"
+	SeverityWarning  Severity = "warning"
+	SeverityCritical Severity = "critical"
 )
 
 // Severities are the three levels, worst first. Anything that has to
@@ -145,12 +151,12 @@ func EnvelopeFields() []string {
 }
 
 // SummaryNoteFields returns the summary-line note keys the envelope
-// owns: the Writer's (exempt, context, hidden) and the MCP response
-// limit's (ResponseNoteFields). Like EnvelopeFields these are
-// implicitly declared for every command, and a command may neither set
-// nor redeclare them.
+// owns: the Writer's (exempt, context, hidden, policy, suppressed) and
+// the MCP response limit's (ResponseNoteFields). Like EnvelopeFields
+// these are implicitly declared for every command, and a command may
+// neither set nor redeclare them.
 func SummaryNoteFields() []string {
-	return append([]string{"exempt", "context", "hidden"}, ResponseNoteFields()...)
+	return append([]string{"exempt", "context", "hidden", "policy", "suppressed"}, ResponseNoteFields()...)
 }
 
 // ResponseNoteFields returns the summary-line note keys `lookout mcp`

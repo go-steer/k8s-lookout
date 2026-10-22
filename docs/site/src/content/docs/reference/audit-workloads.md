@@ -21,6 +21,13 @@ lookout audit workloads [flags]
 | --- | --- | --- | --- |
 | `--cron-suspended` | duration | `168h0m0s` | how long a CronJob must have been suspended before it reads as forgotten rather than as maintenance in progress; it must also have skipped at least one activation, so the claim scales to the schedule |
 | `--job-suspended` | duration | `168h0m0s` | how long a standalone Job must have been suspended before it reads as forgotten rather than as maintenance in progress; Jobs owned by a controller or queued by Kueue are never judged |
+| `--skip-system-namespaces` | bool | — | skip system namespaces matching the active posture policy's system_namespaces patterns |
+| `--policy` | string | — | path to a YAML posture policy file |
+| `--profile` | string | — | built-in posture profile: default\|strict\|onboarding\|gke-autopilot |
+| `--only` | string | — | comma-separated check kind or kind/reason globs to run exclusively |
+| `--skip` | string | — | comma-separated check kind or kind/reason globs to skip |
+| `--min-severity` | string | — | minimum finding severity to emit: info\|warning\|critical |
+| `--set` | string | — | comma-separated check parameter overrides (\<kind>.\<param>=\<val>) |
 
 ## Common flags (every `lookout` command)
 
@@ -90,6 +97,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `nodes` | summary note: nodes in the cluster — the denominator every placement claim is resolved against; omitted when the node List was refused (a read.unavailable record says so, and no placement claim is made) |
 | `workloads` | summary note: workloads examined, broken down as deployments/statefulsets/daemonsets/cronjobs |
 | `jobs` | summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads` |
+| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

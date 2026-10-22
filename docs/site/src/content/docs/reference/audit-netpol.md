@@ -15,6 +15,18 @@ MCP tool: `k8s_audit_netpol` (MCP profile: `audit`)
 lookout audit netpol [flags]
 ```
 
+## Flags
+
+| Flag | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `--skip-system-namespaces` | bool | — | skip system namespaces matching the active posture policy's system_namespaces patterns |
+| `--policy` | string | — | path to a YAML posture policy file |
+| `--profile` | string | — | built-in posture profile: default\|strict\|onboarding\|gke-autopilot |
+| `--only` | string | — | comma-separated check kind or kind/reason globs to run exclusively |
+| `--skip` | string | — | comma-separated check kind or kind/reason globs to skip |
+| `--min-severity` | string | — | minimum finding severity to emit: info\|warning\|critical |
+| `--set` | string | — | comma-separated check parameter overrides (\<kind>.\<param>=\<val>) |
+
 ## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
@@ -53,6 +65,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pod_selector` | the dead policy's podSelector, in label-selector syntax |
 | `policy_types` | the directions the dead policy names, after defaulting an unset policyTypes |
 | `namespaces` | summary note: namespaces examined — the denominator for the namespace-subject claims, which `scanned` (pod templates) does not cover |
+| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 
 ## Output contract
 

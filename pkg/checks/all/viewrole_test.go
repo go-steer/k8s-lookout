@@ -393,6 +393,7 @@ func scanCmd(v *viewClients) checks.Command {
 // client checktest.ViewRole can wrap.
 var notKubeReadPath = map[string]string{
 	"audit exemptions": "reads the --exemptions file, not the cluster",
+	"audit policy":     "dumps the effective posture rule table from --policy/--profile, not the cluster",
 	"triage status":    "reads and writes the sentinel's SQLite store",
 	"findings diff":    "diffs two saved reports",
 	"findings ack":     "writes an ack into a findings state file",

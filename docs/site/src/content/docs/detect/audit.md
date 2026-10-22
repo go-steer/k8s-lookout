@@ -110,6 +110,14 @@ NetworkPolicy coverage posture: namespaces where nothing restricts ingress or eg
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 
+## [`lookout audit policy`](/reference/audit-policy/)
+
+Dump the effective posture rule table after merging detector defaults, --profile, --policy, and CLI overrides (--only, --skip, --min-severity, --set) so operators and agents can inspect what a scan will enforce before running it.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `audit.policy_rule` | info | the resolved enablement, effective severity, provenance layer, and threshold parameters for one posture check rule |
+
 ## [`lookout audit rbac`](/reference/audit-rbac/)
 
 RBAC over-permission posture: bindings that grant cluster-admin, or a role whose rules are cluster-admin under another name, and Roles/ClusterRoles whose rules use `*` for verbs or resources. Judges a binding by the rules of the role it points at, not by the role's name. Objects the platform reconciles (the bootstrap defaults, addon-manager Reconcile objects) are counted, not reported. --namespace judges that namespace's Roles and RoleBindings; ClusterRoles and ClusterRoleBindings are judged under -A. scanned counts bindings and roles examined.

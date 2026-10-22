@@ -128,6 +128,10 @@ func RBACCommand(deps Deps) checks.Command {
 		MCPName:     "k8s_audit_rbac",
 		MCPProfiles: []string{"audit"},
 		Summary:     "RBAC over-permission posture: bindings that grant cluster-admin, or a role whose rules are cluster-admin under another name, and Roles/ClusterRoles whose rules use `*` for verbs or resources. Judges a binding by the rules of the role it points at, not by the role's name. Objects the platform reconciles (the bootstrap defaults, addon-manager Reconcile objects) are counted, not reported. --namespace judges that namespace's Roles and RoleBindings; ClusterRoles and ClusterRoleBindings are judged under -A. scanned counts bindings and roles examined.",
+		Flags: append([]emit.FlagSpec{
+			skipSystemNamespacesFlag(),
+			perWorkloadFlag(),
+		}, PolicyFlags()...),
 		Kinds: []checks.KindField{
 			checks.Kind(kindClusterAdminBinding, "the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindWildcardRBAC, "the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards", emit.SeverityWarning, emit.SeverityInfo),
@@ -143,8 +147,11 @@ func RBACCommand(deps Deps) checks.Command {
 			{Name: "resources", Doc: "the resources of the broadest wildcard rule, comma-joined"},
 			{Name: "api_groups", Doc: "the apiGroups of the broadest wildcard rule, comma-joined, with the core group written as `core`"},
 			{Name: "bindings", Doc: "RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today"},
+			{Name: "workloads", Doc: "workloads in scope running as a bound ServiceAccount subject; omitted when no running workload uses the bound ServiceAccount"},
+			{Name: "workload_names", Doc: "their Kind/name, sorted and capped at 8"},
 			{Name: "platform_managed", Doc: "summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile)"},
 			{Name: "aggregated_roles", Doc: "summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope"},
+			skippedSystemNamespacesField(),
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit rbac -A",
@@ -166,7 +173,9 @@ type rbacObjects struct {
 	roles               []rbacv1.Role
 	clusterRoleBindings []rbacv1.ClusterRoleBinding
 	clusterRoles        []rbacv1.ClusterRole
+	templates           []podTemplate
 	clusterScope        bool
+	perWorkload         bool
 }
 
 func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
@@ -176,6 +185,13 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if inv.Scope.Namespace == "" && !inv.Scope.AllNamespaces {
 		return 0, emit.UsageErrorf("no scope: pass --namespace=<ns> or -A")
 	}
+	pol, err := bindPolicy(inv)
+	if err != nil {
+		return 0, err
+	}
+	skipSys := inv.Flags.Bool("skip-system-namespaces")
+	perWorkload := inv.Flags.Bool("per-workload")
+
 	listNS := inv.Scope.Namespace
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
@@ -185,8 +201,8 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	snap := snapshotFor(ctx, client, listNS)
-	objs := rbacObjects{clusterScope: inv.Scope.AllNamespaces}
+	ctx, snap := ensureSnapshot(ctx, client, listNS)
+	objs := rbacObjects{clusterScope: inv.Scope.AllNamespaces, perWorkload: perWorkload}
 	// Every claim joins bindings to the rules of the roles they point
 	// at, so a refused List leaves nothing that can be judged honestly:
 	// the answer is one read.unavailable record per refused kind
@@ -230,6 +246,68 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 		return 0, nil
 	}
+	if hasServiceAccountSubject(objs) {
+		templates, kindRefused, err := listPodTemplates(ctx, client, listNS, true)
+		if err != nil {
+			return 0, err
+		}
+		for _, r := range kindRefused {
+			if err := inv.Out.Emit(checks.RefusedFinding(r.Refusal, r.kind+" pod templates not checked for ServiceAccount workload attribution")); err != nil {
+				return 0, err
+			}
+		}
+		objs.templates = templates
+	}
+	if skipSys {
+		filteredRB := objs.roleBindings[:0]
+		for _, b := range objs.roleBindings {
+			if pol.IsSystemNamespace(b.Namespace) {
+				snap.recordSkippedNS(b.Namespace)
+				continue
+			}
+			filteredRB = append(filteredRB, b)
+		}
+		objs.roleBindings = filteredRB
+
+		filteredR := objs.roles[:0]
+		for _, r := range objs.roles {
+			if pol.IsSystemNamespace(r.Namespace) {
+				snap.recordSkippedNS(r.Namespace)
+				continue
+			}
+			filteredR = append(filteredR, r)
+		}
+		objs.roles = filteredR
+
+		filteredCRB := objs.clusterRoleBindings[:0]
+		for _, b := range objs.clusterRoleBindings {
+			if len(b.Subjects) > 0 {
+				allSys := true
+				for _, s := range b.Subjects {
+					if s.Kind == rbacv1.ServiceAccountKind && pol.IsSystemNamespace(s.Namespace) {
+						snap.recordSkippedNS(s.Namespace)
+					} else {
+						allSys = false
+					}
+				}
+				if allSys {
+					continue
+				}
+			}
+			filteredCRB = append(filteredCRB, b)
+		}
+		objs.clusterRoleBindings = filteredCRB
+
+		filteredT := objs.templates[:0]
+		for _, t := range objs.templates {
+			if pol.IsSystemNamespace(t.namespace) {
+				snap.recordSkippedNS(t.namespace)
+				continue
+			}
+			filteredT = append(filteredT, t)
+		}
+		objs.templates = filteredT
+	}
 
 	findings, tally := judgeRBAC(objs)
 	sortFindings(findings)
@@ -243,6 +321,11 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	}
 	if tally.aggregated > 0 {
 		if err := inv.Out.Note("aggregated_roles", itoa(tally.aggregated)); err != nil {
+			return 0, err
+		}
+	}
+	if skipSys {
+		if err := inv.Out.Note("skipped_system_namespaces", itoa(snap.skippedNSCount())); err != nil {
 			return 0, err
 		}
 	}
@@ -273,11 +356,25 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 		roleRules[roleKey("ClusterRole", "", r.Name)] = r.Rules
 	}
 	bound := map[string]int{}
+	roleSubjects := map[string][]rbacv1.Subject{}
 	for _, b := range objs.roleBindings {
-		bound[bindingRoleKey(b.RoleRef, b.Namespace)]++
+		rk := bindingRoleKey(b.RoleRef, b.Namespace)
+		bound[rk]++
+		roleSubjects[rk] = append(roleSubjects[rk], normalizeSubjects(b.Subjects, b.Namespace)...)
 	}
 	for _, b := range objs.clusterRoleBindings {
-		bound[bindingRoleKey(b.RoleRef, "")]++
+		rk := bindingRoleKey(b.RoleRef, "")
+		bound[rk]++
+		roleSubjects[rk] = append(roleSubjects[rk], normalizeSubjects(b.Subjects, "")...)
+	}
+	saWorkloads := map[string][]podTemplate{}
+	for _, t := range objs.templates {
+		saName := t.spec.ServiceAccountName
+		if saName == "" {
+			saName = defaultServiceAccount
+		}
+		key := t.namespace + "/" + saName
+		saWorkloads[key] = append(saWorkloads[key], t)
 	}
 
 	for _, b := range objs.roleBindings {
@@ -287,7 +384,7 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 			continue
 		}
 		if f, ok := judgeBinding(b.ObjectMeta, "RoleBinding", b.RoleRef, b.Subjects, roleRules); ok {
-			out = append(out, f)
+			out = append(out, attachRBACWorkloads(f, normalizeSubjects(b.Subjects, b.Namespace), saWorkloads, objs.perWorkload)...)
 		}
 	}
 	for _, b := range objs.clusterRoleBindings {
@@ -297,7 +394,7 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 			continue
 		}
 		if f, ok := judgeBinding(b.ObjectMeta, "ClusterRoleBinding", b.RoleRef, b.Subjects, roleRules); ok {
-			out = append(out, f)
+			out = append(out, attachRBACWorkloads(f, normalizeSubjects(b.Subjects, ""), saWorkloads, objs.perWorkload)...)
 		}
 	}
 	for _, r := range objs.roles {
@@ -306,8 +403,9 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 			tally.platform++
 			continue
 		}
-		if f, ok := judgeRole(r.ObjectMeta, "Role", r.Rules, bound[roleKey("Role", r.Namespace, r.Name)]); ok {
-			out = append(out, f)
+		rk := roleKey("Role", r.Namespace, r.Name)
+		if f, ok := judgeRole(r.ObjectMeta, "Role", r.Rules, bound[rk]); ok {
+			out = append(out, attachRBACWorkloads(f, roleSubjects[rk], saWorkloads, objs.perWorkload)...)
 		}
 	}
 	if objs.clusterScope {
@@ -321,12 +419,92 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 				tally.aggregated++
 				continue
 			}
-			if f, ok := judgeRole(r.ObjectMeta, "ClusterRole", r.Rules, bound[roleKey("ClusterRole", "", r.Name)]); ok {
-				out = append(out, f)
+			rk := roleKey("ClusterRole", "", r.Name)
+			if f, ok := judgeRole(r.ObjectMeta, "ClusterRole", r.Rules, bound[rk]); ok {
+				out = append(out, attachRBACWorkloads(f, roleSubjects[rk], saWorkloads, objs.perWorkload)...)
 			}
 		}
 	}
 	return out, tally
+}
+
+func normalizeSubjects(subjects []rbacv1.Subject, bindingNS string) []rbacv1.Subject {
+	out := make([]rbacv1.Subject, len(subjects))
+	for i, s := range subjects {
+		if s.Kind == rbacv1.ServiceAccountKind && s.Namespace == "" {
+			s.Namespace = bindingNS
+		}
+		out[i] = s
+	}
+	return out
+}
+
+func hasServiceAccountSubject(objs rbacObjects) bool {
+	for _, b := range objs.roleBindings {
+		for _, s := range b.Subjects {
+			if s.Kind == rbacv1.ServiceAccountKind {
+				return true
+			}
+		}
+	}
+	for _, b := range objs.clusterRoleBindings {
+		for _, s := range b.Subjects {
+			if s.Kind == rbacv1.ServiceAccountKind {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func attachRBACWorkloads(f emit.Finding, subjects []rbacv1.Subject, saWorkloads map[string][]podTemplate, perWorkload bool) []emit.Finding {
+	seen := map[string]bool{}
+	var matched []podTemplate
+	for _, s := range subjects {
+		if s.Kind != rbacv1.ServiceAccountKind || s.Namespace == "" {
+			continue
+		}
+		for _, t := range saWorkloads[s.Namespace+"/"+s.Name] {
+			k := t.namespace + "/" + t.kind + "/" + t.name
+			if !seen[k] {
+				seen[k] = true
+				matched = append(matched, t)
+			}
+		}
+	}
+	if len(matched) == 0 {
+		return []emit.Finding{f}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].namespace != matched[j].namespace {
+			return matched[i].namespace < matched[j].namespace
+		}
+		if matched[i].kind != matched[j].kind {
+			return matched[i].kind < matched[j].kind
+		}
+		return matched[i].name < matched[j].name
+	})
+	names := make([]string, len(matched))
+	for i, t := range matched {
+		names[i] = t.kind + "/" + t.name
+	}
+	f.Details = append(f.Details,
+		emit.Field{Key: "workloads", Value: itoa(len(matched))},
+		emit.Field{Key: "workload_names", Value: cappedList(names)},
+	)
+	if !perWorkload {
+		return []emit.Finding{f}
+	}
+	out := make([]emit.Finding, 0, len(matched))
+	for _, t := range matched {
+		wf := f
+		wf.Namespace = t.namespace
+		wf.KindOfObject = t.kind
+		wf.Name = t.name
+		wf.Fingerprint = engine.PostureFingerprint(wf.Kind, wf.Reason, wf.KindOfObject)
+		out = append(out, wf)
+	}
+	return out
 }
 
 func roleKey(kind, namespace, name string) string {

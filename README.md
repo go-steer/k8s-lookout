@@ -169,6 +169,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `audit cluster` † | GKE cluster security configuration: Workload Identity, legacy metadata endpoints, an internet-reachable control plane |
 | `audit upgrades` † | upgrade and patch readiness: how far behind the control plane and node pools are, and whether anything closes the gap on its own |
 | `audit exemptions` | the `--exemptions` file itself: which reviewed opt-outs have lapsed, and which are about to |
+| `audit policy` | dump the effective posture rule table after merging detector defaults, `--profile`, `--policy`, and CLI overrides |
 
 The `audit` rows answer a different question from everything above
 them: not "what is broken now" but "what has no safety net while it is
