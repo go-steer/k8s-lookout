@@ -52,11 +52,6 @@ func serving(name, image string, port int32, live, ready *corev1.Probe, preStop 
 	return c
 }
 
-// lbl is the pod-label set the fixtures select on.
-func lbl(name string) map[string]string { return map[string]string{"app": name} }
-
-func sel(name string) *metav1.LabelSelector { return &metav1.LabelSelector{MatchLabels: lbl(name)} }
-
 func svc(ns, name string, selector map[string]string, ports ...corev1.ServicePort) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},

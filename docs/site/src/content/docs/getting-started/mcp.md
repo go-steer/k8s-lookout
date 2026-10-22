@@ -780,6 +780,7 @@ The current surface:
 | `k8s_cloud_quota` | [`cloud quota`](/reference/cloud-quota/) |
 | `k8s_net_probe` | [`net probe`](/reference/net-probe/) |
 | `k8s_net_probe_from` | [`net probe-from`](/reference/net-probe-from/): **not served by default**, see below |
+| `k8s_audit_all` | [`audit all`](/reference/audit-all/) |
 | `k8s_audit_workloads` | [`audit workloads`](/reference/audit-workloads/) |
 | `k8s_audit_hardening` | [`audit hardening`](/reference/audit-hardening/) |
 | `k8s_audit_netpol` | [`audit netpol`](/reference/audit-netpol/) |

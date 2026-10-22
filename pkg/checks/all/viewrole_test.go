@@ -350,6 +350,7 @@ func viewCases() []viewCase {
 		{"stab drain", []string{"-A"}, func(v *viewClients) checks.Command { return stab.DrainCommand(stabDeps(v)) }},
 		{"stab drain", []string{"--node=n1"}, func(v *viewClients) checks.Command { return stab.DrainCommand(stabDeps(v)) }},
 		{"stab scaledown", nil, func(v *viewClients) checks.Command { return stab.ScaledownCommand(stabDeps(v)) }},
+		{"audit all", []string{"-A"}, func(v *viewClients) checks.Command { return audit.AllCommand(auditDeps(v)) }},
 		{"audit cluster", nil, func(v *viewClients) checks.Command { return audit.ClusterCommand(auditDeps(v)) }},
 		{"audit hardening", []string{"-A"}, func(v *viewClients) checks.Command { return audit.HardeningCommand(auditDeps(v)) }},
 		{"audit netpol", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NetpolCommand(auditDeps(v)) }},
@@ -479,6 +480,11 @@ var viewUnread = map[string][]string{
 	"stab drain -A":                           {"nodes"},
 	"stab drain --node=n1":                    {"nodes"},
 	"stab scaledown ":                         {"nodes"},
+	"audit all -A": {
+		"nodes",
+		"rolebindings.rbac.authorization.k8s.io", "roles.rbac.authorization.k8s.io",
+		"clusterrolebindings.rbac.authorization.k8s.io", "clusterroles.rbac.authorization.k8s.io",
+	},
 	"audit rbac -A": {
 		"rolebindings.rbac.authorization.k8s.io", "roles.rbac.authorization.k8s.io",
 		"clusterrolebindings.rbac.authorization.k8s.io", "clusterroles.rbac.authorization.k8s.io",

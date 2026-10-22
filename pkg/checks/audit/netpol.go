@@ -244,20 +244,14 @@ var netpolDirections = []netpolDirection{
 }
 
 func listNetworkPolicies(ctx context.Context, client kubernetes.Interface, ns string) ([]networkingv1.NetworkPolicy, error) {
-	var out []networkingv1.NetworkPolicy
-	err := listPages("networkpolicies", func(o metav1.ListOptions) ([]networkingv1.NetworkPolicy, string, error) {
-		l, err := client.NetworkingV1().NetworkPolicies(ns).List(ctx, o)
-		if err != nil {
-			return nil, "", err
-		}
-		return l.Items, l.Continue, nil
-	}, func(p *networkingv1.NetworkPolicy) {
-		out = append(out, *p)
-	})
+	items, r, err := snapshotFor(ctx, client, ns).NetworkPolicies(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	if r != nil {
+		return nil, fatalRefusal(r, "listing networkpolicies")
+	}
+	return items, nil
 }
 
 // coversDirection reports whether a policy isolates the pods it selects

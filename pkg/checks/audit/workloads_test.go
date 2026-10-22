@@ -15,7 +15,6 @@
 package audit_test
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,22 +27,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
-
-func testDeps(objs ...runtime.Object) audit.Deps {
-	client := fake.NewClientset(objs...)
-	return audit.Deps{
-		Client: func(context.Context) (kubernetes.Interface, error) { return client, nil },
-	}
-}
-
-func ptr[T any](v T) *T { return &v }
 
 // container builds a container whose probes are present or absent as
 // asked; the probe bodies are irrelevant to every claim here, only
@@ -997,60 +985,6 @@ func TestWorkloadsNewKindsUsePostureFingerprint(t *testing.T) {
 	if len(seen) != 4 {
 		t.Errorf("fixture should exercise 4 new classes, saw %d: %v", len(seen), seen)
 	}
-}
-
-// Logfmt helpers, mirroring the other command test suites.
-
-func parseLine(t *testing.T, line string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	rest := line
-	for rest != "" {
-		eq := strings.IndexByte(rest, '=')
-		if eq <= 0 {
-			t.Fatalf("bad logfmt line %q", line)
-		}
-		key := rest[:eq]
-		rest = rest[eq+1:]
-		var val string
-		if strings.HasPrefix(rest, `"`) {
-			end := len(rest)
-			for i := 1; i < len(rest); i++ {
-				if rest[i] == '"' && rest[i-1] != '\\' {
-					end = i + 1
-					break
-				}
-			}
-			val = strings.ReplaceAll(rest[1:end-1], `\"`, `"`)
-			rest = rest[end:]
-		} else if sp := strings.IndexByte(rest, ' '); sp >= 0 {
-			val, rest = rest[:sp], rest[sp:]
-		} else {
-			val, rest = rest, ""
-		}
-		out[key] = val
-		rest = strings.TrimPrefix(rest, " ")
-	}
-	return out
-}
-
-func findingLines(t *testing.T, stdout string) []map[string]string {
-	t.Helper()
-	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
-	var out []map[string]string
-	for _, l := range lines[:len(lines)-1] {
-		out = append(out, parseLine(t, l))
-	}
-	return out
-}
-
-func kindSet(t *testing.T, stdout string) map[string]bool {
-	t.Helper()
-	out := map[string]bool{}
-	for _, r := range findingLines(t, stdout) {
-		out[r["kind"]] = true
-	}
-	return out
 }
 
 // #268: under an HPA, spec.replicas is the autoscaler's current answer.

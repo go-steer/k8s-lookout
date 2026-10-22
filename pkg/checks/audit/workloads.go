@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -34,11 +33,10 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/engine"
 )
 
-// The posture kinds this command emits (issue #190). The other two,
-// audit.hpa_cannot_scale and audit.rigid_scheduling, are declared
-// beside their detectors in hpa.go and placement.go.
+// The posture kinds this command emits (issue #190). The other kinds
+// are declared beside their detectors in pdb.go, hpa.go, placement.go,
+// probes.go, rollout.go, cronjobs.go, and jobs.go.
 const (
-	kindNoPDB       = "audit.no_pdb"
 	kindSingle      = "audit.single_replica"
 	kindNoReadiness = "audit.no_readiness_probe"
 	kindNoLiveness  = "audit.no_liveness_probe"
@@ -425,139 +423,113 @@ type workloadIndex struct {
 
 func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
 	ix := &workloadIndex{pdbsByNS: map[string]int{}, kindsRefused: map[string]checks.Refusal{}}
-	services, servicesRefused, err := snapshotFor(ctx, client, ns).Services(ctx)
+	snap := snapshotFor(ctx, client, ns)
+	services, servicesRefused, err := snap.Services(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ix.services, ix.servicesRefused = services, servicesRefused
-	steps := []func() error{
-		func() error {
-			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
-				l, err := client.AppsV1().Deployments(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) {
-				strategy := d.Spec.Strategy
-				ix.workloads = append(ix.workloads, workload{
-					kind: "Deployment", namespace: d.Namespace, name: d.Name,
-					replicas: d.Spec.Replicas, template: d.Spec.Template,
-					strategy: &strategy,
-				})
+
+	if items, r, err := snap.Deployments(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.kindsRefused["Deployment"] = *r
+	} else {
+		for i := range items {
+			d := &items[i]
+			strategy := d.Spec.Strategy
+			ix.workloads = append(ix.workloads, workload{
+				kind: "Deployment", namespace: d.Namespace, name: d.Name,
+				replicas: d.Spec.Replicas, template: d.Spec.Template,
+				strategy: &strategy,
 			})
-		},
-		func() error {
-			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
-				l, err := client.AppsV1().StatefulSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(s *appsv1.StatefulSet) {
-				ix.workloads = append(ix.workloads, workload{
-					kind: "StatefulSet", namespace: s.Namespace, name: s.Name,
-					replicas: s.Spec.Replicas, template: s.Spec.Template,
-				})
-			})
-		},
-		func() error {
-			return listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
-				l, err := client.AppsV1().DaemonSets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(d *appsv1.DaemonSet) {
-				ix.workloads = append(ix.workloads, workload{
-					kind: "DaemonSet", namespace: d.Namespace, name: d.Name,
-					template: d.Spec.Template,
-				})
-			})
-		},
-		func() error {
-			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
-				l, err := client.BatchV1().CronJobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(c *batchv1.CronJob) {
-				ix.cronJobs = append(ix.cronJobs, c)
-			})
-		},
-		func() error {
-			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
-				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(j *batchv1.Job) {
-				ix.jobs = append(ix.jobs, j)
-			})
-		},
-		func() error {
-			return listPages("poddisruptionbudgets", func(o metav1.ListOptions) ([]policyv1.PodDisruptionBudget, string, error) {
-				l, err := client.PolicyV1().PodDisruptionBudgets(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(p *policyv1.PodDisruptionBudget) {
-				ix.pdbs = append(ix.pdbs, p)
-				ix.pdbsByNS[p.Namespace]++
-			})
-		},
-		func() error {
-			return listPages("horizontalpodautoscalers", func(o metav1.ListOptions) ([]autoscalingv2.HorizontalPodAutoscaler, string, error) {
-				l, err := client.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(h *autoscalingv2.HorizontalPodAutoscaler) {
-				ix.hpas = append(ix.hpas, h)
-			})
-		},
-		func() error {
-			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
-				l, err := client.CoreV1().Nodes().List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, func(n *corev1.Node) {
-				ix.nodes = append(ix.nodes, n)
-			})
-		},
-	}
-	for i, step := range steps {
-		err := step()
-		if err == nil {
-			continue
-		}
-		// Nodes feed only the placement claim, and the built-in `view`
-		// role does not grant them (#546): a refused node List skips
-		// that one claim, named by a read.unavailable record, and
-		// every other claim still answers. A custom role refusing one of
-		// the other reads (#584) is recorded the same way; the claims
-		// that need it skip themselves (workloadIndex fields above).
-		r, ok := checks.ForbiddenRefusal(err)
-		if !ok {
-			return nil, err
-		}
-		switch i {
-		case len(steps) - 1:
-			ix.nodesRefused = &r
-		case 5:
-			ix.pdbsRefused = &r
-		case 6:
-			ix.hpasRefused = &r
-		default:
-			ix.kindsRefused[workloadStepKinds[i]] = r
 		}
 	}
+
+	if items, r, err := snap.StatefulSets(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.kindsRefused["StatefulSet"] = *r
+	} else {
+		for i := range items {
+			s := &items[i]
+			ix.workloads = append(ix.workloads, workload{
+				kind: "StatefulSet", namespace: s.Namespace, name: s.Name,
+				replicas: s.Spec.Replicas, template: s.Spec.Template,
+			})
+		}
+	}
+
+	if items, r, err := snap.DaemonSets(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.kindsRefused["DaemonSet"] = *r
+	} else {
+		for i := range items {
+			d := &items[i]
+			ix.workloads = append(ix.workloads, workload{
+				kind: "DaemonSet", namespace: d.Namespace, name: d.Name,
+				template: d.Spec.Template,
+			})
+		}
+	}
+
+	if items, r, err := snap.CronJobs(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.kindsRefused["CronJob"] = *r
+	} else {
+		for i := range items {
+			ix.cronJobs = append(ix.cronJobs, &items[i])
+		}
+	}
+
+	if items, r, err := snap.Jobs(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.kindsRefused["Job"] = *r
+	} else {
+		for i := range items {
+			ix.jobs = append(ix.jobs, &items[i])
+		}
+	}
+
+	if items, r, err := snap.PDBs(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.pdbsRefused = r
+	} else {
+		for i := range items {
+			p := &items[i]
+			ix.pdbs = append(ix.pdbs, p)
+			ix.pdbsByNS[p.Namespace]++
+		}
+	}
+
+	if items, r, err := snap.HPAs(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.hpasRefused = r
+	} else {
+		for i := range items {
+			ix.hpas = append(ix.hpas, &items[i])
+		}
+	}
+
+	// Nodes feed only the placement claim, and the built-in `view`
+	// role does not grant them (#546): a refused node List skips
+	// that one claim, named by a read.unavailable record, and
+	// every other claim still answers.
+	if items, r, err := snap.Nodes(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.nodesRefused = r
+	} else {
+		for i := range items {
+			ix.nodes = append(ix.nodes, &items[i])
+		}
+	}
+
 	sort.Slice(ix.workloads, func(i, j int) bool {
 		a, b := ix.workloads[i], ix.workloads[j]
 		if a.namespace != b.namespace {
@@ -567,20 +539,6 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 			return a.kind < b.kind
 		}
 		return a.name < b.name
-	})
-	sort.Slice(ix.cronJobs, func(i, j int) bool {
-		a, b := ix.cronJobs[i], ix.cronJobs[j]
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		return a.Name < b.Name
-	})
-	sort.Slice(ix.hpas, func(i, j int) bool {
-		a, b := ix.hpas[i], ix.hpas[j]
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		return a.Name < b.Name
 	})
 	return ix, nil
 }
@@ -685,31 +643,6 @@ func spreadConstrained(spec corev1.PodSpec) bool {
 	aa := spec.Affinity.PodAntiAffinity
 	return len(aa.RequiredDuringSchedulingIgnoredDuringExecution) > 0 ||
 		len(aa.PreferredDuringSchedulingIgnoredDuringExecution) > 0
-}
-
-// covered reports whether any PDB in the workload's namespace selects
-// its pod template. Matching the TEMPLATE labels rather than live
-// pods is deliberate: the claim is about the spec, so it holds while
-// the workload is scaled down, mid-rollout, or momentarily podless,
-// and it costs no pod List.
-func (ix *workloadIndex) covered(w workload) bool {
-	tpl := labels.Set(w.template.Labels)
-	for _, pdb := range ix.pdbs {
-		if pdb.Namespace != w.namespace {
-			continue
-		}
-		// LabelSelectorAsSelector encodes the policy/v1 distinction
-		// this check would otherwise get wrong: a nil selector matches
-		// NOTHING, an empty one matches everything in the namespace.
-		sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-		if err != nil {
-			continue
-		}
-		if sel.Matches(tpl) {
-			return true
-		}
-	}
-	return false
 }
 
 // probeFindings judges the two probes over the template's containers.

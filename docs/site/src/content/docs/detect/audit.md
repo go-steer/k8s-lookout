@@ -23,6 +23,49 @@ Reachable two ways: the subcommands below, or `lookout scan --include=audit`
 for the whole sweep alongside the incident checks. Like `scan`, it needs
 nothing deployed — a kubeconfig is the whole setup.
 
+## [`lookout audit all`](/reference/audit-all/)
+
+Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), provider cluster configuration (`audit cluster`) and upgrade readiness (`audit upgrades`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=\<subcommand>. Scope with --namespace or -A.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `scan.check_skipped` | info | a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks |
+| `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster — unless EVERY stage failed and none read anything, which is a runtime error (exit 1) rather than a scan |
+| `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
+| `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
+| `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
+| `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
+| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
+| `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
+| `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
+| `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
+| `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
+| `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
+| `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
+| `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
+| `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
+| `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
+| `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
+| `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
+| `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
+| `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
+| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
+| `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
+| `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
+
 ## [`lookout audit cluster`](/reference/audit-cluster/)
 
 Cluster-level configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, a control-plane endpoint the internet can reach with nothing narrowing it, and a node pool whose autoscaler can never add a node. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
