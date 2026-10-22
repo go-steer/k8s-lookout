@@ -31,17 +31,18 @@ import (
 type Format string
 
 const (
-	FormatLogfmt Format = "logfmt"
-	FormatJSON   Format = "json"
+	FormatLogfmt   Format = "logfmt"
+	FormatJSON     Format = "json"
+	FormatFindings Format = "findings"
 )
 
 // ParseFormat maps a --format flag value to a Format.
 func ParseFormat(s string) (Format, error) {
 	switch Format(s) {
-	case FormatLogfmt, FormatJSON:
+	case FormatLogfmt, FormatJSON, FormatFindings:
 		return Format(s), nil
 	}
-	return "", fmt.Errorf("unknown format %q (want logfmt or json)", s)
+	return "", fmt.Errorf("unknown format %q (want logfmt, json, or findings)", s)
 }
 
 // Sanitizer rewrites a finding before it is encoded. Every Writer
@@ -233,6 +234,8 @@ func (w *Writer) Emit(f Finding) error {
 	switch w.format {
 	case FormatJSON:
 		line = encodeJSON(f.pairs())
+	case FormatFindings:
+		line = encodeFindings(f)
 	default:
 		line = EncodeLogfmt(f.pairs())
 	}
@@ -436,6 +439,8 @@ func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
 	switch w.format {
 	case FormatJSON:
 		line = encodeJSONSummary(pairs, scanned, w.findings)
+	case FormatFindings:
+		line = encodeFindingsSummary(pairs, scanned, w.findings)
 	default:
 		line = EncodeLogfmt(pairs)
 	}
