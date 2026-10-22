@@ -26,8 +26,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
-func lbl(name string) map[string]string { return map[string]string{"app": name} }
-
 func imagesCluster() []runtime.Object {
 	return []runtime.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "prod"}},
