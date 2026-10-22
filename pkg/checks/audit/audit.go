@@ -52,6 +52,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -70,6 +71,10 @@ type Deps struct {
 	// with default resolution (in-cluster autodetect, then
 	// $KUBECONFIG / ~/.kube/config).
 	Client func(ctx context.Context) (kubernetes.Interface, error)
+	// Dynamic builds the dynamic client for optional CRD reads (such as
+	// cloud.google.com/v1 ComputeClasses in `audit computeclass`). Nil
+	// means kube.BuildDynamicClient with default resolution.
+	Dynamic func(ctx context.Context) (dynamic.Interface, error)
 	// Provider yields the cloud provider. Nil means cloud.New default
 	// detection (the NoProvider sentinel on vanilla builds — the
 	// cloud-backed commands then report unavailable, never silence,
@@ -86,6 +91,13 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 		return d.Client(ctx)
 	}
 	return kube.BuildClient(kube.OptionsFrom(ctx))
+}
+
+func (d Deps) dynamic(ctx context.Context) (dynamic.Interface, error) {
+	if d.Dynamic != nil {
+		return d.Dynamic(ctx)
+	}
+	return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 }
 
 func (d Deps) provider(ctx context.Context) (cloud.Provider, error) {
@@ -105,6 +117,7 @@ func (d Deps) now() time.Time {
 func init() {
 	checks.Register(AllCommand(Deps{}))
 	checks.Register(ClusterCommand(Deps{}))
+	checks.Register(ComputeClassCommand(Deps{}))
 	checks.Register(ExemptionsCommand())
 	checks.Register(HardeningCommand(Deps{}))
 	checks.Register(NamespacesCommand(Deps{}))

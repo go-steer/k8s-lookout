@@ -787,6 +787,7 @@ The current surface:
 | `k8s_audit_netpol` | [`audit netpol`](/reference/audit-netpol/) |
 | `k8s_audit_namespaces` | [`audit namespaces`](/reference/audit-namespaces/) |
 | `k8s_audit_rbac` | [`audit rbac`](/reference/audit-rbac/) |
+| `k8s_audit_computeclass` | [`audit computeclass`](/reference/audit-computeclass/) |
 | `k8s_audit_cluster` | [`audit cluster`](/reference/audit-cluster/) |
 | `k8s_audit_upgrades` | [`audit upgrades`](/reference/audit-upgrades/) |
 | `k8s_audit_exemptions` | [`audit exemptions`](/reference/audit-exemptions/) |

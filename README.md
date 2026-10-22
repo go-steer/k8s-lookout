@@ -168,6 +168,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |
 | `audit namespaces` | namespace posture: workload-bearing namespaces without a ResourceQuota or LimitRange, quotas near hard limits, and missing required onboarding labels |
 | `audit rbac` | RBAC posture: bindings that grant cluster-admin (by name or by rules), roles with wildcard verbs or resources; platform-reconciled defaults excluded |
+| `audit computeclass` | GKE ComputeClass, Spot fallback, accelerator-zone placement, and single-zone node pool posture |
 | `audit cluster` † | GKE cluster security configuration: Workload Identity, legacy metadata endpoints, an internet-reachable control plane |
 | `audit upgrades` † | upgrade and patch readiness: how far behind the control plane and node pools are, and whether anything closes the gap on its own |
 | `audit exemptions` | the `--exemptions` file itself: which reviewed opt-outs have lapsed, and which are about to |

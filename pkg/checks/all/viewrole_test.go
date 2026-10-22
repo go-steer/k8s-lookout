@@ -353,6 +353,7 @@ func viewCases() []viewCase {
 		{"stab scaledown", nil, func(v *viewClients) checks.Command { return stab.ScaledownCommand(stabDeps(v)) }},
 		{"audit all", []string{"-A"}, func(v *viewClients) checks.Command { return audit.AllCommand(auditDeps(v)) }},
 		{"audit cluster", nil, func(v *viewClients) checks.Command { return audit.ClusterCommand(auditDeps(v)) }},
+		{"audit computeclass", []string{"-A"}, func(v *viewClients) checks.Command { return audit.ComputeClassCommand(auditDeps(v)) }},
 		{"audit hardening", []string{"-A"}, func(v *viewClients) checks.Command { return audit.HardeningCommand(auditDeps(v)) }},
 		{"audit namespaces", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NamespacesCommand(auditDeps(v)) }},
 		{"audit netpol", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NetpolCommand(auditDeps(v)) }},
@@ -492,7 +493,8 @@ var viewUnread = map[string][]string{
 		"rolebindings.rbac.authorization.k8s.io", "roles.rbac.authorization.k8s.io",
 		"clusterrolebindings.rbac.authorization.k8s.io", "clusterroles.rbac.authorization.k8s.io",
 	},
-	"audit workloads -A": {"nodes"},
+	"audit computeclass -A": {"nodes"},
+	"audit workloads -A":    {"nodes"},
 	"scan ": {
 		"nodes",
 		"validatingwebhookconfigurations.admissionregistration.k8s.io",
