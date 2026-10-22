@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Go toolchain 1.26.10**, clearing GO-2026-6809 (`crypto/x509`
+  certificate verification, reachable through every TLS client in the
+  binary). No lookout code changes; `govulncheck` is clean again.
+
 ## [0.42.0] - 2026-10-20
 
 **This release closes an SSRF in `lookout mcp`'s authorization server and stops authentication outages from looking like bad credentials.** steward v0.3.0 refuses zoned IPv6 literals when it fetches a client's metadata document, so a self-registering client can no longer point the server at an internal address. When Google, the Cloud Identity directory or the groups service account can't answer, callers now get a 503 with `Retry-After` instead of a 401, so MCP clients retry rather than send every user back through sign-in.
