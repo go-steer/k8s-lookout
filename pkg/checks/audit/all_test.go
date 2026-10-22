@@ -104,21 +104,21 @@ func TestAllStampsSubcommandAndRunsExemptionsWhenProvided(t *testing.T) {
 		}
 		seenChecks[r["check"]] = true
 	}
-	for _, want := range []string{"audit workloads", "audit hardening", "audit netpol", "audit cluster", "audit upgrades"} {
+	for _, want := range []string{"audit workloads", "audit hardening", "audit netpol", "audit namespaces", "audit cluster", "audit upgrades"} {
 		if !seenChecks[want] {
 			t.Errorf("missing findings from %q; saw %v\nstdout:\n%s", want, seenChecks, res.Stdout)
 		}
 	}
-	if !strings.Contains(res.Stdout, "checks=6") {
-		t.Errorf("summary should report checks=6 without --exemptions:\n%s", res.Stdout)
+	if !strings.Contains(res.Stdout, "checks=7") {
+		t.Errorf("summary should report checks=7 without --exemptions:\n%s", res.Stdout)
 	}
 
 	withExemptions := checktest.Run(t, cmd, "-A", "--exemptions="+write(t, fixture))
 	if withExemptions.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", withExemptions.Code, withExemptions.Stderr)
 	}
-	if !strings.Contains(withExemptions.Stdout, "checks=7") {
-		t.Errorf("summary should report checks=7 with --exemptions:\n%s", withExemptions.Stdout)
+	if !strings.Contains(withExemptions.Stdout, "checks=8") {
+		t.Errorf("summary should report checks=8 with --exemptions:\n%s", withExemptions.Stdout)
 	}
 }
 

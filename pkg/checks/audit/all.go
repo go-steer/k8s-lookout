@@ -62,6 +62,7 @@ func composedCommands(deps Deps, includeExemptions bool) []checks.Command {
 		HardeningCommand(deps),
 		RBACCommand(deps),
 		NetpolCommand(deps),
+		NamespacesCommand(deps),
 		ClusterCommand(deps),
 		UpgradesCommand(deps),
 	}

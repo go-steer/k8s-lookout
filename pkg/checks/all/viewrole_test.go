@@ -354,6 +354,7 @@ func viewCases() []viewCase {
 		{"audit all", []string{"-A"}, func(v *viewClients) checks.Command { return audit.AllCommand(auditDeps(v)) }},
 		{"audit cluster", nil, func(v *viewClients) checks.Command { return audit.ClusterCommand(auditDeps(v)) }},
 		{"audit hardening", []string{"-A"}, func(v *viewClients) checks.Command { return audit.HardeningCommand(auditDeps(v)) }},
+		{"audit namespaces", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NamespacesCommand(auditDeps(v)) }},
 		{"audit netpol", []string{"-A"}, func(v *viewClients) checks.Command { return audit.NetpolCommand(auditDeps(v)) }},
 		{"audit rbac", []string{"-A"}, func(v *viewClients) checks.Command { return audit.RBACCommand(auditDeps(v)) }},
 		{"audit upgrades", nil, func(v *viewClients) checks.Command { return audit.UpgradesCommand(auditDeps(v)) }},

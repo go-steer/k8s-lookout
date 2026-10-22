@@ -70,6 +70,7 @@ type Snapshot struct {
 	roleBindings        snapshotEntry[rbacv1.RoleBinding]
 	clusterRoles        snapshotEntry[rbacv1.ClusterRole]
 	clusterRoleBindings snapshotEntry[rbacv1.ClusterRoleBinding]
+	resourceQuotas      snapshotEntry[corev1.ResourceQuota]
 	validatingWebhooks  snapshotEntry[admissionregistrationv1.ValidatingWebhookConfiguration]
 	mutatingWebhooks    snapshotEntry[admissionregistrationv1.MutatingWebhookConfiguration]
 
@@ -434,6 +435,17 @@ func (s *Snapshot) ClusterRoleBindings(ctx context.Context) ([]rbacv1.ClusterRol
 	}, nil, func(crb *rbacv1.ClusterRoleBinding) string { return crb.Name })
 }
 
+// ResourceQuotas lists the ResourceQuotas in scope, once, sorted by namespace/name.
+func (s *Snapshot) ResourceQuotas(ctx context.Context) ([]corev1.ResourceQuota, *checks.Refusal, error) {
+	return loadSlice(&s.resourceQuotas, "resourcequotas", func(o metav1.ListOptions) ([]corev1.ResourceQuota, string, error) {
+		l, err := s.client.CoreV1().ResourceQuotas(s.ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(rq *corev1.ResourceQuota) string { return rq.Namespace }, func(rq *corev1.ResourceQuota) string { return rq.Name })
+}
+
 // Endpoints lists the Endpoints in scope, once, sorted by namespace/name.
 //
 //nolint:staticcheck // SA1019: Endpoints is used for pre-1.33 webhook service backing
@@ -478,6 +490,9 @@ func (s *Snapshot) MutatingWebhookConfigurations(ctx context.Context) ([]admissi
 		}
 		return l.Items, l.Continue, nil
 	}, nil, func(w *admissionregistrationv1.MutatingWebhookConfiguration) string { return w.Name })
+=======
+	}, func(lr *corev1.LimitRange) string { return lr.Namespace }, func(lr *corev1.LimitRange) string { return lr.Name })
+>>>>>>> 26279b2 (feat(audit,inventory): add lookout audit namespaces and triage list addon detection note)
 }
 
 // selectingServices returns the Services in a namespace whose selector

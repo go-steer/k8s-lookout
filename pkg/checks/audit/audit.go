@@ -107,6 +107,7 @@ func init() {
 	checks.Register(ClusterCommand(Deps{}))
 	checks.Register(ExemptionsCommand())
 	checks.Register(HardeningCommand(Deps{}))
+	checks.Register(NamespacesCommand(Deps{}))
 	checks.Register(NetpolCommand(Deps{}))
 	checks.Register(PolicyCommand())
 	checks.Register(RBACCommand(Deps{}))
