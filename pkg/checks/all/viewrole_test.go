@@ -351,6 +351,7 @@ func viewCases() []viewCase {
 		{"stab drain", []string{"-A"}, func(v *viewClients) checks.Command { return stab.DrainCommand(stabDeps(v)) }},
 		{"stab drain", []string{"--node=n1"}, func(v *viewClients) checks.Command { return stab.DrainCommand(stabDeps(v)) }},
 		{"stab scaledown", nil, func(v *viewClients) checks.Command { return stab.ScaledownCommand(stabDeps(v)) }},
+		{"audit ai", []string{"-A"}, func(v *viewClients) checks.Command { return audit.AICommand(auditDeps(v)) }},
 		{"audit all", []string{"-A"}, func(v *viewClients) checks.Command { return audit.AllCommand(auditDeps(v)) }},
 		{"audit cluster", nil, func(v *viewClients) checks.Command { return audit.ClusterCommand(auditDeps(v)) }},
 		{"audit computeclass", []string{"-A"}, func(v *viewClients) checks.Command { return audit.ComputeClassCommand(auditDeps(v)) }},

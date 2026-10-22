@@ -115,6 +115,7 @@ func (d Deps) now() time.Time {
 }
 
 func init() {
+	checks.Register(AICommand(Deps{}))
 	checks.Register(AllCommand(Deps{}))
 	checks.Register(ClusterCommand(Deps{}))
 	checks.Register(ComputeClassCommand(Deps{}))

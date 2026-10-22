@@ -490,9 +490,6 @@ func (s *Snapshot) MutatingWebhookConfigurations(ctx context.Context) ([]admissi
 		}
 		return l.Items, l.Continue, nil
 	}, nil, func(w *admissionregistrationv1.MutatingWebhookConfiguration) string { return w.Name })
-=======
-	}, func(lr *corev1.LimitRange) string { return lr.Namespace }, func(lr *corev1.LimitRange) string { return lr.Name })
->>>>>>> 26279b2 (feat(audit,inventory): add lookout audit namespaces and triage list addon detection note)
 }
 
 // selectingServices returns the Services in a namespace whose selector

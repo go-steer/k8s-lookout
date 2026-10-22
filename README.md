@@ -163,6 +163,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `net probe` | active DNS/TCP/HTTP checks from inside the cluster |
 | `net probe-from` § | the same checks from inside one named pod's network, for faults only that pod sees; adds an ephemeral container to the pod |
 | `audit all` | run every posture detector in one pass over a shared cluster snapshot, stamping `check=<subcommand>` |
+| `audit ai` | inference-workload security and scheduling posture: unisolated serving Services, `hostNetwork` on accelerator pods, `hostPath` model caches, automounted `default` SA tokens, unpinned model-loader images |
 | `audit workloads` | healthy workloads with no safety net: no PDB, single replica, no probes, no spread, autoscalers that structurally cannot scale |
 | `audit hardening` | workload security posture: privileged containers, host namespaces, hostPath mounts, used default-SA tokens, namespaces with no PSA |
 | `audit netpol` | NetworkPolicy coverage: namespaces nothing isolates, workloads that fell through their neighbours' selectors |

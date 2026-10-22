@@ -43,19 +43,14 @@ func limitRange(namespace, name string) *corev1.LimitRange {
 	}
 }
 
-func boundedContainer(name string) corev1.Container {
+func unboundedContainer(name string) corev1.Container {
 	c := container(name, true, true)
-	c.Resources = corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("128Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
-		},
-	}
+	c.Resources = corev1.ResourceRequirements{}
 	return c
+}
+
+func boundedContainer(name string) corev1.Container {
+	return container(name, true, true)
 }
 
 func findByReason(records []map[string]string, reason string) map[string]string {
@@ -71,7 +66,7 @@ func TestNamespacesNoResourceQuotaAndNoLimitRange(t *testing.T) {
 	cmd := audit.NamespacesCommand(testDeps(
 		nsObj("prod", nil),
 		nsObj("empty", nil),
-		deploy("prod", "api", 2, template(nil, container("api", true, true))),
+		deploy("prod", "api", 2, template(nil, unboundedContainer("api"))),
 	))
 	res := checktest.Run(t, cmd, "-A")
 	if res.Code != emit.ExitData {
