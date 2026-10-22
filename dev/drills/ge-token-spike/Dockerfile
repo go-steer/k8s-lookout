@@ -14,7 +14,7 @@
 
 # Built by Cloud Build from this directory alone (deploy.sh uses
 # `gcloud run deploy --source .`), so it is its own Go module.
-FROM golang:1.26.9 AS build
+FROM golang:1.26.10 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
