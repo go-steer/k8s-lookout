@@ -21,6 +21,7 @@ lookout cloud orphans [flags]
 | --- | --- | --- | --- |
 | `--only` | string | `disks,lbs,addresses` | resource classes to sweep, comma-separated: disks, lbs, addresses, nodepools (nodepools is opt-in: never in the default, judged on one observation, and reads cluster Nodes and Pods) |
 | `--min-age` | duration | `24h0m0s` | report a disk only when unattached at least this long (age from last detach, else creation), and an address only when reserved at least this long; disks and addresses with no datable age are always reported |
+| `--project-wide` | bool | — | sweep unattached disks across the entire GCP project instead of scoping to the target cluster's zone or region |
 
 ## Common flags (every `lookout` command)
 
@@ -79,6 +80,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `total_max_node_count` | orphan.nodepool: the autoscaler's pool-wide maximum, reported instead of max_node_count when the pool sets total limits |
 | `autoprovisioned` | orphan.nodepool: true when node auto-provisioning created the pool (and deletes it once empty); omitted otherwise |
 | `nodepools_skipped` | summary-line note: why --only=nodepools swept no pools although the provider answered (an Autopilot cluster: node pools are provider-managed and billed per pod) |
+| `scope` | summary-line note: disk sweep scope — cluster-zones when filtered to the target cluster's zone/region, or project when sweeping the whole GCP project (--project-wide or cluster location unknown) |
 | `class` | cloud.unavailable (reason=PermissionDenied, SweepFailed or RuleUnresolved): the --only class whose sweep the provider refused or failed (disks, lbs, addresses, nodepools), or that the unresolved rule belongs to (lbs); the other selected classes are still swept, and the summary's unavailable= note lists each such class with its permission, "sweep failed", or its count of unresolved rules |
 | `error` | cloud.unavailable (reason=SweepFailed): the provider error that ended the class's sweep (e.g. a 400 or 500 from the cloud API) — nothing from the failed class is reported, never a partial list; (reason=RuleUnresolved): the error on that one forwarding rule's backend chain (e.g. a 404 for a backend service deleted mid-sweep). Masked and cut to 300 characters |
 | `permission` | cloud.unavailable (reason=PermissionDenied, or RuleUnresolved on a refusal): the provider permission the refused call needed (e.g. compute.addresses.list, container.clusters.get); omitted when the provider did not name it |

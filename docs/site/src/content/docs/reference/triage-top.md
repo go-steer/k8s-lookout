@@ -22,6 +22,7 @@ lookout triage top [flags]
 | `--top-warn` | int | `80` | report a container/node only at or above this percent of its limit/allocatable (zero nominal state; memory additionally turns critical at 95%) |
 | `--all` | bool | — | exploratory dump: emit every sampled row regardless of --top-warn (info severity below it), sorted by pct descending; containers capped at --limit |
 | `--limit` | int | `50` | row cap for the --all container dump |
+| `--sort` | string | `cpu` | sort dimension for spec-fallback pod rows when metrics.k8s.io is unavailable: cpu or memory |
 | `--show-unlimited` | bool | — | list each container missing a cpu or memory limit individually (default: one aggregate count) |
 | `--show-unrequested` | bool | — | list each container missing a cpu or memory request individually (default: one aggregate count); a missing request is the scheduler-side half of the census, always a subset of --show-unlimited |
 | `--history` | duration | — | enrich container findings with max/avg/p95 usage-vs-limit over this window via the cloud provider metrics backend; no provider → explicit unavailable finding + summary marker, point-in-time output unaffected |
@@ -52,6 +53,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `top.unlimited_container` | info | one container that sets no cpu/memory limit (--show-unlimited) |
 | `top.unrequested` | info | how many containers in scope set no cpu/memory request, so the scheduler bin-packs them as zero |
 | `top.unrequested_container` | info | one container that sets no cpu/memory request (--show-unrequested) |
+| `metrics.unavailable` | info | metrics.k8s.io could not be read — falling back to pod spec requests and limits |
+| `top.pod` | info | pod spec requests and limits summary emitted when metrics.k8s.io is unavailable |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
@@ -67,7 +70,12 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `allocatable` | the node's allocatable capacity (top.node), same unit as usage |
 | `pct` | usage as a percent of the limit/allocatable, one decimal |
 | `container` | container name within the pod |
-| `node` | node the pod runs on (top.saturation; top.node carries the node as name) |
+| `node` | node the pod runs on (top.saturation, top.pod; top.node carries the node as name) |
+| `source` | top.pod: data source for the row (spec when metrics.k8s.io is unavailable) |
+| `cpu_request` | top.pod: sum of container CPU requests on the pod (millicores) |
+| `memory_request` | top.pod: sum of container memory requests on the pod (IEC bytes) |
+| `cpu_limit` | top.pod: sum of container CPU limits on the pod (millicores) |
+| `memory_limit` | top.pod: sum of container memory limits on the pod (IEC bytes) |
 | `pods` | top.unlimited/top.unrequested: pods in scope with at least one container missing a cpu or memory limit (resp. request) |
 | `containers` | top.unlimited/top.unrequested: containers in scope missing a cpu or memory limit (resp. request) |
 | `missing` | top.unlimited_container/top.unrequested_container: which dimensions are absent (cpu, memory, or both) |

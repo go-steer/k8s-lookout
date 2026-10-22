@@ -87,6 +87,9 @@ func ConfigForContext(path, context string) (*rest.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig %s: context %q: %w", kubeconfigDesc(path), context, err)
 	}
+	if cfg.Dial == nil {
+		cfg.Dial = newFailFastDialer(DefaultDialTimeout)
+	}
 	return cfg, nil
 }
 

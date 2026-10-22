@@ -17,10 +17,14 @@
 package kube
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/oauth2"
 	"k8s.io/client-go/dynamic"
@@ -37,6 +41,17 @@ const (
 	// DefaultBurst is the default client-side token-bucket burst applied when
 	// Options.Burst is unset (0).
 	DefaultBurst int = 100
+	// DefaultDialTimeout bounds TCP connection setup to the API server when
+	// Options.DialTimeout is unset (0). Kubernetes client-go defaults to 30s,
+	// which burns the entire command --timeout budget on a dead endpoint.
+	DefaultDialTimeout = 3 * time.Second
+	// DefaultKeepAlive is the TCP keep-alive probe interval for API server connections.
+	DefaultKeepAlive = 30 * time.Second
+	// unreachableCacheTTL is how long an initial dial failure (before any
+	// connection to the endpoint has succeeded) is negative-cached on a client
+	// config so sequential Lists in multi-call commands fail fast instead of
+	// multiplying the dial timeout across every call.
+	unreachableCacheTTL = 2 * time.Second
 )
 
 // Options selects how the Kubernetes client config is resolved.
@@ -58,6 +73,8 @@ type Options struct {
 	QPS float32
 	// Burst sets the maximum burst for the REST client throttle (0 = DefaultBurst).
 	Burst int
+	// DialTimeout sets the TCP dial timeout for the REST client (0 = DefaultDialTimeout).
+	DialTimeout time.Duration
 	// CallerToken, when set, replaces whatever credential the resolved
 	// config carries (service-account token, kubeconfig user, exec or
 	// auth-provider plugin, client certificate) with this caller's own
@@ -106,6 +123,7 @@ func BuildDynamicClient(opts Options) (dynamic.Interface, error) {
 // those configs run through the same client construction as the
 // kubeconfig/in-cluster path — pkg/kube stays cloud-free.
 func BuildClientFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
+	cfg = ensureDefaultDial(cfg)
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
@@ -116,6 +134,7 @@ func BuildClientFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
 // BuildDynamicClientFromConfig is BuildClientFromConfig for the dynamic
 // client (CRDs, aggregated APIs), sharing one provider-supplied config.
 func BuildDynamicClientFromConfig(cfg *rest.Config) (dynamic.Interface, error) {
+	cfg = ensureDefaultDial(cfg)
 	client, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("dynamic client: %w", err)
@@ -180,10 +199,68 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 	}
 	cfg.QPS = qps
 	cfg.Burst = burst
+	if cfg.Dial == nil || opts.DialTimeout > 0 {
+		cfg.Dial = newFailFastDialer(opts.DialTimeout)
+	}
 	if opts.CallerToken != nil {
 		return callerConfig(cfg, opts.CallerToken)
 	}
 	return cfg, nil
+}
+
+// ensureDefaultDial returns a shallow copy of cfg with the bounded
+// fail-fast dialer installed when cfg does not already specify a custom Dial.
+func ensureDefaultDial(cfg *rest.Config) *rest.Config {
+	if cfg == nil || cfg.Dial != nil {
+		return cfg
+	}
+	out := rest.CopyConfig(cfg)
+	out.Dial = newFailFastDialer(DefaultDialTimeout)
+	return out
+}
+
+// newFailFastDialer bounds TCP connection setup to timeout (default
+// DefaultDialTimeout) and caches initial dial failures briefly so
+// sequential calls on an unreachable API server fail immediately instead
+// of multiplying the dial timeout across every call in a command.
+func newFailFastDialer(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = DefaultDialTimeout
+	}
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: DefaultKeepAlive,
+	}
+	var (
+		mu            sync.Mutex
+		everConnected bool
+		lastErr       error
+		lastFail      time.Time
+	)
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		if !everConnected && lastErr != nil && time.Since(lastFail) < unreachableCacheTTL {
+			err := lastErr
+			mu.Unlock()
+			return nil, err
+		}
+		mu.Unlock()
+
+		conn, err := dialer.DialContext(ctx, network, addr)
+		mu.Lock()
+		if err == nil {
+			everConnected = true
+			lastErr = nil
+		} else if !everConnected && ctx.Err() == nil {
+			lastErr = err
+			lastFail = time.Now()
+		}
+		mu.Unlock()
+		return conn, err
+	}
 }
 
 // callerConfig returns cfg with every credential replaced by the caller's

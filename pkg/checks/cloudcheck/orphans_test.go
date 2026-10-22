@@ -566,3 +566,107 @@ func TestOrphansSlowLBsCannotStarveTheRest(t *testing.T) {
 		t.Errorf("summary = %v, want unavailable=\"lbs: sweep failed\"", sum)
 	}
 }
+
+// identityOrphanProvider wraps an orphanProvider with cloud.Identity so
+// tests can exercise cluster-zone disk scoping vs --project-wide.
+type identityOrphanProvider struct {
+	orphanProvider
+	project, location, region string
+}
+
+func (p identityOrphanProvider) Project() string  { return p.project }
+func (p identityOrphanProvider) Location() string { return p.location }
+func (p identityOrphanProvider) Region() string   { return p.region }
+
+func TestOrphansDiskScopeClusterZonesAndProjectWide(t *testing.T) {
+	fixture := func() *fakeOrphans {
+		f := orphanFixture()
+		// Add a disk in another region so regional and zonal filtering both drop it.
+		f.disks = append(f.disks, cloud.OrphanDisk{
+			Name:        "other-region-disk",
+			Zone:        "europe-west1-b",
+			SizeGB:      300,
+			Type:        "pd-ssd",
+			UnusedSince: fixedNow.Add(-96 * time.Hour),
+		})
+		return f
+	}
+
+	t.Run("default zonal cluster filters to cluster zone", func(t *testing.T) {
+		p := identityOrphanProvider{
+			orphanProvider: orphanProvider{Provider: cloud.NoProvider, api: fixture()},
+			project:        "p",
+			location:       "us-east1-b",
+			region:         "us-east1",
+		}
+		cmd := cloudcheck.OrphansCommand(testDeps(p))
+		res := checktest.Run(t, cmd, "--only=disks")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		var names []string
+		for _, r := range findingLines(t, res.Stdout) {
+			names = append(names, r["name"])
+		}
+		// Only us-east1-b disks older than 24h (or undatable): undatable and small-old.
+		// big-idle (us-east1-c) and other-region-disk (europe-west1-b) are filtered out.
+		if got := strings.Join(names, ","); got != "undatable,small-old" {
+			t.Errorf("disks = %q, want undatable,small-old", got)
+		}
+		sum := summaryLine(t, res.Stdout)
+		if sum["scope"] != "cluster-zones" || sum["scanned"] != "3" {
+			t.Errorf("summary = %v, want scope=cluster-zones scanned=3", sum)
+		}
+	})
+
+	t.Run("default regional cluster filters to region prefix", func(t *testing.T) {
+		p := identityOrphanProvider{
+			orphanProvider: orphanProvider{Provider: cloud.NoProvider, api: fixture()},
+			project:        "p",
+			location:       "us-east1",
+			region:         "us-east1",
+		}
+		cmd := cloudcheck.OrphansCommand(testDeps(p))
+		res := checktest.Run(t, cmd, "--only=disks")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		var names []string
+		for _, r := range findingLines(t, res.Stdout) {
+			names = append(names, r["name"])
+		}
+		// us-east1-b and us-east1-c disks are kept; europe-west1-b is filtered out.
+		if got := strings.Join(names, ","); got != "big-idle,undatable,small-old" {
+			t.Errorf("disks = %q, want big-idle,undatable,small-old", got)
+		}
+		sum := summaryLine(t, res.Stdout)
+		if sum["scope"] != "cluster-zones" || sum["scanned"] != "4" {
+			t.Errorf("summary = %v, want scope=cluster-zones scanned=4", sum)
+		}
+	})
+
+	t.Run("project-wide keeps all disks across zones", func(t *testing.T) {
+		p := identityOrphanProvider{
+			orphanProvider: orphanProvider{Provider: cloud.NoProvider, api: fixture()},
+			project:        "p",
+			location:       "us-east1-b",
+			region:         "us-east1",
+		}
+		cmd := cloudcheck.OrphansCommand(testDeps(p))
+		res := checktest.Run(t, cmd, "--only=disks", "--project-wide")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		var names []string
+		for _, r := range findingLines(t, res.Stdout) {
+			names = append(names, r["name"])
+		}
+		if got := strings.Join(names, ","); got != "big-idle,other-region-disk,undatable,small-old" {
+			t.Errorf("disks = %q, want big-idle,other-region-disk,undatable,small-old", got)
+		}
+		sum := summaryLine(t, res.Stdout)
+		if sum["scope"] != "project" || sum["scanned"] != "5" {
+			t.Errorf("summary = %v, want scope=project scanned=5", sum)
+		}
+	})
+}
