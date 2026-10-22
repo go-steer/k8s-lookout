@@ -555,3 +555,105 @@ func TestClusterConfig403IsPermissionDenied(t *testing.T) {
 		t.Errorf("Config err = %v, want a plain error", err)
 	}
 }
+
+func TestClusterConfigControlPlanePostureBooleans(t *testing.T) {
+	checkBool := func(t *testing.T, name string, got *bool, want bool) {
+		t.Helper()
+		if got == nil {
+			t.Errorf("%s = nil, want %v", name, want)
+			return
+		}
+		if *got != want {
+			t.Errorf("%s = %v, want %v", name, *got, want)
+		}
+	}
+
+	t.Run("all posture blocks disabled or legacy enabled", func(t *testing.T) {
+		c := &container.Cluster{
+			Name:                 "posture-off",
+			Location:             "us-central1",
+			ShieldedNodes:        &container.ShieldedNodes{Enabled: false},
+			BinaryAuthorization:  &container.BinaryAuthorization{EvaluationMode: "DISABLED"},
+			DatabaseEncryption:   &container.DatabaseEncryption{State: "DECRYPTED"},
+			LegacyAbac:           &container.LegacyAbac{Enabled: true},
+			PrivateClusterConfig: &container.PrivateClusterConfig{EnablePrivateNodes: false, EnablePrivateEndpoint: true},
+			NetworkConfig:        &container.NetworkConfig{DatapathProvider: "LEGACY_DATAPATH"},
+			LoggingService:       "none",
+			MonitoringService:    "none",
+			MonitoringConfig: &container.MonitoringConfig{
+				ComponentConfig:         &container.MonitoringComponentConfig{},
+				ManagedPrometheusConfig: &container.ManagedPrometheusConfig{Enabled: false},
+			},
+			AddonsConfig: &container.AddonsConfig{
+				GkeBackupAgentConfig: &container.GkeBackupAgentConfig{Enabled: false},
+			},
+		}
+		api := &clusterConfigAPI{clusters: stubCluster{c: c}}
+		got, err := api.Config(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkBool(t, "ShieldedNodes", got.ShieldedNodes, false)
+		checkBool(t, "BinaryAuthorization", got.BinaryAuthorization, false)
+		checkBool(t, "DatabaseEncryption", got.DatabaseEncryption, false)
+		checkBool(t, "LegacyABAC", got.LegacyABAC, true)
+		checkBool(t, "PrivateNodes", got.PrivateNodes, false)
+		checkBool(t, "DataplaneV2", got.DataplaneV2, false)
+		checkBool(t, "MasterGlobalAccess", got.MasterGlobalAccess, false)
+		checkBool(t, "LoggingEnabled", got.LoggingEnabled, false)
+		checkBool(t, "MonitoringEnabled", got.MonitoringEnabled, false)
+		checkBool(t, "ManagedPrometheus", got.ManagedPrometheus, false)
+		checkBool(t, "BackupForGKE", got.BackupForGKE, false)
+	})
+
+	t.Run("all posture blocks enabled and hardened", func(t *testing.T) {
+		c := &container.Cluster{
+			Name:                "posture-on",
+			Location:            "us-central1",
+			ShieldedNodes:       &container.ShieldedNodes{Enabled: true},
+			BinaryAuthorization: &container.BinaryAuthorization{EvaluationMode: "PROJECT_SINGLETON_POLICY_ENFORCE"},
+			DatabaseEncryption:  &container.DatabaseEncryption{State: "ENCRYPTED"},
+			LegacyAbac:          &container.LegacyAbac{Enabled: false},
+			ControlPlaneEndpointsConfig: &container.ControlPlaneEndpointsConfig{
+				IpEndpointsConfig: &container.IPEndpointsConfig{
+					Enabled:      true,
+					GlobalAccess: true,
+				},
+			},
+			NetworkConfig: &container.NetworkConfig{
+				DefaultEnablePrivateNodes: true,
+				DatapathProvider:          "ADVANCED_DATAPATH",
+			},
+			LoggingConfig: &container.LoggingConfig{
+				ComponentConfig: &container.LoggingComponentConfig{
+					EnableComponents: []string{"SYSTEM_COMPONENTS", "WORKLOADS"},
+				},
+			},
+			MonitoringConfig: &container.MonitoringConfig{
+				ComponentConfig: &container.MonitoringComponentConfig{
+					EnableComponents: []string{"SYSTEM_COMPONENTS"},
+				},
+				ManagedPrometheusConfig: &container.ManagedPrometheusConfig{Enabled: true},
+			},
+			AddonsConfig: &container.AddonsConfig{
+				GkeBackupAgentConfig: &container.GkeBackupAgentConfig{Enabled: true},
+			},
+		}
+		api := &clusterConfigAPI{clusters: stubCluster{c: c}}
+		got, err := api.Config(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkBool(t, "ShieldedNodes", got.ShieldedNodes, true)
+		checkBool(t, "BinaryAuthorization", got.BinaryAuthorization, true)
+		checkBool(t, "DatabaseEncryption", got.DatabaseEncryption, true)
+		checkBool(t, "LegacyABAC", got.LegacyABAC, false)
+		checkBool(t, "PrivateNodes", got.PrivateNodes, true)
+		checkBool(t, "DataplaneV2", got.DataplaneV2, true)
+		checkBool(t, "MasterGlobalAccess", got.MasterGlobalAccess, true)
+		checkBool(t, "LoggingEnabled", got.LoggingEnabled, true)
+		checkBool(t, "MonitoringEnabled", got.MonitoringEnabled, true)
+		checkBool(t, "ManagedPrometheus", got.ManagedPrometheus, true)
+		checkBool(t, "BackupForGKE", got.BackupForGKE, true)
+	})
+}

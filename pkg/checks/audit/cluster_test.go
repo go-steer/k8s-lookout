@@ -446,3 +446,137 @@ func TestClusterFingerprintIsClassNotInstance(t *testing.T) {
 		t.Errorf("same claim on two clusters fingerprinted apart: %v", fps)
 	}
 }
+
+func TestClusterControlPlanePostureFacets(t *testing.T) {
+	cleanBase := func() cloud.ClusterConfig {
+		return cloud.ClusterConfig{
+			Name:                 "prod-east",
+			Location:             "us-east1",
+			WorkloadIdentityPool: "acme-prod.svc.id.goog",
+		}
+	}
+
+	t.Run("all posture booleans enabled or safe is silent", func(t *testing.T) {
+		cfg := cleanBase()
+		cfg.ShieldedNodes = ptr(true)
+		cfg.BinaryAuthorization = ptr(true)
+		cfg.DatabaseEncryption = ptr(true)
+		cfg.LegacyABAC = ptr(false)
+		cfg.PrivateNodes = ptr(true)
+		cfg.DataplaneV2 = ptr(true)
+		cfg.MasterGlobalAccess = ptr(true)
+		cfg.LoggingEnabled = ptr(true)
+		cfg.MonitoringEnabled = ptr(true)
+		cfg.ManagedPrometheus = ptr(true)
+		cfg.BackupForGKE = ptr(true)
+
+		res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+		if got := findingLines(t, res.Stdout); len(got) != 0 {
+			t.Fatalf("want no findings when all posture controls are enabled, got:\n%s", res.Stdout)
+		}
+	})
+
+	t.Run("security posture findings", func(t *testing.T) {
+		cfg := cleanBase()
+		cfg.ShieldedNodes = ptr(false)
+		cfg.BinaryAuthorization = ptr(false)
+		cfg.DatabaseEncryption = ptr(false)
+		cfg.LegacyABAC = ptr(true)
+
+		res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+		got := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			got[r["reason"]] = r
+		}
+		want := map[string]string{
+			"ShieldedNodesDisabled":              emit.SeverityWarning,
+			"BinaryAuthorizationDisabled":        emit.SeverityInfo,
+			"ApplicationLayerSecretsUnencrypted": emit.SeverityInfo,
+			"LegacyABACEnabled":                  emit.SeverityWarning,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("security posture findings = %v, want %v\nstdout:\n%s", got, want, res.Stdout)
+		}
+		for reason, sev := range want {
+			r := got[reason]
+			if r["kind"] != "audit.cluster_security_posture" || r["severity"] != sev || r["kind_of_object"] != "Cluster" {
+				t.Errorf("%s = %v, want kind=audit.cluster_security_posture severity=%s", reason, r, sev)
+			}
+		}
+	})
+
+	t.Run("network posture findings on private endpoint", func(t *testing.T) {
+		cfg := cleanBase()
+		cfg.PublicEndpoint = ""
+		cfg.PrivateNodes = ptr(false)
+		cfg.DataplaneV2 = ptr(false)
+		cfg.MasterGlobalAccess = ptr(false)
+
+		res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+		got := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			got[r["reason"]] = r
+		}
+		want := map[string]string{
+			"PrivateNodesDisabled":       emit.SeverityInfo,
+			"DataplaneV2Disabled":        emit.SeverityInfo,
+			"MasterGlobalAccessDisabled": emit.SeverityInfo,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("network posture findings = %v, want %v\nstdout:\n%s", got, want, res.Stdout)
+		}
+		for reason, sev := range want {
+			r := got[reason]
+			if r["kind"] != "audit.cluster_network_posture" || r["severity"] != sev {
+				t.Errorf("%s = %v, want kind=audit.cluster_network_posture severity=%s", reason, r, sev)
+			}
+		}
+	})
+
+	t.Run("MasterGlobalAccess false on public endpoint is silent", func(t *testing.T) {
+		cfg := cleanBase()
+		cfg.PublicEndpoint = "203.0.113.10"
+		cfg.AuthorizedNetworks = cloud.AuthorizedNetworks{Enabled: true, CIDRs: []string{"198.51.100.0/24"}}
+		cfg.MasterGlobalAccess = ptr(false)
+
+		res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+		for _, r := range findingLines(t, res.Stdout) {
+			if r["reason"] == "MasterGlobalAccessDisabled" {
+				t.Errorf("MasterGlobalAccessDisabled should not fire when PublicEndpoint is set: %v", r)
+			}
+		}
+	})
+
+	t.Run("observability and backup posture findings", func(t *testing.T) {
+		cfg := cleanBase()
+		cfg.LoggingEnabled = ptr(false)
+		cfg.MonitoringEnabled = ptr(false)
+		cfg.ManagedPrometheus = ptr(false)
+		cfg.BackupForGKE = ptr(false)
+
+		checktest.VerifyContract(t, audit.ClusterCommand(clusterDeps(cfg)))
+		res := checktest.Run(t, audit.ClusterCommand(clusterDeps(cfg)))
+		got := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			got[r["reason"]] = r
+		}
+		want := map[string]struct {
+			kind string
+			sev  string
+		}{
+			"LoggingDisabled":           {"audit.cluster_observability_off", emit.SeverityWarning},
+			"MonitoringDisabled":        {"audit.cluster_observability_off", emit.SeverityWarning},
+			"ManagedPrometheusDisabled": {"audit.cluster_observability_off", emit.SeverityInfo},
+			"BackupForGKEDisabled":      {"audit.cluster_backup_off", emit.SeverityInfo},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("observability/backup findings = %v, want %v\nstdout:\n%s", got, want, res.Stdout)
+		}
+		for reason, w := range want {
+			r := got[reason]
+			if r["kind"] != w.kind || r["severity"] != w.sev {
+				t.Errorf("%s = %v, want kind=%s severity=%s", reason, r, w.kind, w.sev)
+			}
+		}
+	})
+}

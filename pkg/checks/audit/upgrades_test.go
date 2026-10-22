@@ -126,6 +126,13 @@ func TestUpgradesControlPlaneDistance(t *testing.T) {
 		wantSev    string
 	}{
 		{
+			name:       "three minors behind the channel's target (unsupported)",
+			version:    "1.28.5-gke.1000",
+			target:     cloud.UpgradeTargets{DefaultVersion: "1.31.2-gke.1000"},
+			wantReason: "MinorUnsupported",
+			wantSev:    "critical",
+		},
+		{
 			name:       "a minor behind the channel's target",
 			version:    "1.29.7-gke.1104000",
 			target:     cloud.UpgradeTargets{DefaultVersion: "1.30.6-gke.1125000"},

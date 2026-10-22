@@ -39,6 +39,7 @@ const (
 )
 
 const (
+	reasonMinorUnsupported        = "MinorUnsupported"
 	reasonControlPlaneMinorBehind = "ControlPlaneMinorBehind"
 	reasonControlPlanePatchBehind = "ControlPlanePatchBehind"
 	reasonNodePoolVersionSkew     = "NodePoolVersionSkew"
@@ -58,6 +59,11 @@ const (
 // and it is not, which is why the claim is made AT it rather than past
 // it.
 const supportedMinorSkew = 2
+
+// unsupportedMinorGap is the control-plane minor-version distance (3 or
+// more minors behind target_version) at which the cluster's release line
+// is past the standard 3-minor GKE/Kubernetes support window.
+const unsupportedMinorGap = 3
 
 // UpgradesCommand builds `lookout audit upgrades`: the patch-readiness
 // half of the posture group (#187) — whether this cluster is current,
@@ -104,7 +110,7 @@ func UpgradesCommand(deps Deps) checks.Command {
 		Summary:     "Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
 		Flags:       PolicyFlags(),
 		Kinds: []checks.KindField{
-			checks.Kind(kindVersionBehind, "the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindVersionBehind, "the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew", emit.SeverityCritical, emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindUpgradeUnmanaged, "nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off", emit.SeverityWarning),
 			checks.Kind(kindUpgradeBlocked, "an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindUpgradeUnattended, "upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications", emit.SeverityInfo),
@@ -209,17 +215,29 @@ func versionFindings(cfg cloud.ClusterConfig, targets cloud.UpgradeTargets) []em
 		}
 		switch {
 		case olderMinor(cp, tv):
-			if gap, ok := minorGap(cp, tv); ok {
+			gap, hasGap := minorGap(cp, tv)
+			if hasGap {
 				details = append(details, emit.Field{Key: "minor_versions_behind", Value: itoa(gap)})
 			}
-			out = append(out, clusterFinding(cfg, emit.Finding{
-				Kind:     kindVersionBehind,
-				Severity: emit.SeverityWarning,
-				Reason:   reasonControlPlaneMinorBehind,
-				Message: fmt.Sprintf("the control plane runs %s and the provider publishes %s for this cluster: a whole release line of fixes has not been applied, and every minor the cluster falls behind is one the provider will eventually stop supporting it on",
-					cfg.Version, target),
-				Details: details,
-			}))
+			if (hasGap && gap >= unsupportedMinorGap) || cp.major < tv.major {
+				out = append(out, clusterFinding(cfg, emit.Finding{
+					Kind:     kindVersionBehind,
+					Severity: emit.SeverityCritical,
+					Reason:   reasonMinorUnsupported,
+					Message: fmt.Sprintf("the control plane runs %s and the provider publishes %s for this cluster: at 3 or more minor versions behind, this release line is past the standard support window and no longer receives security fixes",
+						cfg.Version, target),
+					Details: details,
+				}))
+			} else {
+				out = append(out, clusterFinding(cfg, emit.Finding{
+					Kind:     kindVersionBehind,
+					Severity: emit.SeverityWarning,
+					Reason:   reasonControlPlaneMinorBehind,
+					Message: fmt.Sprintf("the control plane runs %s and the provider publishes %s for this cluster: a whole release line of fixes has not been applied, and every minor the cluster falls behind is one the provider will eventually stop supporting it on",
+						cfg.Version, target),
+					Details: details,
+				}))
+			}
 		case older(cp, tv):
 			out = append(out, clusterFinding(cfg, emit.Finding{
 				Kind:     kindVersionBehind,

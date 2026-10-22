@@ -537,6 +537,10 @@ type NodePoolConfig struct {
 	// node count: a pool's live size comes from the cluster's own Node
 	// objects, not from this config read.
 	Autoscaling NodePoolAutoscaling
+	// ShieldedNodes is the pool-level Shielded VM integrity-monitoring /
+	// secure-boot posture when explicitly reported by the provider
+	// (nil when unset).
+	ShieldedNodes *bool
 }
 
 // NodePoolAutoscaling is a node pool's autoscaler bounds as
@@ -683,6 +687,21 @@ type ClusterConfig struct {
 	// exist; pools a compute class created still take only pods that
 	// select that class.
 	NodeAutoprovisioning Toggle
+
+	// Optional tri-state control-plane posture booleans (#786, L-40–43).
+	// nil means unset / not reported by the provider or fake so callers
+	// with minimal ClusterConfig fixtures stay silent.
+	ShieldedNodes       *bool
+	BinaryAuthorization *bool
+	DatabaseEncryption  *bool
+	LegacyABAC          *bool
+	PrivateNodes        *bool
+	DataplaneV2         *bool
+	MasterGlobalAccess  *bool
+	LoggingEnabled      *bool
+	MonitoringEnabled   *bool
+	ManagedPrometheus   *bool
+	BackupForGKE        *bool
 
 	// NodePools are the cluster's node pools in the provider's order.
 	NodePools []NodePoolConfig
