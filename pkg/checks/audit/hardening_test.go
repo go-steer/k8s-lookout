@@ -71,6 +71,16 @@ func owned[T metav1.Object](obj T, kind, name string) T {
 
 // --- pod-template mutators ---
 
+func restrictedSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr(true),
+		AllowPrivilegeEscalation: ptr(false),
+		ReadOnlyRootFilesystem:   ptr(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
 func privileged(t corev1.PodTemplateSpec, names ...string) corev1.PodTemplateSpec {
 	want := map[string]bool{}
 	for _, n := range names {
@@ -78,7 +88,15 @@ func privileged(t corev1.PodTemplateSpec, names ...string) corev1.PodTemplateSpe
 	}
 	for i, c := range t.Spec.Containers {
 		if want[c.Name] {
-			t.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{Privileged: ptr(true)}
+			sc := c.SecurityContext
+			if sc == nil {
+				sc = &corev1.SecurityContext{}
+			} else {
+				cp := *sc
+				sc = &cp
+			}
+			sc.Privileged = ptr(true)
+			t.Spec.Containers[i].SecurityContext = sc
 		}
 	}
 	return t
@@ -91,9 +109,19 @@ func addCaps(t corev1.PodTemplateSpec, name string, caps ...string) corev1.PodTe
 	}
 	for i, c := range t.Spec.Containers {
 		if c.Name == name {
-			t.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{
-				Capabilities: &corev1.Capabilities{Add: added},
+			sc := c.SecurityContext
+			if sc == nil {
+				sc = &corev1.SecurityContext{}
+			} else {
+				cp := *sc
+				sc = &cp
 			}
+			var drop []corev1.Capability
+			if sc.Capabilities != nil {
+				drop = sc.Capabilities.Drop
+			}
+			sc.Capabilities = &corev1.Capabilities{Add: added, Drop: drop}
+			t.Spec.Containers[i].SecurityContext = sc
 		}
 	}
 	return t
@@ -137,7 +165,9 @@ func withInit(t corev1.PodTemplateSpec, c corev1.Container) corev1.PodTemplateSp
 }
 
 func app(name string) corev1.PodTemplateSpec {
-	return template(map[string]string{"app": name}, container(name, true, true))
+	c := container(name, true, true)
+	c.SecurityContext = restrictedSecurityContext()
+	return template(map[string]string{"app": name}, c)
 }
 
 // hardeningCluster is the shared fixture: one object per shape the
@@ -156,8 +186,10 @@ func app(name string) corev1.PodTemplateSpec {
 //	legacy     enforce=privileged, default SA automount disabled at the SA
 //	  Deployment/vendor     read-only hostPath, on the default SA
 func hardeningCluster() []runtime.Object {
+	agentContainer := container("agent", true, true)
+	agentContainer.SecurityContext = restrictedSecurityContext()
 	cni := hostPath(hostPath(hostNamespaces(privileged(
-		template(map[string]string{"app": "cni"}, container("agent", true, true)),
+		template(map[string]string{"app": "cni"}, agentContainer),
 		"agent"), true, true, false),
 		"run", "/var/run", "agent", false),
 		"cni-conf", "/etc/cni", "agent", true)
@@ -170,6 +202,7 @@ func hardeningCluster() []runtime.Object {
 		serviceAccount("prod", "default", nil),
 		serviceAccount("platform", "default", nil),
 		serviceAccount("legacy", "default", ptr(false)),
+		roleBinding("prod", "prod-sas", "ClusterRole", "view", sa("prod", "checkout"), sa("prod", "cni")),
 
 		deploy("prod", "checkout", 3, asServiceAccount(app("checkout"), "checkout")),
 		daemon("prod", "cni", asServiceAccount(cni, "cni")),
@@ -204,6 +237,7 @@ func TestHardeningQuietWhenHardened(t *testing.T) {
 	objs := []runtime.Object{
 		nsObj("prod", map[string]string{"pod-security.kubernetes.io/enforce": "baseline"}),
 		serviceAccount("prod", "default", nil),
+		roleBinding("prod", "checkout", "ClusterRole", "view", sa("prod", "checkout")),
 		deploy("prod", "checkout", 3, asServiceAccount(app("checkout"), "checkout")),
 	}
 	res := checktest.Run(t, audit.HardeningCommand(testDeps(objs...)), "-A")
@@ -580,5 +614,195 @@ func hardenedNamespace(objs ...runtime.Object) []runtime.Object {
 	return append([]runtime.Object{
 		nsObj("prod", map[string]string{"pod-security.kubernetes.io/enforce": "baseline"}),
 		serviceAccount("prod", "default", ptr(false)),
+		roleBinding("prod", "x", "ClusterRole", "view", sa("prod", "x")),
 	}, objs...)
+}
+
+func TestHardeningUnboundSATokenAutomount(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		saObj    *corev1.ServiceAccount
+		binding  runtime.Object
+		template func(corev1.PodTemplateSpec) corev1.PodTemplateSpec
+		want     bool
+	}{
+		{
+			name:  "unbound-sa-automounts",
+			saObj: serviceAccount("prod", "checkout", nil),
+			template: func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return asServiceAccount(t, "checkout")
+			},
+			want: true,
+		},
+		{
+			name:    "bound-by-rolebinding",
+			saObj:   serviceAccount("prod", "checkout", nil),
+			binding: roleBinding("prod", "checkout-rb", "Role", "reader", sa("prod", "checkout")),
+			template: func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return asServiceAccount(t, "checkout")
+			},
+			want: false,
+		},
+		{
+			name:    "bound-by-clusterrolebinding",
+			saObj:   serviceAccount("prod", "checkout", nil),
+			binding: clusterBinding("checkout-crb", nil, "view", sa("prod", "checkout")),
+			template: func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return asServiceAccount(t, "checkout")
+			},
+			want: false,
+		},
+		{
+			name:  "declined-at-serviceaccount",
+			saObj: serviceAccount("prod", "checkout", ptr(false)),
+			template: func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return asServiceAccount(t, "checkout")
+			},
+			want: false,
+		},
+		{
+			name:  "declined-at-pod",
+			saObj: serviceAccount("prod", "checkout", nil),
+			template: func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+				return noAutomount(asServiceAccount(t, "checkout"))
+			},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []runtime.Object{
+				nsObj("prod", map[string]string{"pod-security.kubernetes.io/enforce": "baseline"}),
+				serviceAccount("prod", "default", ptr(false)),
+				deploy("prod", "web", 1, tc.template(app("web"))),
+			}
+			if tc.saObj != nil {
+				objs = append(objs, tc.saObj)
+			}
+			if tc.binding != nil {
+				objs = append(objs, tc.binding)
+			}
+			res := checktest.Run(t, audit.HardeningCommand(testDeps(objs...)), "-A")
+			if res.Code != emit.ExitData {
+				t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+			}
+			var got map[string]string
+			for _, r := range findingLines(t, res.Stdout) {
+				if r["kind"] == "audit.sa_token_automount" {
+					got = r
+				}
+			}
+			if (got != nil) != tc.want {
+				t.Fatalf("sa_token_automount present = %v, want %v:\n%s", got != nil, tc.want, res.Stdout)
+			}
+			if tc.want {
+				if got["reason"] != "UnboundServiceAccountAutomount" || got["severity"] != "info" {
+					t.Errorf("unexpected reason/severity: %v", got)
+				}
+				if got["kind_of_object"] != "ServiceAccount" || got["name"] != "checkout" {
+					t.Errorf("subject = %s/%s, want ServiceAccount/checkout", got["kind_of_object"], got["name"])
+				}
+				if got["service_account"] != "checkout" || got["workloads"] != "1" || got["workload_names"] != "Deployment/web" {
+					t.Errorf("details = %v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestHardeningUnboundSATokenPerWorkload(t *testing.T) {
+	objs := []runtime.Object{
+		nsObj("prod", map[string]string{"pod-security.kubernetes.io/enforce": "baseline"}),
+		serviceAccount("prod", "default", ptr(false)),
+		serviceAccount("prod", "worker-sa", nil),
+		deploy("prod", "worker-a", 1, asServiceAccount(app("worker-a"), "worker-sa")),
+		deploy("prod", "worker-b", 1, asServiceAccount(app("worker-b"), "worker-sa")),
+	}
+	res := checktest.Run(t, audit.HardeningCommand(testDeps(objs...)), "--namespace=prod", "--per-workload")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	findRecord(t, res.Stdout, "audit.sa_token_automount", "Deployment", "prod", "worker-a")
+	findRecord(t, res.Stdout, "audit.sa_token_automount", "Deployment", "prod", "worker-b")
+}
+
+func TestHardeningContainerSecurityGaps(t *testing.T) {
+	tpl := app("x")
+	tpl.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+		RunAsUser:                ptr(int64(0)),
+		AllowPrivilegeEscalation: ptr(true),
+		ReadOnlyRootFilesystem:   ptr(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+	}
+	tpl = withInit(tpl, corev1.Container{
+		Name:  "init-unset",
+		Image: "example.com/init:v1",
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost},
+		},
+	})
+	objs := hardenedNamespace(deploy("prod", "x", 1, asServiceAccount(tpl, "x")))
+	res := checktest.Run(t, audit.HardeningCommand(testDeps(objs...)), "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	byReason := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.container_security_gaps" {
+			byReason[r["reason"]] = r
+		}
+	}
+	for _, want := range []struct {
+		reason    string
+		severity  string
+		container string
+	}{
+		{"RunAsRootUID", "warning", "x"},
+		{"RunAsNonRootUnset", "info", "init-unset"},
+		{"AllowPrivilegeEscalation", "warning", "x"},
+		{"NoSeccompProfile", "info", "x"},
+	} {
+		got, ok := byReason[want.reason]
+		if !ok {
+			t.Errorf("missing reason %s in:\n%s", want.reason, res.Stdout)
+			continue
+		}
+		if got["severity"] != want.severity || got["container_names"] != want.container || got["total_containers"] != "2" {
+			t.Errorf("%s: got %v, want severity=%s container_names=%s total=2", want.reason, got, want.severity, want.container)
+		}
+	}
+}
+
+func TestHardeningWritableRootFSAndCapabilities(t *testing.T) {
+	tpl := app("x")
+	tpl.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+		RunAsUser:                ptr(int64(1000)),
+		AllowPrivilegeEscalation: ptr(false),
+		ReadOnlyRootFilesystem:   ptr(false),
+		Capabilities: &corev1.Capabilities{
+			Add: []corev1.Capability{"NET_ADMIN", "CAP_SYS_PTRACE"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	objs := hardenedNamespace(deploy("prod", "x", 1, asServiceAccount(tpl, "x")))
+	res := checktest.Run(t, audit.HardeningCommand(testDeps(objs...)), "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	byKey := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		byKey[r["kind"]+"/"+r["reason"]] = r
+	}
+	if r, ok := byKey["audit.writable_rootfs/WritableRootFilesystem"]; !ok || r["severity"] != "info" || r["container_names"] != "x" {
+		t.Errorf("writable_rootfs: got %v", r)
+	}
+	if r, ok := byKey["audit.capabilities_added/CapabilitiesAdded"]; !ok || r["severity"] != "warning" || r["capabilities"] != "NET_ADMIN,SYS_PTRACE" {
+		t.Errorf("CapabilitiesAdded: got %v", r)
+	}
+	if r, ok := byKey["audit.capabilities_added/CapabilitiesNotDropped"]; !ok || r["severity"] != "info" || r["container_names"] != "x" {
+		t.Errorf("CapabilitiesNotDropped: got %v", r)
+	}
 }

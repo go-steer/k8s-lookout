@@ -67,6 +67,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.sa_token_automount` | info | the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount |
+| `audit.container_security_gaps` | warning, info | a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile |
+| `audit.writable_rootfs` | info | a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime |
+| `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
@@ -132,6 +136,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_enforce` | the namespace's pod-security.kubernetes.io/enforce label, omitted when unset |
 | `pss_warn` | its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run |
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
+| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `namespaces` | summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover |
 | `role` | the role the binding points at, as Kind/name |
 | `subjects` | subjects the binding grants the role to |
@@ -142,7 +147,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `resources` | the resources of the broadest wildcard rule, comma-joined |
 | `api_groups` | the apiGroups of the broadest wildcard rule, comma-joined, with the core group written as `core` |
 | `bindings` | RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today |
-| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
 | `policies` | NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one |

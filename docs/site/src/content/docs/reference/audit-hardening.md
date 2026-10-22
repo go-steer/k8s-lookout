@@ -52,6 +52,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.sa_token_automount` | info | the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount |
+| `audit.container_security_gaps` | warning, info | a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile |
+| `audit.writable_rootfs` | info | a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime |
+| `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
@@ -75,6 +79,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_warn` | its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run |
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
 | `workloads` | pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one |
+| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `namespaces` | summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover |
 | `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |

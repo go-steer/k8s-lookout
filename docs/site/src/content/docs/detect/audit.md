@@ -48,6 +48,10 @@ Run every posture detector in one pass over a shared cluster snapshot: workload 
 | `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.sa_token_automount` | info | the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount |
+| `audit.container_security_gaps` | warning, info | a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile |
+| `audit.writable_rootfs` | info | a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime |
+| `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
@@ -97,6 +101,10 @@ Workload security posture: containers running privileged or holding node-root ca
 | `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.sa_token_automount` | info | the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount |
+| `audit.container_security_gaps` | warning, info | a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile |
+| `audit.writable_rootfs` | info | a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime |
+| `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
