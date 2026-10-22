@@ -670,3 +670,35 @@ func TestOrphansDiskScopeClusterZonesAndProjectWide(t *testing.T) {
 		}
 	})
 }
+
+func TestOrphansNodeDiskAndInstanceGroupReasons(t *testing.T) {
+	api := &fakeOrphans{
+		disks: []cloud.OrphanDisk{
+			{Name: "gke-prod-default-pool-1234abcd-xy12", Zone: "us-east1-b", SizeGB: 100, Type: "pd-balanced", UnusedSince: fixedNow.Add(-48 * time.Hour)},
+			{Name: "gke-prod-pvc-9876-abcd", Zone: "us-east1-b", SizeGB: 50, Type: "pd-ssd", UnusedSince: fixedNow.Add(-48 * time.Hour)},
+		},
+		lbs: []cloud.OrphanLoadBalancer{
+			{Name: "ig-rule", Region: "us-east1", Reason: "backend service ig-bs targets instance group k8s-ig--abc with 0 instances"},
+		},
+	}
+	cmd := cloudcheck.OrphansCommand(testDeps(orphanProvider{Provider: cloud.NoProvider, api: api}))
+	checktest.VerifyContract(t, cmd)
+
+	res := checktest.Run(t, cmd)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	byName := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		byName[r["name"]] = r
+	}
+	if r := byName["gke-prod-default-pool-1234abcd-xy12"]; r["reason"] != "OrphanedNodeDisk" {
+		t.Errorf("node boot disk = %v, want OrphanedNodeDisk", r)
+	}
+	if r := byName["gke-prod-pvc-9876-abcd"]; r["reason"] != "UnattachedDisk" {
+		t.Errorf("pvc disk = %v, want UnattachedDisk", r)
+	}
+	if r := byName["ig-rule"]; r["reason"] != "OrphanedInstanceGroup" {
+		t.Errorf("ig-rule = %v, want OrphanedInstanceGroup", r)
+	}
+}

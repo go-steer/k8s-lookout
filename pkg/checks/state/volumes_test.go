@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -401,4 +402,44 @@ func TestVolumesRegisteredInDefaultRegistry(t *testing.T) {
 	if !strings.Contains(c.Help(), "--namespace") {
 		t.Error("generated help does not document --namespace scoping")
 	}
+}
+
+func TestVolumesExpansionUnsupportedAndWaitForFirstConsumer(t *testing.T) {
+	wffc := storagev1.VolumeBindingWaitForFirstConsumer
+	noExpand := false
+	sc := &storagev1.StorageClass{
+		ObjectMeta:           metav1.ObjectMeta{Name: "local-no-expand"},
+		Provisioner:          "kubernetes.io/no-provisioner",
+		VolumeBindingMode:    &wffc,
+		AllowVolumeExpansion: &noExpand,
+	}
+
+	resizing := volBoundPVC(ns, "resize-stuck", "pv-resize", 2*time.Hour)
+	className := "local-no-expand"
+	resizing.Spec.StorageClassName = &className
+	resizing.Spec.Resources.Requests = corev1.ResourceList{
+		corev1.ResourceStorage: resource.MustParse("20Gi"),
+	}
+
+	pendingWFFC := volPVC(ns, "wffc-unbound", "", corev1.ReadWriteOnce)
+	pendingWFFC.CreationTimestamp = metav1.NewTime(fixedNow.Add(-2 * time.Hour))
+	pendingWFFC.Spec.StorageClassName = &className
+	pendingWFFC.Status.Phase = corev1.ClaimPending
+
+	objs := []runtime.Object{
+		sc,
+		volPod(ns, "app-0", "node-a", "resize-stuck"),
+		resizing,
+		volPV("pv-resize"),
+		pendingWFFC,
+		volNode("node-a", "us-east1-b"),
+	}
+	cmd := volCommand(objs...)
+	checktest.VerifyContract(t, cmd)
+
+	got := volFindings(t, objs)
+	wantFindings(t, got, []string{
+		`kind=volume.expansion_unsupported severity=warning namespace=prod kind_of_object=PersistentVolumeClaim name=resize-stuck reason=VolumeExpansionUnsupported message="claim requests 20Gi (bound capacity 10Gi), but StorageClass \"local-no-expand\" does not allow volume expansion — the resize cannot proceed" pv=pv-resize capacity=10Gi requested=20Gi storage_class=local-no-expand`,
+		`kind=volume.unconsumed_pvc severity=info namespace=prod kind_of_object=PersistentVolumeClaim name=wffc-unbound reason=WaitForFirstConsumerUnbound message="claim is Pending on WaitForFirstConsumer StorageClass \"local-no-expand\" and no pod or workload template references it — it stays unbound until a consumer is created" storage_class=local-no-expand access_modes=ReadWriteOnce claim_age=2h0m0s`,
+	})
 }

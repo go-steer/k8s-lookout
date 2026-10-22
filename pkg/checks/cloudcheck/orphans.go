@@ -762,13 +762,19 @@ func diskFinding(d cloud.OrphanDisk, now time.Time) emit.Finding {
 	if !d.UnusedSince.IsZero() {
 		age = now.Sub(d.UnusedSince).Truncate(time.Minute).String()
 	}
+	reason := "UnattachedDisk"
+	msg := fmt.Sprintf("unattached billing-active disk: %s idle for %s — billed until deleted", desc, age)
+	if isGKENodeBootDisk(d.Name) {
+		reason = "OrphanedNodeDisk"
+		msg = fmt.Sprintf("unattached GKE node boot disk: %s idle for %s — billed until deleted", desc, age)
+	}
 	f := emit.Finding{
 		Kind:         "orphan.disk",
 		Severity:     emit.SeverityWarning,
 		KindOfObject: "Disk",
 		Name:         d.Name,
-		Reason:       "UnattachedDisk",
-		Message:      fmt.Sprintf("unattached billing-active disk: %s idle for %s — billed until deleted", desc, age),
+		Reason:       reason,
+		Message:      msg,
 		Details: []emit.Field{
 			{Key: "zone", Value: d.Zone},
 			{Key: "size_gb", Value: strconv.FormatInt(d.SizeGB, 10)},
@@ -784,17 +790,25 @@ func diskFinding(d cloud.OrphanDisk, now time.Time) emit.Finding {
 	return f
 }
 
+func isGKENodeBootDisk(name string) bool {
+	return strings.HasPrefix(name, "gke-") && !strings.Contains(name, "-pvc-")
+}
+
 func lbFinding(lb cloud.OrphanLoadBalancer) emit.Finding {
 	msg := "forwarding rule routes to zero endpoints — billed and serving nothing"
 	if lb.Reason != "" {
 		msg += ": " + lb.Reason
+	}
+	reason := "NoBackendEndpoints"
+	if strings.Contains(strings.ToLower(lb.Reason), "instance group") {
+		reason = "OrphanedInstanceGroup"
 	}
 	f := emit.Finding{
 		Kind:         "orphan.lb",
 		Severity:     emit.SeverityWarning,
 		KindOfObject: "ForwardingRule",
 		Name:         lb.Name,
-		Reason:       "NoBackendEndpoints",
+		Reason:       reason,
 		Message:      msg,
 		Details: []emit.Field{
 			{Key: "region", Value: lb.Region},

@@ -50,6 +50,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | --- | --- | --- |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `audit.exec_attach_grant` | warning, info | the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward |
+| `audit.impersonate_escalate_grant` | warning | the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields

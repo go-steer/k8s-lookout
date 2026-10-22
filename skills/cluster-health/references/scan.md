@@ -79,6 +79,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
 | `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
+| `volume.expansion_unsupported` | warning | a Bound claim requests more storage than its current capacity, but its StorageClass does not allow volume expansion |
 | `storage.missing_class` | critical | the claim names a StorageClass that does not exist — it will stay Pending forever |
 | `storage.no_default_class` | critical | the claim names no class and the cluster has no default StorageClass |
 | `storage.no_provisioner` | warning | the claim's class is static-only (kubernetes.io/no-provisioner) and no matching PV is available |
@@ -121,8 +122,11 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
+| `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `audit.exec_attach_grant` | warning, info | the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward |
+| `audit.impersonate_escalate_grant` | warning | the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects |
 | `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
 | `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
@@ -247,15 +251,15 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pv_zones` | zones the PV's node affinity allows, sorted |
 | `node_zone` | zone label of the node the pod is scheduled on |
 | `orphan` | which referenced side is gone: "pv missing", "node missing", or both |
-| `capacity` | volume.unconsumed_pvc: the claim's bound capacity (status.capacity.storage); omitted when unreported |
-| `storage_class` | volume.unconsumed_pvc: the claim's StorageClass; omitted when it names none |
+| `capacity` | volume.unconsumed_pvc, volume.expansion_unsupported: the claim's bound capacity (status.capacity.storage); omitted when unreported |
+| `requested` | volume.expansion_unsupported: the larger storage capacity requested in spec.resources.requests.storage |
+| `storage_class` | volume.unconsumed_pvc, volume.expansion_unsupported: the claim's StorageClass; omitted when it names none |
 | `reclaim_policy` | volume.unconsumed_pvc: the bound PV's reclaim policy — Delete means deleting the claim frees the disk, Retain means the PV must be deleted too; omitted when the PV is not visible |
 | `claim_age` | volume.unconsumed_pvc: how long ago the claim was created, truncated to minutes |
 | `classes` | StorageClasses the cluster does have, sorted (empty when there are none) |
 | `defaults` | StorageClasses annotated as the cluster default, sorted |
 | `provisioner` | the class's spec.provisioner |
 | `phase` | the claim's or volume's status.phase at scan time |
-| `requested` | storage the claim requests (spec.resources.requests.storage) |
 | `claim` | the claim the volume was bound to, as namespace/name |
 | `binding_mode` | the class's volumeBindingMode (Immediate when unset) |
 | `gateway_class` | GatewayClass the Gateway names |
@@ -325,7 +329,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |
 | `covered_workloads` | pod templates in the namespace that ARE selected for this direction — the neighbours the subject fell out of step with |
 | `pod_labels` | the template's own labels, which are what the policies' selectors failed to match, sorted and capped at 8 |
-| `pod_selector` | the dead policy's podSelector, in label-selector syntax |
+| `pod_selector` | the dead or allow-all policy's podSelector, in label-selector syntax |
+| `direction` | the direction the permissive rule opens (ingress or egress) |
 | `policy_types` | the directions the dead policy names, after defaulting an unset policyTypes |
 | `role` | the role the binding points at, as Kind/name |
 | `subjects` | subjects the binding grants the role to |
