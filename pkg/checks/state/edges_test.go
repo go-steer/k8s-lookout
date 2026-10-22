@@ -1062,3 +1062,54 @@ func TestEdgesEndpointMismatchExclusions(t *testing.T) {
 		}
 	})
 }
+
+func TestEdgesTargetFreeSweep(t *testing.T) {
+	t.Run("healthy cluster is silent with -A and --namespace", func(t *testing.T) {
+		c := healthy(t)
+		for _, flag := range []string{"-A", "--namespace=prod"} {
+			res := checktest.Run(t, testCommand(c.objects()...), flag)
+			if res.Code != emit.ExitData {
+				t.Fatalf("flag %s: exit %d, stderr: %s", flag, res.Code, res.Stderr)
+			}
+			if !strings.Contains(res.Stdout, "findings=0") {
+				t.Errorf("flag %s: healthy cluster must emit 0 findings, got:\n%s", flag, res.Stdout)
+			}
+		}
+	})
+
+	t.Run("sweeps workload edges and orphan edges across scope", func(t *testing.T) {
+		c := healthy(t)
+		c.cmApp = nil // workload-owned broken ConfigMap ref
+		// Orphan Service in another namespace selecting nothing.
+		orphanSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "dangling-svc"},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "missing"},
+				Ports:    []corev1.ServicePort{{Port: 80}},
+			},
+		}
+		c.extra = append(c.extra, orphanSvc)
+
+		resAll := checktest.Run(t, testCommand(c.objects()...), "-A")
+		if resAll.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", resAll.Code, resAll.Stderr)
+		}
+		if !strings.Contains(resAll.Stdout, "kind=edge.missing_ref severity=critical namespace=prod kind_of_object=ConfigMap name=app-config") {
+			t.Errorf("-A missing workload ConfigMap finding:\n%s", resAll.Stdout)
+		}
+		if !strings.Contains(resAll.Stdout, "kind=edge.selector_empty severity=critical namespace=other kind_of_object=Service name=dangling-svc") {
+			t.Errorf("-A missing orphan Service finding:\n%s", resAll.Stdout)
+		}
+
+		resNS := checktest.Run(t, testCommand(c.objects()...), "--namespace=prod")
+		if resNS.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", resNS.Code, resNS.Stderr)
+		}
+		if !strings.Contains(resNS.Stdout, "kind=edge.missing_ref severity=critical namespace=prod kind_of_object=ConfigMap name=app-config") {
+			t.Errorf("--namespace=prod missing workload ConfigMap finding:\n%s", resNS.Stdout)
+		}
+		if strings.Contains(resNS.Stdout, "dangling-svc") {
+			t.Errorf("--namespace=prod leaked finding from other namespace:\n%s", resNS.Stdout)
+		}
+	})
+}

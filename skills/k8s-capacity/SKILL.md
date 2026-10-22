@@ -145,6 +145,32 @@ path), using the draft's `quota_id`, `region`, `suggested_limit`, and
 lookout command that writes to the cloud — if you find yourself reaching
 for one, you are outside the design.
 
+## Right-sizing, scale-down blockers, and placement drift
+
+When capacity pressure or cost waste comes from over-requested workloads or
+nodes the cluster autoscaler cannot remove, pair the utilization read with
+the scale-down blocker sweep:
+
+```lookout
+lookout stab scaledown
+lookout triage top -A
+lookout triage top --namespace=prod --history=24h
+```
+
+- `stab scaledown` identifies underutilized nodes (`< --utilization`,
+  default 50% of allocatable by pod requests) that the cluster autoscaler
+  is blocked from removing by a gridlocked `PodDisruptionBudget`, an
+  uncontrolled pod, or `cluster-autoscaler.kubernetes.io/safe-to-evict:
+  "false"`.
+- `triage top` (plus `--history` when a cloud metrics provider is
+  configured) contrasts actual CPU/memory usage against limits and flags
+  `top.unrequested` / `top.unlimited` containers so you can right-size
+  before requesting more quota.
+- For continuous placement and compute-class drift signals (`topology-drift`
+  and `compute-class` sources in `lookout watch`, or the standalone
+  metrics-only `leeway` binary), watch for workloads that have drifted off
+  their intended fault domains or compute classes during scale-ups.
+
 ## Record the conclusion
 
 Close the loop so scans and routing reflect triaged reality (§9.4). The

@@ -116,5 +116,24 @@ k8s-triage skill: `bundle` first, then narrow.
   or be destroyed by it (bare pods, emptyDir data, singletons), before
   the eviction API hangs on it.
 
+## Pre/post-upgrade posture & historical `--at` comparison
+
+Before and after a control-plane or node-pool upgrade, pair the upgrade
+posture audit with point-in-time graph history from the sentinel's store:
+
+```lookout
+lookout audit upgrades
+lookout triage changes Deployment/prod/api --since=1h --at=30m --store=/var/lib/lookout/lookout.db
+lookout triage radius Deployment/prod/api --at=30m --store=/var/lib/lookout/lookout.db
+```
+
+- `audit upgrades` checks version currency, release-channel enrollment,
+  node auto-upgrade/auto-repair posture, maintenance exclusions, and node
+  pool version skew before or after an upgrade window.
+- Graph-backed commands accept `--at` (RFC 3339 timestamp or duration ago)
+  with `--store` to answer against the sentinel's recorded topology at
+  incident onset or pre-upgrade baseline, making pre/post-upgrade diffs
+  and rollout regressions deterministic even after pods have been replaced.
+
 Per-command references (all flags, output-field glossaries) are in
 `references/`, generated from the same metadata as `--help`.

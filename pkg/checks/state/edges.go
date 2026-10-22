@@ -190,26 +190,32 @@ func EdgesCommand(deps Deps) checks.Command {
 
 func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	wl := inv.Scope.Workload
-	if wl.IsZero() {
-		return 0, emit.UsageErrorf("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>)")
+	if wl.IsZero() && inv.Scope.Namespace == "" && !inv.Scope.AllNamespaces {
+		return 0, emit.UsageErrorf("state edges requires --workload=<Kind>/<namespace>/<name> (a single pod works too: --workload=Pod/<ns>/<name>), or --namespace=<ns> / -A for a target-free sweep")
 	}
-	// Service is an entry kind, not a workload kind: the evidence for a
-	// broken selector arrives on the Service side, and requiring the
-	// workload behind it asks the caller for the answer (#233).
-	_, isWorkload := workloadKinds[wl.Kind]
-	if !isWorkload && wl.Kind != serviceKind {
-		return 0, emit.UsageErrorf("unsupported target kind %q (want %s, or %s to enter from the service side)",
-			wl.Kind, workloadKindNames(), serviceKind)
-	}
-	if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
-		return 0, emit.UsageErrorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
+	var isWorkload bool
+	if !wl.IsZero() {
+		// Service is an entry kind, not a workload kind: the evidence for a
+		// broken selector arrives on the Service side, and requiring the
+		// workload behind it asks the caller for the answer (#233).
+		_, isWorkload = workloadKinds[wl.Kind]
+		if !isWorkload && wl.Kind != serviceKind {
+			return 0, emit.UsageErrorf("unsupported target kind %q (want %s, or %s to enter from the service side)",
+				wl.Kind, workloadKindNames(), serviceKind)
+		}
+		if inv.Scope.Namespace != "" && inv.Scope.Namespace != wl.Namespace {
+			return 0, emit.UsageErrorf("--namespace=%s contradicts --workload namespace %s", inv.Scope.Namespace, wl.Namespace)
+		}
 	}
 
 	client, err := deps.client(ctx)
 	if err != nil {
 		return 0, err
 	}
-	listNS := wl.Namespace
+	listNS := inv.Scope.Namespace
+	if !wl.IsZero() {
+		listNS = wl.Namespace
+	}
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
 	}
@@ -224,13 +230,24 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	certWarn := inv.Flags.Duration("cert-warn")
+	now := deps.now()
+	if wl.IsZero() {
+		findings := append(cluster.UnreadFindings(edgeUnverified), sweepAllEdges(cluster, certWarn, now)...)
+		for _, f := range findings {
+			if err := inv.Out.Emit(f); err != nil {
+				return 0, err
+			}
+		}
+		return cluster.Scanned(), nil
+	}
 	var verified []emit.Finding
 	affects := edgeUnverified
 	if isWorkload {
-		verified, err = cluster.EdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+		verified, err = cluster.EdgeFindings(wl, certWarn, now)
 	} else {
 		affects = serviceEdgeUnverified
-		verified, err = cluster.ServiceEdgeFindings(wl, inv.Flags.Duration("cert-warn"), deps.now())
+		verified, err = cluster.ServiceEdgeFindings(wl, certWarn, now)
 	}
 	if err != nil {
 		return 0, err
@@ -244,6 +261,84 @@ func runEdges(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 		}
 	}
 	return cluster.Scanned(), nil
+}
+
+// sweepAllEdges runs the target-free broken-edge sweep across every
+// top-level workload in the loaded Cluster plus the orphan-edge sweep
+// (EdgeSweepFindings), deduplicating shared broken references and
+// attributed selector_empty findings.
+func sweepAllEdges(cluster *Cluster, certWarn time.Duration, now time.Time) []emit.Finding {
+	targets := allTopWorkloads(cluster)
+	var out []emit.Finding
+	seen := map[string]bool{}
+	claimed := map[string]bool{}
+	dedupKey := func(f emit.Finding) string {
+		return strings.Join([]string{f.Kind, f.Namespace, f.KindOfObject, f.Name, f.Reason, f.Message}, "\x00")
+	}
+	subjectKey := func(f emit.Finding) string {
+		return strings.Join([]string{f.Kind, f.Namespace, f.KindOfObject, f.Name}, "\x00")
+	}
+	for _, wl := range targets {
+		fs, err := cluster.EdgeFindings(wl, certWarn, now)
+		if err != nil {
+			continue
+		}
+		for _, f := range fs {
+			dk := dedupKey(f)
+			if seen[dk] {
+				continue
+			}
+			seen[dk] = true
+			if f.Kind == "edge.selector_empty" {
+				claimed[subjectKey(f)] = true
+			}
+			out = append(out, f)
+		}
+	}
+	for _, f := range cluster.EdgeSweepFindings(certWarn, now) {
+		dk := dedupKey(f)
+		if seen[dk] {
+			continue
+		}
+		if f.Kind == "edge.selector_empty" && claimed[subjectKey(f)] {
+			continue
+		}
+		seen[dk] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+func allTopWorkloads(cluster *Cluster) []emit.WorkloadRef {
+	seen := map[emit.WorkloadRef]bool{}
+	var out []emit.WorkloadRef
+	add := func(kind, ns, name string) {
+		top, ok := cluster.TopWorkload(kind, ns, name)
+		if !ok || seen[top] {
+			return
+		}
+		seen[top] = true
+		out = append(out, top)
+	}
+	for _, tk := range sortedKeys(cluster.ix.templates) {
+		kind, rest, ok := strings.Cut(tk, "/")
+		if !ok {
+			continue
+		}
+		ns, name, ok := strings.Cut(rest, "/")
+		if !ok {
+			continue
+		}
+		add(kind, ns, name)
+	}
+	for _, pk := range sortedKeys(cluster.ix.pods) {
+		p := cluster.ix.pods[pk]
+		add("Pod", p.Namespace, p.Name)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].String() < out[j].String()
+	})
+	return out
 }
 
 // index holds the typed objects from the List pass. The graph stores
