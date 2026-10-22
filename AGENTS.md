@@ -76,6 +76,32 @@ opens agent incident sessions from leading indicators (watch-path).
   [`docs/adding-a-check.md`](./docs/adding-a-check.md), which has the
   full touchpoint list. Commits need a DCO sign-off (`git commit -s`).
 
+### Branch & worktree workflow (mandatory)
+
+- **Keep the main checkout on `main`:** the primary repository checkout must
+  stay clean and checked out on `main` (`git status` clean, tracking
+  `origin/main`). Never commit or edit directly in the main checkout.
+- **One feature branch + isolated git worktree per task/PR:** create every
+  branch in its own worktree outside the main tree after fetching `origin`:
+  `git fetch origin --tags && git worktree add -b <branch> /tmp/lookout-wt-<slug> origin/main`.
+  Parallel tasks use distinct `/tmp/lookout-wt-<slug>` directories so builds,
+  test caches, and index state never collide.
+- **Rebase and verify before merge:** before merging any PR (especially when
+  parallel PRs touch the same package or generated docs), rebase the worktree
+  onto the latest `origin/main`, regenerate docs (`dev/tools/gen-skill-refs`
+  then `dev/tools/gen-site-docs`), and run `dev/tools/ci` (or `go test ./...`)
+  on the rebased tree. Keep package-wide test helpers in one shared file per
+  package rather than redeclaring them across `*_test.go` files.
+- **Pin PR check status to the current `headRefOid`:** after any push or
+  `--force-with-lease`, verify via `gh pr view --json headRefOid,statusCheckRollup,mergeStateStatus`
+  that check runs are attached to the *new* `headRefOid` before merging.
+- **Clean up after merge:** remove the worktree (`git worktree remove /tmp/lookout-wt-<slug>`)
+  and fast-forward the main checkout (`git -C <main-checkout> pull --ff-only`).
+- **Prefer simple single commands (`run_command`):** invoke one binary per call
+  (e.g., `go test -C /tmp/lookout-wt-<slug> ./pkg/...` or `git -C /tmp/lookout-wt-<slug> status`)
+  instead of chaining with `&&`, `;`, `|`, `$(...)`, or `cd ... && ...` so the
+  auto-mode classifier can prefix-match and auto-approve commands cleanly.
+
 ## Current state
 
 **Implementation complete through M5; pre-1.0 active development** — the
