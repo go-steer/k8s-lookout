@@ -21,6 +21,7 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -53,7 +54,11 @@ func cron(ns, name string, suspend bool, mods ...func(*batchv1.CronJob)) *batchv
 			Namespace: ns, Name: name,
 			CreationTimestamp: cronAgo(90 * 24 * time.Hour),
 		},
-		Spec: batchv1.CronJobSpec{Schedule: "@daily", Suspend: ptr(suspend)},
+		Spec: batchv1.CronJobSpec{
+			Schedule:          "@daily",
+			Suspend:           ptr(suspend),
+			ConcurrencyPolicy: batchv1.ForbidConcurrent,
+		},
 	}
 	for _, m := range mods {
 		m(cj)
@@ -97,9 +102,9 @@ func runCron(t *testing.T, objs []runtime.Object, args ...string) []map[string]s
 // schedule that should have fired and did not is an incident, and
 // `triage delta` owns it (cron.missed).
 func TestSuspendedCronJobIgnoresRunningOnes(t *testing.T) {
-	recs := runCron(t, []runtime.Object{
-		cron("prod", "backup", false, lastScheduled(90*24*time.Hour)),
-	}, "-A")
+	cj := cron("prod", "backup", false, lastScheduled(90*24*time.Hour))
+	cj.Status.LastSuccessfulTime = ptr(cronAgo(90 * 24 * time.Hour))
+	recs := runCron(t, []runtime.Object{cj}, "-A")
 	if len(recs) != 0 {
 		t.Errorf("an unsuspended CronJob must produce nothing here, got %v", recs)
 	}
@@ -377,5 +382,105 @@ func TestSuspendedCronJobWorkloadScopeNotFound(t *testing.T) {
 	}
 	if !strings.Contains(res.Stderr, "not found") {
 		t.Errorf("stderr = %q, want a not-found error", res.Stderr)
+	}
+}
+
+func TestCronJobOverlapRisk(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mod          func(*batchv1.CronJob)
+		wantReason   string
+		wantSeverity string
+	}{
+		{
+			name: "allow-without-active-deadline",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.ConcurrencyPolicy = batchv1.AllowConcurrent
+			},
+			wantReason:   "ConcurrencyAllowOverlap",
+			wantSeverity: "info",
+		},
+		{
+			name: "empty-concurrency-policy-defaults-to-allow",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.ConcurrencyPolicy = ""
+			},
+			wantReason:   "ConcurrencyAllowOverlap",
+			wantSeverity: "info",
+		},
+		{
+			name: "allow-with-bounded-active-deadline-is-quiet",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.Schedule = "*/5 * * * *"
+				cj.Spec.ConcurrencyPolicy = batchv1.AllowConcurrent
+				cj.Spec.JobTemplate.Spec.ActiveDeadlineSeconds = ptr[int64](120)
+			},
+		},
+		{
+			name: "allow-with-deadline-exceeding-interval-warns",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.Schedule = "*/5 * * * *"
+				cj.Spec.ConcurrencyPolicy = batchv1.AllowConcurrent
+				cj.Spec.JobTemplate.Spec.ActiveDeadlineSeconds = ptr[int64](600)
+			},
+			wantReason:   "ConcurrencyAllowOverlap",
+			wantSeverity: "info",
+		},
+		{
+			name: "starting-deadline-under-10s",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.StartingDeadlineSeconds = ptr[int64](5)
+			},
+			wantReason:   "StartingDeadlineTooShort",
+			wantSeverity: "warning",
+		},
+		{
+			name: "starting-deadline-10s-is-quiet",
+			mod: func(cj *batchv1.CronJob) {
+				cj.Spec.StartingDeadlineSeconds = ptr[int64](10)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cj := cron("prod", "sync", false, tc.mod)
+			recs := runCron(t, []runtime.Object{cj}, "-A")
+			if tc.wantReason == "" {
+				if len(recs) != 0 {
+					t.Fatalf("want no findings, got %v", recs)
+				}
+				return
+			}
+			if len(recs) != 1 {
+				t.Fatalf("want 1 finding, got %v", recs)
+			}
+			if recs[0]["kind"] != "audit.cronjob_overlap_risk" || recs[0]["reason"] != tc.wantReason || recs[0]["severity"] != tc.wantSeverity {
+				t.Errorf("finding = %v, want kind=audit.cronjob_overlap_risk reason=%s severity=%s", recs[0], tc.wantReason, tc.wantSeverity)
+			}
+		})
+	}
+}
+
+func TestCronJobFailingNeverSucceeded(t *testing.T) {
+	// Scheduled in the past, never succeeded, no active job -> finding.
+	failing := cron("prod", "import", false, lastScheduled(2*time.Hour))
+	recs := runCron(t, []runtime.Object{failing}, "-A")
+	if len(recs) != 1 {
+		t.Fatalf("want 1 finding, got %v", recs)
+	}
+	if recs[0]["kind"] != "audit.cronjob_failing" || recs[0]["reason"] != "CronJobNeverSucceeded" || recs[0]["severity"] != "warning" {
+		t.Errorf("finding = %v", recs[0])
+	}
+
+	// Active job still running -> quiet.
+	active := cron("prod", "import", false, lastScheduled(2*time.Hour))
+	active.Status.Active = []corev1.ObjectReference{{Name: "import-1"}}
+	if recs := runCron(t, []runtime.Object{active}, "-A"); len(recs) != 0 {
+		t.Errorf("active CronJob should not report CronJobNeverSucceeded, got %v", recs)
+	}
+
+	// Suspended CronJob -> quiet for CronJobNeverSucceeded.
+	suspended := cron("prod", "import", true, lastScheduled(2*time.Hour))
+	if recs := runCron(t, []runtime.Object{suspended}, "-A"); len(recs) != 0 {
+		t.Errorf("2h-suspended CronJob should not report CronJobNeverSucceeded, got %v", recs)
 	}
 }

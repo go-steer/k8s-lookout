@@ -135,16 +135,22 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
 | `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.pdb_posture` | warning | a PodDisruptionBudget overlaps another PDB on the same workload or allows zero disruptions by spec, permanently blocking voluntary node drains |
 | `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
 | `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
 | `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_startup_probe` | warning, info | a container has a livenessProbe and no startupProbe, with either a liveness deadline under 60s (info) or a readinessProbe initialDelaySeconds >= 30s (warning) that shows slow startup is expected |
+| `audit.no_resource_requests` | warning | a container has no CPU or memory request (and no limit or namespace LimitRange to default it from), so the scheduler places it blind and node eviction ranks it first |
+| `audit.no_resource_limits` | warning, info | a container has no memory or CPU limit (and no namespace LimitRange default): an unbounded memory leak OOMs the node (warning), while an unbounded CPU spike is throttled only by contention (info) |
 | `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
-| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `audit.hpa_cannot_scale` | warning, info | the autoscaler structurally cannot scale or drops HA at idle: min equals max, the target is missing, a container has no request for its utilization target to divide by, or minReplicas is 1 |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.cronjob_overlap_risk` | warning, info | a CronJob permits concurrent runs without an activeDeadlineSeconds bounding them to the schedule interval, or sets startingDeadlineSeconds below the controller's 10s check loop |
+| `audit.cronjob_failing` | warning | an active CronJob has scheduled runs, none are currently running, and status.lastSuccessfulTime is nil — it has never succeeded |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
 | `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
-| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook, or a container whose preStop sleep reaches or exceeds terminationGracePeriodSeconds: SIGTERM races endpoint removal or SIGKILL arrives with zero drain time |
 | `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
 | `ipspace.range` | critical, warning, info | a pod/service/node range is at 80% of its CIDR or worse; critical from 95%, info for a range the cloud APIs cannot rate and for an --all row below the line |
 | `orphan.disk` | warning | a GCE disk has been unattached for at least --min-age and is still billing |
@@ -355,12 +361,24 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `ends` | when the exclusion lifts, or `end-of-support` for one that runs until the cluster's version leaves support |
 | `days_remaining` | how much longer the exclusion has left to run |
 | `namespace_pdbs` | PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed |
+| `overlapping_pdb` | other PodDisruptionBudgets in the same namespace selecting the same workload |
+| `workload` | workload(s) selected by the PodDisruptionBudget, as Kind/name |
+| `liveness_window` | the liveness probe's effective deadline (initialDelaySeconds + failureThreshold * periodSeconds) |
+| `period_seconds` | the probe's periodSeconds (default 10) |
+| `failure_threshold` | the probe's failureThreshold (default 3) |
+| `initial_delay_seconds` | the probe's initialDelaySeconds |
+| `prestop_sleep_seconds` | seconds parsed from the container's preStop sleep hook |
+| `termination_grace_period_seconds` | the pod template's terminationGracePeriodSeconds (default 30) |
 | `min_replicas` | the HPA's spec.minReplicas (nil defaults to 1, matching the API server) |
 | `max_replicas` | the HPA's spec.maxReplicas |
 | `metric` | the utilization metric the HPA cannot compute, comma-separated if more than one |
 | `eligible_nodes` | nodes satisfying the workload's REQUIRED placement constraint; an upper bound, since taints and cordons are not subtracted |
 | `cluster_nodes` | nodes in the cluster, so `eligible_nodes` reads as a fraction |
 | `constraint` | the label and field keys that narrow placement, sorted and capped at 8 |
+| `concurrency_policy` | the CronJob's effective spec.concurrencyPolicy (default Allow) |
+| `active_deadline_seconds` | the CronJob jobTemplate's spec.activeDeadlineSeconds, when set |
+| `starting_deadline_seconds` | the CronJob's spec.startingDeadlineSeconds |
+| `last_schedule_time` | the CronJob's status.lastScheduleTime, RFC 3339 |
 | `suspended_for` | how long spec.suspend has been true, rounded to whole days |
 | `suspended_since` | when the suspension is estimated to have started, RFC 3339 |
 | `services` | Services routing to the workload whose ports are not all scrape endpoints — the count that makes it "serving" for the rollout claims |
@@ -413,7 +431,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `latest` | the newest aligned value in the window |
 | `threshold` | the crossed threshold: the critical one when severity=critical, else the warning one |
 | `trend` | startup pack: second-half vs first-half mean delta of the window, e.g. "+34%" — the p95 trend direction |
-| `workload` | the target the edges were traced from as <Kind>/<namespace>/<name>, stamped on every finding — a workload, or the Service itself when entered from the service side |
 | `likely_workload` | on a Service-entry edge.selector_empty: the workload in that namespace whose pod labels best fit the broken selector, i.e. the one it was probably meant to select. Absent when two workloads fit equally well, because then naming one would be a guess |
 | `scaled_to_zero` | on an info edge.selector_empty (reason BackendScaledToZero): the Deployments or StatefulSets the selector matches, as <Kind>/<name>, every one of them asking for zero replicas. The Service routes nowhere until one scales up, but nothing is misconfigured |
 | `volume` | pod volume, or StatefulSet volumeClaimTemplate, whose reference is broken |

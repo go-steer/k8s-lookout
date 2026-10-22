@@ -50,9 +50,10 @@ const kindHPACannotScale = "audit.hpa_cannot_scale"
 // The three structural defects, each with its own remedy and so its
 // own fingerprint class.
 const (
-	reasonMinEqualsMax   = "HPAMinEqualsMax"
-	reasonMissingRequest = "HPATargetMissingRequests"
-	reasonTargetMissing  = "HPATargetMissing"
+	reasonMinEqualsMax     = "HPAMinEqualsMax"
+	reasonMissingRequest   = "HPATargetMissingRequests"
+	reasonTargetMissing    = "HPATargetMissing"
+	reasonMinReplicasIsOne = "MinReplicasIsOne"
 )
 
 // hpaObjectClass is the KindOfObject every finding here carries: the
@@ -107,6 +108,20 @@ func (ix *workloadIndex) hpaFindings(h *autoscalingv2.HorizontalPodAutoscaler) [
 	default:
 		if f, ok := unmeasurableFinding(h, *target); ok {
 			out = append(out, f)
+		}
+		if min := hpaMinReplicas(h); min == 1 && h.Spec.MaxReplicas > 1 {
+			out = append(out, emit.Finding{
+				Kind:     kindHPACannotScale,
+				Severity: emit.SeverityInfo,
+				Reason:   reasonMinReplicasIsOne,
+				Message: fmt.Sprintf("minReplicas is 1 (maxReplicas=%d) on %s: during low traffic the autoscaler scales the workload down to a single pod, eliminating high availability until load rises again",
+					h.Spec.MaxReplicas, scaleTargetString(ref)),
+				Details: []emit.Field{
+					{Key: "min_replicas", Value: itoa(int(min))},
+					{Key: "max_replicas", Value: itoa(int(h.Spec.MaxReplicas))},
+					{Key: "scale_target", Value: scaleTargetString(ref)},
+				},
+			})
 		}
 	}
 

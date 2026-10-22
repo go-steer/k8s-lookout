@@ -27,9 +27,21 @@ import (
 // kindLivenessPreempts: the probe claim that no_readiness_probe and
 // no_liveness_probe (workloads.go) do not cover — both probes exist,
 // and the liveness one makes the readiness one pointless.
-const kindLivenessPreempts = "audit.liveness_preempts_readiness"
+const (
+	kindLivenessPreempts = "audit.liveness_preempts_readiness"
+	kindNoStartupProbe   = "audit.no_startup_probe"
+)
 
-const reasonLivenessFiresFirst = "LivenessFiresFirst"
+const (
+	reasonLivenessFiresFirst           = "LivenessFiresFirst"
+	reasonLivenessWindowUnder60s       = "LivenessWindowUnder60s"
+	reasonSlowStartWithoutStartupProbe = "SlowStartWithoutStartupProbe"
+)
+
+const (
+	defaultMinLivenessWindowSeconds = 60
+	slowReadinessInitialDelay       = 30
+)
 
 // selfHealthSidecars are injected containers whose probes and hooks are
 // the mesh's or the platform's business, not the workload owner's. A
@@ -137,12 +149,62 @@ func canonicalJSON(v any) string {
 }
 
 func probeDeadline(p *corev1.Probe) int {
-	period, threshold := int(p.PeriodSeconds), int(p.FailureThreshold)
+	delay, period, threshold := probeTimings(p)
+	return delay + threshold*period
+}
+
+func probeTimings(p *corev1.Probe) (delay, period, threshold int) {
+	delay = int(p.InitialDelaySeconds)
+	period = int(p.PeriodSeconds)
 	if period == 0 {
 		period = probeDefaultPeriodSeconds
 	}
+	threshold = int(p.FailureThreshold)
 	if threshold == 0 {
 		threshold = probeDefaultFailureThreshold
 	}
-	return int(p.InitialDelaySeconds) + threshold*period
+	return delay, period, threshold
+}
+
+// startupProbeFindings evaluates L-30 (audit.no_startup_probe) on containers
+// that configure a livenessProbe without a startupProbe.
+func startupProbeFindings(spec corev1.PodSpec, minWindow int) []emit.Finding {
+	if minWindow <= 0 {
+		minWindow = defaultMinLivenessWindowSeconds
+	}
+	var out []emit.Finding
+	for _, c := range spec.Containers {
+		if selfHealthSidecars[c.Name] || c.LivenessProbe == nil || c.StartupProbe != nil {
+			continue
+		}
+		delay, period, threshold := probeTimings(c.LivenessProbe)
+		window := delay + threshold*period
+		details := []emit.Field{
+			{Key: "container", Value: c.Name},
+			{Key: "liveness_window", Value: fmt.Sprintf("%ds", window)},
+			{Key: "period_seconds", Value: itoa(period)},
+			{Key: "failure_threshold", Value: itoa(threshold)},
+			{Key: "initial_delay_seconds", Value: itoa(delay)},
+		}
+		if c.ReadinessProbe != nil && c.ReadinessProbe.InitialDelaySeconds >= slowReadinessInitialDelay {
+			out = append(out, emit.Finding{
+				Kind:     kindNoStartupProbe,
+				Severity: emit.SeverityWarning,
+				Reason:   reasonSlowStartWithoutStartupProbe,
+				Message: fmt.Sprintf("container %s sets readinessProbe.initialDelaySeconds=%d (slow startup expected) and has a livenessProbe (window %ds) with no startupProbe: a cold start slower than %ds is killed by liveness before it ever finishes starting",
+					c.Name, c.ReadinessProbe.InitialDelaySeconds, window, window),
+				Details: details,
+			})
+		} else if window < minWindow {
+			out = append(out, emit.Finding{
+				Kind:     kindNoStartupProbe,
+				Severity: emit.SeverityInfo,
+				Reason:   reasonLivenessWindowUnder60s,
+				Message: fmt.Sprintf("container %s has a livenessProbe with a %ds window (< %ds) and no startupProbe: any cold-start stall longer than %ds triggers a restart loop before the container becomes ready",
+					c.Name, window, minWindow, window),
+				Details: details,
+			})
+		}
+	}
+	return out
 }

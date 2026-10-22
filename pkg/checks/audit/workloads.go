@@ -88,16 +88,22 @@ func WorkloadsCommand(deps Deps) checks.Command {
 		}, PolicyFlags()...),
 		Kinds: []checks.KindField{
 			checks.Kind(kindNoPDB, "the workload has no PodDisruptionBudget: a drain can take every replica at once", emit.SeverityWarning),
+			checks.Kind(kindPDBPosture, "a PodDisruptionBudget overlaps another PDB on the same workload or allows zero disruptions by spec, permanently blocking voluntary node drains", emit.SeverityWarning),
 			checks.Kind(kindSingle, "the workload runs a single replica, so any disruption is an outage", emit.SeverityWarning),
 			checks.Kind(kindNoReadiness, "a container has no readiness probe, so traffic reaches it before it can serve", emit.SeverityWarning),
 			checks.Kind(kindNoLiveness, "a container has no liveness probe, so a wedged process is never restarted", emit.SeverityInfo),
+			checks.Kind(kindNoStartupProbe, "a container has a livenessProbe and no startupProbe, with either a liveness deadline under 60s (info) or a readinessProbe initialDelaySeconds >= 30s (warning) that shows slow startup is expected", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindNoResourceRequests, "a container has no CPU or memory request (and no limit or namespace LimitRange to default it from), so the scheduler places it blind and node eviction ranks it first", emit.SeverityWarning),
+			checks.Kind(kindNoResourceLimits, "a container has no memory or CPU limit (and no namespace LimitRange default): an unbounded memory leak OOMs the node (warning), while an unbounded CPU spike is throttled only by contention (info)", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindNoSpread, "the workload's replicas are not spread across nodes or zones", emit.SeverityInfo),
 			checks.Kind(kindRigidScheduling, "placement constraints pin the workload to too few nodes to survive losing one", emit.SeverityWarning, emit.SeverityInfo),
-			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by", emit.SeverityWarning),
+			checks.Kind(kindHPACannotScale, "the autoscaler structurally cannot scale or drops HA at idle: min equals max, the target is missing, a container has no request for its utilization target to divide by, or minReplicas is 1", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindSuspendedCron, "a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that", emit.SeverityWarning),
+			checks.Kind(kindCronOverlapRisk, "a CronJob permits concurrent runs without an activeDeadlineSeconds bounding them to the schedule interval, or sets startingDeadlineSeconds below the controller's 10s check loop", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindCronFailing, "an active CronJob has scheduled runs, none are currently running, and status.lastSuccessfulTime is nil — it has never succeeded", emit.SeverityWarning),
 			checks.Kind(kindSuspendedJob, "a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening", emit.SeverityInfo),
 			checks.Kind(kindLivenessPreempts, "liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier", emit.SeverityWarning, emit.SeverityInfo),
-			checks.Kind(kindRolloutDrops, "a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets", emit.SeverityWarning),
+			checks.Kind(kindRolloutDrops, "a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook, or a container whose preStop sleep reaches or exceeds terminationGracePeriodSeconds: SIGTERM races endpoint removal or SIGKILL arrives with zero drain time", emit.SeverityWarning),
 			checks.Kind(kindRecreate, "a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports", emit.SeverityWarning),
 			checks.UnreadKind(),
 		},
@@ -105,9 +111,18 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "replicas", Doc: "the replica count the claim judged: the workload's spec.replicas (nil defaults to 1, matching the API server), or the targeting HPA's minReplicas when `autoscaler` is present; absent on DaemonSets, whose replica count is the node count"},
 			{Name: "autoscaler", Doc: "the HorizontalPodAutoscaler targeting the workload, when one does: `replicas` is then its minReplicas, the floor it lets the workload fall to, because spec.replicas is its current answer and would make the claim come and go with load"},
 			{Name: "namespace_pdbs", Doc: "PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed"},
+			{Name: "overlapping_pdb", Doc: "other PodDisruptionBudgets in the same namespace selecting the same workload"},
+			{Name: "workload", Doc: "workload(s) selected by the PodDisruptionBudget, as Kind/name"},
 			{Name: "containers", Doc: "containers implicated by the finding: those missing the probe, or missing the request the autoscaler's utilization target divides by"},
 			{Name: "container_names", Doc: "their names, capped at 8 with a +N more tail"},
 			{Name: "total_containers", Doc: "containers in the pod template, so `containers` reads as a fraction"},
+			{Name: "container", Doc: "the container implicated by a per-container probe or lifecycle finding"},
+			{Name: "liveness_window", Doc: "the liveness probe's effective deadline (initialDelaySeconds + failureThreshold * periodSeconds)"},
+			{Name: "period_seconds", Doc: "the probe's periodSeconds (default 10)"},
+			{Name: "failure_threshold", Doc: "the probe's failureThreshold (default 3)"},
+			{Name: "initial_delay_seconds", Doc: "the probe's initialDelaySeconds"},
+			{Name: "prestop_sleep_seconds", Doc: "seconds parsed from the container's preStop sleep hook"},
+			{Name: "termination_grace_period_seconds", Doc: "the pod template's terminationGracePeriodSeconds (default 30)"},
 			{Name: "min_replicas", Doc: "the HPA's spec.minReplicas (nil defaults to 1, matching the API server)"},
 			{Name: "max_replicas", Doc: "the HPA's spec.maxReplicas"},
 			{Name: "metric", Doc: "the utilization metric the HPA cannot compute, comma-separated if more than one"},
@@ -115,7 +130,11 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "eligible_nodes", Doc: "nodes satisfying the workload's REQUIRED placement constraint; an upper bound, since taints and cordons are not subtracted"},
 			{Name: "cluster_nodes", Doc: "nodes in the cluster, so `eligible_nodes` reads as a fraction"},
 			{Name: "constraint", Doc: "the label and field keys that narrow placement, sorted and capped at 8"},
-			{Name: "schedule", Doc: "the suspended CronJob's spec.schedule"},
+			{Name: "schedule", Doc: "the CronJob's spec.schedule"},
+			{Name: "concurrency_policy", Doc: "the CronJob's effective spec.concurrencyPolicy (default Allow)"},
+			{Name: "active_deadline_seconds", Doc: "the CronJob jobTemplate's spec.activeDeadlineSeconds, when set"},
+			{Name: "starting_deadline_seconds", Doc: "the CronJob's spec.startingDeadlineSeconds"},
+			{Name: "last_schedule_time", Doc: "the CronJob's status.lastScheduleTime, RFC 3339"},
 			{Name: "time_zone", Doc: "the CronJob's spec.timeZone, when set"},
 			{Name: "suspended_for", Doc: "how long spec.suspend has been true, rounded to whole days"},
 			{Name: "suspended_since", Doc: "when the suspension is estimated to have started, RFC 3339"},
@@ -204,60 +223,12 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if err != nil {
 		return 0, err
 	}
+	ix.minLivenessWindow = pol.IntParam(kindNoStartupProbe, "min_liveness_window_seconds", defaultMinLivenessWindowSeconds)
 	if r, refused := ix.kindsRefused[wl.Kind]; refused && !wl.IsZero() {
 		return 0, &checks.RefusalError{Refusal: r, What: "workload " + wl.String() + " cannot be audited without it"}
 	}
 	if skipSys {
-		filteredW := ix.workloads[:0]
-		for _, w := range ix.workloads {
-			if pol.IsSystemNamespace(w.namespace) {
-				snap.recordSkippedNS(w.namespace)
-				continue
-			}
-			filteredW = append(filteredW, w)
-		}
-		ix.workloads = filteredW
-
-		filteredCJ := ix.cronJobs[:0]
-		for _, cj := range ix.cronJobs {
-			if pol.IsSystemNamespace(cj.Namespace) {
-				snap.recordSkippedNS(cj.Namespace)
-				continue
-			}
-			filteredCJ = append(filteredCJ, cj)
-		}
-		ix.cronJobs = filteredCJ
-
-		filteredJobs := ix.jobs[:0]
-		for _, j := range ix.jobs {
-			if pol.IsSystemNamespace(j.Namespace) {
-				snap.recordSkippedNS(j.Namespace)
-				continue
-			}
-			filteredJobs = append(filteredJobs, j)
-		}
-		ix.jobs = filteredJobs
-
-		filteredPDBs := ix.pdbs[:0]
-		for _, p := range ix.pdbs {
-			if pol.IsSystemNamespace(p.Namespace) {
-				snap.recordSkippedNS(p.Namespace)
-				delete(ix.pdbsByNS, p.Namespace)
-				continue
-			}
-			filteredPDBs = append(filteredPDBs, p)
-		}
-		ix.pdbs = filteredPDBs
-
-		filteredHPAs := ix.hpas[:0]
-		for _, h := range ix.hpas {
-			if pol.IsSystemNamespace(h.Namespace) {
-				snap.recordSkippedNS(h.Namespace)
-				continue
-			}
-			filteredHPAs = append(filteredHPAs, h)
-		}
-		ix.hpas = filteredHPAs
+		ix.filterSystemNamespaces(pol.IsSystemNamespace, snap)
 	}
 
 	var findings []emit.Finding
@@ -298,6 +269,7 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		if f := suspendedCronJob(cj, now, suspended); f != nil {
 			findings = append(findings, *f)
 		}
+		findings = append(findings, cronJobPostureFindings(cj, now)...)
 	}
 
 	// Jobs likewise: only the suspension claim applies (jobs.go).
@@ -330,6 +302,7 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		}
 		findings = append(findings, ix.hpaFindings(h)...)
 	}
+	findings = append(findings, ix.pdbFindings(wl)...)
 
 	sortFindings(findings)
 	if ix.servicesRefused != nil {
@@ -356,11 +329,15 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	}
 	if ix.pdbsRefused != nil {
 		refusals = append(refusals, checks.RefusedFinding(*ix.pdbsRefused,
-			"audit.no_pdb not judged: PDB coverage is read from the PodDisruptionBudgets"))
+			"audit.no_pdb not judged (nor audit.pdb_posture): PDB coverage is read from the PodDisruptionBudgets"))
 	}
 	if ix.hpasRefused != nil {
 		refusals = append(refusals, checks.RefusedFinding(*ix.hpasRefused,
 			"audit.single_replica, audit.no_pdb, audit.no_spread and audit.hpa_* not judged: a workload's replica floor is its HorizontalPodAutoscaler's minReplicas"))
+	}
+	if ix.limitRangesRefused != nil {
+		refusals = append(refusals, checks.RefusedFinding(*ix.limitRangesRefused,
+			"audit.no_resource_requests and audit.no_resource_limits not judged: namespace defaults are read from the LimitRanges"))
 	}
 	for _, f := range refusals {
 		if err := inv.Out.Emit(f); err != nil {
@@ -484,9 +461,12 @@ type workloadIndex struct {
 	// skip the coverage claim instead of calling every workload
 	// uncovered, and refused HPAs skip every claim that judges the
 	// replica floor instead of judging spec.replicas in its place.
-	kindsRefused map[string]checks.Refusal
-	pdbsRefused  *checks.Refusal
-	hpasRefused  *checks.Refusal
+	kindsRefused       map[string]checks.Refusal
+	pdbsRefused        *checks.Refusal
+	hpasRefused        *checks.Refusal
+	limitRanges        []*corev1.LimitRange
+	limitRangesRefused *checks.Refusal
+	minLivenessWindow  int
 	// pdbsByNS counts PDBs per namespace, so a no-PDB finding can say
 	// whether the namespace uses PDBs at all.
 	pdbsByNS map[string]int
@@ -587,6 +567,16 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 		}
 	}
 
+	if items, r, err := snap.LimitRanges(ctx); err != nil {
+		return nil, err
+	} else if r != nil {
+		ix.limitRangesRefused = r
+	} else {
+		for i := range items {
+			ix.limitRanges = append(ix.limitRanges, &items[i])
+		}
+	}
+
 	// Nodes feed only the placement claim, and the built-in `view`
 	// role does not grant them (#546): a refused node List skips
 	// that one claim, named by a read.unavailable record, and
@@ -618,7 +608,9 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 // The autoscaler claims are not here: their subject is the HPA.
 func (ix *workloadIndex) judge(w workload) []emit.Finding {
 	out := append(ix.availability(w), probeFindings(w)...)
+	out = append(out, startupProbeFindings(w.template.Spec, ix.minLivenessWindow)...)
 	out = append(out, livenessPreemptsReadiness(w.template.Spec)...)
+	out = append(out, ix.resourceFindings(w)...)
 	out = append(out, ix.placement(w)...)
 	out = append(out, ix.rollout(w)...)
 	for i := range out {
@@ -821,4 +813,67 @@ func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, e
 		}
 		opts.Continue = cont
 	}
+}
+
+func (ix *workloadIndex) filterSystemNamespaces(isSystemNS func(string) bool, snap *Snapshot) {
+	filteredW := ix.workloads[:0]
+	for _, w := range ix.workloads {
+		if isSystemNS(w.namespace) {
+			snap.recordSkippedNS(w.namespace)
+			continue
+		}
+		filteredW = append(filteredW, w)
+	}
+	ix.workloads = filteredW
+
+	filteredCJ := ix.cronJobs[:0]
+	for _, cj := range ix.cronJobs {
+		if isSystemNS(cj.Namespace) {
+			snap.recordSkippedNS(cj.Namespace)
+			continue
+		}
+		filteredCJ = append(filteredCJ, cj)
+	}
+	ix.cronJobs = filteredCJ
+
+	filteredJobs := ix.jobs[:0]
+	for _, j := range ix.jobs {
+		if isSystemNS(j.Namespace) {
+			snap.recordSkippedNS(j.Namespace)
+			continue
+		}
+		filteredJobs = append(filteredJobs, j)
+	}
+	ix.jobs = filteredJobs
+
+	filteredPDBs := ix.pdbs[:0]
+	for _, p := range ix.pdbs {
+		if isSystemNS(p.Namespace) {
+			snap.recordSkippedNS(p.Namespace)
+			delete(ix.pdbsByNS, p.Namespace)
+			continue
+		}
+		filteredPDBs = append(filteredPDBs, p)
+	}
+	ix.pdbs = filteredPDBs
+
+	filteredHPAs := ix.hpas[:0]
+	for _, h := range ix.hpas {
+		if isSystemNS(h.Namespace) {
+			snap.recordSkippedNS(h.Namespace)
+			continue
+		}
+		filteredHPAs = append(filteredHPAs, h)
+	}
+	ix.hpas = filteredHPAs
+
+	filteredLRs := ix.limitRanges[:0]
+	for _, lr := range ix.limitRanges {
+		if isSystemNS(lr.Namespace) {
+			snap.recordSkippedNS(lr.Namespace)
+			continue
+		}
+		filteredLRs = append(filteredLRs, lr)
+	}
+	ix.limitRanges = filteredLRs
 }

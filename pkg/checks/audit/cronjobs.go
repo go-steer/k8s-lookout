@@ -28,7 +28,19 @@ import (
 )
 
 // kindSuspendedCron is the posture claim of issue #293.
-const kindSuspendedCron = "audit.suspended_cronjob"
+const (
+	kindSuspendedCron   = "audit.suspended_cronjob"
+	kindCronOverlapRisk = "audit.cronjob_overlap_risk"
+	kindCronFailing     = "audit.cronjob_failing"
+)
+
+const (
+	reasonConcurrencyAllowOverlap  = "ConcurrencyAllowOverlap"
+	reasonStartingDeadlineTooShort = "StartingDeadlineTooShort"
+	reasonCronJobNeverSucceeded    = "CronJobNeverSucceeded"
+)
+
+const minStartingDeadlineSeconds int64 = 10
 
 // defaultCronSuspended is the wall-clock floor below which a suspended
 // CronJob is assumed to be mid-maintenance rather than forgotten.
@@ -120,6 +132,114 @@ func suspendedCronJob(cj *batchv1.CronJob, now time.Time, suspended time.Duratio
 	}
 	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, "CronJob")
 	return &f
+}
+
+// cronJobPostureFindings evaluates L-17 (audit.cronjob_overlap_risk) and
+// L-23 (audit.cronjob_failing) on active (non-suspended) CronJobs.
+func cronJobPostureFindings(cj *batchv1.CronJob, now time.Time) []emit.Finding {
+	if cj.Spec.Suspend != nil && *cj.Spec.Suspend {
+		return nil
+	}
+	var out []emit.Finding
+
+	// L-17a: ConcurrencyAllowOverlap
+	pol := cj.Spec.ConcurrencyPolicy
+	if pol == "" || pol == batchv1.AllowConcurrent {
+		ads := cj.Spec.JobTemplate.Spec.ActiveDeadlineSeconds
+		interval := scheduleInterval(cj, now)
+		if ads == nil || *ads <= 0 || (interval > 0 && time.Duration(*ads)*time.Second > interval) {
+			details := []emit.Field{
+				{Key: "schedule", Value: cj.Spec.Schedule},
+				{Key: "concurrency_policy", Value: string(batchv1.AllowConcurrent)},
+			}
+			msg := fmt.Sprintf("spec.concurrencyPolicy=%s (schedule %q) with no jobTemplate activeDeadlineSeconds: a slow or wedged run overlaps subsequent scheduled runs indefinitely, multiplying load and resource consumption",
+				batchv1.AllowConcurrent, cj.Spec.Schedule)
+			if ads != nil && *ads > 0 {
+				details = append(details, emit.Field{Key: "active_deadline_seconds", Value: itoa(int(*ads))})
+				msg = fmt.Sprintf("spec.concurrencyPolicy=%s (schedule %q) with activeDeadlineSeconds=%ds exceeding the %s schedule interval: a slow run still overlaps the next activation",
+					batchv1.AllowConcurrent, cj.Spec.Schedule, *ads, interval)
+			}
+			f := emit.Finding{
+				Kind:         kindCronOverlapRisk,
+				Severity:     emit.SeverityInfo,
+				Namespace:    cj.Namespace,
+				KindOfObject: "CronJob",
+				Name:         cj.Name,
+				Reason:       reasonConcurrencyAllowOverlap,
+				Message:      msg,
+				Details:      details,
+			}
+			f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, "CronJob")
+			out = append(out, f)
+		}
+	}
+
+	// L-17b: StartingDeadlineTooShort
+	if sds := cj.Spec.StartingDeadlineSeconds; sds != nil && *sds < minStartingDeadlineSeconds {
+		f := emit.Finding{
+			Kind:         kindCronOverlapRisk,
+			Severity:     emit.SeverityWarning,
+			Namespace:    cj.Namespace,
+			KindOfObject: "CronJob",
+			Name:         cj.Name,
+			Reason:       reasonStartingDeadlineTooShort,
+			Message: fmt.Sprintf("spec.startingDeadlineSeconds=%ds is below the CronJob controller's 10s sync loop: scheduled activations can miss their own deadline before the controller even checks them",
+				*sds),
+			Details: []emit.Field{
+				{Key: "schedule", Value: cj.Spec.Schedule},
+				{Key: "starting_deadline_seconds", Value: itoa(int(*sds))},
+			},
+		}
+		f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, "CronJob")
+		out = append(out, f)
+	}
+
+	// L-23: CronJobNeverSucceeded
+	if cj.Status.LastScheduleTime != nil && !cj.Status.LastScheduleTime.IsZero() &&
+		cj.Status.LastSuccessfulTime == nil && len(cj.Status.Active) == 0 {
+		lastSched := cj.Status.LastScheduleTime.UTC().Format(time.RFC3339)
+		f := emit.Finding{
+			Kind:         kindCronFailing,
+			Severity:     emit.SeverityWarning,
+			Namespace:    cj.Namespace,
+			KindOfObject: "CronJob",
+			Name:         cj.Name,
+			Reason:       reasonCronJobNeverSucceeded,
+			Message: fmt.Sprintf("CronJob (schedule %q) last scheduled at %s, has no active runs, and status.lastSuccessfulTime is nil: every scheduled run has failed or been evicted without a single success",
+				cj.Spec.Schedule, lastSched),
+			Details: []emit.Field{
+				{Key: "schedule", Value: cj.Spec.Schedule},
+				{Key: "last_schedule_time", Value: lastSched},
+			},
+		}
+		f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, "CronJob")
+		out = append(out, f)
+	}
+
+	return out
+}
+
+func scheduleInterval(cj *batchv1.CronJob, ref time.Time) time.Duration {
+	tz := ""
+	if cj.Spec.TimeZone != nil {
+		tz = *cj.Spec.TimeZone
+	}
+	sched, err := cronsched.Parse(cj.Spec.Schedule, tz)
+	if err != nil {
+		return 0
+	}
+	if ref.IsZero() {
+		ref = time.Now()
+	}
+	t1 := sched.Next(ref)
+	if t1.IsZero() {
+		return 0
+	}
+	t2 := sched.Next(t1)
+	if t2.IsZero() || !t2.After(t1) {
+		return 0
+	}
+	return t2.Sub(t1)
 }
 
 // pluralHave agrees the verb with the count roundDays cannot.
