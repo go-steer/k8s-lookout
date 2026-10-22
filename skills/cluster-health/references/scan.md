@@ -113,6 +113,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.host_namespace` | warning | the pod shares the node's network, PID, or IPC namespace |
 | `audit.hostpath_mount` | warning, info | the pod mounts a host path; warning when it is writable, info when read-only |
 | `audit.default_sa_automount` | warning | the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it |
+| `audit.sa_token_automount` | info | the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount |
+| `audit.container_security_gaps` | warning, info | a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile |
+| `audit.writable_rootfs` | info | a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime |
+| `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
@@ -314,6 +318,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_warn` | its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run |
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
 | `workloads` | pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one |
+| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `policies` | NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one |
 | `total_policies` | NetworkPolicies in the namespace in either direction, so an egress-only namespace does not read as an empty one |
@@ -329,7 +334,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `verbs` | the verbs of the broadest wildcard rule, comma-joined |
 | `api_groups` | the apiGroups of the broadest wildcard rule, comma-joined, with the core group written as `core` |
 | `bindings` | RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today |
-| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
 | `version` | the current version of the finding's subject — the control plane's, or the node pool's |

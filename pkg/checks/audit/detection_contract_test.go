@@ -85,7 +85,7 @@ func TestAuditWorkloadsDetectionBoundary_PositiveAndNegative(t *testing.T) {
 func TestAuditHardeningDetectionBoundary_PositiveAndNegative(t *testing.T) {
 	enforcedNS := nsObj("prod", map[string]string{"pod-security.kubernetes.io/enforce": "restricted"})
 	dedicatedSA := serviceAccount("prod", "app-sa", ptr(false))
-	cleanTmpl := template(map[string]string{"app": "safe"}, container("app", true, true))
+	cleanTmpl := app("safe")
 	cleanTmpl.Spec.ServiceAccountName = "app-sa"
 	cleanDeploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "safe"},

@@ -18,6 +18,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -105,6 +106,10 @@ func HardeningCommand(deps Deps) checks.Command {
 			checks.Kind(kindHostNamespace, "the pod shares the node's network, PID, or IPC namespace", emit.SeverityWarning),
 			checks.Kind(kindHostPath, "the pod mounts a host path; warning when it is writable, info when read-only", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindDefaultSAMount, "the pod runs as the namespace's default ServiceAccount with its token automounted, and something in the pod can use it", emit.SeverityWarning),
+			checks.Kind(kindSATokenAutomount, "the pod runs as a non-default ServiceAccount with its token automounted, but no RoleBinding or ClusterRoleBinding binds that ServiceAccount", emit.SeverityInfo),
+			checks.Kind(kindContainerSecurityGaps, "a non-privileged container runs as UID 0, leaves runAsNonRoot unset, permits privilege escalation, or has no RuntimeDefault/Localhost seccomp profile", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindWritableRootFS, "a container does not set readOnlyRootFilesystem: true, so the root filesystem is writable at runtime", emit.SeverityInfo),
+			checks.Kind(kindCapabilitiesAdded, "a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindPodSecurity, "the namespace enforces no Pod Security Admission level, so none of the above is prevented", emit.SeverityWarning),
 			checks.Kind(kindImageFloatingTag, "a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record", emit.SeverityInfo),
 			checks.UnreadKind(),
@@ -123,6 +128,7 @@ func HardeningCommand(deps Deps) checks.Command {
 			{Name: "pss_warn", Doc: "its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run"},
 			{Name: "pss_audit", Doc: "its /audit label, omitted when unset — same dry-run meaning"},
 			{Name: "workloads", Doc: "pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one"},
+			{Name: "workload_names", Doc: "their Kind/name, sorted and capped at 8"},
 			{Name: "namespaces", Doc: "summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover"},
 			skippedSystemNamespacesField(),
 		}, checks.UnreadFields()...),
@@ -180,6 +186,7 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 				delete(ix.templatesByNS, t.namespace)
 				delete(ix.defaultSAUsers, t.namespace)
 				delete(ix.defaultSAs, t.namespace)
+				delete(ix.saTokenUsers, t.namespace)
 				continue
 			}
 			filteredT = append(filteredT, t)
@@ -191,6 +198,7 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 			if pol.IsSystemNamespace(ns.Name) {
 				snap.recordSkippedNS(ns.Name)
 				delete(ix.defaultSAs, ns.Name)
+				delete(ix.saTokenUsers, ns.Name)
 				continue
 			}
 			filteredNS = append(filteredNS, ns)
@@ -203,6 +211,15 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 				delete(ix.defaultSAs, nsName)
 			}
 		}
+		for nsName := range ix.saTokenUsers {
+			if pol.IsSystemNamespace(nsName) {
+				snap.recordSkippedNS(nsName)
+				delete(ix.saTokenUsers, nsName)
+			}
+		}
+	}
+	if err := ix.loadSABindings(ctx, snap); err != nil {
+		return 0, err
 	}
 
 	// A custom role refusing one of these reads (#584) costs the
@@ -218,6 +235,10 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if ix.nsRefused != nil {
 		refusals = append(refusals, checks.RefusedFinding(*ix.nsRefused,
 			kindPodSecurity+" and "+kindDefaultSAMount+" not judged: they are claims about the Namespace objects"))
+	}
+	for _, r := range ix.rbacRefused {
+		refusals = append(refusals, checks.RefusedFinding(r,
+			kindSATokenAutomount+" not judged: it checks whether a RoleBinding or ClusterRoleBinding binds the ServiceAccount"))
 	}
 	for _, f := range refusals {
 		if err := inv.Out.Emit(f); err != nil {
@@ -263,26 +284,38 @@ type hardeningIndex struct {
 	// claim then makes no assertion rather than guessing at the
 	// object's automount field.
 	defaultSAs map[string]*corev1.ServiceAccount
+	// serviceAccounts is keyed by namespace/name for non-default SAs.
+	serviceAccounts map[string]*corev1.ServiceAccount
 	// templatesByNS counts judged templates per namespace, so a
 	// namespace-subject finding can say how much rides on it.
 	templatesByNS map[string]int
 	// defaultSAUsers lists, per namespace, the workloads that would
 	// actually receive the default ServiceAccount's token.
 	defaultSAUsers map[string][]string
+	// saTokenUsers lists, per namespace and non-default SA name, the
+	// workloads that automount that ServiceAccount's token.
+	saTokenUsers map[string]map[string][]string
+	// boundSAs records namespace/name of ServiceAccounts bound by a
+	// RoleBinding or ClusterRoleBinding.
+	boundSAs map[string]bool
 	// refused, saRefused and nsRefused record the reads RBAC refused
 	// (#584): pod-template kinds, ServiceAccounts, Namespaces.
 	refused      []kindRefusal
 	saRefused    *checks.Refusal
 	nsRefused    *checks.Refusal
+	rbacRefused  []checks.Refusal
 	perWorkload  bool
 	floatingTags map[string]bool
 }
 
 func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns string) (*hardeningIndex, error) {
 	ix := &hardeningIndex{
-		defaultSAs:     map[string]*corev1.ServiceAccount{},
-		templatesByNS:  map[string]int{},
-		defaultSAUsers: map[string][]string{},
+		defaultSAs:      map[string]*corev1.ServiceAccount{},
+		serviceAccounts: map[string]*corev1.ServiceAccount{},
+		templatesByNS:   map[string]int{},
+		defaultSAUsers:  map[string][]string{},
+		saTokenUsers:    map[string]map[string][]string{},
+		boundSAs:        map[string]bool{},
 	}
 	templates, refused, err := listPodTemplates(ctx, client, ns, true)
 	if err != nil {
@@ -300,6 +333,7 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 	} else {
 		for i := range sas {
 			sa := &sas[i]
+			ix.serviceAccounts[sa.Namespace+"/"+sa.Name] = sa
 			if sa.Name == defaultServiceAccount {
 				ix.defaultSAs[sa.Namespace] = sa
 			}
@@ -317,9 +351,55 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 		ix.templatesByNS[t.namespace]++
 		if mountsDefaultToken(t.spec) {
 			ix.defaultSAUsers[t.namespace] = append(ix.defaultSAUsers[t.namespace], t.kind+"/"+t.name)
+		} else if saName := t.spec.ServiceAccountName; saName != "" && saName != defaultServiceAccount {
+			sa := ix.serviceAccounts[t.namespace+"/"+saName]
+			if mountsSAToken(t.spec, sa) {
+				if ix.saTokenUsers[t.namespace] == nil {
+					ix.saTokenUsers[t.namespace] = map[string][]string{}
+				}
+				ix.saTokenUsers[t.namespace][saName] = append(ix.saTokenUsers[t.namespace][saName], t.kind+"/"+t.name)
+			}
 		}
 	}
 	return ix, nil
+}
+
+func (ix *hardeningIndex) loadSABindings(ctx context.Context, snap *Snapshot) error {
+	if len(ix.saTokenUsers) == 0 || ix.saRefused != nil {
+		return nil
+	}
+	rbs, rbRefused, err := snap.RoleBindings(ctx)
+	if err != nil {
+		return err
+	}
+	if rbRefused != nil {
+		ix.rbacRefused = append(ix.rbacRefused, *rbRefused)
+	}
+	crbs, crbRefused, err := snap.ClusterRoleBindings(ctx)
+	if err != nil {
+		return err
+	}
+	if crbRefused != nil {
+		ix.rbacRefused = append(ix.rbacRefused, *crbRefused)
+	}
+	if len(ix.rbacRefused) > 0 {
+		return nil
+	}
+	for _, rb := range rbs {
+		for _, s := range rb.Subjects {
+			if s.Kind == rbacv1.ServiceAccountKind && (s.Namespace == "" || s.Namespace == rb.Namespace) {
+				ix.boundSAs[rb.Namespace+"/"+s.Name] = true
+			}
+		}
+	}
+	for _, crb := range crbs {
+		for _, s := range crb.Subjects {
+			if s.Kind == rbacv1.ServiceAccountKind && s.Namespace != "" {
+				ix.boundSAs[s.Namespace+"/"+s.Name] = true
+			}
+		}
+	}
+	return nil
 }
 
 // judgeTemplate applies every pod-template-subject claim to one
@@ -327,6 +407,9 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 func (ix *hardeningIndex) judgeTemplate(t podTemplate) []emit.Finding {
 	out := append(privilegeFindings(t.spec), hostNamespaceFindings(t.spec)...)
 	out = append(out, hostPathFindings(t.spec)...)
+	out = append(out, containerSecurityFindings(t.spec)...)
+	out = append(out, writableRootFSFindings(t.spec)...)
+	out = append(out, capabilitiesFindings(t.spec)...)
 	out = append(out, imageTagFindingsWithTags(t.spec, ix.floatingTags)...)
 	for i := range out {
 		out[i].Namespace = t.namespace
@@ -337,12 +420,13 @@ func (ix *hardeningIndex) judgeTemplate(t podTemplate) []emit.Finding {
 	return out
 }
 
-// judgeNamespace applies the two namespace-population claims. Their
-// subjects differ — one is the ServiceAccount, one is the Namespace —
-// because those are the two objects an operator edits to fix them.
+// judgeNamespace applies the namespace-population claims. Their
+// subjects differ — ServiceAccount vs Namespace — because those are
+// the objects an operator edits to fix them.
 func (ix *hardeningIndex) judgeNamespace(ns *corev1.Namespace) []emit.Finding {
 	var out []emit.Finding
 	out = append(out, ix.defaultSAFindings(ns.Name)...)
+	out = append(out, ix.unboundSAFindings(ns.Name)...)
 	if f, ok := ix.podSecurityFinding(ns); ok {
 		out = append(out, f)
 	}

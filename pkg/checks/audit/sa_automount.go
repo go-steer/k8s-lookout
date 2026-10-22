@@ -28,6 +28,9 @@ import (
 const (
 	kindDefaultSAMount       = "audit.default_sa_automount"
 	reasonDefaultSAAutomount = "DefaultServiceAccountAutomount"
+
+	kindSATokenAutomount     = "audit.sa_token_automount" // #nosec G101 -- finding kind constant, not a credential
+	reasonUnboundSAAutomount = "UnboundServiceAccountAutomount"
 )
 
 // defaultServiceAccount is the ServiceAccount every namespace has and
@@ -44,6 +47,20 @@ func mountsDefaultToken(spec corev1.PodSpec) bool {
 		return false
 	}
 	return spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken
+}
+
+// mountsSAToken reports whether a pod template mounts its
+// ServiceAccount token when resolved against the ServiceAccount object:
+// neither the pod spec nor the ServiceAccount sets
+// automountServiceAccountToken: false.
+func mountsSAToken(spec corev1.PodSpec, sa *corev1.ServiceAccount) bool {
+	if spec.AutomountServiceAccountToken != nil && !*spec.AutomountServiceAccountToken {
+		return false
+	}
+	if sa != nil && sa.AutomountServiceAccountToken != nil && !*sa.AutomountServiceAccountToken {
+		return false
+	}
+	return true
 }
 
 // defaultSAFinding judges the default ServiceAccount's token mount.
@@ -107,6 +124,77 @@ func (ix *hardeningIndex) defaultSAFindings(namespace string) []emit.Finding {
 		wf.Name = wlName
 		wf.Fingerprint = engine.PostureFingerprint(wf.Kind, wf.Reason, wf.KindOfObject)
 		out = append(out, wf)
+	}
+	return out
+}
+
+func (ix *hardeningIndex) unboundSAFinding(namespace, saName string, users []string) (emit.Finding, bool) {
+	if ix.saRefused != nil || len(ix.rbacRefused) > 0 {
+		return emit.Finding{}, false
+	}
+	if ix.boundSAs[namespace+"/"+saName] {
+		return emit.Finding{}, false
+	}
+	if len(users) == 0 {
+		return emit.Finding{}, false
+	}
+	sorted := append([]string(nil), users...)
+	sort.Strings(sorted)
+	f := emit.Finding{
+		Kind:     kindSATokenAutomount,
+		Severity: emit.SeverityInfo,
+		Reason:   reasonUnboundSAAutomount,
+		Message: fmt.Sprintf("%d %s run as ServiceAccount %q and automount its token, but no RoleBinding or ClusterRoleBinding binds it: an API credential is mounted for an identity with no RBAC permissions",
+			len(sorted), plural(len(sorted), "workload"), saName),
+		Details: []emit.Field{
+			{Key: "service_account", Value: saName},
+			{Key: "workloads", Value: itoa(len(sorted))},
+			{Key: "workload_names", Value: cappedList(sorted)},
+		},
+		Namespace:    namespace,
+		KindOfObject: "ServiceAccount",
+		Name:         saName,
+	}
+	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+	return f, true
+}
+
+func (ix *hardeningIndex) unboundSAFindings(namespace string) []emit.Finding {
+	bySA := ix.saTokenUsers[namespace]
+	if len(bySA) == 0 {
+		return nil
+	}
+	saNames := make([]string, 0, len(bySA))
+	for saName := range bySA {
+		saNames = append(saNames, saName)
+	}
+	sort.Strings(saNames)
+
+	var out []emit.Finding
+	for _, saName := range saNames {
+		users := bySA[saName]
+		f, ok := ix.unboundSAFinding(namespace, saName, users)
+		if !ok {
+			continue
+		}
+		if !ix.perWorkload {
+			out = append(out, f)
+			continue
+		}
+		sorted := append([]string(nil), users...)
+		sort.Strings(sorted)
+		for _, u := range sorted {
+			wlKind, wlName, ok := strings.Cut(u, "/")
+			if !ok {
+				continue
+			}
+			wf := f
+			wf.Namespace = namespace
+			wf.KindOfObject = wlKind
+			wf.Name = wlName
+			wf.Fingerprint = engine.PostureFingerprint(wf.Kind, wf.Reason, wf.KindOfObject)
+			out = append(out, wf)
+		}
 	}
 	return out
 }

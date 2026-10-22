@@ -25,19 +25,29 @@ import (
 )
 
 const (
-	kindPrivileged    = "audit.privileged_container"
-	kindHostNamespace = "audit.host_namespace"
-	kindHostPath      = "audit.hostpath_mount"
+	kindPrivileged            = "audit.privileged_container"
+	kindHostNamespace         = "audit.host_namespace"
+	kindHostPath              = "audit.hostpath_mount"
+	kindContainerSecurityGaps = "audit.container_security_gaps"
+	kindWritableRootFS        = "audit.writable_rootfs"
+	kindCapabilitiesAdded     = "audit.capabilities_added"
 )
 
 const (
-	reasonPrivileged          = "PrivilegedContainer"
-	reasonDangerousCapability = "DangerousCapability"
-	reasonHostNetwork         = "HostNetwork"
-	reasonHostPID             = "HostPID"
-	reasonHostIPC             = "HostIPC"
-	reasonWritableHostPath    = "WritableHostPath"
-	reasonReadOnlyHostPath    = "ReadOnlyHostPath"
+	reasonPrivileged               = "PrivilegedContainer"
+	reasonDangerousCapability      = "DangerousCapability"
+	reasonHostNetwork              = "HostNetwork"
+	reasonHostPID                  = "HostPID"
+	reasonHostIPC                  = "HostIPC"
+	reasonWritableHostPath         = "WritableHostPath"
+	reasonReadOnlyHostPath         = "ReadOnlyHostPath"
+	reasonRunAsRootUID             = "RunAsRootUID"
+	reasonRunAsNonRootUnset        = "RunAsNonRootUnset"
+	reasonAllowPrivilegeEscalation = "AllowPrivilegeEscalation"
+	reasonNoSeccompProfile         = "NoSeccompProfile"
+	reasonWritableRootFilesystem   = "WritableRootFilesystem"
+	reasonCapabilitiesAdded        = "CapabilitiesAdded"
+	reasonCapabilitiesNotDropped   = "CapabilitiesNotDropped"
 )
 
 // allContainers returns init containers followed by regular ones. Both
@@ -244,5 +254,211 @@ func hostPathFinding(severity, reason, consequence string, paths map[string]bool
 			{Key: "host_paths", Value: itoa(len(names))},
 			{Key: "host_path_names", Value: cappedList(names)},
 		},
+	}
+}
+
+// containerSecurityFindings evaluates non-privileged containers for user
+// identity, privilege escalation, and seccomp profile posture (L-13).
+func containerSecurityFindings(spec corev1.PodSpec) []emit.Finding {
+	cs := allContainers(spec)
+	if len(cs) == 0 {
+		return nil
+	}
+	var (
+		rootUID      []string
+		nonRootUnset []string
+		allowPrivEsc []string
+		noSeccomp    []string
+	)
+	for _, c := range cs {
+		sc := c.SecurityContext
+		if sc != nil && sc.Privileged != nil && *sc.Privileged {
+			continue
+		}
+
+		var runAsUser *int64
+		if sc != nil && sc.RunAsUser != nil {
+			runAsUser = sc.RunAsUser
+		} else if spec.SecurityContext != nil && spec.SecurityContext.RunAsUser != nil {
+			runAsUser = spec.SecurityContext.RunAsUser
+		}
+
+		runAsNonRoot := false
+		if sc != nil && sc.RunAsNonRoot != nil {
+			runAsNonRoot = *sc.RunAsNonRoot
+		} else if spec.SecurityContext != nil && spec.SecurityContext.RunAsNonRoot != nil {
+			runAsNonRoot = *spec.SecurityContext.RunAsNonRoot
+		}
+
+		if runAsUser != nil && *runAsUser == 0 {
+			rootUID = append(rootUID, c.Name)
+		} else if !runAsNonRoot && (runAsUser == nil || *runAsUser <= 0) {
+			nonRootUnset = append(nonRootUnset, c.Name)
+		}
+
+		if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			allowPrivEsc = append(allowPrivEsc, c.Name)
+		}
+
+		var seccomp *corev1.SeccompProfile
+		if sc != nil && sc.SeccompProfile != nil {
+			seccomp = sc.SeccompProfile
+		} else if spec.SecurityContext != nil && spec.SecurityContext.SeccompProfile != nil {
+			seccomp = spec.SecurityContext.SeccompProfile
+		}
+		if seccomp == nil || (seccomp.Type != corev1.SeccompProfileTypeRuntimeDefault && seccomp.Type != corev1.SeccompProfileTypeLocalhost) {
+			noSeccomp = append(noSeccomp, c.Name)
+		}
+	}
+
+	var out []emit.Finding
+	if len(rootUID) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindContainerSecurityGaps,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonRunAsRootUID,
+			Message: fmt.Sprintf("runAsUser=0 on %d of %d %s: the container explicitly runs as root (UID 0)",
+				len(rootUID), len(cs), plural(len(cs), "container")),
+			Details: containerSliceDetails(rootUID, len(cs)),
+		})
+	}
+	if len(nonRootUnset) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindContainerSecurityGaps,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonRunAsNonRootUnset,
+			Message: fmt.Sprintf("runAsNonRoot not enforced and no non-zero runAsUser on %d of %d %s: an image whose default USER is root will run as UID 0",
+				len(nonRootUnset), len(cs), plural(len(cs), "container")),
+			Details: containerSliceDetails(nonRootUnset, len(cs)),
+		})
+	}
+	if len(allowPrivEsc) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindContainerSecurityGaps,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonAllowPrivilegeEscalation,
+			Message: fmt.Sprintf("allowPrivilegeEscalation not disabled on %d of %d %s: a child process can gain more privileges than its parent via setuid/setgid binaries or file capabilities",
+				len(allowPrivEsc), len(cs), plural(len(cs), "container")),
+			Details: containerSliceDetails(allowPrivEsc, len(cs)),
+		})
+	}
+	if len(noSeccomp) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindContainerSecurityGaps,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonNoSeccompProfile,
+			Message: fmt.Sprintf("no RuntimeDefault or Localhost seccompProfile on %d of %d %s: the container runs without seccomp syscall filtering",
+				len(noSeccomp), len(cs), plural(len(cs), "container")),
+			Details: containerSliceDetails(noSeccomp, len(cs)),
+		})
+	}
+	return out
+}
+
+// writableRootFSFindings judges whether containers leave the root
+// filesystem writable (L-31).
+func writableRootFSFindings(spec corev1.PodSpec) []emit.Finding {
+	cs := allContainers(spec)
+	if len(cs) == 0 {
+		return nil
+	}
+	var writable []string
+	for _, c := range cs {
+		if c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem {
+			writable = append(writable, c.Name)
+		}
+	}
+	if len(writable) == 0 {
+		return nil
+	}
+	return []emit.Finding{{
+		Kind:     kindWritableRootFS,
+		Severity: emit.SeverityInfo,
+		Reason:   reasonWritableRootFilesystem,
+		Message: fmt.Sprintf("readOnlyRootFilesystem is not true on %d of %d %s: a compromised process can modify binaries or drop executables into the container filesystem",
+			len(writable), len(cs), plural(len(cs), "container")),
+		Details: containerSliceDetails(writable, len(cs)),
+	}}
+}
+
+// capabilitiesFindings judges non-node-root added Linux capabilities
+// and containers that do not drop ALL capabilities (L-34).
+func capabilitiesFindings(spec corev1.PodSpec) []emit.Finding {
+	cs := allContainers(spec)
+	if len(cs) == 0 {
+		return nil
+	}
+	var (
+		addedContainers []string
+		notDropped      []string
+	)
+	addedCaps := map[string]bool{}
+	for _, c := range cs {
+		sc := c.SecurityContext
+		if sc != nil && sc.Capabilities != nil {
+			var found []string
+			for _, add := range sc.Capabilities.Add {
+				if name := canonicalCapability(string(add)); name != "" && !nodeRootCapabilities[name] {
+					found = append(found, name)
+				}
+			}
+			if len(found) > 0 {
+				addedContainers = append(addedContainers, c.Name)
+				for _, name := range found {
+					addedCaps[name] = true
+				}
+			}
+		}
+		if !dropsAllCapabilities(sc) {
+			notDropped = append(notDropped, c.Name)
+		}
+	}
+
+	var out []emit.Finding
+	if len(addedContainers) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindCapabilitiesAdded,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonCapabilitiesAdded,
+			Message: fmt.Sprintf("capabilities.add %s on %d of %d %s: grants elevated kernel privileges beyond the default container capability set",
+				sortedKeys(addedCaps), len(addedContainers), len(cs), plural(len(cs), "container")),
+			Details: []emit.Field{
+				{Key: "containers", Value: itoa(len(addedContainers))},
+				{Key: "container_names", Value: cappedList(addedContainers)},
+				{Key: "total_containers", Value: itoa(len(cs))},
+				{Key: "capabilities", Value: sortedKeys(addedCaps)},
+			},
+		})
+	}
+	if len(notDropped) > 0 {
+		out = append(out, emit.Finding{
+			Kind:     kindCapabilitiesAdded,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonCapabilitiesNotDropped,
+			Message: fmt.Sprintf("capabilities.drop does not include ALL on %d of %d %s: the container retains the runtime's default Linux capability set",
+				len(notDropped), len(cs), plural(len(cs), "container")),
+			Details: containerSliceDetails(notDropped, len(cs)),
+		})
+	}
+	return out
+}
+
+func dropsAllCapabilities(sc *corev1.SecurityContext) bool {
+	if sc == nil || sc.Capabilities == nil {
+		return false
+	}
+	for _, drop := range sc.Capabilities.Drop {
+		if canonicalCapability(string(drop)) == "ALL" {
+			return true
+		}
+	}
+	return false
+}
+
+func containerSliceDetails(names []string, total int) []emit.Field {
+	return []emit.Field{
+		{Key: "containers", Value: itoa(len(names))},
+		{Key: "container_names", Value: cappedList(names)},
+		{Key: "total_containers", Value: itoa(total)},
 	}
 }
