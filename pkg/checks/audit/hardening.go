@@ -96,6 +96,10 @@ func HardeningCommand(deps Deps) checks.Command {
 		MCPName:     "k8s_audit_hardening",
 		MCPProfiles: []string{"audit"},
 		Summary:     "Workload security posture: containers running privileged or holding node-root capabilities, pods sharing the host network/PID/IPC namespaces, hostPath mounts, default-ServiceAccount tokens that something actually uses, and namespaces with no Pod Security Admission enforcement. Judges every pod-template owner in scope — Deployments, StatefulSets, DaemonSets, CronJobs, unowned Jobs and unowned Pods — plus the namespaces around them. Scope with --namespace or -A; scanned counts pod templates examined, the namespaces note counts namespaces.",
+		Flags: append([]emit.FlagSpec{
+			skipSystemNamespacesFlag(),
+			perWorkloadFlag(),
+		}, PolicyFlags()...),
 		Kinds: []checks.KindField{
 			checks.Kind(kindPrivileged, "a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise", emit.SeverityWarning),
 			checks.Kind(kindHostNamespace, "the pod shares the node's network, PID, or IPC namespace", emit.SeverityWarning),
@@ -120,6 +124,7 @@ func HardeningCommand(deps Deps) checks.Command {
 			{Name: "pss_audit", Doc: "its /audit label, omitted when unset — same dry-run meaning"},
 			{Name: "workloads", Doc: "pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one"},
 			{Name: "namespaces", Doc: "summary note: namespaces examined — the denominator for every namespace-subject claim, which `scanned` (pod templates) does not cover"},
+			skippedSystemNamespacesField(),
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit hardening -A",
@@ -139,6 +144,13 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if inv.Scope.Namespace == "" && !inv.Scope.AllNamespaces {
 		return 0, emit.UsageErrorf("no scope: pass --namespace=<ns> or -A")
 	}
+	pol, err := bindPolicy(inv)
+	if err != nil {
+		return 0, err
+	}
+	skipSys := inv.Flags.Bool("skip-system-namespaces")
+	perWorkload := inv.Flags.Bool("per-workload")
+
 	listNS := inv.Scope.Namespace
 	if inv.Scope.AllNamespaces {
 		listNS = metav1.NamespaceAll
@@ -148,9 +160,49 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if err != nil {
 		return 0, err
 	}
+	ctx, snap := ensureSnapshot(ctx, client, listNS)
 	ix, err := listHardeningIndex(ctx, client, listNS)
 	if err != nil {
 		return 0, err
+	}
+	ix.perWorkload = perWorkload
+	if customTags := pol.StringSliceParam(kindImageFloatingTag, "floating_tags", nil); len(customTags) > 0 {
+		ix.floatingTags = make(map[string]bool, len(customTags))
+		for _, tag := range customTags {
+			ix.floatingTags[tag] = true
+		}
+	}
+	if skipSys {
+		filteredT := ix.templates[:0]
+		for _, t := range ix.templates {
+			if pol.IsSystemNamespace(t.namespace) {
+				snap.recordSkippedNS(t.namespace)
+				delete(ix.templatesByNS, t.namespace)
+				delete(ix.defaultSAUsers, t.namespace)
+				delete(ix.defaultSAs, t.namespace)
+				continue
+			}
+			filteredT = append(filteredT, t)
+		}
+		ix.templates = filteredT
+
+		filteredNS := ix.namespaces[:0]
+		for _, ns := range ix.namespaces {
+			if pol.IsSystemNamespace(ns.Name) {
+				snap.recordSkippedNS(ns.Name)
+				delete(ix.defaultSAs, ns.Name)
+				continue
+			}
+			filteredNS = append(filteredNS, ns)
+		}
+		ix.namespaces = filteredNS
+
+		for nsName := range ix.defaultSAs {
+			if pol.IsSystemNamespace(nsName) {
+				snap.recordSkippedNS(nsName)
+				delete(ix.defaultSAs, nsName)
+			}
+		}
 	}
 
 	// A custom role refusing one of these reads (#584) costs the
@@ -192,6 +244,11 @@ func runHardening(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 			return 0, err
 		}
 	}
+	if skipSys {
+		if err := inv.Out.Note("skipped_system_namespaces", itoa(snap.skippedNSCount())); err != nil {
+			return 0, err
+		}
+	}
 	return len(ix.templates), nil
 }
 
@@ -214,9 +271,11 @@ type hardeningIndex struct {
 	defaultSAUsers map[string][]string
 	// refused, saRefused and nsRefused record the reads RBAC refused
 	// (#584): pod-template kinds, ServiceAccounts, Namespaces.
-	refused   []kindRefusal
-	saRefused *checks.Refusal
-	nsRefused *checks.Refusal
+	refused      []kindRefusal
+	saRefused    *checks.Refusal
+	nsRefused    *checks.Refusal
+	perWorkload  bool
+	floatingTags map[string]bool
 }
 
 func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns string) (*hardeningIndex, error) {
@@ -268,7 +327,7 @@ func listHardeningIndex(ctx context.Context, client kubernetes.Interface, ns str
 func (ix *hardeningIndex) judgeTemplate(t podTemplate) []emit.Finding {
 	out := append(privilegeFindings(t.spec), hostNamespaceFindings(t.spec)...)
 	out = append(out, hostPathFindings(t.spec)...)
-	out = append(out, imageTagFindings(t.spec)...)
+	out = append(out, imageTagFindingsWithTags(t.spec, ix.floatingTags)...)
 	for i := range out {
 		out[i].Namespace = t.namespace
 		out[i].KindOfObject = t.kind
@@ -283,9 +342,7 @@ func (ix *hardeningIndex) judgeTemplate(t podTemplate) []emit.Finding {
 // because those are the two objects an operator edits to fix them.
 func (ix *hardeningIndex) judgeNamespace(ns *corev1.Namespace) []emit.Finding {
 	var out []emit.Finding
-	if f, ok := ix.defaultSAFinding(ns.Name); ok {
-		out = append(out, f)
-	}
+	out = append(out, ix.defaultSAFindings(ns.Name)...)
 	if f, ok := ix.podSecurityFinding(ns); ok {
 		out = append(out, f)
 	}

@@ -102,6 +102,7 @@ func ClusterCommand(deps Deps) checks.Command {
 		MCPName:     "k8s_audit_cluster",
 		MCPProfiles: []string{"audit"},
 		Summary:     "Cluster-level configuration posture, read from the cloud provider: Workload Identity off cluster-wide or bypassed by a node pool, node pools still serving the legacy metadata endpoints, a control-plane endpoint the internet can reach with nothing narrowing it, and a node pool whose autoscaler can never add a node. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.",
+		Flags:       PolicyFlags(),
 		Kinds: []checks.KindField{
 			checks.Kind(kindWorkloadIdentityOff, "Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node", emit.SeverityWarning),
 			checks.Kind(kindLegacyMetadata, "a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read", emit.SeverityWarning),
@@ -137,6 +138,9 @@ func ClusterCommand(deps Deps) checks.Command {
 func runCluster(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if inv.Scope.Namespace != "" || inv.Scope.AllNamespaces || !inv.Scope.Workload.IsZero() {
 		return 0, emit.UsageErrorf("audit cluster reads the provider's cluster record, not objects inside the cluster: --namespace/-A/--workload do not apply")
+	}
+	if _, err := bindPolicy(inv); err != nil {
+		return 0, err
 	}
 
 	provider, err := deps.provider(ctx)

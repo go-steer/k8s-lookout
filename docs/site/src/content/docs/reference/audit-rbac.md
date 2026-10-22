@@ -15,6 +15,19 @@ MCP tool: `k8s_audit_rbac` (MCP profile: `audit`)
 lookout audit rbac [flags]
 ```
 
+## Flags
+
+| Flag | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `--skip-system-namespaces` | bool | — | skip system namespaces matching the active posture policy's system_namespaces patterns |
+| `--per-workload` | bool | — | emit one finding per affected workload instead of one summary finding per holder object |
+| `--policy` | string | — | path to a YAML posture policy file |
+| `--profile` | string | — | built-in posture profile: default\|strict\|onboarding\|gke-autopilot |
+| `--only` | string | — | comma-separated check kind or kind/reason globs to run exclusively |
+| `--skip` | string | — | comma-separated check kind or kind/reason globs to skip |
+| `--min-severity` | string | — | minimum finding severity to emit: info\|warning\|critical |
+| `--set` | string | — | comma-separated check parameter overrides (\<kind>.\<param>=\<val>) |
+
 ## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |
@@ -54,8 +67,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `resources` | the resources of the broadest wildcard rule, comma-joined |
 | `api_groups` | the apiGroups of the broadest wildcard rule, comma-joined, with the core group written as `core` |
 | `bindings` | RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today |
+| `workloads` | workloads in scope running as a bound ServiceAccount subject; omitted when no running workload uses the bound ServiceAccount |
+| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
+| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

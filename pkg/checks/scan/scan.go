@@ -151,9 +151,10 @@ var optionalGroups = []string{"audit", "cloud", "perf"}
 var excluded = map[string]string{
 	"scan": "the entry point itself; a scan that ran scan would not terminate",
 
-	"health":    "a composition over the same underlying derivations: every finding would appear twice, once as a scorecard category and once on its own. `lookout health` is the scorecard view of this data, `lookout scan` the finding view",
-	"bundle":    "a composition, and workload-targeted: `lookout bundle --workload=…` is the SECOND call, made once a scan has named the workload worth looking at",
-	"audit all": "the posture-group composition: `scan --include=audit` already runs the individual `audit` commands, so running `audit all` inside it would run every posture detector twice",
+	"health":       "a composition over the same underlying derivations: every finding would appear twice, once as a scorecard category and once on its own. `lookout health` is the scorecard view of this data, `lookout scan` the finding view",
+	"bundle":       "a composition, and workload-targeted: `lookout bundle --workload=…` is the SECOND call, made once a scan has named the workload worth looking at",
+	"audit all":    "the posture-group composition: `scan --include=audit` already runs the individual `audit` commands, so running `audit all` inside it would run every posture detector twice",
+	"audit policy": "dumps the effective posture rule table rather than scanning cluster objects; it is an inspection command for `--policy`/`--profile`, not a posture detector",
 
 	"triage list":    "an inventory aggregator (`kubectl get` across every kind at once), not a detector: it emits one line per object that EXISTS, which would bury the findings under the cluster",
 	"triage top":     "needs the metrics.k8s.io API, an optional add-on, and answers \"how loaded is this\" rather than \"what is broken\": a cluster without metrics-server would collect a degradation record on every scan",

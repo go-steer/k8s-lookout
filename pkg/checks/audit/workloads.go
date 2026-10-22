@@ -79,12 +79,13 @@ func WorkloadsCommand(deps Deps) checks.Command {
 		MCPName:     "k8s_audit_workloads",
 		MCPProfiles: []string{"audit"},
 		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, standalone Jobs left suspended past a maintenance window, and the rollout-safety claims for Service-backed workloads: liveness probes that fire before readiness on the same handler, serving containers with no preStop hook, and Deployment strategies that permit zero surviving pods. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
-		Flags: []emit.FlagSpec{
+		Flags: append([]emit.FlagSpec{
 			{Name: "cron-suspended", Type: emit.FlagDuration, Default: defaultCronSuspended.String(),
 				Help: "how long a CronJob must have been suspended before it reads as forgotten rather than as maintenance in progress; it must also have skipped at least one activation, so the claim scales to the schedule"},
 			{Name: "job-suspended", Type: emit.FlagDuration, Default: defaultJobSuspended.String(),
 				Help: "how long a standalone Job must have been suspended before it reads as forgotten rather than as maintenance in progress; Jobs owned by a controller or queued by Kueue are never judged"},
-		},
+			skipSystemNamespacesFlag(),
+		}, PolicyFlags()...),
 		Kinds: []checks.KindField{
 			checks.Kind(kindNoPDB, "the workload has no PodDisruptionBudget: a drain can take every replica at once", emit.SeverityWarning),
 			checks.Kind(kindSingle, "the workload runs a single replica, so any disruption is an outage", emit.SeverityWarning),
@@ -129,6 +130,7 @@ func WorkloadsCommand(deps Deps) checks.Command {
 			{Name: "nodes", Doc: "summary note: nodes in the cluster — the denominator every placement claim is resolved against; omitted when the node List was refused (a read.unavailable record says so, and no placement claim is made)"},
 			{Name: "workloads", Doc: "summary note: workloads examined, broken down as deployments/statefulsets/daemonsets/cronjobs"},
 			{Name: "jobs", Doc: "summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads`"},
+			skippedSystemNamespacesField(),
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout audit workloads -A",
@@ -179,6 +181,11 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 		}
 		wl.Kind = canonical
 	}
+	pol, err := bindPolicy(inv)
+	if err != nil {
+		return 0, err
+	}
+	skipSys := inv.Flags.Bool("skip-system-namespaces")
 
 	listNS := inv.Scope.Namespace
 	if inv.Scope.AllNamespaces {
@@ -192,12 +199,65 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	if err != nil {
 		return 0, err
 	}
+	ctx, snap := ensureSnapshot(ctx, client, listNS)
 	ix, err := listWorkloadIndex(ctx, client, listNS)
 	if err != nil {
 		return 0, err
 	}
 	if r, refused := ix.kindsRefused[wl.Kind]; refused && !wl.IsZero() {
 		return 0, &checks.RefusalError{Refusal: r, What: "workload " + wl.String() + " cannot be audited without it"}
+	}
+	if skipSys {
+		filteredW := ix.workloads[:0]
+		for _, w := range ix.workloads {
+			if pol.IsSystemNamespace(w.namespace) {
+				snap.recordSkippedNS(w.namespace)
+				continue
+			}
+			filteredW = append(filteredW, w)
+		}
+		ix.workloads = filteredW
+
+		filteredCJ := ix.cronJobs[:0]
+		for _, cj := range ix.cronJobs {
+			if pol.IsSystemNamespace(cj.Namespace) {
+				snap.recordSkippedNS(cj.Namespace)
+				continue
+			}
+			filteredCJ = append(filteredCJ, cj)
+		}
+		ix.cronJobs = filteredCJ
+
+		filteredJobs := ix.jobs[:0]
+		for _, j := range ix.jobs {
+			if pol.IsSystemNamespace(j.Namespace) {
+				snap.recordSkippedNS(j.Namespace)
+				continue
+			}
+			filteredJobs = append(filteredJobs, j)
+		}
+		ix.jobs = filteredJobs
+
+		filteredPDBs := ix.pdbs[:0]
+		for _, p := range ix.pdbs {
+			if pol.IsSystemNamespace(p.Namespace) {
+				snap.recordSkippedNS(p.Namespace)
+				delete(ix.pdbsByNS, p.Namespace)
+				continue
+			}
+			filteredPDBs = append(filteredPDBs, p)
+		}
+		ix.pdbs = filteredPDBs
+
+		filteredHPAs := ix.hpas[:0]
+		for _, h := range ix.hpas {
+			if pol.IsSystemNamespace(h.Namespace) {
+				snap.recordSkippedNS(h.Namespace)
+				continue
+			}
+			filteredHPAs = append(filteredHPAs, h)
+		}
+		ix.hpas = filteredHPAs
 	}
 
 	var findings []emit.Finding
@@ -225,6 +285,9 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 	// anything for a pod that runs to completion on a schedule and
 	// serves no traffic. Only the suspension claim applies.
 	suspended := inv.Flags.Duration("cron-suspended")
+	if suspended == defaultCronSuspended {
+		suspended = pol.DurationParam(kindSuspendedCron, "suspended_for", pol.DurationParam(kindSuspendedCron, "cron_suspended", suspended))
+	}
 	now := deps.now()
 	for _, cj := range ix.cronJobs {
 		if !wl.IsZero() && (wl.Kind != "CronJob" || cj.Name != wl.Name) {
@@ -239,6 +302,9 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 
 	// Jobs likewise: only the suspension claim applies (jobs.go).
 	jobSuspended := inv.Flags.Duration("job-suspended")
+	if jobSuspended == defaultJobSuspended {
+		jobSuspended = pol.DurationParam(kindSuspendedJob, "suspended_for", pol.DurationParam(kindSuspendedJob, "job_suspended", jobSuspended))
+	}
 	jobs := 0
 	for _, j := range ix.jobs {
 		if !wl.IsZero() && (wl.Kind != "Job" || j.Name != wl.Name) {
@@ -321,6 +387,11 @@ func runWorkloads(ctx context.Context, deps Deps, inv emit.Invocation) (int, err
 			continue
 		}
 		if err := inv.Out.Note(n[0], n[1]); err != nil {
+			return 0, err
+		}
+	}
+	if skipSys {
+		if err := inv.Out.Note("skipped_system_namespaces", itoa(snap.skippedNSCount())); err != nil {
 			return 0, err
 		}
 	}

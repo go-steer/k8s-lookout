@@ -17,6 +17,7 @@ package audit
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -82,4 +83,30 @@ func (ix *hardeningIndex) defaultSAFinding(namespace string) (emit.Finding, bool
 	}
 	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
 	return f, true
+}
+
+func (ix *hardeningIndex) defaultSAFindings(namespace string) []emit.Finding {
+	f, ok := ix.defaultSAFinding(namespace)
+	if !ok {
+		return nil
+	}
+	if !ix.perWorkload {
+		return []emit.Finding{f}
+	}
+	users := append([]string(nil), ix.defaultSAUsers[namespace]...)
+	sort.Strings(users)
+	out := make([]emit.Finding, 0, len(users))
+	for _, u := range users {
+		wlKind, wlName, ok := strings.Cut(u, "/")
+		if !ok {
+			continue
+		}
+		wf := f
+		wf.Namespace = namespace
+		wf.KindOfObject = wlKind
+		wf.Name = wlName
+		wf.Fingerprint = engine.PostureFingerprint(wf.Kind, wf.Reason, wf.KindOfObject)
+		out = append(out, wf)
+	}
+	return out
 }

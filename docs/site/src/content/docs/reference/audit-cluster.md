@@ -15,6 +15,17 @@ MCP tool: `k8s_audit_cluster` (MCP profile: `audit`)
 lookout audit cluster [flags]
 ```
 
+## Flags
+
+| Flag | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `--policy` | string | — | path to a YAML posture policy file |
+| `--profile` | string | — | built-in posture profile: default\|strict\|onboarding\|gke-autopilot |
+| `--only` | string | — | comma-separated check kind or kind/reason globs to run exclusively |
+| `--skip` | string | — | comma-separated check kind or kind/reason globs to skip |
+| `--min-severity` | string | — | minimum finding severity to emit: info\|warning\|critical |
+| `--set` | string | — | comma-separated check parameter overrides (\<kind>.\<param>=\<val>) |
+
 ## Common flags (every `lookout` command)
 
 | Flag | Type | Default | Meaning |

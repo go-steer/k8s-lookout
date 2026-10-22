@@ -52,13 +52,16 @@ var floatingTags = map[string]bool{
 	"nightly": true, "stable": true, "edge": true,
 }
 
-// imageTagFindings judges every container in the template, init
+// imageTagFindingsWithTags judges every container in the template, init
 // containers included (an init container that pulls `:latest` changes
 // what the pod boots into just as surely).
-func imageTagFindings(spec corev1.PodSpec) []emit.Finding {
+func imageTagFindingsWithTags(spec corev1.PodSpec, tags map[string]bool) []emit.Finding {
+	if len(tags) == 0 {
+		tags = floatingTags
+	}
 	var untagged, floating []string
 	for _, c := range allContainers(spec) {
-		switch classifyImageRef(c.Image) {
+		switch classifyImageRefWithTags(c.Image, tags) {
 		case reasonNoTag:
 			untagged = append(untagged, c.Name)
 		case reasonFloatingTag:
@@ -98,11 +101,11 @@ func imageTagFindings(spec corev1.PodSpec) []emit.Finding {
 	return out
 }
 
-// classifyImageRef returns the reason an image reference is floating,
+// classifyImageRefWithTags returns the reason an image reference is floating,
 // or "" when it is pinned. A digest pins regardless of tag. The tag is
 // the part after the last '/', because a registry host may carry a
 // port (`registry:5000/app`).
-func classifyImageRef(image string) string {
+func classifyImageRefWithTags(image string, tags map[string]bool) string {
 	if image == "" || strings.Contains(image, "@sha256:") {
 		return ""
 	}
@@ -111,7 +114,7 @@ func classifyImageRef(image string) string {
 	if i < 0 {
 		return reasonNoTag
 	}
-	if floatingTags[last[i+1:]] {
+	if tags[last[i+1:]] {
 		return reasonFloatingTag
 	}
 	return ""

@@ -71,6 +71,30 @@ type Snapshot struct {
 	services        []*corev1.Service
 	servicesRefused *checks.Refusal
 	servicesErr     error
+
+	skippedMu sync.Mutex
+	skippedNS map[string]bool
+}
+
+func (s *Snapshot) recordSkippedNS(ns string) {
+	if s == nil || ns == "" {
+		return
+	}
+	s.skippedMu.Lock()
+	if s.skippedNS == nil {
+		s.skippedNS = map[string]bool{}
+	}
+	s.skippedNS[ns] = true
+	s.skippedMu.Unlock()
+}
+
+func (s *Snapshot) skippedNSCount() int {
+	if s == nil {
+		return 0
+	}
+	s.skippedMu.Lock()
+	defer s.skippedMu.Unlock()
+	return len(s.skippedNS)
 }
 
 type snapshotEntry[T any] struct {
@@ -103,6 +127,14 @@ func snapshotFor(ctx context.Context, client kubernetes.Interface, ns string) *S
 		return s
 	}
 	return NewSnapshot(client, ns)
+}
+
+func ensureSnapshot(ctx context.Context, client kubernetes.Interface, ns string) (context.Context, *Snapshot) {
+	if s, ok := ctx.Value(snapshotKey{}).(*Snapshot); ok && s != nil && s.client == client && s.ns == ns {
+		return ctx, s
+	}
+	s := NewSnapshot(client, ns)
+	return WithSnapshot(ctx, s), s
 }
 
 // fatalRefusal turns a cached Refusal into the RefusalError a caller

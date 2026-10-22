@@ -314,6 +314,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_warn` | its /warn label, omitted when unset — set without /enforce means the namespace is in dry-run |
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
 | `workloads` | pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one |
+| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `policies` | NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one |
 | `total_policies` | NetworkPolicies in the namespace in either direction, so an egress-only namespace does not read as an empty one |
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |
@@ -328,6 +329,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `verbs` | the verbs of the broadest wildcard rule, comma-joined |
 | `api_groups` | the apiGroups of the broadest wildcard rule, comma-joined, with the core group written as `core` |
 | `bindings` | RoleBindings and ClusterRoleBindings pointing at the role; 0 means it grants nothing today |
+| `workload_names` | their Kind/name, sorted and capped at 8 |
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
 | `version` | the current version of the finding's subject — the control plane's, or the node pool's |

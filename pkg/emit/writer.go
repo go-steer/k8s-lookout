@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -81,22 +82,40 @@ type Visibility interface {
 	Visible(namespace string) bool
 }
 
+// Policy answers whether a finding kind (and optional reason) is
+// enabled under the active posture policy and what effective severity
+// it should carry (issue #779).
+//
+// Unlike an Exempter (which annotates per-object exceptions and never
+// drops), a Policy is a check-level configuration: disabled checks are
+// withheld from the finding stream and counted on the terminating
+// summary line as `policy=<name> suppressed=<n>`, so a filtered run is
+// never mistaken for an unfiltered all-clear. Degradation records
+// (`*.unavailable`) and `scan.*` meta-findings bypass Policy so a
+// policy can never hide a failed or refused read (§11).
+type Policy interface {
+	Name() string
+	Decide(kind, reason string, sev Severity) (enabled bool, out Severity)
+}
+
 // Writer encodes sanitized findings to one output stream and counts
 // them for the summary line. Not safe for concurrent use; checks are
 // single-goroutine emitters by design (deterministic output order).
 type Writer struct {
-	out      io.Writer
-	format   Format
-	sanitize Sanitizer
-	exempt   Exempter
-	visible  Visibility
-	findings int
-	exempted int
-	hidden   int
-	notes    []Field
-	stamps   []Field
-	watchers []func(Finding)
-	folds    []func(Finding) bool
+	out        io.Writer
+	format     Format
+	sanitize   Sanitizer
+	exempt     Exempter
+	visible    Visibility
+	policy     Policy
+	findings   int
+	exempted   int
+	hidden     int
+	suppressed int
+	notes      []Field
+	stamps     []Field
+	watchers   []func(Finding)
+	folds      []func(Finding) bool
 }
 
 // WriterOption customizes a Writer.
@@ -124,6 +143,37 @@ func WithExemptions(e Exempter) WriterOption {
 // Visibility is the same as not passing one.
 func WithVisibility(v Visibility) WriterOption {
 	return func(w *Writer) { w.visible = v }
+}
+
+// WithPolicy makes the Writer apply a check-level Policy to every
+// non-meta finding (suppressing disabled checks and rewriting
+// overridden severities) and report `policy=<name> suppressed=<n>` on
+// the summary line. A nil Policy is the same as not passing one.
+func WithPolicy(p Policy) WriterOption {
+	return func(w *Writer) { w.SetPolicy(p) }
+}
+
+// SetPolicy attaches the Writer's Policy before or during a check
+// invocation. When a composition (`audit all`) has already set a
+// Policy on its shared Writer, child stages' SetPolicy calls are
+// no-ops so the outer policy and suppressed tally remain intact.
+// Passing a nil (or typed-nil) Policy clears it.
+func (w *Writer) SetPolicy(p Policy) {
+	if p != nil {
+		if rv := reflect.ValueOf(p); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			p = nil
+		}
+	}
+	if p == nil || w.policy == nil {
+		w.policy = p
+	}
+}
+
+// isPolicyMetaKind reports whether kind is a degradation record
+// (`*.unavailable`) or a `scan.*` composition record that a Policy
+// must never suppress (§11).
+func isPolicyMetaKind(kind string) bool {
+	return strings.HasSuffix(kind, ".unavailable") || strings.HasPrefix(kind, "scan.") || kind == "audit.policy_rule"
 }
 
 // NewWriter returns a Writer emitting the given format to out.
@@ -159,15 +209,25 @@ func (w *Writer) Emit(f Finding) error {
 			return nil
 		}
 	}
+	if err := f.validate(); err != nil {
+		return err
+	}
+	if w.policy != nil && !isPolicyMetaKind(f.Kind) {
+		enabled, outSev := w.policy.Decide(f.Kind, f.Reason, f.Severity)
+		if !enabled {
+			w.suppressed++
+			return nil
+		}
+		if outSev != "" {
+			f.Severity = outSev
+		}
+	}
 	exempted := false
 	if w.exempt != nil {
 		if reason, expires, ok := w.exempt.Exempt(f.Kind, f.Namespace, f.Name); ok {
 			f.ExemptReason, f.ExemptExpires = reason, expires
 			exempted = true
 		}
-	}
-	if err := f.validate(); err != nil {
-		return err
 	}
 	var line []byte
 	switch w.format {
@@ -293,6 +353,10 @@ func (w *Writer) Findings() int { return w.findings }
 // annotation.
 func (w *Writer) Exempted() int { return w.exempted }
 
+// Suppressed reports how many findings were suppressed by the active
+// Policy.
+func (w *Writer) Suppressed() int { return w.suppressed }
+
 // Note records one summary-line annotation, appended after the
 // mandatory scanned/findings/elapsed keys in the order first set
 // (setting a key again replaces its value in place). This is the
@@ -356,6 +420,12 @@ func (w *Writer) Summary(scanned int, elapsed time.Duration) error {
 		Field{Key: "elapsed", Value: elapsed.String()},
 	)
 	pairs = append(pairs, w.notes...)
+	if w.policy != nil {
+		if name := w.policy.Name(); name != "" {
+			pairs = append(pairs, Field{Key: "policy", Value: name})
+		}
+		pairs = append(pairs, Field{Key: "suppressed", Value: strconv.Itoa(w.suppressed)})
+	}
 	if w.exempt != nil {
 		pairs = append(pairs, Field{Key: "exempt", Value: strconv.Itoa(w.exempted)})
 	}
