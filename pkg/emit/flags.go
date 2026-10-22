@@ -84,7 +84,10 @@ func CommonFlagsWith(timeout time.Duration) []FlagSpec {
 		{Name: "format", Type: FlagString, Default: "logfmt", Help: "output format: logfmt|json (one record per line either way)"},
 		{Name: "timeout", Type: FlagDuration, Default: timeout.String(), Help: "abort the invocation after this long (exit 1)"},
 		{Name: "kubeconfig", Type: FlagString, Default: "", Help: "path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config"},
+		{Name: "kubeconfig-dir", Type: FlagString, Default: "", Help: "directory of kubeconfig files to fan out across (mutually exclusive with --kubeconfig); each finding is stamped with cluster=<label> and the summary reports clusters=<n>"},
 		{Name: "context", Type: FlagString, Default: "", Help: "kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line"},
+		{Name: "contexts", Type: FlagString, Default: "", Help: "comma-separated kubeconfig contexts to fan out across, or '*' for every context in the selected kubeconfig(s) (mutually exclusive with --context); each finding is stamped with cluster=<label> and the summary reports clusters=<n>"},
+		{Name: "concurrency", Type: FlagInt, Default: "4", Help: "maximum concurrent cluster executions when fanning out with --contexts or --kubeconfig-dir"},
 		{Name: "exemptions", Type: FlagString, Default: "", Help: "path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped"},
 	}
 }
@@ -256,6 +259,20 @@ func (v FlagValues) String(name string) string          { return v.get(name).(st
 func (v FlagValues) Bool(name string) bool              { return v.get(name).(bool) }
 func (v FlagValues) Int(name string) int                { return v.get(name).(int) }
 func (v FlagValues) Duration(name string) time.Duration { return v.get(name).(time.Duration) }
+
+// IsSet reports whether --name was explicitly passed on the command line.
+func (v FlagValues) IsSet(name string) bool {
+	if v.fs == nil {
+		return false
+	}
+	found := false
+	v.fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
 
 func (v FlagValues) get(name string) any {
 	f := v.fs.Lookup(name)

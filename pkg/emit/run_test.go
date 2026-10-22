@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -476,5 +478,145 @@ func TestRunContextNoteIsReserved(t *testing.T) {
 	}
 	if noteErr == nil {
 		t.Error("a check was allowed to set the reserved context note")
+	}
+}
+
+func TestRunFleetContextsDeterministicOrderAndStamp(t *testing.T) {
+	c2Done := make(chan struct{})
+	check := func(ctx context.Context, inv Invocation) (int, error) {
+		sel := kube.SelectionFrom(ctx)
+		if sel.Context == "c1" {
+			// Wait for c2 to finish first to prove output is still ordered c1 then c2.
+			<-c2Done
+		}
+		err := inv.Out.Emit(Finding{
+			Kind:     "test.finding",
+			Severity: SeverityWarning,
+			Name:     "pod-" + sel.Context,
+			Reason:   "CrashLoop",
+		})
+		if sel.Context == "c2" {
+			close(c2Done)
+		}
+		return 4, err
+	}
+
+	code, stdout, stderr := runOnce(t, check, nil, "--contexts=c1,c2", "--concurrency=2")
+	if code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	want := "kind=test.finding severity=warning name=pod-c1 reason=CrashLoop cluster=c1\n" +
+		"kind=test.finding severity=warning name=pod-c2 reason=CrashLoop cluster=c2\n" +
+		"scanned=8 findings=2 elapsed=100ms clusters=2\n"
+	if stdout != want {
+		t.Errorf("stdout =\n%s\nwant:\n%s", stdout, want)
+	}
+}
+
+func TestRunFleetKubeconfigDirDiscoveryAndDisambiguation(t *testing.T) {
+	dir := t.TempDir()
+	writeKC := func(name, ctxName string) {
+		content := "apiVersion: v1\nkind: Config\ncurrent-context: " + ctxName + "\n" +
+			"clusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:6443\n" +
+			"contexts:\n- name: " + ctxName + "\n  context:\n    cluster: c\n    user: u\n" +
+			"users:\n- name: u\n  user:\n    token: tok\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeKC("b-west.yaml", "default")
+	writeKC("a-east.yaml", "default")
+	writeKC("c-central.conf", "central")
+
+	check := func(ctx context.Context, inv Invocation) (int, error) {
+		sel := kube.SelectionFrom(ctx)
+		err := inv.Out.Emit(Finding{
+			Kind: "test.finding",
+			Name: filepath.Base(sel.Kubeconfig),
+		})
+		return 2, err
+	}
+
+	code, stdout, stderr := runOnce(t, check, nil, "--kubeconfig-dir="+dir)
+	if code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	want := "kind=test.finding name=a-east.yaml cluster=a-east.yaml:default\n" +
+		"kind=test.finding name=b-west.yaml cluster=b-west.yaml:default\n" +
+		"kind=test.finding name=c-central.conf cluster=central\n" +
+		"scanned=6 findings=3 elapsed=100ms clusters=3\n"
+	if stdout != want {
+		t.Errorf("stdout =\n%s\nwant:\n%s", stdout, want)
+	}
+}
+
+func TestRunFleetPartialClusterFailureAndAllFailed(t *testing.T) {
+	check := func(ctx context.Context, inv Invocation) (int, error) {
+		sel := kube.SelectionFrom(ctx)
+		if sel.Context == "broken" {
+			return 0, errors.New("dial tcp 10.0.0.9:443: connection refused")
+		}
+		err := inv.Out.Emit(Finding{
+			Kind:     "test.finding",
+			Severity: SeverityInfo,
+			Name:     "ok-" + sel.Context,
+		})
+		return 5, err
+	}
+
+	code, stdout, stderr := runOnce(t, check, nil, "--contexts=healthy,broken")
+	if code != ExitData {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr should be empty on partial failure, got %q", stderr)
+	}
+	want := "kind=test.finding severity=info name=ok-healthy cluster=healthy\n" +
+		"kind=scan.cluster_failed severity=warning reason=ClusterFailed message=\"dial tcp 10.0.0.9:443: connection refused\" cluster=broken\n" +
+		"scanned=5 findings=2 elapsed=100ms clusters=2 clusters_failed=1\n"
+	if stdout != want {
+		t.Errorf("stdout =\n%s\nwant:\n%s", stdout, want)
+	}
+
+	// All clusters failing with 0 scanned must exit 1 with clean stdout.
+	allFail := func(ctx context.Context, inv Invocation) (int, error) {
+		return 0, errors.New("unreachable api server")
+	}
+	code, stdout, stderr = runOnce(t, allFail, nil, "--contexts=c1,c2")
+	if code != ExitRuntime {
+		t.Fatalf("all-failed exit = %d, want %d", code, ExitRuntime)
+	}
+	if stdout != "" {
+		t.Errorf("stdout must stay empty when all clusters fail with 0 scanned, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "unreachable api server") {
+		t.Errorf("stderr = %q, want diagnostic", stderr)
+	}
+}
+
+func TestRunFleetMutualExclusionAndConcurrencyUsageErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"context and contexts conflict", []string{"--context=c1", "--contexts=c1,c2"}},
+		{"kubeconfig and kubeconfig-dir conflict", []string{"--kubeconfig=/tmp/kc", "--kubeconfig-dir=/tmp/dir"}},
+		{"zero concurrency", []string{"--concurrency=0"}},
+		{"negative concurrency", []string{"--concurrency=-2"}},
+		{"empty contexts", []string{"--contexts=,"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, stdout, stderr := runOnce(t, emitOne, nil, tt.args...)
+			if code != ExitUsage {
+				t.Errorf("exit = %d, want %d (stderr: %q)", code, ExitUsage, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout must stay clean on usage error, got %q", stdout)
+			}
+			if stderr == "" {
+				t.Error("stderr must report usage error")
+			}
+		})
 	}
 }

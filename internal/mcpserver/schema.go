@@ -61,11 +61,14 @@ func propertyName(flag string) string {
 // WithStore), never to an untrusted model client: they are omitted
 // from inputSchema and rejected by argv if sent.
 var serverScopedFlags = map[string]bool{
-	"kubeconfig": true,
-	"context":    true,
-	"exemptions": true,
-	"store":      true,
-	"report":     true,
+	"kubeconfig":     true,
+	"kubeconfig-dir": true,
+	"context":        true,
+	"contexts":       true,
+	"concurrency":    true,
+	"exemptions":     true,
+	"store":          true,
+	"report":         true,
 }
 
 // IsServerScopedFlag reports whether flag is stripped from the MCP

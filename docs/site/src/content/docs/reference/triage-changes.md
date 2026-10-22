@@ -34,7 +34,10 @@ lookout triage changes <Kind>/[<namespace>/]<name> [flags]
 | `--format` | string | `logfmt` | output format: logfmt\|json (one record per line either way) |
 | `--timeout` | duration | `10s` | abort the invocation after this long (exit 1) |
 | `--kubeconfig` | string | — | path to a kubeconfig file, instead of $KUBECONFIG / ~/.kube/config |
+| `--kubeconfig-dir` | string | — | directory of kubeconfig files to fan out across (mutually exclusive with --kubeconfig); each finding is stamped with cluster=\<label> and the summary reports clusters=\<n> |
 | `--context` | string | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=\<name> in the summary line |
+| `--contexts` | string | — | comma-separated kubeconfig contexts to fan out across, or '*' for every context in the selected kubeconfig(s) (mutually exclusive with --context); each finding is stamped with cluster=\<label> and the summary reports clusters=\<n> |
+| `--concurrency` | int | `4` | maximum concurrent cluster executions when fanning out with --contexts or --kubeconfig-dir |
 | `--exemptions` | string | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=\<n> in the summary, never dropped |
 
 ## Point-in-time flags (graph-backed commands)

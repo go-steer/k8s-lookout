@@ -15,11 +15,16 @@
 package kube
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // ContextRef describes one context in a kubeconfig: enough to name a
@@ -109,4 +114,209 @@ func kubeconfigDesc(path string) string {
 		return path
 	}
 	return "(default search: $KUBECONFIG, else ~/.kube/config)"
+}
+
+// FleetTarget is one resolved target cluster for a read-path fleet
+// fan-out (--kubeconfig-dir / --contexts).
+type FleetTarget struct {
+	Kubeconfig string
+	Context    string
+	// Label is Context when unique across the resolved target set, or
+	// <filename>:<Context> when two kubeconfig files share a context
+	// name.
+	Label string
+}
+
+// ParseContextsList parses a --contexts value: a comma-separated list
+// of context names, or "*" to select every context in the target
+// kubeconfig(s). Duplicate names are collapsed in listed order.
+func ParseContextsList(raw string) (contexts []string, all bool, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false, errors.New("--contexts names no contexts")
+	}
+	seen := map[string]bool{}
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if tok == "*" {
+			all = true
+			continue
+		}
+		if !seen[tok] {
+			seen[tok] = true
+			contexts = append(contexts, tok)
+		}
+	}
+	if all {
+		return nil, true, nil
+	}
+	if len(contexts) == 0 {
+		return nil, false, errors.New("--contexts names no contexts")
+	}
+	return contexts, false, nil
+}
+
+// ResolveFleetTargets resolves the ordered list of target clusters for
+// a read-path fleet fan-out from --kubeconfig / --kubeconfig-dir and
+// --contexts.
+func ResolveFleetTargets(kubeconfig, kubeconfigDir, contextsRaw string) ([]FleetTarget, error) {
+	var (
+		wanted []string
+		all    bool
+		err    error
+	)
+	if strings.TrimSpace(contextsRaw) != "" {
+		wanted, all, err = ParseContextsList(contextsRaw)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var targets []FleetTarget
+	if kubeconfigDir != "" {
+		files, err := discoverKubeconfigFiles(kubeconfigDir)
+		if err != nil {
+			return nil, err
+		}
+		matchedWanted := map[string]bool{}
+		for _, f := range files {
+			switch {
+			case all:
+				for _, name := range sortedContextNames(f.cfg) {
+					targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: name})
+				}
+			case len(wanted) > 0:
+				for _, name := range wanted {
+					if _, ok := f.cfg.Contexts[name]; ok {
+						matchedWanted[name] = true
+						targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: name})
+					}
+				}
+			default:
+				if f.cfg.CurrentContext != "" {
+					if _, ok := f.cfg.Contexts[f.cfg.CurrentContext]; ok {
+						targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: f.cfg.CurrentContext})
+						continue
+					}
+				}
+				for _, name := range sortedContextNames(f.cfg) {
+					targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: name})
+				}
+			}
+		}
+		if len(wanted) > 0 {
+			for _, name := range wanted {
+				if !matchedWanted[name] {
+					return nil, fmt.Errorf("--kubeconfig-dir %q: context %q not found in any kubeconfig file", kubeconfigDir, name)
+				}
+			}
+		}
+	} else {
+		if all {
+			refs, err := ListContexts(kubeconfig)
+			if err != nil {
+				return nil, err
+			}
+			if len(refs) == 0 {
+				return nil, fmt.Errorf("kubeconfig %s defines no contexts", kubeconfigDesc(kubeconfig))
+			}
+			for _, ref := range refs {
+				targets = append(targets, FleetTarget{Kubeconfig: kubeconfig, Context: ref.Name})
+			}
+		} else {
+			for _, name := range wanted {
+				targets = append(targets, FleetTarget{Kubeconfig: kubeconfig, Context: name})
+			}
+		}
+	}
+
+	if len(targets) == 0 {
+		return nil, errors.New("no target contexts resolved")
+	}
+
+	counts := make(map[string]int, len(targets))
+	for _, t := range targets {
+		counts[t.Context]++
+	}
+	for i := range targets {
+		if counts[targets[i].Context] > 1 && targets[i].Kubeconfig != "" {
+			targets[i].Label = filepath.Base(targets[i].Kubeconfig) + ":" + targets[i].Context
+		} else {
+			targets[i].Label = targets[i].Context
+		}
+	}
+	return targets, nil
+}
+
+type loadedKubeconfig struct {
+	path string
+	cfg  *clientcmdapi.Config
+}
+
+func discoverKubeconfigFiles(dir string) ([]loadedKubeconfig, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("--kubeconfig-dir %q: %w", dir, err)
+	}
+	var (
+		files    []loadedKubeconfig
+		firstErr error
+	)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		fullPath := filepath.Join(dir, name)
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		knownExt := hasKubeconfigExt(name)
+		cfg, err := clientcmd.LoadFromFile(fullPath)
+		if err != nil {
+			if knownExt {
+				return nil, fmt.Errorf("kubeconfig %s: %w", fullPath, err)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("kubeconfig %s: %w", fullPath, err)
+			}
+			continue
+		}
+		if len(cfg.Contexts) == 0 {
+			if knownExt {
+				return nil, fmt.Errorf("kubeconfig %s defines no contexts", fullPath)
+			}
+			continue
+		}
+		files = append(files, loadedKubeconfig{path: fullPath, cfg: cfg})
+	}
+	if len(files) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("--kubeconfig-dir %q contains no kubeconfig files", dir)
+	}
+	return files, nil
+}
+
+func hasKubeconfigExt(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".yaml", ".yml", ".conf", ".kubeconfig":
+		return true
+	default:
+		return false
+	}
+}
+
+func sortedContextNames(cfg *clientcmdapi.Config) []string {
+	names := make([]string, 0, len(cfg.Contexts))
+	for name := range cfg.Contexts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
