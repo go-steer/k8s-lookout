@@ -342,6 +342,7 @@ func viewCases() []viewCase {
 		{"state volumes", []string{"--namespace=prod"}, func(v *viewClients) checks.Command { return state.VolumesCommand(stateDeps(v)) }},
 		{"state storage", nil, func(v *viewClients) checks.Command { return state.StorageCommand(stateDeps(v)) }},
 		{"state keda", nil, func(v *viewClients) checks.Command { return state.KEDACommand(stateDeps(v)) }},
+		{"state kcc", nil, func(v *viewClients) checks.Command { return state.KCCCommand(stateDeps(v)) }},
 		{"state gateway", nil, func(v *viewClients) checks.Command { return state.GatewayCommand(stateDeps(v)) }},
 		{"state wi", []string{wl}, func(v *viewClients) checks.Command {
 			return state.WICommand(state.WIDeps{Client: v.client(), Provider: noProvider, Now: viewClock})
