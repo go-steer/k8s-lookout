@@ -52,6 +52,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | --- | --- | --- |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
+| `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
 
 ## Output fields
 
@@ -65,7 +66,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |
 | `covered_workloads` | pod templates in the namespace that ARE selected for this direction — the neighbours the subject fell out of step with |
 | `pod_labels` | the template's own labels, which are what the policies' selectors failed to match, sorted and capped at 8 |
-| `pod_selector` | the dead policy's podSelector, in label-selector syntax |
+| `pod_selector` | the dead or allow-all policy's podSelector, in label-selector syntax |
+| `direction` | the direction the permissive rule opens (ingress or egress) |
 | `policy_types` | the directions the dead policy names, after defaulting an unset policyTypes |
 | `namespaces` | summary note: namespaces examined — the denominator for the namespace-subject claims, which `scanned` (pod templates) does not cover |
 | `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |

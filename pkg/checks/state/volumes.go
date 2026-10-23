@@ -138,6 +138,7 @@ func VolumesCommand(deps Deps) checks.Command {
 			checks.Kind("volume.attach_error", "the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow", emit.SeverityCritical, emit.SeverityWarning),
 			checks.Kind("volume.orphaned_attachment", "a VolumeAttachment survives its PV or its node", emit.SeverityInfo),
 			checks.Kind("volume.unconsumed_pvc", "a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict", emit.SeverityInfo),
+			checks.Kind("volume.expansion_unsupported", "a Bound claim requests more storage than its current capacity, but its StorageClass does not allow volume expansion", emit.SeverityWarning),
 			UnreadKind(),
 		},
 		Output: append([]checks.OutputField{
@@ -154,8 +155,9 @@ func VolumesCommand(deps Deps) checks.Command {
 			{Name: "pv_zones", Doc: "zones the PV's node affinity allows, sorted"},
 			{Name: "node_zone", Doc: "zone label of the node the pod is scheduled on"},
 			{Name: "orphan", Doc: "which referenced side is gone: \"pv missing\", \"node missing\", or both"},
-			{Name: "capacity", Doc: "volume.unconsumed_pvc: the claim's bound capacity (status.capacity.storage); omitted when unreported"},
-			{Name: "storage_class", Doc: "volume.unconsumed_pvc: the claim's StorageClass; omitted when it names none"},
+			{Name: "capacity", Doc: "volume.unconsumed_pvc, volume.expansion_unsupported: the claim's bound capacity (status.capacity.storage); omitted when unreported"},
+			{Name: "requested", Doc: "volume.expansion_unsupported: the larger storage capacity requested in spec.resources.requests.storage"},
+			{Name: "storage_class", Doc: "volume.unconsumed_pvc, volume.expansion_unsupported: the claim's StorageClass; omitted when it names none"},
 			{Name: "reclaim_policy", Doc: "volume.unconsumed_pvc: the bound PV's reclaim policy — Delete means deleting the claim frees the disk, Retain means the PV must be deleted too; omitted when the PV is not visible"},
 			{Name: "claim_age", Doc: "volume.unconsumed_pvc: how long ago the claim was created, truncated to minutes"},
 		}, UnreadFields()...),
@@ -216,6 +218,7 @@ type volumeIndex struct {
 	pvcs        map[string]*corev1.PersistentVolumeClaim // ns/name
 	pvs         map[string]*corev1.PersistentVolume      // name
 	nodes       map[string]*corev1.Node                  // name
+	classes     map[string]*storagev1.StorageClass       // name
 	attachments []*storagev1.VolumeAttachment
 
 	// templateClaims are the claims a workload pod template names
@@ -270,6 +273,7 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 		pvcs:             map[string]*corev1.PersistentVolumeClaim{},
 		pvs:              map[string]*corev1.PersistentVolume{},
 		nodes:            map[string]*corev1.Node{},
+		classes:          map[string]*storagev1.StorageClass{},
 		templateClaims:   map[string]bool{},
 		stsClaimPrefixes: map[string][]string{},
 		refused:          map[string]checks.Refusal{},
@@ -341,6 +345,13 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 	if err := vix.listWorkloadTemplates(ctx, client, ns); err != nil {
 		return nil, err
 	}
+	_ = listPages("storageclasses", func(o metav1.ListOptions) ([]storagev1.StorageClass, string, error) {
+		l, err := client.StorageV1().StorageClasses().List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(sc *storagev1.StorageClass) { vix.classes[sc.Name] = sc })
 	return vix, nil
 }
 
@@ -467,6 +478,44 @@ func (vix *volumeIndex) findings(now time.Time) []emit.Finding {
 	out = append(out, vix.zoneConflicts()...)
 	out = append(out, vix.attachmentFindings(now)...)
 	out = append(out, vix.unconsumedClaims(now)...)
+	out = append(out, vix.expansionUnsupported()...)
+	return out
+}
+
+func (vix *volumeIndex) expansionUnsupported() []emit.Finding {
+	var out []emit.Finding
+	for _, pvc := range vix.pvcs {
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.DeletionTimestamp != nil || pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+			continue
+		}
+		sc := vix.classes[*pvc.Spec.StorageClassName]
+		if sc == nil || (sc.AllowVolumeExpansion != nil && *sc.AllowVolumeExpansion) {
+			continue
+		}
+		req, hasReq := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		capQty, hasCap := pvc.Status.Capacity[corev1.ResourceStorage]
+		if !hasReq || !hasCap || req.Cmp(capQty) <= 0 {
+			continue
+		}
+		details := []emit.Field{
+			{Key: "capacity", Value: capQty.String()},
+			{Key: "requested", Value: req.String()},
+			{Key: "storage_class", Value: sc.Name},
+		}
+		if pvc.Spec.VolumeName != "" {
+			details = append([]emit.Field{{Key: "pv", Value: pvc.Spec.VolumeName}}, details...)
+		}
+		out = append(out, emit.Finding{
+			Kind:         "volume.expansion_unsupported",
+			Severity:     emit.SeverityWarning,
+			Namespace:    pvc.Namespace,
+			KindOfObject: "PersistentVolumeClaim",
+			Name:         pvc.Name,
+			Reason:       "VolumeExpansionUnsupported",
+			Message:      fmt.Sprintf("claim requests %s (bound capacity %s), but StorageClass %q does not allow volume expansion — the resize cannot proceed", req.String(), capQty.String(), sc.Name),
+			Details:      details,
+		})
+	}
 	return out
 }
 
@@ -499,7 +548,7 @@ func (vix *volumeIndex) unconsumedClaims(now time.Time) []emit.Finding {
 
 	var out []emit.Finding
 	for k, pvc := range vix.pvcs {
-		if pvc.Status.Phase != corev1.ClaimBound || pvc.DeletionTimestamp != nil {
+		if pvc.DeletionTimestamp != nil {
 			continue
 		}
 		if consumed[k] || vix.templateClaims[k] || volumeOwnedByLifecycle(pvc) {
@@ -510,6 +559,31 @@ func (vix *volumeIndex) unconsumedClaims(now time.Time) []emit.Finding {
 		}
 		age := now.Sub(pvc.CreationTimestamp.Time)
 		if !pvc.CreationTimestamp.IsZero() && age < volumeUnconsumedGrace {
+			continue
+		}
+		if pvc.Status.Phase == corev1.ClaimPending && pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+			if sc := vix.classes[*pvc.Spec.StorageClassName]; sc != nil && sc.VolumeBindingMode != nil && *sc.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer {
+				details := []emit.Field{
+					{Key: "storage_class", Value: sc.Name},
+					{Key: "access_modes", Value: volumeAccessModes(pvc.Spec.AccessModes)},
+				}
+				if !pvc.CreationTimestamp.IsZero() {
+					details = append(details, emit.Field{Key: "claim_age", Value: age.Truncate(time.Minute).String()})
+				}
+				out = append(out, emit.Finding{
+					Kind:         "volume.unconsumed_pvc",
+					Severity:     emit.SeverityInfo,
+					Namespace:    pvc.Namespace,
+					KindOfObject: "PersistentVolumeClaim",
+					Name:         pvc.Name,
+					Reason:       "WaitForFirstConsumerUnbound",
+					Message:      fmt.Sprintf("claim is Pending on WaitForFirstConsumer StorageClass %q and no pod or workload template references it — it stays unbound until a consumer is created", sc.Name),
+					Details:      details,
+				})
+			}
+			continue
+		}
+		if pvc.Status.Phase != corev1.ClaimBound {
 			continue
 		}
 		out = append(out, vix.unconsumedFinding(pvc, age))

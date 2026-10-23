@@ -39,6 +39,10 @@ const kindNetpolMissing = "audit.netpol_missing"
 // namespace, where the namespace-subject claim does not already say so.
 const kindNetpolSelectsNothing = "audit.netpol_selects_nothing"
 
+// kindNetpolAllowAll reports a NetworkPolicy whose ingress or egress
+// rules admit traffic from or to all peers (#784).
+const kindNetpolAllowAll = "audit.network_policy_allow_all"
+
 // The reasons split that condition two ways — by direction, and by
 // whether the namespace is trying at all. The distinction is the whole
 // point of the check: a namespace with no policies has made a choice,
@@ -51,6 +55,8 @@ const (
 	reasonEgressPoliciesSelectNone  = "EgressPoliciesSelectNothing"
 	reasonUnselectedIngress         = "UnselectedIngress"
 	reasonUnselectedEgress          = "UnselectedEgress"
+	reasonIngressAllowAll           = "IngressAllowAll"
+	reasonEgressAllowAll            = "EgressAllowAll"
 )
 
 // NetpolCommand builds `lookout audit netpol`: which workloads no
@@ -115,6 +121,7 @@ func NetpolCommand(deps Deps) checks.Command {
 		Kinds: []checks.KindField{
 			checks.Kind(kindNetpolMissing, "nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindNetpolSelectsNothing, "this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing", emit.SeverityWarning),
+			checks.Kind(kindNetpolAllowAll, "this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress", emit.SeverityWarning, emit.SeverityInfo),
 		},
 		Output: []checks.OutputField{
 			{Name: "policies", Doc: "NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one"},
@@ -123,7 +130,8 @@ func NetpolCommand(deps Deps) checks.Command {
 			{Name: "host_network_workloads", Doc: "pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0"},
 			{Name: "covered_workloads", Doc: "pod templates in the namespace that ARE selected for this direction — the neighbours the subject fell out of step with"},
 			{Name: "pod_labels", Doc: "the template's own labels, which are what the policies' selectors failed to match, sorted and capped at 8"},
-			{Name: "pod_selector", Doc: "the dead policy's podSelector, in label-selector syntax"},
+			{Name: "pod_selector", Doc: "the dead or allow-all policy's podSelector, in label-selector syntax"},
+			{Name: "direction", Doc: "the direction the permissive rule opens (ingress or egress)"},
 			{Name: "policy_types", Doc: "the directions the dead policy names, after defaulting an unset policyTypes"},
 			{Name: "namespaces", Doc: "summary note: namespaces examined — the denominator for the namespace-subject claims, which `scanned` (pod templates) does not cover"},
 			skippedSystemNamespacesField(),
@@ -212,6 +220,7 @@ func runNetpol(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 	for _, ns := range namespaces {
 		findings = append(findings, judgeNetpolNamespace(ns.Name, templates, policies)...)
 	}
+	findings = append(findings, judgeAllowAllPolicies(policies)...)
 
 	sortFindings(findings)
 	for _, f := range findings {
@@ -604,4 +613,102 @@ func labelPairs(set map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// judgeAllowAllPolicies reports NetworkPolicies whose ingress or egress
+// rules allow traffic from or to all peers.
+func judgeAllowAllPolicies(policies []networkingv1.NetworkPolicy) []emit.Finding {
+	var out []emit.Finding
+	for _, np := range policies {
+		podSel := formatNetpolPodSelector(&np.Spec.PodSelector)
+		if coversDirection(np, networkingv1.PolicyTypeIngress) && hasAllowAllIngressRule(np.Spec.Ingress) {
+			f := emit.Finding{
+				Kind:     kindNetpolAllowAll,
+				Severity: emit.SeverityWarning,
+				Reason:   reasonIngressAllowAll,
+				Message:  "NetworkPolicy has an ingress rule that allows traffic from all peers (empty from list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector)",
+				Details: []emit.Field{
+					{Key: "direction", Value: "ingress"},
+					{Key: "pod_selector", Value: podSel},
+				},
+				Namespace:    np.Namespace,
+				KindOfObject: "NetworkPolicy",
+				Name:         np.Name,
+			}
+			f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+			out = append(out, f)
+		}
+		if coversDirection(np, networkingv1.PolicyTypeEgress) && hasAllowAllEgressRule(np.Spec.Egress) {
+			f := emit.Finding{
+				Kind:     kindNetpolAllowAll,
+				Severity: emit.SeverityInfo,
+				Reason:   reasonEgressAllowAll,
+				Message:  "NetworkPolicy has an egress rule that allows traffic to all destinations (empty to list or 0.0.0.0/0 / ::/0 without except)",
+				Details: []emit.Field{
+					{Key: "direction", Value: "egress"},
+					{Key: "pod_selector", Value: podSel},
+				},
+				Namespace:    np.Namespace,
+				KindOfObject: "NetworkPolicy",
+				Name:         np.Name,
+			}
+			f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func formatNetpolPodSelector(sel *metav1.LabelSelector) string {
+	s := metav1.FormatLabelSelector(sel)
+	if s == "" || s == "<none>" {
+		return "<all>"
+	}
+	return s
+}
+
+func hasAllowAllIngressRule(rules []networkingv1.NetworkPolicyIngressRule) bool {
+	for _, r := range rules {
+		if len(r.From) == 0 {
+			return true
+		}
+		for _, peer := range r.From {
+			if peerIsAllowAllCIDR(peer) || peerIsAllNamespaces(peer) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasAllowAllEgressRule(rules []networkingv1.NetworkPolicyEgressRule) bool {
+	for _, r := range rules {
+		if len(r.To) == 0 {
+			return true
+		}
+		for _, peer := range r.To {
+			if peerIsAllowAllCIDR(peer) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func peerIsAllowAllCIDR(peer networkingv1.NetworkPolicyPeer) bool {
+	if peer.IPBlock == nil || len(peer.IPBlock.Except) > 0 {
+		return false
+	}
+	return peer.IPBlock.CIDR == "0.0.0.0/0" || peer.IPBlock.CIDR == "::/0"
+}
+
+func peerIsAllNamespaces(peer networkingv1.NetworkPolicyPeer) bool {
+	if peer.NamespaceSelector == nil || !isEmptyLabelSelector(peer.NamespaceSelector) {
+		return false
+	}
+	return peer.PodSelector == nil || isEmptyLabelSelector(peer.PodSelector)
+}
+
+func isEmptyLabelSelector(sel *metav1.LabelSelector) bool {
+	return sel != nil && len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0
 }

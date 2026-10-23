@@ -57,7 +57,11 @@ func undefaulted(p *networkingv1.NetworkPolicy) *networkingv1.NetworkPolicy {
 // withEgressRule adds an egress rule, which is what makes an
 // undefaulted policy cover egress as well as ingress.
 func withEgressRule(p *networkingv1.NetworkPolicy) *networkingv1.NetworkPolicy {
-	p.Spec.Egress = append(p.Spec.Egress, networkingv1.NetworkPolicyEgressRule{})
+	p.Spec.Egress = append(p.Spec.Egress, networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			PodSelector: matching(map[string]string{"app": "dns"}),
+		}},
+	})
 	return p
 }
 
@@ -552,5 +556,76 @@ func TestNetpolDeadPolicyInEmptyNamespaceIsSilent(t *testing.T) {
 	}
 	if recs := findingLines(t, checktest.Run(t, audit.NetpolCommand(testDeps(objs...)), "--namespace=prod").Stdout); len(recs) != 0 {
 		t.Errorf("want silence, got %v", recs)
+	}
+}
+
+func TestNetpolAllowAllPeerRules(t *testing.T) {
+	emptyFrom := netpol("prod", "allow-all-ingress-empty", nil, networkingv1.PolicyTypeIngress)
+	emptyFrom.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{}}
+
+	cidrIngress := netpol("prod", "allow-all-ingress-cidr", matching(map[string]string{"app": "web"}), networkingv1.PolicyTypeIngress)
+	cidrIngress.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
+		From: []networkingv1.NetworkPolicyPeer{{
+			IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"},
+		}},
+	}}
+
+	allNSIngress := netpol("prod", "allow-all-ingress-ns", matching(map[string]string{"app": "api"}), networkingv1.PolicyTypeIngress)
+	allNSIngress.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
+		From: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{},
+		}},
+	}}
+
+	emptyTo := netpol("prod", "allow-all-egress", matching(map[string]string{"app": "web"}), networkingv1.PolicyTypeEgress)
+	emptyTo.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{}}
+
+	cidrWithExcept := netpol("prod", "cidr-with-except", matching(map[string]string{"app": "web"}), networkingv1.PolicyTypeIngress)
+	cidrWithExcept.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
+		From: []networkingv1.NetworkPolicyPeer{{
+			IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{"10.0.0.0/8"}},
+		}},
+	}}
+
+	objs := []runtime.Object{
+		nsObj("prod", nil),
+		emptyFrom,
+		cidrIngress,
+		allNSIngress,
+		emptyTo,
+		cidrWithExcept,
+		deploy("prod", "web", 1, app("web")),
+		deploy("prod", "api", 1, app("api")),
+	}
+	cmd := audit.NetpolCommand(testDeps(objs...))
+	checktest.VerifyContract(t, cmd, "--namespace=prod")
+
+	res := checktest.Run(t, cmd, "--namespace=prod")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	got := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.network_policy_allow_all" {
+			got[r["name"]] = r
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("allow_all findings = %v, want 4", got)
+	}
+	if r := got["allow-all-ingress-empty"]; r["severity"] != emit.SeverityWarning || r["reason"] != "IngressAllowAll" || r["direction"] != "ingress" || r["pod_selector"] != "<all>" {
+		t.Errorf("allow-all-ingress-empty = %v", r)
+	}
+	if r := got["allow-all-ingress-cidr"]; r["severity"] != emit.SeverityWarning || r["reason"] != "IngressAllowAll" || r["direction"] != "ingress" || r["pod_selector"] != "app=web" {
+		t.Errorf("allow-all-ingress-cidr = %v", r)
+	}
+	if r := got["allow-all-ingress-ns"]; r["severity"] != emit.SeverityWarning || r["reason"] != "IngressAllowAll" || r["direction"] != "ingress" || r["pod_selector"] != "app=api" {
+		t.Errorf("allow-all-ingress-ns = %v", r)
+	}
+	if r := got["allow-all-egress"]; r["severity"] != emit.SeverityInfo || r["reason"] != "EgressAllowAll" || r["direction"] != "egress" || r["pod_selector"] != "app=web" {
+		t.Errorf("allow-all-egress = %v", r)
+	}
+	if _, bad := got["cidr-with-except"]; bad {
+		t.Errorf("cidr-with-except should not be reported as allow-all")
 	}
 }

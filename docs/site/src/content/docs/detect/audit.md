@@ -56,8 +56,11 @@ Run every posture detector in one pass over a shared cluster snapshot: workload 
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `audit.exec_attach_grant` | warning, info | the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward |
+| `audit.impersonate_escalate_grant` | warning | the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
+| `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
@@ -117,6 +120,7 @@ NetworkPolicy coverage posture: namespaces where nothing restricts ingress or eg
 | --- | --- | --- |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
+| `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
 
 ## [`lookout audit policy`](/reference/audit-policy/)
 
@@ -134,6 +138,8 @@ RBAC over-permission posture: bindings that grant cluster-admin, or a role whose
 | --- | --- | --- |
 | `audit.cluster_admin_binding` | warning, info | the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace |
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
+| `audit.exec_attach_grant` | warning, info | the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward |
+| `audit.impersonate_escalate_grant` | warning | the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## [`lookout audit upgrades`](/reference/audit-upgrades/)

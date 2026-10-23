@@ -33,8 +33,10 @@ import (
 // power, the other about which object grants it, so their subjects
 // differ — a binding and a role.
 const (
-	kindClusterAdminBinding = "audit.cluster_admin_binding"
-	kindWildcardRBAC        = "audit.wildcard_rbac"
+	kindClusterAdminBinding      = "audit.cluster_admin_binding"
+	kindWildcardRBAC             = "audit.wildcard_rbac"
+	kindExecAttachGrant          = "audit.exec_attach_grant"
+	kindImpersonateEscalateGrant = "audit.impersonate_escalate_grant"
 )
 
 const (
@@ -43,6 +45,10 @@ const (
 	reasonFullWildcard            = "FullWildcard"
 	reasonWildcardVerbs           = "WildcardVerbs"
 	reasonWildcardResources       = "WildcardResources"
+	reasonExecOrAttachGrant       = "ExecOrAttachGrant"
+	reasonPortForwardGrant        = "PortForwardGrant"
+	reasonImpersonateGrant        = "ImpersonateGrant"
+	reasonBindOrEscalateGrant     = "BindOrEscalateGrant"
 )
 
 // The two labels that mark an RBAC object as the platform's rather than
@@ -135,6 +141,8 @@ func RBACCommand(deps Deps) checks.Command {
 		Kinds: []checks.KindField{
 			checks.Kind(kindClusterAdminBinding, "the binding grants a full-wildcard role (cluster-admin, or one with the same rule) to its subjects; warning for a ClusterRoleBinding, info for a RoleBinding, which confines it to one namespace", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindWildcardRBAC, "the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindExecAttachGrant, "the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindImpersonateEscalateGrant, "the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects", emit.SeverityWarning),
 			checks.UnreadKind(),
 		},
 		Output: append([]checks.OutputField{
@@ -349,11 +357,16 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 	// Rules by role, and how many bindings point at each — a role's
 	// finding needs the second, a binding's needs the first.
 	roleRules := map[string][]rbacv1.PolicyRule{}
+	rolePlatform := map[string]bool{}
 	for _, r := range objs.roles {
-		roleRules[roleKey("Role", r.Namespace, r.Name)] = r.Rules
+		rk := roleKey("Role", r.Namespace, r.Name)
+		roleRules[rk] = r.Rules
+		rolePlatform[rk] = platformManaged(r.Labels)
 	}
 	for _, r := range objs.clusterRoles {
-		roleRules[roleKey("ClusterRole", "", r.Name)] = r.Rules
+		rk := roleKey("ClusterRole", "", r.Name)
+		roleRules[rk] = r.Rules
+		rolePlatform[rk] = platformManaged(r.Labels)
 	}
 	bound := map[string]int{}
 	roleSubjects := map[string][]rbacv1.Subject{}
@@ -383,8 +396,13 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 			tally.platform++
 			continue
 		}
+		normSubj := normalizeSubjects(b.Subjects, b.Namespace)
 		if f, ok := judgeBinding(b.ObjectMeta, "RoleBinding", b.RoleRef, b.Subjects, roleRules); ok {
-			out = append(out, attachRBACWorkloads(f, normalizeSubjects(b.Subjects, b.Namespace), saWorkloads, objs.perWorkload)...)
+			out = append(out, attachRBACWorkloads(f, normSubj, saWorkloads, objs.perWorkload)...)
+			continue
+		}
+		for _, f := range judgeSubGrants(b.ObjectMeta, "RoleBinding", b.RoleRef, b.Subjects, roleRules, rolePlatform) {
+			out = append(out, attachRBACWorkloads(f, normSubj, saWorkloads, objs.perWorkload)...)
 		}
 	}
 	for _, b := range objs.clusterRoleBindings {
@@ -393,8 +411,13 @@ func judgeRBAC(objs rbacObjects) ([]emit.Finding, rbacTally) {
 			tally.platform++
 			continue
 		}
+		normSubj := normalizeSubjects(b.Subjects, "")
 		if f, ok := judgeBinding(b.ObjectMeta, "ClusterRoleBinding", b.RoleRef, b.Subjects, roleRules); ok {
-			out = append(out, attachRBACWorkloads(f, normalizeSubjects(b.Subjects, ""), saWorkloads, objs.perWorkload)...)
+			out = append(out, attachRBACWorkloads(f, normSubj, saWorkloads, objs.perWorkload)...)
+			continue
+		}
+		for _, f := range judgeSubGrants(b.ObjectMeta, "ClusterRoleBinding", b.RoleRef, b.Subjects, roleRules, rolePlatform) {
+			out = append(out, attachRBACWorkloads(f, normSubj, saWorkloads, objs.perWorkload)...)
 		}
 	}
 	for _, r := range objs.roles {
@@ -561,6 +584,147 @@ func judgeBinding(meta metav1.ObjectMeta, kind string, ref rbacv1.RoleRef, subje
 	}
 	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
 	return f, true
+}
+
+func isSystemRBACName(name string) bool {
+	return strings.HasPrefix(name, "system:")
+}
+
+// judgeSubGrants reports non-system bindings whose role grants
+// pods/exec, pods/attach, pods/portforward, or impersonate/bind/escalate
+// without already being a full-wildcard cluster-admin binding.
+func judgeSubGrants(meta metav1.ObjectMeta, kind string, ref rbacv1.RoleRef, subjects []rbacv1.Subject, roleRules map[string][]rbacv1.PolicyRule, rolePlatform map[string]bool) []emit.Finding {
+	rk := bindingRoleKey(ref, meta.Namespace)
+	rules, ok := roleRules[rk]
+	if !ok || len(subjects) == 0 || rolePlatform[rk] || isSystemRBACName(meta.Name) || isSystemRBACName(ref.Name) || anyRule(rules, isFullWildcard) {
+		return nil
+	}
+	var out []emit.Finding
+	if f, ok := judgeExecAttachBinding(meta, kind, ref, subjects, rules); ok {
+		out = append(out, f)
+	}
+	if f, ok := judgeImpersonateEscalateBinding(meta, kind, ref, subjects, rules); ok {
+		out = append(out, f)
+	}
+	return out
+}
+
+func judgeExecAttachBinding(meta metav1.ObjectMeta, kind string, ref rbacv1.RoleRef, subjects []rbacv1.Subject, rules []rbacv1.PolicyRule) (emit.Finding, bool) {
+	var severity, reason, what string
+	switch {
+	case anyRule(rules, isExecOrAttachRule):
+		severity, reason = emit.SeverityWarning, reasonExecOrAttachGrant
+		what = "pods/exec or pods/attach — interactive shell and stream attachment to running containers"
+	case anyRule(rules, isPortForwardRule):
+		severity, reason = emit.SeverityInfo, reasonPortForwardGrant
+		what = "pods/portforward — direct network tunneling into pod ports bypassing Services and NetworkPolicies"
+	default:
+		return emit.Finding{}, false
+	}
+	role := ref.Kind + "/" + ref.Name
+	f := emit.Finding{
+		Kind:     kindExecAttachGrant,
+		Severity: severity,
+		Reason:   reason,
+		Message:  fmt.Sprintf("binds %s to %d %s, granting %s", role, len(subjects), plural(len(subjects), "subject"), what),
+		Details: []emit.Field{
+			{Key: "role", Value: role},
+			{Key: "subjects", Value: itoa(len(subjects))},
+			{Key: "subject_names", Value: cappedList(subjectNames(subjects))},
+		},
+		Namespace:    meta.Namespace,
+		KindOfObject: kind,
+		Name:         meta.Name,
+	}
+	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+	return f, true
+}
+
+func judgeImpersonateEscalateBinding(meta metav1.ObjectMeta, kind string, ref rbacv1.RoleRef, subjects []rbacv1.Subject, rules []rbacv1.PolicyRule) (emit.Finding, bool) {
+	var reason, what string
+	switch {
+	case anyRule(rules, isImpersonateRule):
+		reason = reasonImpersonateGrant
+		what = "impersonate on users, groups, serviceaccounts, or userextras — allowing subjects to act as another identity"
+	case anyRule(rules, isBindOrEscalateRule):
+		reason = reasonBindOrEscalateGrant
+		what = "bind or escalate on RBAC roles — allowing subjects to grant permissions they do not already hold"
+	default:
+		return emit.Finding{}, false
+	}
+	role := ref.Kind + "/" + ref.Name
+	f := emit.Finding{
+		Kind:     kindImpersonateEscalateGrant,
+		Severity: emit.SeverityWarning,
+		Reason:   reason,
+		Message:  fmt.Sprintf("binds %s to %d %s, granting %s", role, len(subjects), plural(len(subjects), "subject"), what),
+		Details: []emit.Field{
+			{Key: "role", Value: role},
+			{Key: "subjects", Value: itoa(len(subjects))},
+			{Key: "subject_names", Value: cappedList(subjectNames(subjects))},
+		},
+		Namespace:    meta.Namespace,
+		KindOfObject: kind,
+		Name:         meta.Name,
+	}
+	f.Fingerprint = engine.PostureFingerprint(f.Kind, f.Reason, f.KindOfObject)
+	return f, true
+}
+
+func isExecOrAttachRule(r rbacv1.PolicyRule) bool {
+	if !hasGroup(r.APIGroups, "") && !hasStar(r.APIGroups) {
+		return false
+	}
+	if !hasAnyToken(r.Verbs, "create", "get", rbacv1.VerbAll) {
+		return false
+	}
+	return hasAnyToken(r.Resources, "pods/exec", "pods/attach", "pods/*")
+}
+
+func isPortForwardRule(r rbacv1.PolicyRule) bool {
+	if !hasGroup(r.APIGroups, "") && !hasStar(r.APIGroups) {
+		return false
+	}
+	if !hasAnyToken(r.Verbs, "create", "get", rbacv1.VerbAll) {
+		return false
+	}
+	return hasAnyToken(r.Resources, "pods/portforward")
+}
+
+func isImpersonateRule(r rbacv1.PolicyRule) bool {
+	if !hasAnyToken(r.Verbs, "impersonate") {
+		return false
+	}
+	for _, res := range r.Resources {
+		switch {
+		case res == "users" || res == "groups" || res == "serviceaccounts" || res == "userextras" || res == rbacv1.ResourceAll:
+			return true
+		case strings.HasPrefix(res, "userextras/"):
+			return true
+		}
+	}
+	return false
+}
+
+func isBindOrEscalateRule(r rbacv1.PolicyRule) bool {
+	if !hasGroup(r.APIGroups, rbacv1.GroupName) && !hasStar(r.APIGroups) {
+		return false
+	}
+	if !hasAnyToken(r.Verbs, "bind", "escalate") {
+		return false
+	}
+	return hasAnyToken(r.Resources, "roles", "clusterroles", rbacv1.ResourceAll)
+}
+
+func hasAnyToken(items []string, wants ...string) bool {
+	for _, item := range items {
+		for _, w := range wants {
+			if item == w {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pronounFor keeps "1 subject ... it can" and "3 subjects ... they can"

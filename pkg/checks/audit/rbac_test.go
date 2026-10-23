@@ -317,3 +317,85 @@ func TestRBACScopeErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestRBACExecAttachAndPortForwardGrants(t *testing.T) {
+	d := deploy("prod", "debugger", 1, app("debugger"))
+	d.Spec.Template.Spec.ServiceAccountName = "debug-sa"
+	objs := []runtime.Object{
+		role("prod", "exec-role", rule([]string{""}, []string{"pods/exec"}, []string{"create"})),
+		roleBinding("prod", "exec-binding", "Role", "exec-role", sa("prod", "debug-sa")),
+		role("prod", "pf-role", rule([]string{""}, []string{"pods/portforward"}, []string{"get"})),
+		roleBinding("prod", "pf-binding", "Role", "pf-role", user("dev@example.com")),
+		// system:* role/binding and full-wildcard role should not emit redundant exec_attach_grant.
+		clusterRole("system:node-exec", nil, rule([]string{""}, []string{"pods/exec"}, []string{"create"})),
+		clusterBinding("system:node-exec", nil, "system:node-exec", group("system:nodes")),
+		clusterRole("root-all", nil, fullWildcard()),
+		clusterBinding("root-all-binding", nil, "root-all", user("root@example.com")),
+		d,
+	}
+	cmd := audit.RBACCommand(testDeps(objs...))
+	checktest.VerifyContract(t, cmd, "-A")
+
+	res := checktest.Run(t, cmd, "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	execRec := findRecord(t, res.Stdout, "audit.exec_attach_grant", "RoleBinding", "prod", "exec-binding")
+	if execRec["severity"] != emit.SeverityWarning || execRec["reason"] != "ExecOrAttachGrant" {
+		t.Errorf("exec-binding = %v, want warning ExecOrAttachGrant", execRec)
+	}
+	if execRec["role"] != "Role/exec-role" || execRec["subjects"] != "1" || execRec["workloads"] != "1" || execRec["workload_names"] != "Deployment/debugger" {
+		t.Errorf("exec-binding details = %v", execRec)
+	}
+
+	pfRec := findRecord(t, res.Stdout, "audit.exec_attach_grant", "RoleBinding", "prod", "pf-binding")
+	if pfRec["severity"] != emit.SeverityInfo || pfRec["reason"] != "PortForwardGrant" {
+		t.Errorf("pf-binding = %v, want info PortForwardGrant", pfRec)
+	}
+
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.exec_attach_grant" && (r["name"] == "system:node-exec" || r["name"] == "root-all-binding") {
+			t.Errorf("unexpected exec_attach_grant on %s: %v", r["name"], r)
+		}
+	}
+
+	// Verify --per-workload re-subjects to the running Deployment.
+	pwRes := checktest.Run(t, cmd, "-A", "--per-workload")
+	findRecord(t, pwRes.Stdout, "audit.exec_attach_grant", "Deployment", "prod", "debugger")
+}
+
+func TestRBACImpersonateAndEscalateGrants(t *testing.T) {
+	objs := []runtime.Object{
+		clusterRole("impersonator", nil, rule([]string{""}, []string{"users", "serviceaccounts"}, []string{"impersonate"})),
+		clusterBinding("impersonator-binding", nil, "impersonator", sa("prod", "proxy-sa")),
+		role("prod", "escalator", rule([]string{"rbac.authorization.k8s.io"}, []string{"roles"}, []string{"bind", "escalate"})),
+		roleBinding("prod", "escalator-binding", "Role", "escalator", user("operator@example.com")),
+		// system:* role and full-wildcard role should not emit impersonate_escalate_grant.
+		clusterRole("system:impersonator", nil, rule([]string{""}, []string{"users"}, []string{"impersonate"})),
+		clusterBinding("system:impersonator", nil, "system:impersonator", user("sys")),
+		clusterRole("root-all", nil, fullWildcard()),
+		clusterBinding("root-all-binding", nil, "root-all", user("root@example.com")),
+	}
+	cmd := audit.RBACCommand(testDeps(objs...))
+	checktest.VerifyContract(t, cmd, "-A")
+
+	res := checktest.Run(t, cmd, "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	impRec := findRecord(t, res.Stdout, "audit.impersonate_escalate_grant", "ClusterRoleBinding", "", "impersonator-binding")
+	if impRec["severity"] != emit.SeverityWarning || impRec["reason"] != "ImpersonateGrant" || impRec["role"] != "ClusterRole/impersonator" {
+		t.Errorf("impersonator-binding = %v, want warning ImpersonateGrant", impRec)
+	}
+
+	escRec := findRecord(t, res.Stdout, "audit.impersonate_escalate_grant", "RoleBinding", "prod", "escalator-binding")
+	if escRec["severity"] != emit.SeverityWarning || escRec["reason"] != "BindOrEscalateGrant" || escRec["role"] != "Role/escalator" {
+		t.Errorf("escalator-binding = %v, want warning BindOrEscalateGrant", escRec)
+	}
+
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.impersonate_escalate_grant" && (r["name"] == "system:impersonator" || r["name"] == "root-all-binding") {
+			t.Errorf("unexpected impersonate_escalate_grant on %s: %v", r["name"], r)
+		}
+	}
+}

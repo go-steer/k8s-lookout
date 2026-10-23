@@ -43,6 +43,7 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `volume.attach_error` | critical, warning | the attach or detach is failing; critical once it has been failing long enough to be stuck rather than slow |
 | `volume.orphaned_attachment` | info | a VolumeAttachment survives its PV or its node |
 | `volume.unconsumed_pvc` | info | a Bound claim that no pod (in any phase) mounts and no workload template or live StatefulSet claim template references — its volume is provisioned and billed for nothing; consumers outside the built-in workload kinds (a VM operator, a CI workspace) are invisible here, so read it as a lead, not a verdict |
+| `volume.expansion_unsupported` | warning | a Bound claim requests more storage than its current capacity, but its StorageClass does not allow volume expansion |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## Output fields
@@ -64,8 +65,9 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pv_zones` | zones the PV's node affinity allows, sorted |
 | `node_zone` | zone label of the node the pod is scheduled on |
 | `orphan` | which referenced side is gone: "pv missing", "node missing", or both |
-| `capacity` | volume.unconsumed_pvc: the claim's bound capacity (status.capacity.storage); omitted when unreported |
-| `storage_class` | volume.unconsumed_pvc: the claim's StorageClass; omitted when it names none |
+| `capacity` | volume.unconsumed_pvc, volume.expansion_unsupported: the claim's bound capacity (status.capacity.storage); omitted when unreported |
+| `requested` | volume.expansion_unsupported: the larger storage capacity requested in spec.resources.requests.storage |
+| `storage_class` | volume.unconsumed_pvc, volume.expansion_unsupported: the claim's StorageClass; omitted when it names none |
 | `reclaim_policy` | volume.unconsumed_pvc: the bound PV's reclaim policy — Delete means deleting the claim frees the disk, Retain means the PV must be deleted too; omitted when the PV is not visible |
 | `claim_age` | volume.unconsumed_pvc: how long ago the claim was created, truncated to minutes |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
