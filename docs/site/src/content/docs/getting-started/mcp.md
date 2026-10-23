@@ -770,6 +770,7 @@ The current surface:
 | `k8s_storage_binding` | [`state storage`](/reference/state-storage/) |
 | `k8s_gateway_routes` | [`state gateway`](/reference/state-gateway/) |
 | `k8s_keda_scalers` | [`state keda`](/reference/state-keda/) |
+| `k8s_state_kcc` | [`state kcc`](/reference/state-kcc/) |
 | `k8s_gitops_drift` | [`stab drift`](/reference/stab-drift/) |
 | `k8s_drain_blockers` | [`stab drain`](/reference/stab-drain/) |
 | `k8s_scaledown_blockers` | [`stab scaledown`](/reference/stab-scaledown/) |
