@@ -19,6 +19,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -45,6 +46,19 @@ func serving(name, image string, port int32, live, ready *corev1.Probe, preStop 
 		Ports:          []corev1.ContainerPort{{Name: "http", ContainerPort: port}},
 		LivenessProbe:  live,
 		ReadinessProbe: ready,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
+	if live != nil {
+		c.StartupProbe = httpProbe("/healthz", 0, 5, 12)
 	}
 	if preStop {
 		c.Lifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: 5}}}
@@ -119,7 +133,20 @@ func rolloutCluster() []runtime.Object {
 		// logger: Service-backed, but the hookless container owns no served port -> silent.
 		deploy("prod", "logger", 3, spread(template(lbl("logger"),
 			serving("logger", "ghcr.io/acme/logger:v9", 8080, nil, readyOnly, true),
-			corev1.Container{Name: "fluent-bit", Image: "docker.io/fluent/fluent-bit:3.1.0"}))),
+			corev1.Container{
+				Name:  "fluent-bit",
+				Image: "docker.io/fluent/fluent-bit:3.1.0",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("50m"),
+						corev1.ResourceMemory: resource.MustParse("64Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("200m"),
+						corev1.ResourceMemory: resource.MustParse("128Mi"),
+					},
+				},
+			}))),
 		svc("prod", "logger", lbl("logger"), port("http", 80, "http")),
 
 		// node-agent: a Service-backed DaemonSet with no preStop -> rollout_drops_traffic (no replica test).
@@ -192,4 +219,71 @@ func TestRolloutHealthyIsSilent(t *testing.T) {
 	for _, kind := range []string{"audit.liveness_preempts_readiness", "audit.rollout_drops_traffic", "audit.recreate_strategy"} {
 		checktest.AssertNoFinding(t, out, checktest.FindingMatch{Kind: kind})
 	}
+}
+
+func TestRolloutPreStopExceedsGracePeriod(t *testing.T) {
+	ready := httpProbe("/ready", 0, 5, 3)
+	live := httpProbe("/healthz", 10, 10, 3)
+
+	cExec := serving("api", "ghcr.io/acme/api:v9", 8080, live, ready, false)
+	cExec.Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "sleep 30"}},
+		},
+	}
+
+	cExceedsCustom := serving("worker", "ghcr.io/acme/worker:v9", 8080, live, ready, false)
+	cExceedsCustom.Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{Command: []string{"sleep", "45"}},
+		},
+	}
+	customTpl := spread(template(lbl("worker"), cExceedsCustom))
+	customTpl.Spec.TerminationGracePeriodSeconds = ptr(int64(40))
+
+	cSafe := serving("safe", "ghcr.io/acme/safe:v9", 8080, live, ready, false)
+	cSafe.Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{Command: []string{"sleep", "10"}},
+		},
+	}
+
+	out := checktest.AssertEnvelopeContract(t, audit.WorkloadsCommand(testDeps(
+		deploy("prod", "api", 3, spread(template(lbl("api"), cExec))),
+		svc("prod", "api", lbl("api"), port("http", 80, "http")),
+		pdb("prod", "api", sel("api")),
+
+		deploy("prod", "worker", 3, customTpl),
+		svc("prod", "worker", lbl("worker"), port("http", 80, "http")),
+		pdb("prod", "worker", sel("worker")),
+
+		deploy("prod", "safe", 3, spread(template(lbl("safe"), cSafe))),
+		svc("prod", "safe", lbl("safe"), port("http", 80, "http")),
+		pdb("prod", "safe", sel("safe")),
+	)), "--namespace=prod")
+
+	fAPI := checktest.AssertHasFinding(t, out, checktest.FindingMatch{
+		Kind:     "audit.rollout_drops_traffic",
+		Name:     "api",
+		Severity: emit.SeverityWarning,
+		Reason:   "PreStopExceedsGracePeriod",
+	})
+	if fAPI.Fields["container"] != "api" || fAPI.Fields["prestop_sleep_seconds"] != "30" || fAPI.Fields["termination_grace_period_seconds"] != "30" {
+		t.Errorf("api fields = %v", fAPI.Fields)
+	}
+
+	fWorker := checktest.AssertHasFinding(t, out, checktest.FindingMatch{
+		Kind:     "audit.rollout_drops_traffic",
+		Name:     "worker",
+		Severity: emit.SeverityWarning,
+		Reason:   "PreStopExceedsGracePeriod",
+	})
+	if fWorker.Fields["container"] != "worker" || fWorker.Fields["prestop_sleep_seconds"] != "45" || fWorker.Fields["termination_grace_period_seconds"] != "40" {
+		t.Errorf("worker fields = %v", fWorker.Fields)
+	}
+
+	checktest.AssertNoFinding(t, out, checktest.FindingMatch{
+		Kind: "audit.rollout_drops_traffic",
+		Name: "safe",
+	})
 }

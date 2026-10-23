@@ -32,16 +32,22 @@ Run every posture detector in one pass over a shared cluster snapshot: workload 
 | `scan.check_skipped` | info | a stage declined this invocation because a zero-argument scan cannot supply something it needs — the coverage claim is smaller than it looks |
 | `scan.check_failed` | warning | a stage errored; the scan continued without it, so this run saw less than a whole cluster — unless EVERY stage failed and none read anything, which is a runtime error (exit 1) rather than a scan |
 | `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.pdb_posture` | warning | a PodDisruptionBudget overlaps another PDB on the same workload or allows zero disruptions by spec, permanently blocking voluntary node drains |
 | `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
 | `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
 | `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_startup_probe` | warning, info | a container has a livenessProbe and no startupProbe, with either a liveness deadline under 60s (info) or a readinessProbe initialDelaySeconds >= 30s (warning) that shows slow startup is expected |
+| `audit.no_resource_requests` | warning | a container has no CPU or memory request (and no limit or namespace LimitRange to default it from), so the scheduler places it blind and node eviction ranks it first |
+| `audit.no_resource_limits` | warning, info | a container has no memory or CPU limit (and no namespace LimitRange default): an unbounded memory leak OOMs the node (warning), while an unbounded CPU spike is throttled only by contention (info) |
 | `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
-| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `audit.hpa_cannot_scale` | warning, info | the autoscaler structurally cannot scale or drops HA at idle: min equals max, the target is missing, a container has no request for its utilization target to divide by, or minReplicas is 1 |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.cronjob_overlap_risk` | warning, info | a CronJob permits concurrent runs without an activeDeadlineSeconds bounding them to the schedule interval, or sets startingDeadlineSeconds below the controller's 10s check loop |
+| `audit.cronjob_failing` | warning | an active CronJob has scheduled runs, none are currently running, and status.lastSuccessfulTime is nil — it has never succeeded |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
 | `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
-| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook, or a container whose preStop sleep reaches or exceeds terminationGracePeriodSeconds: SIGTERM races endpoint removal or SIGKILL arrives with zero drain time |
 | `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 | `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
@@ -161,16 +167,22 @@ Workload reliability posture for workloads that are healthy right now: no PodDis
 | Kind | Severity | What it means |
 | --- | --- | --- |
 | `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
+| `audit.pdb_posture` | warning | a PodDisruptionBudget overlaps another PDB on the same workload or allows zero disruptions by spec, permanently blocking voluntary node drains |
 | `audit.single_replica` | warning | the workload runs a single replica, so any disruption is an outage |
 | `audit.no_readiness_probe` | warning | a container has no readiness probe, so traffic reaches it before it can serve |
 | `audit.no_liveness_probe` | info | a container has no liveness probe, so a wedged process is never restarted |
+| `audit.no_startup_probe` | warning, info | a container has a livenessProbe and no startupProbe, with either a liveness deadline under 60s (info) or a readinessProbe initialDelaySeconds >= 30s (warning) that shows slow startup is expected |
+| `audit.no_resource_requests` | warning | a container has no CPU or memory request (and no limit or namespace LimitRange to default it from), so the scheduler places it blind and node eviction ranks it first |
+| `audit.no_resource_limits` | warning, info | a container has no memory or CPU limit (and no namespace LimitRange default): an unbounded memory leak OOMs the node (warning), while an unbounded CPU spike is throttled only by contention (info) |
 | `audit.no_spread` | info | the workload's replicas are not spread across nodes or zones |
 | `audit.rigid_scheduling` | warning, info | placement constraints pin the workload to too few nodes to survive losing one |
-| `audit.hpa_cannot_scale` | warning | the autoscaler structurally cannot scale: min equals max, the target is missing, or a container has no request for its utilization target to divide by |
+| `audit.hpa_cannot_scale` | warning, info | the autoscaler structurally cannot scale or drops HA at idle: min equals max, the target is missing, a container has no request for its utilization target to divide by, or minReplicas is 1 |
 | `audit.suspended_cronjob` | warning | a CronJob has been suspended past --cron-suspended and has skipped activations because of it: whatever it does is not happening, and nothing else reports that |
+| `audit.cronjob_overlap_risk` | warning, info | a CronJob permits concurrent runs without an activeDeadlineSeconds bounding them to the schedule interval, or sets startingDeadlineSeconds below the controller's 10s check loop |
+| `audit.cronjob_failing` | warning | an active CronJob has scheduled runs, none are currently running, and status.lastSuccessfulTime is nil — it has never succeeded |
 | `audit.suspended_job` | info | a standalone Job (no controller owner, not queued by Kueue) has been suspended past --job-suspended without finishing: the one-shot task it carries is not happening |
 | `audit.liveness_preempts_readiness` | warning, info | liveness and readiness probe the same handler and liveness gives up no later than readiness: the kubelet restarts the container before readiness can take it out of the Service, so the readiness probe is decoration; info when the two deadlines tie, warning when liveness is strictly earlier |
-| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook: SIGTERM races endpoint removal on every rollout, drain and scale-down, and in-flight requests get connection resets |
+| `audit.rollout_drops_traffic` | warning | a Service-backed, multi-replica workload (or a Service-backed DaemonSet) whose serving container has no preStop hook, or a container whose preStop sleep reaches or exceeds terminationGracePeriodSeconds: SIGTERM races endpoint removal or SIGKILL arrives with zero drain time |
 | `audit.recreate_strategy` | warning | a Service-backed, multi-replica Deployment whose strategy permits zero surviving pods — Recreate, or rollingUpdate.maxUnavailable at or above the replica count — so every rollout is an outage the Deployment never reports |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 

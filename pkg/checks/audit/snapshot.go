@@ -59,6 +59,7 @@ type Snapshot struct {
 	namespaces          snapshotEntry[corev1.Namespace]
 	nodes               snapshotEntry[corev1.Node]
 	serviceAccounts     snapshotEntry[corev1.ServiceAccount]
+	limitRanges         snapshotEntry[corev1.LimitRange]
 	pdbs                snapshotEntry[policyv1.PodDisruptionBudget]
 	hpas                snapshotEntry[autoscalingv2.HorizontalPodAutoscaler]
 	networkPolicies     snapshotEntry[networkingv1.NetworkPolicy]
@@ -298,6 +299,17 @@ func (s *Snapshot) ServiceAccounts(ctx context.Context) ([]corev1.ServiceAccount
 		}
 		return l.Items, l.Continue, nil
 	}, func(sa *corev1.ServiceAccount) string { return sa.Namespace }, func(sa *corev1.ServiceAccount) string { return sa.Name })
+}
+
+// LimitRanges lists the LimitRanges in scope, once, sorted by namespace/name.
+func (s *Snapshot) LimitRanges(ctx context.Context) ([]corev1.LimitRange, *checks.Refusal, error) {
+	return loadSlice(&s.limitRanges, "limitranges", func(o metav1.ListOptions) ([]corev1.LimitRange, string, error) {
+		l, err := s.client.CoreV1().LimitRanges(s.ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(lr *corev1.LimitRange) string { return lr.Namespace }, func(lr *corev1.LimitRange) string { return lr.Name })
 }
 
 // Services lists the Services in scope, once. An RBAC refusal is not an

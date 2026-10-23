@@ -16,6 +16,9 @@ package audit
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -38,9 +41,12 @@ const (
 
 const (
 	reasonNoPreStop             = "NoPreStopOnServingContainer"
+	reasonPreStopExceedsGrace   = "PreStopExceedsGracePeriod"
 	reasonRecreateServiceBacked = "RecreateServiceBacked"
 	reasonMaxUnavailableIsAll   = "MaxUnavailableIsAll"
 )
+
+var preStopSleepRe = regexp.MustCompile(`\bsleep\s+([0-9]+)s?\b`)
 
 // metricsOnlyPortNames mark a Service port as a scrape endpoint. A
 // workload whose only Services expose such ports is not "serving" for
@@ -66,6 +72,7 @@ func (ix *workloadIndex) rollout(w workload) []emit.Finding {
 	if ix.servicesRefused != nil {
 		return out
 	}
+	out = append(out, preStopExceedsGracePeriod(w.template.Spec)...)
 	serving := servingServices(ix.services, w.namespace, w.template.Labels)
 	if len(serving) == 0 {
 		return out
@@ -77,6 +84,58 @@ func (ix *workloadIndex) rollout(w workload) []emit.Finding {
 		out = append(out, f)
 	}
 	return out
+}
+
+func preStopExceedsGracePeriod(spec corev1.PodSpec) []emit.Finding {
+	grace := defaultTerminationGrace
+	if spec.TerminationGracePeriodSeconds != nil {
+		grace = *spec.TerminationGracePeriodSeconds
+	}
+	var out []emit.Finding
+	for _, c := range spec.Containers {
+		if selfHealthSidecars[c.Name] || c.Lifecycle == nil || c.Lifecycle.PreStop == nil {
+			continue
+		}
+		sleepSec, ok := parsePreStopSleepSeconds(c.Lifecycle.PreStop)
+		if !ok || sleepSec < grace {
+			continue
+		}
+		out = append(out, emit.Finding{
+			Kind:     kindRolloutDrops,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonPreStopExceedsGrace,
+			Message: fmt.Sprintf("container %s has a preStop sleep of %ds while terminationGracePeriodSeconds is %ds: the grace period runs from the start of preStop, so SIGKILL arrives before or right as preStop finishes, leaving zero drain time for the process to close connections",
+				c.Name, sleepSec, grace),
+			Details: []emit.Field{
+				{Key: "container", Value: c.Name},
+				{Key: "prestop_sleep_seconds", Value: itoa(int(sleepSec))},
+				{Key: "termination_grace_period_seconds", Value: itoa(int(grace))},
+			},
+		})
+	}
+	return out
+}
+
+func parsePreStopSleepSeconds(h *corev1.LifecycleHandler) (int64, bool) {
+	if h == nil {
+		return 0, false
+	}
+	if h.Sleep != nil && h.Sleep.Seconds > 0 {
+		return h.Sleep.Seconds, true
+	}
+	if h.Exec == nil || len(h.Exec.Command) == 0 {
+		return 0, false
+	}
+	joined := strings.Join(h.Exec.Command, " ")
+	m := preStopSleepRe.FindStringSubmatch(joined)
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // servingServices are the Services selecting the template whose ports
