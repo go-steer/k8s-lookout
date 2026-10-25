@@ -181,6 +181,7 @@ func newCommand(deps Deps, now func() time.Time) checks.Command {
 			{Name: "truncated", Doc: "summary-line note: how many objects --max left out; they are the LAST kinds of the listing, which is ordered workloads → routing → configuration for this reason"},
 			{Name: "skipped", Doc: "summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact; each forbidden kind also gets a read.unavailable record naming the grant that fixes it)"},
 			{Name: "namespace_absent", Doc: "summary-line note: \"true\" when the listing was empty because the namespace does not exist, which an empty listing alone cannot distinguish from an empty namespace"},
+			{Name: "addons_detected", Doc: "summary-line note: well-known cluster add-ons detected from listed objects under -A (cert-manager, config-connector, gatekeeper, gmp, istio, keda)"},
 		}, checks.UnreadFields()...),
 		Examples: []string{
 			"lookout triage list --namespace=storefront",
@@ -315,7 +316,59 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			}
 		}
 	}
+	if inv.Scope.AllNamespaces {
+		if addons := detectAddons(objects); len(addons) > 0 {
+			if err := inv.Out.Note("addons_detected", strings.Join(addons, ",")); err != nil {
+				return 0, err
+			}
+		}
+	}
 	return len(objects), nil
+}
+
+func detectAddons(objects []object) []string {
+	found := map[string]bool{}
+	for _, o := range objects {
+		ns := o.namespace
+		if o.kind == "Namespace" {
+			ns = o.name
+		}
+		switch ns {
+		case "istio-system":
+			found["istio"] = true
+		case "cert-manager":
+			found["cert-manager"] = true
+		case "gatekeeper-system":
+			found["gatekeeper"] = true
+		case "keda":
+			found["keda"] = true
+		case "gmp-system":
+			found["gmp"] = true
+		case "cnrm-system":
+			found["config-connector"] = true
+		}
+		if o.kind == "Deployment" || o.kind == "DaemonSet" {
+			switch {
+			case strings.HasPrefix(o.name, "istiod"):
+				found["istio"] = true
+			case o.name == "cert-manager":
+				found["cert-manager"] = true
+			case strings.HasPrefix(o.name, "gatekeeper-"):
+				found["gatekeeper"] = true
+			case strings.HasPrefix(o.name, "keda-operator"):
+				found["keda"] = true
+			}
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(found))
+	for name := range found {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // object is one listed resource, kept as the decoded map because the

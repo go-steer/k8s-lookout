@@ -90,6 +90,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `truncated` | summary-line note: how many objects --max left out; they are the LAST kinds of the listing, which is ordered workloads → routing → configuration for this reason |
 | `skipped` | summary-line note: kinds that could not be listed and why, as <Kind>:<reason> (forbidden = the caller may not list it, so its absence from the output is a blind spot, not a fact; each forbidden kind also gets a read.unavailable record naming the grant that fixes it) |
 | `namespace_absent` | summary-line note: "true" when the listing was empty because the namespace does not exist, which an empty listing alone cannot distinguish from an empty namespace |
+| `addons_detected` | summary-line note: well-known cluster add-ons detected from listed objects under -A (cert-manager, config-connector, gatekeeper, gmp, istio, keda) |
 | `resource` | read.unavailable: the resource that could not be read, as resource[.group] |
 
 ## Output contract

@@ -607,3 +607,46 @@ func field(line, key string) (string, bool) {
 	}
 	return "", false
 }
+
+func TestAddonsDetectedNoteOnAllNamespaces(t *testing.T) {
+	cmd := listCmd(t,
+		obj("apps/v1", "Deployment", "istio-system", "istiod", time.Hour, nil),
+		obj("apps/v1", "Deployment", "cert-manager", "cert-manager", time.Hour, nil),
+		obj("apps/v1", "Deployment", "gatekeeper-system", "gatekeeper-controller-manager", time.Hour, nil),
+		obj("apps/v1", "Deployment", "keda", "keda-operator", time.Hour, nil),
+		obj("apps/v1", "DaemonSet", "gmp-system", "collector", time.Hour, nil),
+		obj("apps/v1", "StatefulSet", "cnrm-system", "cnrm-controller-manager", time.Hour, nil),
+		obj("apps/v1", "Deployment", "prod", "api", time.Hour, nil),
+	)
+
+	res := checktest.Run(t, cmd, "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	sum := summaryLine(t, res.Stdout)
+	got, ok := field(sum, "addons_detected")
+	if !ok {
+		t.Fatalf("expected addons_detected in summary, got: %s", sum)
+	}
+	want := "cert-manager,config-connector,gatekeeper,gmp,istio,keda"
+	if got != want {
+		t.Errorf("addons_detected = %q, want %q", got, want)
+	}
+
+	nsRes := checktest.Run(t, cmd, "--namespace=istio-system")
+	if nsRes.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", nsRes.Code, nsRes.Stderr)
+	}
+	if _, has := field(summaryLine(t, nsRes.Stdout), "addons_detected"); has {
+		t.Errorf("single-namespace listing should not emit addons_detected: %s", summaryLine(t, nsRes.Stdout))
+	}
+
+	cleanCmd := listCmd(t, obj("apps/v1", "Deployment", "prod", "api", time.Hour, nil))
+	cleanRes := checktest.Run(t, cleanCmd, "-A")
+	if cleanRes.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", cleanRes.Code, cleanRes.Stderr)
+	}
+	if _, has := field(summaryLine(t, cleanRes.Stdout), "addons_detected"); has {
+		t.Errorf("cluster without addons should not emit addons_detected: %s", summaryLine(t, cleanRes.Stdout))
+	}
+}

@@ -29,20 +29,35 @@ import (
 // the Kubernetes API: the settings are the cluster's, not any object's
 // inside it, and nothing in the API server can see them.
 const (
-	kindWorkloadIdentityOff = "audit.workload_identity_off"
-	kindLegacyMetadata      = "audit.legacy_metadata"
-	kindPublicControlPlane  = "audit.public_control_plane"
-	kindNodePoolCannotGrow  = "audit.nodepool_cannot_grow"
+	kindWorkloadIdentityOff     = "audit.workload_identity_off"
+	kindLegacyMetadata          = "audit.legacy_metadata"
+	kindPublicControlPlane      = "audit.public_control_plane"
+	kindNodePoolCannotGrow      = "audit.nodepool_cannot_grow"
+	kindClusterSecurityPosture  = "audit.cluster_security_posture"
+	kindClusterNetworkPosture   = "audit.cluster_network_posture"
+	kindClusterObservabilityOff = "audit.cluster_observability_off"
+	kindClusterBackupOff        = "audit.cluster_backup_off"
 )
 
 const (
-	reasonWorkloadIdentityDisabled = "WorkloadIdentityDisabled"
-	reasonNodePoolMetadataServer   = "NodePoolMetadataServerOff"
-	reasonLegacyMetadata           = "LegacyMetadataEndpoints"
-	reasonPublicEndpointOpen       = "PublicEndpointUnrestricted"
-	reasonAuthorizedNetworksAll    = "AuthorizedNetworksAllowAll"
-	reasonAuthorizedNetworksGCP    = "AuthorizedNetworksAllowProviderCIDRs"
-	reasonAutoscalingMaxZero       = "AutoscalingMaxZero"
+	reasonWorkloadIdentityDisabled           = "WorkloadIdentityDisabled"
+	reasonNodePoolMetadataServer             = "NodePoolMetadataServerOff"
+	reasonLegacyMetadata                     = "LegacyMetadataEndpoints"
+	reasonPublicEndpointOpen                 = "PublicEndpointUnrestricted"
+	reasonAuthorizedNetworksAll              = "AuthorizedNetworksAllowAll"
+	reasonAuthorizedNetworksGCP              = "AuthorizedNetworksAllowProviderCIDRs"
+	reasonAutoscalingMaxZero                 = "AutoscalingMaxZero"
+	reasonShieldedNodesDisabled              = "ShieldedNodesDisabled"
+	reasonBinaryAuthorizationDisabled        = "BinaryAuthorizationDisabled"
+	reasonApplicationLayerSecretsUnencrypted = "ApplicationLayerSecretsUnencrypted"
+	reasonLegacyABACEnabled                  = "LegacyABACEnabled"
+	reasonPrivateNodesDisabled               = "PrivateNodesDisabled"
+	reasonDataplaneV2Disabled                = "DataplaneV2Disabled"
+	reasonMasterGlobalAccessDisabled         = "MasterGlobalAccessDisabled"
+	reasonLoggingDisabled                    = "LoggingDisabled"
+	reasonMonitoringDisabled                 = "MonitoringDisabled"
+	reasonManagedPrometheusDisabled          = "ManagedPrometheusDisabled"
+	reasonBackupForGKEDisabled               = "BackupForGKEDisabled"
 )
 
 // anyIPv4 is the CIDR that makes an allow-list allow everything.
@@ -108,6 +123,10 @@ func ClusterCommand(deps Deps) checks.Command {
 			checks.Kind(kindLegacyMetadata, "a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read", emit.SeverityWarning),
 			checks.Kind(kindPublicControlPlane, "the control-plane endpoint is reachable from the internet; info when authorized networks narrow it", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindNodePoolCannotGrow, "a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever", emit.SeverityWarning),
+			checks.Kind(kindClusterSecurityPosture, "cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindClusterNetworkPosture, "cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindClusterObservabilityOff, "cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off", emit.SeverityWarning, emit.SeverityInfo),
+			checks.Kind(kindClusterBackupOff, "Backup for GKE addon is disabled on the cluster", emit.SeverityInfo),
 			checks.CloudUnavailableKind(),
 		},
 		Output: []checks.OutputField{
@@ -162,6 +181,10 @@ func runCluster(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	findings := append(workloadIdentityFindings(cfg), legacyMetadataFindings(cfg)...)
 	findings = append(findings, controlPlaneFindings(cfg)...)
 	findings = append(findings, cannotGrowFindings(cfg)...)
+	findings = append(findings, securityPostureFindings(cfg)...)
+	findings = append(findings, networkPostureFindings(cfg)...)
+	findings = append(findings, observabilityFindings(cfg)...)
+	findings = append(findings, backupFindings(cfg)...)
 	sortFindings(findings)
 	for _, f := range findings {
 		if err := inv.Out.Emit(f); err != nil {
@@ -312,6 +335,123 @@ func controlPlaneFindings(cfg cloud.ClusterConfig) []emit.Finding {
 			Message: fmt.Sprintf("the authorized-network allow-list names %d %s and additionally admits the provider's own public ranges: anyone who can rent a VM from the provider is inside the allow-list. On by default, so it is reported as posture rather than as a defect",
 				len(an.CIDRs), plural(len(an.CIDRs), "range")),
 			Details: append(withList, emit.Field{Key: "gcp_public_cidrs", Value: "true"}),
+		})}
+	}
+	return nil
+}
+
+// securityPostureFindings evaluates cluster-level security toggles (#786, L-40):
+// Shielded Nodes, Binary Authorization, application-layer etcd secret encryption,
+// and legacy ABAC authorization. Unset (nil) fields make no claim.
+func securityPostureFindings(cfg cloud.ClusterConfig) []emit.Finding {
+	var out []emit.Finding
+	if cfg.ShieldedNodes != nil && !*cfg.ShieldedNodes {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterSecurityPosture,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonShieldedNodesDisabled,
+			Message:  "Shielded GKE Nodes are disabled on the cluster: nodes lack verifiable boot integrity and vTPM identity, weakening defense against boot-level or rootkit persistence",
+		}))
+	}
+	if cfg.BinaryAuthorization != nil && !*cfg.BinaryAuthorization {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterSecurityPosture,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonBinaryAuthorizationDisabled,
+			Message:  "Binary Authorization is disabled on the cluster: container images are admitted without cryptographic attestation enforcement",
+		}))
+	}
+	if cfg.DatabaseEncryption != nil && !*cfg.DatabaseEncryption {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterSecurityPosture,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonApplicationLayerSecretsUnencrypted,
+			Message:  "application-layer Secrets encryption (DatabaseEncryption) is disabled: Kubernetes Secrets are stored in etcd without an additional customer-managed KMS envelope",
+		}))
+	}
+	if cfg.LegacyABAC != nil && *cfg.LegacyABAC {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterSecurityPosture,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonLegacyABACEnabled,
+			Message:  "legacy ABAC authorization is enabled on the cluster: static attribute-based permissions bypass RBAC and IAM policy controls",
+		}))
+	}
+	return out
+}
+
+// networkPostureFindings evaluates cluster-level network posture toggles (#786, L-41):
+// private nodes, Dataplane V2 (Cilium/eBPF), and master global access on private
+// control-plane endpoints. Unset (nil) fields make no claim.
+func networkPostureFindings(cfg cloud.ClusterConfig) []emit.Finding {
+	var out []emit.Finding
+	if cfg.PrivateNodes != nil && !*cfg.PrivateNodes {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterNetworkPosture,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonPrivateNodesDisabled,
+			Message:  "private nodes are disabled on the cluster: nodes carry external public IP addresses, widening direct internet reachability to node workloads",
+		}))
+	}
+	if cfg.DataplaneV2 != nil && !*cfg.DataplaneV2 {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterNetworkPosture,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonDataplaneV2Disabled,
+			Message:  "Dataplane V2 (ADVANCED_DATAPATH) is disabled on the cluster: the cluster uses legacy kube-proxy iptables routing instead of eBPF datapath and integrated NetworkPolicy enforcement",
+		}))
+	}
+	if cfg.MasterGlobalAccess != nil && !*cfg.MasterGlobalAccess && cfg.PublicEndpoint == "" {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterNetworkPosture,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonMasterGlobalAccessDisabled,
+			Message:  "master global access is disabled on this private-endpoint cluster: clients and CI/CD runners in other VPC regions cannot reach the control plane's internal endpoint",
+		}))
+	}
+	return out
+}
+
+// observabilityFindings evaluates cluster-level logging and monitoring posture (#786, L-42).
+// Unset (nil) fields make no claim.
+func observabilityFindings(cfg cloud.ClusterConfig) []emit.Finding {
+	var out []emit.Finding
+	if cfg.LoggingEnabled != nil && !*cfg.LoggingEnabled {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterObservabilityOff,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonLoggingDisabled,
+			Message:  "Cloud Logging is disabled on the cluster: control-plane, system, and workload logs are not exported, leaving incident triage without historical log evidence",
+		}))
+	}
+	if cfg.MonitoringEnabled != nil && !*cfg.MonitoringEnabled {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterObservabilityOff,
+			Severity: emit.SeverityWarning,
+			Reason:   reasonMonitoringDisabled,
+			Message:  "Cloud Monitoring is disabled on the cluster: system and kubelet metrics are not exported, blinding alerting and capacity diagnostics",
+		}))
+	}
+	if cfg.ManagedPrometheus != nil && !*cfg.ManagedPrometheus {
+		out = append(out, clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterObservabilityOff,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonManagedPrometheusDisabled,
+			Message:  "Google Cloud Managed Service for Prometheus is disabled on the cluster: Prometheus-format workload metrics are not collected by the managed pipeline",
+		}))
+	}
+	return out
+}
+
+// backupFindings evaluates whether the Backup for GKE addon is enabled (#786, L-43).
+// Unset (nil) fields make no claim.
+func backupFindings(cfg cloud.ClusterConfig) []emit.Finding {
+	if cfg.BackupForGKE != nil && !*cfg.BackupForGKE {
+		return []emit.Finding{clusterFinding(cfg, emit.Finding{
+			Kind:     kindClusterBackupOff,
+			Severity: emit.SeverityInfo,
+			Reason:   reasonBackupForGKEDisabled,
+			Message:  "Backup for GKE is disabled on the cluster: cluster state and persistent volumes have no managed GKE backup agent configured",
 		})}
 	}
 	return nil

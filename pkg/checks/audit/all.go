@@ -62,6 +62,7 @@ func composedCommands(deps Deps, includeExemptions bool) []checks.Command {
 		HardeningCommand(deps),
 		RBACCommand(deps),
 		NetpolCommand(deps),
+		NamespacesCommand(deps),
 		ClusterCommand(deps),
 		UpgradesCommand(deps),
 	}
@@ -69,9 +70,11 @@ func composedCommands(deps Deps, includeExemptions bool) []checks.Command {
 		cmds = append(cmds, ExemptionsCommand())
 	}
 	seen := map[string]bool{
-		"audit all":        true,
-		"audit exemptions": true,
-		"audit policy":     true,
+		"audit ai":           true,
+		"audit all":          true,
+		"audit computeclass": true,
+		"audit exemptions":   true,
+		"audit policy":       true,
 	}
 	for _, c := range cmds {
 		seen[c.Name] = true
@@ -98,7 +101,7 @@ func allKinds(deps Deps) []checks.KindField {
 		scan.KindCheckSkipped: true,
 		scan.KindCheckFailed:  true,
 	}
-	for _, c := range composedCommands(deps, true) {
+	for _, c := range append(composedCommands(deps, true), ComputeClassCommand(deps), AICommand(deps)) {
 		for _, k := range c.Kinds {
 			if seen[k.Name] {
 				continue
@@ -119,7 +122,7 @@ func allOutput(deps Deps) []checks.OutputField {
 		"check":  true,
 		"checks": true,
 	}
-	for _, c := range composedCommands(deps, true) {
+	for _, c := range append(composedCommands(deps, true), ComputeClassCommand(deps), AICommand(deps)) {
 		for _, f := range c.Output {
 			if seen[f.Name] {
 				continue

@@ -20,6 +20,7 @@ import (
 	"sort"
 	"sync"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
@@ -56,17 +57,22 @@ type Snapshot struct {
 	jobs                snapshotEntry[batchv1.Job]
 	cronjobs            snapshotEntry[batchv1.CronJob]
 	pods                snapshotEntry[corev1.Pod]
+	endpoints           snapshotEntry[corev1.Endpoints] //nolint:staticcheck // SA1019: Endpoints is used for pre-1.33 webhook service backing
 	namespaces          snapshotEntry[corev1.Namespace]
 	nodes               snapshotEntry[corev1.Node]
 	serviceAccounts     snapshotEntry[corev1.ServiceAccount]
 	limitRanges         snapshotEntry[corev1.LimitRange]
 	pdbs                snapshotEntry[policyv1.PodDisruptionBudget]
 	hpas                snapshotEntry[autoscalingv2.HorizontalPodAutoscaler]
+	ingresses           snapshotEntry[networkingv1.Ingress]
 	networkPolicies     snapshotEntry[networkingv1.NetworkPolicy]
 	roles               snapshotEntry[rbacv1.Role]
 	roleBindings        snapshotEntry[rbacv1.RoleBinding]
 	clusterRoles        snapshotEntry[rbacv1.ClusterRole]
 	clusterRoleBindings snapshotEntry[rbacv1.ClusterRoleBinding]
+	resourceQuotas      snapshotEntry[corev1.ResourceQuota]
+	validatingWebhooks  snapshotEntry[admissionregistrationv1.ValidatingWebhookConfiguration]
+	mutatingWebhooks    snapshotEntry[admissionregistrationv1.MutatingWebhookConfiguration]
 
 	servicesOnce    sync.Once
 	services        []*corev1.Service
@@ -136,6 +142,13 @@ func ensureSnapshot(ctx context.Context, client kubernetes.Interface, ns string)
 	}
 	s := NewSnapshot(client, ns)
 	return WithSnapshot(ctx, s), s
+}
+
+func snapshotAnyScope(ctx context.Context, client kubernetes.Interface) *Snapshot {
+	if s, ok := ctx.Value(snapshotKey{}).(*Snapshot); ok && s != nil && s.client == client {
+		return s
+	}
+	return NewSnapshot(client, metav1.NamespaceAll)
 }
 
 // fatalRefusal turns a cached Refusal into the RefusalError a caller
@@ -420,6 +433,63 @@ func (s *Snapshot) ClusterRoleBindings(ctx context.Context) ([]rbacv1.ClusterRol
 		}
 		return l.Items, l.Continue, nil
 	}, nil, func(crb *rbacv1.ClusterRoleBinding) string { return crb.Name })
+}
+
+// ResourceQuotas lists the ResourceQuotas in scope, once, sorted by namespace/name.
+func (s *Snapshot) ResourceQuotas(ctx context.Context) ([]corev1.ResourceQuota, *checks.Refusal, error) {
+	return loadSlice(&s.resourceQuotas, "resourcequotas", func(o metav1.ListOptions) ([]corev1.ResourceQuota, string, error) {
+		l, err := s.client.CoreV1().ResourceQuotas(s.ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(rq *corev1.ResourceQuota) string { return rq.Namespace }, func(rq *corev1.ResourceQuota) string { return rq.Name })
+}
+
+// Endpoints lists the Endpoints in scope, once, sorted by namespace/name.
+//
+//nolint:staticcheck // SA1019: Endpoints is used for pre-1.33 webhook service backing
+func (s *Snapshot) Endpoints(ctx context.Context) ([]corev1.Endpoints, *checks.Refusal, error) {
+	return loadSlice(&s.endpoints, "endpoints", func(o metav1.ListOptions) ([]corev1.Endpoints, string, error) {
+		l, err := s.client.CoreV1().Endpoints(s.ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(ep *corev1.Endpoints) string { return ep.Namespace }, func(ep *corev1.Endpoints) string { return ep.Name })
+}
+
+// Ingresses lists the Ingresses in scope, once, sorted by namespace/name.
+func (s *Snapshot) Ingresses(ctx context.Context) ([]networkingv1.Ingress, *checks.Refusal, error) {
+	return loadSlice(&s.ingresses, "ingresses", func(o metav1.ListOptions) ([]networkingv1.Ingress, string, error) {
+		l, err := s.client.NetworkingV1().Ingresses(s.ns).List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, func(ing *networkingv1.Ingress) string { return ing.Namespace }, func(ing *networkingv1.Ingress) string { return ing.Name })
+}
+
+// ValidatingWebhookConfigurations lists the ValidatingWebhookConfigurations in the cluster, once, sorted by name.
+func (s *Snapshot) ValidatingWebhookConfigurations(ctx context.Context) ([]admissionregistrationv1.ValidatingWebhookConfiguration, *checks.Refusal, error) {
+	return loadSlice(&s.validatingWebhooks, "validatingwebhookconfigurations", func(o metav1.ListOptions) ([]admissionregistrationv1.ValidatingWebhookConfiguration, string, error) {
+		l, err := s.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, nil, func(w *admissionregistrationv1.ValidatingWebhookConfiguration) string { return w.Name })
+}
+
+// MutatingWebhookConfigurations lists the MutatingWebhookConfigurations in the cluster, once, sorted by name.
+func (s *Snapshot) MutatingWebhookConfigurations(ctx context.Context) ([]admissionregistrationv1.MutatingWebhookConfiguration, *checks.Refusal, error) {
+	return loadSlice(&s.mutatingWebhooks, "mutatingwebhookconfigurations", func(o metav1.ListOptions) ([]admissionregistrationv1.MutatingWebhookConfiguration, string, error) {
+		l, err := s.client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, o)
+		if err != nil {
+			return nil, "", err
+		}
+		return l.Items, l.Continue, nil
+	}, nil, func(w *admissionregistrationv1.MutatingWebhookConfiguration) string { return w.Name })
 }
 
 // selectingServices returns the Services in a namespace whose selector

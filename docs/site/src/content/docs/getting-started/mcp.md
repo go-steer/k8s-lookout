@@ -782,10 +782,13 @@ The current surface:
 | `k8s_net_probe` | [`net probe`](/reference/net-probe/) |
 | `k8s_net_probe_from` | [`net probe-from`](/reference/net-probe-from/): **not served by default**, see below |
 | `k8s_audit_all` | [`audit all`](/reference/audit-all/) |
+| `k8s_audit_ai` | [`audit ai`](/reference/audit-ai/) |
 | `k8s_audit_workloads` | [`audit workloads`](/reference/audit-workloads/) |
 | `k8s_audit_hardening` | [`audit hardening`](/reference/audit-hardening/) |
 | `k8s_audit_netpol` | [`audit netpol`](/reference/audit-netpol/) |
+| `k8s_audit_namespaces` | [`audit namespaces`](/reference/audit-namespaces/) |
 | `k8s_audit_rbac` | [`audit rbac`](/reference/audit-rbac/) |
+| `k8s_audit_computeclass` | [`audit computeclass`](/reference/audit-computeclass/) |
 | `k8s_audit_cluster` | [`audit cluster`](/reference/audit-cluster/) |
 | `k8s_audit_upgrades` | [`audit upgrades`](/reference/audit-upgrades/) |
 | `k8s_audit_exemptions` | [`audit exemptions`](/reference/audit-exemptions/) |

@@ -25,6 +25,17 @@ import (
 	"testing"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -125,6 +136,13 @@ func TestUpgradesControlPlaneDistance(t *testing.T) {
 		wantReason string
 		wantSev    string
 	}{
+		{
+			name:       "three minors behind the channel's target (unsupported)",
+			version:    "1.28.5-gke.1000",
+			target:     cloud.UpgradeTargets{DefaultVersion: "1.31.2-gke.1000"},
+			wantReason: "MinorUnsupported",
+			wantSev:    "critical",
+		},
 		{
 			name:       "a minor behind the channel's target",
 			version:    "1.29.7-gke.1104000",
@@ -585,5 +603,406 @@ func TestUpgradesFingerprintIsClassNotInstance(t *testing.T) {
 		if want := got[r["reason"]]; r["fingerprint"] != want {
 			t.Errorf("%s fingerprint %q != %q: the class must not carry the subject", r["reason"], r["fingerprint"], want)
 		}
+	}
+}
+
+func upgradeDepsWithKube(api *fakeClusterConfig, objs ...runtime.Object) audit.Deps {
+	deps := upgradeDeps(api)
+	client := fake.NewClientset(objs...)
+	deps.Client = func(context.Context) (kubernetes.Interface, error) { return client, nil }
+	return deps
+}
+
+func TestUpgradesTargetVersionFlag(t *testing.T) {
+	t.Run("overrides provider target with 2-part major.minor", func(t *testing.T) {
+		api := behindCluster()
+		api.cfg.Version = "1.29.7-gke.1104000"
+		api.cfg.NodePools = nil
+		res := checktest.Run(t, audit.UpgradesCommand(upgradeDeps(api)), "--target-version=1.32")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		var got map[string]string
+		for _, r := range findingLines(t, res.Stdout) {
+			if r["kind"] == "audit.version_behind" {
+				got = r
+			}
+		}
+		if got == nil {
+			t.Fatalf("want version_behind finding:\n%s", res.Stdout)
+		}
+		if got["reason"] != "MinorUnsupported" || got["severity"] != "critical" || got["target_version"] != "1.32" || got["minor_versions_behind"] != "3" {
+			t.Errorf("unexpected finding: %v", got)
+		}
+	})
+
+	t.Run("works without cloud provider when --target-version is set", func(t *testing.T) {
+		ing := &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod",
+				Name:      "legacy-ing",
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"networking.k8s.io/v1beta1","kind":"Ingress"}`,
+				},
+			},
+		}
+		client := fake.NewClientset(ing)
+		deps := audit.Deps{
+			Client:   func(context.Context) (kubernetes.Interface, error) { return client, nil },
+			Provider: func(context.Context) (cloud.Provider, error) { return cloud.NoProvider, nil },
+		}
+		res := checktest.Run(t, audit.UpgradesCommand(deps), "--target-version=1.32")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		reasons := map[string]bool{}
+		for _, r := range findingLines(t, res.Stdout) {
+			reasons[r["reason"]] = true
+		}
+		if !reasons["RemovedInTargetMinor"] || !reasons["RemovedAPIInUse"] {
+			t.Errorf("want RemovedInTargetMinor and RemovedAPIInUse, got %v\nstdout:\n%s", reasons, res.Stdout)
+		}
+	})
+
+	t.Run("rejects invalid --target-version", func(t *testing.T) {
+		res := checktest.Run(t, audit.UpgradesCommand(upgradeDeps(behindCluster())), "--target-version=not-a-version")
+		if res.Code != emit.ExitUsage {
+			t.Errorf("exit %d, want usage error", res.Code)
+		}
+	})
+}
+
+func TestUpgradesDeprecatedAndRemovedAPIs(t *testing.T) {
+	objs := []runtime.Object{
+		&networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod",
+				Name:      "old-ing",
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"networking.k8s.io/v1beta1","kind":"Ingress"}`,
+				},
+			},
+		},
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod",
+				Name:      "old-pdb",
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"policy/v1beta1","kind":"PodDisruptionBudget"}`,
+				},
+			},
+		},
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod",
+				Name:      "flowschema-holder",
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"flowcontrol.apiserver.k8s.io/v1beta3","kind":"FlowSchema"}`,
+				},
+			},
+		},
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod",
+				Name:      "clean-deploy",
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"apps/v1","kind":"Deployment"}`,
+				},
+			},
+		},
+	}
+
+	t.Run("at 1.30 flowcontrol v1beta3 is deprecated while 1.22 and 1.25 APIs are removed", func(t *testing.T) {
+		api := behindCluster()
+		api.cfg.NodePools = nil
+		api.cfg.Maintenance.Exclusions = nil
+		res := checktest.Run(t, audit.UpgradesCommand(upgradeDepsWithKube(api, objs...)), "--target-version=1.30")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+
+		byNameReason := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			byNameReason[r["name"]+"/"+r["reason"]] = r
+		}
+
+		if r, ok := byNameReason["old-ing/RemovedInTargetMinor"]; !ok || r["severity"] != "critical" || r["removed_in"] != "1.22" || r["replacement"] != "networking.k8s.io/v1" {
+			t.Errorf("old-ing RemovedInTargetMinor = %v", r)
+		}
+		if r, ok := byNameReason["old-ing/RemovedAPIInUse"]; !ok || r["kind"] != "audit.upgrade_blocked" || r["severity"] != "critical" {
+			t.Errorf("old-ing RemovedAPIInUse = %v", r)
+		}
+		if r, ok := byNameReason["old-pdb/RemovedInTargetMinor"]; !ok || r["removed_in"] != "1.25" || r["replacement"] != "policy/v1" {
+			t.Errorf("old-pdb RemovedInTargetMinor = %v", r)
+		}
+		if r, ok := byNameReason["flowschema-holder/DeprecatedInTargetMinor"]; !ok || r["severity"] != "warning" || r["removed_in"] != "1.32" {
+			t.Errorf("flowschema-holder DeprecatedInTargetMinor = %v", r)
+		}
+		if _, ok := byNameReason["flowschema-holder/RemovedAPIInUse"]; ok {
+			t.Errorf("flowschema-holder must not be RemovedAPIInUse at 1.30")
+		}
+	})
+
+	t.Run("at 1.32 flowcontrol v1beta3 becomes RemovedInTargetMinor and RemovedAPIInUse", func(t *testing.T) {
+		api := behindCluster()
+		api.cfg.NodePools = nil
+		api.cfg.Maintenance.Exclusions = nil
+		res := checktest.Run(t, audit.UpgradesCommand(upgradeDepsWithKube(api, objs...)), "--target-version=1.32")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+
+		byNameReason := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			byNameReason[r["name"]+"/"+r["reason"]] = r
+		}
+		if r, ok := byNameReason["flowschema-holder/RemovedInTargetMinor"]; !ok || r["severity"] != "critical" {
+			t.Errorf("want flowschema-holder RemovedInTargetMinor at 1.32, got %v", r)
+		}
+		if r, ok := byNameReason["flowschema-holder/RemovedAPIInUse"]; !ok || r["severity"] != "critical" {
+			t.Errorf("want flowschema-holder RemovedAPIInUse at 1.32, got %v", r)
+		}
+	})
+}
+
+func TestUpgradesWebhookPathGroups(t *testing.T) {
+	fail := admissionregistrationv1.Fail
+	ignore := admissionregistrationv1.Ignore
+	shortTimeout := int32(5)
+	longTimeout := int32(25)
+
+	groups := []struct {
+		name     string
+		group    string
+		resource string
+		want     string
+	}{
+		{name: "drain-eviction", group: "", resource: "pods/eviction", want: "drain-eviction"},
+		{name: "pod-creation", group: "", resource: "pods", want: "pod-creation"},
+		{name: "node-lease", group: "coordination.k8s.io", resource: "leases", want: "node-lease"},
+		{name: "kubelet-csr", group: "certificates.k8s.io", resource: "certificatesigningrequests", want: "kubelet-csr"},
+		{name: "csi-storage", group: "storage.k8s.io", resource: "volumeattachments", want: "csi-storage"},
+		{name: "control-plane-rbac", group: "rbac.authorization.k8s.io", resource: "clusterrolebindings", want: "control-plane-rbac"},
+	}
+
+	for _, tc := range groups {
+		t.Run("dead service on "+tc.name, func(t *testing.T) {
+			vwc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{Name: "vwc-" + tc.name},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+					Name:           "hook.example.com",
+					FailurePolicy:  &fail,
+					TimeoutSeconds: &shortTimeout,
+					ClientConfig: admissionregistrationv1.WebhookClientConfig{
+						Service: &admissionregistrationv1.ServiceReference{
+							Namespace: "webhook-sys",
+							Name:      "missing-svc",
+						},
+					},
+					Rules: []admissionregistrationv1.RuleWithOperations{{
+						Rule: admissionregistrationv1.Rule{
+							APIGroups:   []string{tc.group},
+							APIVersions: []string{"v1"},
+							Resources:   []string{tc.resource},
+						},
+					}},
+				}},
+			}
+			api := behindCluster()
+			api.cfg.NodePools = nil
+			api.cfg.Maintenance.Exclusions = nil
+			res := checktest.Run(t, audit.UpgradesCommand(upgradeDepsWithKube(api, vwc)))
+			if res.Code != emit.ExitData {
+				t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+			}
+
+			var got map[string]string
+			for _, r := range findingLines(t, res.Stdout) {
+				if r["reason"] == "WebhookBlocksUpgrade" {
+					got = r
+				}
+			}
+			if got == nil {
+				t.Fatalf("want WebhookBlocksUpgrade for %s:\n%s", tc.name, res.Stdout)
+			}
+			if got["severity"] != "critical" || got["webhook_group"] != tc.want || got["service"] != "webhook-sys/missing-svc" {
+				t.Errorf("unexpected webhook finding: %v", got)
+			}
+		})
+	}
+
+	t.Run("single-replica backing service and long timeout", func(t *testing.T) {
+		one := int32(1)
+		sel := map[string]string{"app": "admit"}
+		svcObj := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "webhook-sys", Name: "admit-svc"},
+			Spec:       corev1.ServiceSpec{Selector: sel},
+		}
+		depObj := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "webhook-sys", Name: "admit"},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &one,
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: sel}},
+			},
+		}
+		mwc := &admissionregistrationv1.MutatingWebhookConfiguration{
+			ObjectMeta: metav1.ObjectMeta{Name: "mwc-pods"},
+			Webhooks: []admissionregistrationv1.MutatingWebhook{
+				{
+					Name:           "mutate.example.com",
+					FailurePolicy:  &fail,
+					TimeoutSeconds: &longTimeout,
+					ClientConfig: admissionregistrationv1.WebhookClientConfig{
+						Service: &admissionregistrationv1.ServiceReference{
+							Namespace: "webhook-sys",
+							Name:      "admit-svc",
+						},
+					},
+					Rules: []admissionregistrationv1.RuleWithOperations{{
+						Rule: admissionregistrationv1.Rule{
+							APIGroups:   []string{""},
+							APIVersions: []string{"v1"},
+							Resources:   []string{"pods"},
+						},
+					}},
+				},
+				{
+					Name:          "ignored.example.com",
+					FailurePolicy: &ignore,
+					Rules: []admissionregistrationv1.RuleWithOperations{{
+						Rule: admissionregistrationv1.Rule{
+							APIGroups:   []string{""},
+							APIVersions: []string{"v1"},
+							Resources:   []string{"pods/eviction"},
+						},
+					}},
+				},
+			},
+		}
+		api := behindCluster()
+		api.cfg.NodePools = nil
+		api.cfg.Maintenance.Exclusions = nil
+		res := checktest.Run(t, audit.UpgradesCommand(upgradeDepsWithKube(api, svcObj, depObj, mwc)))
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+
+		reasons := map[string]map[string]string{}
+		for _, r := range findingLines(t, res.Stdout) {
+			reasons[r["reason"]] = r
+		}
+		if r, ok := reasons["WebhookTargetsSingleReplica"]; !ok || r["severity"] != "warning" || r["replicas"] != "1" || r["webhook_group"] != "pod-creation" {
+			t.Errorf("want WebhookTargetsSingleReplica, got %v", r)
+		}
+		if r, ok := reasons["ControlPlaneWebhookNoTimeout"]; !ok || r["severity"] != "warning" || r["timeout_seconds"] != "25" {
+			t.Errorf("want ControlPlaneWebhookNoTimeout with timeout_seconds=25, got %v", r)
+		}
+	})
+}
+
+func TestUpgradesPDBBlocksNodeDrain(t *testing.T) {
+	one := int32(1)
+	two := int32(2)
+	lblOne := map[string]string{"app": "singleton"}
+	lblTwo := map[string]string{"app": "pair"}
+	lblHealthy := map[string]string{"app": "healthy-pair"}
+
+	depOne := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "singleton"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &one,
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: lblOne}},
+		},
+	}
+	depTwo := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pair"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &two,
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: lblTwo}},
+		},
+	}
+	depHealthy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "healthy-pair"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &two,
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: lblHealthy}},
+		},
+	}
+
+	zero := intstr.FromInt32(0)
+	pct50 := intstr.FromString("50%")
+	pct80 := intstr.FromString("80%")
+	pct100 := intstr.FromString("100%")
+
+	pdbs := []runtime.Object{
+		depOne, depTwo, depHealthy,
+		// 1. maxUnavailable = 0
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-max-zero"},
+			Spec:       policyv1.PodDisruptionBudgetSpec{MaxUnavailable: &zero},
+		},
+		// 2. minAvailable = 100%
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-min-100pct"},
+			Spec:       policyv1.PodDisruptionBudgetSpec{MinAvailable: &pct100},
+		},
+		// 3. minAvailable = 50% on 1 replica -> ceil(0.5) = 1 >= 1 (blocks drain)
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-50pct-on-1"},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				MinAvailable: &pct50,
+				Selector:     &metav1.LabelSelector{MatchLabels: lblOne},
+			},
+		},
+		// 4. minAvailable = 80% on 2 replicas -> ceil(1.6) = 2 >= 2 (blocks drain)
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-80pct-on-2"},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				MinAvailable: &pct80,
+				Selector:     &metav1.LabelSelector{MatchLabels: lblTwo},
+			},
+		},
+		// 5. minAvailable = 50% on 2 replicas -> ceil(1.0) = 1 < 2 (allows 1 disruption -> silent)
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-50pct-on-2-ok"},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				MinAvailable: &pct50,
+				Selector:     &metav1.LabelSelector{MatchLabels: lblHealthy},
+			},
+			Status: policyv1.PodDisruptionBudgetStatus{CurrentHealthy: 2, DisruptionsAllowed: 1},
+		},
+		// 6. live status disruptionsAllowed == 0 with currentHealthy > 0
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "pdb-live-zero"},
+			Status:     policyv1.PodDisruptionBudgetStatus{CurrentHealthy: 2, DisruptionsAllowed: 0},
+		},
+	}
+
+	api := behindCluster()
+	api.cfg.NodePools = nil
+	api.cfg.Maintenance.Exclusions = nil
+	res := checktest.Run(t, audit.UpgradesCommand(upgradeDepsWithKube(api, pdbs...)))
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+
+	blockedPDBs := map[string]map[string]string{}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["reason"] == "PDBBlocksNodeDrain" {
+			blockedPDBs[r["name"]] = r
+		}
+	}
+
+	for _, wantName := range []string{"pdb-max-zero", "pdb-min-100pct", "pdb-50pct-on-1", "pdb-80pct-on-2", "pdb-live-zero"} {
+		if _, ok := blockedPDBs[wantName]; !ok {
+			t.Errorf("missing PDBBlocksNodeDrain for %q; got %v\nstdout:\n%s", wantName, blockedPDBs, res.Stdout)
+		}
+	}
+	if _, ok := blockedPDBs["pdb-50pct-on-2-ok"]; ok {
+		t.Errorf("pdb-50pct-on-2-ok allows 1 disruption and must not be flagged: %v", blockedPDBs["pdb-50pct-on-2-ok"])
+	}
+	if blockedPDBs["pdb-50pct-on-1"]["replicas"] != "1" || blockedPDBs["pdb-80pct-on-2"]["replicas"] != "2" {
+		t.Errorf("expected replicas detail on percentage-rounded PDBs: 50pct=%v 80pct=%v",
+			blockedPDBs["pdb-50pct-on-1"], blockedPDBs["pdb-80pct-on-2"])
 	}
 }

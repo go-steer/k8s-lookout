@@ -89,17 +89,28 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 | `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
+| `audit.no_resource_quota` | warning, info | workload-bearing namespace has no ResourceQuota or a ResourceQuota is >= 90% of hard limit |
+| `audit.no_limit_range` | info | workload-bearing namespace has no LimitRange while containers omit resource requests/limits |
+| `audit.namespace_onboarding_gaps` | warning, info | workload-bearing namespace is missing required onboarding labels |
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
 | `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `audit.cluster_security_posture` | warning, info | cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled |
+| `audit.cluster_network_posture` | warning, info | cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint |
+| `audit.cluster_observability_off` | warning, info | cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off |
+| `audit.cluster_backup_off` | info | Backup for GKE addon is disabled on the cluster |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
-| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.version_behind` | critical, warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
-| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_blocked` | critical, warning, info | an active maintenance exclusion, a node image on the removed Docker runtime, a removed API in use, a fail-closed upgrade-path webhook, or a zero-disruption PDB will stop or stall the upgrade when it comes |
+| `audit.deprecated_api_in_use` | critical, warning | a cluster resource was last applied with a Kubernetes API version that is deprecated or removed in the target minor release |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
 | `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
 | `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
+| `audit.compute_class_posture` | warning, info | a workload's GKE ComputeClass or hardware-placement spec has no fallback or cannot be satisfied by the cluster: references a non-existent ComputeClass, requests a class or accelerator with zero matching nodes and no node-pool auto-creation, pins multi-replica pods directly to Spot without a ComputeClass priority fallback chain, or pins an accelerator workload to a zone with zero matching accelerator nodes while other zones have them |
+| `audit.single_zone_nodepool` | warning, info | a multi-node pool has all of its nodes in a single availability zone while the cluster spans multiple zones, or a workload with zone topologySpreadConstraints is pinned to a single-zone node pool |
+| `audit.ai_workload_exposure` | warning, info | an AI/inference workload has an unisolated serving Service, hostNetwork with accelerators, a hostPath model-cache mount, an automounted default ServiceAccount token, or an unpinned model-loader/inference container image |
 
 ## Output fields
 
@@ -182,6 +193,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pod_selector` | the dead or allow-all policy's podSelector, in label-selector syntax |
 | `direction` | the direction the permissive rule opens (ingress or egress) |
 | `policy_types` | the directions the dead policy names, after defaulting an unset policyTypes |
+| `quota` | name of the ResourceQuota at or above 90% of its hard limit |
+| `used` | current ResourceQuota status.used quantity for the resource |
+| `hard` | configured ResourceQuota status.hard quantity for the resource |
+| `pct` | integer percentage of status.used relative to status.hard |
+| `missing_labels` | comma-separated required onboarding labels missing from the Namespace |
 | `cluster` | on a node-pool finding: the cluster the pool belongs to, so the record stands alone |
 | `workload_pool` | the cluster-wide workload identity pool that this node pool's pods bypass |
 | `metadata_mode` | how the node pool exposes instance metadata to pods: node-identity means any pod can mint tokens for the node's service account |
@@ -195,7 +211,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `provider` | cloud.unavailable: the provider that was asked |
 | `unavailable` | summary-line note: why the cloud read could not be served |
 | `version` | the current version of the finding's subject — the control plane's, or the node pool's |
-| `target_version` | the version the provider would move this cluster to: its channel's upgrade target where one is published, otherwise the channel's default |
+| `target_version` | the version the provider would move this cluster to: its channel's upgrade target where one is published, otherwise the channel's default (or --target-version) |
 | `control_plane_version` | on a node-pool skew finding: the control-plane version the pool is measured against |
 | `minor_versions_behind` | how many minor releases separate the two versions |
 | `channel` | the release channel the cluster is subscribed to, and the one whose published versions the comparison used; `none` when it is subscribed to no channel |
@@ -204,6 +220,16 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scope` | how much of the upgrade stream that exclusion holds back: all-upgrades, minor-upgrades or minor-and-node-upgrades |
 | `ends` | when the exclusion lifts, or `end-of-support` for one that runs until the cluster's version leaves support |
 | `days_remaining` | how much longer the exclusion has left to run |
+| `api_version` | on a deprecated-API finding: the deprecated or removed group/version in use |
+| `removed_in` | on a deprecated-API finding: the Kubernetes major.minor release that removes the API |
+| `replacement` | on a deprecated-API finding: the successor group/version to migrate to |
+| `webhook` | on a webhook upgrade-blocker finding: the individual webhook entry within the configuration |
+| `webhook_group` | on a webhook upgrade-blocker finding: the upgrade-critical operation group intercepted (drain-eviction, pod-creation, node-lease, kubelet-csr, csi-storage, control-plane-rbac) |
+| `service` | on a webhook upgrade-blocker finding: the namespace/name of the backing Service |
+| `timeout_seconds` | on a webhook timeout finding: the configured webhook timeout in seconds, or default(10) when unset |
+| `min_available` | on a PDB upgrade-blocker finding: the configured minAvailable threshold |
+| `max_unavailable` | on a PDB upgrade-blocker finding: the configured maxUnavailable threshold |
+| `disruptions_allowed` | on a PDB upgrade-blocker finding: the live disruptionsAllowed count |
 | `exempt_kind` | the finding kind the entry covers — this is the entry's `kind:` field, not this finding's own kind |
 | `subject` | the entry's match scope as written: `<kind>`, `<kind> in <ns>`, or `<kind> on <ns>/<name>` |
 | `expires` | when the entry stops applying, RFC 3339 (a bare `YYYY-MM-DD` in the file resolves to 00:00:00Z that day) |
@@ -211,6 +237,19 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `expires_in` | how long until the entry lapses, rounded to whole days — only on audit.exemption_expiring |
 | `owner` | the entry's `owner:` field, absent if it has none — which is itself worth fixing, since "expired, and nobody knows whose it was" is where these files end up |
 | `justification` | the entry's `reason:` field: why the exempted finding was accepted. Distinct from the envelope's exempt_reason, which is the justification for THIS finding being exempt |
+| `compute_class` | the `cloud.google.com/compute-class` name requested by the workload template |
+| `accelerator` | the accelerator type (`cloud.google.com/gke-accelerator`) or extended resource (`nvidia.com/gpu`, `google.com/tpu`) requested by the workload template |
+| `zone` | the availability zone (`topology.kubernetes.io/zone`) the workload or single-zone node pool is pinned to |
+| `accelerator_zones` | zones in the cluster that actually host nodes with the requested accelerator, capped at 8 |
+| `spot_selector` | the nodeSelector or affinity expression pinning the workload directly to Spot nodes |
+| `nodepool` | the `cloud.google.com/gke-nodepool` name for a single-zone node pool |
+| `cluster_zones` | distinct availability zones across all nodes in the cluster, capped at 8 |
+| `affected_workloads` | workloads with zone topologySpreadConstraints pinned to the single-zone node pool |
+| `affected_workload_names` | their Kind/namespace/name, sorted and capped at 8 |
+| `compute_classes` | summary note: ComputeClass custom resources listed in the cluster, when the CRD is served |
+| `ports` | Service port(s) exposed without an ingress NetworkPolicy (ServingPortClusterWideNoNetPol) |
+| `volumes` | comma-separated name:path pairs (capped at 8) of hostPath volumes mounted by the AI workload (SharedModelCacheHostPath) |
+| `ai_workloads` | summary-line note: count of AI/inference workload templates identified in the scan scope |
 
 ## Output contract
 

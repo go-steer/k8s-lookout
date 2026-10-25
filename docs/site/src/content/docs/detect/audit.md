@@ -23,6 +23,15 @@ Reachable two ways: the subcommands below, or `lookout scan --include=audit`
 for the whole sweep alongside the incident checks. Like `scan`, it needs
 nothing deployed — a kubeconfig is the whole setup.
 
+## [`lookout audit ai`](/reference/audit-ai/)
+
+Inference-workload security and scheduling posture across workload templates: serving Services in namespaces with no ingress NetworkPolicy isolating the model endpoint, hostNetwork on accelerator workloads, hostPath model-cache volumes, default ServiceAccount token automount on accelerator workloads, and unpinned model-loader or inference images. Scope with --namespace, -A, or --workload.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `audit.ai_workload_exposure` | warning, info | an AI/inference workload has an unisolated serving Service, hostNetwork with accelerators, a hostPath model-cache mount, an automounted default ServiceAccount token, or an unpinned model-loader/inference container image |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
+
 ## [`lookout audit all`](/reference/audit-all/)
 
 Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), provider cluster configuration (`audit cluster`) and upgrade readiness (`audit upgrades`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=\<subcommand>. Scope with --namespace or -A.
@@ -67,17 +76,28 @@ Run every posture detector in one pass over a shared cluster snapshot: workload 
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 | `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
+| `audit.no_resource_quota` | warning, info | workload-bearing namespace has no ResourceQuota or a ResourceQuota is >= 90% of hard limit |
+| `audit.no_limit_range` | info | workload-bearing namespace has no LimitRange while containers omit resource requests/limits |
+| `audit.namespace_onboarding_gaps` | warning, info | workload-bearing namespace is missing required onboarding labels |
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
 | `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `audit.cluster_security_posture` | warning, info | cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled |
+| `audit.cluster_network_posture` | warning, info | cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint |
+| `audit.cluster_observability_off` | warning, info | cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off |
+| `audit.cluster_backup_off` | info | Backup for GKE addon is disabled on the cluster |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
-| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.version_behind` | critical, warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
-| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_blocked` | critical, warning, info | an active maintenance exclusion, a node image on the removed Docker runtime, a removed API in use, a fail-closed upgrade-path webhook, or a zero-disruption PDB will stop or stall the upgrade when it comes |
+| `audit.deprecated_api_in_use` | critical, warning | a cluster resource was last applied with a Kubernetes API version that is deprecated or removed in the target minor release |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
 | `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
 | `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
+| `audit.compute_class_posture` | warning, info | a workload's GKE ComputeClass or hardware-placement spec has no fallback or cannot be satisfied by the cluster: references a non-existent ComputeClass, requests a class or accelerator with zero matching nodes and no node-pool auto-creation, pins multi-replica pods directly to Spot without a ComputeClass priority fallback chain, or pins an accelerator workload to a zone with zero matching accelerator nodes while other zones have them |
+| `audit.single_zone_nodepool` | warning, info | a multi-node pool has all of its nodes in a single availability zone while the cluster spans multiple zones, or a workload with zone topologySpreadConstraints is pinned to a single-zone node pool |
+| `audit.ai_workload_exposure` | warning, info | an AI/inference workload has an unisolated serving Service, hostNetwork with accelerators, a hostPath model-cache mount, an automounted default ServiceAccount token, or an unpinned model-loader/inference container image |
 
 ## [`lookout audit cluster`](/reference/audit-cluster/)
 
@@ -89,7 +109,21 @@ Cluster-level configuration posture, read from the cloud provider: Workload Iden
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
 | `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `audit.cluster_security_posture` | warning, info | cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled |
+| `audit.cluster_network_posture` | warning, info | cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint |
+| `audit.cluster_observability_off` | warning, info | cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off |
+| `audit.cluster_backup_off` | info | Backup for GKE addon is disabled on the cluster |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
+
+## [`lookout audit computeclass`](/reference/audit-computeclass/)
+
+GKE ComputeClass, hardware-placement, and node-pool zone posture: workloads referencing a non-existent ComputeClass (`ComputeClassMissing`), workloads requesting a compute class or accelerator that matches zero nodes without node-pool auto-creation (`ComputeClassNoMatchingNodes`), multi-replica workloads pinned directly to Spot nodes without a ComputeClass fallback chain (`SpotWithoutFallback`), accelerator workloads pinned to a zone that hosts no matching accelerator nodes while other zones do (`UnsatisfiableZoneWithAccelerator`), and multi-node pools confined to a single availability zone (`SingleZoneNodePool`). Scope with --namespace, -A, or --workload.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `audit.compute_class_posture` | warning, info | a workload's GKE ComputeClass or hardware-placement spec has no fallback or cannot be satisfied by the cluster: references a non-existent ComputeClass, requests a class or accelerator with zero matching nodes and no node-pool auto-creation, pins multi-replica pods directly to Spot without a ComputeClass priority fallback chain, or pins an accelerator workload to a zone with zero matching accelerator nodes while other zones have them |
+| `audit.single_zone_nodepool` | warning, info | a multi-node pool has all of its nodes in a single availability zone while the cluster spans multiple zones, or a workload with zone topologySpreadConstraints is pinned to a single-zone node pool |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## [`lookout audit exemptions`](/reference/audit-exemptions/)
 
@@ -116,6 +150,17 @@ Workload security posture: containers running privileged or holding node-root ca
 | `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
+
+## [`lookout audit namespaces`](/reference/audit-namespaces/)
+
+Audit workload-bearing namespaces for ResourceQuotas, LimitRanges, and required onboarding labels. Scope with --namespace or -A.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `audit.no_resource_quota` | warning, info | workload-bearing namespace has no ResourceQuota or a ResourceQuota is >= 90% of hard limit |
+| `audit.no_limit_range` | info | workload-bearing namespace has no LimitRange while containers omit resource requests/limits |
+| `audit.namespace_onboarding_gaps` | warning, info | workload-bearing namespace is missing required onboarding labels |
 | `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
 
 ## [`lookout audit netpol`](/reference/audit-netpol/)
@@ -150,13 +195,14 @@ RBAC over-permission posture: bindings that grant cluster-admin, or a role whose
 
 ## [`lookout audit upgrades`](/reference/audit-upgrades/)
 
-Upgrade and patch readiness, read from the cloud provider: how far the control plane and its node pools are behind what the provider publishes, and whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications. Reads the provider's cluster record, not Kubernetes objects, so it takes no --namespace/-A/--workload; scanned counts the cluster plus its node pools. Without a provider capability it reports an explicit unavailable rather than silence.
+Upgrade and patch readiness, read from the cloud provider and cluster upgrade-blocker catalogue: how far the control plane and its node pools are behind what the provider publishes (or --target-version), whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications — plus in-cluster upgrade blockers (deprecated/removed APIs in use, fail-closed admission webhooks on upgrade-critical paths, and PodDisruptionBudgets that allow zero disruptions during node drain). Without a provider capability or --target-version it reports an explicit unavailable rather than silence.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
-| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.version_behind` | critical, warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
-| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_blocked` | critical, warning, info | an active maintenance exclusion, a node image on the removed Docker runtime, a removed API in use, a fail-closed upgrade-path webhook, or a zero-disruption PDB will stop or stall the upgrade when it comes |
+| `audit.deprecated_api_in_use` | critical, warning | a cluster resource was last applied with a Kubernetes API version that is deprecated or removed in the target minor release |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
 

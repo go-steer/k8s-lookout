@@ -132,6 +132,17 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 	out.PublicEndpoint = publicEndpoint(c)
 	out.AuthorizedNetworks = authorizedNetworks(c)
 	out.Autopilot = c.Autopilot != nil && c.Autopilot.Enabled
+	out.ShieldedNodes = shieldedNodes(c)
+	out.BinaryAuthorization = binaryAuthorization(c)
+	out.DatabaseEncryption = databaseEncryption(c)
+	out.LegacyABAC = legacyABAC(c)
+	out.PrivateNodes = privateNodes(c)
+	out.DataplaneV2 = dataplaneV2(c)
+	out.MasterGlobalAccess = masterGlobalAccess(c)
+	out.LoggingEnabled = loggingEnabled(c)
+	out.MonitoringEnabled = monitoringEnabled(c)
+	out.ManagedPrometheus = managedPrometheus(c)
+	out.BackupForGKE = backupForGKE(c)
 	switch {
 	case c.Autoscaling == nil:
 		out.NodeAutoprovisioning = cloud.ToggleUnset
@@ -156,6 +167,7 @@ func (a *clusterConfigAPI) Config(ctx context.Context) (cloud.ClusterConfig, err
 			AutoRepair:         nodeManagement(np, func(m *container.NodeManagement) bool { return m.AutoRepair }),
 			MachineType:        machineType(np),
 			Autoscaling:        poolAutoscaling(np),
+			ShieldedNodes:      poolShieldedNodes(np),
 		})
 	}
 	return out, nil
@@ -447,6 +459,134 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func shieldedNodes(c *container.Cluster) *bool {
+	if c.ShieldedNodes == nil {
+		return nil
+	}
+	return boolPtr(c.ShieldedNodes.Enabled)
+}
+
+func poolShieldedNodes(np *container.NodePool) *bool {
+	if np.Config == nil || np.Config.ShieldedInstanceConfig == nil {
+		return nil
+	}
+	return boolPtr(np.Config.ShieldedInstanceConfig.EnableIntegrityMonitoring || np.Config.ShieldedInstanceConfig.EnableSecureBoot)
+}
+
+func binaryAuthorization(c *container.Cluster) *bool {
+	if c.BinaryAuthorization == nil {
+		return nil
+	}
+	switch c.BinaryAuthorization.EvaluationMode {
+	case "", "EVALUATION_MODE_UNSPECIFIED":
+		return boolPtr(c.BinaryAuthorization.Enabled)
+	case "DISABLED":
+		return boolPtr(false)
+	default:
+		return boolPtr(true)
+	}
+}
+
+func databaseEncryption(c *container.Cluster) *bool {
+	if c.DatabaseEncryption == nil {
+		return nil
+	}
+	switch c.DatabaseEncryption.State {
+	case "ENCRYPTED", "ALL_OBJECTS_ENCRYPTION_ENABLED":
+		return boolPtr(true)
+	case "DECRYPTED":
+		return boolPtr(false)
+	}
+	switch c.DatabaseEncryption.CurrentState {
+	case "CURRENT_STATE_ENCRYPTED", "CURRENT_STATE_ALL_OBJECTS_ENCRYPTION_ENABLED":
+		return boolPtr(true)
+	default:
+		return boolPtr(false)
+	}
+}
+
+func legacyABAC(c *container.Cluster) *bool {
+	if c.LegacyAbac == nil {
+		return nil
+	}
+	return boolPtr(c.LegacyAbac.Enabled)
+}
+
+func privateNodes(c *container.Cluster) *bool {
+	if c.PrivateClusterConfig != nil && c.PrivateClusterConfig.EnablePrivateNodes {
+		return boolPtr(true)
+	}
+	if c.NetworkConfig != nil && c.NetworkConfig.DefaultEnablePrivateNodes {
+		return boolPtr(true)
+	}
+	if c.PrivateClusterConfig != nil || c.NetworkConfig != nil {
+		return boolPtr(false)
+	}
+	return nil
+}
+
+func dataplaneV2(c *container.Cluster) *bool {
+	if c.NetworkConfig == nil {
+		return nil
+	}
+	return boolPtr(c.NetworkConfig.DatapathProvider == "ADVANCED_DATAPATH")
+}
+
+func masterGlobalAccess(c *container.Cluster) *bool {
+	if ip := ipEndpointsConfig(c); ip != nil {
+		return boolPtr(ip.GlobalAccess)
+	}
+	if c.PrivateClusterConfig != nil {
+		if c.PrivateClusterConfig.MasterGlobalAccessConfig != nil {
+			return boolPtr(c.PrivateClusterConfig.MasterGlobalAccessConfig.Enabled)
+		}
+		return boolPtr(false)
+	}
+	return nil
+}
+
+func loggingEnabled(c *container.Cluster) *bool {
+	if c.LoggingConfig != nil && c.LoggingConfig.ComponentConfig != nil {
+		return boolPtr(len(c.LoggingConfig.ComponentConfig.EnableComponents) > 0)
+	}
+	if c.LoggingService != "" {
+		return boolPtr(c.LoggingService != "none")
+	}
+	return nil
+}
+
+func monitoringEnabled(c *container.Cluster) *bool {
+	if c.MonitoringConfig != nil && c.MonitoringConfig.ComponentConfig != nil {
+		return boolPtr(len(c.MonitoringConfig.ComponentConfig.EnableComponents) > 0)
+	}
+	if c.MonitoringService != "" {
+		return boolPtr(c.MonitoringService != "none")
+	}
+	return nil
+}
+
+func managedPrometheus(c *container.Cluster) *bool {
+	if c.MonitoringConfig == nil {
+		return nil
+	}
+	if c.MonitoringConfig.ManagedPrometheusConfig == nil {
+		return boolPtr(false)
+	}
+	return boolPtr(c.MonitoringConfig.ManagedPrometheusConfig.Enabled)
+}
+
+func backupForGKE(c *container.Cluster) *bool {
+	if c.AddonsConfig == nil {
+		return nil
+	}
+	if c.AddonsConfig.GkeBackupAgentConfig == nil {
+		return boolPtr(false)
+	}
+	return boolPtr(c.AddonsConfig.GkeBackupAgentConfig.Enabled)
 }
 
 // gkeServerConfigClient is the production serverConfigGetter.
