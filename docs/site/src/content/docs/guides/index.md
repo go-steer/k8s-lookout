@@ -1,15 +1,16 @@
 ---
 title: Guides
-description: Scenario walkthroughs with real captured output — broken workloads, stuck rollouts, resource exhaustion, node failures, post-mortems, and capacity planning.
+description: Scenario walkthroughs with real captured output — broken workloads, stuck rollouts, resource exhaustion, node failures, post-mortems, capacity planning, and standing posture audits.
 sidebar:
   order: 0
 ---
 
-This section is for the moment something is wrong — or just was. Each
-guide starts from a symptom you might be staring at and walks the real
-investigation, command by command, to a diagnosis and a verified
-outcome. By the end of a guide you can run the same workflow on your
-own cluster, and you will know which commands answer which questions.
+This section is for the moment something is wrong — or when you want to
+find what has no safety net before it breaks. Each guide starts from a
+real operational question and walks the investigation, command by command,
+to a diagnosis and a verified outcome. By the end of a guide you can run
+the same workflow on your own cluster, and you will know which commands
+answer which questions.
 
 ## Which guide do I need?
 
@@ -21,6 +22,7 @@ own cluster, and you will know which commands answer which questions.
 | A node went down and everything on it is failing at once | [A node just died](/guides/node-failure/) |
 | The incident is over and you need to know what changed before it | [What changed before the incident](/guides/what-changed/) |
 | You'd rather hit quota and capacity limits on your terms than in an outage | [Capacity & quota ahead of time](/guides/capacity-quota/) |
+| Nothing is broken right now, and you want to audit reliability, security, and upgrade posture | [Audit cluster posture & track drift](/guides/posture-audit/) |
 
 Each guide walks the real workflow, using output captured during live
 validation drills (abridged, never invented):
@@ -38,6 +40,10 @@ validation drills (abridged, never invented):
 - [Capacity & quota ahead of time](/guides/capacity-quota/) — the
   correlated quota incident, the drafted increase request, and the cloud
   sweep commands.
+- [Audit cluster posture & track drift](/guides/posture-audit/) — single-pass
+  `lookout audit all`, profiles (`default`, `strict`, `onboarding`,
+  `gke-autopilot`), policy overlays, auditable `--exemptions`, and
+  regression tracking with `findings diff`.
 
 Every guide ends with a pointer to the matching agent skill in
 [`skills/`](https://github.com/go-steer/k8s-lookout/tree/main/skills) — the

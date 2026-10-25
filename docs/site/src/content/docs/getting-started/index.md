@@ -38,12 +38,12 @@ works without the next:
    the read path from any MCP client or shell-capable agent, and the
    watch path into any webhook receiver.
 
-The two commands worth running first take no arguments and need
-nothing deployed — point them at a cluster you have never seen:
+The two commands worth running first need nothing deployed — point them
+at a cluster you have never seen:
 
 ```sh
-lookout scan     # what is broken right now
-lookout audit    # what has no safety net, while it is still healthy
+lookout scan           # what is broken right now
+lookout audit all -A   # what has no safety net, while it is still healthy
 ```
 
 [What lookout detects](/detect/) is the coverage map for both, and for

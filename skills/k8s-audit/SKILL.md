@@ -1,37 +1,59 @@
 ---
 name: k8s-audit
-description: Audit Kubernetes/GKE cluster security, workload reliability, network segmentation, RBAC privilege, upgrade safety, and exemption hygiene with lookout audit (cluster, workloads, hardening, netpol, rbac, upgrades, exemptions) and track posture deltas over time with findings diff and findings ack.
+description: Audit Kubernetes/GKE cluster security, workload reliability, network segmentation, namespace governance, RBAC privilege, ComputeClass/AI workload posture, upgrade safety, policy profiles, and exemption hygiene with lookout audit (all, policy, cluster, workloads, hardening, netpol, namespaces, rbac, computeclass, ai, upgrades, exemptions) and track posture deltas over time with findings diff and findings ack.
 ---
 
 # k8s-audit — security & reliability posture auditing with lookout
 
-`lookout audit` inspects cluster configuration posture before an incident occurs: missing disruption budgets, unhardened container security contexts, unsegmented namespaces, wildcard RBAC bindings, control-plane upgrade blockers, and lapsed exemptions.
+`lookout audit` inspects cluster configuration posture before an incident occurs: missing disruption budgets, unhardened container security contexts, unsegmented namespaces, missing ResourceQuotas/LimitRanges, wildcard RBAC bindings, GKE ComputeClass/Spot fallback gaps, exposed AI/inference workloads, control-plane upgrade blockers, and lapsed exemptions.
 
 Unlike `lookout health` or `lookout scan` (which report active failures happening right now), `audit` answers **"where is the safety net missing?"** Every audit finding carries a deterministic `fingerprint=` so teams can baseline findings in SQLite (`lookout findings diff`), acknowledge accepted risk (`lookout findings ack`), or codify time-bounded YAML exemptions (`--exemptions`).
 
 ## Decision tree across audit surfaces
 
-Run the targeted sweep matching the posture layer under review, or run all layers during a scheduled posture audit:
+Start with `lookout audit all -A` to run every posture detector in a single pass over a shared cluster snapshot, or run the targeted subcommand matching the posture layer under review:
 
 ```lookout
+lookout audit all -A
+lookout audit policy
 lookout audit cluster
 lookout audit upgrades
 lookout audit workloads -A
 lookout audit hardening -A
 lookout audit netpol -A
+lookout audit namespaces -A
 lookout audit rbac -A
+lookout audit computeclass -A
+lookout audit ai -A
 lookout audit exemptions
 ```
 
 | Posture layer | Command | What it verifies |
 | --- | --- | --- |
-| Cluster baseline | `lookout audit cluster` | Control-plane public endpoint exposure, binary authorization, workload identity enablement, shielding, and provider security posture |
-| Upgrade readiness | `lookout audit upgrades` | Node pool skew against control plane, deprecated API usage, and release channel drift before maintenance windows |
-| Workload reliability | `lookout audit workloads -A` | Missing readiness/liveness probes, single-replica deployments, missing PDBs (`audit.no_pdb`), HPA min==max or missing resource requests (`audit.hpa_cannot_scale`), and rigid node scheduling |
-| Pod & host security | `lookout audit hardening -A` | Privileged containers, dangerous Linux capabilities (`SYS_ADMIN`), host namespaces (`hostNetwork`, `hostPID`, `hostIPC`), writable `hostPath` mounts, Pod Security Admission gaps, and default ServiceAccount automounting |
-| Network segmentation | `lookout audit netpol -A` | Namespaces missing default ingress/egress deny NetworkPolicies and workloads exposed without policy selection |
-| Access & privilege | `lookout audit rbac -A` | Wildcard verbs/resources/API groups (`audit.wildcard_rbac`) and direct or equivalent `cluster-admin` bindings (`audit.cluster_admin_binding`) |
+| Full single-pass sweep | `lookout audit all -A` | Runs every posture detector in one pass over a shared cluster snapshot, stamping `check=<subcommand>` on each finding |
+| Effective policy table | `lookout audit policy` | Dumps the resolved enablement, severity, provenance layer (`default\|profile\|policy\|cli`), and threshold parameters for every posture rule |
+| Cluster baseline | `lookout audit cluster` | Control-plane public endpoint exposure, binary authorization, workload identity enablement, shielding, etcd encryption, Dataplane V2, observability, and Backup for GKE |
+| Upgrade readiness | `lookout audit upgrades` | Node pool skew against control plane, unsupported minor versions, deprecated/removed APIs (`--target-version`), upgrade-path webhooks, zero-disruption PDBs, and release channel drift |
+| Workload reliability | `lookout audit workloads -A` | Missing readiness/liveness/startup probes, missing CPU/memory requests & limits, single-replica deployments, missing or overlapping PDBs, preStop >= grace period, HPA min==max or min==1, CronJob overlap/failure, and rigid scheduling |
+| Pod & host security | `lookout audit hardening -A` | Privileged containers, added Linux capabilities, root UID / privilege escalation / missing seccomp, writable rootfs, host namespaces, writable `hostPath` mounts, Pod Security Admission gaps, and bound/unbound ServiceAccount token automounting |
+| Network segmentation | `lookout audit netpol -A` | Namespaces missing default ingress/egress NetworkPolicies, workloads missed by policy selectors, policies selecting nothing, and allow-all peer rules (`0.0.0.0/0`, empty `from`/`to`) |
+| Namespace governance | `lookout audit namespaces -A` | Workload-bearing namespaces missing a `ResourceQuota` or `LimitRange`, quotas >= 90% of hard limits, and missing required onboarding labels (`--required-labels`) |
+| Access & privilege | `lookout audit rbac -A` | Wildcard verbs/resources (`audit.wildcard_rbac`), direct or equivalent `cluster-admin` bindings (`audit.cluster_admin_binding`), `pods/exec` or `pods/attach` grants, and `impersonate`/`bind`/`escalate` grants |
+| Hardware & ComputeClass | `lookout audit computeclass -A` | Workloads referencing missing ComputeClasses or unsatisfiable node/accelerator selectors, multi-replica Spot workloads without fallback, and single-zone node pools |
+| AI / inference posture | `lookout audit ai -A` | Unisolated inference Services, `hostNetwork` on accelerator pods, `hostPath` model caches, default SA token automount on GPU/TPU pods, and floating model-loader images |
 | Exemption governance | `lookout audit exemptions` | Expired (`audit.exemption_expired`) and soon-to-expire (`audit.exemption_expiring`) YAML exemptions so accepted risk never rots silently |
+
+## Profiles, policy overlays, and holder attribution
+
+All audit commands share common policy and scoping flags:
+
+- `--profile=default|strict|onboarding|gke-autopilot`: select a built-in rule preset (`gke-autopilot` disables checks Autopilot enforces at admission; `strict` promotes `info` hardening/reliability findings to `warning`; `onboarding` restricts to high-signal blockers).
+- `--policy=<file>`, `--only`, `--skip`, `--min-severity`, `--set=kind.key=val`: layer custom YAML policy rules or CLI overrides. Preview the merged rule table first with:
+  ```lookout
+  lookout audit policy --profile=gke-autopilot
+  ```
+- `--skip-system-namespaces`: skip `kube-*`, `gke-*`, `gmp-*`, and `istio-system` when running `-A`.
+- `--per-workload`: expand holder findings (`audit rbac` and `audit hardening` ServiceAccount/Namespace checks, which stamp `workloads=<n>` and `workload_names=...`) into one finding record per affected workload.
 
 ## Reading audit findings
 

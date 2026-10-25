@@ -15,6 +15,7 @@
 package sitedoc_test
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,8 @@ import (
 	// checks a different registry than the generator writes from.
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/all"
 )
+
+var update = flag.Bool("update", false, "write generated site docs")
 
 // repoRoot is the working-tree root relative to this package.
 const repoRoot = "../.."
@@ -42,7 +45,16 @@ func TestSitePagesAreCurrent(t *testing.T) {
 		t.Fatal("no reference pages generated")
 	}
 	for _, rel := range sitedoc.SortedPaths(files) {
-		got, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		p := filepath.Join(repoRoot, filepath.FromSlash(rel))
+		if *update {
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(files[rel]), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := os.ReadFile(p)
 		if err != nil {
 			t.Errorf("%s: %v (run dev/tools/gen-site-docs)", rel, err)
 			continue

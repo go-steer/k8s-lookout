@@ -541,14 +541,35 @@ func auditCoveragePage(reg *checks.Registry) string {
 		"posture finding is a standing claim — it never self-clears, because a\n"+
 		"workload with one replica has one replica until somebody decides\n"+
 		"otherwise.\n\n"+
-		"That is also why every claim here is `--exemptions`-auditable: the answer\n"+
-		"is often \"yes, deliberately\", and a git-reviewed exemption file records the\n"+
-		"reason and an expiry instead of the finding quietly disappearing. Covered\n"+
-		"findings are **annotated** with their reason and counted as `exempt=<n>`,\n"+
-		"never dropped.\n\n"+
-		"Reachable two ways: the subcommands below, or `lookout scan --include=audit`\n"+
-		"for the whole sweep alongside the incident checks. Like `scan`, it needs\n"+
-		"nothing deployed — %s.\n\n",
+		"Reachable three ways: `lookout audit all -A` (every posture detector in one\n"+
+		"pass over a shared cluster snapshot, stamping `check=<subcommand>`), the\n"+
+		"individual subcommands below, or `lookout scan --include=audit` for the\n"+
+		"whole sweep alongside the incident checks. Like `scan`, it needs nothing\n"+
+		"deployed — %s.\n\n"+
+		"### Profiles, policy overlays, and exemptions\n\n"+
+		"Posture claims depend on the cluster's role and platform, so every audit\n"+
+		"command shares one rule-selection and exemption pipeline:\n\n"+
+		"- **Profiles (`--profile=default|strict|onboarding|gke-autopilot`)** —\n"+
+		"  built-in rule presets (e.g., `strict` promotes info-level hardening and\n"+
+		"  reliability gaps to `warning`; `onboarding` focuses on high-signal\n"+
+		"  blockers; `gke-autopilot` disables checks that Autopilot enforces at\n"+
+		"  admission).\n"+
+		"- **Declarative policy (`--policy=<file>`) & CLI overrides** — per-kind\n"+
+		"  enablement, severity overrides, and threshold `params` in git-reviewed\n"+
+		"  YAML, composable with `--only`, `--skip`, `--min-severity`, and `--set`.\n"+
+		"  Run [`lookout audit policy`](/reference/audit-policy/) to inspect the\n"+
+		"  effective rule table and provenance before scanning.\n"+
+		"- **Scope & holder attribution** — `--skip-system-namespaces` omits\n"+
+		"  platform-managed namespaces from cluster-wide sweeps, and `--per-workload`\n"+
+		"  expands shared ServiceAccount/RBAC/PSA findings (`workloads`,\n"+
+		"  `workload_names`) into one record per affected workload.\n"+
+		"- **Auditable opt-outs (`--exemptions=<file>`)** — when the answer to a\n"+
+		"  posture claim is \"yes, deliberately\", a git-reviewed exemption file\n"+
+		"  records the reason and an expiry instead of the finding quietly\n"+
+		"  disappearing. Covered findings are **annotated** with their reason and\n"+
+		"  counted as `exempt=<n>`, never dropped, and\n"+
+		"  [`lookout audit exemptions`](/reference/audit-exemptions/) audits the\n"+
+		"  exemption file itself for expired or expiring entries.\n\n",
 		"a kubeconfig is the whole setup")
 
 	for _, c := range reg.GroupCommands("audit") {
