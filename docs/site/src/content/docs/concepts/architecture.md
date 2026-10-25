@@ -35,10 +35,11 @@ from:
 
 ## The read-path
 
-One-shot diagnostic commands an agent (or a human) runs mid-investigation:
-`triage`, `state`, `stab`, `perf`, `cloud`, `net`, plus the composed
-`bundle` and `health`. All of them share a single check implementation,
-consumed by three invocation surfaces:
+One-shot diagnostic commands an agent (or a human) runs mid-investigation
+or on a standing schedule:
+`triage`, `state`, `stab`, `perf`, `cloud`, `net`, `audit`, `findings`,
+plus the composed `scan`, `bundle`, and `health`. All of them share a
+single check implementation, consumed by three invocation surfaces:
 
 ```
              CLI (lookout <command>) ──┐
@@ -54,7 +55,8 @@ consumed by three invocation surfaces:
   pre-warm incident sessions; no fork/exec, shared informer cache.
 
 Whatever the surface, the output contract is identical: one finding per line
-(logfmt by default, `--format=json` for JSON-per-line), keys in fixed order,
+(logfmt by default, `--format=json` for JSON-per-line, or
+`--format=findings` for a JSON array of findings), keys in fixed order,
 healthy resources silent, a mandatory final summary line. Exit `0` is pure
 payload on stdout; exit `1` puts diagnostics on stderr only, so a captured
 stream never corrupts a context window; exit `2` is a usage error.
@@ -72,14 +74,17 @@ The sources (enabled per deployment via `--sources`) cover reactive and
 leading classes: `k8s-events` (the reactive baseline), `object-state`
 (transitions: node flaps, emptied endpoints, gridlocked PDBs), `rollout`
 (stalls caught while the old revision still serves), `workload` (failed
-Jobs and CronJob schedules that stop producing runs), `saturation` (slope →
-ETA forecasts), `degradation` (ready-ratio trends), `expiry` (certificate
-countdowns), `capacity` and `quota` (cluster-autoscaler and project-quota
-seams), `notifications` (the provider's own upgrade events and security
-bulletins), and `token-burn` (agent spend as a saturation dimension). The full
-flag surface is in [Reference → `lookout watch`](/reference/watch/); every
-signal kind is cataloged in
-[Reference → Signal kinds](/reference/signal-kinds/).
+Jobs and CronJob schedules that stop producing runs), `autoscaling` (HPA
+thrash and ceiling pinning), `saturation` (slope → ETA forecasts),
+`degradation` (ready-ratio trends), `expiry` (certificate countdowns),
+`capacity` and `quota` (cluster-autoscaler and project-quota seams),
+`ingress` and `gateway` (controller/GCLB and Gateway API path failures),
+`topology-drift` and `compute-class` (placement skew and GKE ComputeClass
+fallback drift), `notifications` (the provider's own upgrade events and
+security bulletins), and `token-burn` (agent spend as a saturation
+dimension). The full flag surface is in
+[Reference → `lookout watch`](/reference/watch/); every signal kind is
+cataloged in [Reference → Signal kinds](/reference/signal-kinds/).
 
 A sentinel with `--store` also keeps a bounded, TTL'd SQLite file: every
 emitted signal with its routing outcome, plus topology snapshots and the

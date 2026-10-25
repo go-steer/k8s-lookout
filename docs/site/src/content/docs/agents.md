@@ -36,7 +36,9 @@ that plant fake credentials.
 
 | The user wants | Do |
 | --- | --- |
-| "Is anything wrong with my cluster?" right now | [Install the CLI](#install-the-cli), run `lookout health` and `lookout triage delta -A` |
+| "Is anything wrong with my cluster?" right now | [Install the CLI](#install-the-cli), run `lookout scan` (or `lookout health` and `lookout triage delta -A`) |
+| "Audit security, reliability, or upgrade readiness" | Run `lookout audit all -A` (with `--profile=default\|strict\|onboarding\|gke-autopilot` or `--policy=<file>`) |
+| Sweep multiple clusters from one workstation | Pass `--contexts=ctx1,ctx2` or `--kubeconfig-dir=<dir>` (with `--concurrency=4`) on any read command |
 | Standing monitoring that opens incidents | [Deploy the sentinel](#deploy-the-sentinel) |
 | Their agent runtime to call these checks as tools | [Serve MCP](#serve-mcp) |
 | A demo / evaluation on a disposable cluster | [Tutorial: see both halves work](/getting-started/tutorial/) — kind cluster, staged failures, real incidents |

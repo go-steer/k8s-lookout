@@ -13,15 +13,38 @@ posture finding is a standing claim — it never self-clears, because a
 workload with one replica has one replica until somebody decides
 otherwise.
 
-That is also why every claim here is `--exemptions`-auditable: the answer
-is often "yes, deliberately", and a git-reviewed exemption file records the
-reason and an expiry instead of the finding quietly disappearing. Covered
-findings are **annotated** with their reason and counted as `exempt=<n>`,
-never dropped.
+Reachable three ways: `lookout audit all -A` (every posture detector in one
+pass over a shared cluster snapshot, stamping `check=<subcommand>`), the
+individual subcommands below, or `lookout scan --include=audit` for the
+whole sweep alongside the incident checks. Like `scan`, it needs nothing
+deployed — a kubeconfig is the whole setup.
 
-Reachable two ways: the subcommands below, or `lookout scan --include=audit`
-for the whole sweep alongside the incident checks. Like `scan`, it needs
-nothing deployed — a kubeconfig is the whole setup.
+### Profiles, policy overlays, and exemptions
+
+Posture claims depend on the cluster's role and platform, so every audit
+command shares one rule-selection and exemption pipeline:
+
+- **Profiles (`--profile=default|strict|onboarding|gke-autopilot`)** —
+  built-in rule presets (e.g., `strict` promotes info-level hardening and
+  reliability gaps to `warning`; `onboarding` focuses on high-signal
+  blockers; `gke-autopilot` disables checks that Autopilot enforces at
+  admission).
+- **Declarative policy (`--policy=<file>`) & CLI overrides** — per-kind
+  enablement, severity overrides, and threshold `params` in git-reviewed
+  YAML, composable with `--only`, `--skip`, `--min-severity`, and `--set`.
+  Run [`lookout audit policy`](/reference/audit-policy/) to inspect the
+  effective rule table and provenance before scanning.
+- **Scope & holder attribution** — `--skip-system-namespaces` omits
+  platform-managed namespaces from cluster-wide sweeps, and `--per-workload`
+  expands shared ServiceAccount/RBAC/PSA findings (`workloads`,
+  `workload_names`) into one record per affected workload.
+- **Auditable opt-outs (`--exemptions=<file>`)** — when the answer to a
+  posture claim is "yes, deliberately", a git-reviewed exemption file
+  records the reason and an expiry instead of the finding quietly
+  disappearing. Covered findings are **annotated** with their reason and
+  counted as `exempt=<n>`, never dropped, and
+  [`lookout audit exemptions`](/reference/audit-exemptions/) audits the
+  exemption file itself for expired or expiring entries.
 
 ## [`lookout audit ai`](/reference/audit-ai/)
 

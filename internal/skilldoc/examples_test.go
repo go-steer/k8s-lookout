@@ -137,6 +137,17 @@ func validateInvocation(t *testing.T, toks []string) error {
 	if !ok {
 		return fmt.Errorf("no such command in the pkg/checks registry")
 	}
+	for i, a := range args {
+		if val, found := strings.CutPrefix(a, "--exemptions="); found && val != "" {
+			if _, err := os.Stat(val); os.IsNotExist(err) {
+				tmp := filepath.Join(t.TempDir(), "exemptions.yaml")
+				if werr := os.WriteFile(tmp, []byte("exemptions: []\n"), 0o600); werr != nil {
+					return werr
+				}
+				args[i] = "--exemptions=" + tmp
+			}
+		}
+	}
 	c.Run = func(context.Context, emit.Invocation) (int, error) { return 0, nil }
 	res := checktest.Run(t, c, args...)
 	if res.Code == emit.ExitUsage {

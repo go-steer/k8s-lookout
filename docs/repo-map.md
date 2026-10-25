@@ -57,6 +57,8 @@ k8s-lookout/
 │   ├── leeway/           # shared placement intent & drift math used by topologydrift/computeclass
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
+│   ├── policy/           # four-layer posture policy engine + built-in profiles
+│   │                     #   (default, strict, onboarding, gke-autopilot) for `lookout audit`
 │   ├── sources/          # §7.2 signal sources, one package each: k8sevents, objectstate,
 │   │                     #   rollout, workload, autoscaling, saturation, degradation, expiry,
 │   │                     #   capacity, ingress, gateway, topologydrift, computeclass, quota,
@@ -154,7 +156,8 @@ workload-identity, stockout, orphans, ipspace, …).
 ## Generated outward — one source of truth
 
 Command metadata declared in `pkg/checks` (`Command`: name, flags,
-when-to-use line, output-field glossary) generates three surfaces:
+when-to-use line, output-field glossary, and finding-kind ledger)
+generates four surfaces:
 
 1. `--help` — `pkg/checks/help.go`, rendered by the multicall binary;
 2. MCP tool schemas — `internal/mcpserver/schema.go`, every command
@@ -162,7 +165,10 @@ when-to-use line, output-field glossary) generates three surfaces:
 3. skill `references/` — `internal/skilldoc` via
    `dev/tools/gen-skill-refs` (committed output; a drift test in
    `internal/skilldoc` fails CI when metadata changes without a
-   re-run).
+   re-run);
+4. Starlight docs-site `reference/` and `detect/{index,scan,audit}.md`
+   — `internal/sitedoc` via `dev/tools/gen-site-docs` (committed
+   output; a drift test in `internal/sitedoc` fails CI on drift).
 
 Drift gates on the docs themselves: every fenced ```` ```lookout ````
 block under `skills/` must parse against the real registry
@@ -247,28 +253,43 @@ Where the tree deliberately differs from DESIGN.md, in one place:
 
 ## Further pointers
 
-- [`DESIGN.md`](./DESIGN.md) — normative spec; records *rejected*
-  alternatives with reasons. Do not re-propose without new evidence.
-- Design notes: [`signal-schema-v1.md`](./signal-schema-v1.md),
-  [`triage-status-write-design.md`](./triage-status-write-design.md),
-  [`watchboard-rotation-design.md`](./watchboard-rotation-design.md),
-  [`agent-sink-design.md`](./agent-sink-design.md),
-  [`graph-q5-gate.md`](./graph-q5-gate.md),
-  [`fleet-audit-detectors-design.md`](./fleet-audit-detectors-design.md)
-  (proposal — re-basing the fleet audit onto deterministic `checks`),
-  [`audit-ingestion-contract.md`](./audit-ingestion-contract.md)
-  (its consumer seam: `emit.Finding` → an audit ledger),
-  [`leeway-design.md`](./leeway-design.md)
-  (proposal — placement-drift detection as `pkg/leeway` plus two
-  watch sources; the runtime complement to `audit.no_spread`),
-  [`in-pod-probe-design.md`](./in-pod-probe-design.md)
-  (decided — `net probe-from`, the one opt-in privileged probe, and
-  the `deploy-probe/` overlay; DESIGN §5 amendment of 2026-10-07),
-  [`mcp-multi-tenant-design.md`](./mcp-multi-tenant-design.md)
-  (decided — one MCP endpoint for many clusters and many callers;
-  per-user identity via steward first (Gemini Enterprise), then a
-  per-call `cluster` argument).
-- [`milestones/`](./milestones/) — M0–M5 completion records with
-  exit-check evidence and the post-M5 review backlog (M5.md).
-- [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
-  — historical only; nothing in it is normative.
+- **Normative specifications & contracts:**
+  - [`DESIGN.md`](./DESIGN.md) — normative spec; records *rejected*
+    alternatives with reasons. Do not re-propose without new evidence.
+  - [`signal-schema-v1.md`](./signal-schema-v1.md) — frozen v1 wire
+    contract and kind ledger for fleet consumers.
+  - [`cli-stability-policy.md`](./cli-stability-policy.md) — CLI flag,
+    syntax, default, and exit-code stability rules.
+  - [`adding-a-check.md`](./adding-a-check.md) — step-by-step guide and
+    touchpoint checklist for adding a read-path command.
+  - [`release-process.md`](./release-process.md) — release tagging,
+    multi-arch image signing, and SBOM attestation pipeline.
+- **Subsystem design notes (shipped):**
+  - [`fleet-audit-detectors-design.md`](./fleet-audit-detectors-design.md)
+    and [`audit-ingestion-contract.md`](./audit-ingestion-contract.md) —
+    deterministic posture detectors (`lookout audit`), policy profiles,
+    and the `emit.Finding` (`--format=findings`) audit ledger seam.
+  - [`findings-diff-design.md`](./findings-diff-design.md) — stateful
+    finding transition stream (`lookout findings diff` and `findings ack`).
+  - [`leeway-design.md`](./leeway-design.md) — placement-drift detection
+    (`pkg/leeway`, watch sources `topology-drift` & `compute-class`,
+    read-path `audit computeclass`, and standalone `cmd/leeway`).
+  - [`in-pod-probe-design.md`](./in-pod-probe-design.md) — `net probe-from`,
+    the opt-in privileged ephemeral-container probe (`deploy-probe/`).
+  - [`multi-cluster-design.md`](./multi-cluster-design.md) and
+    [`mcp-multi-tenant-design.md`](./mcp-multi-tenant-design.md) —
+    multi-cluster resolution (`internal/fleet`, `--contexts`,
+    `--kubeconfig-dir`) and per-caller Google OAuth identity on `lookout mcp`.
+  - [`agent-sink-design.md`](./agent-sink-design.md) and
+    [`ax-sink-design.md`](./ax-sink-design.md) — the two-verb `Sink`
+    interface, generic webhook sink, and AX task lifecycle sink.
+  - [`triage-status-write-design.md`](./triage-status-write-design.md),
+    [`watchboard-rotation-design.md`](./watchboard-rotation-design.md),
+    and [`graph-q5-gate.md`](./graph-q5-gate.md).
+- **Historical & milestone records:**
+  - [`milestones/`](./milestones/) — M0–M5 completion records with
+    exit-check evidence.
+  - [`assessments/`](./assessments/) — competitive & detection-coverage
+    assessments (k8sgpt, LangChain SRE agent).
+  - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
+    — historical only; nothing in it is normative.

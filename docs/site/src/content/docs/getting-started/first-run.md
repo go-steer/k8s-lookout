@@ -57,7 +57,9 @@ every kind it can emit, grouped by stage.
 
 `scan` reports **incidents**: things broken now, which clear themselves
 when fixed. The posture sweep is one flag away —
-`lookout scan --include=audit`, or on its own:
+`lookout scan --include=audit`, or across every posture detector in one
+shared-snapshot pass (`lookout audit all -A`, or a single layer like
+`lookout audit workloads -A`):
 
 ```sh
 lookout audit workloads -A

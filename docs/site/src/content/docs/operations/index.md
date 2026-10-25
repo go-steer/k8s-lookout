@@ -30,6 +30,14 @@ is [Getting started → Deploy the sentinel](/getting-started/deploy/)):
   sentinel watches: `--exclude-namespace` as a real watch scope, why
   `--namespace` is not one, and which sources can be split into their
   own deployment without paying for a second cache.
+- [Sizing & resource footprint](/operations/sizing/) — informer memory
+  trimming, SQLite store bounds, and CPU/memory sizing by cluster scale.
+- [Placement drift (`topology-drift` & `compute-class`)](/operations/placement/)
+  — how the sentinel watches runtime pod placement skew and GKE
+  ComputeClass fallback states.
+- [Standalone `leeway` exporter](/operations/leeway-standalone/) — running
+  `cmd/leeway` for placement-drift Prometheus metrics without the sentinel
+  store or inject pipeline.
 
 The generated [`lookout watch` flag table](/reference/watch/) and
 [Prometheus metrics reference](/reference/metrics/) are the authoritative
