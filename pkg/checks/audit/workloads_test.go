@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
@@ -37,11 +38,25 @@ import (
 // asked; the probe bodies are irrelevant to every claim here, only
 // their existence is.
 func container(name string, readiness, liveness bool) corev1.Container {
-	c := corev1.Container{Name: name, Image: "example.com/" + name + ":v1"}
+	c := corev1.Container{
+		Name:  name,
+		Image: "example.com/" + name + ":v1",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
 	// Readiness tighter than liveness, as a well-formed manifest has
 	// it; a pair on one handler with identical timings is itself a
 	// finding (audit.liveness_preempts_readiness), tested in
-	// rollout_test.go.
+	// rollout_test.go. PeriodSeconds=20 gives a 60s liveness window
+	// (3 * 20s), satisfying the 60s startup window check.
 	probe := func(period int32) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: &corev1.TCPSocketAction{},
@@ -51,7 +66,7 @@ func container(name string, readiness, liveness bool) corev1.Container {
 		c.ReadinessProbe = probe(5)
 	}
 	if liveness {
-		c.LivenessProbe = probe(10)
+		c.LivenessProbe = probe(20)
 	}
 	return c
 }
@@ -151,7 +166,18 @@ func cpuUtil(pct int32) autoscalingv2.MetricSpec {
 // requests attaches a cpu request, the denominator a utilization
 // target divides by.
 func requests(c corev1.Container, cpu string) corev1.Container {
-	c.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)}
+	if c.Resources.Requests == nil {
+		c.Resources.Requests = corev1.ResourceList{}
+	}
+	c.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(cpu)
+	return c
+}
+
+// noCPURequest removes the explicit CPU request while keeping the CPU limit
+// (so HPA utilization arithmetic fails on the missing request field, while
+// template resource posture remains satisfied by the limit).
+func noCPURequest(c corev1.Container) corev1.Container {
+	delete(c.Resources.Requests, corev1.ResourceCPU)
 	return c
 }
 
@@ -206,8 +232,8 @@ func postureCluster() []runtime.Object {
 
 		deploy("prod", "checkout", 3, spread(template(
 			map[string]string{"app": "checkout"},
-			container("app", true, true),
-			container("envoy", false, false),
+			noCPURequest(container("app", true, true)),
+			noCPURequest(container("envoy", false, false)),
 		))),
 		pdb("prod", "checkout-pdb", matching(map[string]string{"app": "checkout"})),
 		hpa("prod", "checkout-hpa", "Deployment", "checkout", 3, 3, cpuUtil(70)),
@@ -656,7 +682,7 @@ func TestWorkloadsHPAUtilizationNeedsRequests(t *testing.T) {
 	// app has a cpu request, the sidecar does not.
 	tpl := spread(template(map[string]string{"app": "x"},
 		requests(container("app", true, true), "1"),
-		container("sidecar", true, true),
+		noCPURequest(container("sidecar", true, true)),
 	))
 
 	for _, tc := range []struct {
@@ -702,7 +728,7 @@ func TestWorkloadsHPAUtilizationNeedsRequests(t *testing.T) {
 // shape of this defect.
 func TestWorkloadsHPAEmptyMetricsDefaultsToCPUUtilization(t *testing.T) {
 	objs := []runtime.Object{
-		deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, container("app", true, true)))),
+		deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, noCPURequest(container("app", true, true))))),
 		pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
 		hpa("prod", "x-hpa", "Deployment", "x", 2, 10),
 	}
@@ -1064,4 +1090,149 @@ func TestWorkloadsReplicaFloorKeepsTheFingerprint(t *testing.T) {
 	if plain == "" || plain != scaled {
 		t.Errorf("fingerprint moved: plain=%q under-hpa=%q", plain, scaled)
 	}
+}
+
+func TestWorkloadsHPAMinReplicasIsOne(t *testing.T) {
+	tpl := spread(template(map[string]string{"app": "x"}, container("app", true, true)))
+	objs := []runtime.Object{
+		deploy("prod", "x", 3, tpl),
+		pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		hpa("prod", "x-hpa", "Deployment", "x", 1, 5, cpuUtil(70)),
+	}
+	res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+	var got map[string]string
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["kind"] == "audit.hpa_cannot_scale" && r["reason"] == "MinReplicasIsOne" {
+			got = r
+		}
+	}
+	if got == nil {
+		t.Fatalf("want MinReplicasIsOne finding, got:\n%s", res.Stdout)
+	}
+	if got["severity"] != "info" || got["min_replicas"] != "1" || got["max_replicas"] != "5" {
+		t.Errorf("finding = %v", got)
+	}
+}
+
+func TestWorkloadsNoStartupProbe(t *testing.T) {
+	t.Run("liveness-window-under-60s", func(t *testing.T) {
+		c := container("app", true, true)
+		c.LivenessProbe.PeriodSeconds = 10
+		c.LivenessProbe.FailureThreshold = 3
+		objs := []runtime.Object{
+			deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, c))),
+			pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		}
+		res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+		recs := findingLines(t, res.Stdout)
+		if len(recs) != 1 {
+			t.Fatalf("want 1 finding, got:\n%s", res.Stdout)
+		}
+		if recs[0]["kind"] != "audit.no_startup_probe" || recs[0]["reason"] != "LivenessWindowUnder60s" || recs[0]["severity"] != "info" {
+			t.Errorf("finding = %v", recs[0])
+		}
+		if recs[0]["liveness_window"] != "30s" || recs[0]["container"] != "app" {
+			t.Errorf("details = %v", recs[0])
+		}
+	})
+
+	t.Run("slow-start-without-startup-probe", func(t *testing.T) {
+		c := container("app", true, true)
+		c.ReadinessProbe.InitialDelaySeconds = 45
+		c.LivenessProbe.InitialDelaySeconds = 60
+		c.LivenessProbe.PeriodSeconds = 10
+		objs := []runtime.Object{
+			deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, c))),
+			pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		}
+		res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+		recs := findingLines(t, res.Stdout)
+		if len(recs) != 1 {
+			t.Fatalf("want 1 finding, got:\n%s", res.Stdout)
+		}
+		if recs[0]["kind"] != "audit.no_startup_probe" || recs[0]["reason"] != "SlowStartWithoutStartupProbe" || recs[0]["severity"] != "warning" {
+			t.Errorf("finding = %v", recs[0])
+		}
+	})
+
+	t.Run("startup-probe-present-suppresses", func(t *testing.T) {
+		c := container("app", true, true)
+		c.LivenessProbe.PeriodSeconds = 10
+		c.StartupProbe = c.LivenessProbe.DeepCopy()
+		objs := []runtime.Object{
+			deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, c))),
+			pdb("prod", "x-pdb", matching(map[string]string{"app": "x"})),
+		}
+		res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+		if len(findingLines(t, res.Stdout)) != 0 {
+			t.Errorf("want 0 findings when startupProbe is set, got:\n%s", res.Stdout)
+		}
+	})
+}
+
+func TestWorkloadsPDBPosture(t *testing.T) {
+	t.Run("overlapping-pdb-selectors", func(t *testing.T) {
+		objs := []runtime.Object{
+			deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, container("app", true, true)))),
+			pdb("prod", "pdb-a", matching(map[string]string{"app": "x"})),
+			pdb("prod", "pdb-b", matching(map[string]string{"app": "x"})),
+		}
+		res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+		recs := findingLines(t, res.Stdout)
+		if len(recs) != 1 {
+			t.Fatalf("want 1 finding, got:\n%s", res.Stdout)
+		}
+		if recs[0]["kind"] != "audit.pdb_posture" || recs[0]["reason"] != "OverlappingPDBSelectors" {
+			t.Errorf("finding = %v", recs[0])
+		}
+		if recs[0]["kind_of_object"] != "PodDisruptionBudget" || recs[0]["name"] != "pdb-a" || recs[0]["overlapping_pdb"] != "pdb-b" || recs[0]["workload"] != "Deployment/x" {
+			t.Errorf("details = %v", recs[0])
+		}
+	})
+
+	t.Run("zero-disruptions-by-spec", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			mod  func(*policyv1.PodDisruptionBudget)
+		}{
+			{"max-unavailable-zero", func(p *policyv1.PodDisruptionBudget) {
+				v := intstr.FromInt32(0)
+				p.Spec.MaxUnavailable = &v
+			}},
+			{"max-unavailable-zero-percent", func(p *policyv1.PodDisruptionBudget) {
+				v := intstr.FromString("0%")
+				p.Spec.MaxUnavailable = &v
+			}},
+			{"min-available-100-percent", func(p *policyv1.PodDisruptionBudget) {
+				v := intstr.FromString("100%")
+				p.Spec.MinAvailable = &v
+			}},
+			{"min-available-equals-replicas", func(p *policyv1.PodDisruptionBudget) {
+				v := intstr.FromInt32(3)
+				p.Spec.MinAvailable = &v
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p := pdb("prod", "x-pdb", matching(map[string]string{"app": "x"}))
+				tc.mod(p)
+				objs := []runtime.Object{
+					deploy("prod", "x", 3, spread(template(map[string]string{"app": "x"}, container("app", true, true)))),
+					p,
+				}
+				res := checktest.Run(t, audit.WorkloadsCommand(testDeps(objs...)), "-A")
+				var got map[string]string
+				for _, r := range findingLines(t, res.Stdout) {
+					if r["kind"] == "audit.pdb_posture" && r["reason"] == "ZeroDisruptionsAllowedBySpec" {
+						got = r
+					}
+				}
+				if got == nil {
+					t.Fatalf("want ZeroDisruptionsAllowedBySpec, got:\n%s", res.Stdout)
+				}
+				if got["kind_of_object"] != "PodDisruptionBudget" || got["name"] != "x-pdb" || got["severity"] != "warning" {
+					t.Errorf("finding = %v", got)
+				}
+			})
+		}
+	})
 }
