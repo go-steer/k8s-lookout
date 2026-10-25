@@ -129,6 +129,16 @@ When a KEDA-scaled workload stops scaling — report every ScaledObject or Scale
 | `keda.not_ready` | warning | KEDA reports the scaler Ready=False: scaling has stopped at the current size |
 | `crd.unavailable` | info | the API group this check reads is not served by the cluster, so nothing was examined (no coverage lies) |
 
+### [`lookout state kcc`](/reference/state-kcc/)
+
+When GCP resources managed by Config Connector stop reconciling or wedge on deletion — inspect *.cnrm.cloud.google.com objects for UpdateFailed, DependencyNotReady, ManagementConflict, DeleteFailed/stuck finalizers, and generation drift. Degrades explicitly on clusters without Config Connector installed.
+
+| Kind | Severity | What it means |
+| --- | --- | --- |
+| `kcc.not_ready` | warning, info | a Config Connector object is not Ready, stuck terminating, or has an unreconciled spec generation |
+| `kcc.unavailable` | info | no Config Connector (*.cnrm.cloud.google.com) CRDs are served by the cluster, so nothing was examined (no coverage lies) |
+| `read.unavailable` | info | a resource this command reads was refused (RBAC forbidden, e.g. Nodes, Secrets or RBAC objects under the built-in view role) or is not served, so the checks that need it did not run and their silence is not a clean bill; everything else was still verified. The message names the refused verb and resource, whether it is cluster-scoped, whether the built-in view role grants it, and the grant that fixes it; resource= carries the refused resource as resource[.group] — an explicit degradation record, never silence |
+
 ### [`lookout state wi`](/reference/state-wi/)
 
 When a GKE pod gets 403s or metadata-server errors calling GCP APIs, verify the Workload Identity chain — KSA annotation (iam.gke.io/gcp-service-account) → roles/iam.workloadIdentityUser binding on the GSA — reporting only the broken links; vanilla clusters report an explicit unavailable.

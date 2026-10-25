@@ -151,6 +151,7 @@ testing the CLI through agent harnesses via skills or MCP.
 | `state storage` | why a PersistentVolumeClaim will never bind: missing StorageClass, no cluster default, static-only class, stranded volumes |
 | `state gateway` ‡ | the Gateway API path end to end: GatewayClass → Gateway → listener → HTTPRoute → Service, and every hop that is rejected, unprogrammed, or points at nothing |
 | `state keda` ‡ | KEDA scalers that have stopped scaling: a ScaledObject whose target Deployment/StatefulSet is gone, a trigger whose TriggerAuthentication does not exist, or a scaler KEDA reports not Ready |
+| `state kcc` ‡ | Config Connector (`*.cnrm.cloud.google.com`) objects that have stopped reconciling or wedged on deletion: `UpdateFailed`, `DependencyNotReady`, `ManagementConflict`, `DeleteFailed`/stuck finalizers, and generation drift |
 | `stab drift` | out-of-band drift vs the GitOps manager via managedFields |
 | `stab drain` | everything that will block a node drain |
 | `stab scaledown` | underused nodes the cluster autoscaler cannot remove, and the PDBs and pods pinning them |

@@ -102,6 +102,8 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `keda.missing_target` | warning | the ScaledObject's scaleTargetRef names a Deployment or StatefulSet that does not exist — nothing is being scaled |
 | `keda.missing_auth` | warning | a trigger's authenticationRef names a TriggerAuthentication or ClusterTriggerAuthentication that does not exist — the scaler cannot read its metric |
 | `keda.not_ready` | warning | KEDA reports the scaler Ready=False: scaling has stopped at the current size |
+| `kcc.not_ready` | warning, info | a Config Connector object is not Ready, stuck terminating, or has an unreconciled spec generation |
+| `kcc.unavailable` | info | no Config Connector (*.cnrm.cloud.google.com) CRDs are served by the cluster, so nothing was examined (§11: no coverage lies) |
 | `wi.gsa_missing` | critical | the annotated Google service account does not exist — every GCP call from these pods fails |
 | `wi.unbound` | critical | the KSA annotates a GSA but the roles/iam.workloadIdentityUser binding is missing or malformed |
 | `wi.unannotated_use` | info | a pod sets GOOGLE_APPLICATION_CREDENTIALS but its ServiceAccount carries no Workload Identity annotation |
@@ -284,6 +286,11 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `target` | the scaleTargetRef the ScaledObject names, as <Kind>/<name> |
 | `trigger` | trigger type (prometheus, kafka, …) whose authenticationRef does not resolve |
 | `authentication` | the authenticationRef that does not resolve, as <Kind>/<name> |
+| `gvr` | GroupVersionResource of the Config Connector object (group/version/resource) |
+| `api_version` | apiVersion of the Config Connector object |
+| `condition_reason` | the Ready condition's reason reported by the Config Connector controller |
+| `observed_generation` | status.observedGeneration last reconciled by Config Connector |
+| `generation` | metadata.generation of the object |
 | `gsa` | the cloud identity (GSA email) the ServiceAccount's annotation claims |
 | `problem` | machine-matchable problem code from the provider (e.g. no-workload-identity-binding) |
 | `env` | the credential-file env var found (GOOGLE_APPLICATION_CREDENTIALS) |
