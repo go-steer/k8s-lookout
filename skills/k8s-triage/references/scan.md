@@ -109,10 +109,17 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `wi.unannotated_use` | info | a pod sets GOOGLE_APPLICATION_CREDENTIALS but its ServiceAccount carries no Workload Identity annotation |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence (§2, §11) |
 | `drift.manual_edit` | critical, warning | a manager other than the GitOps controller owns spec fields on this object; critical when one of them is high blast radius (image, replicas, env) |
+| `audit.ai_workload_exposure` | warning, info | an AI/inference workload has an unisolated serving Service, hostNetwork with accelerators, a hostPath model-cache mount, an automounted default ServiceAccount token, or an unpinned model-loader/inference container image |
 | `audit.workload_identity_off` | warning | Workload Identity is off cluster-wide, or a node pool bypasses it — pods authenticate to the cloud as the node |
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
 | `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `audit.cluster_security_posture` | warning, info | cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled |
+| `audit.cluster_network_posture` | warning, info | cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint |
+| `audit.cluster_observability_off` | warning, info | cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off |
+| `audit.cluster_backup_off` | info | Backup for GKE addon is disabled on the cluster |
+| `audit.compute_class_posture` | warning, info | a workload's GKE ComputeClass or hardware-placement spec has no fallback or cannot be satisfied by the cluster: references a non-existent ComputeClass, requests a class or accelerator with zero matching nodes and no node-pool auto-creation, pins multi-replica pods directly to Spot without a ComputeClass priority fallback chain, or pins an accelerator workload to a zone with zero matching accelerator nodes while other zones have them |
+| `audit.single_zone_nodepool` | warning, info | a multi-node pool has all of its nodes in a single availability zone while the cluster spans multiple zones, or a workload with zone topologySpreadConstraints is pinned to a single-zone node pool |
 | `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
 | `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
 | `audit.privileged_container` | warning | a container runs privileged or holds a node-root capability (ALL, SYS_ADMIN): a container escape is a node compromise |
@@ -125,6 +132,9 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.capabilities_added` | warning, info | a container adds Linux capabilities below node-root (NET_ADMIN, NET_RAW, SYS_PTRACE, ...) or does not drop ALL default capabilities |
 | `audit.podsecurity_gaps` | warning | the namespace enforces no Pod Security Admission level, so none of the above is prevented |
 | `audit.image_floating_tag` | info | a container image reference names no particular bytes — a tag that by convention moves (latest, main, master, dev, nightly, stable, edge) or no tag at all, with no digest: the next pull may run different code with no deploy and no record |
+| `audit.no_resource_quota` | warning, info | workload-bearing namespace has no ResourceQuota or a ResourceQuota is >= 90% of hard limit |
+| `audit.no_limit_range` | info | workload-bearing namespace has no LimitRange while containers omit resource requests/limits |
+| `audit.namespace_onboarding_gaps` | warning, info | workload-bearing namespace is missing required onboarding labels |
 | `audit.netpol_missing` | warning, info | nothing restricts this direction for the subject — a namespace with no policy at all, or a workload the covering policies' selectors miss; info for the egress direction, where no policy is a defensible default |
 | `audit.netpol_selects_nothing` | warning | this NetworkPolicy's podSelector matches no workload in its namespace, so neither its isolation nor its allow rules apply to anything; reported only where the namespace claim does not already say the namespace's policies select nothing |
 | `audit.network_policy_allow_all` | warning, info | this NetworkPolicy has an allow-all peer rule (empty from/to peer list, 0.0.0.0/0 or ::/0 without except, or an empty namespaceSelector with no podSelector); warning for ingress, info for egress |
@@ -132,9 +142,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.wildcard_rbac` | warning, info | the role has a rule using `*` for verbs or resources; warning for a full wildcard that something binds, info for an unbound one and for the narrower wildcards |
 | `audit.exec_attach_grant` | warning, info | the binding grants pods/exec, pods/attach, or pods/portforward to its subjects; warning for exec or attach, info for portforward |
 | `audit.impersonate_escalate_grant` | warning | the binding grants impersonate on identities or bind/escalate on RBAC roles to its subjects |
-| `audit.version_behind` | warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
+| `audit.version_behind` | critical, warning, info | the control plane or a node pool is behind what the provider publishes, or a node pool has skewed from the control plane; info while the gap is still within the supported skew |
 | `audit.upgrade_unmanaged` | warning | nothing will close that gap on its own: no release channel, or node auto-upgrade/auto-repair off |
-| `audit.upgrade_blocked` | warning, info | an active maintenance exclusion, or a node image on the removed Docker runtime, will stop the upgrade when it comes |
+| `audit.upgrade_blocked` | critical, warning, info | an active maintenance exclusion, a node image on the removed Docker runtime, a removed API in use, a fail-closed upgrade-path webhook, or a zero-disruption PDB will stop or stall the upgrade when it comes |
+| `audit.deprecated_api_in_use` | critical, warning | a cluster resource was last applied with a Kubernetes API version that is deprecated or removed in the target minor release |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
 | `audit.no_pdb` | warning | the workload has no PodDisruptionBudget: a drain can take every replica at once |
 | `audit.pdb_posture` | warning | a PodDisruptionBudget overlaps another PDB on the same workload or allows zero disruptions by spec, permanently blocking voluntary node drains |
@@ -310,6 +321,15 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `principal_agent` | --identity: the caller-supplied client string of that write (a kubectl or controller user-agent), when the trail records one; caller-controlled text, display-only |
 | `other_principals` | --identity: other distinct principals that wrote the object inside the audit window, capped at 8 with a +N more tail |
 | `identity` | summary note when --identity could not be served: the §2 unavailable marker naming why (no provider / audit capability absent / lookout's own cloud identity could not obtain an access token) |
+| `ports` | Service port(s) exposed without an ingress NetworkPolicy (ServingPortClusterWideNoNetPol) |
+| `accelerator` | accelerator resource or node selector detected on the workload, when present |
+| `volumes` | comma-separated name:path pairs (capped at 8) of hostPath volumes mounted by the AI workload (SharedModelCacheHostPath) |
+| `service_account` | ServiceAccount name used by the AI workload (DefaultSAWithAccelerator) |
+| `containers` | count of containers in the AI workload template with an unpinned image reference (UnpinnedModelLoaderImage) |
+| `container_names` | comma-separated container names (capped at 8) with an unpinned image reference (UnpinnedModelLoaderImage) |
+| `total_containers` | total containers (init + regular) in the AI workload template (UnpinnedModelLoaderImage) |
+| `ai_workloads` | summary-line note: count of AI/inference workload templates identified in the scan scope |
+| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
 | `cluster` | on a node-pool finding: the cluster the pool belongs to, so the record stands alone |
 | `workload_pool` | the cluster-wide workload identity pool that this node pool's pods bypass |
 | `metadata_mode` | how the node pool exposes instance metadata to pods: node-identity means any pod can mint tokens for the node's service account |
@@ -319,19 +339,26 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `authorized_networks` | how many source ranges the allow-list permits |
 | `authorized_network_cidrs` | those ranges, sorted as the provider returned them and capped at 8 with a +N more tail |
 | `gcp_public_cidrs` | whether the provider's own public ranges are admitted in addition to the allow-list |
+| `compute_class` | the `cloud.google.com/compute-class` name requested by the workload template |
+| `zone` | the availability zone (`topology.kubernetes.io/zone`) the workload or single-zone node pool is pinned to |
+| `accelerator_zones` | zones in the cluster that actually host nodes with the requested accelerator, capped at 8 |
+| `spot_selector` | the nodeSelector or affinity expression pinning the workload directly to Spot nodes |
+| `services` | count of serving Services routing to the workload, when Service-backed |
+| `service_names` | names of the serving Services routing to the workload, capped at 8 |
+| `nodepool` | the `cloud.google.com/gke-nodepool` name for a single-zone node pool |
+| `cluster_zones` | distinct availability zones across all nodes in the cluster, capped at 8 |
+| `affected_workloads` | workloads with zone topologySpreadConstraints pinned to the single-zone node pool |
+| `affected_workload_names` | their Kind/namespace/name, sorted and capped at 8 |
+| `compute_classes` | summary note: ComputeClass custom resources listed in the cluster, when the CRD is served |
 | `exempt_kind` | the finding kind the entry covers — this is the entry's `kind:` field, not this finding's own kind |
 | `expires` | when the entry stops applying, RFC 3339 (a bare `YYYY-MM-DD` in the file resolves to 00:00:00Z that day) |
 | `expired_for` | how long ago the entry lapsed, rounded to whole days — only on audit.exemption_expired |
 | `expires_in` | how long until the entry lapses, rounded to whole days — only on audit.exemption_expiring |
 | `owner` | the entry's `owner:` field, absent if it has none — which is itself worth fixing, since "expired, and nobody knows whose it was" is where these files end up |
 | `justification` | the entry's `reason:` field: why the exempted finding was accepted. Distinct from the envelope's exempt_reason, which is the justification for THIS finding being exempt |
-| `containers` | containers implicated by the finding — those running privileged, or holding a node-root capability |
-| `container_names` | their names, capped at 8 with a +N more tail |
-| `total_containers` | containers in the pod template, init containers included, so `containers` reads as a fraction |
 | `capabilities` | the node-root capabilities added by those containers (ALL, SYS_ADMIN), sorted and deduplicated |
 | `host_paths` | hostPath volumes the template mounts; a declared but unmounted hostPath volume grants no access and is not counted |
 | `host_path_names` | the paths on the node, sorted and capped at 8 |
-| `service_account` | the ServiceAccount the finding is about — always `default`, the one every pod gets when its template names none |
 | `mounting_workloads` | workloads in the namespace running as the default ServiceAccount without disabling automount at the pod level; the finding does not fire at 0 |
 | `mounting_workload_names` | their Kind/name, sorted and capped at 8 |
 | `pss_enforce` | the namespace's pod-security.kubernetes.io/enforce label, omitted when unset |
@@ -339,7 +366,8 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `pss_audit` | its /audit label, omitted when unset — same dry-run meaning |
 | `workloads` | pod templates this pass judged in the namespace, so an unenforced namespace with nothing in it reads differently from a busy one |
 | `workload_names` | their Kind/name, sorted and capped at 8 |
-| `skipped_system_namespaces` | summary note: distinct system namespaces skipped under `--skip-system-namespaces` |
+| `quota` | name of the ResourceQuota at or above 90% of its hard limit |
+| `missing_labels` | comma-separated required onboarding labels missing from the Namespace |
 | `policies` | NetworkPolicies in the namespace naming this direction in policyTypes; 0 on a namespace-subject finding, and the number that failed to select the subject on a workload one |
 | `total_policies` | NetworkPolicies in the namespace in either direction, so an egress-only namespace does not read as an empty one |
 | `host_network_workloads` | pod templates excluded because they use the node's network namespace, where NetworkPolicy does not apply; omitted at 0 |
@@ -358,7 +386,7 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `platform_managed` | summary note: bindings and roles left out because the platform reconciles them (kubernetes.io/bootstrapping=rbac-defaults, or addonmanager.kubernetes.io/mode=Reconcile) |
 | `aggregated_roles` | summary note: aggregated ClusterRoles left out of audit.wildcard_rbac, whose rules come from the roles that are judged; omitted when there are none or ClusterRoles are out of scope |
 | `version` | the current version of the finding's subject — the control plane's, or the node pool's |
-| `target_version` | the version the provider would move this cluster to: its channel's upgrade target where one is published, otherwise the channel's default |
+| `target_version` | the version the provider would move this cluster to: its channel's upgrade target where one is published, otherwise the channel's default (or --target-version) |
 | `control_plane_version` | on a node-pool skew finding: the control-plane version the pool is measured against |
 | `minor_versions_behind` | how many minor releases separate the two versions |
 | `channel` | the release channel the cluster is subscribed to, and the one whose published versions the comparison used; `none` when it is subscribed to no channel |
@@ -367,6 +395,13 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `scope` | how much of the upgrade stream that exclusion holds back: all-upgrades, minor-upgrades or minor-and-node-upgrades |
 | `ends` | when the exclusion lifts, or `end-of-support` for one that runs until the cluster's version leaves support |
 | `days_remaining` | how much longer the exclusion has left to run |
+| `removed_in` | on a deprecated-API finding: the Kubernetes major.minor release that removes the API |
+| `replacement` | on a deprecated-API finding: the successor group/version to migrate to |
+| `webhook_group` | on a webhook upgrade-blocker finding: the upgrade-critical operation group intercepted (drain-eviction, pod-creation, node-lease, kubelet-csr, csi-storage, control-plane-rbac) |
+| `timeout_seconds` | on a webhook timeout finding: the configured webhook timeout in seconds, or default(10) when unset |
+| `min_available` | on a PDB upgrade-blocker finding: the configured minAvailable threshold |
+| `max_unavailable` | on a PDB upgrade-blocker finding: the configured maxUnavailable threshold |
+| `disruptions_allowed` | on a PDB upgrade-blocker finding: the live disruptionsAllowed count |
 | `namespace_pdbs` | PodDisruptionBudgets in the workload's namespace — 0 says the namespace has no PDB culture at all, a non-zero value says this workload was missed |
 | `overlapping_pdb` | other PodDisruptionBudgets in the same namespace selecting the same workload |
 | `workload` | workload(s) selected by the PodDisruptionBudget, as Kind/name |
@@ -388,8 +423,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `last_schedule_time` | the CronJob's status.lastScheduleTime, RFC 3339 |
 | `suspended_for` | how long spec.suspend has been true, rounded to whole days |
 | `suspended_since` | when the suspension is estimated to have started, RFC 3339 |
-| `services` | Services routing to the workload whose ports are not all scrape endpoints — the count that makes it "serving" for the rollout claims |
-| `service_names` | their names, capped at 8 with a +N more tail |
 | `termination_grace` | the pod template's terminationGracePeriodSeconds (the API default of 30s when unset), the ceiling any preStop hook would run inside |
 | `strategy` | the Deployment strategy setting that permits zero surviving pods: strategy.type=Recreate, or rollingUpdate.maxUnavailable=<value> |
 | `pdbs` | summary note: PodDisruptionBudgets seen in scope |
@@ -397,7 +430,6 @@ Beyond the shared envelope fields (`kind`, `severity`, `namespace`, `kind_of_obj
 | `jobs` | summary note: Jobs examined for the suspension claim; they count toward scanned but not toward `workloads` |
 | `cidr` | the range's CIDR block |
 | `purpose` | what the range allocates: pods, services, or nodes |
-| `zone` | orphan.disk: the disk's zone |
 | `size_gb` | orphan.disk: provisioned size in GB (billed whether used or not) |
 | `disk_type` | orphan.disk: disk type short name (pd-ssd bills ~4x pd-standard idle) |
 | `unused_since` | orphan.disk: last detach (or creation, if never attached), RFC3339; omitted when the provider cannot date it |

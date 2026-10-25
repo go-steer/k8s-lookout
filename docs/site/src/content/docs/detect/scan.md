@@ -195,7 +195,7 @@ property of the whole group. `--include=all` takes every one; `-` subtracts
 
 Best-practice posture: the absence of a safety net around a workload or cluster that is currently healthy — a different claim from the incident groups, which is why it is a different group
 
-Its 50 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
+Its 61 kinds have their own page — [what `lookout audit` checks](/detect/audit/).
 
 ### `--include=cloud`
 

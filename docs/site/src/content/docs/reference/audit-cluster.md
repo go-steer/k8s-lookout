@@ -53,6 +53,10 @@ Every `kind=` this command can emit, and the severities it carries them at. Noth
 | `audit.legacy_metadata` | warning | a node pool still serves the pre-v1 instance-metadata endpoints, which any pod can read |
 | `audit.public_control_plane` | warning, info | the control-plane endpoint is reachable from the internet; info when authorized networks narrow it |
 | `audit.nodepool_cannot_grow` | warning | a node pool has autoscaling on with a maximum of 0 nodes: it can never hold a node, so a pod only it could host stays Pending forever |
+| `audit.cluster_security_posture` | warning, info | cluster-level security posture gap: Shielded Nodes disabled, Binary Authorization disabled, application-layer etcd secrets encryption disabled, or legacy ABAC enabled |
+| `audit.cluster_network_posture` | warning, info | cluster-level network posture gap: nodes carry public IPs, Dataplane V2 is disabled, or master global access is off on a private control-plane endpoint |
+| `audit.cluster_observability_off` | warning, info | cluster-level observability disabled: Cloud Logging, Cloud Monitoring, or Managed Service for Prometheus is turned off |
+| `audit.cluster_backup_off` | info | Backup for GKE addon is disabled on the cluster |
 | `cloud.unavailable` | info | the cloud capability this check needs is unavailable, so nothing was examined — an explicit degradation record, never silence |
 
 ## Output fields
