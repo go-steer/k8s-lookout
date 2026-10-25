@@ -55,6 +55,7 @@ uat_build_invocations() {
   UAT_INVOCATION=(
     # Read the provider's cluster record, not objects in the cluster.
     ["audit cluster"]=""
+    ["audit policy"]=""
     ["audit upgrades"]=""
     ["cloud ipspace"]=""
     ["cloud orphans"]=""
@@ -72,13 +73,18 @@ uat_build_invocations() {
     # scan takes no target by design — that is the point of it.
     ["scan"]=""
     # Namespace-scoped sweeps.
+    ["audit ai"]="-A"
+    ["audit all"]="-A"
+    ["audit computeclass"]="-A"
     ["audit hardening"]="-A"
+    ["audit namespaces"]="-A"
     ["audit netpol"]="-A"
     ["audit rbac"]="-A"
     ["audit workloads"]="-A"
     ["health"]="-A"
     ["stab drift"]="-A"
     ["state gateway"]="-A"
+    ["state kcc"]="-A"
     ["state keda"]="-A"
     ["state storage"]="-A"
     ["state volumes"]="-A"
@@ -136,6 +142,7 @@ declare -A UAT_COMMAND_SKIP=()
 
 UAT_SCOPE_REJECTERS=(
   "audit cluster"   # reads the provider's cluster record
+  "audit policy"    # inspects the posture rule table, not cluster objects
   "audit upgrades"  # ditto
   "cloud ipspace"   # reads the cloud project
   "cloud orphans"

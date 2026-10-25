@@ -116,6 +116,18 @@ func TestAuditPolicyUsageErrors(t *testing.T) {
 			name: "malformed set",
 			args: []string{"--set=bad_set_expr"},
 		},
+		{
+			name: "rejects all-namespaces",
+			args: []string{"-A"},
+		},
+		{
+			name: "rejects namespace",
+			args: []string{"--namespace=prod"},
+		},
+		{
+			name: "rejects workload",
+			args: []string{"--workload=Deployment/prod/web"},
+		},
 	}
 
 	for _, tc := range cases {

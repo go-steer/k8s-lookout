@@ -271,10 +271,12 @@ Nine, of which the scaffolder does five.
    `state.LoadCluster`, declare the resource in
    `state.LoadClusterListRequirements` too. `pkg/checks/state/rbac_test.go`
    parses the manifest against those requirements and will tell you.
-8. **Skills**, if a workflow should reach for the command. Add it to the right
-   entry of `skilldoc.SkillCommands` and mention it in that skill's `SKILL.md`
-   decision tree. A command no skill names is reachable by an agent that
-   already knows it exists, and by no other.
+8. **Skills and UAT**, if a workflow should reach for the command. Add it to the right
+   entry of `skilldoc.SkillCommands`, mention it in that skill's `SKILL.md`
+   decision tree, and add its valid CLI invocation to `UAT_INVOCATION` in
+   `examples/uat-invocations.sh` (`TestUATInvocationsCoversEveryRegisteredCommand`
+   in `pkg/checks/all` enforces this at presubmit). A command no skill names is
+   reachable by an agent that already knows it exists, and by no other.
 9. **Docs**, regenerated in this order — `gen-site-docs` must run last or its
    output is stale:
 

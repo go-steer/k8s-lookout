@@ -184,6 +184,9 @@ func PolicyCommand() checks.Command {
 }
 
 func runPolicy(_ context.Context, inv emit.Invocation) (int, error) {
+	if inv.Scope.Namespace != "" || inv.Scope.AllNamespaces || !inv.Scope.Workload.IsZero() {
+		return 0, emit.UsageErrorf("audit policy inspects the posture rule table, not objects inside the cluster: --namespace/-A/--workload do not apply")
+	}
 	pol, err := LoadPolicy(inv.Flags)
 	if err != nil {
 		return 0, err
