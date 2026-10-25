@@ -85,17 +85,27 @@ bench_one() {
 # triage changes and friends are all single-target by contract.)
 bench_one "health"               health
 bench_one "scan"                 scan
+bench_one "audit all -A"         audit all -A
 bench_one "audit workloads -A"   audit workloads -A
 bench_one "audit hardening -A"   audit hardening -A
 bench_one "audit netpol -A"      audit netpol -A
 bench_one "audit rbac -A"        audit rbac -A
+bench_one "audit namespaces -A"  audit namespaces -A
+bench_one "audit computeclass -A" audit computeclass -A
+bench_one "audit ai -A"          audit ai -A
+bench_one "audit policy"         audit policy
 bench_one "triage delta -A"      triage delta -A
 bench_one "triage events -A"     triage events -A
+bench_one "triage list -A"       triage list -A
 bench_one "triage top -A"        triage top -A
 bench_one "stab drain -A"        stab drain -A
-bench_one "stab drift"           stab drift
+bench_one "stab drift -A"        stab drift -A
+bench_one "stab scaledown"       stab scaledown
 bench_one "state webhooks"       state webhooks
-bench_one "state storage"        state storage
+bench_one "state storage -A"     state storage -A
+bench_one "state gateway -A"     state gateway -A
+bench_one "state keda -A"        state keda -A
+bench_one "state kcc -A"         state kcc -A
 
 echo
 echo "DEFAULT-TO = the command's own shipped --timeout default (see its --help)."

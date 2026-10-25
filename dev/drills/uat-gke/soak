@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# soak — extended live-GKE soak of `lookout watch` (with cloud/GKE sources),
+# resident `lookout mcp`, and periodic `audit all -A | findings diff` +
+# `cloud *` posture/provider sweeps inside the UAT GKE staging cluster.
+#
+# Runs inside the cluster under the `lookout-uat` Workload Identity KSA so
+# the `-gke` binary resolves cluster metadata and calls live Google Cloud
+# APIs (Container, Compute, Monitoring, Logging, Cloud Quotas, IAM).
+#
+# Writes sample series in the exact format `examples/kwok/soak --report`
+# consumes, then invokes `examples/kwok/soak --report` for the least-squares
+# RSS/heap and SQLite store drift verdicts.
+#
+# Usage:
+#   cd dev/drills/uat-gke
+#   GKE_SOAK_HOURS=2 ./soak
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$here/../../.." && pwd)"
+# shellcheck source=dev/drills/uat-gke/env
+source "$here/env"
+
+HOURS="${GKE_SOAK_HOURS:-2}"
+SAMPLE="${GKE_SOAK_SAMPLE:-30}"
+AUDIT_INTERVAL="${GKE_SOAK_AUDIT_INTERVAL:-120}"
+CHURN="${GKE_SOAK_CHURN:-1}"
+POD="lookout-gke-soak"
+
+mkdir -p "$OUT"
+export STATE_DIR="$OUT/soak"
+mkdir -p "$STATE_DIR"
+
+k() { kubectl --context "$CTX" "$@"; }
+
+echo "▸ deploying $POD in $NS_RUNNER on $CTX (image: $IMAGE_GKE)"
+k -n "$NS_RUNNER" delete pod "$POD" --ignore-not-found --wait >/dev/null 2>&1 || true
+
+k -n "$NS_RUNNER" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $POD
+  namespace: $NS_RUNNER
+  labels:
+    app: lookout-gke-soak
+spec:
+  serviceAccountName: lookout-uat
+  initContainers:
+  - name: copy-bin
+    image: $IMAGE_GKE
+    command: ["/lookout", "version"]
+    volumeMounts:
+    - name: work
+      mountPath: /work
+  containers:
+  - name: watch
+    image: $IMAGE_GKE
+    command: ["/lookout", "watch"]
+    args:
+    - "--dry-run"
+    - "--sources=auto"
+    - "--store=/work/soak.db"
+    - "--metrics-addr=127.0.0.1:9090"
+    volumeMounts:
+    - name: work
+      mountPath: /work
+  - name: mcp
+    image: $IMAGE_GKE
+    command: ["/lookout", "mcp"]
+    args:
+    - "--listen=127.0.0.1:9091"
+    - "--store=/work/soak.db"
+    - "--max-response-bytes=0"
+    volumeMounts:
+    - name: work
+      mountPath: /work
+  volumes:
+  - name: work
+    emptyDir: {}
+EOF
+
+echo "▸ waiting for $POD to become Ready"
+k -n "$NS_RUNNER" wait --for=condition=Ready "pod/$POD" --timeout=180s
+
+pf_pid=""
+churn_pid=""
+cleanup() {
+  [[ -n "$pf_pid" ]] && kill "$pf_pid" 2>/dev/null || true
+  [[ -n "$churn_pid" ]] && kill "$churn_pid" 2>/dev/null || true
+  k -n "$NS_RUNNER" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+k -n "$NS_RUNNER" port-forward "pod/$POD" 39090:9090 39091:9091 >/dev/null 2>&1 &
+pf_pid=$!
+sleep 2
+
+if ((CHURN > 0)); then
+  echo "▸ starting background rollout churn on uat-drift/drift-target"
+  (
+    while true; do
+      k -n uat-drift rollout restart deploy/drift-target >/dev/null 2>&1 || true
+      sleep 45
+    done
+  ) &
+  churn_pid=$!
+fi
+
+SAMPLES="$STATE_DIR/soak-samples.tsv"
+POSTURE_SAMPLES="$STATE_DIR/soak-posture.tsv"
+: >"$SAMPLES"
+: >"$POSTURE_SAMPLES"
+
+secs="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 }')"
+started="$(date +%s)"
+last_audit=0
+
+echo "▸ soaking on GKE for ${HOURS} h (${secs}s), sampling every ${SAMPLE}s, posture sweep every ${AUDIT_INTERVAL}s"
+
+while true; do
+  now="$(date +%s)"
+  elapsed=$((now - started))
+  ((elapsed < secs)) || break
+
+  metrics="$(curl -fsS http://127.0.0.1:39090/metrics 2>/dev/null || true)"
+  rss_b="$(awk '/^process_resident_memory_bytes /{ v = $2 } END { print v + 0 }' <<<"$metrics")"
+  heap_b="$(awk '/^go_memstats_heap_inuse_bytes /{ v = $2 } END { print v + 0 }' <<<"$metrics")"
+  objs="$(k get pods,replicasets -A --no-headers 2>/dev/null | grep -c . || echo 0)"
+
+  awk -v e="$elapsed" -v r="$rss_b" -v h="$heap_b" -v o="$objs" \
+    'BEGIN { printf "%d\t%.1f\t%.1f\t%d\n", e, r / 1048576, h / 1048576, o }' >>"$SAMPLES"
+
+  if ((elapsed - last_audit >= AUDIT_INTERVAL)); then
+    last_audit=$elapsed
+    arc=0
+    k -n "$NS_RUNNER" run "uat-soak-audit-$elapsed" --rm -i --restart=Never \
+      --serviceaccount=lookout-uat --image="$IMAGE_GKE" --command -- \
+      /lookout audit all -A --skip-system-namespaces --timeout=120s >"$STATE_DIR/last-audit.txt" 2>&1 || arc=$?
+    sum="$(grep -E '(^| )scanned=' "$STATE_DIR/last-audit.txt" 2>/dev/null | tail -n1 || true)"
+    scanned="$(grep -oE 'scanned=[0-9]+' <<<"$sum" | head -n1 | cut -d= -f2 || echo 0)"
+    findings="$(grep -oE 'findings=[0-9]+' <<<"$sum" | head -n1 | cut -d= -f2 || echo 0)"
+    printf "%d\t%d\t0\t0\t%d\t%d\t0\t%d\t0\t1024.0\n" \
+      "$elapsed" "$arc" "${scanned:-0}" "${findings:-0}" "${findings:-0}" >>"$POSTURE_SAMPLES"
+  fi
+
+  sleep "$SAMPLE"
+done
+
+LEEWAY_SOAK_WARMUP="${GKE_SOAK_WARMUP:-600}" "$repo_root/examples/kwok/soak" --report

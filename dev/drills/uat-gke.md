@@ -36,10 +36,11 @@ export PROJECT=<staging-project>      # ZONE defaults to us-central1-a
 ./grant-iam   # the IAM step: review it, then run it yourself
 # wait ~10 minutes: LB provisioning, metrics and audit-log ingestion
 ./run         # assertions; verdicts in out/summary.txt, raw output in out/<case>.txt
+./soak        # optional: multi-hour in-cluster soak (watch + mcp + audit all -A)
 ./down        # deletes everything up and grant-iam created
 ```
 
-`./run t2_wi t3_ipspace` runs only the named case blocks.
+`./run t2_wi t3_ipspace t3_audit` runs only the named case blocks. `GKE_SOAK_HOURS=4 ./soak` runs a multi-hour in-cluster soak of `lookout watch`, `lookout mcp`, and periodic `lookout audit all -A` against the live GKE cluster and evaluates the sample series with `examples/kwok/soak --report`.
 
 ## IAM the `-gke` image needs
 

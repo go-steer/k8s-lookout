@@ -92,6 +92,11 @@ if want t0; then
   has   t0_state_wi "default image: state wi says cloud.unavailable" 'cloud\.unavailable'
   lookout t0_perf "$IMAGE_DEFAULT" perf probe --pack=apiserver
   has   t0_perf "default image: perf probe degrades explicitly" 'pack_unavailable|cloud\.unavailable'
+  for ac in cluster upgrades; do
+    lookout "t0_audit_$ac" "$IMAGE_DEFAULT" audit "$ac"
+    exitis "t0_audit_$ac" "default image: audit $ac exits 0" 0
+    has    "t0_audit_$ac" "default image: audit $ac says cloud.unavailable provider=none" 'cloud\.unavailable.*provider=none'
+  done
 fi
 
 # --- T2: state wi (#179) ---------------------------------------------------
@@ -203,6 +208,33 @@ if want t3_stockout; then
   lookout t3_stockout "$IMAGE_GKE" cloud stockout --since=720h --timeout=120s
   exitis t3_stockout "cloud stockout exits 0 (findings or an explicit empty result)" 0
   hasnt  t3_stockout "no cloud.unavailable"              'cloud\.unavailable'
+fi
+
+# --- T3: standing posture on live GKE (#793) -----------------------------------
+if want t3_audit; then
+  lookout t3_audit_cluster "$IMAGE_GKE" audit cluster
+  exitis t3_audit_cluster "audit cluster exits 0" 0
+  hasnt  t3_audit_cluster "audit cluster is provider-backed on -gke" 'cloud\.unavailable'
+
+  lookout t3_audit_upgrades "$IMAGE_GKE" audit upgrades
+  exitis t3_audit_upgrades "audit upgrades exits 0" 0
+  hasnt  t3_audit_upgrades "audit upgrades is provider-backed on -gke" 'cloud\.unavailable'
+
+  lookout t3_audit_computeclass "$IMAGE_GKE" audit computeclass -A
+  exitis t3_audit_computeclass "audit computeclass -A exits 0" 0
+
+  lookout t3_audit_namespaces "$IMAGE_GKE" audit namespaces -A
+  exitis t3_audit_namespaces "audit namespaces -A exits 0" 0
+
+  lookout t3_audit_ai "$IMAGE_GKE" audit ai -A
+  exitis t3_audit_ai "audit ai -A exits 0" 0
+
+  lookout t3_audit_all "$IMAGE_GKE" audit all -A --skip-system-namespaces --timeout=120s
+  exitis t3_audit_all "audit all -A exits 0" 0
+  has    t3_audit_all "audit all -A reports checks=" 'checks=[1-9]'
+
+  lookout t3_state_kcc "$IMAGE_GKE" state kcc -A
+  exitis t3_state_kcc "state kcc -A exits 0" 0
 fi
 
 echo "fails=$fails" | tee -a "$summary"

@@ -424,12 +424,19 @@ examples/kwok/soak --report
 examples/kwok/soak --selftest   # checks the verdict; needs no cluster
 ```
 
-This one runs `lookout watch` with the full source set, deliberately
-the opposite choice from `leeway-scale`: a leak is a property of the
-shipped process, and a leak in the plumbing eleven sources share is
-still a leak an operator pages on. It churns the fleet throughout,
-samples RSS and Go heap every `LEEWAY_SOAK_SAMPLE` seconds, and fits a
-least-squares slope over everything after `LEEWAY_SOAK_WARMUP`.
+This one runs `lookout watch` with the full source set, a resident
+`lookout mcp` HTTP server under periodic tool-call traffic
+(`LEEWAY_SOAK_MCP=1`), and periodic `lookout audit all -A | lookout
+findings diff --store=…` posture baselining (`LEEWAY_SOAK_AUDIT=1`),
+deliberately the opposite choice from `leeway-scale`: a leak is a
+property of the shipped processes and SQLite store, and a leak in the
+plumbing eleven sources, MCP sessions, or posture baseline writes share
+is still a leak an operator pages on. It churns the fleet throughout,
+samples RSS and Go heap every `LEEWAY_SOAK_SAMPLE` seconds, fits a
+least-squares slope over everything after `LEEWAY_SOAK_WARMUP` for
+both `lookout watch` and `lookout mcp`, and verifies that every posture
+and MCP round exits 0 with bounded SQLite store growth
+(`LEEWAY_SOAK_STORE_TOLERANCE`, default `0.25`).
 
 Both series are fitted because they answer different questions — a
 rising heap is lookout retaining objects, a rising RSS with a flat heap

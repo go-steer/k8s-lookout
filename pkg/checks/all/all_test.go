@@ -21,12 +21,15 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 
 	_ "github.com/go-steer/k8s-lookout/pkg/checks/all"
 )
@@ -81,6 +84,74 @@ func TestRegistryIsPopulated(t *testing.T) {
 	}
 	if len(reg.TopLevel()) == 0 {
 		t.Error("no top-level commands registered after importing pkg/checks/all")
+	}
+}
+
+// TestUATInvocationsCoversEveryRegisteredCommand is the hermetic presubmit
+// twin of examples/uat-cases/00-contract.sh: every command advertised by
+// `lookout mcp --list-tools` (!c.Hidden && !c.Privileged) must have an entry
+// in UAT_INVOCATION in examples/uat-invocations.sh, no stale entries may
+// remain, and every command listed in UAT_SCOPE_REJECTERS must exit 2
+// (ExitUsage) when passed -A (#798).
+func TestUATInvocationsCoversEveryRegisteredCommand(t *testing.T) {
+	uatFile := filepath.Join(repoRoot, "examples", "uat-invocations.sh")
+	raw, err := os.ReadFile(uatFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", uatFile, err)
+	}
+	src := string(raw)
+
+	invRe := regexp.MustCompile(`(?m)^\s*\["([^"]+)"\]="([^"]*)"`)
+	invocations := map[string]string{}
+	for _, m := range invRe.FindAllStringSubmatch(src, -1) {
+		invocations[m[1]] = m[2]
+	}
+	if len(invocations) == 0 {
+		t.Fatalf("parsed zero UAT_INVOCATION entries from %s", uatFile)
+	}
+
+	reg := checks.Default()
+	advertised := map[string]checks.Command{}
+	for _, c := range reg.All() {
+		if c.Hidden || c.Privileged {
+			continue
+		}
+		advertised[c.Name] = c
+		if _, ok := invocations[c.Name]; !ok {
+			t.Errorf("command %q is advertised by `lookout mcp --list-tools` but has no UAT_INVOCATION entry in examples/uat-invocations.sh", c.Name)
+		}
+	}
+	for name := range invocations {
+		if _, ok := advertised[name]; !ok {
+			t.Errorf("examples/uat-invocations.sh has stale UAT_INVOCATION entry %q", name)
+		}
+	}
+
+	blockRe := regexp.MustCompile(`(?ms)UAT_SCOPE_REJECTERS=\((.*?)\)`)
+	blockMatch := blockRe.FindStringSubmatch(src)
+	if len(blockMatch) < 2 {
+		t.Fatalf("could not locate UAT_SCOPE_REJECTERS block in %s", uatFile)
+	}
+	strRe := regexp.MustCompile(`"([^"]+)"`)
+	for _, m := range strRe.FindAllStringSubmatch(blockMatch[1], -1) {
+		name := m[1]
+		c, ok := advertised[name]
+		if !ok {
+			t.Errorf("UAT_SCOPE_REJECTERS names unknown command %q", name)
+			continue
+		}
+		var args []string
+		for _, tok := range strings.Fields(invocations[name]) {
+			if !strings.Contains(tok, "$") {
+				args = append(args, tok)
+			}
+		}
+		args = append(args, "-A")
+		res := checktest.Run(t, c, args...)
+		if res.Code != emit.ExitUsage {
+			t.Errorf("UAT_SCOPE_REJECTERS command %q with %v exited %d, want %d (ExitUsage); stderr=%s",
+				name, args, res.Code, emit.ExitUsage, strings.TrimSpace(res.Stderr))
+		}
 	}
 }
 
