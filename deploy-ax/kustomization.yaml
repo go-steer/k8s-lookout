@@ -1,0 +1,139 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# The cluster-wide bundle with the ax sink (docs/ax-sink-design.md):
+# incidents run in Agent Executor tasks on Agent Substrate instead of
+# sessions on a core-agent daemon. Use it INSTEAD of deploy/, not on top
+# of it:
+#
+#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-ax?ref=vX.Y.Z"
+#
+# It is deploy/ with three changes to the watcher:
+#   1. --sink=ax in place of --daemon-url, with --ax-server and
+#      --ax-task-template (task.yaml, below, as a ConfigMap — edit it:
+#      the image is a placeholder);
+#   2. the two projected volumes Substrate v0.6+'s router requires
+#      (issue #809). The router serves only HTTPS and only to clients
+#      presenting a pod certificate from its podidentity signer, and its
+#      own certificate comes from the servicedns signer. The mount paths
+#      are Substrate's own and the --ax-router-* defaults, so no router
+#      flag is needed;
+#   3. nothing else: --token-env still authenticates to the agent's
+#      session API inside each task.
+#
+# ONE STEP OUTSIDE THIS REPO: the router admits only allowlisted SPIFFE
+# IDs, and with this overlay the pod's is
+#
+#   spiffe://cluster.local/ns/agent-triage/sa/lookout-watch
+#
+# (spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount> in general).
+# Add it to Substrate's ingressAllowedSPIFFEIDs (ate-setup
+# --ingress-allowed-spiffe-ids / ATE_INGRESS_ALLOWED_SPIFFE_IDS). Until
+# then the router refuses every request, and each incident open fails
+# its readiness wait naming the router's answer.
+#
+# The volumes need the PodCertificateRequest and ClusterTrustBundle APIs,
+# which a Substrate install already depends on, and Substrate's signers:
+# without them the kubelet never populates the podCertificate volume and
+# the pod stays in ContainerCreating, which is the signal to check
+# Substrate rather than lookout.
+#
+# A Substrate v0.5 or earlier router serves plain HTTP only: add
+# --ax-router-url=http://atenet-router.ate-system.svc.cluster.local and
+# drop the two volumes.
+#
+# Helm: the same through values — args (replace --daemon-url with the
+# --sink=ax flags), extraVolumes and extraVolumeMounts with the stanzas
+# below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../deploy
+configMapGenerator:
+  - name: lookout-ax-task
+    namespace: agent-triage
+    files:
+      - task.yaml
+patches:
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: watcher
+      - op: test
+        path: /spec/template/spec/containers/0/args/0
+        value: --daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777
+      - op: replace
+        path: /spec/template/spec/containers/0/args/0
+        value: --sink=ax
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --ax-server=ax-server.ax-system.svc:8080
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --ax-task-template=/etc/lookout/ax/task.yaml
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: ax-task
+          mountPath: /etc/lookout/ax
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: servicedns-ca
+          mountPath: /run/servicedns-ca
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: ax-task
+          configMap:
+            name: lookout-ax-task
+      # The router client certificate: a PKCS#8 key followed by the
+      # chain, rewritten by the kubelet as it rotates (24h lifetime,
+      # refreshed 30 min before expiry). lookout re-reads it.
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: podidentity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+      # The authorities the router's certificate chains to. Only the
+      # live bundle: a canaried CA joins it when Substrate promotes it.
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem

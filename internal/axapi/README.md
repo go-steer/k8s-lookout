@@ -7,9 +7,13 @@ by `internal/axsink`.
 ## Upstream Provenance
 
 - **Canonical project:** [`github.com/google/ax`](https://github.com/google/ax)
-- **Source fork & branch:** [`github.com/mastersingh24/ax`](https://github.com/mastersingh24/ax) (`task-idle-suspend`)
-- **Pinned commit:** `11844ef`
-- **Proto package:** `ax.v1alpha1` (`proto/ax/v1alpha1/*.proto`)
+- **Source fork & tag:** [`github.com/mastersingh24/ax`](https://github.com/mastersingh24/ax) (`substrate-v1-12dbe16`, on google/ax `f0228f1`)
+- **Pinned commit:** `12dbe16`
+- **Proto package:** `ax.v1alpha1` (`pkg/apis/v1alpha1/ax.proto`)
+- **Fork-only fields:** `TaskSpec.egress` = 100, `http` = 101, `idle` = 102,
+  `on_completion` = 103. These must match the AX server: lookout v0.42 and
+  earlier carry the pre-rebase numbers (7–10), which the rebased server reads
+  as `config` and unknown fields.
 
 ## Why Stubs Are Vendored Under `internal/`
 
@@ -28,14 +32,11 @@ by `internal/axsink`.
 When pulling upstream proto changes from `ax`:
 
 ```bash
-# From a checkout of github.com/mastersingh24/ax (or github.com/google/ax):
-protoc \
-  --proto_path=proto \
-  --go_out=/path/to/k8s-lookout/internal/axapi \
-  --go_opt=paths=source_relative \
-  --go-grpc_out=/path/to/k8s-lookout/internal/axapi \
-  --go-grpc_opt=paths=source_relative \
-  proto/ax/v1alpha1/*.proto
+# Copy the proto from the pinned ax tag, keeping the vendoring comment at
+# the top of ax.proto and changing only go_package:
+git -C /path/to/ax show <tag>:pkg/apis/v1alpha1/ax.proto > /tmp/ax.proto
+#   ...edit go_package to github.com/go-steer/k8s-lookout/internal/axapi...
+go generate ./internal/axapi   # buf generate + goimports (generate.go)
 ```
 
 Verify licence headers (`./dev/tools/add-license-headers`) and run

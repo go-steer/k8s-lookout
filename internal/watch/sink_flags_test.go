@@ -158,6 +158,48 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 			args: []string{"--sink=ax", "--ax-server=ax.example.internal:443", "--ax-task-template=t.yaml", "--token-env=TOK", "--ax-server-tls", "--ax-ca-file=/etc/lookout/ax-ca.pem", "--ax-token-env=AX_RPC_TOKEN", "--ax-router-url=https://router.example.internal"},
 		},
 		{
+			name: "ax router mTLS flags with an https router are valid",
+			args: []string{"--sink=ax", "--dry-run", "--ax-router-url=https://atenet-router.ate-system.svc.cluster.local", "--ax-router-credential-bundle=/run/pod/bundle.pem", "--ax-router-trust-bundle=/run/ca/trust.pem", "--ax-router-server-name=atenet-router.ate-system.svc"},
+		},
+		{
+			name: "ax router mTLS with an empty server name verifies the URL host",
+			args: []string{"--sink=ax", "--dry-run", "--ax-router-server-name="},
+		},
+		{
+			name: "ax https router without a client certificate is one-way TLS",
+			args: []string{"--sink=ax", "--dry-run", "--ax-router-url=https://router.example.internal", "--ax-router-credential-bundle="},
+		},
+		{
+			name:    "ax rejects router mTLS flags with an http router",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-url=http://router.local", "--ax-router-credential-bundle=/run/pod/bundle.pem"},
+			wantErr: "need an https --ax-router-url",
+		},
+		{
+			name:    "ax rejects a trust bundle without a client certificate",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-credential-bundle=", "--ax-router-trust-bundle=/run/ca/trust.pem"},
+			wantErr: "need --ax-router-credential-bundle",
+		},
+		{
+			name:    "ax rejects a server name without a client certificate",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-credential-bundle=", "--ax-router-server-name=router.example.internal"},
+			wantErr: "need --ax-router-credential-bundle",
+		},
+		{
+			name:    "ax rejects mTLS with no trust bundle",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-trust-bundle="},
+			wantErr: "--ax-router-trust-bundle is required with --ax-router-credential-bundle",
+		},
+		{
+			name:    "ax rejects a router URL without a scheme",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-router-url=atenet-router.ate-system.svc:443"},
+			wantErr: "--ax-router-url must be an http:// or https:// URL",
+		},
+		{
+			name:    "core-agent rejects router mTLS flags",
+			args:    []string{"--ax-router-server-name=x", "--dry-run"},
+			wantErr: "only valid with --sink=ax",
+		},
+		{
 			name: "ax accepts TLS on system roots",
 			args: []string{"--sink=ax", "--dry-run", "--ax-server-tls"},
 		},

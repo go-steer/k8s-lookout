@@ -149,10 +149,11 @@ func realMain(argv []string) error {
 			}
 			inj = MaskingSink(ws)
 		case sinkAX:
-			as, aerr := newAXSink(f, token)
+			as, closeAX, aerr := newAXSink(f, token)
 			if aerr != nil {
 				return fmt.Errorf("ax sink: %w", aerr)
 			}
+			defer closeAX()
 			inj = MaskingSink(as)
 		default:
 			ci, cerr := inject.NewInjector(inject.Config{

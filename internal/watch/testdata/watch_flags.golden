@@ -2,7 +2,10 @@
 # Format: <name>\t<type>\t<default>\t<stability>
 access-recheck	duration	"2m0s"	stable
 ax-ca-file	string	""	stable
-ax-router-url	string	"http://atenet-router.ate-system.svc.cluster.local"	stable
+ax-router-credential-bundle	string	"/run/podidentity.podcert.ate.dev/credential-bundle.pem"	stable
+ax-router-server-name	string	"atenet-router.ate-system.svc"	stable
+ax-router-trust-bundle	string	"/run/servicedns-ca/trust-bundle.pem"	stable
+ax-router-url	string	"https://atenet-router.ate-system.svc.cluster.local"	stable
 ax-server	string	""	stable
 ax-server-tls	bool	"false"	stable
 ax-task-scope	string	"incident"	stable

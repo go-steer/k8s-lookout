@@ -291,9 +291,11 @@ func TestNewAXSink_PlainHTTPWarningCarriesNoSecret(t *testing.T) {
 		axRouterURL:    "http://lookout:" + password + "@router.example.com",
 		axTaskScope:    axScopeIncident,
 	}
-	if _, err := newAXSink(f, token); err != nil {
+	_, closeAX, err := newAXSink(f, token)
+	if err != nil {
 		t.Fatalf("newAXSink: %v", err)
 	}
+	closeAX()
 	out := buf.String()
 	if !strings.Contains(out, "WARNING: --ax-router-url") || !strings.Contains(out, "router.example.com") {
 		t.Fatalf("no plain-http warning naming the router; log was %q", out)
@@ -302,13 +304,16 @@ func TestNewAXSink_PlainHTTPWarningCarriesNoSecret(t *testing.T) {
 		t.Errorf("the warning leaked a secret: %q", out)
 	}
 
-	// Cluster-local Services (switchboard.agent.svc:8080 and the default) stay quiet.
-	for _, localURL := range []string{defaultAXRouterURL, "http://switchboard.agent.svc:8080"} {
+	// Cluster-local Services (switchboard.agent.svc:8080 and the pre-v0.43
+	// default) stay quiet.
+	for _, localURL := range []string{"http://atenet-router.ate-system.svc.cluster.local", "http://switchboard.agent.svc:8080"} {
 		buf.Reset()
 		f.axRouterURL = localURL
-		if _, err := newAXSink(f, token); err != nil {
+		_, closeAX, err := newAXSink(f, token)
+		if err != nil {
 			t.Fatalf("newAXSink(%s): %v", localURL, err)
 		}
+		closeAX()
 		if strings.Contains(buf.String(), "WARNING") {
 			t.Errorf("warned about cluster-local router %s: %q", localURL, buf.String())
 		}

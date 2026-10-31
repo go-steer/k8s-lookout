@@ -18,10 +18,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/internal/axsink"
 	clusterfleet "github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
@@ -71,6 +73,9 @@ type flags struct {
 	axServerTLS       bool
 	axCAFile          string
 	axTokenEnv        string
+	axRouterBundle    string
+	axRouterTrust     string
+	axRouterName      string
 	reasons           string
 	namespaces        string
 	excludeNamespaces string
@@ -216,10 +221,13 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.StringVar(&f.sinkTokenEnv, "sink-token-env", "", "Env var name holding the bearer token the webhook sink sends as Authorization: Bearer. Optional (unset = unauthenticated POSTs); only valid with --sink=webhook.")
 	fs.StringVar(&f.axServer, "ax-server", "", "Agent Executor (AX) API address (host:port; plaintext gRPC unless --ax-server-tls), e.g. ax-server.ax-system.svc:8080. Required with --sink=ax: incidents run in AX tasks (docs/ax-sink-design.md).")
 	fs.BoolVar(&f.axServerTLS, "ax-server-tls", false, "Dial --ax-server over TLS, verifying its certificate against the system roots (or --ax-ca-file) and the host name in --ax-server. Off by default: AX itself serves plaintext gRPC, so TLS needs a front that terminates it (a load balancer, gateway or mesh), which is the shape for an AX in another cluster. Only valid with --sink=ax.")
-	fs.StringVar(&f.axCAFile, "ax-ca-file", "", "PEM file of CA certificates added to the system roots when verifying the --ax-server TLS certificate (for a front with a private CA). Requires --ax-server-tls. Applies to the AX API only: an https --ax-router-url verifies against the system roots, which SSL_CERT_FILE extends.")
+	fs.StringVar(&f.axCAFile, "ax-ca-file", "", "PEM file of CA certificates added to the system roots when verifying the --ax-server TLS certificate (for a front with a private CA). Requires --ax-server-tls. Applies to the AX API only: the router is verified against --ax-router-trust-bundle.")
 	fs.StringVar(&f.axTokenEnv, "ax-token-env", "", "Env var name holding a bearer token (e.g. a Google ID token or service JWT) sent as per-RPC authorization metadata on every AX gRPC call. Optional (unset = unauthenticated gRPC); requires --ax-server-tls and --sink=ax.")
 	fs.StringVar(&f.axTaskTemplate, "ax-task-template", "", "Path to the AX Task manifest every task runs as (image, command, egress, http.port); the ax sink sets metadata.name per task (see --ax-task-scope). Required with --sink=ax.")
-	fs.StringVar(&f.axRouterURL, "ax-router-url", defaultAXRouterURL, "Agent Substrate router the ax sink reaches its tasks through (no trailing slash). Only valid with --sink=ax.")
+	fs.StringVar(&f.axRouterURL, "ax-router-url", defaultAXRouterURL, "Agent Substrate router the ax sink reaches its tasks through (no trailing slash). An https URL is mutual TLS: lookout presents the pod certificate in --ax-router-credential-bundle and verifies the router against --ax-router-trust-bundle and --ax-router-server-name, which is the only ingress Substrate v0.6 and later serve; the pod's SPIFFE ID, spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>, must be in Substrate's ingressAllowedSPIFFEIDs. An http URL is plain HTTP, for a Substrate v0.5 or earlier router (the default before lookout v0.43). Only valid with --sink=ax.")
+	fs.StringVar(&f.axRouterBundle, "ax-router-credential-bundle", axsink.DefaultRouterCredentialBundle, "Client credential for an https --ax-router-url: the credentialBundlePath file of a podCertificate projected volume from signer podidentity.podcert.ate.dev/identity (a PKCS#8 private key followed by the certificate chain, leaf first). Re-read as the kubelet rotates it. The default is where Agent Substrate's own components mount it. Set it empty for one-way TLS against the system roots instead (a TLS-terminating front that does its own client authentication). Only valid with --sink=ax and an https --ax-router-url.")
+	fs.StringVar(&f.axRouterTrust, "ax-router-trust-bundle", axsink.DefaultRouterTrustBundle, "PEM bundle the router's certificate must chain to, for an https --ax-router-url with a credential bundle: a clusterTrustBundle projection of signer servicedns.podcert.ate.dev/identity, label podcert.ate.dev/canarying=live. Re-read as it rotates. Only valid with --sink=ax and --ax-router-credential-bundle.")
+	fs.StringVar(&f.axRouterName, "ax-router-server-name", axsink.DefaultRouterServerName, "Name the router's certificate is verified against (and sent as SNI), for an https --ax-router-url with a credential bundle. The default is the only name on Substrate's router certificate, which omits the .cluster.local suffix the default URL uses. Empty verifies the URL's host instead. Every Service in the cluster can get a certificate from the same CA for its own name, so this check is what identifies the router. Only valid with --sink=ax and --ax-router-credential-bundle.")
 	fs.StringVar(&f.axTaskScope, "ax-task-scope", axScopeIncident, "How the ax sink maps incidents onto AX tasks: incident (default: each incident and each storm runs in its own task, named from lookout's incident identity, plus one watchboard task per cluster) or cluster (one long-lived task per cluster, named from the cluster name; every incident gets its own session in it, which uses far fewer Substrate workers). Either way, an incident that comes back reopens into its earlier session; with --store that survives a restart. Only valid with --sink=ax.")
 
 	// Event filtering.
@@ -501,8 +509,41 @@ const (
 	axScopeCluster  = "cluster"
 )
 
-// defaultAXRouterURL is Agent Substrate's in-cluster router Service.
-const defaultAXRouterURL = "http://atenet-router.ate-system.svc.cluster.local"
+// defaultAXRouterURL is Agent Substrate's in-cluster router Service. Its
+// https listener (443) is the only ingress from Substrate v0.6 on; the
+// default was the plain-http port before lookout v0.43 (issue #809).
+const defaultAXRouterURL = "https://atenet-router.ate-system.svc.cluster.local"
+
+// axRouterTLSFlagsSet reports whether any router mTLS flag differs from
+// its default.
+func (f *flags) axRouterTLSFlagsSet() bool {
+	return f.axRouterBundle != axsink.DefaultRouterCredentialBundle ||
+		f.axRouterTrust != axsink.DefaultRouterTrustBundle ||
+		f.axRouterName != axsink.DefaultRouterServerName
+}
+
+// validateAXRouterTLS checks the router transport flags against the
+// router URL's scheme (docs/ax-sink-design.md "The router"): https with a
+// credential bundle is mutual TLS, https without one is one-way TLS on the
+// system roots, http is plaintext. A flag that the chosen mode would
+// silently ignore is a usage error, so nobody believes they configured
+// mTLS on a connection that does not use it. Nothing is read from disk
+// here; a missing mount fails when the sink is built.
+func (f *flags) validateAXRouterTLS() error {
+	u, err := url.Parse(f.axRouterURL)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return emit.UsageErrorf("--ax-router-url must be an http:// or https:// URL with a host (got %q)", redactedURL(f.axRouterURL))
+	}
+	switch {
+	case u.Scheme == "http" && f.axRouterTLSFlagsSet():
+		return emit.UsageErrorf("--ax-router-credential-bundle, --ax-router-trust-bundle and --ax-router-server-name need an https --ax-router-url: an http router is plaintext")
+	case u.Scheme == "https" && f.axRouterBundle == "" && (f.axRouterTrust != axsink.DefaultRouterTrustBundle || f.axRouterName != axsink.DefaultRouterServerName):
+		return emit.UsageErrorf("--ax-router-trust-bundle and --ax-router-server-name need --ax-router-credential-bundle: without a client certificate the router is verified against the system roots and the URL's host")
+	case u.Scheme == "https" && f.axRouterBundle != "" && f.axRouterTrust == "":
+		return emit.UsageErrorf("--ax-router-trust-bundle is required with --ax-router-credential-bundle: the router's CA is cluster-internal, and the system roots would not verify it")
+	}
+	return nil
+}
 
 // validate checks flag combinations after parse. Called once from
 // main so misconfig fails before any network / API touching.
@@ -544,6 +585,9 @@ func (f *flags) validate() error {
 		if f.axTokenEnv != "" && !f.axServerTLS {
 			return emit.UsageErrorf("--ax-token-env needs --ax-server-tls: per-RPC bearer credentials require TLS transport")
 		}
+		if err := f.validateAXRouterTLS(); err != nil {
+			return err
+		}
 		// Each incident gets its own session, so there is no shared one.
 		if f.mode != "per-incident" {
 			return fmt.Errorf("--sink=ax always opens a session per incident (got --mode=%s)", f.mode)
@@ -560,6 +604,8 @@ func (f *flags) validate() error {
 		return emit.UsageErrorf("--ax-server-tls and --ax-ca-file are only valid with --sink=ax")
 	} else if f.axTokenEnv != "" {
 		return emit.UsageErrorf("--ax-token-env is only valid with --sink=ax")
+	} else if f.axRouterTLSFlagsSet() {
+		return emit.UsageErrorf("--ax-router-credential-bundle, --ax-router-trust-bundle and --ax-router-server-name are only valid with --sink=ax")
 	}
 	if f.sink == sinkWebhook {
 		if !f.dryRun && f.sinkURL == "" {

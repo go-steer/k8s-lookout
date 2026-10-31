@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# The AX Task every incident runs as (--ax-task-template). The ax sink
+# sets metadata.name per task and changes nothing else; the template is
+# decoded strictly at startup, so a typo fails `lookout watch` at once.
+#
+# Replace the image with your agent's (it must serve core-agent's
+# session API, POST /sessions and /sessions/<sid>/inject, on http.port),
+# and the egress rules with what it needs to reach.
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  atespace: default
+spec:
+  image: REGISTRY/AGENT-IMAGE@sha256:REPLACE-ME
+  # Limits only: Substrate sizes a sandbox by limits, and AX refuses
+  # requests. Unset, AX gives every task 1 CPU and 512Mi, which is more
+  # CPU and less memory than a triage agent wants.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  # One Workspace (git repos, files, MCP and skills config) bound at
+  # /workspace, created with `ax apply`. Singular since the AX API that
+  # lookout v0.43 speaks; the old `workspaces:` list is refused. Leave it
+  # out for an empty working directory.
+  # workspace:
+  #   name: triage
+  http:
+    port: 8484
+  idle:
+    suspendAfter: 10m

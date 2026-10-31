@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/logging v1.20.0
 	cloud.google.com/go/pubsub v1.51.1
 	github.com/go-logr/stdr v1.2.2
-	github.com/go-steer/purser v0.3.1
+	github.com/go-steer/purser v0.5.0
 	github.com/go-steer/steward v0.3.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
