@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-31
+
+**This release moves the ax sink to Agent Substrate v1.0: lookout reaches the router over mutual TLS and speaks the v1.0 port of the ax fork.** Substrate v0.6 removed the router's plaintext ingress, so an https router URL is now the default and is dialled with the pod's own certificate from Substrate's podidentity signer, verifying the router against the servicedns trust bundle; an explicit `http://` URL keeps the old behaviour for clusters still on v0.5. The vendored ax API follows the fork's v1.0 port, with one `workspace` per task, explicit resource limits in templates, and a task whose actor is gone recognised as gone. Upgrade lookout and ax-server together.
+
 ### Changed
 
 - **`--ax-router-url` defaults to `https://atenet-router.ate-system.svc.cluster.local`,
