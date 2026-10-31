@@ -16,6 +16,7 @@ package axsink
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -147,7 +148,32 @@ const (
 	// phase says nothing about the task itself. It is not "gone" either: a
 	// Substrate outage must not unbind every open incident.
 	phaseUnknown = "Unknown"
+	// phaseFailed with Ready reason reasonActorNotFound: the task's actor
+	// was removed outside AX. ResumeTask recreates it from the template,
+	// but as a fresh agent: every session the old one held is gone.
+	phaseFailed         = "Failed"
+	conditionReady      = "Ready"
+	reasonActorNotFound = "ActorNotFound"
 )
+
+// taskGoneIn reports whether a GetTask answer means the task's sessions can
+// never answer again: AX has no such task, or it has the task but its actor
+// was removed (phase Failed, Ready reason ActorNotFound). Any other failure,
+// phase Unknown included, is not proof of anything.
+func taskGoneIn(t *axapi.Task, err error) bool {
+	if status.Code(err) == codes.NotFound {
+		return true
+	}
+	if err != nil || t.GetStatus().GetPhase() != phaseFailed {
+		return false
+	}
+	for _, c := range t.GetStatus().GetConditions() {
+		if c.GetType() == conditionReady {
+			return c.GetReason() == reasonActorNotFound
+		}
+	}
+	return false
+}
 
 // stateOf decides whether a reminder may go to task now without waking it
 // or holding it awake past its idle window. Awake means a real inject was
@@ -164,7 +190,8 @@ const (
 // mid-investigation (the router is Substrate's data plane and can be up
 // while AX's view of the control plane is not), and holding its reminder
 // would hide the incident's latest count from an agent that is reading.
-// It is never treated as gone: only NotFound un-binds an incident.
+// It is never treated as gone: only a missing task or a missing actor
+// (taskGoneIn) un-binds an incident.
 func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	s.hold.mu.Lock()
 	last, ok := s.hold.lastReal[task]
@@ -178,7 +205,7 @@ func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	cancel()
 	phase := t.GetStatus().GetPhase()
 	switch {
-	case status.Code(err) == codes.NotFound:
+	case taskGoneIn(t, err):
 		return taskGone
 	case err != nil || phase == phaseUnknown:
 		if recent {
@@ -191,16 +218,40 @@ func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	return taskAwake
 }
 
-// goneError is what Append returns for a reminder whose task AX no longer
-// has: the same 404 the agent gives for a session it no longer has, so the
-// dispatcher un-binds the incident and reopens it on the next occurrence
-// instead of holding a reminder for a wake that will never come.
+// goneError is what Append returns for a task AX no longer has, or whose
+// actor is gone: the same 404 the agent gives for a session it no longer
+// has, so the dispatcher un-binds the incident and reopens it on the next
+// occurrence instead of holding a reminder for a wake that will never come,
+// or retrying a session that no longer exists.
 func (s *Sink) goneError(task string) error {
 	return &inject.StatusError{
 		Op:   "ax sink: Append",
 		Code: http.StatusNotFound,
-		Body: fmt.Sprintf("task %s/%s not found", s.atespace, task),
+		Body: fmt.Sprintf("task %s/%s is gone: AX has no such task, or its actor was removed", s.atespace, task),
 	}
+}
+
+// confirmGone asks AX about a delivery that failed with anything but a
+// 404 or 410. If the task or its actor is gone, the failure becomes
+// goneError, so the incident is re-opened rather than retried against a
+// session that cannot come back; what the router answers for a missing
+// actor is the router's business, and this does not depend on it.
+// Otherwise err is returned unchanged. It costs one bounded GetTask, on
+// failures only.
+func (s *Sink) confirmGone(ctx context.Context, task string, err error) error {
+	var se *inject.StatusError
+	if err == nil || (errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)) {
+		return err
+	}
+	gctx, cancel := context.WithTimeout(ctx, getTaskTimeout)
+	t, gerr := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
+	cancel()
+	if !taskGoneIn(t, gerr) {
+		return err
+	}
+	s.dropHeldIn(task)
+	s.clearAwake(task)
+	return s.goneError(task)
 }
 
 // owe and paid track incident ids whose last real inject failed: an open

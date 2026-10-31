@@ -59,7 +59,11 @@ type fakeAX struct {
 	resumed []string
 	gets    int    // GetTask calls
 	phase   string // status.phase GetTask reports, when set
-	hang    bool   // GetTask blocks until the caller gives up
+	reason  string // the Ready condition's reason GetTask reports, when set
+	// onResume runs inside ResumeTask with mu held, as AX recreating a
+	// removed actor would.
+	onResume func(*fakeAX)
+	hang     bool // GetTask blocks until the caller gives up
 }
 
 func (f *fakeAX) CreateTask(_ context.Context, req *axapi.CreateTaskRequest) (*axapi.Task, error) {
@@ -87,6 +91,9 @@ func (f *fakeAX) GetTask(ctx context.Context, req *axapi.GetTaskRequest) (*axapi
 		if f.phase != "" {
 			t = proto.Clone(t).(*axapi.Task)
 			t.Status = &axapi.TaskStatus{Phase: f.phase}
+			if f.reason != "" {
+				t.Status.Conditions = []*axapi.Condition{{Type: "Ready", Status: "False", Reason: f.reason}}
+			}
 		}
 		return t, nil
 	}
@@ -97,6 +104,9 @@ func (f *fakeAX) ResumeTask(_ context.Context, req *axapi.ResumeTaskRequest) (*a
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resumed = append(f.resumed, req.GetAtespace()+"/"+req.GetName())
+	if f.onResume != nil {
+		f.onResume(f)
+	}
 	return &axapi.Task{}, nil
 }
 
@@ -173,8 +183,10 @@ func (r *fakeRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (r *fakeRouter) forget(actor string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sessions[actor] = 0
+	r.forgetLocked(actor)
 }
+
+func (r *fakeRouter) forgetLocked(actor string) { r.sessions[actor] = 0 }
 
 func newTestAXSink(t *testing.T, router *fakeRouter) (*Sink, *fakeAX) {
 	t.Helper()

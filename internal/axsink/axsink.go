@@ -247,7 +247,8 @@ func (s *Sink) OpenIncidentKeyed(ctx context.Context, key inject.IncidentKey, pa
 		s.flushHeld(ctx, task)
 		if hasRecalled {
 			if t, sid, ok := splitID(recalledID); ok && t == task {
-				err := inj.Append(ctx, sid, payload)
+				// confirmGone: a task whose actor was removed starts over too.
+				err := s.confirmGone(ctx, task, inj.Append(ctx, sid, payload))
 				var se *inject.StatusError
 				switch {
 				case err == nil:
@@ -393,7 +394,7 @@ func (s *Sink) Append(ctx context.Context, id string, payload any) error {
 			}
 		}
 		s.forgetHeld(id)
-		err := s.injectorFor(task).Append(ctx, sid, payload)
+		err := s.confirmGone(ctx, task, s.injectorFor(task).Append(ctx, sid, payload))
 		if err == nil {
 			s.paid(id) // it carries the incident's payload
 			s.countReminder(cluster, ReminderDirect)
@@ -401,7 +402,7 @@ func (s *Sink) Append(ctx context.Context, id string, payload any) error {
 		return err
 	}
 	s.flushHeld(ctx, task)
-	err := s.injectorFor(task).Append(ctx, sid, payload)
+	err := s.confirmGone(ctx, task, s.injectorFor(task).Append(ctx, sid, payload))
 	if err != nil {
 		s.owe(id)
 		return err

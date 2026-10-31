@@ -28,6 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`deploy-ax/` shows them), and add the pod's SPIFFE ID,
   `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, to
   Substrate's `ingressAllowedSPIFFEIDs`.
+- **The ax sink speaks the AX API of the Substrate v1.0 ax fork
+  (`mastersingh24/ax` `substrate-v1-12dbe16`); upgrade lookout and
+  ax-server together (#809).** The fork rebased onto an upstream that
+  took `TaskSpec` field 7 for `config`, so its own fields moved to 100
+  and up: `egress` 100, `http` 101, `idle` 102, `onCompletion` 103.
+  Field numbers are the wire, so lookout v0.42 against the new server
+  would put a task's egress rules where the server reads `config` and
+  lose the `http.port` pass-through; this release against an older
+  ax-server has the mirror-image problem. The YAML keys are unchanged
+  except one: **`spec.workspaces` (a list) is now `spec.workspace`, a
+  single `{name, path}` binding**, and a template still using the list
+  fails at startup with an error that says so. Set
+  `spec.resources.limits` in the template while you are there: AX
+  refuses `requests`, and unset limits give every task 1 CPU and 512Mi
+  (`deploy-ax/task.yaml` uses 500m and 1Gi).
+- **A task whose actor was removed counts as gone.** The new AX reports
+  such a task as `Failed` with Ready reason `ActorNotFound`. ResumeTask
+  would recreate the actor, but as a fresh agent with none of the old
+  sessions, so a reminder for it now answers 404 instead of being held,
+  and the incident re-opens into a new session. A delivery that fails
+  with anything but 404 or 410 asks AX once whether the actor is gone
+  and, if it is, reports the same 404. A phase of `Unknown`, which AX
+  reports when it cannot reach Substrate, is never taken as gone: the
+  sink's own record of recent deliveries decides, as for a failed
+  `GetTask`.
 
 ### Added
 

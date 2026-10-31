@@ -26,6 +26,19 @@ metadata:
   atespace: default
 spec:
   image: REGISTRY/AGENT-IMAGE@sha256:REPLACE-ME
+  # Limits only: Substrate sizes a sandbox by limits, and AX refuses
+  # requests. Unset, AX gives every task 1 CPU and 512Mi, which is more
+  # CPU and less memory than a triage agent wants.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  # One Workspace (git repos, files, MCP and skills config) bound at
+  # /workspace, created with `ax apply`. Singular since the AX API that
+  # lookout v0.43 speaks; the old `workspaces:` list is refused. Leave it
+  # out for an empty working directory.
+  # workspace:
+  #   name: triage
   http:
     port: 8484
   idle:

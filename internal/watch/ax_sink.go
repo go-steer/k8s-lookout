@@ -237,6 +237,10 @@ func loadAXTaskTemplate(path string) (*axapi.Task, error) {
 	}
 	var t axapi.Task
 	if err := protojson.Unmarshal(js, &t); err != nil {
+		if strings.Contains(err.Error(), `"workspaces"`) {
+			// The AX API lookout v0.43 speaks binds one workspace, not a list.
+			return nil, fmt.Errorf("AX task template %s: %w (spec.workspaces is now spec.workspace, a single {name, path} binding)", path, err)
+		}
 		return nil, fmt.Errorf("AX task template %s: %w", path, err)
 	}
 	if t.GetKind() != "" && t.GetKind() != "Task" {

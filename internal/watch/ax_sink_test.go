@@ -39,6 +39,12 @@ metadata:
 spec:
   image: us-docker.pkg.dev/p/r/agent@sha256:abc
   command: [mast, --workload=/opt/mast/workloads/gke-triage]
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  workspace:
+    name: triage
   egress:
     - hosts: [aiplatform.googleapis.com]
       credentials:
@@ -62,10 +68,25 @@ spec:
 	if got := tmpl.GetSpec().GetEgress()[0].GetCredentials()[0].GetCredentialUri(); !strings.HasPrefix(got, "ate-secret://") {
 		t.Errorf("credential uri = %q", got)
 	}
+	if tmpl.GetSpec().GetWorkspace().GetName() != "triage" {
+		t.Errorf("workspace not decoded: %v", tmpl.GetSpec().GetWorkspace())
+	}
+	if lim := tmpl.GetSpec().GetResources().GetLimits(); lim.GetCpu() != "500m" || lim.GetMemory() != "1Gi" {
+		t.Errorf("resource limits not decoded: %v", tmpl.GetSpec().GetResources())
+	}
 	// AX suspends idle or finished tasks itself when the template asks it to;
 	// the sink only has to pass the fields through.
 	if idle := tmpl.GetSpec().GetIdle(); idle.GetSuspendAfter() != "10m" || idle.GetBusyPath() != "/busy" || tmpl.GetSpec().GetOnCompletion() != "Suspend" {
 		t.Errorf("idle policy not decoded: %v", tmpl.GetSpec())
+	}
+}
+
+// A template written for the old AX API's workspaces list fails with a
+// pointer to the singular field, not only protojson's "unknown field".
+func TestLoadAXTaskTemplate_OldWorkspacesListSaysWhatChanged(t *testing.T) {
+	_, err := loadAXTaskTemplate(writeTemplate(t, "kind: Task\nspec:\n  image: x\n  workspaces:\n    - name: triage\n"))
+	if err == nil || !strings.Contains(err.Error(), "spec.workspace") {
+		t.Fatalf("old workspaces list: err=%v, want a pointer to spec.workspace", err)
 	}
 }
 

@@ -250,11 +250,23 @@ once the agent's server accepts connections.
 ### The task template
 
 `--ax-task-template` is an AX `Task` manifest: image, command, egress rules,
-injected credentials, `http.port`, workspaces. The sink sets
+injected credentials, `http.port`, resource limits, a workspace. The sink sets
 `metadata.name` per task and never changes anything else.
 `metadata.atespace` defaults to `default`. The template is decoded strictly at
 startup, so a typo fails `lookout watch` immediately rather than on the first
-incident.
+incident. `deploy-ax/task.yaml` is a starting point.
+
+Two things changed with the AX API lookout speaks from v0.43 (see AX API,
+below):
+
+- **`workspace:` is one binding**, `{name, path}`, mounted at `/workspace`
+  unless `path` says otherwise. The old `workspaces:` list is refused at
+  startup, with an error naming the new field rather than only protojson's
+  "unknown field".
+- **Set `resources.limits`.** Substrate sizes a sandbox by limits alone and
+  AX refuses `requests`. Unset, AX gives a task 1 CPU and 512Mi, more CPU and
+  less memory than a triage agent wants; our agents run at `cpu: 500m`,
+  `memory: 1Gi`.
 
 ### Agents need to know which cluster
 
@@ -474,6 +486,35 @@ lookout. `internal/axapi` carries a copy of AX's `ax.proto` with generated
 stubs (`go generate ./internal/axapi`). AX's API is `v1alpha1`, so the copy is
 pinned deliberately; re-copy it when AX changes.
 
+**The copy and the AX server must match.** Protobuf field numbers, not names,
+are the wire. The copy is from `mastersingh24/ax` tag `substrate-v1-12dbe16`
+(on google/ax f0228f1, built for Substrate v1.0). That fork rebased onto an
+upstream that took `TaskSpec` field 7 for `config`, so it moved its own four
+fields to 100–103: `egress` 100, `http` 101, `idle` 102, `on_completion`
+103. lookout v0.42 and earlier carry the old numbers (`egress` 7 … 10).
+Against the new server they would put the egress rules in field 7, which it
+decodes as `config`, and the `http.port` pass-through in a field it doesn't
+know, so lookout and ax-server have to be upgraded together. The same copy drops `WatchTask`, `goal`, and the
+`pendingApproval`/`usage` status fields, none of which lookout used, and
+renames `ResourceReqs` to `ResourcesSpec`.
+
+**Reading a task's status.** AX now reads a task's phase live from Substrate
+rather than from its own store. Two outcomes matter to the sink:
+
+- `Unknown` (Ready reason `SubstrateUnavailable`): AX couldn't reach
+  Substrate. Nothing is known about the task; see Phase `Unknown` under
+  Holding reminders.
+- `Failed` with Ready reason `ActorNotFound`: the task's actor was removed
+  outside AX. `ResumeTask` recreates it from the template, but as a fresh
+  agent, so every session it held is gone. The sink treats that task as gone
+  (`taskGoneIn`): a reminder for it answers 404 instead of being held. A
+  delivery that fails with anything but 404 or 410 makes one bounded
+  `GetTask` (`confirmGone`), and if the actor is gone, the failure becomes
+  that 404 too. The dispatcher then re-opens the incident, and on the fast
+  path the open itself starts over (`ResumeTask`, then a new session) instead
+  of failing against the dead one. This does not rely on whatever the router
+  answers for a missing actor.
+
 The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
 `pkg/` half never depends on the AX stubs or gRPC
 (`TestLayering_TheImportGraphMatchesTheDesign`). `pkg/inject` exports
@@ -483,8 +524,8 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
 
 - **AX runner pass-through (`spec.http.port`).** Substrate's router only
   reaches the AX runner, so without a pass-through no request reaches the
-  agent's session API. This is on a fork of AX
-  (`mastersingh24/ax:task-idle-suspend`, built on `task-egress-credentials`)
+  agent's session API. This is on a fork of AX (`mastersingh24/ax`, tag
+  `substrate-v1-12dbe16` for Substrate v1.0; earlier, `task-idle-suspend`)
   and will be proposed upstream. The same fork lets a task declare egress and
   injected credentials, and suspends idle or finished tasks itself
   (`spec.idle`, `spec.onCompletion`; google/ax#420), which matters because
@@ -551,6 +592,12 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   - A recent task that AX records as `Suspended` holds.
   - Phase `Unknown` falls back to the record (sent when recent, held when
     idle) and is never treated as gone.
+  - `Failed` with `ActorNotFound` is gone (404, held reminders dropped);
+    `Failed` for another reason is not.
+  - A delivery failing with 503 against a removed actor becomes a 404, and
+    against a healthy one stays a 503.
+  - On the fast path, a removed actor's incident re-opens through
+    `ResumeTask` into a new session.
   - Held reminders fold to the latest, which is delivered ahead of the next
     real inject.
   - A resolution delivers the held reminder first.
@@ -579,7 +626,9 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   the identity the router must allow; missing mounts fail startup naming the
   file and the `http://` fallback; `http://` and one-way `https://` read no
   files; the flag-combination matrix; `deploy-ax/`'s template decodes and
-  its volumes land where the flag defaults look.
+  its volumes land where the flag defaults look; a template with
+  `workspace:` and `resources.limits` decodes, and the old `workspaces:`
+  list fails naming `spec.workspace`.
 - `pkg/inject`: the core-agent and webhook sinks deliver every reminder at
   once.
 - `internal/watch`: the AX API dialled over TLS with CA cert + per-RPC

@@ -492,3 +492,111 @@ func TestHold_GoneTaskDropsAndAnswers404(t *testing.T) {
 		t.Errorf("dropped count = %d, want 1", r.counts.get(ReminderDropped))
 	}
 }
+
+// A task whose actor was removed outside AX (phase Failed, Ready reason
+// ActorNotFound) is gone as far as its sessions go: ResumeTask would
+// recreate the actor, but as a fresh agent. A reminder drops what was held
+// and answers 404, as for a task AX no longer has.
+func TestHold_ActorNotFoundIsGone(t *testing.T) {
+	r := newHoldRig(t, ScopeIncident, nil)
+	id := r.open(t, crashKey, crashPayload(0))
+	r.clock.advance(defaultIdleAfter)
+	r.appendOK(t, id, crashPayload(1)) // held
+	r.ax.mu.Lock()
+	r.ax.phase, r.ax.reason = phaseFailed, reasonActorNotFound
+	r.ax.mu.Unlock()
+
+	err := r.sink.Append(context.Background(), id, crashPayload(2))
+	var se *inject.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusNotFound {
+		t.Fatalf("reminder for a task whose actor is gone = %v, want a 404 StatusError", err)
+	}
+	if len(r.sink.heldFor(r.sink.taskFor(crashKey))) != 0 {
+		t.Error("a reminder for a task whose actor is gone is still held")
+	}
+}
+
+// Failed for any other reason is not proof the sessions are gone: the
+// record decides, as for Unknown.
+func TestHold_FailedForAnotherReasonIsNotGone(t *testing.T) {
+	r := newHoldRig(t, ScopeIncident, nil)
+	id := r.open(t, crashKey, crashPayload(0))
+	r.clock.advance(defaultIdleAfter)
+	r.ax.mu.Lock()
+	r.ax.phase, r.ax.reason = phaseFailed, "ActorResumeFailed"
+	r.ax.mu.Unlock()
+	r.appendOK(t, id, crashPayload(1))
+	if len(r.sink.heldFor(r.sink.taskFor(crashKey))) != 1 {
+		t.Error("a reminder for a Failed (not ActorNotFound) idle task was not held")
+	}
+}
+
+// A real inject that fails with something other than 404 or 410 asks AX
+// whether the actor is gone. If it is, the failure becomes the gone 404 so
+// the dispatcher re-opens the incident instead of retrying a dead session;
+// if not, the original error stands.
+func TestAppend_FailureAgainstAGoneActorBecomes404(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		reason   string
+		wantCode int
+	}{
+		{"actor removed", reasonActorNotFound, http.StatusNotFound},
+		{"actor fine", "", http.StatusServiceUnavailable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := newHoldRig(t, ScopeIncident, nil)
+			id := r.open(t, crashKey, crashPayload(0))
+			r.router.mu.Lock()
+			r.router.failWith = http.StatusServiceUnavailable
+			r.router.mu.Unlock()
+			if c.reason != "" {
+				r.ax.mu.Lock()
+				r.ax.phase, r.ax.reason = phaseFailed, c.reason
+				r.ax.mu.Unlock()
+			}
+			err := r.sink.Append(context.Background(), id, inject.Payload{Kind: "k8s-event-followup", Cluster: "prod", UID: "u1", Message: "changed"})
+			var se *inject.StatusError
+			if !errors.As(err, &se) || se.Code != c.wantCode {
+				t.Fatalf("Append = %v, want a %d StatusError", err, c.wantCode)
+			}
+		})
+	}
+}
+
+// On the fast path (task known awake), a recalled session whose actor turns
+// out to be gone starts over: ResumeTask (which recreates the actor) and a
+// new session, not an error bound to the dead one.
+func TestOpen_FastPathRecoversFromAGoneActor(t *testing.T) {
+	r := newHoldRig(t, ScopeIncident, nil)
+	first := r.open(t, crashKey, crashPayload(0))
+	r.router.mu.Lock()
+	r.router.failWith = http.StatusServiceUnavailable
+	r.router.mu.Unlock()
+	r.ax.mu.Lock()
+	r.ax.phase, r.ax.reason = phaseFailed, reasonActorNotFound
+	r.ax.mu.Unlock()
+
+	// ResumeTask recreates the actor, and AX reads it as running again.
+	r.ax.mu.Lock()
+	r.ax.onResume = func(f *fakeAX) {
+		f.phase, f.reason = "", ""
+		r.router.mu.Lock()
+		r.router.failWith = 0
+		r.router.mu.Unlock()
+	}
+	r.ax.mu.Unlock()
+	id, err := r.sink.OpenIncidentKeyed(context.Background(), crashKey, crashPayload(0))
+	if err != nil {
+		t.Fatalf("reopen after the actor was removed: %v", err)
+	}
+	if id == first {
+		t.Errorf("reopen stayed bound to the dead session %s", first)
+	}
+	r.ax.mu.Lock()
+	defer r.ax.mu.Unlock()
+	if len(r.ax.resumed) != 2 {
+		t.Errorf("resumes = %d, want 2 (the open, then the recovery)", len(r.ax.resumed))
+	}
+}
