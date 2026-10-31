@@ -204,6 +204,45 @@ func TestHold_SuspendedPhaseHolds(t *testing.T) {
 	}
 }
 
+// Phase Unknown (AX could not reach Substrate) says nothing about the task,
+// so it is treated like a failed GetTask: the sink's record decides. It is
+// never "gone": the incident stays bound and nothing answers 404.
+func TestHold_UnknownPhaseFallsBackToTheRecord(t *testing.T) {
+	cases := []struct {
+		name    string
+		since   time.Duration // since the open, the last real inject
+		wantOut string
+	}{
+		{"recent real inject: sent", time.Minute, ReminderDirect},
+		{"idle: held", defaultIdleAfter, ReminderHeld},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := newHoldRig(t, ScopeIncident, nil)
+			id := r.open(t, crashKey, crashPayload(0))
+			r.clock.advance(c.since)
+			r.ax.mu.Lock()
+			r.ax.phase = phaseUnknown
+			r.ax.mu.Unlock()
+
+			resumes, _, _, _ := r.calls()
+			if err := r.sink.Append(context.Background(), id, crashPayload(1)); err != nil {
+				t.Fatalf("Append with phase Unknown = %v, want nil (never a gone 404)", err)
+			}
+			if r.counts.get(c.wantOut) != 1 {
+				t.Errorf("outcome %s not counted (held=%d direct=%d)", c.wantOut, r.counts.get(ReminderHeld), r.counts.get(ReminderDirect))
+			}
+			if resumes2, _, _, _ := r.calls(); resumes2 != resumes {
+				t.Errorf("a reminder resumed the task (resumes %d->%d)", resumes, resumes2)
+			}
+			if r.counts.get(ReminderDropped) != 0 {
+				t.Errorf("dropped = %d, want 0: Unknown is not gone", r.counts.get(ReminderDropped))
+			}
+		})
+	}
+}
+
 // Held reminders fold to the latest per session, and it is delivered ahead
 // of the next real inject (here a material change).
 func TestHold_LatestOnlyDeliveredAheadOfTheNextRealInject(t *testing.T) {

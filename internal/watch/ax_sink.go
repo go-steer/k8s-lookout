@@ -21,6 +21,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -39,15 +40,23 @@ import (
 
 // newAXSink builds the ax sink from flags (docs/ax-sink-design.md). The AX
 // API is plaintext gRPC unless --ax-server-tls; the router URL's scheme
-// decides TLS for the session calls, which carry the bearer token.
-func newAXSink(f *flags, token string) (*axsink.Sink, error) {
+// decides TLS for the session calls, which carry the bearer token, and an
+// https router is mutual TLS (axRouterHTTPClient). The returned func
+// releases the router credential reloaders.
+func newAXSink(f *flags, token string) (*axsink.Sink, func(), error) {
 	tmpl, err := loadAXTaskTemplate(f.axTaskTemplate)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	routerClient, closeRouter, err := axRouterHTTPClient(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	release := func() { _ = closeRouter() }
 	conn, err := dialAX(f)
 	if err != nil {
-		return nil, err
+		release()
+		return nil, nil, err
 	}
 	if f.tokenEnv != "" || token != "" {
 		if warning, ok := axRouterPlainHTTPWarning(f.axRouterURL); ok {
@@ -55,14 +64,68 @@ func newAXSink(f *flags, token string) (*axsink.Sink, error) {
 			log.Print(warning)
 		}
 	}
-	return axsink.New(axsink.Config{
+	sink, err := axsink.New(axsink.Config{
 		Client:         axapi.NewAXClient(conn),
 		Template:       tmpl,
 		RouterURL:      f.axRouterURL,
 		BearerToken:    token,
 		AssertedCaller: f.owner,
 		Scope:          axsink.Scope(f.axTaskScope),
+		HTTPClient:     routerClient,
 	})
+	if err != nil {
+		release()
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return sink, func() { release(); _ = conn.Close() }, nil
+}
+
+// axRouterHTTPClient is the session-call transport for --ax-router-url
+// (issue #809). Three modes, by scheme and flags:
+//
+//   - https with --ax-router-credential-bundle (the default): mutual TLS
+//     as Substrate v0.6+ requires. The pod certificate and the servicedns
+//     trust bundle are read now, so a missing mount fails startup, and
+//     re-read as they rotate.
+//   - https with an empty bundle: one-way TLS on the system roots (the
+//     shared sink client), for a front that terminates TLS and does its
+//     own client authentication.
+//   - http: plaintext (the shared sink client), for a Substrate v0.5 or
+//     earlier router, which is what the default URL meant before v0.43.
+//
+// A nil client means the shared sink client.
+func axRouterHTTPClient(f *flags) (*http.Client, func() error, error) {
+	noop := func() error { return nil }
+	u, err := url.Parse(f.axRouterURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--ax-router-url %s: %w", redactedURL(f.axRouterURL), err)
+	}
+	switch {
+	case u.Scheme == "http":
+		log.Printf("ax sink: router %s is plain http, which only Agent Substrate v0.5 and earlier serve; v0.6+ needs an https URL and mTLS (docs/ax-sink-design.md, The router)", redactedURL(f.axRouterURL))
+		return nil, noop, nil
+	case f.axRouterBundle == "":
+		log.Printf("ax sink: router %s over TLS with no client certificate, verified against the system roots", redactedURL(f.axRouterURL))
+		return nil, noop, nil
+	}
+	c, closeFn, err := axsink.NewRouterHTTPClient(axsink.RouterTLS{
+		CredentialBundlePath: f.axRouterBundle,
+		TrustBundlePath:      f.axRouterTrust,
+		ServerName:           f.axRouterName,
+		OnReloadError: func(err error) {
+			// The previous credential stays in use until it expires, and
+			// after that every handshake fails: say so while there is time.
+			slog.Warn("ax sink: reloading the router credentials failed; the previous ones stay in use until they expire", "err", err)
+			log.Printf("WARNING: ax sink: reloading the router credentials failed: %v (the previous ones stay in use until they expire)", err)
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w (an https --ax-router-url is mutual TLS: mount the podidentity podCertificate and servicedns-ca clusterTrustBundle volumes, docs/ax-sink-design.md \"The router\"; or pass an http:// --ax-router-url for a Substrate v0.5 router)", err)
+	}
+	log.Printf("ax sink: router %s over mTLS: client certificate %s, trust bundle %s, server name %q; this pod's SPIFFE ID must be in Substrate's ingressAllowedSPIFFEIDs",
+		redactedURL(f.axRouterURL), f.axRouterBundle, f.axRouterTrust, f.axRouterName)
+	return c, closeFn, nil
 }
 
 // dialAX opens the AX API connection. gRPC connects lazily, so a TLS

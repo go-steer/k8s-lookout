@@ -495,22 +495,38 @@ func (s *Sink) startTask(ctx context.Context, task string) error {
 // waitReady polls the task runner's /readyz through the router. With a
 // pass-through (spec.http.port) the runner reports ready only once the
 // agent's server accepts connections.
+//
+// On timeout the error carries the last attempt's outcome. A task still
+// starting looks the same as a router that will never answer (an
+// untrusted certificate, a name mismatch, a SPIFFE ID missing from the
+// router's allowlist) until something says which, and the first incident
+// is usually where an operator finds out.
 func (s *Sink) waitReady(ctx context.Context, task string) error {
 	client := s.routedClient(task)
+	last := "no attempt completed"
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.RouterURL+"/readyz", nil)
 		if err != nil {
 			return err
 		}
-		if resp, err := client.Do(req); err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
+		resp, err := client.Do(req)
+		switch {
+		case err != nil:
+			// The attempt the deadline cut short says nothing new.
+			// net/http strips any URL password from its errors.
+			if ctx.Err() == nil {
+				last = err.Error()
 			}
+		case resp.StatusCode == http.StatusOK:
+			_ = resp.Body.Close()
+			return nil
+		default:
+			_ = resp.Body.Close()
+			last = "router answered " + resp.Status
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("ax sink: task %s/%s not ready: %w", s.atespace, task, ctx.Err())
+			return fmt.Errorf("ax sink: task %s/%s not ready: %w (last attempt: %s)", s.atespace, task, ctx.Err(), last)
 		case <-time.After(time.Second):
 		}
 	}

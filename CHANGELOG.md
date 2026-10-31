@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`--ax-router-url` defaults to `https://atenet-router.ate-system.svc.cluster.local`,
+  and an https router is mutual TLS (#809).** Agent Substrate v0.6
+  removed the router's plaintext ingress, and v1.0 has no way to turn it
+  back on: the router answers only on 443, only to a client presenting a
+  pod certificate from Substrate's podidentity signer whose SPIFFE ID is
+  on the router's allowlist. With the old `http://` default, every
+  incident open against such a router timed out in its readiness wait
+  after two minutes. The ax sink now reads the pod certificate and the
+  router's trust bundle from two projected volumes, at the paths
+  Substrate's own components use, and re-reads both as they rotate (a
+  pod certificate lasts at most a day). The old behaviour is one flag
+  away: an explicit `--ax-router-url=http://…` is plaintext exactly as
+  before, for a Substrate v0.5 or earlier router. A v0.5 deployment that
+  relied on the default now fails at startup, naming the missing
+  credential file and that flag, rather than failing every incident.
+  Two things to do when moving to Substrate v1.0: mount the two volumes
+  (`deploy-ax/` shows them), and add the pod's SPIFFE ID,
+  `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, to
+  Substrate's `ingressAllowedSPIFFEIDs`.
+
+### Added
+
+- **`--ax-router-credential-bundle`, `--ax-router-trust-bundle` and
+  `--ax-router-server-name`** (#809). They default to
+  `/run/podidentity.podcert.ate.dev/credential-bundle.pem`,
+  `/run/servicedns-ca/trust-bundle.pem` and `atenet-router.ate-system.svc`,
+  so a manifest that mounts the volumes where Substrate does needs none
+  of them. The server name matters more than it looks: the router's
+  certificate names only `atenet-router.ate-system.svc`, not the
+  `.cluster.local` form the URL uses, and every Service in the cluster
+  can get a certificate from the same CA for its own name, so the name
+  check is what tells the router apart from them. An empty credential
+  bundle keeps the previous https behaviour, one-way TLS on the system
+  roots, for a front that terminates TLS itself. A flag the chosen mode
+  would ignore is a usage error.
+- **`deploy-ax/`**, `deploy/` with the ax sink: `--sink=ax`, a task
+  template ConfigMap, and the two projected volumes. It is the first
+  in-repo manifest for the ax sink.
+
+### Fixed
+
+- **An ax-sink readiness timeout says why.** The sink polls the task's
+  `/readyz` through the router for up to two minutes after resuming it,
+  and used to report only "context deadline exceeded". The error now
+  carries the last attempt's outcome, so an untrusted certificate, a
+  name mismatch or a router refusal shows up in the first incident's
+  open error instead of looking like a slow task.
+
 ### Security
 
 - **Go toolchain 1.26.10**, clearing GO-2026-6809 (`crypto/x509`

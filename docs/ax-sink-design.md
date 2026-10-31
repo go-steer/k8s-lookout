@@ -7,7 +7,8 @@ a third, `--sink=ax`, which runs incidents in
 [Agent Executor (AX)](https://github.com/google/ax) tasks on Agent Substrate:
 by default one task per incident, or one long-lived task per cluster.
 Tracking issues: #567 (the sink), #590 (task identity, task scope, session
-reuse), #580 (TLS for an AX in another cluster), #599 (holding reminders).
+reuse), #580 (TLS for an AX in another cluster), #599 (holding reminders),
+#809 (mutual TLS to Substrate v0.6+'s router).
 
 **Decision: the ax sink creates (or finds) an AX task for each incident (or
 one per cluster), named from lookout's own incident identity, and speaks the
@@ -191,6 +192,16 @@ phase that catches a task suspended early (on completion, or by hand).
 calls `Append` on the source's own goroutine and a hung AX API must not stall
 the source. If `GetTask` fails or times out, the record alone decides.
 
+**Phase `Unknown`.** From the Substrate v1.0 upgrade on, AX reports a task's
+phase as `Unknown` when it can't reach Substrate. That phase describes AX's
+view, not the task, so the sink treats it exactly like a failed `GetTask`:
+the record decides. It is not treated as `Suspended`, because the router is
+Substrate's data plane and can be serving a busy agent while AX can't see
+the control plane; holding that agent's reminder would hide the incident's
+latest count from someone who is reading. It is never treated as gone:
+only NotFound un-binds an incident, so a Substrate outage can't make
+lookout reopen every open incident when it ends.
+
 A reminder sent inside the window resets AX's idle clock, which can keep a
 task awake for up to one more window. That is bounded: reminders are at
 least `--dedup-window` apart, and the next one usually falls outside the
@@ -266,7 +277,10 @@ with them, it built the path and finished the diagnosis. The sentinel logs a
 | `--ax-ca-file` | PEM CA bundle added to the system roots for verifying the AX API's certificate. Requires `--ax-server-tls`. |
 | `--ax-token-env` | Optional env var name holding a bearer token (e.g. Google ID token or service JWT) attached as per-RPC `authorization: Bearer <token>` metadata on every AX gRPC call. Requires `--ax-server-tls`. |
 | `--ax-task-template` | Path to the Task manifest. Required. |
-| `--ax-router-url` | Substrate router, default `http://atenet-router.ate-system.svc.cluster.local`. |
+| `--ax-router-url` | Substrate router, default `https://atenet-router.ate-system.svc.cluster.local` (mutual TLS; see Router mutual TLS). An `http://` URL is plaintext, for a Substrate v0.5 or earlier router. The default was `http://…` before v0.43. |
+| `--ax-router-credential-bundle` | The client's pod certificate, in the podCertificate `credentialBundlePath` layout. Default `/run/podidentity.podcert.ate.dev/credential-bundle.pem`. Empty means one-way TLS on the system roots. |
+| `--ax-router-trust-bundle` | The authorities the router's certificate must chain to. Default `/run/servicedns-ca/trust-bundle.pem`. |
+| `--ax-router-server-name` | The name verified on the router's certificate. Default `atenet-router.ate-system.svc`; empty verifies the URL's host. |
 | `--ax-task-scope` | `incident` (default) or `cluster`; see Task scope. |
 | `--token-env`, `--owner` | Same meaning as for the core-agent sink, applied to the agent's session API inside each task. |
 
@@ -310,10 +324,12 @@ gRPC. Passing `--ax-token-env` without `--ax-server-tls`, or when `--sink != ax`
 fails startup with a usage error (exit 2); if the named environment variable is
 empty at startup, `dialAX` returns an error before running informers.
 
-**The router.** An `https://` `--ax-router-url` works out of the box: session
-calls use the shared sink HTTP transport verified against the system roots
-(`SSL_CERT_FILE` or `SSL_CERT_DIR` add a private CA; `--ax-ca-file` applies to
-the AX API only). Over plain `http://`, the `--token-env` session bearer token
+**The router.** In-cluster, the router is mutual TLS (see Router mutual
+TLS). A router reached through a front that terminates TLS and does its own
+client authentication takes `--ax-router-credential-bundle=` (empty): session
+calls then use the shared sink HTTP transport verified against the system
+roots (`SSL_CERT_FILE` or `SSL_CERT_DIR` add a private CA; `--ax-ca-file`
+applies to the AX API only). Over plain `http://`, the `--token-env` session bearer token
 crosses the network in the clear, so lookout emits a startup warning (`slog.Warn`
 and stderr log) when `--ax-router-url` uses plain `http://` targeting any host
 outside the local cluster. Any userinfo password in the logged URL is masked,
@@ -327,6 +343,129 @@ a shared VPC ILB from a local ClusterIP. Not short names (`atenet-router.ate-sys
 either: they resolve through the pod's DNS search path, which can match search
 domains outside the cluster. Spell in-cluster Service names out in full (for
 example `http://switchboard.agent.svc:8080`) to keep plain HTTP warnings silent.
+
+### Router mutual TLS (Substrate v0.6+)
+
+Agent Substrate v0.6 removed the router's plaintext ingress (substrate
+#2977), and v1.0 has no mode switch left. The `atenet-router` Service exposes
+`https` 443 and `connect-tls` 8444 only, and the router admits a request
+only if:
+
+- the client presents a certificate chaining to Substrate's **podidentity**
+  ClusterTrustBundle,
+- its single URI SAN, `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`,
+  is in Substrate's `ingressAllowedSPIFFEIDs` (ate-setup
+  `--ingress-allowed-spiffe-ids`), matched exactly. With the list empty the
+  router serves nothing.
+
+The router's own certificate comes from a different signer, **servicedns**,
+and names `atenet-router.ate-system.svc` only: no URI SAN, and no
+`.cluster.local` suffix.
+
+**Decision: an `https://` router URL is mutual TLS by default, built on
+purser's PKI client profile with both credentials read from projected
+volumes and re-read as they rotate; the default URL becomes `https://`.**
+
+**What a pod mounts.** Two projected volumes, the same two Substrate's own
+components and upstream ax mount, at the same paths, so the flag defaults
+need no overriding:
+
+```yaml
+volumes:
+- name: podidentity          # mountPath: /run/podidentity.podcert.ate.dev
+  projected:
+    sources:
+    - podCertificate:
+        signerName: podidentity.podcert.ate.dev/identity
+        keyType: ECDSAP256
+        credentialBundlePath: credential-bundle.pem   # PKCS#8 key, then the chain
+- name: servicedns-ca        # mountPath: /run/servicedns-ca
+  projected:
+    sources:
+    - clusterTrustBundle:
+        signerName: servicedns.podcert.ate.dev/identity
+        labelSelector: {matchLabels: {podcert.ate.dev/canarying: live}}
+        path: trust-bundle.pem
+```
+
+`deploy-ax/` is `deploy/` with the ax sink and these two volumes. Its pod's
+SPIFFE ID is `spiffe://cluster.local/ns/agent-triage/sa/lookout-watch`, and
+the one step outside this repo is adding that ID to
+`ingressAllowedSPIFFEIDs`.
+
+**The client.**
+
+- `mtls.NewCertificateFileSource` reads the credential bundle and
+  `mtls.NewCertPoolFileSource` the trust bundle (go-steer/purser v0.5.0).
+  Both are re-read every 30 seconds. A pod certificate lives at most 24
+  hours and the kubelet refreshes it 30 minutes before expiry, so a restart
+  is never needed for the client certificate. A canaried servicedns CA is
+  picked up the same way.
+- `client.NewPKI` with `GetClientCertificate` and `RootCAsSource` verifies
+  the router against the pool current at each handshake, resumed ones
+  included. `client.Transport` gives the router its own connection pool.
+  otelhttp and the 10-second timeout match the shared sink client.
+- A failed re-read keeps the previous credential, logs a `WARNING`, and
+  leaves it in use until it expires.
+
+**Three modes, by scheme and flags,** each logged once at startup:
+
+| `--ax-router-url` | `--ax-router-credential-bundle` | Transport |
+|---|---|---|
+| `https://` | set (the default) | mutual TLS: pod certificate, trust bundle, server name |
+| `https://` | empty | one-way TLS on the system roots (a front that terminates TLS) |
+| `http://` | (must stay at its default) | plaintext, for a Substrate v0.5 or earlier router |
+
+A flag the chosen mode would ignore is a usage error (exit 2): a trust
+bundle or server name without a credential bundle, any of the three with an
+`http://` URL, mTLS without a trust bundle, or any of them with another
+sink. Nobody should believe they configured mTLS on a connection that does
+not use it.
+
+**Why the server name matters.** The servicedns signer issues a certificate
+to every Service-backed pod in the cluster, each for its own Service's name.
+Chaining to that CA proves only "some Service in this cluster"; the name
+check is what proves "the router". It is also required for the connection to
+work at all: the default URL's host, `….svc.cluster.local`, is not on the
+certificate. Empty `--ax-router-server-name` verifies the URL's host, which
+is right only for a router reached by a name its certificate carries.
+
+**Failing at startup.** The two files are read when the sink is built, so a
+missing mount, a bundle with no key, or an expired certificate fails
+`lookout watch` (exit 1). The error names the file and both ways out: mount
+the volumes, or pass an `http://` URL for an older router. The alternative,
+failing each incident's readiness wait two minutes in, is how a deployment
+learns too late. For failures only the router can report (a SPIFFE ID not on
+the allowlist, an untrusted certificate, a name mismatch), the readiness
+wait's timeout error carries the last attempt's error or status, so the
+first incident's open error says why instead of only "context deadline
+exceeded".
+
+**The default URL.** docs/cli-stability-policy.md rule 4: changing a default
+is a minor-version event with a `### Changed` entry, and the old behavior
+must stay reachable by explicit flag. It does: an explicit `http://` URL is
+plaintext, exactly as before. Keeping `http://` as the default was rejected:
+every v1.0 deployment would have to override it, and the failure for one
+that didn't is a timeout on every incident. A deployment on Substrate v0.5
+that relied on the default fails at startup instead (no credential bundle
+mounted), and the error names the `http://` URL that restores it.
+
+**Rejected alternatives.**
+
+- **purser's SPIFFE profile.** Its client requires an `Authorize` matcher on
+  the server's SPIFFE ID, and the router's certificate has none.
+- **Reading the key pair per handshake, as upstream ax does**
+  (`tls.LoadX509KeyPair` in `GetClientCertificate`). That re-parses on every
+  connection, can read a half-written file mid-rotation, and on a read error
+  ax presents an empty certificate. purser double-checks for torn reads,
+  keeps the last good credential, and refuses an expired leaf rather than
+  presenting it.
+- **A static trust pool read at startup** (`RootCAs`, or `SSL_CERT_FILE`).
+  A servicedns CA rotation would then need a restart of every lookout pod,
+  timed against the canary.
+- **Checking the files in flag validation.** `validate()` runs before
+  anything touches the network and also under `--dry-run`, where no sink is
+  built. Validation checks combinations; building the sink checks files.
 
 ### AX API: a pinned copy, not an import
 
@@ -351,6 +490,8 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   (`spec.idle`, `spec.onCompletion`; google/ax#420), which matters because
   every open incident task otherwise keeps a running agent, with its memory
   and CPU, on a Substrate worker.
+- **Substrate's router allowlist.** From Substrate v0.6 on, the pod's SPIFFE
+  ID must be in `ingressAllowedSPIFFEIDs`; see Router mutual TLS.
 - **The agent's session API.** The agent must serve `POST /sessions` and
   `POST /sessions/<sid>/inject` (core-agent's attach API). mast answered 501
   to `POST /sessions` until go-steer/mast `feat/ax-substrate-support`.
@@ -408,6 +549,8 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   - A gone task drops its held reminders and answers 404.
   - A reminder to a busy task goes through.
   - A recent task that AX records as `Suspended` holds.
+  - Phase `Unknown` falls back to the record (sent when recent, held when
+    idle) and is never treated as gone.
   - Held reminders fold to the latest, which is delivered ahead of the next
     real inject.
   - A resolution delivers the held reminder first.
@@ -417,6 +560,26 @@ The sink lives in `internal/axsink`, not `pkg/inject`, so the embeddable
   - Stale reminders are dropped, the total held is bounded, and an empty
     record (after a restart) counts as idle.
   - Each outcome is counted.
+- `internal/axsink` (`router_tls_test.go`), router mutual TLS, against an
+  in-process stand-in for Substrate's router ingress: a client certificate
+  required and verified against a podidentity CA, its SPIFFE ID matched
+  against an allowlist, and a servicedns certificate naming only
+  `atenet-router.ate-system.svc`, dialed by IP:
+  - Readiness, open, inject and append all go through.
+  - The stand-in refuses a client without a certificate, and a certificate
+    whose SPIFFE ID isn't allowed.
+  - A rewritten credential bundle is presented on the next handshake.
+  - A router certificate from a new CA is refused until the trust bundle
+    carries that CA, then accepted, with no new client.
+  - Another Service's certificate from the same CA, the `.cluster.local`
+    name, and an empty server name while dialing an IP are all refused.
+  - A readiness timeout names the TLS reason.
+  - A missing or keyless bundle fails at construction, naming the file.
+- `internal/watch`: the default deployment builds the mTLS client and logs
+  the identity the router must allow; missing mounts fail startup naming the
+  file and the `http://` fallback; `http://` and one-way `https://` read no
+  files; the flag-combination matrix; `deploy-ax/`'s template decodes and
+  its volumes land where the flag defaults look.
 - `pkg/inject`: the core-agent and webhook sinks deliver every reminder at
   once.
 - `internal/watch`: the AX API dialled over TLS with CA cert + per-RPC

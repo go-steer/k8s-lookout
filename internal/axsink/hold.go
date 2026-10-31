@@ -137,14 +137,34 @@ const (
 	taskGone                   // AX has no such task: the session can't come back
 )
 
+// Task phases stateOf reads from AX's record.
+const (
+	// phaseSuspended: AX suspended the task (idle, on completion, or by
+	// hand). Delivering would wake it.
+	phaseSuspended = "Suspended"
+	// phaseUnknown: AX could not reach Agent Substrate when it read the
+	// task (ax reports this from the Substrate v1.0 upgrade on), so the
+	// phase says nothing about the task itself. It is not "gone" either: a
+	// Substrate outage must not unbind every open incident.
+	phaseUnknown = "Unknown"
+)
+
 // stateOf decides whether a reminder may go to task now without waking it
 // or holding it awake past its idle window. Awake means a real inject was
 // delivered within the idle window (so AX cannot have suspended it for
 // idleness, and the agent is plausibly still on the incident) and AX does
 // not record it as Suspended (on completion, or by hand). Both come from a
 // GetTask, a read of AX's own record that never wakes the task, which also
-// says whether the task still exists. If GetTask fails, the record alone
-// decides: a busy task gets the reminder as before, an idle one holds it.
+// says whether the task still exists.
+//
+// When AX cannot say — GetTask fails, or answers with phase Unknown because
+// Substrate is unreachable — the sink's own record decides: a busy task
+// gets the reminder as before, an idle one holds it. Unknown is treated as
+// a failed read rather than as Suspended because the agent may well be
+// mid-investigation (the router is Substrate's data plane and can be up
+// while AX's view of the control plane is not), and holding its reminder
+// would hide the incident's latest count from an agent that is reading.
+// It is never treated as gone: only NotFound un-binds an incident.
 func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	s.hold.mu.Lock()
 	last, ok := s.hold.lastReal[task]
@@ -156,12 +176,16 @@ func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	gctx, cancel := context.WithTimeout(ctx, getTaskTimeout)
 	t, err := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
 	cancel()
+	phase := t.GetStatus().GetPhase()
 	switch {
 	case status.Code(err) == codes.NotFound:
 		return taskGone
-	case err != nil && recent:
-		return taskAwake
-	case err != nil, !recent, t.GetStatus().GetPhase() == "Suspended":
+	case err != nil || phase == phaseUnknown:
+		if recent {
+			return taskAwake
+		}
+		return taskIdle
+	case !recent, phase == phaseSuspended:
 		return taskIdle
 	}
 	return taskAwake
