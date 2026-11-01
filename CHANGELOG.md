@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Generic MCP clients signed in through lookout's authorization server
+  no longer go back to browser sign-in every hour under vault custody.**
+  steward v0.3.0 force-refreshed a vault-held Google token with under 5
+  minutes left. The vault answers a forced refresh of a token Google
+  still accepts by asking for consent, so an active client's hourly
+  refresh got `server_error`, and the MCP TypeScript SDK answers that by
+  starting a new interactive sign-in. steward v0.4.0
+  ([go-steer/steward#23](https://github.com/go-steer/steward/pull/23))
+  never forces a token Google accepts, and waits out a nearly spent one
+  (up to about 93 s) before the refresh token rotates. **Upgrade note:**
+  `/token` and the sign-in callback can now take that long, so whatever
+  fronts lookout needs a request timeout of at least 2 minutes:
+  `deploy-mcp-gemini`'s `GCPBackendPolicy` allows 300 s, and lookout's
+  own server sets no `WriteTimeout`. Also from steward v0.4.0: on Path A
+  only Google's own `400 invalid_token` verdict is a refusal (401), and
+  another 400, such as an egress proxy's, is a retryable 503; consent
+  pages clean client names; a recreated allow-listed group's members are
+  let back in without waiting out the hour-long name cache.
+
 ## [0.43.1] - 2026-11-01
 
 **This release stops a resolved incident from re-opening from its own Kubernetes Event.** lookout recognised an Event it had already handled only while the incident was still in its dedup cache, and dropped a resolved incident from that cache a few minutes after its last activity, while the Event itself lives on for an hour. Every relist after that re-delivered the unchanged Event as new, so the incident opened again; with the ax sink that kept the incident's task from ever idle-suspending and re-created it after it was deleted. A resolved incident now leaves a tombstone that keeps recognising its Event for an hour, and the event source ignores re-deliveries that carry no change. Genuinely new activity still opens the incident as before.
