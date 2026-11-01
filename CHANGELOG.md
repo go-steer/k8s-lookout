@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-11-01
+
+**This release stops a resolved incident from re-opening from its own Kubernetes Event.** lookout recognised an Event it had already handled only while the incident was still in its dedup cache, and dropped a resolved incident from that cache a few minutes after its last activity, while the Event itself lives on for an hour. Every relist after that re-delivered the unchanged Event as new, so the incident opened again; with the ax sink that kept the incident's task from ever idle-suspending and re-created it after it was deleted. A resolved incident now leaves a tombstone that keeps recognising its Event for an hour, and the event source ignores re-deliveries that carry no change. Genuinely new activity still opens the incident as before.
+
 ### Fixed
 
 - **A resolved incident no longer re-opens from its own unchanged Event
