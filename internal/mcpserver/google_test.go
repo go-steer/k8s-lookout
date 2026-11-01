@@ -56,7 +56,7 @@ func fakeGoogle(t *testing.T) string {
 		}
 		email, ok := googlePeople[tok]
 		if !ok {
-			http.Error(w, "{}", http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid_token"}`, http.StatusBadRequest)
 			return
 		}
 		hd := email[strings.IndexByte(email, '@')+1:]
