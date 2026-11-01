@@ -33,14 +33,22 @@ import (
 )
 
 // switchObserver is a §7.4 clearance observer whose verdict the test
-// flips: stuck (symptom present) until cleared is set.
-type switchObserver struct{ cleared bool }
+// flips: stuck (symptom present) until cleared is set. resolution is
+// the verdict once cleared; empty means recovered.
+type switchObserver struct {
+	cleared    bool
+	resolution engine.Resolution
+}
 
 func (o *switchObserver) Clearance(engine.Incident) (engine.Clearance, bool) {
 	if !o.cleared {
 		return engine.Clearance{Cleared: false}, true
 	}
-	return engine.Clearance{Cleared: true, StableSince: time.Now().Add(-time.Hour), Resolution: engine.ResolutionRecovered}, true
+	res := o.resolution
+	if res == "" {
+		res = engine.ResolutionRecovered
+	}
+	return engine.Clearance{Cleared: true, StableSince: time.Now().Add(-time.Hour), Resolution: res}, true
 }
 
 // repeatRig is a dispatcher with the production #599 wiring — §7.7

@@ -250,7 +250,7 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			}
 			emit(s.toSignal(ev))
 		},
-		UpdateFunc: func(_, newObj any) {
+		UpdateFunc: func(oldObj, newObj any) {
 			// Update fires when the k8s API bumps the Event's
 			// Count / LastTimestamp (kubelet reports a repeat).
 			// We treat each update as another observation so
@@ -259,6 +259,9 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 			ev, ok := newObj.(*corev1.Event)
 			if !ok {
 				log.Printf("k8s-events: unexpected object type on Update: %T", newObj)
+				return
+			}
+			if old, ok := oldObj.(*corev1.Event); ok && unchanged(old, ev) {
 				return
 			}
 			if !s.HasSynced() || !s.allows(ev) {
@@ -297,6 +300,19 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.arm()
 	<-ctx.Done()
 	return nil
+}
+
+// unchanged reports an Update that carries no change: a periodic resync,
+// or a relist (the reflector's Replace after a watch expires) handing back
+// an Event the cache already holds at the same ResourceVersion. Every real
+// write bumps the ResourceVersion, so this drops only re-deliveries. They
+// used to reach the dispatcher as observations, and after the incident
+// had resolved, as a new incident (issue #816). The dedup cache's replay
+// test is the second line; this keeps the re-deliveries from costing a
+// pipeline pass at all. An empty ResourceVersion (fake clients) is never
+// treated as unchanged.
+func unchanged(old, ev *corev1.Event) bool {
+	return old.ResourceVersion != "" && old.ResourceVersion == ev.ResourceVersion
 }
 
 // arm enables emission — called once, after the initial LIST drains.

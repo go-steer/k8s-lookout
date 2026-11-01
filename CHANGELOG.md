@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A resolved incident no longer re-opens from its own unchanged Event
+  (#816).** lookout recognises a Kubernetes Event it has already
+  processed by the Event's `LastTimestamp`, but it kept that record only
+  for as long as the incident's dedup entry lived. A resolved entry was
+  dropped one `--dedup-window` after its last activity, while the Event
+  stays in the API server for an hour. Every informer relist after that
+  re-delivered the unchanged Event as if it were new, so the incident
+  opened again. With the ax sink, that re-woke the incident's task about
+  every ten minutes, so it never idle-suspended, and it re-created the
+  task once it had been deleted. That is how shipmind-stage's nightly
+  scenario failed on 2026-11-01. A retired resolved entry now leaves a
+  replay tombstone for an hour, and a replay that hits it is suppressed
+  without retrying an open. The `k8s-events` source also stops emitting
+  informer updates that carry no change (same `ResourceVersion`). An
+  Event whose `last_seen` really advances still opens the incident. This
+  code is the same as in v0.36.0: what changed on stage was how often
+  Events were re-delivered, not lookout.
+
 ## [0.43.0] - 2026-10-31
 
 **This release moves the ax sink to Agent Substrate v1.0: lookout reaches the router over mutual TLS and speaks the v1.0 port of the ax fork.** Substrate v0.6 removed the router's plaintext ingress, so an https router URL is now the default and is dialled with the pod's own certificate from Substrate's podidentity signer, verifying the router against the servicedns trust bundle; an explicit `http://` URL keeps the old behaviour for clusters still on v0.5. The vendored ax API follows the fork's v1.0 port, with one `workspace` per task, explicit resource limits in templates, and a task whose actor is gone recognised as gone. Upgrade lookout and ax-server together.

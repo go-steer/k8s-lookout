@@ -253,6 +253,12 @@ type DedupResult struct {
 	// that owns the incident alive (§7.5 idle TTL), which the
 	// pre-#599 reopen used to do as a side effect.
 	Absorbed bool
+	// Replay marks a DedupDuplicate for activity an incident that has
+	// since resolved and been retired already handled (issue #816): the
+	// Event re-delivered unchanged by an informer relist. It has no
+	// session, and the dispatcher must not read that as a failed open to
+	// retry (#84/#96): the incident it belonged to is over.
+	Replay bool
 }
 
 // RepeatChange* name what made a repeat material (DedupResult.Change).
@@ -310,6 +316,23 @@ type DedupCache struct {
 	// lastSweep records when sweepExpiredLocked last pruned expired
 	// unbound/resolved entries (#643).
 	lastSweep time.Time
+	// tombstones remember, per key, the Event timestamp a retired
+	// resolved entry had last processed (issue #816). A resolved entry
+	// leaves the cache one window after its last activity, so that
+	// routing and joins stop reaching its session, but the Event behind
+	// it lives on in the API server for up to an hour and every relist
+	// re-delivers it. Without this, that re-delivery is a first sighting
+	// and re-opens an incident that is over. Memory only: after a
+	// restart the k8s-events source's ResourceVersion check covers the
+	// relists, and the informer's initial LIST is never emitted.
+	tombstones map[EventKey]tombstone
+}
+
+// tombstone is what survives of a retired resolved entry: enough for the
+// replay test, nothing that routes.
+type tombstone struct {
+	EventLastTS time.Time // the Event's LastTimestamp last processed
+	LastSeen    time.Time // wall clock of the entry's last real activity
 }
 
 // maxDedupEntries caps the sidecar's cache size. 10k is plenty for
@@ -326,6 +349,7 @@ func NewDedupCache(window time.Duration, persistPath string) (*DedupCache, error
 	}
 	c := &DedupCache{
 		entries:     make(map[EventKey]*dedupEntry),
+		tombstones:  make(map[EventKey]tombstone),
 		window:      window,
 		max:         maxDedupEntries,
 		persistPath: persistPath,
@@ -595,7 +619,11 @@ type Observation struct {
 // slot. The wire event's original Reason is preserved on the
 // inject payload — canonicalization is a dedup-only mechanism.
 //
-// Four cases, checked in order:
+// Four cases, checked in order, after one that needs no entry:
+//
+//  0. **Replay of a retired incident** — no entry, but a tombstone
+//     says a resolved incident already processed this key's activity
+//     up to LastTS (issue #816). Suppressed with Replay set.
 //
 //  1. **Replay** — LastTS is not later than the recorded
 //     EventLastTS. This is the k8s Event object being re-delivered
@@ -643,6 +671,17 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	c.maybeSweepLocked(now)
 	entry, ok := c.entries[key]
 	if !ok {
+		if tomb, dead := c.tombstones[key]; dead {
+			if !obs.LastTS.After(tomb.EventLastTS) {
+				// Case 0: a replay of activity a resolved, retired
+				// incident already handled (issue #816). Suppressed,
+				// and never a retry: there is no open to retry.
+				return DedupResult{Kind: DedupDuplicate, Count: 1, Replay: true}
+			}
+			// The Event moved on: genuinely new activity, which opens
+			// a new incident like any first sighting.
+			delete(c.tombstones, key)
+		}
 		// First sighting for this key.
 		c.evictIfFull(now)
 		c.entries[key] = newDedupEntry(now, obs, class)
@@ -1196,7 +1235,7 @@ func (c *DedupCache) Bindings() []BoundIncident {
 	for key, entry := range c.entries {
 		if entry.Resolved {
 			if c.window > 0 && now.Sub(entry.LastSeen) > c.window {
-				delete(c.entries, key)
+				c.retireLocked(key, entry)
 			}
 			continue
 		}
@@ -1237,7 +1276,7 @@ func (c *DedupCache) sweepExpiredLocked(now time.Time) int {
 	if c.window <= 0 {
 		return 0
 	}
-	replayTTL := max(time.Hour, 4*c.window)
+	replayTTL := c.replayTTL()
 	removed := 0
 	for k, e := range c.entries {
 		age := now.Sub(e.LastSeen)
@@ -1245,7 +1284,7 @@ func (c *DedupCache) sweepExpiredLocked(now time.Time) int {
 			continue
 		}
 		if e.Resolved {
-			delete(c.entries, k)
+			c.retireLocked(k, e)
 			removed++
 			continue
 		}
@@ -1257,7 +1296,43 @@ func (c *DedupCache) sweepExpiredLocked(now time.Time) int {
 			removed++
 		}
 	}
+	for k, tomb := range c.tombstones {
+		if now.Sub(tomb.LastSeen) > replayTTL {
+			delete(c.tombstones, k)
+		}
+	}
 	return removed
+}
+
+// replayTTL is how long a closed entry, or a retired one's tombstone,
+// still answers the replay test: at least an hour, the API server's
+// default Event TTL, measured from the entry's last real activity, which
+// is no earlier than the Event's own last update.
+func (c *DedupCache) replayTTL() time.Duration {
+	return max(time.Hour, 4*c.window)
+}
+
+// retireLocked removes a resolved entry and leaves a tombstone, so a
+// relist of the Event it was opened from stays a replay (issue #816).
+// Bounded like the entries: past c.max, the tombstone with the oldest
+// LastSeen goes first.
+func (c *DedupCache) retireLocked(k EventKey, e *dedupEntry) {
+	delete(c.entries, k)
+	if c.tombstones == nil {
+		c.tombstones = make(map[EventKey]tombstone)
+	}
+	if _, ok := c.tombstones[k]; !ok && len(c.tombstones) >= c.max {
+		var oldest EventKey
+		var oldestAt time.Time
+		first := true
+		for tk, t := range c.tombstones {
+			if first || t.LastSeen.Before(oldestAt) {
+				oldest, oldestAt, first = tk, t.LastSeen, false
+			}
+		}
+		delete(c.tombstones, oldest)
+	}
+	c.tombstones[k] = tombstone{EventLastTS: e.EventLastTS, LastSeen: e.LastSeen}
 }
 
 func (c *DedupCache) evictionTierLocked(k EventKey, e *dedupEntry, now time.Time) int {
@@ -1296,6 +1371,10 @@ func (c *DedupCache) evictIfFull(now time.Time) {
 			victimTs = e.LastSeen
 			victimTier = tier
 		}
+	}
+	if victim := c.entries[victimKey]; victim != nil && victim.Resolved {
+		c.retireLocked(victimKey, victim)
+		return
 	}
 	delete(c.entries, victimKey)
 }
