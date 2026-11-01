@@ -716,7 +716,30 @@ its agent re-diagnosed an unchanged failure each time. Now:
   re-sends the full open payload at the next occurrence, so the agent never
   meets an incident first as a pure reminder.
 - After the incident resolves, a recurrence opens fresh, as before. Replays
-  (an Event's `LastTimestamp` not advancing) never reach any of this.
+  (an Event's `LastTimestamp` not advancing) never reach any of this, and
+  that includes replays after the incident is over (#816):
+  - A resolved entry leaves the cache one window after its last activity,
+    so routing and the cross-source joins stop reaching its session. It
+    leaves a **replay tombstone** behind: the key and the Event timestamp
+    it last processed, kept for the replay TTL (max(1h, 4 windows); the API
+    server keeps an Event for an hour after its last update, its default
+    `--event-ttl`).
+  - An Event re-delivered by a relist with that timestamp unchanged is a
+    suppressed duplicate marked `Replay`. It has no session, and the
+    dispatcher does not mistake it for a failed open to retry (#84/#96).
+  - An Event whose timestamp has advanced clears the tombstone and opens a
+    new incident like any first sighting.
+  - Tombstones are memory-only and bounded like the entries. The snapshot
+    format is unchanged, so older binaries still read it.
+  - The `k8s-events` source is the first line: it drops an informer
+    `Update` whose `ResourceVersion` hasn't changed (a resync, or a
+    relist's Replace), so most re-deliveries never become signals. That
+    check works on the informer's cache, so it covers relists after a
+    restart too, when the tombstones are gone.
+
+  Before this, a relist after the window re-opened the resolved incident.
+  With the ax sink, that meant re-waking or re-creating its task every
+  ~10 minutes, until the Event expired.
 
 The schedule rides `--dedup-persist`, so a restart mid-backoff resumes at the
 next reminder. A storm-claimed incident's repeats refresh the storm's idle

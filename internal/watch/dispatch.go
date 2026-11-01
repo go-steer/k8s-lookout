@@ -274,6 +274,14 @@ func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (en
 
 func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord) {
 	d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
+	if result.Replay {
+		// Issue #816: the Event re-delivered unchanged after its incident
+		// resolved. No session, and not a failed open to retry either.
+		log.Printf("dedup %s pod=%s/%s (replay of a resolved incident's Event, last_seen unchanged — suppressed)",
+			sig.Key.Reason, sig.Namespace, sig.Name)
+		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
+		return
+	}
 	log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
 		sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
 	if downgraded != nil && result.SessionID != "" {

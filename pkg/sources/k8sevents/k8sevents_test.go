@@ -428,3 +428,55 @@ func TestTruncateMessage_ShortPayloadUnchanged(t *testing.T) {
 		t.Errorf("short message should pass through unchanged; got %q", got)
 	}
 }
+
+// TestSource_DropsReDeliveriesOfAnUnchangedEvent (issue #816): a resync
+// or relist hands the handler the same Event at the same ResourceVersion.
+// That is not an observation and must not be emitted; a real update (new
+// ResourceVersion, Count and LastTimestamp advanced) still is.
+func TestSource_DropsReDeliveriesOfAnUnchangedEvent(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset()
+	rec := newSignalRecorder()
+	// Resync re-delivers every cached Event as an Update at the same
+	// ResourceVersion. client-go raises any period under a second to one.
+	src := New(client, time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- src.Run(ctx, rec.emit) }()
+	waitArmed(ctx, t, src)
+
+	ev := crashEvent("checkout-svc.evt")
+	ev.ResourceVersion = "100"
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, ev, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	select {
+	case <-rec.first:
+	case <-ctx.Done():
+		t.Fatal("no signal for the new Event")
+	}
+	time.Sleep(2500 * time.Millisecond) // two resyncs
+	if n := len(rec.snapshot()); n != 1 {
+		t.Fatalf("signals after resyncs of an unchanged Event = %d, want 1 (the Add)", n)
+	}
+
+	ev.ResourceVersion = "101"
+	ev.Count = 4
+	ev.LastTimestamp = metav1.Time{Time: time.Now()}
+	if _, err := client.CoreV1().Events("checkout").Update(ctx, ev, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update event: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(rec.snapshot()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+	got := rec.snapshot()
+	if len(got) != 2 || got[1].Count != 4 {
+		t.Fatalf("signals = %d (last count %d), want exactly 2: the Add and the real update", len(got), got[len(got)-1].Count)
+	}
+}
