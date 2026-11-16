@@ -184,6 +184,7 @@ func NewKubeletVolumeFetcher(client kubernetes.Interface) VolumeUsageFetcher {
 		},
 		proxyGet: func(ctx context.Context, node string) ([]byte, error) {
 			return client.CoreV1().RESTClient().Get().
+				SetHeader("Accept", "application/json").
 				Resource("nodes").Name(node).SubResource("proxy").
 				Suffix("stats/summary").DoRaw(ctx)
 		},

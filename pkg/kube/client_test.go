@@ -15,16 +15,26 @@
 package kube
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	authv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 )
 
 // twoContexts is a kubeconfig naming two clusters, with the SECOND as
@@ -205,5 +215,173 @@ users:
 	elapsed := time.Since(start)
 	if elapsed >= 500*time.Millisecond {
 		t.Errorf("5 sequential calls to unreachable endpoint took %s, want < 500ms", elapsed)
+	}
+}
+
+func TestBuildConfigProtobufDefaults(t *testing.T) {
+	path := writeKubeconfig(t)
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+
+	cfg, err := BuildConfig(Options{Kubeconfig: path})
+	if err != nil {
+		t.Fatalf("BuildConfig: %v", err)
+	}
+	if cfg.AcceptContentTypes != DefaultAcceptContentTypes {
+		t.Errorf("AcceptContentTypes = %q, want %q", cfg.AcceptContentTypes, DefaultAcceptContentTypes)
+	}
+	if cfg.ContentType != DefaultContentType {
+		t.Errorf("ContentType = %q, want %q", cfg.ContentType, DefaultContentType)
+	}
+
+	// Explicit Target.Config content-type overrides are preserved.
+	override := &rest.Config{
+		Host: "https://override.example:6443",
+		ContentConfig: rest.ContentConfig{
+			AcceptContentTypes: "application/json",
+			ContentType:        "application/json",
+		},
+	}
+	got, err := BuildConfig(Options{Target: &Target{Name: "override", Config: override}})
+	if err != nil {
+		t.Fatalf("BuildConfig(Target): %v", err)
+	}
+	if got.AcceptContentTypes != "application/json" || got.ContentType != "application/json" {
+		t.Errorf("Target overrides not preserved: Accept=%q ContentType=%q", got.AcceptContentTypes, got.ContentType)
+	}
+}
+
+func TestBuildClientFromConfigAppliesProtobufWithoutMutatingCaller(t *testing.T) {
+	var gotAccept atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept.Store(r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"kind":"NamespaceList","apiVersion":"v1","items":[]}`))
+	}))
+	defer srv.Close()
+
+	caller := &rest.Config{Host: srv.URL}
+	client, err := BuildClientFromConfig(caller)
+	if err != nil {
+		t.Fatalf("BuildClientFromConfig: %v", err)
+	}
+	if caller.AcceptContentTypes != "" || caller.ContentType != "" {
+		t.Errorf("BuildClientFromConfig mutated caller config: Accept=%q ContentType=%q", caller.AcceptContentTypes, caller.ContentType)
+	}
+	if _, err := client.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{}); err != nil {
+		t.Fatalf("list namespaces: %v", err)
+	}
+	if got, _ := gotAccept.Load().(string); got != DefaultAcceptContentTypes {
+		t.Errorf("Accept header = %q, want %q", got, DefaultAcceptContentTypes)
+	}
+}
+
+func TestClientNegotiatesProtobufAndDynamicStaysJSON(t *testing.T) {
+	pbSer := protobuf.NewSerializer(scheme.Scheme, scheme.Scheme)
+
+	var (
+		gotListAccept  atomic.Value
+		gotPostCT      atomic.Value
+		gotDynAccept   atomic.Value
+		respondAsProto atomic.Bool
+	)
+	respondAsProto.Store(true)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces":
+			gotListAccept.Store(r.Header.Get("Accept"))
+			if respondAsProto.Load() {
+				var buf bytes.Buffer
+				nsList := &corev1.NamespaceList{
+					Items: []corev1.Namespace{{ObjectMeta: metav1.ObjectMeta{Name: "default"}}},
+				}
+				if err := pbSer.Encode(nsList, &buf); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", DefaultContentType)
+				_, _ = w.Write(buf.Bytes())
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"kind":"NamespaceList","apiVersion":"v1","items":[{"metadata":{"name":"json-fallback"}}]}`))
+
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/selfsubjectaccessreviews"):
+			gotPostCT.Store(r.Header.Get("Content-Type"))
+			var buf bytes.Buffer
+			resp := &authv1.SelfSubjectAccessReview{Status: authv1.SubjectAccessReviewStatus{Allowed: true}}
+			if err := pbSer.Encode(resp, &buf); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", DefaultContentType)
+			_, _ = w.Write(buf.Bytes())
+
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "computeclasses"):
+			gotDynAccept.Store(r.Header.Get("Accept"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"apiVersion":"cloud.google.com/v1","kind":"ComputeClassList","items":[]}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	target := &Target{Name: "test", Config: &rest.Config{Host: srv.URL}}
+	client, err := BuildClient(Options{Target: target})
+	if err != nil {
+		t.Fatalf("BuildClient: %v", err)
+	}
+
+	// 1. Typed GET negotiates Protobuf and decodes a Protobuf response.
+	nsList, err := client.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list namespaces (protobuf): %v", err)
+	}
+	if len(nsList.Items) != 1 || nsList.Items[0].Name != "default" {
+		t.Fatalf("protobuf namespaces = %+v, want [default]", nsList.Items)
+	}
+	if got, _ := gotListAccept.Load().(string); got != DefaultAcceptContentTypes {
+		t.Errorf("typed GET Accept = %q, want %q", got, DefaultAcceptContentTypes)
+	}
+
+	// 2. Typed GET transparently falls back to JSON when the server responds with JSON.
+	respondAsProto.Store(false)
+	nsList, err = client.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list namespaces (json fallback): %v", err)
+	}
+	if len(nsList.Items) != 1 || nsList.Items[0].Name != "json-fallback" {
+		t.Fatalf("json fallback namespaces = %+v, want [json-fallback]", nsList.Items)
+	}
+
+	// 3. Typed POST encodes request body as Protobuf.
+	ssar, err := client.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), &authv1.SelfSubjectAccessReview{
+		Spec: authv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authv1.ResourceAttributes{Verb: "list", Resource: "pods"},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create SSAR: %v", err)
+	}
+	if !ssar.Status.Allowed {
+		t.Errorf("SSAR Allowed = false, want true")
+	}
+	if got, _ := gotPostCT.Load().(string); got != DefaultContentType {
+		t.Errorf("typed POST Content-Type = %q, want %q", got, DefaultContentType)
+	}
+
+	// 4. Dynamic client keeps JSON for CRDs even when built from the same Target/BuildConfig.
+	dyn, err := BuildDynamicClient(Options{Target: target})
+	if err != nil {
+		t.Fatalf("BuildDynamicClient: %v", err)
+	}
+	gvr := schema.GroupVersionResource{Group: "cloud.google.com", Version: "v1", Resource: "computeclasses"}
+	if _, err := dyn.Resource(gvr).List(context.Background(), metav1.ListOptions{}); err != nil {
+		t.Fatalf("dynamic list: %v", err)
+	}
+	if got, _ := gotDynAccept.Load().(string); !strings.Contains(got, "application/json") || strings.Contains(got, "protobuf") {
+		t.Errorf("dynamic GET Accept = %q, want JSON without protobuf", got)
 	}
 }

@@ -45,8 +45,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	authv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // What an identity may do in a cluster.
@@ -72,7 +73,7 @@ type accessFunc func(ctx context.Context, cfg *rest.Config) string
 // may list pods cluster-wide: one SelfSubjectAccessReview, which needs no
 // grant of its own.
 func reviewAccess(ctx context.Context, cfg *rest.Config) string {
-	client, err := kubernetes.NewForConfig(cfg)
+	client, err := kube.BuildClientFromConfig(cfg)
 	if err != nil {
 		return accessUnreachable
 	}

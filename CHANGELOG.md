@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Typed Kubernetes clients now negotiate Protobuf by default
+  (`pkg/kube/client.go`).** `BuildConfig` and `BuildClientFromConfig` now set
+  `AcceptContentTypes` to `application/vnd.kubernetes.protobuf,application/json`
+  and `ContentType` to `application/vnd.kubernetes.protobuf` whenever the caller
+  did not specify an override (landing the `docs/leeway-design.md` §6.1 client
+  setting across every typed Kubernetes path: CLI checks, `lookout mcp`,
+  `lookout watch`, and standalone `cmd/leeway`). Built-in resources decode via
+  generated Protobuf unmarshalers rather than `encoding/json` reflection —
+  cutting deserialization CPU, transient allocations, apiserver JSON
+  re-encoding, and wire payload size — while still falling back transparently to
+  JSON for endpoints that only speak JSON. Dynamic clients (`BuildDynamicClient`
+  / `BuildDynamicClientFromConfig`) continue using JSON for CRDs, and the raw
+  kubelet `/stats/summary` proxy call in `pkg/sources/saturation` explicitly
+  requests `application/json`.
+
 ### Security
 
 - **Go toolchain 1.26.11**, clearing GO-2026-6859 (`net/http` HTTP/1 server
