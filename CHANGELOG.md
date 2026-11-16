@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Go toolchain 1.26.11**, clearing GO-2026-6859 (`net/http` HTTP/1 server
+  crash due to `MaxBytesReader` header race). No lookout code changes;
+  `govulncheck` is clean again.
+
 ## [0.43.2] - 2026-11-01
 
 **This release stops generic MCP clients, signed in through lookout's authorization server under vault custody, from being sent back to browser sign-in around the hourly token refresh.** It carries steward v0.4.0 (#819), which never force-refreshes a vault-held Google token that Google still accepts and waits out a nearly spent one before the refresh token rotates. A front end needs a request timeout of at least 2 minutes; `deploy-mcp-gemini` allows 300 s. No flags, tools or manifests change beyond the version pins.
