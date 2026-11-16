@@ -33,9 +33,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // fakeLogs is the fixture PodLogGetter: content per
@@ -389,5 +391,86 @@ func TestEndToEndCompression(t *testing.T) {
 		rawBytes, outBytes, float64(rawBytes)/float64(outBytes), lines)
 	if outBytes*20 > rawBytes {
 		t.Errorf("compression below 20x: %d -> %d bytes", rawBytes, outBytes)
+	}
+}
+
+type pagedPodClient struct {
+	kubernetes.Interface
+	listPods func(ctx context.Context, ns string, opts metav1.ListOptions) (*corev1.PodList, error)
+}
+
+func (c *pagedPodClient) CoreV1() corev1client.CoreV1Interface {
+	return &pagedPodCoreV1{CoreV1Interface: c.Interface.CoreV1(), listPods: c.listPods}
+}
+
+type pagedPodCoreV1 struct {
+	corev1client.CoreV1Interface
+	listPods func(ctx context.Context, ns string, opts metav1.ListOptions) (*corev1.PodList, error)
+}
+
+func (c *pagedPodCoreV1) Pods(ns string) corev1client.PodInterface {
+	return &pagedPodInterface{PodInterface: c.CoreV1Interface.Pods(ns), ns: ns, listPods: c.listPods}
+}
+
+type pagedPodInterface struct {
+	corev1client.PodInterface
+	ns       string
+	listPods func(ctx context.Context, ns string, opts metav1.ListOptions) (*corev1.PodList, error)
+}
+
+func (p *pagedPodInterface) List(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+	return p.listPods(ctx, p.ns, opts)
+}
+
+func TestResolvePods_PaginatesAcrossContinueTokens(t *testing.T) {
+	var seenOpts []metav1.ListOptions
+	cs := &pagedPodClient{
+		Interface: fake.NewClientset(
+			deployment("shop", "checkout", map[string]string{"app": "checkout"}),
+		),
+		listPods: func(_ context.Context, _ string, opts metav1.ListOptions) (*corev1.PodList, error) {
+			seenOpts = append(seenOpts, opts)
+			switch opts.Continue {
+			case "":
+				return &corev1.PodList{
+					ListMeta: metav1.ListMeta{Continue: "tok-2"},
+					Items:    []corev1.Pod{*pod("shop", "p1", "app", map[string]string{"app": "checkout"})},
+				}, nil
+			case "tok-2":
+				return &corev1.PodList{
+					Items: []corev1.Pod{*pod("shop", "p2", "app", map[string]string{"app": "checkout"})},
+				}, nil
+			default:
+				t.Fatalf("unexpected continue token %q", opts.Continue)
+				return nil, nil
+			}
+		},
+	}
+
+	// Namespace scope pagination.
+	pods, err := resolvePods(context.Background(), cs, emit.Scope{Namespace: "shop"}, "")
+	if err != nil {
+		t.Fatalf("resolvePods(ns): %v", err)
+	}
+	if len(pods) != 2 {
+		t.Fatalf("got %d pods, want 2", len(pods))
+	}
+	if len(seenOpts) != 2 || seenOpts[0].Limit != kube.DefaultPageLimit || seenOpts[1].Continue != "tok-2" {
+		t.Fatalf("unexpected ns list opts: %+v", seenOpts)
+	}
+
+	// Workload scope pagination preserves LabelSelector across pages.
+	seenOpts = nil
+	wlPods, err := resolvePods(context.Background(), cs, emit.Scope{
+		Workload: emit.WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "checkout"},
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvePods(workload): %v", err)
+	}
+	if len(wlPods) != 2 {
+		t.Fatalf("got %d workload pods, want 2", len(wlPods))
+	}
+	if len(seenOpts) != 2 || seenOpts[0].LabelSelector != "app=checkout" || seenOpts[1].LabelSelector != "app=checkout" || seenOpts[1].Continue != "tok-2" {
+		t.Fatalf("unexpected workload list opts: %+v", seenOpts)
 	}
 }

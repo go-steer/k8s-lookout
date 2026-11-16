@@ -156,25 +156,13 @@ func sortFindings(fs []emit.Finding) {
 	sort.Slice(fs, func(i, j int) bool { return key(fs[i]) < key(fs[j]) })
 }
 
-// pageLimit is the paged-List page size (§6.3; a one-shot CLI call
-// keeps pages small to bound peak memory).
-const pageLimit = 500
-
-// listPages drives one paged List to exhaustion: list returns a
-// page's items plus the continue token; each is called per item.
+// listPages drives one paged List to exhaustion via kube.ListPages so
+// HTTP 410 Gone continue-token expiry transparently restarts from page 1.
 func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, error), each func(*T)) error {
-	opts := metav1.ListOptions{Limit: pageLimit}
-	for {
-		items, cont, err := list(opts)
-		if err != nil {
-			return fmt.Errorf("listing %s: %w", what, err)
-		}
-		for i := range items {
-			each(&items[i])
-		}
-		if cont == "" {
-			return nil
-		}
-		opts.Continue = cont
+	if err := kube.ListPages(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
+		return list(opts)
+	}, each); err != nil {
+		return fmt.Errorf("listing %s: %w", what, err)
 	}
+	return nil
 }

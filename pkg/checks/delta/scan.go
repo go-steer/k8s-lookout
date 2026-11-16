@@ -363,23 +363,23 @@ func paged[T any](ctx context.Context, list func(context.Context, metav1.ListOpt
 }
 
 func listPods(ctx context.Context, c kubernetes.Interface, ns string) ([]corev1.Pod, error) {
-	return paged(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+	return kube.ListAllPagesTrim(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
 		l, err := c.CoreV1().Pods(ns).List(ctx, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("listing pods: %w", err)
 		}
 		return l.Items, l.Continue, nil
-	})
+	}, kube.TrimReadPod)
 }
 
 func listNodes(ctx context.Context, c kubernetes.Interface) ([]corev1.Node, error) {
-	return paged(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
+	return kube.ListAllPagesTrim(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
 		l, err := c.CoreV1().Nodes().List(ctx, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("listing nodes: %w", err)
 		}
 		return l.Items, l.Continue, nil
-	})
+	}, kube.TrimReadNode)
 }
 
 func listDeployments(ctx context.Context, c kubernetes.Interface, ns string) ([]appsv1.Deployment, error) {

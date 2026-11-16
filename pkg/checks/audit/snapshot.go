@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // Snapshot is the audit group's shared, lazy, per-invocation read of
@@ -256,6 +257,9 @@ func (s *Snapshot) Pods(ctx context.Context) ([]corev1.Pod, *checks.Refusal, err
 		if err != nil {
 			return nil, "", err
 		}
+		for i := range l.Items {
+			kube.TrimReadPod(&l.Items[i])
+		}
 		return l.Items, l.Continue, nil
 	}, func(p *corev1.Pod) string { return p.Namespace }, func(p *corev1.Pod) string { return p.Name })
 }
@@ -298,6 +302,9 @@ func (s *Snapshot) Nodes(ctx context.Context) ([]corev1.Node, *checks.Refusal, e
 		l, err := s.client.CoreV1().Nodes().List(ctx, o)
 		if err != nil {
 			return nil, "", err
+		}
+		for i := range l.Items {
+			kube.TrimReadNode(&l.Items[i])
 		}
 		return l.Items, l.Continue, nil
 	}, nil, func(n *corev1.Node) string { return n.Name })

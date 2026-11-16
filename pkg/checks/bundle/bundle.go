@@ -506,12 +506,15 @@ func bundleEvents(ctx context.Context, client kubernetes.Interface, snap *graph.
 	groups := map[eventGroupKey]*eventGroup{}
 	var scanned int
 
-	listErr := kube.ListPages(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Event, string, error) {
+	listErr := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Event, string, error) {
 		list, err := client.CoreV1().Events(wl.Namespace).List(ctx, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("listing events: %w", err)
 		}
 		return list.Items, list.Continue, nil
+	}, func() {
+		clear(groups)
+		scanned = 0
 	}, func(ev *corev1.Event) {
 		io := ev.InvolvedObject
 		ns := io.Namespace

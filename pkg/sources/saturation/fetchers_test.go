@@ -26,10 +26,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
+
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 func fakeInformerFactoryWithPod(t *testing.T, pod *corev1.Pod) informers.SharedInformerFactory {
@@ -286,5 +290,148 @@ func TestSource_SkipsSeriesAllocationForLimitlessContainers(t *testing.T) {
 	}, now)
 	if len(s.series) != 0 {
 		t.Fatalf("retained %d series for limit-less containers, want 0", len(s.series))
+	}
+}
+
+type pagedCoreClient struct {
+	kubernetes.Interface
+	listPods  func(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error)
+	listNodes func(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error)
+}
+
+func (c *pagedCoreClient) CoreV1() corev1client.CoreV1Interface {
+	return &pagedCoreV1{CoreV1Interface: c.Interface.CoreV1(), parent: c}
+}
+
+type pagedCoreV1 struct {
+	corev1client.CoreV1Interface
+	parent *pagedCoreClient
+}
+
+func (c *pagedCoreV1) Pods(ns string) corev1client.PodInterface {
+	return &pagedPods{PodInterface: c.CoreV1Interface.Pods(ns), list: c.parent.listPods}
+}
+
+func (c *pagedCoreV1) Nodes() corev1client.NodeInterface {
+	return &pagedNodes{NodeInterface: c.CoreV1Interface.Nodes(), list: c.parent.listNodes}
+}
+
+type pagedPods struct {
+	corev1client.PodInterface
+	list func(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error)
+}
+
+func (p *pagedPods) List(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+	if p.list != nil {
+		return p.list(ctx, opts)
+	}
+	return p.PodInterface.List(ctx, opts)
+}
+
+type pagedNodes struct {
+	corev1client.NodeInterface
+	list func(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error)
+}
+
+func (n *pagedNodes) List(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error) {
+	if n.list != nil {
+		return n.list(ctx, opts)
+	}
+	return n.NodeInterface.List(ctx, opts)
+}
+
+func TestMetricsPodFetcher_PaginatesPodList(t *testing.T) {
+	t.Parallel()
+	metrics := newMetricsFake(t,
+		&metricsv1beta1.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p1"},
+			Containers: []metricsv1beta1.ContainerMetrics{{
+				Name:  "app",
+				Usage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			}},
+		},
+		&metricsv1beta1.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p2"},
+			Containers: []metricsv1beta1.ContainerMetrics{{
+				Name:  "app",
+				Usage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+			}},
+		},
+	)
+
+	var seenOpts []metav1.ListOptions
+	core := &pagedCoreClient{
+		Interface: fake.NewSimpleClientset(),
+		listPods: func(_ context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+			seenOpts = append(seenOpts, opts)
+			switch opts.Continue {
+			case "":
+				return &corev1.PodList{
+					ListMeta: metav1.ListMeta{Continue: "page-2"},
+					Items: []corev1.Pod{{
+						ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p1", UID: "u1"},
+						Spec:       corev1.PodSpec{NodeName: "n1", Containers: []corev1.Container{{Name: "app"}}},
+					}},
+				}, nil
+			case "page-2":
+				return &corev1.PodList{
+					Items: []corev1.Pod{{
+						ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p2", UID: "u2"},
+						Spec:       corev1.PodSpec{NodeName: "n2", Containers: []corev1.Container{{Name: "app"}}},
+					}},
+				}, nil
+			default:
+				t.Fatalf("unexpected continue token %q", opts.Continue)
+				return nil, nil
+			}
+		},
+	}
+
+	got, err := NewMetricsPodFetcher(metrics, core).FetchPodUsage(context.Background())
+	if err != nil {
+		t.Fatalf("FetchPodUsage: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d samples across 2 pod pages, want 4", len(got))
+	}
+	if len(seenOpts) != 2 || seenOpts[0].Limit != kube.DefaultPageLimit || seenOpts[1].Limit != kube.DefaultPageLimit || seenOpts[1].Continue != "page-2" {
+		t.Fatalf("unexpected pod list options: %+v", seenOpts)
+	}
+}
+
+func TestKubeletVolumeFetcher_PaginatesNodeList(t *testing.T) {
+	t.Parallel()
+	var seenOpts []metav1.ListOptions
+	core := &pagedCoreClient{
+		Interface: fake.NewSimpleClientset(),
+		listNodes: func(_ context.Context, opts metav1.ListOptions) (*corev1.NodeList, error) {
+			seenOpts = append(seenOpts, opts)
+			switch opts.Continue {
+			case "":
+				return &corev1.NodeList{
+					ListMeta: metav1.ListMeta{Continue: "next-nodes"},
+					Items:    []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}},
+				}, nil
+			case "next-nodes":
+				return &corev1.NodeList{
+					Items: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-2"}}},
+				}, nil
+			default:
+				t.Fatalf("unexpected continue token %q", opts.Continue)
+				return nil, nil
+			}
+		},
+	}
+
+	f := NewKubeletVolumeFetcher(core).(*kubeletVolumeFetcher)
+	names, err := f.listNodes(context.Background())
+	if err != nil {
+		t.Fatalf("listNodes: %v", err)
+	}
+	if len(names) != 2 || names[0] != "node-1" || names[1] != "node-2" {
+		t.Fatalf("names = %v, want [node-1 node-2]", names)
+	}
+	if len(seenOpts) != 2 || seenOpts[0].Limit != kube.DefaultPageLimit || seenOpts[1].Continue != "next-nodes" {
+		t.Fatalf("unexpected node list options: %+v", seenOpts)
 	}
 }

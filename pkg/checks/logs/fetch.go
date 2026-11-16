@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // PodLogGetter streams one container's logs. The production
@@ -102,11 +103,17 @@ func resolvePods(ctx context.Context, cs kubernetes.Interface, scope emit.Scope,
 		return workloadPods(ctx, cs, scope.Workload)
 
 	case scope.Namespace != "" || scope.AllNamespaces:
-		list, err := cs.CoreV1().Pods(scope.Namespace).List(ctx, metav1.ListOptions{})
+		items, err := kube.ListAllPagesTrim(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+			list, err := cs.CoreV1().Pods(scope.Namespace).List(ctx, opts)
+			if err != nil {
+				return nil, "", err
+			}
+			return list.Items, list.Continue, nil
+		}, kube.TrimReadPod)
 		if err != nil {
 			return nil, fmt.Errorf("listing pods: %w", err)
 		}
-		return list.Items, nil
+		return items, nil
 	}
 	return nil, emit.UsageErrorf("scope required: one of --workload, --pod (with --namespace), --namespace, or -A")
 }
@@ -162,11 +169,19 @@ func workloadPods(ctx context.Context, cs kubernetes.Interface, w emit.WorkloadR
 	if err != nil {
 		return nil, fmt.Errorf("workload %s: selector: %w", w, err)
 	}
-	list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	selStr := selector.String()
+	items, err := kube.ListAllPagesTrim(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+		opts.LabelSelector = selStr
+		list, err := cs.CoreV1().Pods(ns).List(ctx, opts)
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.Continue, nil
+	}, kube.TrimReadPod)
 	if err != nil {
 		return nil, fmt.Errorf("workload %s: listing pods: %w", w, err)
 	}
-	return list.Items, nil
+	return items, nil
 }
 
 // podContainers lists the pod's container names in spec order (init,

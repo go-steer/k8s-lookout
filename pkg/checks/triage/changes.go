@@ -33,6 +33,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/state"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
@@ -592,25 +593,32 @@ var scaleEventReasons = map[string]bool{"SuccessfulRescale": true, "ScalingRepli
 // involving the neighborhood, inside the window. Returns the entries
 // plus the number of events examined.
 func eventEntries(ctx context.Context, client kubernetes.Interface, namespace string, hood map[string]string, from, to time.Time, approximation bool) ([]changeEntry, int, error) {
-	list, err := client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, 0, fmt.Errorf("listing events: %w", err)
-	}
 	var out []changeEntry
-	for i := range list.Items {
-		ev := &list.Items[i]
+	examined := 0
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Event, string, error) {
+		list, err := client.CoreV1().Events(namespace).List(ctx, opts)
+		if err != nil {
+			return nil, "", err
+		}
+		return list.Items, list.Continue, nil
+	}, func() {
+		out = nil
+		examined = 0
+	}, func(ev *corev1.Event) {
+		seq := examined
+		examined++
 		wanted, known := scaleEventReasons[ev.Reason]
 		if !known || (!wanted && !approximation) {
-			continue
+			return
 		}
 		rel, inHood := hood[refKey(ev.InvolvedObject.Kind, ev.InvolvedObject.Namespace, ev.InvolvedObject.Name)]
 		at := eventTime(ev)
 		if !inHood || !at.After(from) || at.After(to) {
-			continue
+			return
 		}
 		out = append(out, changeEntry{
 			at:  at,
-			seq: i,
+			seq: seq,
 			f: emit.Finding{
 				Kind:         kindScale,
 				Severity:     emit.SeverityInfo,
@@ -626,8 +634,11 @@ func eventEntries(ctx context.Context, client kubernetes.Interface, namespace st
 				},
 			},
 		})
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing events: %w", err)
 	}
-	return out, len(list.Items), nil
+	return out, examined, nil
 }
 
 // eventTime picks the most recent timestamp an Event carries (the

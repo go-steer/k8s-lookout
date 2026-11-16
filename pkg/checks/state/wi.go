@@ -172,6 +172,9 @@ func runWI(ctx context.Context, deps WIDeps, inv emit.Invocation) (int, error) {
 			if err != nil {
 				return nil, "", err
 			}
+			for i := range l.Items {
+				kube.TrimReadPod(&l.Items[i])
+			}
 			return l.Items, l.Continue, nil
 		}, func(p *corev1.Pod) { pods = append(pods, p) })
 		if err != nil {

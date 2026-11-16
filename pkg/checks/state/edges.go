@@ -411,12 +411,70 @@ func key(ns, name string) string { return ns + "/" + name }
 // listPages drives one paged List to exhaustion via kube.ListPages so
 // 410 Gone continue-token expiry transparently restarts from page 1.
 func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, error), each func(*T)) error {
-	if err := kube.ListPages(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
+	return listPagesTrim(what, list, nil, each)
+}
+
+// listPagesTrim drives one paged List to exhaustion via kube.ListAllPagesTrim,
+// applying trim to each item as soon as its page arrives before delivering the
+// complete slice to each.
+func listPagesTrim[T any](what string, list func(metav1.ListOptions) ([]T, string, error), trim func(*T), each func(*T)) error {
+	items, err := kube.ListAllPagesTrim(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
 		return list(opts)
-	}, each); err != nil {
+	}, trim)
+	if err != nil {
 		return fmt.Errorf("listing %s: %w", what, err)
 	}
+	for i := range items {
+		each(&items[i])
+	}
 	return nil
+}
+
+// trimEdgeConfigMap drops ConfigMap payload values while preserving every key
+// in Data and BinaryData so key-existence checks in edges_checks.go see the
+// exact same key set without retaining large ConfigMap bodies across pages.
+func trimEdgeConfigMap(cm *corev1.ConfigMap) {
+	cm.ManagedFields = nil
+	if len(cm.Data) > 0 {
+		keys := make(map[string]string, len(cm.Data))
+		for k := range cm.Data {
+			keys[k] = ""
+		}
+		cm.Data = keys
+	}
+	if len(cm.BinaryData) > 0 {
+		keys := make(map[string][]byte, len(cm.BinaryData))
+		for k := range cm.BinaryData {
+			keys[k] = nil
+		}
+		cm.BinaryData = keys
+	}
+}
+
+// trimEdgeSecret drops Secret payload values while preserving every key name
+// and, for kubernetes.io/tls secrets, the tls.crt certificate bytes needed by
+// TLS expiry checks. Non-cert values (private keys, credentials, Helm release
+// blobs) are never read by edge checks and are discarded per page.
+func trimEdgeSecret(s *corev1.Secret) {
+	s.ManagedFields = nil
+	if len(s.Data) > 0 {
+		keys := make(map[string][]byte, len(s.Data))
+		for k, v := range s.Data {
+			if s.Type == corev1.SecretTypeTLS && k == corev1.TLSCertKey {
+				keys[k] = v
+			} else {
+				keys[k] = nil
+			}
+		}
+		s.Data = keys
+	}
+	if len(s.StringData) > 0 {
+		keys := make(map[string]string, len(s.StringData))
+		for k := range s.StringData {
+			keys[k] = ""
+		}
+		s.StringData = keys
+	}
 }
 
 // listCluster runs the paged Lists over the pod-nexus kinds in ns
@@ -465,26 +523,26 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 
 	steps := []func() error{
 		func() error {
-			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
+			return listPagesTrim("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
 				l, err := client.CoreV1().Pods(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(p *corev1.Pod) { ix.pods[key(p.Namespace, p.Name)] = p; graphObj(p) })
+			}, kube.TrimReadPod, func(p *corev1.Pod) { ix.pods[key(p.Namespace, p.Name)] = p; graphObj(p) })
 		},
 		func() error {
 			// Nodes are cluster-scoped and ingested for the graph
 			// only: they resolve pods' RunsOn edges so blast-radius
 			// consumers (`bundle`) see placement neighbors as
 			// observed nodes, not dangling references.
-			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
+			return listPagesTrim("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
 				l, err := client.CoreV1().Nodes().List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(n *corev1.Node) { graphObj(n) })
+			}, kube.TrimReadNode, func(n *corev1.Node) { graphObj(n) })
 		},
 		func() error {
 			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
@@ -603,25 +661,27 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 			})
 		},
 		func() error {
-			return listPages("configmaps", func(o metav1.ListOptions) ([]corev1.ConfigMap, string, error) {
+			return listPagesTrim("configmaps", func(o metav1.ListOptions) ([]corev1.ConfigMap, string, error) {
 				l, err := client.CoreV1().ConfigMaps(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(c *corev1.ConfigMap) { ix.configMaps[key(c.Namespace, c.Name)] = c; graphObj(c) })
+			}, trimEdgeConfigMap, func(c *corev1.ConfigMap) { ix.configMaps[key(c.Namespace, c.Name)] = c; graphObj(c) })
 		},
 		func() error {
 			// Secrets are indexed for key-name and tls.crt checks
 			// only; the graph ingests ObjectMeta alone (§6.5) and no
-			// value ever reaches a finding.
-			return listPages("secrets", func(o metav1.ListOptions) ([]corev1.Secret, string, error) {
+			// value ever reaches a finding. Trimming non-cert values
+			// per page avoids retaining large Helm release Secrets or
+			// key material across pages.
+			return listPagesTrim("secrets", func(o metav1.ListOptions) ([]corev1.Secret, string, error) {
 				l, err := client.CoreV1().Secrets(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(s *corev1.Secret) { ix.secrets[key(s.Namespace, s.Name)] = s; graphObj(s) })
+			}, trimEdgeSecret, func(s *corev1.Secret) { ix.secrets[key(s.Namespace, s.Name)] = s; graphObj(s) })
 		},
 		func() error {
 			return listPages("serviceaccounts", func(o metav1.ListOptions) ([]corev1.ServiceAccount, string, error) {
