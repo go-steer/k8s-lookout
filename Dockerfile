@@ -34,8 +34,8 @@
 # Alpine base for a smaller builder image — faster CI cold-cache
 # pulls. CGO_ENABLED=0 below means we don't care about the builder's
 # libc (musl vs glibc); we only ship the binary.
-ARG GO_VERSION=1.26.10
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:5cb67f19c5e7994dcb80c074f7cfca8aeeada45bbdca035f73df269cefdcce61 AS builder
+ARG GO_VERSION=1.26.11
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS builder
 
 WORKDIR /src
 
