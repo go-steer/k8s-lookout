@@ -29,15 +29,18 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/graph"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
 
@@ -451,5 +454,110 @@ func TestChangesRegistered(t *testing.T) {
 	}
 	if !c.GraphBacked {
 		t.Error("triage changes must be graph-backed (--at/--store)")
+	}
+}
+
+type pagedEventsClient struct {
+	kubernetes.Interface
+	listEvents func(ctx context.Context, opts metav1.ListOptions) (*corev1.EventList, error)
+}
+
+func (c *pagedEventsClient) CoreV1() corev1client.CoreV1Interface {
+	return &pagedEventsCoreV1{CoreV1Interface: c.Interface.CoreV1(), listEvents: c.listEvents}
+}
+
+type pagedEventsCoreV1 struct {
+	corev1client.CoreV1Interface
+	listEvents func(ctx context.Context, opts metav1.ListOptions) (*corev1.EventList, error)
+}
+
+func (c *pagedEventsCoreV1) Events(ns string) corev1client.EventInterface {
+	return &pagedEventsInterface{EventInterface: c.CoreV1Interface.Events(ns), listEvents: c.listEvents}
+}
+
+type pagedEventsInterface struct {
+	corev1client.EventInterface
+	listEvents func(ctx context.Context, opts metav1.ListOptions) (*corev1.EventList, error)
+}
+
+func (e *pagedEventsInterface) List(ctx context.Context, opts metav1.ListOptions) (*corev1.EventList, error) {
+	return e.listEvents(ctx, opts)
+}
+
+func TestEventEntries_PaginatesAndRecoversFromGone(t *testing.T) {
+	from := changesT0
+	to := changesT0.Add(30 * time.Minute)
+	inWindow := metav1.NewTime(changesT0.Add(10 * time.Minute))
+	hood := map[string]string{refKey("HorizontalPodAutoscaler", "prod", "web-hpa"): "target"}
+
+	goneInjected := false
+	var seenLimits []int64
+	cs := &pagedEventsClient{
+		Interface: fake.NewSimpleClientset(),
+		listEvents: func(_ context.Context, opts metav1.ListOptions) (*corev1.EventList, error) {
+			seenLimits = append(seenLimits, opts.Limit)
+			switch opts.Continue {
+			case "":
+				if !goneInjected {
+					return &corev1.EventList{
+						ListMeta: metav1.ListMeta{Continue: "expired"},
+						Items: []corev1.Event{{
+							Reason:         "SuccessfulRescale",
+							Message:        "stale-rescale",
+							LastTimestamp:  inWindow,
+							InvolvedObject: corev1.ObjectReference{Kind: "HorizontalPodAutoscaler", Namespace: "prod", Name: "web-hpa"},
+						}},
+					}, nil
+				}
+				return &corev1.EventList{
+					ListMeta: metav1.ListMeta{Continue: "page-2"},
+					Items: []corev1.Event{
+						{
+							Reason:         "SuccessfulRescale",
+							Message:        "rescale-1",
+							LastTimestamp:  inWindow,
+							InvolvedObject: corev1.ObjectReference{Kind: "HorizontalPodAutoscaler", Namespace: "prod", Name: "web-hpa"},
+						},
+						{
+							Reason:         "Pulled",
+							Message:        "ignored-non-scale-event",
+							LastTimestamp:  inWindow,
+							InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "prod", Name: "web-1"},
+						},
+					},
+				}, nil
+			case "expired":
+				goneInjected = true
+				return nil, apierrors.NewResourceExpired("continue expired")
+			case "page-2":
+				return &corev1.EventList{
+					Items: []corev1.Event{{
+						Reason:         "SuccessfulRescale",
+						Message:        "rescale-2",
+						LastTimestamp:  inWindow,
+						InvolvedObject: corev1.ObjectReference{Kind: "HorizontalPodAutoscaler", Namespace: "prod", Name: "web-hpa"},
+					}},
+				}, nil
+			default:
+				t.Fatalf("unexpected continue token %q", opts.Continue)
+				return nil, nil
+			}
+		},
+	}
+
+	entries, examined, err := eventEntries(context.Background(), cs, "prod", hood, from, to, false)
+	if err != nil {
+		t.Fatalf("eventEntries: %v", err)
+	}
+	if examined != 3 {
+		t.Errorf("examined = %d, want 3 (stale page must be reset on 410 Gone)", examined)
+	}
+	if len(entries) != 2 || entries[0].f.Message != "rescale-1" || entries[1].f.Message != "rescale-2" {
+		t.Fatalf("entries = %+v, want [rescale-1, rescale-2]", entries)
+	}
+	for i, lim := range seenLimits {
+		if lim != kube.DefaultPageLimit {
+			t.Errorf("page %d Limit = %d, want %d", i, lim, kube.DefaultPageLimit)
+		}
 	}
 }

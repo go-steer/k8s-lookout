@@ -28,6 +28,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 const (
@@ -68,22 +70,36 @@ func (f *metricsPodFetcher) WithPodLister(l corelisters.PodLister) {
 	f.podLister = l
 }
 
-func (f *metricsPodFetcher) listPods(ctx context.Context) ([]*corev1.Pod, error) {
+func (f *metricsPodFetcher) forEachPod(ctx context.Context, reset func(), fn func(*corev1.Pod)) error {
 	if f.podLister != nil {
+		var (
+			items []*corev1.Pod
+			err   error
+		)
 		if f.namespace != "" && f.namespace != metav1.NamespaceAll {
-			return f.podLister.Pods(f.namespace).List(labels.Everything())
+			items, err = f.podLister.Pods(f.namespace).List(labels.Everything())
+		} else {
+			items, err = f.podLister.List(labels.Everything())
 		}
-		return f.podLister.List(labels.Everything())
+		if err != nil {
+			return err
+		}
+		for _, p := range items {
+			fn(p)
+		}
+		return nil
 	}
-	podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, metav1.ListOptions{})
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+		podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, opts)
+		if err != nil {
+			return nil, "", err
+		}
+		return podList.Items, podList.Continue, nil
+	}, reset, fn)
 	if err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
+		return fmt.Errorf("list pods: %w", err)
 	}
-	out := make([]*corev1.Pod, len(podList.Items))
-	for i := range podList.Items {
-		out[i] = &podList.Items[i]
-	}
-	return out, nil
+	return nil
 }
 
 func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSample, error) {
@@ -91,14 +107,11 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 	if err != nil {
 		return nil, fmt.Errorf("list pod metrics: %w", err)
 	}
-	podItems, err := f.listPods(ctx)
-	if err != nil {
-		return nil, err
-	}
 	// One walk of each container's resource block yields both
 	// dimensions: limits (the saturation denominator) and requests
-	// (`triage top`'s missing-requests census). Reading them together
-	// keeps the pod-spec join to a single pass over one List.
+	// (`triage top`'s missing-requests census). Streaming pages into
+	// this compact map avoids holding full Pod structs for the whole
+	// cluster in memory when no informer podLister is wired.
 	type resources struct {
 		cpuLim, memLim float64
 		cpuReq, memReq float64
@@ -107,26 +120,34 @@ func (f *metricsPodFetcher) FetchPodUsage(ctx context.Context) ([]ContainerSampl
 		uid, node string
 		byName    map[string]resources
 	}
-	pods := make(map[string]podRef, len(podItems))
-	for _, p := range podItems {
-		byName := make(map[string]resources)
-		for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
-			var l resources
-			if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
-				l.cpuLim = float64(q.MilliValue())
+	pods := make(map[string]podRef, len(pmList.Items))
+	err = f.forEachPod(ctx, func() { clear(pods) }, func(p *corev1.Pod) {
+		byName := make(map[string]resources, len(p.Spec.InitContainers)+len(p.Spec.Containers))
+		add := func(cs []corev1.Container) {
+			for i := range cs {
+				c := &cs[i]
+				var l resources
+				if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+					l.cpuLim = float64(q.MilliValue())
+				}
+				if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+					l.memLim = float64(q.Value())
+				}
+				if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+					l.cpuReq = float64(q.MilliValue())
+				}
+				if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+					l.memReq = float64(q.Value())
+				}
+				byName[c.Name] = l
 			}
-			if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
-				l.memLim = float64(q.Value())
-			}
-			if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
-				l.cpuReq = float64(q.MilliValue())
-			}
-			if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
-				l.memReq = float64(q.Value())
-			}
-			byName[c.Name] = l
 		}
+		add(p.Spec.InitContainers)
+		add(p.Spec.Containers)
 		pods[p.Namespace+"/"+p.Name] = podRef{uid: string(p.UID), node: p.Spec.NodeName, byName: byName}
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var out []ContainerSample
@@ -172,15 +193,15 @@ type kubeletVolumeFetcher struct {
 func NewKubeletVolumeFetcher(client kubernetes.Interface) VolumeUsageFetcher {
 	return &kubeletVolumeFetcher{
 		listNodes: func(ctx context.Context) ([]string, error) {
-			nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-			if err != nil {
-				return nil, err
-			}
-			names := make([]string, 0, len(nodes.Items))
-			for _, n := range nodes.Items {
-				names = append(names, n.Name)
-			}
-			return names, nil
+			return kube.ListAllPagesMap(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
+				nodes, err := client.CoreV1().Nodes().List(ctx, opts)
+				if err != nil {
+					return nil, "", err
+				}
+				return nodes.Items, nodes.Continue, nil
+			}, func(n *corev1.Node) (string, bool) {
+				return n.Name, true
+			})
 		},
 		proxyGet: func(ctx context.Context, node string) ([]byte, error) {
 			return client.CoreV1().RESTClient().Get().

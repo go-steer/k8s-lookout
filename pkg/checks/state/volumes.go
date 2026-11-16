@@ -90,6 +90,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 func init() {
@@ -288,6 +289,9 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				if err != nil {
 					return nil, "", err
 				}
+				for i := range l.Items {
+					kube.TrimReadPod(&l.Items[i])
+				}
 				return l.Items, l.Continue, nil
 			}, func(p *corev1.Pod) { vix.pods = append(vix.pods, p); vix.scanned++ })
 		}},
@@ -323,6 +327,9 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				l, err := client.CoreV1().Nodes().List(ctx, o)
 				if err != nil {
 					return nil, "", err
+				}
+				for i := range l.Items {
+					kube.TrimReadNode(&l.Items[i])
 				}
 				return l.Items, l.Continue, nil
 			}, func(n *corev1.Node) { vix.nodes[n.Name] = n; vix.scanned++ })

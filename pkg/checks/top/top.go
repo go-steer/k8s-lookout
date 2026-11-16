@@ -601,27 +601,18 @@ func runSpecFallback(
 	scanned int,
 	metricsErr error,
 ) (int, error) {
-	podList, err := client.CoreV1().Pods(listNS).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		if ok, emitErr := checks.RefusedAnswer(inv.Out, err,
-			"no container or node was judged: neither metrics.k8s.io nor core pods could be listed"); ok {
-			return scanned, emitErr
+	specs, err := kube.ListAllPagesMap(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+		list, err := client.CoreV1().Pods(listNS).List(ctx, opts)
+		if err != nil {
+			return nil, "", err
 		}
-		if ok, emitErr := checks.RefusedAnswer(inv.Out, metricsErr,
-			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
-			return scanned, emitErr
-		}
-		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", metricsErr)
-	}
-
-	var specs []podSpecSummary
-	for i := range podList.Items {
-		p := &podList.Items[i]
+		return list.Items, list.Continue, nil
+	}, func(p *corev1.Pod) (podSpecSummary, bool) {
 		if podSet != nil && !podSet[p.Namespace+"/"+p.Name] {
-			continue
+			return podSpecSummary{}, false
 		}
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			continue
+			return podSpecSummary{}, false
 		}
 		var s podSpecSummary
 		s.namespace = p.Namespace
@@ -641,7 +632,18 @@ func runSpecFallback(
 				s.memLim += float64(q.Value())
 			}
 		}
-		specs = append(specs, s)
+		return s, true
+	})
+	if err != nil {
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, err,
+			"no container or node was judged: neither metrics.k8s.io nor core pods could be listed"); ok {
+			return scanned, emitErr
+		}
+		if ok, emitErr := checks.RefusedAnswer(inv.Out, metricsErr,
+			"no container or node was judged: usage is read from metrics.k8s.io"); ok {
+			return scanned, emitErr
+		}
+		return 0, fmt.Errorf("%w — triage top needs metrics.k8s.io (install metrics-server)", metricsErr)
 	}
 
 	if podSet == nil {
@@ -953,18 +955,24 @@ func fetchNodeUsage(ctx context.Context, metrics metricsv.Interface, client kube
 	if err != nil {
 		return nil, 0, fmt.Errorf("list node metrics: %w", err)
 	}
-	nodeList, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, 0, fmt.Errorf("list nodes: %w", err)
-	}
 	type alloc struct{ cpu, mem float64 }
-	allocs := make(map[string]alloc, len(nodeList.Items))
-	for i := range nodeList.Items {
-		n := &nodeList.Items[i]
+	allocs := make(map[string]alloc, len(nmList.Items))
+	err = kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
+		nodeList, err := client.CoreV1().Nodes().List(ctx, opts)
+		if err != nil {
+			return nil, "", err
+		}
+		return nodeList.Items, nodeList.Continue, nil
+	}, func() {
+		clear(allocs)
+	}, func(n *corev1.Node) {
 		allocs[n.Name] = alloc{
 			cpu: float64(n.Status.Allocatable.Cpu().MilliValue()),
 			mem: float64(n.Status.Allocatable.Memory().Value()),
 		}
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("list nodes: %w", err)
 	}
 	var out []nodeRated
 	examined := 0

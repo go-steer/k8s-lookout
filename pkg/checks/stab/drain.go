@@ -29,6 +29,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // DrainCommand builds `lookout stab drain` (§5 tool matrix row):
@@ -223,6 +224,9 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 				if err != nil {
 					return nil, "", err
 				}
+				for i := range l.Items {
+					kube.TrimReadNode(&l.Items[i])
+				}
 				return l.Items, l.Continue, nil
 			}, func(n *corev1.Node) { ix.nodes[n.Name] = true; ix.nodeObjs[n.Name] = n })
 		},
@@ -231,6 +235,9 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 				l, err := client.CoreV1().Pods(all).List(ctx, o)
 				if err != nil {
 					return nil, "", err
+				}
+				for i := range l.Items {
+					kube.TrimReadPod(&l.Items[i])
 				}
 				return l.Items, l.Continue, nil
 			}, func(p *corev1.Pod) {

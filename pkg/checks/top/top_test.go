@@ -47,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
@@ -56,6 +57,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks/top"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 var fixedNow = time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
@@ -1009,5 +1011,156 @@ func TestMetricsUnavailableSpecFallback(t *testing.T) {
 
 	t.Run("contract verification", func(t *testing.T) {
 		checktest.VerifyContract(t, cmd, "--namespace=prod")
+	})
+}
+
+type pagedTopClient struct {
+	kubernetes.Interface
+	listPods  func(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error)
+	listNodes func(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error)
+}
+
+func (c *pagedTopClient) CoreV1() corev1client.CoreV1Interface {
+	return &pagedTopCoreV1{CoreV1Interface: c.Interface.CoreV1(), parent: c}
+}
+
+type pagedTopCoreV1 struct {
+	corev1client.CoreV1Interface
+	parent *pagedTopClient
+}
+
+func (c *pagedTopCoreV1) Pods(ns string) corev1client.PodInterface {
+	return &pagedTopPods{PodInterface: c.CoreV1Interface.Pods(ns), list: c.parent.listPods}
+}
+
+func (c *pagedTopCoreV1) Nodes() corev1client.NodeInterface {
+	return &pagedTopNodes{NodeInterface: c.CoreV1Interface.Nodes(), list: c.parent.listNodes}
+}
+
+type pagedTopPods struct {
+	corev1client.PodInterface
+	list func(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error)
+}
+
+func (p *pagedTopPods) List(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+	if p.list != nil {
+		return p.list(ctx, opts)
+	}
+	return p.PodInterface.List(ctx, opts)
+}
+
+type pagedTopNodes struct {
+	corev1client.NodeInterface
+	list func(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error)
+}
+
+func (n *pagedTopNodes) List(ctx context.Context, opts metav1.ListOptions) (*corev1.NodeList, error) {
+	if n.list != nil {
+		return n.list(ctx, opts)
+	}
+	return n.NodeInterface.List(ctx, opts)
+}
+
+func TestTopPaginatesNodesAndSpecFallbackPods(t *testing.T) {
+	t.Run("node usage paginates nodes", func(t *testing.T) {
+		var nodeOpts []metav1.ListOptions
+		cs := &pagedTopClient{
+			Interface: fake.NewClientset(),
+			listNodes: func(_ context.Context, opts metav1.ListOptions) (*corev1.NodeList, error) {
+				nodeOpts = append(nodeOpts, opts)
+				switch opts.Continue {
+				case "":
+					return &corev1.NodeList{
+						ListMeta: metav1.ListMeta{Continue: "n-page-2"},
+						Items: []corev1.Node{{
+							ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+							Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("1000m"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
+							}},
+						}},
+					}, nil
+				case "n-page-2":
+					return &corev1.NodeList{
+						Items: []corev1.Node{{
+							ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+							Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("1000m"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
+							}},
+						}},
+					}, nil
+				default:
+					t.Fatalf("unexpected continue token %q", opts.Continue)
+					return nil, nil
+				}
+			},
+		}
+		metrics := newMetricsFake(t,
+			&metricsv1beta1.NodeMetrics{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+				Usage:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("900m"), corev1.ResourceMemory: resource.MustParse("100Mi")},
+			},
+			&metricsv1beta1.NodeMetrics{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+				Usage:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("950m"), corev1.ResourceMemory: resource.MustParse("100Mi")},
+			},
+		)
+		cmd := top.New(top.Deps{
+			Client:  func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+			Metrics: func(context.Context) (metricsv.Interface, error) { return metrics, nil },
+			Now:     func() time.Time { return fixedNow },
+		})
+		res := checktest.Run(t, cmd, "-A")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if len(nodeOpts) != 2 || nodeOpts[0].Limit != kube.DefaultPageLimit || nodeOpts[1].Continue != "n-page-2" {
+			t.Fatalf("unexpected node list opts: %+v", nodeOpts)
+		}
+		if !strings.Contains(res.Stdout, "name=node-1") || !strings.Contains(res.Stdout, "name=node-2") {
+			t.Fatalf("expected both paginated nodes in output:\n%s", res.Stdout)
+		}
+	})
+
+	t.Run("spec fallback paginates pods", func(t *testing.T) {
+		var podOpts []metav1.ListOptions
+		cs := &pagedTopClient{
+			Interface: fake.NewClientset(),
+			listPods: func(_ context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+				podOpts = append(podOpts, opts)
+				switch opts.Continue {
+				case "":
+					return &corev1.PodList{
+						ListMeta: metav1.ListMeta{Continue: "p-page-2"},
+						Items:    []corev1.Pod{*pod("prod", "pod-a", "node-1", "app", "500m", "512Mi")},
+					}, nil
+				case "p-page-2":
+					return &corev1.PodList{
+						Items: []corev1.Pod{*pod("prod", "pod-b", "node-2", "app", "1000m", "1Gi")},
+					}, nil
+				default:
+					t.Fatalf("unexpected continue token %q", opts.Continue)
+					return nil, nil
+				}
+			},
+		}
+		cmd := top.New(top.Deps{
+			Client: func(context.Context) (kubernetes.Interface, error) { return cs, nil },
+			Metrics: func(context.Context) (metricsv.Interface, error) {
+				return nil, errors.New("metrics-server unavailable")
+			},
+			Now: func() time.Time { return fixedNow },
+		})
+		res := checktest.Run(t, cmd, "--namespace=prod")
+		if res.Code != emit.ExitData {
+			t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+		}
+		if len(podOpts) != 2 || podOpts[0].Limit != kube.DefaultPageLimit || podOpts[1].Continue != "p-page-2" {
+			t.Fatalf("unexpected pod list opts: %+v", podOpts)
+		}
+		if !strings.Contains(res.Stdout, "name=pod-a") || !strings.Contains(res.Stdout, "name=pod-b") {
+			t.Fatalf("expected both paginated pods in spec fallback output:\n%s", res.Stdout)
+		}
 	})
 }

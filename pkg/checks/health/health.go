@@ -822,25 +822,23 @@ func worstSeverity(fs []emit.Finding) string {
 	return worst
 }
 
-func listPages[T any](what string, list func(metav1.ListOptions) ([]T, string, error), each func(*T)) error {
-	if err := kube.ListPages(context.Background(), func(_ context.Context, opts metav1.ListOptions) ([]T, string, error) {
-		return list(opts)
-	}, each); err != nil {
-		return fmt.Errorf("listing %s: %w", what, err)
-	}
-	return nil
-}
-
 // checkStorage flags PVCs not Bound: Pending (workloads mounting it
-// cannot start) and Lost (the bound volume is gone).
+// cannot start) and Lost (the bound volume is gone). Findings are
+// accumulated locally and committed to card only when pagination
+// succeeds so a 410 Gone retry or mid-stream failure never leaves
+// partial results behind.
 func checkStorage(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, card *scorecard) (int, error) {
+	var pending []emit.Finding
 	count := 0
-	err := listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
 		l, err := client.CoreV1().PersistentVolumeClaims(ns).List(ctx, o)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("listing persistentvolumeclaims: %w", err)
 		}
 		return l.Items, l.Continue, nil
+	}, func() {
+		pending = nil
+		count = 0
 	}, func(pvc *corev1.PersistentVolumeClaim) {
 		count++
 		f := emit.Finding{
@@ -866,9 +864,15 @@ func checkStorage(ctx context.Context, client kubernetes.Interface, ns string, n
 		default:
 			return // Bound is nominal
 		}
-		card.add("storage", f)
+		pending = append(pending, f)
 	})
-	return count, err
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range pending {
+		card.add("storage", f)
+	}
+	return count, nil
 }
 
 // checkCerts parses tls.crt of every kubernetes.io/tls Secret in
@@ -876,18 +880,23 @@ func checkStorage(ctx context.Context, client kubernetes.Interface, ns string, n
 // none can reach a finding. Only TLS-type secrets count as scanned.
 // A Secret in managed ("ns/name") is a cert-manager Certificate's and
 // was judged as that Certificate: it is skipped, not judged twice.
-// Findings are returned rather than scored, so a List refused midway
-// leaves nothing partial behind.
+// Streaming per page avoids buffering every Secret (including large
+// Helm release Secrets) across the cluster in memory. Findings are
+// returned rather than scored, so a List refused midway leaves nothing
+// partial behind.
 func checkCerts(ctx context.Context, client kubernetes.Interface, ns string, now time.Time, warn time.Duration, managed map[string]bool) ([]emit.Finding, int, error) {
 	var out []emit.Finding
 	count := 0
 	now = now.UTC()
-	err := listPages("secrets", func(o metav1.ListOptions) ([]corev1.Secret, string, error) {
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]corev1.Secret, string, error) {
 		l, err := client.CoreV1().Secrets(ns).List(ctx, o)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("listing secrets: %w", err)
 		}
 		return l.Items, l.Continue, nil
+	}, func() {
+		out = nil
+		count = 0
 	}, func(s *corev1.Secret) {
 		if s.Type != corev1.SecretTypeTLS || managed[s.Namespace+"/"+s.Name] {
 			return

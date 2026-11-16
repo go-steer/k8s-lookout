@@ -56,6 +56,19 @@ func ListAllPages[T any](
 	ctx context.Context,
 	list func(context.Context, metav1.ListOptions) ([]T, string, error),
 ) ([]T, error) {
+	return ListAllPagesTrim(ctx, list, nil)
+}
+
+// ListAllPagesTrim fetches all items across Continue tokens and calls trim on
+// each item as soon as its page arrives, before appending to the returned
+// slice and requesting the next page. Trimming per page bounds transient memory
+// to one untrimmed page plus the trimmed items collected so far, while keeping
+// single-restart HTTP 410 Gone recovery.
+func ListAllPagesTrim[T any](
+	ctx context.Context,
+	list func(context.Context, metav1.ListOptions) ([]T, string, error),
+	trim func(*T),
+) ([]T, error) {
 	opts := metav1.ListOptions{Limit: DefaultPageLimit}
 	var all []T
 	restarted := false
@@ -71,12 +84,125 @@ func ListAllPages[T any](
 			}
 			return nil, err
 		}
+		if trim != nil {
+			for i := range page {
+				trim(&page[i])
+			}
+		}
 		all = append(all, page...)
 		if next == "" {
 			return all, nil
 		}
 		opts.Continue = next
 	}
+}
+
+// ListAllPagesMap fetches all pages across Continue tokens, projecting and
+// optionally filtering each item via fn as soon as its page arrives. Items for
+// which fn returns ok=false are dropped immediately, so callers that only keep
+// a small summary or filtered subset never buffer full Kubernetes objects across
+// pages. A single HTTP 410 Gone continuation error discards partial results and
+// restarts cleanly from page 1.
+func ListAllPagesMap[T, R any](
+	ctx context.Context,
+	list func(context.Context, metav1.ListOptions) ([]T, string, error),
+	fn func(*T) (R, bool),
+) ([]R, error) {
+	opts := metav1.ListOptions{Limit: DefaultPageLimit}
+	var all []R
+	restarted := false
+
+	for {
+		page, next, err := list(ctx, opts)
+		if err != nil {
+			if (apierrors.IsResourceExpired(err) || apierrors.IsGone(err)) && !restarted {
+				restarted = true
+				all = nil
+				opts = metav1.ListOptions{Limit: DefaultPageLimit}
+				continue
+			}
+			return nil, err
+		}
+		for i := range page {
+			if mapped, ok := fn(&page[i]); ok {
+				all = append(all, mapped)
+			}
+		}
+		if next == "" {
+			return all, nil
+		}
+		opts.Continue = next
+	}
+}
+
+// ListPagesStream streams pages across Continue tokens, delivering each item to
+// each as its page arrives without buffering the entire list in memory. If the
+// API server expires the continue token mid-stream (HTTP 410 Gone), reset is
+// invoked (when non-nil) to discard partial caller state and pagination restarts
+// once from Continue="".
+//
+// Callers that must not leave partial mutations behind when pagination fails
+// even after retry should accumulate into local state and commit only when
+// ListPagesStream returns nil.
+func ListPagesStream[T any](
+	ctx context.Context,
+	list func(context.Context, metav1.ListOptions) ([]T, string, error),
+	reset func(),
+	each func(*T),
+) error {
+	opts := metav1.ListOptions{Limit: DefaultPageLimit}
+	restarted := false
+
+	for {
+		page, next, err := list(ctx, opts)
+		if err != nil {
+			if (apierrors.IsResourceExpired(err) || apierrors.IsGone(err)) && !restarted {
+				restarted = true
+				if reset != nil {
+					reset()
+				}
+				opts = metav1.ListOptions{Limit: DefaultPageLimit}
+				continue
+			}
+			return err
+		}
+		for i := range page {
+			each(&page[i])
+		}
+		if next == "" {
+			return nil
+		}
+		opts.Continue = next
+	}
+}
+
+// TrimReadPod drops high-overhead metadata from a Pod fetched on the one-shot
+// read path without touching any field inspected by read-path checks (including
+// `audit`, `delta`, `state`, and `stab`, which read container specs, probes,
+// env vars, security contexts, status, labels, and operational annotations).
+func TrimReadPod(p *corev1.Pod) {
+	if p == nil {
+		return
+	}
+	p.ManagedFields = nil
+	p.Annotations = stripAppliedAnnotations(p.Annotations)
+}
+
+// TrimReadNode drops high-overhead status blobs from a Node fetched on the
+// one-shot read path — most notably Status.Images (10-40 KiB per node), plus
+// VolumesInUse, VolumesAttached, and full-manifest last-applied annotations.
+//
+// Node.ManagedFields is deliberately preserved here (unlike the watch-path
+// informer transform): pkg/checks/delta/squeeze.go reads ManagedFields to
+// attribute taint writers when explaining unschedulable pods.
+func TrimReadNode(n *corev1.Node) {
+	if n == nil {
+		return
+	}
+	n.Annotations = stripAppliedAnnotations(n.Annotations)
+	n.Status.Images = nil
+	n.Status.VolumesInUse = nil
+	n.Status.VolumesAttached = nil
 }
 
 type listCacheKey struct{}
@@ -195,21 +321,19 @@ func (p *cachedPods) List(ctx context.Context, opts metav1.ListOptions) (*corev1
 	}
 	p.cache.mu.Unlock()
 
-	items, err := ListAllPages(ctx, func(ctx context.Context, pageOpts metav1.ListOptions) ([]corev1.Pod, string, error) {
+	items, err := ListAllPagesTrim(ctx, func(ctx context.Context, pageOpts metav1.ListOptions) ([]corev1.Pod, string, error) {
 		list, err := p.PodInterface.List(ctx, pageOpts)
 		if err != nil {
 			return nil, "", err
 		}
 		return list.Items, list.Continue, nil
-	})
+	}, TrimReadPod)
 	if err != nil {
 		return nil, err
 	}
 
 	p.cache.mu.Lock()
-	stored := make([]corev1.Pod, len(items))
-	copy(stored, items)
-	p.cache.pods[exactKey] = stored
+	p.cache.pods[exactKey] = items
 	p.cache.mu.Unlock()
 
 	out := make([]corev1.Pod, len(items))
@@ -236,21 +360,19 @@ func (n *cachedNodes) List(ctx context.Context, opts metav1.ListOptions) (*corev
 	}
 	n.cache.mu.Unlock()
 
-	items, err := ListAllPages(ctx, func(ctx context.Context, pageOpts metav1.ListOptions) ([]corev1.Node, string, error) {
+	items, err := ListAllPagesTrim(ctx, func(ctx context.Context, pageOpts metav1.ListOptions) ([]corev1.Node, string, error) {
 		list, err := n.NodeInterface.List(ctx, pageOpts)
 		if err != nil {
 			return nil, "", err
 		}
 		return list.Items, list.Continue, nil
-	})
+	}, TrimReadNode)
 	if err != nil {
 		return nil, err
 	}
 
 	n.cache.mu.Lock()
-	stored := make([]corev1.Node, len(items))
-	copy(stored, items)
-	n.cache.nodes[n.rawClient] = stored
+	n.cache.nodes[n.rawClient] = items
 	n.cache.mu.Unlock()
 
 	out := make([]corev1.Node, len(items))
