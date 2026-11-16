@@ -47,6 +47,14 @@ const (
 	DefaultDialTimeout = 3 * time.Second
 	// DefaultKeepAlive is the TCP keep-alive probe interval for API server connections.
 	DefaultKeepAlive = 30 * time.Second
+	// DefaultAcceptContentTypes prefers Kubernetes Protobuf for typed API
+	// responses and falls back to JSON for endpoints or mock servers that only
+	// speak JSON (docs/leeway-design.md §6.1).
+	DefaultAcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
+	// DefaultContentType encodes typed write requests as Kubernetes Protobuf.
+	// Dynamic clients unconditionally override both content-type fields back to
+	// JSON in client-go's dynamic.ConfigFor, so CRDs are unaffected.
+	DefaultContentType = "application/vnd.kubernetes.protobuf"
 	// unreachableCacheTTL is how long an initial dial failure (before any
 	// connection to the endpoint has succeeded) is negative-cached on a client
 	// config so sequential Lists in multi-call commands fail fast instead of
@@ -123,7 +131,7 @@ func BuildDynamicClient(opts Options) (dynamic.Interface, error) {
 // those configs run through the same client construction as the
 // kubeconfig/in-cluster path — pkg/kube stays cloud-free.
 func BuildClientFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
-	cfg = ensureDefaultDial(cfg)
+	cfg = ensureTypedDefaults(cfg)
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
@@ -199,6 +207,12 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 	}
 	cfg.QPS = qps
 	cfg.Burst = burst
+	if cfg.AcceptContentTypes == "" {
+		cfg.AcceptContentTypes = DefaultAcceptContentTypes
+	}
+	if cfg.ContentType == "" {
+		cfg.ContentType = DefaultContentType
+	}
 	if cfg.Dial == nil || opts.DialTimeout > 0 {
 		cfg.Dial = newFailFastDialer(opts.DialTimeout)
 	}
@@ -206,6 +220,28 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 		return callerConfig(cfg, opts.CallerToken)
 	}
 	return cfg, nil
+}
+
+// ensureTypedDefaults returns a shallow copy of cfg with the bounded fail-fast
+// dialer and Protobuf content-type defaults installed when unset.
+func ensureTypedDefaults(cfg *rest.Config) *rest.Config {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Dial != nil && cfg.AcceptContentTypes != "" && cfg.ContentType != "" {
+		return cfg
+	}
+	out := rest.CopyConfig(cfg)
+	if out.Dial == nil {
+		out.Dial = newFailFastDialer(DefaultDialTimeout)
+	}
+	if out.AcceptContentTypes == "" {
+		out.AcceptContentTypes = DefaultAcceptContentTypes
+	}
+	if out.ContentType == "" {
+		out.ContentType = DefaultContentType
+	}
+	return out
 }
 
 // ensureDefaultDial returns a shallow copy of cfg with the bounded

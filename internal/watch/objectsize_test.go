@@ -193,9 +193,9 @@ func heapPer[T any, PT interface {
 	return int(after.HeapAlloc-before.HeapAlloc) / copies
 }
 
-// sizeOf is the serialised size in bytes. JSON because that is what the typed
-// client negotiates by default — pkg/kube sets no ContentType — so it is both
-// the bytes on the wire and the bytes the decoder walks.
+// sizeOf is the JSON serialised size in bytes — a human-readable upper bound
+// on wire size (pkg/kube negotiates Protobuf on the wire for typed clients,
+// which is typically 40-60% smaller than JSON).
 func sizeOf(t *testing.T, obj any) int {
 	t.Helper()
 	b, err := json.Marshal(obj)
