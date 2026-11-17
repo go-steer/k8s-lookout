@@ -29,9 +29,13 @@ type ClientSource func(ctx context.Context) (kubernetes.Interface, error)
 
 // DefaultSource resolves the client with BuildClient's default
 // precedence: in-cluster when running in a pod, $KUBECONFIG /
-// ~/.kube/config otherwise.
+// ~/.kube/config otherwise. When WithListCache is attached to ctx,
+// repeated DefaultSource()(ctx) calls with identical Options share one
+// underlying kubernetes.Interface and its wrapped Pod/Node ListCache so
+// multi-stage commands (`lookout scan`, `lookout health`, `lookout audit all`)
+// neither re-dial nor re-list 100k-pod slices per stage.
 func DefaultSource() ClientSource {
 	return func(ctx context.Context) (kubernetes.Interface, error) {
-		return BuildClient(OptionsFrom(ctx))
+		return cachedDefaultClient(ctx, OptionsFrom(ctx))
 	}
 }

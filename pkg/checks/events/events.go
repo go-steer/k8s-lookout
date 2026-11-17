@@ -219,29 +219,29 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		}
 	}
 
-	evs, err := listEvents(ctx, client, listNS)
-	if err != nil {
-		return 0, err
-	}
-
 	timeline := map[engine.EventKey]*entry{}
 	var rescales []rescale
-	for i := range evs {
-		ev := &evs[i]
+	scanned, err := streamEvents(ctx, client, listNS, func() {
+		clear(timeline)
+		rescales = nil
+	}, func(ev *corev1.Event) {
 		first, last := eventTimes(ev)
 		if last.Before(cutoff) {
-			continue
+			return
 		}
 		if match != nil {
 			io := ev.InvolvedObject
 			if _, ok := match[matchKey(io.Kind, io.Namespace, io.Name)]; !ok {
-				continue
+				return
 			}
 		}
 		accumulate(timeline, ev, first, last)
 		if ev.Reason == "SuccessfulRescale" && ev.InvolvedObject.Kind == hpaKind {
 			rescales = append(rescales, newRescale(ev, first, last))
 		}
+	})
+	if err != nil {
+		return 0, err
 	}
 
 	// A namespace or -A timeline rolls up per owner and reason
@@ -288,7 +288,7 @@ func (e *events) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	// The summary counts EVENTS scanned — the timeline's raw
 	// material — not the graph's List pass; the tree resolution is
 	// plumbing, not scan surface.
-	return len(evs), nil
+	return scanned, nil
 }
 
 // ownerTreeLists is everything ownerTree walks: the pod-owning
@@ -498,37 +498,39 @@ func eventSource(ev *corev1.Event) string {
 	return ev.ReportingController
 }
 
-// eventPageLimit matches the state package's one-shot page size.
-const eventPageLimit = 500
-
-func listEvents(ctx context.Context, client kubernetes.Interface, ns string) ([]corev1.Event, error) {
-	var out []corev1.Event
-	opts := metav1.ListOptions{Limit: eventPageLimit}
-	for {
-		l, err := client.CoreV1().Events(ns).List(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("listing events: %w", err)
+func streamEvents(
+	ctx context.Context,
+	client kubernetes.Interface,
+	ns string,
+	reset func(),
+	each func(*corev1.Event),
+) (int, error) {
+	scanned := 0
+	err := kube.StreamClusterEvents(ctx, client, ns, func() {
+		scanned = 0
+		if reset != nil {
+			reset()
 		}
-		out = append(out, l.Items...)
-		if l.Continue == "" {
-			return out, nil
-		}
-		opts.Continue = l.Continue
+	}, func(ev *corev1.Event) {
+		scanned++
+		each(ev)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing events: %w", err)
 	}
+	return scanned, nil
 }
 
 func listHPAs(ctx context.Context, client kubernetes.Interface, ns string) ([]autoscalingv2.HorizontalPodAutoscaler, error) {
-	var out []autoscalingv2.HorizontalPodAutoscaler
-	opts := metav1.ListOptions{Limit: eventPageLimit}
-	for {
+	items, err := kube.ListAllPages(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]autoscalingv2.HorizontalPodAutoscaler, string, error) {
 		l, err := client.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing horizontalpodautoscalers: %w", err)
+			return nil, "", err
 		}
-		out = append(out, l.Items...)
-		if l.Continue == "" {
-			return out, nil
-		}
-		opts.Continue = l.Continue
+		return l.Items, l.Continue, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing horizontalpodautoscalers: %w", err)
 	}
+	return items, nil
 }

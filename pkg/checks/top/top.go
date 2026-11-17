@@ -601,13 +601,7 @@ func runSpecFallback(
 	scanned int,
 	metricsErr error,
 ) (int, error) {
-	specs, err := kube.ListAllPagesMap(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
-		list, err := client.CoreV1().Pods(listNS).List(ctx, opts)
-		if err != nil {
-			return nil, "", err
-		}
-		return list.Items, list.Continue, nil
-	}, func(p *corev1.Pod) (podSpecSummary, bool) {
+	specs, err := kube.ListClusterPodsMap(ctx, client, listNS, func(p *corev1.Pod) (podSpecSummary, bool) {
 		if podSet != nil && !podSet[p.Namespace+"/"+p.Name] {
 			return podSpecSummary{}, false
 		}

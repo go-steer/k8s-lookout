@@ -76,6 +76,7 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
 // kindIdleNodePool is the nodepools class's one claim.
@@ -94,10 +95,6 @@ const nodePoolLabel = "cloud.google.com/gke-nodepool"
 
 // mirrorPodAnnotation marks the API's mirror of a static pod.
 const mirrorPodAnnotation = "kubernetes.io/config.mirror"
-
-// nodePoolPageLimit is the Node/Pod List page size: a one-shot read
-// keeps pages small to bound peak memory, as the state group does.
-const nodePoolPageLimit = 500
 
 // podPlacement is the only part of a pod the judgment reads.
 type podPlacement struct {
@@ -159,46 +156,47 @@ func emitNodePoolsUnread(inv emit.Invocation, r checks.Refusal) error {
 // left out: no provider pool can claim them.
 func listNodePools(ctx context.Context, client kubernetes.Interface) (map[string]string, error) {
 	out := map[string]string{}
-	opts := metav1.ListOptions{Limit: nodePoolPageLimit}
-	for {
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
 		l, err := client.CoreV1().Nodes().List(ctx, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing nodes: %w", err)
+			return nil, "", err
 		}
-		for i := range l.Items {
-			if pool := l.Items[i].Labels[nodePoolLabel]; pool != "" {
-				out[l.Items[i].Name] = pool
-			}
+		return l.Items, l.Continue, nil
+	}, func() {
+		clear(out)
+	}, func(n *corev1.Node) {
+		if pool := n.Labels[nodePoolLabel]; pool != "" {
+			out[n.Name] = pool
 		}
-		if l.Continue == "" {
-			return out, nil
-		}
-		opts.Continue = l.Continue
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
+	return out, nil
 }
 
 // listPodPlacements pages through every pod in the cluster, keeping
 // only the scheduled, non-terminated ones and whether each is workload.
 func listPodPlacements(ctx context.Context, client kubernetes.Interface) ([]podPlacement, error) {
 	var out []podPlacement
-	opts := metav1.ListOptions{Limit: nodePoolPageLimit}
-	for {
+	err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
 		l, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing pods: %w", err)
+			return nil, "", err
 		}
-		for i := range l.Items {
-			p := &l.Items[i]
-			if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-				continue
-			}
-			out = append(out, podPlacement{node: p.Spec.NodeName, workload: isWorkloadPod(p)})
+		return l.Items, l.Continue, nil
+	}, func() {
+		out = nil
+	}, func(p *corev1.Pod) {
+		if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			return
 		}
-		if l.Continue == "" {
-			return out, nil
-		}
-		opts.Continue = l.Continue
+		out = append(out, podPlacement{node: p.Spec.NodeName, workload: isWorkloadPod(p)})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing pods: %w", err)
 	}
+	return out, nil
 }
 
 // isWorkloadPod reports whether a pod is something a pool exists to

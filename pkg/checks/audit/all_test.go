@@ -16,6 +16,11 @@ package audit_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +34,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
@@ -129,5 +135,73 @@ func TestAllScopeValidation(t *testing.T) {
 	}
 	if res := checktest.Run(t, cmd, "--workload=Deployment/prod/api"); res.Code != emit.ExitUsage {
 		t.Errorf("--workload: exit %d, want %d", res.Code, emit.ExitUsage)
+	}
+}
+
+func TestAllSharesSnapshotWithProductionNilClientDeps(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		counts = map[string]int{}
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"major":"1","minor":"32","gitVersion":"v1.32.1"}`))
+		default:
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"List","items":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	kc := filepath.Join(t.TempDir(), "kubeconfig")
+	body := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: local
+  cluster:
+    server: %s
+contexts:
+- name: local
+  context:
+    cluster: local
+    user: local
+current-context: local
+users:
+- name: local
+  user: {}
+`, srv.URL)
+	if err := os.WriteFile(kc, []byte(body), 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	// Production wiring has Client == nil. Every sub-check inside audit all
+	// must still reuse the single Snapshot on ctx instead of minting a new
+	// client per stage and re-listing pods/deployments 5 times.
+	cmd := audit.AllCommand(audit.Deps{
+		Provider: func(context.Context) (cloud.Provider, error) { return cloud.NoProvider, nil },
+	})
+	res := checktest.Run(t, cmd, "-A", "--kubeconfig="+kc)
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+
+	for _, path := range []string{
+		"/apis/apps/v1/deployments",
+		"/apis/apps/v1/statefulsets",
+		"/apis/apps/v1/daemonsets",
+		"/apis/batch/v1/jobs",
+		"/apis/batch/v1/cronjobs",
+		"/api/v1/pods",
+		"/api/v1/services",
+		"/api/v1/namespaces",
+		"/api/v1/serviceaccounts",
+	} {
+		if got := counts[path]; got != 1 {
+			t.Errorf("HTTP GET %s count = %d across production audit all, want 1", path, got)
+		}
 	}
 }

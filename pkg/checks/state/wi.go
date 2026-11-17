@@ -74,9 +74,13 @@ type WIDeps struct {
 
 func (d WIDeps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
-		return d.Client(ctx)
+		c, err := d.Client(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return kube.WrapClient(ctx, c), nil
 	}
-	return kube.BuildClient(kube.OptionsFrom(ctx))
+	return kube.DefaultSource()(ctx)
 }
 
 func (d WIDeps) provider(ctx context.Context) (cloud.Provider, error) {

@@ -162,11 +162,8 @@ func (ix *workloadIndex) scaleTarget(ns string, ref autoscalingv2.CrossVersionOb
 	if _, refused := ix.kindsRefused[kind]; refused {
 		return nil, false
 	}
-	for i := range ix.workloads {
-		w := &ix.workloads[i]
-		if w.namespace == ns && w.kind == ref.Kind && w.name == ref.Name {
-			return w, true
-		}
+	if w, ok := ix.workloadByKey[ref.Kind+"\x00"+ns+"\x00"+ref.Name]; ok {
+		return w, true
 	}
 	return nil, true
 }

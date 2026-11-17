@@ -416,10 +416,7 @@ func (w workload) wantReplicas() int32 {
 //
 // The second return names the HPA, as a detail, when one was used.
 func (ix *workloadIndex) replicaFloor(w workload) (int32, []emit.Field) {
-	for _, h := range ix.hpas {
-		if !hpaTargets(h, w.kind, w.namespace, w.name) {
-			continue
-		}
+	if h, ok := ix.hpaByTarget[w.kind+"\x00"+w.namespace+"\x00"+w.name]; ok {
 		floor := int32(1)
 		if h.Spec.MinReplicas != nil {
 			floor = *h.Spec.MinReplicas
@@ -471,6 +468,16 @@ type workloadIndex struct {
 	// pdbsByNS counts PDBs per namespace, so a no-PDB finding can say
 	// whether the namespace uses PDBs at all.
 	pdbsByNS map[string]int
+
+	// Pre-indexed per-namespace and per-key lookups built by buildFastIndexes().
+	workloadsByNS   map[string][]workload
+	workloadByKey   map[string]*workload
+	compiledPDBs    []compiledPDB
+	pdbsByNSList    map[string][]compiledPDB
+	servicesByNS    map[string][]*corev1.Service
+	hpaByTarget     map[string]*autoscalingv2.HorizontalPodAutoscaler
+	nsLimitDefaults map[string]namespaceResourceDefaults
+	placementCache  map[string]int
 }
 
 func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns string) (*workloadIndex, error) {
@@ -602,7 +609,55 @@ func listWorkloadIndex(ctx context.Context, client kubernetes.Interface, ns stri
 		}
 		return a.name < b.name
 	})
+	ix.buildFastIndexes()
 	return ix, nil
+}
+
+func (ix *workloadIndex) buildFastIndexes() {
+	ix.workloadsByNS = make(map[string][]workload)
+	ix.workloadByKey = make(map[string]*workload, len(ix.workloads))
+	for i := range ix.workloads {
+		w := &ix.workloads[i]
+		ix.workloadsByNS[w.namespace] = append(ix.workloadsByNS[w.namespace], *w)
+		ix.workloadByKey[w.kind+"\x00"+w.namespace+"\x00"+w.name] = w
+	}
+
+	ix.compiledPDBs = make([]compiledPDB, 0, len(ix.pdbs))
+	ix.pdbsByNSList = make(map[string][]compiledPDB)
+	for _, p := range ix.pdbs {
+		sel, err := metav1.LabelSelectorAsSelector(p.Spec.Selector)
+		if err != nil {
+			sel = nil
+		}
+		cp := compiledPDB{pdb: p, sel: sel}
+		ix.compiledPDBs = append(ix.compiledPDBs, cp)
+		ix.pdbsByNSList[p.Namespace] = append(ix.pdbsByNSList[p.Namespace], cp)
+	}
+
+	ix.servicesByNS = make(map[string][]*corev1.Service)
+	for _, svc := range ix.services {
+		ix.servicesByNS[svc.Namespace] = append(ix.servicesByNS[svc.Namespace], svc)
+	}
+
+	ix.hpaByTarget = make(map[string]*autoscalingv2.HorizontalPodAutoscaler, len(ix.hpas))
+	for _, h := range ix.hpas {
+		ref := h.Spec.ScaleTargetRef
+		k := ref.Kind + "\x00" + h.Namespace + "\x00" + ref.Name
+		if _, exists := ix.hpaByTarget[k]; !exists {
+			ix.hpaByTarget[k] = h
+		}
+	}
+
+	lrsByNS := make(map[string][]*corev1.LimitRange)
+	for _, lr := range ix.limitRanges {
+		lrsByNS[lr.Namespace] = append(lrsByNS[lr.Namespace], lr)
+	}
+	ix.nsLimitDefaults = make(map[string]namespaceResourceDefaults, len(lrsByNS))
+	for ns, lrs := range lrsByNS {
+		ix.nsLimitDefaults[ns] = computeNamespaceResourceDefaults(lrs, ns)
+	}
+
+	ix.placementCache = make(map[string]int)
 }
 
 // judge applies every workload-subject posture claim to one workload.
@@ -867,4 +922,5 @@ func (ix *workloadIndex) filterSystemNamespaces(isSystemNS func(string) bool, sn
 		filteredLRs = append(filteredLRs, lr)
 	}
 	ix.limitRanges = filteredLRs
+	ix.buildFastIndexes()
 }

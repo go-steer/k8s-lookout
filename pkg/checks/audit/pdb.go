@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	policyv1 "k8s.io/api/policy/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -39,37 +38,29 @@ const (
 
 const pdbObjectClass = "PodDisruptionBudget"
 
+// compiledPDB pairs a PodDisruptionBudget with its pre-parsed label selector
+// so cross-checking thousands of workloads and PDBs compiles each selector once.
+type compiledPDB struct {
+	pdb *policyv1.PodDisruptionBudget
+	sel labels.Selector
+}
+
+func (cp compiledPDB) matchesLabels(podLabels map[string]string) bool {
+	return cp.sel != nil && cp.sel.Matches(labels.Set(podLabels))
+}
+
 // covered reports whether any PDB in the workload's namespace selects
 // its pod template. Matching the TEMPLATE labels rather than live
 // pods is deliberate: the claim is about the spec, so it holds while
 // the workload is scaled down, mid-rollout, or momentarily podless,
 // and it costs no pod List.
 func (ix *workloadIndex) covered(w workload) bool {
-	return hasMatchingPDB(ix.pdbs, w.namespace, w.template.Labels)
-}
-
-// hasMatchingPDB reports whether any PDB in namespace selects podLabels.
-func hasMatchingPDB(pdbs []*policyv1.PodDisruptionBudget, namespace string, podLabels map[string]string) bool {
-	for _, pdb := range pdbs {
-		if pdbMatchesLabels(pdb, namespace, podLabels) {
+	for _, cp := range ix.pdbsByNSList[w.namespace] {
+		if cp.matchesLabels(w.template.Labels) {
 			return true
 		}
 	}
 	return false
-}
-
-func pdbMatchesLabels(pdb *policyv1.PodDisruptionBudget, namespace string, podLabels map[string]string) bool {
-	if pdb.Namespace != namespace {
-		return false
-	}
-	// LabelSelectorAsSelector encodes the policy/v1 distinction
-	// this check would otherwise get wrong: a nil selector matches
-	// NOTHING, an empty one matches everything in the namespace.
-	sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-	if err != nil {
-		return false
-	}
-	return sel.Matches(labels.Set(podLabels))
 }
 
 // pdbFindings evaluates L-20 (audit.pdb_posture): overlapping PDB selectors
@@ -79,16 +70,22 @@ func (ix *workloadIndex) pdbFindings(wl emit.WorkloadRef) []emit.Finding {
 		return nil
 	}
 	var out []emit.Finding
-	for _, p := range ix.pdbs {
+	for _, cp := range ix.compiledPDBs {
+		p := cp.pdb
+		if !wl.IsZero() && p.Namespace != wl.Namespace {
+			continue
+		}
 		var matched []workload
 		var matchedNames []string
 		matchesScopeWorkload := wl.IsZero()
-		for _, w := range ix.workloads {
-			if pdbMatchesLabels(p, w.namespace, w.template.Labels) {
-				matched = append(matched, w)
-				matchedNames = append(matchedNames, w.kind+"/"+w.name)
-				if !wl.IsZero() && w.namespace == wl.Namespace && w.kind == wl.Kind && w.name == wl.Name {
-					matchesScopeWorkload = true
+		if cp.sel != nil {
+			for _, w := range ix.workloadsByNS[p.Namespace] {
+				if cp.matchesLabels(w.template.Labels) {
+					matched = append(matched, w)
+					matchedNames = append(matchedNames, w.kind+"/"+w.name)
+					if !wl.IsZero() && w.kind == wl.Kind && w.name == wl.Name {
+						matchesScopeWorkload = true
+					}
 				}
 			}
 		}
@@ -100,17 +97,18 @@ func (ix *workloadIndex) pdbFindings(wl emit.WorkloadRef) []emit.Finding {
 		var overlappingPDBs []string
 		seenPDB := map[string]bool{}
 		var overlappingWorkloads []string
+		nsPDBs := ix.pdbsByNSList[p.Namespace]
 		for _, w := range matched {
 			overlappedThisWorkload := false
-			for _, other := range ix.pdbs {
-				if other.Namespace != p.Namespace || other.Name <= p.Name {
+			for _, other := range nsPDBs {
+				if other.pdb.Name <= p.Name {
 					continue
 				}
-				if pdbMatchesLabels(other, w.namespace, w.template.Labels) {
+				if other.matchesLabels(w.template.Labels) {
 					overlappedThisWorkload = true
-					if !seenPDB[other.Name] {
-						seenPDB[other.Name] = true
-						overlappingPDBs = append(overlappingPDBs, other.Name)
+					if !seenPDB[other.pdb.Name] {
+						seenPDB[other.pdb.Name] = true
+						overlappingPDBs = append(overlappingPDBs, other.pdb.Name)
 					}
 				}
 			}

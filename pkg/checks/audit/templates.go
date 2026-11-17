@@ -165,17 +165,12 @@ func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns strin
 			what: "pods",
 			kind: "unowned Pod",
 			run: func() (*checks.Refusal, error) {
-				items, r, err := snap.Pods(ctx)
+				items, r, err := snap.UnownedPods(ctx)
 				if err != nil || r != nil {
 					return r, err
 				}
 				for i := range items {
 					p := &items[i]
-					// Every pod with an owner is a copy of a template judged
-					// above; only hand-rolled pods are their own subject.
-					if len(p.OwnerReferences) > 0 {
-						continue
-					}
 					add("Pod", p.Namespace, p.Name, p.Labels, p.Spec)
 				}
 				return nil, nil

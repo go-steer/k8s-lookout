@@ -47,9 +47,7 @@ import (
 
 func init() {
 	Register(SpecCommand(SpecDeps{
-		Typed: func(ctx context.Context) (kubernetes.Interface, error) {
-			return kube.BuildClient(kube.OptionsFrom(ctx))
-		},
+		Typed: kube.DefaultSource(),
 		Dynamic: func(ctx context.Context) (dynamic.Interface, error) {
 			return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 		},

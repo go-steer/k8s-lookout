@@ -17,6 +17,7 @@ package audit
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -81,10 +82,16 @@ func (ix *workloadIndex) placement(w workload) []emit.Finding {
 		return nil
 	}
 
-	eligible := 0
-	for _, n := range ix.nodes {
-		if sel.matches(n) {
-			eligible++
+	cacheKey := sel.cacheKey()
+	eligible, cached := ix.placementCache[cacheKey]
+	if !cached {
+		for _, n := range ix.nodes {
+			if sel.matches(n) {
+				eligible++
+			}
+		}
+		if ix.placementCache != nil {
+			ix.placementCache[cacheKey] = eligible
 		}
 	}
 
@@ -273,4 +280,29 @@ func (ns nodeSelection) matches(n *corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+func (ns nodeSelection) cacheKey() string {
+	var b strings.Builder
+	b.WriteString(selectorCacheKey(ns.selector))
+	for _, t := range ns.terms {
+		b.WriteByte('\x00')
+		b.WriteString(selectorCacheKey(t.labelSel))
+		b.WriteByte('\x01')
+		b.WriteString(selectorCacheKey(t.fieldSel))
+	}
+	return b.String()
+}
+
+func selectorCacheKey(s labels.Selector) string {
+	if s == nil {
+		return "<nil>"
+	}
+	if s.Empty() {
+		return "<all>"
+	}
+	if str := s.String(); str != "" {
+		return str
+	}
+	return "<none>"
 }
