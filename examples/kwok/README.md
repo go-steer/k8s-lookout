@@ -302,19 +302,37 @@ attached.
 
 ## bench
 
-`bench` times every target-free read command twice and reports both:
+`bench` times every cluster-wide read command twice, writes
+`$STATE_DIR/bench.tsv`, and reports:
 
 - **ELAPSED** under a generous `--timeout`, so the command finishes and
   reports a real cost;
+- **PEAK-MB** — peak child resident set (`ru_maxrss`), sizing transient
+  decode + per-page trimming memory;
 - **DEFAULT-TO** — whether it survives its own shipped `--timeout`
-  default (10s). A command that cannot answer a 300-node cluster inside
-  the default it documents fails closed for every operator who does not
-  know to override it, and that is precisely the class of defect a
-  two-node cluster can never surface.
+  default (`10s` for single checks, `30s`/`60s` for compositions). A
+  command that cannot answer a 300-node cluster inside the default it
+  documents fails closed for every operator who does not know to
+  override it, and that is precisely the class of defect a two-node
+  cluster can never surface.
 
 `SCANNED` comes from each command's summary line, so a command that
-returns fast because it silently scanned nothing shows up as
-`scanned=0` rather than passing as fast.
+returns fast because it silently scanned nothing or dropped a page shows
+up as `scanned=0` or under-counted rather than passing as fast. When a
+kwok fleet Deployment is present, `bench` also runs `state edges`
+against one fleet workload to exercise its full-cluster graph snapshot.
+
+Two optional guards turn the table into a CI regression gate (both off
+by default for interactive runs, set in
+[`.github/workflows/scale-kwok.yml`](../../.github/workflows/scale-kwok.yml)):
+
+| | |
+|---|---|
+| `BENCH_REQUIRE_DEFAULT_TIMEOUT=1` | fail on a `void` stream, a shipped `--timeout` failure, or a pod sweep returning `scanned < fleet_pods` |
+| `BENCH_MAX_PEAK_MB` | fail if any command's peak RSS exceeds this MiB ceiling |
+
+`examples/kwok/bench --selftest` checks the parser and guards without a
+cluster.
 
 ### What it measured
 

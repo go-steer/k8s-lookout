@@ -77,9 +77,9 @@ import (
 // exactly this).
 const defaultMax = 500
 
-// pageSize keeps single List responses bounded on large clusters; the
-// loop follows Continue tokens until the pass is complete.
-const pageSize = 500
+// pageSize keeps single List responses bounded on large clusters;
+// ListAllPagesMap follows Continue tokens until the pass is complete.
+const pageSize = kube.DefaultPageLimit
 
 func init() {
 	checks.Register(New(DefaultDeps()))
@@ -246,8 +246,9 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		refused []emit.Finding
 		listed  int
 	)
+	now := l.now()
 	for _, k := range kinds {
-		items, err := listKind(ctx, dyn, k, ns)
+		items, err := listKind(ctx, dyn, k, ns, now)
 		if err != nil {
 			// A refusal is a RESULT, not an error. The caller may be
 			// allowed to list sixteen kinds and not the seventeenth
@@ -295,9 +296,8 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			return 0, err
 		}
 	}
-	now := l.now()
 	for _, o := range shown {
-		if err := inv.Out.Emit(o.finding(now)); err != nil {
+		if err := inv.Out.Emit(o.finding()); err != nil {
 			return 0, err
 		}
 	}
@@ -371,15 +371,15 @@ func detectAddons(objects []object) []string {
 	return out
 }
 
-// object is one listed resource, kept as the decoded map because the
-// point is to read two or three fields out of eighteen unrelated
-// schemas.
+// object is one listed resource with its two or three formatted
+// headline fields already projected per page, so full unstructured
+// maps (managedFields, annotations, Secret/ConfigMap payloads) are
+// dropped as each page finishes rather than retained across all kinds.
 type object struct {
 	kind      string
 	namespace string
 	name      string
-	created   time.Time
-	raw       map[string]any
+	details   []emit.Field
 }
 
 // target is the object as the other read tools accept it, spelled
@@ -393,15 +393,7 @@ func (o object) target() string {
 	return o.kind + "/" + o.namespace + "/" + o.name
 }
 
-func (o object) finding(now time.Time) emit.Finding {
-	k := &kv{now: now}
-	k.add("target", o.target())
-	if f := formatters[o.kind]; f != nil {
-		f(k, o.raw)
-	}
-	if !o.created.IsZero() {
-		k.add("age", compactAge(now.Sub(o.created)))
-	}
+func (o object) finding() emit.Finding {
 	return emit.Finding{
 		// One finding kind for every object: this command reports
 		// existence, and existence is one class. WHAT exists is
@@ -415,31 +407,33 @@ func (o object) finding(now time.Time) emit.Finding {
 		Namespace:    o.namespace,
 		KindOfObject: o.kind,
 		Name:         o.name,
-		Details:      k.fields,
+		Details:      o.details,
 	}
 }
 
-// listKind pages one kind's List call chain and returns its objects
-// sorted by (namespace, name), so output order is fully determined by
-// the kind order plus the object names.
-func listKind(ctx context.Context, dyn dynamic.Interface, k kindSpec, ns string) ([]object, error) {
+// listKind pages one kind's List call chain and returns its projected
+// objects sorted by (namespace, name), with single-restart 410 Gone
+// recovery when an etcd compaction expires a mid-walk continue token.
+func listKind(ctx context.Context, dyn dynamic.Interface, k kindSpec, ns string, now time.Time) ([]object, error) {
 	var ri dynamic.ResourceInterface = dyn.Resource(k.gvr)
 	if k.namespaced && ns != metav1.NamespaceAll {
 		ri = dyn.Resource(k.gvr).Namespace(ns)
 	}
-	var out []object
-	opts := metav1.ListOptions{Limit: pageSize}
-	for {
-		list, err := ri.List(ctx, opts)
-		if err != nil {
-			return nil, err
-		}
-		for i := range list.Items {
-			out = append(out, newObject(k.kind, &list.Items[i]))
-		}
-		if opts.Continue = list.GetContinue(); opts.Continue == "" {
-			break
-		}
+	out, err := kube.ListAllPagesMap(
+		ctx,
+		func(ctx context.Context, opts metav1.ListOptions) ([]unstructured.Unstructured, string, error) {
+			list, err := ri.List(ctx, opts)
+			if err != nil {
+				return nil, "", err
+			}
+			return list.Items, list.GetContinue(), nil
+		},
+		func(u *unstructured.Unstructured) (object, bool) {
+			return newObject(k.kind, u, now), true
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].namespace != out[j].namespace {
@@ -450,7 +444,7 @@ func listKind(ctx context.Context, dyn dynamic.Interface, k kindSpec, ns string)
 	return out, nil
 }
 
-func newObject(kind string, u *unstructured.Unstructured) object {
+func newObject(kind string, u *unstructured.Unstructured, now time.Time) object {
 	// The item's own kind wins when the server set one: a listing of
 	// a kind served under several versions still names itself
 	// correctly, and the built-in table's kind is only a fallback.
@@ -461,11 +455,16 @@ func newObject(kind string, u *unstructured.Unstructured) object {
 		kind:      kind,
 		namespace: u.GetNamespace(),
 		name:      u.GetName(),
-		raw:       u.Object,
+	}
+	k := &kv{now: now}
+	k.add("target", o.target())
+	if f := formatters[o.kind]; f != nil {
+		f(k, u.Object)
 	}
 	if ts := u.GetCreationTimestamp(); !ts.IsZero() {
-		o.created = ts.Time
+		k.add("age", compactAge(now.Sub(ts.Time)))
 	}
+	o.details = k.fields
 	return o
 }
 
