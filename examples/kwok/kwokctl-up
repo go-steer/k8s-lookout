@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Boot a standalone, tuned kwokctl control plane (--runtime=binary by
+# default — no Docker, no root, no kindnet/kube-proxy DaemonSets) for
+# high-scale tiers (10k–200k+ padded pods, issue #495) where kind hits
+# etcd's 2 GiB quota, default controller QPS limits, and /24 pod-CIDR
+# exhaustion.
+#
+# Kubeconfig isolation: writes exclusively to $KWOKCTL_KUBECONFIG
+# (default $STATE_DIR/kwokctl.kubeconfig) and NEVER modifies
+# ~/.kube/config. Every script in examples/kwok/ picks up
+# $KWOKCTL_KUBECONFIG automatically while it exists; remove it cleanly
+# with examples/kwok/kwokctl-down.
+#
+# Usage:
+#   examples/kwok/kwokctl-up
+#   examples/kwok/scale-up 2000 5000 25   # 2,000 nodes, 100,500 padded pods
+#   examples/kwok/leeway-scale
+#   examples/kwok/bench
+#   examples/kwok/kwokctl-down
+#
+# Env:
+#   KWOKCTL_RUNTIME          kwokctl runtime (default: binary)
+#   KWOKCTL_ETCD_QUOTA       etcd --quota-backend-bytes (default: 8Gi)
+#   KWOKCTL_CONTROLLER_PORT  host port for fake kubelet (default: 10247)
+#   KWOKCTL_SYNC_WORKERS     controller-manager worker concurrency (default: 30)
+
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+RUNTIME="${KWOKCTL_RUNTIME:-binary}"
+ETCD_QUOTA="${KWOKCTL_ETCD_QUOTA:-8Gi}"
+CONTROLLER_PORT="${KWOKCTL_CONTROLLER_PORT:-10247}"
+SYNC_WORKERS="${KWOKCTL_SYNC_WORKERS:-30}"
+
+command -v kubectl >/dev/null 2>&1 || {
+  echo "ERROR: kubectl not found on PATH" >&2
+  exit 1
+}
+
+kwokctl="$(kwokctl_bin)"
+mkdir -p "$(dirname "$KWOKCTL_KUBECONFIG")"
+
+if "$kwokctl" get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
+  echo "▸ reusing existing kwokctl cluster '$CLUSTER_NAME'"
+  "$kwokctl" get kubeconfig --name "$CLUSTER_NAME" >"$KWOKCTL_KUBECONFIG"
+else
+  echo "▸ creating tuned kwokctl cluster '$CLUSTER_NAME' (runtime=$RUNTIME, etcd-quota=$ETCD_QUOTA)"
+  cfg="$(mktemp "${TMPDIR:-/tmp}/kwokctl-cfg.XXXXXX.yaml")"
+  trap 'rm -f "$cfg"' EXIT
+  cat >"$cfg" <<YAML
+apiVersion: config.kwok.x-k8s.io/v1alpha1
+kind: KwokctlConfiguration
+componentsPatches:
+- name: etcd
+  extraArgs:
+  - key: auto-compaction-retention
+    value: "5m"
+  - key: max-request-bytes
+    value: "16777216"
+  - key: snapshot-count
+    value: "100000"
+  - key: unsafe-no-fsync
+    value: "true"
+- name: kube-controller-manager
+  extraArgs:
+  - key: leader-elect
+    value: "false"
+  - key: concurrent-deployment-syncs
+    value: "${SYNC_WORKERS}"
+  - key: concurrent-replicaset-syncs
+    value: "${SYNC_WORKERS}"
+  - key: concurrent-endpoint-syncs
+    value: "${SYNC_WORKERS}"
+  - key: concurrent-service-endpoint-syncs
+    value: "${SYNC_WORKERS}"
+- name: kube-scheduler
+  extraArgs:
+  - key: leader-elect
+    value: "false"
+- name: kwok-controller
+  extraArgs:
+  - key: cidr
+    value: "10.244.0.0/12"
+  - key: node-ip
+    value: "127.0.0.1"
+YAML
+
+  "$kwokctl" create cluster \
+    --name "$CLUSTER_NAME" \
+    --runtime "$RUNTIME" \
+    --kubeconfig "$KWOKCTL_KUBECONFIG" \
+    -c "$cfg" \
+    --quiet-pull \
+    --disable-qps-limits \
+    --etcd-quota-backend-size "$ETCD_QUOTA" \
+    --controller-port "$CONTROLLER_PORT" \
+    --enable-crds=Stage \
+    --wait 120s
+fi
+
+chmod 600 "$KWOKCTL_KUBECONFIG"
+export KUBECONFIG="$KWOKCTL_KUBECONFIG"
+
+echo "▸ waiting for Stage CRD"
+kubectl wait --for=condition=Established crd/stages.kwok.x-k8s.io --timeout=60s >/dev/null
+
+echo "▸ installing default lifecycle stages (pod fast-forward + node heartbeat)"
+kubectl apply -f "${KWOK_RELEASE_URL}/stage-fast.yaml" >/dev/null
+
+echo "▸ installing node-failure stages (node-fail / node-heal)"
+kubectl apply -f "$(kwok_root)/stages/" >/dev/null
+
+echo
+echo "kwokctl cluster '$CLUSTER_NAME' is up (isolated kubeconfig — ~/.kube/config untouched):"
+echo "  kubeconfig: $KWOKCTL_KUBECONFIG"
+echo "  context:    $(kubectl config current-context)"
+echo "  kubelet:    127.0.0.1:${CONTROLLER_PORT}"
+echo
+echo "All examples/kwok/* scripts pick up this cluster automatically."
+echo "For ad-hoc kubectl or lookout commands in your shell:"
+echo "  export KUBECONFIG=\"$KWOKCTL_KUBECONFIG\""
+echo
+echo "Next:"
+echo "  examples/kwok/leeway-scale                # rung 0 (empty cluster)"
+echo "  examples/kwok/scale-up 2000 5000 25       # 2,000 nodes, 100,500 padded pods"
+echo "  examples/kwok/leeway-scale                # loaded rung + marginal verdict"
+echo "  examples/kwok/bench                       # read-path timings & peak RSS"
+echo "  examples/kwok/kwokctl-down                # tear down cluster & kubeconfig"

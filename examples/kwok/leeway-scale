@@ -266,8 +266,8 @@ require_kwok_installed
 
 bin="$(leeway_bin)"
 
-nodes="$(kubectl get nodes -o name | grep -c . || true)"
-pods="$(kubectl get pods -A -o name | grep -c . || true)"
+nodes="$(kubectl get nodes --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+pods="$(kubectl get pods -A --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
 
 echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) faked by kwok)"
 echo "▸ binary:  $bin"
@@ -278,10 +278,11 @@ echo "▸ binary:  $bin"
 # against it. verify-padding correctly fails on an empty fleet, so the
 # padding gate has to know the difference between "no objects" and
 # "objects that deflated".
-fleet_pods="$(kubectl get pods -A -l "$FLEET_LABEL" -o name 2>/dev/null | grep -c . || true)"
+has_fleet="$(kubectl get --raw "/api/v1/pods?labelSelector=${FLEET_LABEL}&limit=1" 2>/dev/null \
+  | jq -r '.items | length' || echo 0)"
 
 void=""
-if ((fleet_pods == 0)); then
+if ((has_fleet == 0)); then
   echo "  ▸ intercept rung: no synthetic fleet, so no padding to check"
 elif ! ((KWOK_PAD)); then
   void="unpadded fixtures (KWOK_PAD=0)"
@@ -304,7 +305,7 @@ trap 'rm -f "$log"' EXIT
   --sources=topology-drift \
   --cluster-name=kwok-scale \
   --metrics-addr=127.0.0.1:0 \
-  --exit-after="$((SETTLE + WINDOW + 120))s" >"$log" 2>&1 &
+  --exit-after="$((SETTLE + WINDOW + 300))s" >"$log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -f "$log"' EXIT
 
@@ -381,15 +382,18 @@ cpu_core="$(awk -v a="$cpu_before" -v b="$cpu_after" -v t="$ticks" -v w="$WINDOW
   'BEGIN { printf "%.4f", (b - a) / t / w }')"
 peak_mb="$(awk -v k="$peak_kb" 'BEGIN { printf "%.1f", k / 1024 }')"
 
+# ---- what the subsystem says about itself --------------------------------
+# Scrape immediately when the sample window closes (before waiting on
+# churn workers and counting created pods from the apiserver) so
+# t_close - t_open brackets the window rather than the post-run tally.
+
+metrics="$(curl -sf "http://$addr/metrics")"
+t_close="$(date +%s.%N)"
+
 if [[ -n "$churn_pid" ]]; then
   wait "$churn_pid" 2>/dev/null || true
   CHURNED="$(fleet_pods_created_since "$churn_since")"
 fi
-
-# ---- what the subsystem says about itself --------------------------------
-
-metrics="$(curl -sf "http://$addr/metrics")"
-t_close="$(date +%s.%N)"
 
 sum_of() {
   awk -v m="$1" '$1 ~ "^"m"([{ ]|$)" { s += $NF } END { printf "%.0f", s }' <<<"$metrics"

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
+
 # verify-padding — assert the synthetic fleet's objects are the size real
 # ones are. Spike S8's durable half.
 #
@@ -43,22 +43,24 @@ if ! ((KWOK_PAD)); then
   exit 0
 fi
 
-# mean_size <kubectl-args...> — mean serialised bytes of the listed
-# objects.
+# mean_size_raw <api-path> <api-version> <kind> — mean serialised bytes
+# across up to $VERIFY_PADDING_SAMPLE objects (default 200, 20 full
+# archetype cycles).
 #
-# --show-managed-fields is not optional and is the whole reason this
-# function exists rather than being inlined. kubectl STRIPS managedFields
-# from -o json by default, and managedFields is 5–6 KB of a pod: without
-# the flag this reads a third under the truth, and a correctly padded
-# fixture fails its own check.
-#
-# tojson is the compact form, which is what the Go measurement in
-# internal/watch/objectsize_test.go produces too. The two agreed to within
-# 31 bytes on the same cluster, which is the only reason the targets below
-# can be quoted from one and asserted by the other.
-mean_size() {
-  kubectl "$@" --show-managed-fields -o json |
-    jq -r '[.items[] | (. | tojson | length)] | if length == 0 then "0 0" else "\(add) \(length)" end' |
+# Uses raw REST GET with `limit=` rather than `kubectl get -A -o json`:
+# the raw endpoint always includes metadata.managedFields (5–6 KB/pod
+# that `kubectl get -o json` strips unless --show-managed-fields is set)
+# AND caps the sample to one page, avoiding buffering 1.6+ GB of JSON in
+# jq on 100k–200k-pod runs (#495). Stamping apiVersion/kind onto each
+# list item matches `kubectl get --show-managed-fields -o json` and
+# internal/watch/objectsize_test.go to the byte.
+VERIFY_PADDING_SAMPLE="${VERIFY_PADDING_SAMPLE:-200}"
+
+mean_size_raw() {
+  local path="$1" av="$2" kind="$3"
+  kubectl get --raw "$path" |
+    jq -r --arg av "$av" --arg k "$kind" \
+      '[.items[] | (({"apiVersion": $av, "kind": $k} + .) | tojson | length)] | if length == 0 then "0 0" else "\(add) \(length)" end' |
     awk '{ if ($2 == 0) print 0; else printf "%d\n", $1 / $2 }'
 }
 
@@ -80,8 +82,8 @@ check() {
 
 echo "▸ checking the synthetic fleet is the weight of a real one"
 
-pods="$(mean_size get pods -A -l "$FLEET_LABEL")"
-nodes="$(mean_size get nodes -l "$FAKE_NODE_LABEL")"
+pods="$(mean_size_raw "/api/v1/pods?labelSelector=${FLEET_LABEL}&limit=${VERIFY_PADDING_SAMPLE}" "v1" "Pod")"
+nodes="$(mean_size_raw "/api/v1/nodes?labelSelector=${FAKE_NODE_LABEL}&limit=${VERIFY_PADDING_SAMPLE}" "v1" "Node")"
 
 if ((pods == 0)); then
   echo "ERROR: no fleet pods found — run examples/kwok/scale-up first" >&2
