@@ -105,20 +105,28 @@ var reclaimTaints = map[string]struct {
 	"DeletionCandidateOfClusterAutoscaler":        {emit.SeverityInfo, "AutoscalerCandidate"},
 }
 
+// recordPodOccupancy increments a node's non-DaemonSet active pod count,
+// used to count what a cordoned or preempting node is still holding.
+func recordPodOccupancy(occupancy map[string]int, p *corev1.Pod) {
+	if p.Spec.NodeName == "" || ownedBy(p.OwnerReferences, "DaemonSet") {
+		return // DaemonSet pods never block a drain
+	}
+	if p.Status.Phase == corev1.PodRunning || p.Status.Phase == corev1.PodPending {
+		occupancy[p.Spec.NodeName]++
+	}
+}
+
 // checkNodes derives the node.* findings. pods is the scope's pod
 // list, used to count what a cordoned node is still holding.
 func (s *scanner) checkNodes(nodes []corev1.Node, pods []corev1.Pod) {
 	occupancy := map[string]int{}
 	for i := range pods {
-		p := &pods[i]
-		if p.Spec.NodeName == "" || ownedBy(p.OwnerReferences, "DaemonSet") {
-			continue // DaemonSet pods never block a drain
-		}
-		if p.Status.Phase == corev1.PodRunning || p.Status.Phase == corev1.PodPending {
-			occupancy[p.Spec.NodeName]++
-		}
+		recordPodOccupancy(occupancy, &pods[i])
 	}
+	s.checkNodesWithOccupancy(nodes, occupancy)
+}
 
+func (s *scanner) checkNodesWithOccupancy(nodes []corev1.Node, occupancy map[string]int) {
 	for i := range nodes {
 		s.checkNode(&nodes[i], occupancy[nodes[i].Name])
 	}

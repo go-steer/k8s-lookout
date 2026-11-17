@@ -213,9 +213,13 @@ func (d Deps) registry() *checks.Registry {
 
 func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
-		return d.Client(ctx)
+		c, err := d.Client(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return kube.WrapClient(ctx, c), nil
 	}
-	return kube.BuildClient(kube.OptionsFrom(ctx))
+	return kube.DefaultSource()(ctx)
 }
 
 func (d Deps) now() time.Time {

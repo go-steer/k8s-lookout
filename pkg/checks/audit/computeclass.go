@@ -137,7 +137,7 @@ type decodedClassInfo struct {
 type computeClassIndex struct {
 	templates       []podTemplate
 	replicasByOwner map[string]int32 // "Kind/ns/name" -> replicas
-	services        []*corev1.Service
+	servicesByNS    map[string][]*corev1.Service
 	servicesRefused *checks.Refusal
 	nodes           []*corev1.Node
 	nodesRefused    *checks.Refusal
@@ -319,11 +319,11 @@ func loadComputeClassIndex(ctx context.Context, deps Deps, client kubernetes.Int
 		}
 	}
 
-	services, servicesRefused, err := snap.Services(ctx)
+	servicesByNS, servicesRefused, err := snap.ServicesByNamespace(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ix.services, ix.servicesRefused = services, servicesRefused
+	ix.servicesByNS, ix.servicesRefused = servicesByNS, servicesRefused
 
 	if nodes, r, err := snap.Nodes(ctx); err != nil {
 		return nil, err
@@ -528,7 +528,7 @@ func (ix *computeClassIndex) judgeWorkload(t podTemplate) []emit.Finding {
 		if !ix.hasComputeClassFallback(ccName) {
 			var serving []*corev1.Service
 			if ix.servicesRefused == nil {
-				serving = servingServices(ix.services, t.namespace, t.labels)
+				serving = servingServices(ix.servicesByNS[t.namespace], t.namespace, t.labels)
 			}
 			details := []emit.Field{
 				{Key: "replicas", Value: itoa(int(replicas))},
@@ -624,6 +624,13 @@ func (ix *computeClassIndex) judgeNodePools(templates []podTemplate, workloadSco
 	}
 	sort.Strings(poolNames)
 
+	var zoneSpreadTemplates []podTemplate
+	for _, t := range templates {
+		if hasZoneTopologySpread(t.spec) {
+			zoneSpreadTemplates = append(zoneSpreadTemplates, t)
+		}
+	}
+
 	var out []emit.Finding
 	for _, pool := range poolNames {
 		pNodes := nodesByPool[pool]
@@ -639,10 +646,7 @@ func (ix *computeClassIndex) judgeNodePools(templates []podTemplate, workloadSco
 		onlyZone := sortedMapKeys(zoneSet)[0]
 
 		var affected []string
-		for _, t := range templates {
-			if !hasZoneTopologySpread(t.spec) {
-				continue
-			}
+		for _, t := range zoneSpreadTemplates {
 			if workloadTargetsNodePool(t.spec, pool) {
 				affected = append(affected, t.kind+"/"+t.namespace+"/"+t.name)
 			}

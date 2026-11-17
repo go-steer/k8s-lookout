@@ -140,6 +140,20 @@ func rollup(entries []*entry) []emit.Finding {
 			groups[k] = append(groups[k], en)
 		}
 	}
+	groupObjects := make(map[groupKey][]string, len(groups))
+	for k, members := range groups {
+		minimum := rollupNormalMin
+		if k.warning {
+			minimum = rollupWarningMin
+		}
+		if len(members) < minimum {
+			continue
+		}
+		if objs := objectsOf(members); len(objs) >= minimum {
+			groupObjects[k] = objs
+		}
+	}
+
 	type row struct {
 		last time.Time
 		f    emit.Finding
@@ -148,12 +162,8 @@ func rollup(entries []*entry) []emit.Finding {
 	done := map[groupKey]bool{}
 	for _, en := range entries {
 		k, ok := keyOf(en)
-		members := groups[k]
-		minimum := rollupNormalMin
-		if en.warning {
-			minimum = rollupWarningMin
-		}
-		if !ok || len(objectsOf(members)) < minimum {
+		objs := groupObjects[k]
+		if !ok || len(objs) == 0 {
 			rows = append(rows, row{en.last, en.finding()})
 			continue
 		}
@@ -161,7 +171,7 @@ func rollup(entries []*entry) []emit.Finding {
 			continue
 		}
 		done[k] = true
-		f, last := merged(k, members)
+		f, last := merged(k, groups[k], objs)
 		rows = append(rows, row{last, f})
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].last.Before(rows[j].last) })
@@ -175,7 +185,7 @@ func rollup(entries []*entry) []emit.Finding {
 // merged is one group's entry: the newest member's message and source,
 // counts summed, the widest first/last, the variants combined, and the
 // newest members named.
-func merged(k groupKey, members []*entry) (emit.Finding, time.Time) {
+func merged(k groupKey, members []*entry, objects []string) (emit.Finding, time.Time) {
 	sum := &entry{
 		namespace: k.namespace, kind: k.kind, reason: k.reason, warning: k.warning,
 		variants: map[string]struct{}{}, first: members[0].first, last: members[0].last,
@@ -198,7 +208,6 @@ func merged(k groupKey, members []*entry) (emit.Finding, time.Time) {
 	}
 	f := sum.finding()
 
-	objects := objectsOf(members)
 	keep := examplesNormal
 	if k.warning {
 		keep = examplesWarning

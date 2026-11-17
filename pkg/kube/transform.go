@@ -293,8 +293,13 @@ func trimNode(obj any) (any, error) {
 // without mutating m in place. If none of strippedAnnotations are present, m is
 // returned directly without allocating.
 func stripAppliedAnnotations(m map[string]string) map[string]string {
+	out, _ := stripAppliedAnnotationsChecked(m)
+	return out
+}
+
+func stripAppliedAnnotationsChecked(m map[string]string) (map[string]string, bool) {
 	if len(m) == 0 {
-		return m
+		return m, false
 	}
 	drop := 0
 	for k := range m {
@@ -303,10 +308,10 @@ func stripAppliedAnnotations(m map[string]string) map[string]string {
 		}
 	}
 	if drop == 0 {
-		return m
+		return m, false
 	}
 	if drop == len(m) {
-		return nil
+		return nil, true
 	}
 	out := make(map[string]string, len(m)-drop)
 	for k, v := range m {
@@ -314,7 +319,7 @@ func stripAppliedAnnotations(m map[string]string) map[string]string {
 			out[k] = v
 		}
 	}
-	return out
+	return out, true
 }
 
 // filterKeys returns m reduced to the keys in keep, or nil if none survive.

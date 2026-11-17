@@ -144,7 +144,7 @@ func (d FromDeps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
 		return d.Client(ctx)
 	}
-	return kube.BuildClient(kube.OptionsFrom(ctx))
+	return kube.DefaultSource()(ctx)
 }
 
 func (d FromDeps) logs(ctx context.Context, c kubernetes.Interface, ns, pod, container string) (io.ReadCloser, error) {

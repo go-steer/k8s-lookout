@@ -16,8 +16,13 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -388,5 +394,234 @@ func TestWrapClientTrimsReadPathMetadataWhilePreservingUsedFields(t *testing.T) 
 	// Node.ManagedFields MUST be preserved for pkg/checks/delta/squeeze.go:taintWriter.
 	if len(node.ManagedFields) != 1 || node.ManagedFields[0].Manager != "node-controller" {
 		t.Errorf("Node.ManagedFields must be preserved for delta/squeeze.go, got %+v", node.ManagedFields)
+	}
+}
+
+func TestDefaultSourceSharesClientAndPodCacheAcrossStages(t *testing.T) {
+	var podHits atomic.Int32
+	var nodeHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			podHits.Add(1)
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items: []corev1.Pod{
+					{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "api-0"}},
+					{ObjectMeta: metav1.ObjectMeta{Namespace: "staging", Name: "web-0"}},
+				},
+			})
+		case "/api/v1/nodes":
+			nodeHits.Add(1)
+			_ = json.NewEncoder(w).Encode(corev1.NodeList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "NodeList"},
+				Items:    []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	base := WithTarget(context.Background(), Target{
+		Name:   "test-cluster",
+		Config: &rest.Config{Host: srv.URL},
+	})
+	ctx := WithListCache(base)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := DefaultSource()(ctx)
+			if err != nil {
+				t.Errorf("DefaultSource: %v", err)
+				return
+			}
+			pods, err := c.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+			if err != nil || len(pods.Items) != 2 {
+				t.Errorf("Pods list: len=%d err=%v", len(pods.Items), err)
+				return
+			}
+			for i := range pods.Items {
+				TrimReadPod(&pods.Items[i])
+			}
+			nodes, err := c.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+			if err != nil || len(nodes.Items) != 1 {
+				t.Errorf("Nodes list: len=%d err=%v", len(nodes.Items), err)
+				return
+			}
+			for i := range nodes.Items {
+				TrimReadNode(&nodes.Items[i])
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := podHits.Load(); got != 1 {
+		t.Errorf("API /api/v1/pods hits = %d, want 1 across 8 DefaultSource() stages", got)
+	}
+	if got := nodeHits.Load(); got != 1 {
+		t.Errorf("API /api/v1/nodes hits = %d, want 1 across 8 DefaultSource() stages", got)
+	}
+}
+
+func TestStreamClusterPodsParallelizesMultiNamespaceAndRecoversFromGone(t *testing.T) {
+	var (
+		allPodHits atomic.Int32
+		nsHits     atomic.Int32
+		goneOnce   atomic.Bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			allPodHits.Add(1)
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				ListMeta: metav1.ListMeta{Continue: "more-pods"},
+				Items: []corev1.Pod{
+					{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "pod-a0"}},
+				},
+			})
+		case "/api/v1/namespaces":
+			_ = json.NewEncoder(w).Encode(corev1.NamespaceList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "NamespaceList"},
+				Items: []corev1.Namespace{
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-a"}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-b"}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-c"}},
+				},
+			})
+		case "/api/v1/namespaces/ns-a/pods":
+			nsHits.Add(1)
+			if r.URL.Query().Get("continue") == "" {
+				_ = json.NewEncoder(w).Encode(corev1.PodList{
+					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+					ListMeta: metav1.ListMeta{Continue: "ns-a-p2"},
+					Items: []corev1.Pod{{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace:     "ns-a",
+							Name:          "pod-a1",
+							ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kcm"}},
+						},
+					}},
+				})
+				return
+			}
+			if !goneOnce.Swap(true) {
+				w.WriteHeader(http.StatusGone)
+				_ = json.NewEncoder(w).Encode(apierrors.NewResourceExpired("expired").ErrStatus)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "pod-a2"}}},
+			})
+		case "/api/v1/namespaces/ns-b/pods":
+			nsHits.Add(1)
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-b", Name: "pod-b1"}}},
+			})
+		case "/api/v1/namespaces/ns-c/pods":
+			nsHits.Add(1)
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-c", Name: "pod-c1"}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := BuildClient(Options{
+		Target: &Target{Name: "test", Config: &rest.Config{Host: srv.URL}},
+	})
+	if err != nil {
+		t.Fatalf("BuildClient: %v", err)
+	}
+
+	got := map[string]int{}
+	resets := 0
+	err = StreamClusterPods(context.Background(), client, "", TrimReadPod, func() {
+		resets++
+		clear(got)
+	}, func(p *corev1.Pod) {
+		if p.ManagedFields != nil {
+			t.Errorf("expected TrimReadPod applied in worker, got ManagedFields=%+v", p.ManagedFields)
+		}
+		got[p.Namespace+"/"+p.Name]++
+	})
+	if err != nil {
+		t.Fatalf("StreamClusterPods: %v", err)
+	}
+	if resets != 1 {
+		t.Errorf("resets = %d, want 1 after injected 410 Gone", resets)
+	}
+	if allPodHits.Load() != 1 {
+		t.Errorf("/api/v1/pods probe hits = %d, want 1", allPodHits.Load())
+	}
+	want := map[string]int{
+		"ns-a/pod-a1": 1,
+		"ns-a/pod-a2": 1,
+		"ns-b/pod-b1": 1,
+		"ns-c/pod-c1": 1,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestStreamClusterPodsFallsBackSequentiallyWhenNamespacesForbidden(t *testing.T) {
+	var podHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			podHits.Add(1)
+			if r.URL.Query().Get("continue") == "" {
+				_ = json.NewEncoder(w).Encode(corev1.PodList{
+					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+					ListMeta: metav1.ListMeta{Continue: "seq-2"},
+					Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p1"}}},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "p2"}}},
+			})
+		case "/api/v1/namespaces":
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", errors.New("forbidden")).ErrStatus)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := BuildClient(Options{
+		Target: &Target{Name: "test", Config: &rest.Config{Host: srv.URL}},
+	})
+	if err != nil {
+		t.Fatalf("BuildClient: %v", err)
+	}
+
+	var got []string
+	err = StreamClusterPods(context.Background(), client, "", nil, func() { got = nil }, func(p *corev1.Pod) {
+		got = append(got, p.Name)
+	})
+	if err != nil {
+		t.Fatalf("StreamClusterPods sequential fallback: %v", err)
+	}
+	if podHits.Load() != 2 {
+		t.Errorf("/api/v1/pods hits = %d, want 2 (page 1 must not be re-fetched)", podHits.Load())
+	}
+	if !reflect.DeepEqual(got, []string{"p1", "p2"}) {
+		t.Fatalf("got %v, want [p1 p2]", got)
 	}
 }

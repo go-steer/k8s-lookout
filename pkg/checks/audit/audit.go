@@ -90,7 +90,10 @@ func (d Deps) client(ctx context.Context) (kubernetes.Interface, error) {
 	if d.Client != nil {
 		return d.Client(ctx)
 	}
-	return kube.BuildClient(kube.OptionsFrom(ctx))
+	if s, ok := ctx.Value(snapshotKey{}).(*Snapshot); ok && s != nil && s.client != nil {
+		return s.client, nil
+	}
+	return kube.DefaultSource()(ctx)
 }
 
 func (d Deps) dynamic(ctx context.Context) (dynamic.Interface, error) {

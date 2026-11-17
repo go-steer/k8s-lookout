@@ -98,7 +98,7 @@ func (ix *workloadIndex) resourceFindings(w workload) []emit.Finding {
 	if len(cs) == 0 {
 		return nil
 	}
-	nsDef := computeNamespaceResourceDefaults(ix.limitRanges, w.namespace)
+	nsDef := ix.nsLimitDefaults[w.namespace]
 
 	var (
 		noCPUReq, noMemReq []string

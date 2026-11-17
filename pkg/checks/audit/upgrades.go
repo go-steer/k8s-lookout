@@ -811,9 +811,9 @@ func resolveWebhookServiceBacking(ctx context.Context, snap *Snapshot, namespace
 	}
 
 	podCount := 0
-	if pods, _, err := snap.Pods(ctx); err == nil {
+	if pods, _, err := snap.ActivePodLabels(ctx); err == nil {
 		for _, p := range pods {
-			if p.Namespace != namespace || p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
+			if p.Namespace != namespace {
 				continue
 			}
 			if sel.Matches(labels.Set(p.Labels)) {
@@ -846,10 +846,21 @@ func pdbUpgradeFindings(ctx context.Context, snap *Snapshot) []emit.Finding {
 	}
 	deployments, _, _ := snap.Deployments(ctx)
 	statefulsets, _, _ := snap.StatefulSets(ctx)
+	depsByNS := make(map[string][]*appsv1.Deployment)
+	for i := range deployments {
+		d := &deployments[i]
+		depsByNS[d.Namespace] = append(depsByNS[d.Namespace], d)
+	}
+	stsByNS := make(map[string][]*appsv1.StatefulSet)
+	for i := range statefulsets {
+		st := &statefulsets[i]
+		stsByNS[st.Namespace] = append(stsByNS[st.Namespace], st)
+	}
 
 	var out []emit.Finding
-	for _, pdb := range pdbs {
-		if f, blocked := evaluateBlockingPDB(pdb, deployments, statefulsets); blocked {
+	for i := range pdbs {
+		pdb := &pdbs[i]
+		if f, blocked := evaluateBlockingPDB(pdb, depsByNS[pdb.Namespace], stsByNS[pdb.Namespace]); blocked {
 			out = append(out, f)
 		}
 	}
@@ -857,9 +868,9 @@ func pdbUpgradeFindings(ctx context.Context, snap *Snapshot) []emit.Finding {
 }
 
 func evaluateBlockingPDB(
-	pdb policyv1.PodDisruptionBudget,
-	deployments []appsv1.Deployment,
-	statefulsets []appsv1.StatefulSet,
+	pdb *policyv1.PodDisruptionBudget,
+	deployments []*appsv1.Deployment,
+	statefulsets []*appsv1.StatefulSet,
 ) (emit.Finding, bool) {
 	makeFinding := func(msg string, details ...emit.Field) (emit.Finding, bool) {
 		return emit.Finding{
@@ -897,9 +908,8 @@ func evaluateBlockingPDB(
 		}
 	}
 
-	replicas := matchedWorkloadReplicas(pdb, deployments, statefulsets)
-
 	if ma := pdb.Spec.MinAvailable; ma != nil {
+		replicas := matchedWorkloadReplicas(pdb, deployments, statefulsets)
 		switch ma.Type {
 		case intstr.String:
 			s := strings.TrimSpace(ma.StrVal)
@@ -960,9 +970,9 @@ func evaluateBlockingPDB(
 }
 
 func matchedWorkloadReplicas(
-	pdb policyv1.PodDisruptionBudget,
-	deployments []appsv1.Deployment,
-	statefulsets []appsv1.StatefulSet,
+	pdb *policyv1.PodDisruptionBudget,
+	deployments []*appsv1.Deployment,
+	statefulsets []*appsv1.StatefulSet,
 ) []int {
 	if pdb.Spec.Selector == nil {
 		return nil
@@ -973,9 +983,6 @@ func matchedWorkloadReplicas(
 	}
 	var out []int
 	for _, d := range deployments {
-		if d.Namespace != pdb.Namespace {
-			continue
-		}
 		if sel.Matches(labels.Set(d.Spec.Template.Labels)) {
 			r := 1
 			if d.Spec.Replicas != nil {
@@ -985,9 +992,6 @@ func matchedWorkloadReplicas(
 		}
 	}
 	for _, st := range statefulsets {
-		if st.Namespace != pdb.Namespace {
-			continue
-		}
 		if sel.Matches(labels.Set(st.Spec.Template.Labels)) {
 			r := 1
 			if st.Spec.Replicas != nil {

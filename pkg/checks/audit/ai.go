@@ -191,9 +191,9 @@ func runAI(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		templates = filtered
 	}
 
-	var svcs []*corev1.Service
+	var svcsByNS map[string][]*corev1.Service
 	var svcsOK bool
-	if sList, r, err := snap.Services(ctx); err != nil {
+	if sMap, r, err := snap.ServicesByNamespace(ctx); err != nil {
 		return 0, fmt.Errorf("listing services: %w", err)
 	} else if r != nil {
 		if err := inv.Out.Emit(checks.RefusedFinding(*r,
@@ -201,7 +201,7 @@ func runAI(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 			return 0, err
 		}
 	} else {
-		svcs = sList
+		svcsByNS = sMap
 		svcsOK = true
 	}
 
@@ -245,7 +245,7 @@ func runAI(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 
 		var raw []emit.Finding
 		if svcsOK && netpolsOK {
-			if f, ok := aiServingPortFinding(t, svcs, ingressPoliciesByNS[t.namespace]); ok {
+			if f, ok := aiServingPortFinding(t, svcsByNS[t.namespace], ingressPoliciesByNS[t.namespace]); ok {
 				raw = append(raw, f)
 			}
 		}

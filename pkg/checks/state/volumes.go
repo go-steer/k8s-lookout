@@ -211,14 +211,22 @@ func runVolumes(ctx context.Context, deps Deps, inv emit.Invocation) (int, error
 	return vix.scanned, nil
 }
 
+type volumePod struct {
+	namespace        string
+	name             string
+	nodeName         string
+	pvcClaims        []string
+	ephemeralVolumes []string
+}
+
 // volumeIndex holds the one List pass `state volumes` joins over.
 type volumeIndex struct {
 	scanned int // every listed object across all five kinds
 
-	pods        []*corev1.Pod
+	pods        []volumePod
 	pvcs        map[string]*corev1.PersistentVolumeClaim // ns/name
 	pvs         map[string]*corev1.PersistentVolume      // name
-	nodes       map[string]*corev1.Node                  // name
+	nodeZones   map[string]string                        // node name → zone ("" if unlabelled; key presence means node exists)
 	classes     map[string]*storagev1.StorageClass       // name
 	attachments []*storagev1.VolumeAttachment
 
@@ -273,7 +281,7 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 	vix := &volumeIndex{
 		pvcs:             map[string]*corev1.PersistentVolumeClaim{},
 		pvs:              map[string]*corev1.PersistentVolume{},
-		nodes:            map[string]*corev1.Node{},
+		nodeZones:        map[string]string{},
 		classes:          map[string]*storagev1.StorageClass{},
 		templateClaims:   map[string]bool{},
 		stsClaimPrefixes: map[string][]string{},
@@ -284,16 +292,40 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 		run      func() error
 	}{
 		{volPods, func() error {
-			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-				l, err := client.CoreV1().Pods(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
+			var pods []volumePod
+			podScanned := 0
+			err := kube.StreamClusterPods(ctx, client, ns, nil, func() {
+				pods = nil
+				podScanned = 0
+			}, func(p *corev1.Pod) {
+				podScanned++
+				var pvcClaims, ephVols []string
+				for i := range p.Spec.Volumes {
+					v := &p.Spec.Volumes[i]
+					switch {
+					case v.PersistentVolumeClaim != nil:
+						pvcClaims = append(pvcClaims, v.PersistentVolumeClaim.ClaimName)
+					case v.Ephemeral != nil:
+						ephVols = append(ephVols, v.Name)
+					}
 				}
-				for i := range l.Items {
-					kube.TrimReadPod(&l.Items[i])
+				if len(pvcClaims) == 0 && len(ephVols) == 0 {
+					return
 				}
-				return l.Items, l.Continue, nil
-			}, func(p *corev1.Pod) { vix.pods = append(vix.pods, p); vix.scanned++ })
+				pods = append(pods, volumePod{
+					namespace:        p.Namespace,
+					name:             p.Name,
+					nodeName:         p.Spec.NodeName,
+					pvcClaims:        pvcClaims,
+					ephemeralVolumes: ephVols,
+				})
+			})
+			if err != nil {
+				return fmt.Errorf("listing pods: %w", err)
+			}
+			vix.pods = pods
+			vix.scanned += podScanned
+			return nil
 		}},
 		{volPVCs, func() error {
 			return listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
@@ -323,16 +355,27 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 			}, func(a *storagev1.VolumeAttachment) { vix.attachments = append(vix.attachments, a); vix.scanned++ })
 		}},
 		{volNodes, func() error {
-			return listPages("nodes", func(o metav1.ListOptions) ([]corev1.Node, string, error) {
+			nodeScanned := 0
+			zones := map[string]string{}
+			err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]corev1.Node, string, error) {
 				l, err := client.CoreV1().Nodes().List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
-				for i := range l.Items {
-					kube.TrimReadNode(&l.Items[i])
-				}
 				return l.Items, l.Continue, nil
-			}, func(n *corev1.Node) { vix.nodes[n.Name] = n; vix.scanned++ })
+			}, func() {
+				nodeScanned = 0
+				clear(zones)
+			}, func(n *corev1.Node) {
+				nodeScanned++
+				zones[n.Name] = volumeNodeZone(n)
+			})
+			if err != nil {
+				return fmt.Errorf("listing nodes: %w", err)
+			}
+			vix.nodeZones = zones
+			vix.scanned += nodeScanned
+			return nil
 		}},
 	}
 	// A refused List degrades (#546): the checks that join over it are
@@ -540,16 +583,15 @@ func (vix *volumeIndex) unconsumedClaims(now time.Time) []emit.Finding {
 	}
 
 	consumed := map[string]bool{}
-	for _, p := range vix.pods {
-		for _, v := range p.Spec.Volumes {
-			switch {
-			case v.PersistentVolumeClaim != nil:
-				consumed[key(p.Namespace, v.PersistentVolumeClaim.ClaimName)] = true
-			case v.Ephemeral != nil:
-				// A generic ephemeral volume's claim is named
-				// <pod>-<volume> by the ephemeral-volume controller.
-				consumed[key(p.Namespace, p.Name+"-"+v.Name)] = true
-			}
+	for i := range vix.pods {
+		p := &vix.pods[i]
+		for _, claim := range p.pvcClaims {
+			consumed[key(p.namespace, claim)] = true
+		}
+		for _, volName := range p.ephemeralVolumes {
+			// A generic ephemeral volume's claim is named
+			// <pod>-<volume> by the ephemeral-volume controller.
+			consumed[key(p.namespace, p.name+"-"+volName)] = true
 		}
 	}
 
@@ -681,22 +723,20 @@ type volumeClaimUse struct {
 // ContainerCreating behind Multi-Attach events.
 func (vix *volumeIndex) multiAttach() []emit.Finding {
 	use := map[string]*volumeClaimUse{} // PVC ns/name
-	for _, p := range vix.pods {
-		if p.Spec.NodeName == "" {
+	for i := range vix.pods {
+		p := &vix.pods[i]
+		if p.nodeName == "" {
 			continue // unscheduled pods hold no attachment anywhere
 		}
-		for _, v := range p.Spec.Volumes {
-			if v.PersistentVolumeClaim == nil {
-				continue
-			}
-			k := key(p.Namespace, v.PersistentVolumeClaim.ClaimName)
+		for _, claim := range p.pvcClaims {
+			k := key(p.namespace, claim)
 			u := use[k]
 			if u == nil {
 				u = &volumeClaimUse{pods: map[string]bool{}, nodes: map[string]bool{}}
 				use[k] = u
 			}
-			u.pods[p.Name] = true
-			u.nodes[p.Spec.NodeName] = true
+			u.pods[p.name] = true
+			u.nodes[p.nodeName] = true
 		}
 	}
 	var out []emit.Finding
@@ -747,23 +787,17 @@ func volumeSingleNode(modes []corev1.PersistentVolumeAccessMode) bool {
 // mount forever, and no reschedule onto the same node can succeed.
 func (vix *volumeIndex) zoneConflicts() []emit.Finding {
 	var out []emit.Finding
-	for _, p := range vix.pods {
-		if p.Spec.NodeName == "" {
+	for i := range vix.pods {
+		p := &vix.pods[i]
+		if p.nodeName == "" {
 			continue
 		}
-		node := vix.nodes[p.Spec.NodeName]
-		if node == nil {
+		nodeZone, nodeExists := vix.nodeZones[p.nodeName]
+		if !nodeExists || nodeZone == "" {
 			continue
 		}
-		nodeZone := volumeNodeZone(node)
-		if nodeZone == "" {
-			continue
-		}
-		for _, v := range p.Spec.Volumes {
-			if v.PersistentVolumeClaim == nil {
-				continue
-			}
-			pvc := vix.pvcs[key(p.Namespace, v.PersistentVolumeClaim.ClaimName)]
+		for _, claim := range p.pvcClaims {
+			pvc := vix.pvcs[key(p.namespace, claim)]
 			if pvc == nil || pvc.Spec.VolumeName == "" {
 				continue
 			}
@@ -779,9 +813,9 @@ func (vix *volumeIndex) zoneConflicts() []emit.Finding {
 			out = append(out, emit.Finding{
 				Kind:         "volume.zone_conflict",
 				Severity:     emit.SeverityCritical,
-				Namespace:    p.Namespace,
+				Namespace:    p.namespace,
 				KindOfObject: "Pod",
-				Name:         p.Name,
+				Name:         p.name,
 				Reason:       "ZoneConflict",
 				Message: fmt.Sprintf("volume is locked to zone(s) %s; the pod landed in %s and can never mount it",
 					strings.Join(zoneList, ","), nodeZone),
@@ -789,7 +823,7 @@ func (vix *volumeIndex) zoneConflicts() []emit.Finding {
 					{Key: "pvc", Value: pvc.Name},
 					{Key: "pv", Value: pv.Name},
 					{Key: "pv_zones", Value: strings.Join(zoneList, ",")},
-					{Key: "node", Value: p.Spec.NodeName},
+					{Key: "node", Value: p.nodeName},
 					{Key: "node_zone", Value: nodeZone},
 				},
 			})
@@ -921,12 +955,14 @@ func (vix *volumeIndex) volumeOrphaned(va *storagev1.VolumeAttachment, pvName st
 		missing = append(missing, "pv missing")
 		what = "PersistentVolume"
 	}
-	if va.Spec.NodeName != "" && !nodesUnread && vix.nodes[va.Spec.NodeName] == nil {
-		missing = append(missing, "node missing")
-		if what == "" {
-			what = "node"
-		} else {
-			what = "PersistentVolume and node"
+	if va.Spec.NodeName != "" && !nodesUnread {
+		if _, ok := vix.nodeZones[va.Spec.NodeName]; !ok {
+			missing = append(missing, "node missing")
+			if what == "" {
+				what = "node"
+			} else {
+				what = "PersistentVolume and node"
+			}
 		}
 	}
 	if len(missing) == 0 {

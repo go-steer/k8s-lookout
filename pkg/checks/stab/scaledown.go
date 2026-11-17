@@ -275,9 +275,13 @@ func (s scaledownSet) total() int { return s.pdbGridlock + s.bare + s.notSafe }
 // about what a gridlocked PDB or a bare pod is.
 func (ix *drainIndex) scaledownBlockers(node string) scaledownSet {
 	var s scaledownSet
-	pods := map[string]*corev1.Pod{}
-	for _, p := range ix.podsByNode[node] {
-		pods[p.Namespace+"/"+p.Name] = p
+	safeToEvict := map[string]string{}
+	nodePods := ix.podsByNode[node]
+	for i := range nodePods {
+		p := &nodePods[i]
+		if p.safeToEvict != "" {
+			safeToEvict[p.namespace+"/"+p.name] = p.safeToEvict
+		}
 	}
 	for _, f := range ix.nodeBlockers(node).findings {
 		ref := f.Namespace + "/" + f.Name
@@ -289,17 +293,18 @@ func (ix *drainIndex) scaledownBlockers(node string) scaledownSet {
 			// An explicit annotation either way is the autoscaler's
 			// answer for this pod: "true" releases it, "false" is
 			// counted below as its own class.
-			if p := pods[ref]; p != nil && p.Annotations[annotationSafeToEvict] != "" {
+			if safeToEvict[ref] != "" {
 				continue
 			}
 			s.bare++
 			s.blockedBy = append(s.blockedBy, "Pod/"+ref)
 		}
 	}
-	for _, p := range ix.podsByNode[node] {
-		if p.Annotations[annotationSafeToEvict] == "false" {
+	for i := range nodePods {
+		p := &nodePods[i]
+		if p.safeToEvict == "false" {
 			s.notSafe++
-			s.blockedBy = append(s.blockedBy, "Pod/"+p.Namespace+"/"+p.Name)
+			s.blockedBy = append(s.blockedBy, "Pod/"+p.namespace+"/"+p.name)
 		}
 	}
 	sort.Strings(s.blockedBy)

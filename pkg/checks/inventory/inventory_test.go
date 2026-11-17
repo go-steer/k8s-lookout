@@ -16,6 +16,7 @@ package inventory
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -29,6 +30,9 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -734,5 +738,101 @@ func TestListKindRecoversFromExpiredContinue410(t *testing.T) {
 	}
 	if sum := summaryLine(t, res.Stdout); !strings.Contains(sum, "scanned=2 findings=2") {
 		t.Errorf("unexpected summary after 410 restart: %s", sum)
+	}
+}
+
+func TestTypedAndDynamicParityAcrossAllBuiltins(t *testing.T) {
+	extras := []*unstructured.Unstructured{
+		obj("apps/v1", "ReplicaSet", "storefront", "web-6f4c9d7b8", 12*24*time.Hour, map[string]any{
+			"spec":   map[string]any{"replicas": int64(2)},
+			"status": map[string]any{"readyReplicas": int64(2)},
+		}),
+		obj("v1", "Node", "", "gke-pool-1", 40*24*time.Hour, map[string]any{
+			"metadata": map[string]any{
+				"name":              "gke-pool-1",
+				"creationTimestamp": ago(40 * 24 * time.Hour),
+				"labels":            map[string]any{"node-role.kubernetes.io/worker": ""},
+			},
+			"spec": map[string]any{"unschedulable": true},
+			"status": map[string]any{
+				"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
+				"nodeInfo":   map[string]any{"kubeletVersion": "v1.32.1-gke.100"},
+			},
+		}),
+		obj("v1", "Namespace", "", "storefront", 90*24*time.Hour, map[string]any{
+			"status": map[string]any{"phase": "Active"},
+		}),
+		obj("v1", "PersistentVolume", "", "pvc-vol-1", 40*24*time.Hour, map[string]any{
+			"spec": map[string]any{
+				"capacity":         map[string]any{"storage": "20Gi"},
+				"accessModes":      []any{"ReadWriteOnce", "ReadOnlyMany"},
+				"claimRef":         map[string]any{"namespace": "storefront", "name": "data"},
+				"storageClassName": "standard-rwo",
+			},
+			"status": map[string]any{"phase": "Bound"},
+		}),
+	}
+	allUnstructured := append(storefront(), extras...)
+
+	typedObjs := make([]runtime.Object, 0, len(allUnstructured))
+	for _, u := range allUnstructured {
+		cp := u.DeepCopy()
+		if cp.GetKind() == "Secret" {
+			if data, ok := cp.Object["data"].(map[string]any); ok {
+				for k, v := range data {
+					if s, ok := v.(string); ok {
+						data[k] = base64.StdEncoding.EncodeToString([]byte(s))
+					}
+				}
+			}
+		}
+		gvk := cp.GroupVersionKind()
+		typed, err := scheme.Scheme.New(gvk)
+		if err != nil {
+			t.Fatalf("scheme.New(%v): %v", gvk, err)
+		}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(cp.Object, typed); err != nil {
+			t.Fatalf("FromUnstructured(%v/%s): %v", gvk, cp.GetName(), err)
+		}
+		typedObjs = append(typedObjs, typed)
+	}
+
+	dynClient := newDynamic(t, allListKinds(), allUnstructured...)
+	typedClient := fake.NewClientset(typedObjs...)
+
+	dynCmd := cmdFor(dynClient)
+	typedCmd := newCommand(Deps{
+		Client: func(context.Context) (kubernetes.Interface, error) { return typedClient, nil },
+		Dynamic: func(context.Context) (dynamic.Interface, error) {
+			t.Fatal("builtin listing must not touch dynamic.Interface when typed Client is provided")
+			return nil, nil
+		},
+		Discovery: func(context.Context) (discovery.DiscoveryInterface, error) {
+			t.Fatal("builtin listing must not touch discovery")
+			return nil, nil
+		},
+	}, func() time.Time { return testNow })
+
+	allNames := make([]string, 0, len(builtins))
+	for _, b := range builtins {
+		allNames = append(allNames, b.gvr.Resource)
+	}
+	kindsArg := "--kinds=" + strings.Join(allNames, ",")
+
+	for _, args := range [][]string{
+		{"--namespace=storefront"},
+		{"--namespace=storefront", kindsArg},
+		{"-A", kindsArg},
+		{"--namespace=missing"},
+	} {
+		want := checktest.Run(t, dynCmd, args...)
+		got := checktest.Run(t, typedCmd, args...)
+		if got.Code != want.Code || got.Stdout != want.Stdout || got.Stderr != want.Stderr {
+			t.Fatalf("typed vs dynamic mismatch for args %v:\n--- typed (code=%d) ---\n%s\n--- dynamic (code=%d) ---\n%s",
+				args, got.Code, got.Stdout, want.Code, want.Stdout)
+		}
+		if strings.Contains(got.Stdout, leakMarker) {
+			t.Fatalf("secret leaked in typed output for %v", args)
+		}
 	}
 }

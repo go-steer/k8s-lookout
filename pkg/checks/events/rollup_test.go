@@ -250,3 +250,32 @@ func countPrefix(recs []record, prefix string) int {
 	}
 	return n
 }
+
+func TestRollupLargeGroupIsNearLinear(t *testing.T) {
+	const total = 50_000
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	entries := make([]*entry, total)
+	for i := range total {
+		ts := base.Add(time.Duration(i) * time.Millisecond)
+		entries[i] = &entry{
+			namespace: "bench-00",
+			kind:      "ReplicaSet",
+			name:      fmt.Sprintf("app-%05d-7d9c4bf6d8", i%5000),
+			reason:    "SuccessfulCreate",
+			message:   "Created pod",
+			source:    "replicaset-controller",
+			count:     1,
+			first:     ts,
+			last:      ts,
+		}
+	}
+	start := time.Now()
+	got := rollup(entries)
+	elapsed := time.Since(start)
+	if len(got) != 1 {
+		t.Fatalf("rollup findings = %d, want 1", len(got))
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("rollup(%d entries) took %s; expected near-linear execution (<2s)", total, elapsed)
+	}
+}

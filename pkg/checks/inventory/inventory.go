@@ -63,6 +63,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
@@ -90,9 +91,13 @@ func init() {
 // usage errors never touch cluster credentials; tests inject fakes
 // (§13).
 type Deps struct {
-	// Dynamic lists every kind through one client — eighteen
-	// unrelated schemas, two or three fields read from each, is not
-	// worth eighteen typed clients.
+	// Client lists the 22 built-in Kubernetes kinds over Protobuf so
+	// 100k-pod enumerations do not decode multi-GiB JSON maps through
+	// dynamic.Interface. When nil (existing fake-dynamic unit tests),
+	// Dynamic handles every kind.
+	Client kube.ClientSource
+	// Dynamic lists non-builtin kinds (CRDs and aggregated APIs), and
+	// serves as the fallback when Client is nil.
 	Dynamic func(ctx context.Context) (dynamic.Interface, error)
 	// Discovery resolves `--kinds` tokens the built-in table does not
 	// know (a CRD, an aggregated API). The default listing never
@@ -103,11 +108,12 @@ type Deps struct {
 // DefaultDeps is the production wiring.
 func DefaultDeps() Deps {
 	return Deps{
+		Client: kube.DefaultSource(),
 		Dynamic: func(ctx context.Context) (dynamic.Interface, error) {
 			return kube.BuildDynamicClient(kube.OptionsFrom(ctx))
 		},
 		Discovery: func(ctx context.Context) (discovery.DiscoveryInterface, error) {
-			c, err := kube.BuildClient(kube.OptionsFrom(ctx))
+			c, err := kube.DefaultSource()(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -235,9 +241,25 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		return 0, err
 	}
 
-	dyn, err := l.deps.Dynamic(ctx)
-	if err != nil {
-		return 0, err
+	var typedClient kubernetes.Interface
+	if l.deps.Client != nil {
+		typedClient, err = l.deps.Client(ctx)
+		if err != nil {
+			return 0, err
+		}
+		typedClient = kube.WrapClient(ctx, typedClient)
+	}
+	var dyn dynamic.Interface
+	getDynamic := func() (dynamic.Interface, error) {
+		if dyn != nil {
+			return dyn, nil
+		}
+		if l.deps.Dynamic == nil {
+			return nil, fmt.Errorf("dynamic client not configured")
+		}
+		var err error
+		dyn, err = l.deps.Dynamic(ctx)
+		return dyn, err
 	}
 
 	var (
@@ -248,7 +270,19 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	)
 	now := l.now()
 	for _, k := range kinds {
-		items, err := listKind(ctx, dyn, k, ns, now)
+		var items []object
+		handled := false
+		if typedClient != nil {
+			items, handled, err = listTypedKind(ctx, typedClient, k, ns, now)
+		}
+		if !handled {
+			var dc dynamic.Interface
+			dc, err = getDynamic()
+			if err != nil {
+				return 0, err
+			}
+			items, err = listKind(ctx, dc, k, ns, now)
+		}
 		if err != nil {
 			// A refusal is a RESULT, not an error. The caller may be
 			// allowed to list sixteen kinds and not the seventeenth
@@ -303,7 +337,7 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 	}
 
 	if len(objects) == 0 && ns != "" {
-		absent, refused := l.namespaceAbsent(ctx, dyn, ns)
+		absent, refused := l.namespaceAbsent(ctx, typedClient, getDynamic, ns)
 		if refused != nil {
 			if err := inv.Out.Emit(checks.RefusedFinding(*refused,
 				"this empty listing cannot be told apart from a namespace that does not exist")); err != nil {
@@ -491,8 +525,23 @@ func skipReason(err error) (string, bool) {
 // listing came back with nothing. A caller who may not read
 // namespaces gets no note rather than a wrong one, and the refusal
 // that kept the question open (#584).
-func (l *lister) namespaceAbsent(ctx context.Context, dyn dynamic.Interface, ns string) (bool, *checks.Refusal) {
-	_, err := dyn.Resource(namespacesGVR).Get(ctx, ns, metav1.GetOptions{})
+func (l *lister) namespaceAbsent(
+	ctx context.Context,
+	typedClient kubernetes.Interface,
+	getDynamic func() (dynamic.Interface, error),
+	ns string,
+) (bool, *checks.Refusal) {
+	var err error
+	if typedClient != nil {
+		_, err = typedClient.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	} else {
+		var dyn dynamic.Interface
+		dyn, err = getDynamic()
+		if err != nil {
+			return false, nil
+		}
+		_, err = dyn.Resource(namespacesGVR).Get(ctx, ns, metav1.GetOptions{})
+	}
 	if r, ok := checks.ForbiddenRefusal(err); ok {
 		return false, &r
 	}

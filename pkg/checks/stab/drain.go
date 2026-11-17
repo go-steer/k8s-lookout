@@ -179,21 +179,43 @@ func runDrain(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) 
 	return scanned, nil
 }
 
+type drainPod struct {
+	namespace   string
+	name        string
+	labels      map[string]string
+	unowned     bool
+	ctrlKind    string
+	ctrlName    string
+	safeToEvict string
+	emptyDirs   []string
+}
+
+type drainRSSummary struct {
+	replicas    int32
+	deployOwner string
+}
+
+type compiledDrainPDB struct {
+	pdb *policyv1.PodDisruptionBudget
+	sel labels.Selector
+}
+
 // drainIndex holds the listed objects a drain analysis needs.
 type drainIndex struct {
 	nodes      map[string]bool
-	nodeObjs   map[string]*corev1.Node  // name → node (allocatable, labels; `stab scaledown`)
-	podsByNode map[string][]*corev1.Pod // examined pods only, name-sorted
+	nodeObjs   map[string]*corev1.Node // name → node (allocatable, labels; `stab scaledown`)
+	podsByNode map[string][]drainPod   // examined pods only, name-sorted
 	// requested sums the effective requests of EVERY non-terminal pod
 	// bound to each node — DaemonSet and mirror pods included, unlike
 	// podsByNode — because that is the population the cluster
 	// autoscaler's utilization figure is computed over (`stab
 	// scaledown`).
-	requested  map[string]corev1.ResourceList
-	pdbs       []*policyv1.PodDisruptionBudget
-	replicaSet map[string]*appsv1.ReplicaSet  // ns/name
-	deployment map[string]*appsv1.Deployment  // ns/name
-	statefulSt map[string]*appsv1.StatefulSet // ns/name
+	requested    map[string]corev1.ResourceList
+	pdbs         []*policyv1.PodDisruptionBudget
+	zeroPDBsByNS map[string][]compiledDrainPDB
+	replicaSet   map[string]drainRSSummary // ns/name
+	deployment   map[string]int32          // ns/name → replicas
+	statefulSt   map[string]int32          // ns/name → replicas
 	// nodesRefused is set when RBAC refused the node List; nodes then
 	// holds the nodes the listed pods are bound to, and nodeObjs is
 	// empty.
@@ -210,11 +232,11 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 	ix := &drainIndex{
 		nodes:      map[string]bool{},
 		nodeObjs:   map[string]*corev1.Node{},
-		podsByNode: map[string][]*corev1.Pod{},
+		podsByNode: map[string][]drainPod{},
 		requested:  map[string]corev1.ResourceList{},
-		replicaSet: map[string]*appsv1.ReplicaSet{},
-		deployment: map[string]*appsv1.Deployment{},
-		statefulSt: map[string]*appsv1.StatefulSet{},
+		replicaSet: map[string]drainRSSummary{},
+		deployment: map[string]int32{},
+		statefulSt: map[string]int32{},
 	}
 	all := metav1.NamespaceAll
 	steps := []func() error{
@@ -231,15 +253,9 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 			}, func(n *corev1.Node) { ix.nodes[n.Name] = true; ix.nodeObjs[n.Name] = n })
 		},
 		func() error {
-			return listPages("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-				l, err := client.CoreV1().Pods(all).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				for i := range l.Items {
-					kube.TrimReadPod(&l.Items[i])
-				}
-				return l.Items, l.Continue, nil
+			err := kube.StreamClusterPods(ctx, client, all, nil, func() {
+				clear(ix.requested)
+				clear(ix.podsByNode)
 			}, func(p *corev1.Pod) {
 				if p.Spec.NodeName != "" && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
 					addRequests(ix.requested, p.Spec.NodeName, podRequests(p))
@@ -247,8 +263,24 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 				if drainSkips(p) {
 					return
 				}
-				ix.podsByNode[p.Spec.NodeName] = append(ix.podsByNode[p.Spec.NodeName], p)
+				dp := drainPod{
+					namespace:   p.Namespace,
+					name:        p.Name,
+					labels:      p.Labels,
+					unowned:     len(p.OwnerReferences) == 0,
+					safeToEvict: p.Annotations[annotationSafeToEvict],
+					emptyDirs:   emptyDirVolumes(p),
+				}
+				if ctrl := metav1.GetControllerOf(p); ctrl != nil {
+					dp.ctrlKind = ctrl.Kind
+					dp.ctrlName = ctrl.Name
+				}
+				ix.podsByNode[p.Spec.NodeName] = append(ix.podsByNode[p.Spec.NodeName], dp)
 			})
+			if err != nil {
+				return fmt.Errorf("listing pods: %w", err)
+			}
+			return nil
 		},
 		func() error {
 			return listPages("poddisruptionbudgets", func(o metav1.ListOptions) ([]policyv1.PodDisruptionBudget, string, error) {
@@ -260,31 +292,59 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 			}, func(p *policyv1.PodDisruptionBudget) { ix.pdbs = append(ix.pdbs, p) })
 		},
 		func() error {
-			return listPages("replicasets", func(o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
+			err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
 				l, err := client.AppsV1().ReplicaSets(all).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(r *appsv1.ReplicaSet) { ix.replicaSet[r.Namespace+"/"+r.Name] = r })
+			}, func() {
+				clear(ix.replicaSet)
+			}, func(r *appsv1.ReplicaSet) {
+				s := drainRSSummary{replicas: replicasOf(r.Spec.Replicas)}
+				if owner := metav1.GetControllerOf(r); owner != nil && owner.Kind == "Deployment" {
+					s.deployOwner = owner.Name
+				}
+				ix.replicaSet[r.Namespace+"/"+r.Name] = s
+			})
+			if err != nil {
+				return fmt.Errorf("listing replicasets: %w", err)
+			}
+			return nil
 		},
 		func() error {
-			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
+			err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
 				l, err := client.AppsV1().Deployments(all).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) { ix.deployment[d.Namespace+"/"+d.Name] = d })
+			}, func() {
+				clear(ix.deployment)
+			}, func(d *appsv1.Deployment) {
+				ix.deployment[d.Namespace+"/"+d.Name] = replicasOf(d.Spec.Replicas)
+			})
+			if err != nil {
+				return fmt.Errorf("listing deployments: %w", err)
+			}
+			return nil
 		},
 		func() error {
-			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
+			err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
 				l, err := client.AppsV1().StatefulSets(all).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(s *appsv1.StatefulSet) { ix.statefulSt[s.Namespace+"/"+s.Name] = s })
+			}, func() {
+				clear(ix.statefulSt)
+			}, func(s *appsv1.StatefulSet) {
+				ix.statefulSt[s.Namespace+"/"+s.Name] = replicasOf(s.Spec.Replicas)
+			})
+			if err != nil {
+				return fmt.Errorf("listing statefulsets: %w", err)
+			}
+			return nil
 		},
 	}
 	for i, step := range steps {
@@ -314,10 +374,10 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 	}
 	for _, pods := range ix.podsByNode {
 		sort.Slice(pods, func(i, j int) bool {
-			if pods[i].Namespace != pods[j].Namespace {
-				return pods[i].Namespace < pods[j].Namespace
+			if pods[i].namespace != pods[j].namespace {
+				return pods[i].namespace < pods[j].namespace
 			}
-			return pods[i].Name < pods[j].Name
+			return pods[i].name < pods[j].name
 		})
 	}
 	sort.Slice(ix.pdbs, func(i, j int) bool {
@@ -326,6 +386,17 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 		}
 		return ix.pdbs[i].Name < ix.pdbs[j].Name
 	})
+	ix.zeroPDBsByNS = map[string][]compiledDrainPDB{}
+	for _, pdb := range ix.pdbs {
+		if pdb.Status.DisruptionsAllowed != 0 || pdb.Spec.Selector == nil {
+			continue
+		}
+		sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+		if err != nil {
+			continue
+		}
+		ix.zeroPDBsByNS[pdb.Namespace] = append(ix.zeroPDBsByNS[pdb.Namespace], compiledDrainPDB{pdb: pdb, sel: sel})
+	}
 	return ix, nil
 }
 
@@ -371,54 +442,60 @@ func (ix *drainIndex) nodeBlockers(node string) blockerSet {
 
 	// drain.pdb_gridlock: disruptionsAllowed=0 + ≥1 covered pod on
 	// this node means the eviction API refuses and the drain hangs.
-	for _, pdb := range ix.pdbs {
-		if pdb.Status.DisruptionsAllowed != 0 || pdb.Spec.Selector == nil {
-			continue
+	// pods is sorted by (namespace, name), so walking contiguous namespace
+	// runs checks only zero-disruption PDBs in namespaces present on node.
+	for start := 0; start < len(pods); {
+		ns := pods[start].namespace
+		end := start + 1
+		for end < len(pods) && pods[end].namespace == ns {
+			end++
 		}
-		sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-		if err != nil {
-			continue
-		}
-		var covered []string
-		for _, p := range pods {
-			if p.Namespace == pdb.Namespace && sel.Matches(labels.Set(p.Labels)) {
-				covered = append(covered, p.Name)
+		nsPods := pods[start:end]
+		for _, cp := range ix.zeroPDBsByNS[ns] {
+			var covered []string
+			for i := range nsPods {
+				if cp.sel.Matches(labels.Set(nsPods[i].labels)) {
+					covered = append(covered, nsPods[i].name)
+				}
 			}
+			if len(covered) == 0 {
+				continue
+			}
+			pdb := cp.pdb
+			b.pdbGridlock++
+			b.findings = append(b.findings, emit.Finding{
+				Kind:         "drain.pdb_gridlock",
+				Severity:     emit.SeverityCritical,
+				Namespace:    pdb.Namespace,
+				KindOfObject: "PodDisruptionBudget",
+				Name:         pdb.Name,
+				Reason:       "PDBGridlock",
+				Message: fmt.Sprintf("PDB allows 0 disruptions and covers %d %s on %s: the eviction API will refuse and the drain hangs",
+					len(covered), plural(len(covered), "pod"), node),
+				Details: []emit.Field{
+					{Key: "node", Value: node},
+					{Key: "pods", Value: itoa(len(covered))},
+					{Key: "pod_names", Value: cappedList(covered)},
+					{Key: "disruptions_allowed", Value: "0"},
+					{Key: "current_healthy", Value: itoa32(pdb.Status.CurrentHealthy)},
+					{Key: "desired_healthy", Value: itoa32(pdb.Status.DesiredHealthy)},
+				},
+			})
 		}
-		if len(covered) == 0 {
-			continue
-		}
-		b.pdbGridlock++
-		b.findings = append(b.findings, emit.Finding{
-			Kind:         "drain.pdb_gridlock",
-			Severity:     emit.SeverityCritical,
-			Namespace:    pdb.Namespace,
-			KindOfObject: "PodDisruptionBudget",
-			Name:         pdb.Name,
-			Reason:       "PDBGridlock",
-			Message: fmt.Sprintf("PDB allows 0 disruptions and covers %d %s on %s: the eviction API will refuse and the drain hangs",
-				len(covered), plural(len(covered), "pod"), node),
-			Details: []emit.Field{
-				{Key: "node", Value: node},
-				{Key: "pods", Value: itoa(len(covered))},
-				{Key: "pod_names", Value: cappedList(covered)},
-				{Key: "disruptions_allowed", Value: "0"},
-				{Key: "current_healthy", Value: itoa32(pdb.Status.CurrentHealthy)},
-				{Key: "desired_healthy", Value: itoa32(pdb.Status.DesiredHealthy)},
-			},
-		})
+		start = end
 	}
 
-	for _, p := range pods {
+	for i := range pods {
+		p := &pods[i]
 		// drain.bare_pod: nothing recreates an evicted bare pod.
-		if len(p.OwnerReferences) == 0 {
+		if p.unowned {
 			b.bare++
 			b.findings = append(b.findings, emit.Finding{
 				Kind:         "drain.bare_pod",
 				Severity:     emit.SeverityWarning,
-				Namespace:    p.Namespace,
+				Namespace:    p.namespace,
 				KindOfObject: "Pod",
-				Name:         p.Name,
+				Name:         p.name,
 				Reason:       "NoController",
 				Message:      "pod has no owner: eviction deletes it permanently and nothing recreates it",
 				Details:      []emit.Field{{Key: "node", Value: node}},
@@ -426,14 +503,14 @@ func (ix *drainIndex) nodeBlockers(node string) blockerSet {
 		}
 		// drain.local_storage: eviction is destructive for emptyDir
 		// data (kubectl drain demands --delete-emptydir-data).
-		if vols := emptyDirVolumes(p); len(vols) > 0 {
+		if vols := p.emptyDirs; len(vols) > 0 {
 			b.localStorage++
 			b.findings = append(b.findings, emit.Finding{
 				Kind:         "drain.local_storage",
 				Severity:     emit.SeverityWarning,
-				Namespace:    p.Namespace,
+				Namespace:    p.namespace,
 				KindOfObject: "Pod",
-				Name:         p.Name,
+				Name:         p.name,
 				Reason:       "EmptyDirData",
 				Message: fmt.Sprintf("pod has %d emptyDir %s: the drain needs --delete-emptydir-data and the data is lost",
 					len(vols), plural(len(vols), "volume")),
@@ -449,9 +526,9 @@ func (ix *drainIndex) nodeBlockers(node string) blockerSet {
 			b.findings = append(b.findings, emit.Finding{
 				Kind:         "drain.singleton",
 				Severity:     emit.SeverityWarning,
-				Namespace:    p.Namespace,
+				Namespace:    p.namespace,
 				KindOfObject: "Pod",
-				Name:         p.Name,
+				Name:         p.name,
 				Reason:       "SingleReplica",
 				Message:      fmt.Sprintf("evicting this pod takes down the only replica of %s", ref),
 				Details: []emit.Field{
@@ -520,31 +597,30 @@ func emptyDirVolumes(p *corev1.Pod) []string {
 // the workload when it runs exactly one replica: StatefulSet
 // directly, Deployment via its ReplicaSet, or a bare ReplicaSet. A
 // nil spec.replicas defaults to 1, matching the API server.
-func (ix *drainIndex) singletonController(p *corev1.Pod) (string, bool) {
-	ctrl := metav1.GetControllerOf(p)
-	if ctrl == nil {
+func (ix *drainIndex) singletonController(p *drainPod) (string, bool) {
+	if p.ctrlKind == "" {
 		return "", false
 	}
-	switch ctrl.Kind {
+	switch p.ctrlKind {
 	case "StatefulSet":
-		if sts, ok := ix.statefulSt[p.Namespace+"/"+ctrl.Name]; ok && replicasOf(sts.Spec.Replicas) == 1 {
-			return "StatefulSet/" + p.Namespace + "/" + sts.Name, true
+		if reps, ok := ix.statefulSt[p.namespace+"/"+p.ctrlName]; ok && reps == 1 {
+			return "StatefulSet/" + p.namespace + "/" + p.ctrlName, true
 		}
 	case "ReplicaSet":
-		rs, ok := ix.replicaSet[p.Namespace+"/"+ctrl.Name]
+		rs, ok := ix.replicaSet[p.namespace+"/"+p.ctrlName]
 		if !ok {
 			return "", false
 		}
-		if owner := metav1.GetControllerOf(rs); owner != nil && owner.Kind == "Deployment" {
-			if d, ok := ix.deployment[p.Namespace+"/"+owner.Name]; ok {
-				if replicasOf(d.Spec.Replicas) == 1 {
-					return "Deployment/" + p.Namespace + "/" + d.Name, true
+		if rs.deployOwner != "" {
+			if reps, ok := ix.deployment[p.namespace+"/"+rs.deployOwner]; ok {
+				if reps == 1 {
+					return "Deployment/" + p.namespace + "/" + rs.deployOwner, true
 				}
 				return "", false
 			}
 		}
-		if replicasOf(rs.Spec.Replicas) == 1 {
-			return "ReplicaSet/" + p.Namespace + "/" + rs.Name, true
+		if rs.replicas == 1 {
+			return "ReplicaSet/" + p.namespace + "/" + p.ctrlName, true
 		}
 	}
 	return "", false

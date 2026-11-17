@@ -77,11 +77,26 @@ type Snapshot struct {
 
 	servicesOnce    sync.Once
 	services        []*corev1.Service
+	servicesByNS    map[string][]*corev1.Service
 	servicesRefused *checks.Refusal
 	servicesErr     error
 
+	podScanOnce    sync.Once
+	unownedPods    []corev1.Pod
+	activePodLbls  []ActivePodLabelSet
+	podScanRefused *checks.Refusal
+	podScanErr     error
+
 	skippedMu sync.Mutex
 	skippedNS map[string]bool
+}
+
+// ActivePodLabelSet is the compact (namespace, labels) projection of a
+// non-terminal Pod retained for selector-matching checks (`audit upgrades`)
+// without holding full Pod specs/statuses in memory across 100k-pod clusters.
+type ActivePodLabelSet struct {
+	Namespace string
+	Labels    map[string]string
 }
 
 func (s *Snapshot) recordSkippedNS(ns string) {
@@ -252,16 +267,81 @@ func (s *Snapshot) CronJobs(ctx context.Context) ([]batchv1.CronJob, *checks.Ref
 
 // Pods lists the Pods in scope, once, sorted by namespace/name.
 func (s *Snapshot) Pods(ctx context.Context) ([]corev1.Pod, *checks.Refusal, error) {
-	return loadSlice(&s.pods, "pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-		l, err := s.client.CoreV1().Pods(s.ns).List(ctx, o)
+	s.pods.once.Do(func() {
+		items, err := kube.ListClusterPodsTrim(ctx, s.client, s.ns)
 		if err != nil {
-			return nil, "", err
+			if r, ok := checks.ForbiddenRefusal(err); ok {
+				s.pods.refused = &r
+				return
+			}
+			s.pods.err = fmt.Errorf("listing pods: %w", err)
+			return
 		}
-		for i := range l.Items {
-			kube.TrimReadPod(&l.Items[i])
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Namespace != items[j].Namespace {
+				return items[i].Namespace < items[j].Namespace
+			}
+			return items[i].Name < items[j].Name
+		})
+		s.pods.items = items
+	})
+	return s.pods.items, s.pods.refused, s.pods.err
+}
+
+// UnownedPods streams the Pods in scope once and retains only hand-rolled pods
+// (len(OwnerReferences) == 0), sorted by namespace/name, while simultaneously
+// populating ActivePodLabels for selector-matching detectors. Controller-owned
+// pods are discarded per page so 100k-pod clusters do not retain multi-GiB Pod
+// slices just to skip owned pods.
+func (s *Snapshot) UnownedPods(ctx context.Context) ([]corev1.Pod, *checks.Refusal, error) {
+	s.scanPods(ctx)
+	return s.unownedPods, s.podScanRefused, s.podScanErr
+}
+
+// ActivePodLabels returns the (namespace, labels) projection of every
+// non-terminal Pod in scope, sharing the same single-pass stream as UnownedPods.
+func (s *Snapshot) ActivePodLabels(ctx context.Context) ([]ActivePodLabelSet, *checks.Refusal, error) {
+	s.scanPods(ctx)
+	return s.activePodLbls, s.podScanRefused, s.podScanErr
+}
+
+func (s *Snapshot) scanPods(ctx context.Context) {
+	s.podScanOnce.Do(func() {
+		var unowned []corev1.Pod
+		var active []ActivePodLabelSet
+		err := kube.StreamClusterPods(ctx, s.client, s.ns, nil, func() {
+			unowned = nil
+			active = nil
+		}, func(p *corev1.Pod) {
+			if p.Status.Phase != corev1.PodFailed && p.Status.Phase != corev1.PodSucceeded {
+				active = append(active, ActivePodLabelSet{
+					Namespace: p.Namespace,
+					Labels:    p.Labels,
+				})
+			}
+			if len(p.OwnerReferences) == 0 {
+				cp := *p
+				kube.TrimReadPod(&cp)
+				unowned = append(unowned, cp)
+			}
+		})
+		if err != nil {
+			if r, ok := checks.ForbiddenRefusal(err); ok {
+				s.podScanRefused = &r
+				return
+			}
+			s.podScanErr = fmt.Errorf("listing pods: %w", err)
+			return
 		}
-		return l.Items, l.Continue, nil
-	}, func(p *corev1.Pod) string { return p.Namespace }, func(p *corev1.Pod) string { return p.Name })
+		sort.Slice(unowned, func(i, j int) bool {
+			if unowned[i].Namespace != unowned[j].Namespace {
+				return unowned[i].Namespace < unowned[j].Namespace
+			}
+			return unowned[i].Name < unowned[j].Name
+		})
+		s.unownedPods = unowned
+		s.activePodLbls = active
+	})
 }
 
 // Namespaces returns the Namespaces in scope, once, sorted by name.
@@ -361,8 +441,18 @@ func (s *Snapshot) Services(ctx context.Context) ([]*corev1.Service, *checks.Ref
 			}
 			return a.Name < b.Name
 		})
+		s.servicesByNS = make(map[string][]*corev1.Service)
+		for _, svc := range s.services {
+			s.servicesByNS[svc.Namespace] = append(s.servicesByNS[svc.Namespace], svc)
+		}
 	})
 	return s.services, s.servicesRefused, s.servicesErr
+}
+
+// ServicesByNamespace returns the cached Services grouped by namespace.
+func (s *Snapshot) ServicesByNamespace(ctx context.Context) (map[string][]*corev1.Service, *checks.Refusal, error) {
+	_, refused, err := s.Services(ctx)
+	return s.servicesByNS, refused, err
 }
 
 // PDBs lists the PodDisruptionBudgets in scope, once, sorted by namespace/name.

@@ -58,17 +58,26 @@ type scanner struct {
 	// per-pool counts; nodesRead says the list ran and was not refused.
 	nodes     []corev1.Node
 	nodesRead bool
-	// pods and daemonSets are the listed Pods and DaemonSets, kept for
+	// pendingCandidates, scheduledPods, and daemonSets are retained for
 	// the capacity-squeeze account of unschedulable pods (#748): what
-	// each node's requests add up to, and which DaemonSets are new.
-	// Nil when their list was not issued or was refused.
-	pods       []corev1.Pod
-	daemonSets []appsv1.DaemonSet
+	// each node's requests add up to, and which DaemonSets are new,
+	// without keeping full corev1.Pod structs across large clusters.
+	podsRead          bool
+	pendingCandidates []corev1.Pod
+	scheduledPods     []scheduledPodReq
+	daemonSets        []appsv1.DaemonSet
 }
 
 // view is what the pass listed, for explaining unschedulable pods.
 func (s *scanner) view() clusterView {
-	return clusterView{nodes: s.nodes, nodesRead: s.nodesRead, pods: s.pods, daemonSets: s.daemonSets}
+	return clusterView{
+		nodes:             s.nodes,
+		nodesRead:         s.nodesRead,
+		podsRead:          s.podsRead,
+		pendingCandidates: s.pendingCandidates,
+		scheduledPods:     s.scheduledPods,
+		daemonSets:        s.daemonSets,
+	}
 }
 
 // scan runs one paged List pass per resource kind needed by the
@@ -99,12 +108,45 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 	// A refused List is fatal unless the caller asked for a tolerant
 	// pass (ScanClusterPartial), in which case only the parts that
 	// needed it are dropped, each named with the reason (#546).
-	var podsRefused bool
-	var pods []corev1.Pod
+	var (
+		podsRefused       bool
+		podScanned        int
+		pendingCandidates []corev1.Pod
+		scheduledPods     []scheduledPodReq
+		occupancy         map[string]int
+	)
+	if nodesOn {
+		occupancy = make(map[string]int)
+	}
 	if s.classes[classPods] || nodesOn {
-		var err error
-		pods, err = listPods(ctx, s.client, s.ns)
+		findingsBase := len(s.findings)
+		err := streamPods(ctx, s.client, s.ns, func() {
+			podScanned = 0
+			s.findings = s.findings[:findingsBase]
+			pendingCandidates = pendingCandidates[:0]
+			scheduledPods = scheduledPods[:0]
+			clear(occupancy)
+		}, func(p *corev1.Pod) {
+			podScanned++
+			if s.classes[classPods] {
+				prevLen := len(s.findings)
+				s.checkPod(p)
+				if len(s.findings) > prevLen &&
+					s.findings[len(s.findings)-1].Kind == "pod.pending" &&
+					s.findings[len(s.findings)-1].Severity == emit.SeverityCritical {
+					kube.TrimReadPod(p)
+					pendingCandidates = append(pendingCandidates, *p)
+				}
+				if req, ok := makeScheduledPodReq(p); ok {
+					scheduledPods = append(scheduledPods, req)
+				}
+			}
+			if nodesOn {
+				recordPodOccupancy(occupancy, p)
+			}
+		})
 		if err != nil {
+			s.findings = s.findings[:findingsBase]
 			var parts []string
 			if s.classes[classPods] {
 				parts = append(parts, PartPods)
@@ -121,9 +163,10 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 
 	if s.classes[classPods] {
 		if !podsRefused {
-			scanned += len(pods)
-			s.checkPods(pods)
-			s.pods = pods
+			scanned += podScanned
+			s.podsRead = true
+			s.pendingCandidates = pendingCandidates
+			s.scheduledPods = scheduledPods
 		}
 
 		var (
@@ -190,7 +233,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 			}
 		} else {
 			scanned += len(nodes)
-			s.checkNodes(nodes, pods)
+			s.checkNodesWithOccupancy(nodes, occupancy)
 			s.nodes, s.nodesRead = nodes, true
 		}
 	}
@@ -362,14 +405,11 @@ func paged[T any](ctx context.Context, list func(context.Context, metav1.ListOpt
 	return kube.ListAllPages(ctx, list)
 }
 
-func listPods(ctx context.Context, c kubernetes.Interface, ns string) ([]corev1.Pod, error) {
-	return kube.ListAllPagesTrim(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
-		l, err := c.CoreV1().Pods(ns).List(ctx, opts)
-		if err != nil {
-			return nil, "", fmt.Errorf("listing pods: %w", err)
-		}
-		return l.Items, l.Continue, nil
-	}, kube.TrimReadPod)
+func streamPods(ctx context.Context, c kubernetes.Interface, ns string, reset func(), each func(*corev1.Pod)) error {
+	if err := kube.StreamClusterPods(ctx, c, ns, nil, reset, each); err != nil {
+		return fmt.Errorf("listing pods: %w", err)
+	}
+	return nil
 }
 
 func listNodes(ctx context.Context, c kubernetes.Interface) ([]corev1.Node, error) {

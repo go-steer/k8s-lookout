@@ -73,7 +73,7 @@ func (ix *workloadIndex) rollout(w workload) []emit.Finding {
 		return out
 	}
 	out = append(out, preStopExceedsGracePeriod(w.template.Spec)...)
-	serving := servingServices(ix.services, w.namespace, w.template.Labels)
+	serving := servingServices(ix.servicesByNS[w.namespace], w.namespace, w.template.Labels)
 	if len(serving) == 0 {
 		return out
 	}

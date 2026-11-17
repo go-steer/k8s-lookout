@@ -68,6 +68,33 @@ type target struct {
 // Containers default to all of the pod's init + regular + ephemeral
 // containers; --container restricts to pods that have that container.
 func resolveTargets(ctx context.Context, cs kubernetes.Interface, scope emit.Scope, podName, container string) ([]target, error) {
+	if podName == "" && scope.Workload.IsZero() && (scope.Namespace != "" || scope.AllNamespaces) {
+		var out []target
+		err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+			list, err := cs.CoreV1().Pods(scope.Namespace).List(ctx, opts)
+			if err != nil {
+				return nil, "", err
+			}
+			return list.Items, list.Continue, nil
+		}, func() {
+			out = nil
+		}, func(p *corev1.Pod) {
+			for _, c := range podContainers(p, container) {
+				out = append(out, target{namespace: p.Namespace, pod: p.Name, container: c})
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing pods: %w", err)
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].namespace != out[j].namespace {
+				return out[i].namespace < out[j].namespace
+			}
+			return out[i].pod < out[j].pod
+		})
+		return out, nil
+	}
+
 	pods, err := resolvePods(ctx, cs, scope, podName)
 	if err != nil {
 		return nil, err

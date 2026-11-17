@@ -89,14 +89,7 @@ func (f *metricsPodFetcher) forEachPod(ctx context.Context, reset func(), fn fun
 		}
 		return nil
 	}
-	err := kube.ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
-		podList, err := f.core.CoreV1().Pods(f.namespace).List(ctx, opts)
-		if err != nil {
-			return nil, "", err
-		}
-		return podList.Items, podList.Continue, nil
-	}, reset, fn)
-	if err != nil {
+	if err := kube.StreamClusterPods(ctx, f.core, f.namespace, nil, reset, fn); err != nil {
 		return fmt.Errorf("list pods: %w", err)
 	}
 	return nil

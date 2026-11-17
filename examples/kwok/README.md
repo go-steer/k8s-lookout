@@ -25,15 +25,22 @@ examples/kwok/node-heal             # give them back
 examples/kwok/down                  # remove the whole layer
 ```
 
-For **10k–200k+ pod runs** ([#495](https://github.com/go-steer/k8s-lookout/issues/495)), where `kind` hits etcd's 2 GiB quota, default controller QPS limits, and `/16` pod-CIDR exhaustion around ~8,800 S8-padded pods, `kwokctl-up` boots a standalone tuned `kwokctl --runtime=binary` control plane (no Docker, no root, no DaemonSet overhead) into an isolated kubeconfig (`$STATE_DIR/kwokctl.kubeconfig`, never touching `~/.kube/config`):
+For **10k–200k+ pod runs** ([#495](https://github.com/go-steer/k8s-lookout/issues/495)), where `kind` hits etcd's 2 GiB quota, default controller QPS limits, and `/16` pod-CIDR exhaustion around ~8,800 S8-padded pods, `kwokctl-run` drives the entire benchmark end-to-end against a standalone tuned `kwokctl --runtime=binary` control plane (no Docker, no root, no DaemonSet overhead) using an isolated kubeconfig (`$STATE_DIR/kwokctl.kubeconfig`, never touching `~/.kube/config`):
+
+```sh
+examples/kwok/kwokctl-run                 # one-click: 2,000 nodes, 5,000 workloads, 100,500 S8-padded pods
+examples/kwok/kwokctl-run 400 1000 10     # quick tier (~9,100 pods)
+```
+
+Or step by step against the same isolated control plane:
 
 ```sh
 examples/kwok/kwokctl-up                  # tuned etcd (8 GiB) + QPS-unlimited apiserver/controllers
 examples/kwok/leeway-scale                # rung 0 (empty cluster intercept)
 examples/kwok/scale-up 2000 5000 25       # 2,000 fake nodes, 5,000 workloads, 100,500 S8-padded pods
 examples/kwok/leeway-scale                # quiet 100.5k-pod rung + marginal KiB/pod verdict
-LEEWAY_SCALE_CHURN=16 examples/kwok/leeway-scale  # ~600 pod lifecycles/s rollout churn rung
 examples/kwok/bench                       # all 26 read-path commands at 100.5k pods
+LEEWAY_SCALE_CHURN=16 examples/kwok/leeway-scale  # ~650 pod lifecycles/s rollout churn rung
 examples/kwok/kwokctl-down                # tear down cluster & remove isolated kubeconfig
 ```
 
@@ -371,15 +378,19 @@ useful kind: the read path's cost at 300 nodes is not where to look for
 a scaling problem, and there is now a cheap way to re-check that claim
 whenever the sources change.
 
-At **2,000 nodes / 100,500 S8-padded pods / 5,000 workloads** (`kwokctl-up` + Protobuf client encoding, 64-core workstation), the real scaling boundaries appear:
+At **2,000 nodes / 100,500 S8-padded pods / 5,000 workloads** (`examples/kwok/kwokctl-run 2000 5000 25`, 64-core workstation, shipped defaults `--kube-qps=50 --kube-burst=100`), **26/26** read-path commands pass `BENCH_REQUIRE_DEFAULT_TIMEOUT=1` inside their shipped `--timeout` defaults:
 
-| Command class | Representative rows (`ELAPSED`, `PEAK-MB`, `SCANNED`, `DEFAULT-TO`) | Takeaway |
+| Command class | Representative rows (`ELAPSED`, `PEAK-MB`, `SCANNED`, `DEFAULT-TO`) | Why it holds |
 | --- | --- | --- |
-| Non-pod / scoped reads | `audit workloads -A` (`6.7s`, `444.1M`, `5000`, `ok`), `stab drift -A` (`2.2s`, `447.7M`, `4500`, `ok`), `state edges (fleet)` (`1.5s`, `392.3M`, `9905`, `ok`), `state webhooks` (`0.1s`, `53.6M`, `ok`) | Sub-7s and `<450 MiB` RSS; all survive default `--timeout`. |
-| Streaming per-page pod sweeps | `triage top -A` (`19.0s`, `130.1M`, `100500`, `TIMEOUT`), `triage list -A` (`125.9s`, `283.0M`, `109033`, `TIMEOUT`), `triage events -A` (`435.9s`, `398.9M`, `109021`, `ok`) | Per-page trimming caps RSS under `400 MiB` at 100k pods, but `500`-item pagination (`201` sequential etcd pages throttled at `50 QPS`) pushes latency past `10s` defaults. |
-| Full-slice pod sweeps | `triage delta -A` (`20.4s`, `3211.9M`, `TIMEOUT`), `stab drain -A` (`23.4s`, `3453.8M`, `TIMEOUT`), `stab scaledown` (`20.8s`, `3067.9M`, `TIMEOUT`), `state volumes -A` (`22.2s`, `3430.8M`, `TIMEOUT`) | Retaining `100,500` trimmed `corev1.Pod` structs costs `3.1–3.5 GiB` RSS and `~21s` (`2×` the `10s` default `--timeout`). |
-| `audit` naked-pod loaders | `audit hardening -A` (`22.6s`, `3764.8M`, `TIMEOUT`), `audit rbac -A` (`20.7s`, `3741.4M`, `scanned=133`, `TIMEOUT`), `audit netpol -A` (`20.4s`, `3688.6M`, `TIMEOUT`) | Detectors calling `listPodTemplates(..., includeNakedPods=true)` materialize all `100,500` owned pods in `snap.Pods` before filtering `len(OwnerReferences)==0`. |
-| Multi-pass compositions | `health` (`38.0s`, `4121.1M`, `211501`, `TIMEOUT` vs `30s`), `scan` (`80.2s`, `8296.1M`, `339663`, `ok`) | `scan` survives its `120s` default across `339,663` objects; `health` lists all pods twice (`delta` + `state.Cluster`) and misses its `30s` default by `8s`. |
+| Non-pod / scoped reads | `audit workloads -A` (`1.8s`, `534.7M`, `5000`, `ok`), `stab drift -A` (`1.8s`, `535.3M`, `4500`, `ok`), `state edges (fleet)` (`1.3s`, `457.3M`, `9905`, `ok`), `state webhooks` (`0.0s`, `51.0M`, `ok`) | Same-namespace selector/PDB indexing and cached node-eligibility evaluations keep 5,000-workload posture checks under `2s`. |
+| Streaming per-page sweeps | `triage events -A` (`1.4s`, `211.5M`, `107089`, `ok`), `triage top -A` (`4.7s`, `1611.3M`, `100500`, `ok`), `triage list -A` (`5.7s`, `1269.0M`, `109033`, `ok`) | `5000`-item Protobuf pages, 12-worker parallel per-namespace pod/event streaming, O(1) incremental event rollup, and typed Protobuf listers across all 22 built-in GVRs. |
+| Projected pod-index checks | `triage delta -A` (`5.6s`, `1338.0M`, `111000`, `ok`), `state volumes -A` (`6.0s`, `1104.0M`, `112000`, `ok`), `stab drain -A` (`6.4s`, `1360.1M`, `100500`, `ok`), `stab scaledown` (`6.5s`, `1327.6M`, `2000`, `ok`) | Per-page compact pod projections discard `corev1.Pod` structs immediately (`1.1–1.4 GiB` peak RSS instead of `3.1–3.5 GiB` retaining full structs). |
+| `audit` pod-aware detectors | `audit rbac -A` (`5.1s`, `1797.9M`, `133`, `ok`), `audit netpol -A` (`5.7s`, `1927.4M`, `5000`, `ok`), `audit hardening -A` (`7.8s`, `1734.7M`, `5000`, `ok`), `audit all -A` (`9.2s`, `1853.4M`, `20146`, `ok`) | Streaming naked-pod (`len(OwnerReferences)==0`) and active-pod-label extraction avoids materializing owned pods; `audit all` shares one `Snapshot` across all sub-audits. |
+| Multi-pass compositions | `health` (`9.2s`, `4131.6M`, `211501`, `ok` vs `30s`), `scan` (`13.3s`, `4245.0M`, `339663`, `ok` vs `120s`) | Singleflight pod/node list caching (`WithListCache`) across concurrent sub-checks deduplicates cluster-wide pod LISTs (`health` finishes under `10s`; `scan` sweeps `339,663` objects in `13.3s`). |
+
+On the same `100,500`-pod cluster, `kwokctl-run` also records both watch-path engines:
+- **`lookout watch --dry-run --sources=auto`:** `/readyz` in `22.1s`, `4454.3 MiB` peak `VmHWM` (`4433.0 MiB` steady `VmRSS`, `2834.0 MiB` Go heap in use), `0.71 core` steady-state CPU.
+- **`leeway-scale`:** `37.08 KiB/pod` marginal resident (`30.46 KiB/pod` Go heap, `60.4 MiB` empty-cluster intercept), `/readyz` in `19.0s` (`3699.3 MiB` peak RSS, `0.001 core` quiet); under 16 rollout drivers (`647.0` pod lifecycles/s, `31.66` evaluations/s), `1.26 core` whole-process (`0.57 core` evaluator share) and `p99 <= 100 ms` with `0` counter mismatches.
 
 ## leeway-scale
 

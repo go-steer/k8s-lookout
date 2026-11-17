@@ -59,14 +59,50 @@ const (
 	squeezeTop = 3
 )
 
+// scheduledPodReq is the compact request summary of one scheduled
+// non-terminal pod, retained during pod streaming so explainSqueeze
+// can sum per-node requests and name largest CPU consumers without
+// keeping full corev1.Pod objects in memory across large clusters.
+type scheduledPodReq struct {
+	namespace   string
+	name        string
+	node        string
+	cpu         int64
+	mem         int64
+	dsOwnerUIDs []types.UID
+}
+
+func makeScheduledPodReq(p *corev1.Pod) (scheduledPodReq, bool) {
+	if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		return scheduledPodReq{}, false
+	}
+	cpu, mem := podRequests(p.Spec)
+	var dsUIDs []types.UID
+	for _, o := range p.OwnerReferences {
+		if o.Kind == "DaemonSet" {
+			dsUIDs = append(dsUIDs, o.UID)
+		}
+	}
+	return scheduledPodReq{
+		namespace:   p.Namespace,
+		name:        p.Name,
+		node:        p.Spec.NodeName,
+		cpu:         cpu,
+		mem:         mem,
+		dsOwnerUIDs: dsUIDs,
+	}, true
+}
+
 // clusterView is what the pass listed that explaining unschedulable
-// pods draws on. nodesRead says the Node list ran and was not refused;
-// nil pods or daemonSets mean that list was not issued or was refused.
+// pods draws on. nodesRead and podsRead say those lists ran and were
+// not refused; nil daemonSets means that list was not issued or was refused.
 type clusterView struct {
-	nodes      []corev1.Node
-	nodesRead  bool
-	pods       []corev1.Pod
-	daemonSets []appsv1.DaemonSet
+	nodes             []corev1.Node
+	nodesRead         bool
+	podsRead          bool
+	pendingCandidates []corev1.Pod
+	scheduledPods     []scheduledPodReq
+	daemonSets        []appsv1.DaemonSet
 }
 
 // squeeze is the account of why the unschedulable pods fit nowhere.
@@ -108,22 +144,20 @@ type newDaemonSet struct {
 // read what it needs (Nodes and Pods, cluster-wide) or no pending pod is
 // found among the listed Pods.
 func explainSqueeze(findings []emit.Finding, v clusterView, now time.Time) (squeeze, bool) {
-	if !v.nodesRead || v.pods == nil {
+	if !v.nodesRead || !v.podsRead {
 		return squeeze{}, false
 	}
 	nodes := v.nodes
-	pending := pendingPods(findings, v.pods)
+	pending := pendingPods(findings, v.pendingCandidates)
 	if len(pending) == 0 {
 		return squeeze{}, false
 	}
 
 	sq := squeeze{usablePools: map[string]bool{}, poolsSeen: map[string]bool{}}
 	needCPU, needMem := smallestRequest(pending)
-	onNode := map[string][]corev1.Pod{}
-	for _, p := range v.pods {
-		if p.Spec.NodeName != "" && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
-			onNode[p.Spec.NodeName] = append(onNode[p.Spec.NodeName], p)
-		}
+	onNode := map[string][]scheduledPodReq{}
+	for _, p := range v.scheduledPods {
+		onNode[p.node] = append(onNode[p.node], p)
 	}
 	dsByUID := map[types.UID]appsv1.DaemonSet{}
 	for _, ds := range v.daemonSets {
@@ -412,11 +446,10 @@ func taintWriter(n corev1.Node) (string, time.Time) {
 
 // requested sums the CPU (millicores) and memory (bytes) the pods on a
 // node request, as the scheduler counts them.
-func requested(pods []corev1.Pod) (cpu, mem int64) {
+func requested(pods []scheduledPodReq) (cpu, mem int64) {
 	for _, p := range pods {
-		c, m := podRequests(p.Spec)
-		cpu += c
-		mem += m
+		cpu += p.cpu
+		mem += p.mem
 	}
 	return cpu, mem
 }
@@ -470,7 +503,7 @@ func smallestRequest(pending []corev1.Pod) (cpu, mem int64) {
 // largestRequests names the biggest CPU requesters on the full nodes,
 // by owner: a DaemonSet once, with its per-pod request and age when it
 // is new; anything else by its pod.
-func largestRequests(onNode map[string][]corev1.Pod, full map[string]bool, dsByUID map[types.UID]appsv1.DaemonSet, now time.Time) string {
+func largestRequests(onNode map[string][]scheduledPodReq, full map[string]bool, dsByUID map[types.UID]appsv1.DaemonSet, now time.Time) string {
 	type req struct {
 		name string
 		cpu  int64
@@ -479,21 +512,20 @@ func largestRequests(onNode map[string][]corev1.Pod, full map[string]bool, dsByU
 	byName := map[string]*req{}
 	for node := range full {
 		for _, p := range onNode[node] {
-			cpu, _ := podRequests(p.Spec)
-			if cpu == 0 {
+			if p.cpu == 0 {
 				continue
 			}
-			name, note := p.Namespace+"/"+p.Name, ""
-			for _, o := range p.OwnerReferences {
-				if ds, ok := dsByUID[o.UID]; ok && o.Kind == "DaemonSet" {
+			name, note := p.namespace+"/"+p.name, ""
+			for _, uid := range p.dsOwnerUIDs {
+				if ds, ok := dsByUID[uid]; ok {
 					name, note = ds.Namespace+"/"+ds.Name, "DaemonSet"
 					if age := now.Sub(ds.CreationTimestamp.Time); age <= squeezeLookback {
 						note += ", created " + ageText(age) + " ago"
 					}
 				}
 			}
-			if r := byName[name]; r == nil || cpu > r.cpu {
-				byName[name] = &req{name: name, cpu: cpu, note: note}
+			if r := byName[name]; r == nil || p.cpu > r.cpu {
+				byName[name] = &req{name: name, cpu: p.cpu, note: note}
 			}
 		}
 	}

@@ -175,9 +175,13 @@ func runCheck(deps Deps) emit.CheckFunc {
 
 func buildClient(ctx context.Context, deps Deps) (kubernetes.Interface, error) {
 	if deps.Client != nil {
-		return deps.Client(ctx)
+		c, err := deps.Client(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return kube.WrapClient(ctx, c), nil
 	}
-	return kube.BuildClient(kube.OptionsFrom(ctx))
+	return kube.DefaultSource()(ctx)
 }
 
 // fetchOne streams one container's logs into the engine. Timestamps
