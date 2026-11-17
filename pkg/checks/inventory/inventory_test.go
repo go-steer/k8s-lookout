@@ -22,6 +22,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -648,5 +649,90 @@ func TestAddonsDetectedNoteOnAllNamespaces(t *testing.T) {
 	}
 	if _, has := field(summaryLine(t, cleanRes.Stdout), "addons_detected"); has {
 		t.Errorf("cluster without addons should not emit addons_detected: %s", summaryLine(t, cleanRes.Stdout))
+	}
+}
+
+type pagedDynamic struct {
+	dynamic.Interface
+	listPods func(metav1.ListOptions) (*unstructured.UnstructuredList, error)
+}
+
+func (p pagedDynamic) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	base := p.Interface.Resource(gvr)
+	if gvr.Resource != "pods" {
+		return base
+	}
+	return pagedNSResource{NamespaceableResourceInterface: base, list: p.listPods}
+}
+
+type pagedNSResource struct {
+	dynamic.NamespaceableResourceInterface
+	list func(metav1.ListOptions) (*unstructured.UnstructuredList, error)
+}
+
+func (p pagedNSResource) Namespace(ns string) dynamic.ResourceInterface {
+	return pagedResource{ResourceInterface: p.NamespaceableResourceInterface.Namespace(ns), list: p.list}
+}
+
+type pagedResource struct {
+	dynamic.ResourceInterface
+	list func(metav1.ListOptions) (*unstructured.UnstructuredList, error)
+}
+
+func (p pagedResource) List(_ context.Context, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	return p.list(opts)
+}
+
+func TestListKindRecoversFromExpiredContinue410(t *testing.T) {
+	podA := obj("v1", "Pod", "prod", "pod-a", time.Hour, map[string]any{"status": map[string]any{"phase": "Running"}})
+	podB := obj("v1", "Pod", "prod", "pod-b", time.Hour, map[string]any{"status": map[string]any{"phase": "Running"}})
+
+	calls := 0
+	dyn := pagedDynamic{
+		Interface: newDynamic(t, allListKinds()),
+		listPods: func(opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+			if opts.Limit != pageSize {
+				t.Errorf("list Limit = %d, want %d", opts.Limit, pageSize)
+			}
+			calls++
+			switch calls {
+			case 1:
+				ul := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*podA}}
+				ul.SetContinue("expired-tok")
+				return ul, nil
+			case 2:
+				if opts.Continue != "expired-tok" {
+					t.Fatalf("call 2 Continue = %q, want expired-tok", opts.Continue)
+				}
+				return nil, apierrors.NewResourceExpired("continue token expired")
+			case 3:
+				if opts.Continue != "" {
+					t.Fatalf("call 3 restart Continue = %q, want empty", opts.Continue)
+				}
+				ul := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*podA}}
+				ul.SetContinue("fresh-tok")
+				return ul, nil
+			case 4:
+				if opts.Continue != "fresh-tok" {
+					t.Fatalf("call 4 Continue = %q, want fresh-tok", opts.Continue)
+				}
+				return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*podB}}, nil
+			default:
+				t.Fatalf("unexpected pod list call %d", calls)
+				return nil, nil
+			}
+		},
+	}
+
+	res := checktest.Run(t, cmdFor(dyn), "--namespace=prod", "--kinds=pods")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	lines := findingLines(t, res.Stdout)
+	if len(lines) != 2 {
+		t.Fatalf("got %d findings (want 2 without duplicate page-1 items):\n%s", len(lines), res.Stdout)
+	}
+	if sum := summaryLine(t, res.Stdout); !strings.Contains(sum, "scanned=2 findings=2") {
+		t.Errorf("unexpected summary after 410 restart: %s", sum)
 	}
 }

@@ -73,11 +73,13 @@ on:
     branches: [main]
     paths:
       # Only what can move these numbers. The subsystem, the binary
-      # that isolates it, the shared watch plumbing it sits on, and the
-      # harness itself.
+      # that isolates it, the shared client/watch plumbing it sits on,
+      # and the harness itself.
+      - 'pkg/kube/**'
       - 'pkg/sources/topologydrift/**'
       - 'cmd/leeway/**'
       - 'internal/watch/**'
+      - 'examples/kind/**'
       - 'examples/kwok/**'
       - 'examples/lib.sh'
       - '.github/workflows/scale-kwok.yml'
@@ -116,6 +118,9 @@ jobs:
         # of cluster below.
         run: examples/kwok/soak --selftest
 
+      - name: Read-path bench self-test
+        run: examples/kwok/bench --selftest
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -124,10 +129,11 @@ jobs:
         run: go install sigs.k8s.io/kind@v0.31.0
 
       - name: Cluster up
-        # No --build: this tier runs the `leeway` binary from HEAD
-        # against the cluster over kubeconfig, so nothing needs to be
-        # deployed into it and there is no image to build.
-        run: examples/kind/up
+        # No --build and no demo python pulls: this tier runs `leeway`
+        # and `lookout` from HEAD over kubeconfig against kwok-managed
+        # pods, so nothing is deployed into the real nodes beyond
+        # metrics-server and kwok-controller.
+        run: examples/kind/up --no-demo-images
 
       - name: kwok up
         run: examples/kwok/up
@@ -175,11 +181,22 @@ jobs:
         # quietly pass this by being cheap to cache.
         run: examples/kwok/leeway-scale
 
+      - name: Read-path scale guard (bench)
+        # Reuses the already-provisioned padded kwok fleet to time every
+        # cluster-wide read command, assert multi-page pagination
+        # completeness (scanned >= fleet_pods), assert survival under
+        # each command's shipped --timeout default, and bound peak RSS.
+        env:
+          BENCH_REQUIRE_DEFAULT_TIMEOUT: '1'
+          BENCH_MAX_PEAK_MB: '768'
+        run: examples/kwok/bench
+
       - name: Collect forensics
         if: failure()
         run: |
           mkdir -p _forensics
           cp "${TMPDIR:-/tmp}/lookout-examples/leeway-scale.tsv" _forensics/ 2>/dev/null || true
+          cp "${TMPDIR:-/tmp}/lookout-examples/bench.tsv" _forensics/ 2>/dev/null || true
           kubectl get nodes -o wide >_forensics/nodes.txt 2>&1 || true
           kubectl get pods -A -o wide >_forensics/pods.txt 2>&1 || true
           kubectl -n kube-system logs deploy/kwok-controller --tail=-1 >_forensics/kwok.log 2>&1 || true

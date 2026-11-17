@@ -127,6 +127,48 @@ cap_kind_nodes() {
   done <<<"$nodes"
 }
 
+# host_linux_platform — the linux/<arch> OCI platform matching the host
+# kernel (`linux/amd64` or `linux/arm64`), for single-platform pulls and
+# archive exports into kind nodes.
+host_linux_platform() {
+  case "$(uname -m)" in
+    x86_64 | amd64) echo "linux/amd64" ;;
+    aarch64 | arm64) echo "linux/arm64" ;;
+    *) echo "linux/$(uname -m)" ;;
+  esac
+}
+
+# kind_load_image <image> [cluster-name]
+#
+# Side-load a local Docker image into every node of <cluster-name>
+# (default $CLUSTER_NAME).
+#
+# Under Docker's containerd image store (default on Ubuntu 26.04 /
+# Docker 29+, Docker Desktop, and OrbStack), `docker pull` records the
+# full multi-platform OCI index while downloading only the host
+# platform's blobs. `kind load docker-image` runs unfiltered `docker
+# save` into `ctr images import --all-platforms --digests`, which fails
+# with `ctr: content digest ...: not found` on the missing foreign-arch
+# manifests (kubernetes-sigs/kind#3795, #808, #823). Exporting a
+# single-platform archive via `docker save --platform` and feeding `kind
+# load image-archive` strips the foreign index descriptors while keeping
+# kind's own snapshotter and node-loading path; older Docker CLIs
+# without `save --platform` fall back to `kind load docker-image`.
+kind_load_image() {
+  local img="$1" cluster="${2:-$CLUSTER_NAME}"
+  if docker save --help 2>&1 | grep -q -- '--platform'; then
+    local archive rc=0
+    archive="$(mktemp "${TMPDIR:-/tmp}/kind-img.XXXXXX.tar")"
+    if ! docker save --platform "$(host_linux_platform)" -o "$archive" "$img" \
+      || ! kind load image-archive "$archive" --name "$cluster"; then
+      rc=1
+    fi
+    rm -f "$archive"
+    return "$rc"
+  fi
+  kind load docker-image "$img" --name "$cluster"
+}
+
 # ---- the lookout binary (read-path verification) -------------------------
 
 # Resolution order: $LOOKOUT_BIN, `lookout` on PATH, then a one-time

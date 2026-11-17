@@ -13,101 +13,313 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Time every target-free read-path command against the current cluster
-# and report what each one costs at this scale.
+# Time every cluster-wide read-path command against the current cluster
+# and report wall-clock latency, peak RSS, object counts, and default
+# --timeout survival at this scale.
 #
 #   examples/kwok/bench
+#   examples/kwok/bench --selftest
 #
-# Two numbers per command, and the second is the point:
+# Numbers per command:
 #
-#   elapsed   wall clock under a generous --timeout, so the command
-#             gets to finish and report a real cost
-#   default   whether the command SURVIVES its own shipped --timeout
-#             default (10s). Every read command documents that default
-#             in --help, and a command that cannot answer a 400-node
-#             cluster inside it fails closed for every operator who
-#             does not know to override it — which is exactly the class
-#             of defect a two-node kind cluster can never surface.
+#   elapsed     wall clock under a generous --timeout, so the command
+#               gets to finish and report a real cost
+#   peak-mb     peak child resident set (ru_maxrss via os.wait4), sizing
+#               the transient decode + per-page trimming footprint
+#   scanned     from the summary line; void if exit != 0 or missing,
+#               catching silent under-scans or truncated page loops
+#   default-to  whether the command SURVIVES its own shipped --timeout
+#               default (10s for single checks, 30s/60s for compositions).
+#               A command that cannot answer a scaled cluster inside its
+#               documented default fails closed for every operator who
+#               does not know to override it.
 #
-# Findings counts come from each command's summary line, so a command
-# that returns fast because it silently scanned nothing is visible as
-# scanned=0 rather than passing as fast.
+# Env (optional CI regression guards — off by default for human runs,
+# matching leeway-scale):
+#   BENCH_TIMEOUT                  generous first-pass timeout (default 300s)
+#   BENCH_REQUIRE_DEFAULT_TIMEOUT  1 = fail on void stream, default-timeout
+#                                  failure, or under-scanned fleet pages
+#                                  (default 0)
+#   BENCH_MAX_PEAK_MB              fail if any command's peak RSS exceeds
+#                                  this MiB ceiling (default 0, off)
 
+set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-require_examples_context
 
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-300s}"
+BENCH_REQUIRE_DEFAULT_TIMEOUT="${BENCH_REQUIRE_DEFAULT_TIMEOUT:-0}"
+BENCH_MAX_PEAK_MB="${BENCH_MAX_PEAK_MB:-0}"
+BENCH_TSV="$STATE_DIR/bench.tsv"
+
+# run_measured <outfile> <cmd...>
+#
+# Executes <cmd...>, writes stdout to <outfile>, and prints:
+#   <exit_code> <elapsed_sec> <peak_mb_or_->
+run_measured() {
+  local outfile="$1"
+  shift
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$outfile" "$@" <<'PY'
+import os, subprocess, sys, time
+
+outfile = sys.argv[1]
+argv = sys.argv[2:]
+t0 = time.monotonic()
+proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+out = proc.stdout.read()
+_, status, rusage = os.wait4(proc.pid, 0)
+elapsed = time.monotonic() - t0
+rc = os.waitstatus_to_exitcode(status)
+kib = rusage.ru_maxrss / 1024.0 if sys.platform == "darwin" else float(rusage.ru_maxrss)
+with open(outfile, "wb") as fh:
+    fh.write(out)
+print(f"{rc} {elapsed:.1f} {kib / 1024.0:.1f}")
+PY
+    return 0
+  fi
+
+  local start rc=0 elapsed
+  start="$(date +%s.%N)"
+  "$@" >"$outfile" 2>/dev/null || rc=$?
+  elapsed="$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f", b - a}')"
+  printf '%d %s -\n' "$rc" "$elapsed"
+}
+
+# bench_suite <bin> <fleet_pods> <first_fleet_deploy>
+#
+# Runs the table and writes $BENCH_TSV. Evaluates optional guards when
+# BENCH_REQUIRE_DEFAULT_TIMEOUT=1 or BENCH_MAX_PEAK_MB>0.
+bench_suite() {
+  local bin="$1" fleet_pods="$2" fleet_deploy="${3:-}"
+  mkdir -p "$(dirname "$BENCH_TSV")"
+  printf 'command\telapsed_s\tpeak_mb\tscanned\tfindings\tdefault_to\n' >"$BENCH_TSV"
+
+  printf '%-28s %9s %9s %9s %9s %10s\n' COMMAND ELAPSED PEAK-MB SCANNED FINDINGS DEFAULT-TO
+  printf '%-28s %9s %9s %9s %9s %10s\n' '----------------------------' --------- --------- --------- --------- ----------
+
+  local -a failures=()
+  local tmp_out
+  tmp_out="$(mktemp)"
+
+  # min_scan:
+  #   pods   -> must scan >= $fleet_pods when fleet_pods > 0 (proves multi-page list)
+  #   fleet  -> must scan > 0 when fleet_pods > 0
+  #   any    -> 0 is valid (e.g. optional CRDs absent on kind+kwok)
+  bench_one() {
+    local label="$1" min_scan="$2"
+    shift 2
+    local rc elapsed_s peak_mb summary scanned findings default_to
+
+    read -r rc elapsed_s peak_mb < <(run_measured "$tmp_out" "$bin" "$@" --timeout="$BENCH_TIMEOUT")
+
+    # The summary line is the contract: scanned=<n> findings=<n> elapsed=<d>.
+    # Non-zero exit or a missing summary line means the stream was void.
+    summary=""
+    if ((rc == 0)); then
+      summary="$(grep -E '(^| )scanned=[0-9]+' "$tmp_out" | tail -n1 || true)"
+    fi
+    if [[ -z "$summary" ]]; then
+      scanned="void"
+      findings="void"
+    else
+      scanned="$(grep -oE 'scanned=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
+      findings="$(grep -oE 'findings=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
+      [[ -n "$scanned" ]] || scanned="void"
+      [[ -n "$findings" ]] || findings="void"
+    fi
+
+    # Same invocation with NO --timeout override: does it survive the
+    # default the operator actually gets?
+    if "$bin" "$@" >/dev/null 2>&1; then
+      default_to="ok"
+    else
+      default_to="TIMEOUT"
+    fi
+
+    local peak_disp="$peak_mb"
+    [[ "$peak_mb" != "-" ]] && peak_disp="${peak_mb}M"
+    printf '%-28s %9s %9s %9s %9s %10s\n' \
+      "$label" "${elapsed_s}s" "$peak_disp" "$scanned" "$findings" "$default_to"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$label" "$elapsed_s" "$peak_mb" "$scanned" "$findings" "$default_to" >>"$BENCH_TSV"
+
+    if [[ "$BENCH_REQUIRE_DEFAULT_TIMEOUT" == "1" ]]; then
+      if [[ "$scanned" == "void" ]]; then
+        failures+=("$label: void output or non-zero exit ($rc) under --timeout=$BENCH_TIMEOUT")
+      elif ((fleet_pods > 0)); then
+        if [[ "$min_scan" == "pods" ]] && ((scanned < fleet_pods)); then
+          failures+=("$label: scanned=$scanned < fleet_pods=$fleet_pods (truncated list or dropped page)")
+        elif [[ "$min_scan" == "fleet" ]] && ((scanned <= 0)); then
+          failures+=("$label: scanned=0 on a non-empty kwok fleet ($fleet_pods pods)")
+        fi
+      fi
+      if [[ "$default_to" != "ok" ]]; then
+        failures+=("$label: failed its shipped --timeout default")
+      fi
+    fi
+
+    if [[ "$BENCH_MAX_PEAK_MB" != "0" && "$peak_mb" != "-" ]]; then
+      if awk -v p="$peak_mb" -v m="$BENCH_MAX_PEAK_MB" 'BEGIN { exit !(p > m) }'; then
+        failures+=("$label: peak RSS ${peak_mb} MiB exceeds ceiling ${BENCH_MAX_PEAK_MB} MiB")
+      fi
+    fi
+  }
+
+  # Target-free sweeps across the cluster.
+  bench_one "health"                pods  health
+  bench_one "scan"                  pods  scan
+  bench_one "audit all -A"          fleet audit all -A
+  bench_one "audit workloads -A"    fleet audit workloads -A
+  bench_one "audit hardening -A"    fleet audit hardening -A
+  bench_one "audit netpol -A"       fleet audit netpol -A
+  bench_one "audit rbac -A"         fleet audit rbac -A
+  bench_one "audit namespaces -A"   fleet audit namespaces -A
+  bench_one "audit computeclass -A" any   audit computeclass -A
+  bench_one "audit ai -A"           any   audit ai -A
+  bench_one "audit policy"          any   audit policy
+  bench_one "triage delta -A"       pods  triage delta -A
+  bench_one "triage events -A"      any   triage events -A
+  bench_one "triage list -A"        pods  triage list -A
+  bench_one "triage top -A"         any   triage top -A
+  bench_one "stab drain -A"         fleet stab drain -A
+  bench_one "stab drift -A"         fleet stab drift -A
+  bench_one "stab scaledown"        fleet stab scaledown
+  bench_one "state webhooks"        any   state webhooks
+  bench_one "state volumes -A"      any   state volumes -A
+  bench_one "state wi -A"           any   state wi -A
+  bench_one "state storage -A"      any   state storage -A
+  bench_one "state gateway -A"      any   state gateway -A
+  bench_one "state keda -A"         any   state keda -A
+  bench_one "state kcc -A"          any   state kcc -A
+
+  # `state edges` takes --workload, but builds a full-cluster graph
+  # snapshot (Pods, Services, EndpointSlices, Ingresses, Secrets,
+  # ConfigMaps, RBAC) on every call — benchmarking one fleet workload
+  # exercises that whole-cluster paged+trimmed snapshot directly.
+  if [[ -n "$fleet_deploy" ]]; then
+    bench_one "state edges (fleet)" fleet state edges --workload="Deployment/$fleet_deploy"
+  fi
+
+  rm -f "$tmp_out"
+
+  echo
+  echo "DEFAULT-TO = the command's own shipped --timeout default (see its --help)."
+  echo "A TIMEOUT there is a real operator-facing failure at this cluster size,"
+  echo "not a benchmark artefact."
+
+  if [[ "$BENCH_REQUIRE_DEFAULT_TIMEOUT" == "1" || "$BENCH_MAX_PEAK_MB" != "0" ]]; then
+    echo
+    if ((${#failures[@]} > 0)); then
+      echo "  ✗ REGRESSION (${#failures[@]} read-path guard failure(s)):" >&2
+      local f
+      for f in "${failures[@]}"; do
+        echo "    - $f" >&2
+      done
+      return 1
+    fi
+    echo "  ✓ all read-path commands survived their shipped --timeout defaults and ceilings."
+  fi
+}
+
+selftest() {
+  local workdir stub
+  workdir="$(mktemp -d)"
+  STATE_DIR="$workdir"
+  BENCH_TSV="$STATE_DIR/bench.tsv"
+  stub="$workdir/fake-lookout"
+
+  cat >"$stub" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="${FAKE_MODE:-ok}"
+has_timeout=0
+for a in "$@"; do
+  [[ "$a" == --timeout=* ]] && has_timeout=1
+done
+
+if [[ "$mode" == "void" && "$1" == "scan" ]]; then
+  echo "partial output without summary"
+  exit 1
+fi
+if [[ "$mode" == "default-timeout" && "$1" == "health" && "$has_timeout" -eq 0 ]]; then
+  exit 1
+fi
+if [[ "$mode" == "dropped-page" && "$1" == "triage" && "${2:-}" == "delta" ]]; then
+  echo "scanned=500 findings=0 elapsed=10ms"
+  exit 0
+fi
+echo "scanned=1500 findings=2 elapsed=12ms"
+STUB
+  chmod +x "$stub"
+
+  echo "▸ bench --selftest"
+
+  # 1. Healthy fleet passes all guards.
+  FAKE_MODE=ok BENCH_REQUIRE_DEFAULT_TIMEOUT=1 BENCH_MAX_PEAK_MB=512 \
+    bench_suite "$stub" 1200 "kwok-fleet-00/fleet-0000" >/dev/null
+  echo "  ✓ healthy multi-page fleet passes default-timeout, page-count, and RSS guards"
+
+  # 2. Void stream fails when gated.
+  if (FAKE_MODE=void BENCH_REQUIRE_DEFAULT_TIMEOUT=1 BENCH_MAX_PEAK_MB=0 \
+    bench_suite "$stub" 1200 "" >/dev/null 2>&1); then
+    echo "  ✗ void stream passed BENCH_REQUIRE_DEFAULT_TIMEOUT=1" >&2
+    rm -rf "$workdir"
+    return 1
+  fi
+  echo "  ✓ void stream / missing summary line fails guard"
+
+  # 3. Shipped default --timeout failure fails when gated.
+  if (FAKE_MODE=default-timeout BENCH_REQUIRE_DEFAULT_TIMEOUT=1 BENCH_MAX_PEAK_MB=0 \
+    bench_suite "$stub" 1200 "" >/dev/null 2>&1); then
+    echo "  ✗ default --timeout failure passed BENCH_REQUIRE_DEFAULT_TIMEOUT=1" >&2
+    rm -rf "$workdir"
+    return 1
+  fi
+  echo "  ✓ default --timeout failure fails guard"
+
+  # 4. Dropped pagination page (scanned=500 < fleet_pods=1200) fails when gated.
+  if (FAKE_MODE=dropped-page BENCH_REQUIRE_DEFAULT_TIMEOUT=1 BENCH_MAX_PEAK_MB=0 \
+    bench_suite "$stub" 1200 "" >/dev/null 2>&1); then
+    echo "  ✗ dropped page (scanned=500 < 1200) passed BENCH_REQUIRE_DEFAULT_TIMEOUT=1" >&2
+    rm -rf "$workdir"
+    return 1
+  fi
+  echo "  ✓ dropped pagination page (scanned < fleet_pods) fails guard"
+
+  # 5. RSS ceiling breach fails when gated (0.001 MiB ceiling forces breach).
+  if (FAKE_MODE=ok BENCH_REQUIRE_DEFAULT_TIMEOUT=0 BENCH_MAX_PEAK_MB=0.001 \
+    bench_suite "$stub" 1200 "" >/dev/null 2>&1); then
+    echo "  ✗ RSS ceiling breach passed BENCH_MAX_PEAK_MB" >&2
+    rm -rf "$workdir"
+    return 1
+  fi
+  echo "  ✓ peak RSS ceiling breach fails guard"
+
+  # 6. Interactive mode (guards off) still prints and exits 0 even on a timeout row.
+  FAKE_MODE=default-timeout BENCH_REQUIRE_DEFAULT_TIMEOUT=0 BENCH_MAX_PEAK_MB=0 \
+    bench_suite "$stub" 1200 "" >/dev/null
+  echo "  ✓ interactive mode (guards off) exits 0 and writes bench.tsv"
+
+  rm -rf "$workdir"
+}
+
+if [[ "${1:-}" == "--selftest" ]]; then
+  selftest
+  exit 0
+fi
+
+require_examples_context
 bin="$(lookout_bin)"
 
 nodes="$(kubectl get nodes -o name | grep -c . || true)"
 pods="$(kubectl get pods -A -o name | grep -c . || true)"
-echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) nodes faked by kwok)"
+fleet_pods="$(kubectl get pods -A -l "$FLEET_LABEL" -o name 2>/dev/null | grep -c . || true)"
+fleet_deploy="$(kubectl get deploy -A -l "$FLEET_LABEL" \
+  -o jsonpath='{.items[0].metadata.namespace}/{.items[0].metadata.name}' 2>/dev/null || true)"
+[[ "$fleet_deploy" == "/" ]] && fleet_deploy=""
+
+echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) nodes faked by kwok, $fleet_pods fleet pods)"
 echo "▸ binary:  $bin"
 echo
 
-printf '%-28s %9s %9s %9s %9s\n' COMMAND ELAPSED SCANNED FINDINGS 'DEFAULT-TO'
-printf '%-28s %9s %9s %9s %9s\n' '----------------------------' --------- --------- --------- ---------
-
-bench_one() {
-  local label="$1"
-  shift
-  local out start elapsed scanned findings default
-
-  start="$(date +%s.%N)"
-  out="$("$bin" "$@" --timeout="$BENCH_TIMEOUT" 2>/dev/null || true)"
-  elapsed="$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1fs", b - a}')"
-
-  # The summary line is the contract: scanned=<n> findings=<n> elapsed=<d>.
-  # Its absence means the stream was void — a failure, not a zero.
-  local summary
-  summary="$(grep -E '(^| )scanned=' <<<"$out" | tail -n1 || true)"
-  if [[ -z "$summary" ]]; then
-    scanned="void"
-    findings="void"
-  else
-    scanned="$(grep -oE 'scanned=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
-    findings="$(grep -oE 'findings=[0-9]+' <<<"$summary" | head -n1 | cut -d= -f2 || true)"
-  fi
-
-  # Now the same command with NO --timeout override: does it survive
-  # the default the operator actually gets?
-  if "$bin" "$@" >/dev/null 2>&1; then
-    default="ok"
-  else
-    default="TIMEOUT"
-  fi
-
-  printf '%-28s %9s %9s %9s %9s\n' "$label" "$elapsed" "$scanned" "$findings" "$default"
-}
-
-# Target-free commands only: anything needing --workload measures one
-# object and says nothing about scale. (state edges, triage radius,
-# triage changes and friends are all single-target by contract.)
-bench_one "health"               health
-bench_one "scan"                 scan
-bench_one "audit all -A"         audit all -A
-bench_one "audit workloads -A"   audit workloads -A
-bench_one "audit hardening -A"   audit hardening -A
-bench_one "audit netpol -A"      audit netpol -A
-bench_one "audit rbac -A"        audit rbac -A
-bench_one "audit namespaces -A"  audit namespaces -A
-bench_one "audit computeclass -A" audit computeclass -A
-bench_one "audit ai -A"          audit ai -A
-bench_one "audit policy"         audit policy
-bench_one "triage delta -A"      triage delta -A
-bench_one "triage events -A"     triage events -A
-bench_one "triage list -A"       triage list -A
-bench_one "triage top -A"        triage top -A
-bench_one "stab drain -A"        stab drain -A
-bench_one "stab drift -A"        stab drift -A
-bench_one "stab scaledown"       stab scaledown
-bench_one "state webhooks"       state webhooks
-bench_one "state storage -A"     state storage -A
-bench_one "state gateway -A"     state gateway -A
-bench_one "state keda -A"        state keda -A
-bench_one "state kcc -A"         state kcc -A
-
-echo
-echo "DEFAULT-TO = the command's own shipped --timeout default (see its --help)."
-echo "A TIMEOUT there is a real operator-facing failure at this cluster size,"
-echo "not a benchmark artefact."
+bench_suite "$bin" "$fleet_pods" "$fleet_deploy"
