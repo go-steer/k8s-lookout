@@ -16,10 +16,30 @@
 # Shared helpers for the kwok scale layer. Source from each script with:
 #   . "$(dirname "$0")/lib.sh"
 #
-# Everything here sits ON TOP of examples/lib.sh — the kwok layer is
-# additive to the kind cluster, never a replacement for it.
+# Everything here sits ON TOP of examples/lib.sh. Two modes share these
+# helpers:
+#   1. Additive on kind (`examples/kind/up` + `examples/kwok/up`), where
+#      kwok-controller runs as an in-cluster Deployment alongside real
+#      kubelets.
+#   2. Standalone via kwokctl (`examples/kwok/kwokctl-up`), where a tuned
+#      control plane + host kwok-controller run out of an isolated
+#      kubeconfig ($KWOKCTL_KUBECONFIG) for 100k–200k-pod rungs (#495)
+#      without touching ~/.kube/config.
 
+_EXPLICIT_EXAMPLES_CONTEXT="${LOOKOUT_EXAMPLES_CONTEXT:-}"
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+
+KWOKCTL_KUBECONFIG="${KWOKCTL_KUBECONFIG:-$STATE_DIR/kwokctl.kubeconfig}"
+if [[ -z "${KUBECONFIG:-}" && -f "$KWOKCTL_KUBECONFIG" ]]; then
+  export KUBECONFIG="$KWOKCTL_KUBECONFIG"
+fi
+if [[ "${KUBECONFIG:-}" == "$KWOKCTL_KUBECONFIG" && -z "$_EXPLICIT_EXAMPLES_CONTEXT" ]]; then
+  EXAMPLES_CONTEXT="kwok-${CLUSTER_NAME}"
+fi
+
+is_kwokctl_context() {
+  [[ "$EXAMPLES_CONTEXT" == kwok-* ]]
+}
 
 kwok_root() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
@@ -60,8 +80,11 @@ KINDNET_LIMIT_ANNOTATION="lookout.examples/kindnet-original-memory-limit"
 FLEET_LABEL="app.kubernetes.io/managed-by=lookout-kwok-scale"
 
 # fake_nodes — names of the nodes kwok is currently managing.
+# --chunk-size=0 --no-headers requests a single server-side Table projection
+# (~100 B/node from the apiserver watch cache) rather than paginated full Node
+# JSON (~21 KB/node padded), keeping 2,000+ node queries under 100ms.
 fake_nodes() {
-  kubectl get nodes -l "$FAKE_NODE_LABEL" -o name 2>/dev/null | sed 's|^node/||'
+  kubectl get nodes -l "$FAKE_NODE_LABEL" --chunk-size=0 --no-headers 2>/dev/null | awk '{print $1}'
 }
 
 # fake_node_count — how many, as a bare integer.
@@ -99,8 +122,7 @@ fleet_churn() {
 
   local -a targets
   mapfile -t targets < <(kubectl get deployments -A -l "$FLEET_LABEL" \
-    -o 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' \
-    2>/dev/null || true)
+    --chunk-size=0 --no-headers 2>/dev/null | awk '{print $1 "/" $2}' || true)
   ((${#targets[@]})) || return 0
 
   for ((w = 0; w < workers; w++)); do
@@ -132,13 +154,69 @@ _fleet_churn_worker() {
 # lifecycle count: what happened, rather than what a driver asked for.
 # Timestamps are second-granularity UTC in a fixed layout, so a string
 # compare is a time compare.
+# Uses raw REST streaming + `tr` line-splitting rather than `kubectl get -o jsonpath`:
+# at 100k+ padded pods, `kubectl -o jsonpath` unmarshals ~1.8 GB of JSON
+# into Go maps (~36 GiB RSS), and `kubectl get --raw` emits a single
+# ~2 GB line that trips GNU grep's line buffer unless split on commas.
 fleet_pods_created_since() {
-  kubectl get pods -A -l "$FLEET_LABEL" \
-    -o 'jsonpath={range .items[*]}{.metadata.creationTimestamp}{"\n"}{end}' \
-    2>/dev/null | awk -v since="$1" '$1 >= since { n++ } END { print n + 0 }'
+  kubectl get --raw "/api/v1/pods?labelSelector=${FLEET_LABEL}" 2>/dev/null \
+    | tr ',' '\n' \
+    | awk -F'"' -v since="$1" '$2 == "creationTimestamp" && $4 >= since { n++ } END { print n + 0 }'
+}
+
+# kwokctl_bin — resolve $KWOKCTL_BIN, `kwokctl` on PATH, or download the
+# pinned $KWOK_VERSION binary once into $STATE_DIR/bin/kwokctl.
+kwokctl_bin() {
+  if [[ -n "${KWOKCTL_BIN:-}" ]]; then
+    echo "$KWOKCTL_BIN"
+    return 0
+  fi
+  if command -v kwokctl >/dev/null 2>&1; then
+    command -v kwokctl
+    return 0
+  fi
+  local cached="$STATE_DIR/bin/kwokctl"
+  if [[ ! -x "$cached" ]]; then
+    local os arch
+    case "$(uname -s)" in
+      Linux) os="linux" ;;
+      Darwin) os="darwin" ;;
+      *)
+        echo "ERROR: unsupported OS '$(uname -s)' for automatic kwokctl download" >&2
+        return 1
+        ;;
+    esac
+    case "$(uname -m)" in
+      x86_64 | amd64) arch="amd64" ;;
+      aarch64 | arm64) arch="arm64" ;;
+      *)
+        echo "ERROR: unsupported arch '$(uname -m)' for automatic kwokctl download" >&2
+        return 1
+        ;;
+    esac
+    mkdir -p "$STATE_DIR/bin"
+    echo "▸ downloading kwokctl $KWOK_VERSION (${os}/${arch}) into $cached (first run only)" >&2
+    local tmp
+    tmp="$(mktemp "$STATE_DIR/bin/kwokctl.XXXXXX")"
+    if ! curl -fsSL -o "$tmp" "${KWOK_RELEASE_URL}/kwokctl-${os}-${arch}"; then
+      rm -f "$tmp"
+      echo "ERROR: failed to download kwokctl from ${KWOK_RELEASE_URL}/kwokctl-${os}-${arch}" >&2
+      return 1
+    fi
+    chmod +x "$tmp"
+    mv "$tmp" "$cached"
+  fi
+  echo "$cached"
 }
 
 require_kwok_installed() {
+  if is_kwokctl_context; then
+    if ! kubectl get crd stages.kwok.x-k8s.io >/dev/null 2>&1; then
+      echo "ERROR: kwok Stage CRD is not installed in '$EXAMPLES_CONTEXT' — run examples/kwok/kwokctl-up first" >&2
+      exit 1
+    fi
+    return 0
+  fi
   if ! kubectl -n kube-system get deploy kwok-controller >/dev/null 2>&1; then
     echo "ERROR: kwok-controller is not installed — run examples/kwok/up first" >&2
     exit 1
@@ -148,10 +226,16 @@ require_kwok_installed() {
 # kwok_host_ip — the node address the controller serves its fake kubelet
 # endpoint on. `up` runs it with hostNetwork precisely so this is a REAL
 # node IP: see the long comment in scale-up for why every fake node has
-# to advertise it as its own InternalIP.
+# to advertise it as its own InternalIP. Under standalone `kwokctl-up`,
+# kwok-controller runs on the host and serves 127.0.0.1.
 kwok_host_ip() {
-  kubectl -n kube-system get pods -l app=kwok-controller \
-    -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null
+  local ip
+  ip="$(kubectl -n kube-system get pods -l app=kwok-controller \
+    -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || true)"
+  if [[ -z "$ip" ]] && is_kwokctl_context; then
+    ip="127.0.0.1"
+  fi
+  printf '%s' "$ip"
 }
 
 # ---- object padding (spike S8) ---------------------------------------------

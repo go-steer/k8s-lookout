@@ -311,12 +311,11 @@ fi
 require_examples_context
 bin="$(lookout_bin)"
 
-nodes="$(kubectl get nodes -o name | grep -c . || true)"
-pods="$(kubectl get pods -A -o name | grep -c . || true)"
-fleet_pods="$(kubectl get pods -A -l "$FLEET_LABEL" -o name 2>/dev/null | grep -c . || true)"
-fleet_deploy="$(kubectl get deploy -A -l "$FLEET_LABEL" \
-  -o jsonpath='{.items[0].metadata.namespace}/{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ "$fleet_deploy" == "/" ]] && fleet_deploy=""
+nodes="$(kubectl get nodes --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+pods="$(kubectl get pods -A --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+fleet_pods="$(kubectl get pods -A -l "$FLEET_LABEL" --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+fleet_deploy="$(kubectl get --raw "/apis/apps/v1/deployments?labelSelector=${FLEET_LABEL}&limit=1" 2>/dev/null \
+  | jq -r '.items[0] | select(.) | "\(.metadata.namespace)/\(.metadata.name)"' || true)"
 
 echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) nodes faked by kwok, $fleet_pods fleet pods)"
 echo "▸ binary:  $bin"

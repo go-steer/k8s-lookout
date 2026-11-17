@@ -397,8 +397,8 @@ fi
 require_examples_context
 require_kwok_installed
 
-nodes="$(kubectl get nodes --no-headers | wc -l | tr -d ' ')"
-pods="$(kubectl get pods -A --no-headers | wc -l | tr -d ' ')"
+nodes="$(kubectl get nodes --chunk-size=0 --no-headers | wc -l | tr -d ' ')"
+pods="$(kubectl get pods -A --chunk-size=0 --no-headers | wc -l | tr -d ' ')"
 fake="$(fake_node_count)"
 echo "▸ cluster: ${nodes} nodes, ${pods} pods (${fake} faked by kwok)"
 
@@ -539,7 +539,7 @@ OBJECTS="$STATE_DIR/soak-objects"
 count_objects_once() {
   local n
   n="$(kubectl get pods,replicasets -A -l "$FLEET_LABEL" \
-    --no-headers 2>/dev/null | grep -c . || true)"
+    --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
   ((n > 0)) && echo "$n" >"$OBJECTS"
   return 0
 }

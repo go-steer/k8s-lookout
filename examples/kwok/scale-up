@@ -111,10 +111,10 @@ fi
 # in every subsequent read, so say so rather than let it look like a
 # product defect. Widen `podSubnet` in ../kind/cluster.yaml to go
 # higher cleanly.
-if ((NODES > 250)); then
+if is_kind_context && ((NODES > 250)); then
   echo "  ⚠ $NODES nodes exceeds what kind's default 10.244.0.0/16 pod subnet can" >&2
   echo "    allocate (/24 per node = 256). Expect CIDRNotAvailable events on the" >&2
-  echo "    overflow; see README § Known limits." >&2
+  echo "    overflow; see README § Known limits (or use examples/kwok/kwokctl-up)." >&2
 fi
 
 # ---- CNI headroom --------------------------------------------------------
@@ -201,10 +201,14 @@ fi
 # answers interesting, not to simulate resource exhaustion — the
 # `pending` scenario on the real kind nodes already covers that
 # honestly, with a real kubelet behind it.
+# Precompute the static padding block once rather than forking ~125
+# subshells per node across 2,000+ nodes.
+NODE_IMAGES_BLOCK="$(pad_node_images)"
+
 emit_nodes() {
   local i name
   for ((i = 0; i < NODES; i++)); do
-    name="$(node_name "$i")"
+    printf -v name 'kwok-node-%04d' "$i"
     cat <<EOF
 ---
 apiVersion: v1
@@ -249,25 +253,72 @@ status:
     kubeletVersion: fake
     operatingSystem: linux
   phase: Running
-$(pad_node_images)
+${NODE_IMAGES_BLOCK}
 EOF
   done
 }
 
-# A bulk apply that lands right behind a scale-down's mass delete can
-# hit `etcdserver: request timed out` while etcd is still working
-# through the deletions. apply is idempotent, so retry once instead of
-# handing the operator a half-built fleet and an error.
+# Shard multi-document streams into chunks of $KWOK_APPLY_CHUNK_DOCS
+# (default 250) and apply up to $KWOK_APPLY_JOBS (default 8) chunks in
+# parallel while keeping client-side `kubectl apply` (so S8's
+# last-applied-configuration weight stays identical). Retries once if a
+# chunk hits a transient etcd timeout.
 apply_stdin() {
-  local what="$1" manifest
-  manifest="$(mktemp)"
-  cat >"$manifest"
-  if ! kubectl apply -f "$manifest" >/dev/null; then
-    echo "  … etcd busy applying $what; retrying once in 30s" >&2
-    sleep 30
-    kubectl apply -f "$manifest" >/dev/null
+  local what="$1" tmpdir rc=0
+  local chunk_docs="${KWOK_APPLY_CHUNK_DOCS:-250}"
+  local jobs="${KWOK_APPLY_JOBS:-8}"
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/kwok-apply.XXXXXX")"
+  awk -v dir="$tmpdir" -v max="$chunk_docs" '
+    /^---$/ {
+      if (docs > 0 && docs % max == 0) {
+        close(out)
+        part++
+      }
+      docs++
+    }
+    {
+      if (out == "" || prev_part != part) {
+        out = sprintf("%s/part-%05d.yaml", dir, part)
+        prev_part = part
+      }
+      print > out
+    }
+  '
+  local -a parts=("$tmpdir"/part-*.yaml)
+  if [[ ! -e "${parts[0]}" ]]; then
+    rm -rf "$tmpdir"
+    return 0
   fi
-  rm -f "$manifest"
+  _apply_chunk() {
+    local f="$1" label="$2"
+    if ! kubectl apply -f "$f" >/dev/null; then
+      echo "  … etcd busy applying $label ($(basename "$f")); retrying once in 15s" >&2
+      sleep 15
+      kubectl apply -f "$f" >/dev/null
+    fi
+  }
+  if ((${#parts[@]} == 1 || jobs <= 1)); then
+    local f
+    for f in "${parts[@]}"; do
+      _apply_chunk "$f" "$what" || rc=1
+    done
+  else
+    local active=0 f
+    for f in "${parts[@]}"; do
+      _apply_chunk "$f" "$what" &
+      active=$((active + 1))
+      if ((active >= jobs)); then
+        wait -n || rc=1
+        active=$((active - 1))
+      fi
+    done
+    while ((active > 0)); do
+      wait -n || rc=1
+      active=$((active - 1))
+    done
+  fi
+  rm -rf "$tmpdir"
+  return "$rc"
 }
 
 emit_nodes | apply_stdin nodes
@@ -367,12 +418,20 @@ spec:
 EOF
 }
 
+# Precompute invariant blocks once so emitting thousands of workloads
+# executes zero subshell forks in the loop.
+POD_ANNOTATIONS_BLOCK="$(pad_pod_annotations)"
+POD_ENV_BLOCK="$(pad_pod_env)"
+TOLERATIONS_BLOCK="$(tolerations_block)"
+CRON_TOLERATIONS_BLOCK="$(tolerations_block | sed 's/^      /          /')"
+PROBES_BLOCK="$(probes_block)"
+
 # emit_workload <index> — one archetype's worth of YAML.
 emit_workload() {
   local i="$1"
   local arch=$((i % 10))
   local ns_idx=$(((i / 10) % NAMESPACES))
-  local ns name replicas="$REPLICAS"
+  local ns name pin_node replicas="$REPLICAS"
 
   # PSA baseline rejects privileged, host namespaces and hostPath at
   # admission. Move those three archetypes one namespace along, which
@@ -380,8 +439,8 @@ emit_workload() {
   if ((arch >= 6 && arch <= 8 && ns_idx % 3 == 0)); then
     ns_idx=$((ns_idx + 1))
   fi
-  ns="$(ns_name "$ns_idx")"
-  name="$(printf 'svc-%04d' "$i")"
+  printf -v ns '%s-%02d' "$FLEET_NS_PREFIX" "$ns_idx"
+  printf -v name 'svc-%04d' "$i"
 
   if ((arch == 9)); then
     cat <<EOF
@@ -407,7 +466,7 @@ spec:
           restartPolicy: OnFailure
           nodeSelector:
             type: kwok
-$(tolerations_block | sed 's/^      /          /')
+${CRON_TOLERATIONS_BLOCK}
           containers:
           - name: job
             image: fake-image:v1
@@ -446,7 +505,7 @@ spec:
       labels:
         app: ${name}
         ${FLEET_LABEL%%=*}: ${FLEET_LABEL##*=}
-$(pad_pod_annotations)
+${POD_ANNOTATIONS_BLOCK}
     spec:
       nodeSelector:
         type: kwok
@@ -454,9 +513,12 @@ EOF
 
   # pinned: narrow placement to exactly one node, so the placement
   # claim has a real eligible_nodes=1 to report.
-  ((arch == 5)) && printf '        kubernetes.io/hostname: %s\n' "$(node_name $((i % NODES)))"
+  if ((arch == 5)); then
+    printf -v pin_node 'kwok-node-%04d' "$((i % NODES))"
+    printf '        kubernetes.io/hostname: %s\n' "$pin_node"
+  fi
 
-  tolerations_block
+  printf '%s\n' "$TOLERATIONS_BLOCK"
 
   case "$arch" in
   7) printf '      hostNetwork: true\n      hostPID: true\n' ;;
@@ -508,12 +570,12 @@ EOF
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: 500m, memory: 512Mi}
-$(pad_pod_env)
+${POD_ENV_BLOCK}
 EOF
 
   ((arch == 6)) && printf '        securityContext:\n          privileged: true\n'
   ((arch == 8)) && printf '        volumeMounts:\n        - name: hostlib\n          mountPath: /host/lib\n'
-  ((arch != 3)) && probes_block
+  ((arch != 3)) && printf '%s\n' "$PROBES_BLOCK"
   ((arch != 1 && arch != 2)) && emit_pdb "$ns" "$name"
 
   return 0
@@ -526,13 +588,16 @@ done | apply_stdin workloads
 echo "  ✓ workloads applied"
 
 echo "▸ waiting for pods to reach Running (kwok fast-forwards them)"
-deadline=$((SECONDS + 600))
+default_timeout=600
+((pods >= 50000)) && default_timeout=1200
+scale_timeout="${KWOK_SCALE_TIMEOUT:-$default_timeout}"
+deadline=$((SECONDS + scale_timeout))
 while :; do
   running="$(kubectl get pods -A -l "$FLEET_LABEL" --field-selector=status.phase=Running \
-    -o name 2>/dev/null | grep -c . || true)"
+    --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
   ((running >= pods)) && break
   if ((SECONDS >= deadline)); then
-    printf '\r  ⚠ only %s/%s pods Running after 600s — continuing anyway\n' "$running" "$pods" >&2
+    printf '\r  ⚠ only %s/%s pods Running after %ss — continuing anyway\n' "$running" "$pods" "$scale_timeout" >&2
     break
   fi
   printf '\r  … %s/%s Running ' "$running" "$pods"

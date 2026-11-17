@@ -1497,30 +1497,26 @@ Three things in that table are worth more than the numbers:
 
 Extrapolating the measured slope, and saying plainly that this is arithmetic:
 
-| Tier | Pods | Resident, extrapolated |
+| Tier | Pods | Resident, extrapolated (JSON, 3 replicas/Deployment) |
 |---|---|---|
 | 200,000 | 200,000 | **~12.1 GiB** |
 | 1,000,000 | 1,000,000 | **~60.4 GiB** |
 
-> **What was not measured, and will not be pretended otherwise.** Two of the three
-> figures §12.1 asks for are still open.
->
-> - **The 200k-pod tier is extrapolation, not measurement.** §12.1 calls it
->   "directly measurable" on a large machine with tuned etcd; this run reached 8,814
->   pods on kind, an order of magnitude short, and the binding constraint was the
->   apiserver rather than the process under test. The 1M tier was always going to be
->   arithmetic and is labelled as such above; the 200k one is *supposed* to be
->   measurable and has not been.
-> - **500 pods/sec was not approached.** The churn rung sustained **4.6 pod
->   lifecycles/s**, two orders of magnitude below the design target, because
->   `kubectl rollout restart` against a kind apiserver is what was available. The
->   process cost 0.071 core at that rate. Extrapolating a hundredfold on one point
->   would be indefensible, so §6.6.1's totals stay modelled.
->
-> What the run *does* establish: the memory model is linear over three decades of
-> pod count with no cliff, its constant agrees with S8's independently, evaluation
-> p99 stays at 5 ms under churn against an NFR that has room for three orders of
-> magnitude more, and nothing in the subsystem's own SLIs moved while it happened.
+**Measured 100k-pod & 596 pods/s ladder (2026-11-17, Protobuf + `kwokctl`, #495 / #823).** With typed Kubernetes clients switched to Protobuf (`pkg/kube`, #828) and `examples/kwok/kwokctl-up` running a standalone `kwokctl --runtime=binary` control plane (`8 GiB` etcd quota, QPS limits off, `30` controller workers, `2,000` fake nodes, `5,000` workloads × `25` replicas across 10 archetypes = `100,500` S8-padded pods at `16,395 B` mean Pod and `21,060 B` mean Node) on a 64-core / 117 GiB workstation:
+
+| Nodes | Pods | Subject-axes | Ready | Peak RSS | Go heap | CPU | p99 | Churn | Evals/s |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0 | 0 | 0.0 s | 54.4 MiB | 6.8 MiB | 0.000 core | — | — | — |
+| 2,000 | 100,500 | 4,500 | 21.1 s | **3,093.0 MiB** | **2,241.6 MiB** | 0.001 core | 10.0 ms | — | — |
+| 2,000 | 111,422 | 4,500 | 19.0 s | **3,647.7 MiB** | **3,284.0 MiB** | **1.174 core** | 25.0 ms | **596.3 lifecycles/s** | 131.53 /s |
+
+Key outcomes from the 100k+ run (`counter_mismatch_total = 0` across every rung):
+
+1. **Marginal memory drops to `30.96 KiB/pod` resident and `22.77 KiB/pod` Go heap** (over a `54.4 MiB` intercept), cutting the 200k-pod resident projection from `~12.1 GiB` to **`5.96 GiB`** (`29.58 GiB` arithmetic at 1M pods). Two real effects drive the drop: Protobuf wire decoding eliminates JSON reflection bloat (~43% RSS reduction measured at constant 3-replica density in CI), and `25` replicas per Deployment brings the owner-to-pod ratio (`1:25` vs `1:3`) close to production fleets — leaving Go heap only `4.2 KiB/pod` above S8's `18.6 KiB` raw per-pod baseline despite including `4,500` Deployments/ReplicaSets, `2,000` Nodes, and `leeway`'s live indexes.
+2. **Sustained `596.3 pod lifecycles/s` exceeds §6.6.1 / §12.1's `500 pods/s` design target.** Sixteen rollout drivers pushed `131.53 evaluations/s` across `2,000` nodes at **`1.1743` whole-process cores** (`0.5247` core inside the evaluator at `3,989.3 µs` mean evaluation, `0.6496` core across Protobuf decode, reflector, informer indexing, and GC) with evaluation p99 bounded at **`25.0 ms`**.
+3. **Full sentinel (`lookout watch --dry-run --sources=auto`) holds all 10 portable sources plus the live `--storm` topology graph (`pkg/graph`) in `4,161.9 MiB` peak RSS (`4.06 GiB` `VmHWM`, `3,658.8 MiB` Go heap)**, draining `/readyz` in **`43.6 s`** and idling at **`0.0123` core** across `100,500` pods.
+
+> **Remaining extrapolation boundary.** Both `100k+` object density (`111,422` live S8-padded pods) and `>500 pods/s` churn (`596.3 lifecycles/s`) are now directly measured rather than modelled. The `200k` figure (`5.96 GiB` resident) is a `2×` linear step from `100.5k` and directly runnable via `examples/kwok/kwokctl-up` (`scale-up 4000 8000 28`); the `1M` tier (`29.6 GiB`) remains headroom arithmetic.
 
 **Measured steady-state soak (2026-09-22, #478).** `examples/kwok/soak` is the other
 half of the gate, and it runs the opposite experiment: the *whole sentinel*, eleven
