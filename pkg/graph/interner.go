@@ -38,16 +38,23 @@ import (
 //     published snapshot's length, so reads within the snapshot's
 //     bounds are race-free even when the writer grows the slice.
 type interner struct {
-	ids   sync.Map // string → NodeID
-	keys  []string // NodeID-1 → key; writer-owned, append-only within an epoch
-	epoch uint64   // increments whenever Compact() remaps dense NodeIDs
+	ids       sync.Map          // string → NodeID (reader-facing lock-free index)
+	writerIDs map[string]NodeID // writer-only plain map avoiding sync.Map dirty-promotion churn
+	keys      []string          // NodeID-1 → key; writer-owned, append-only within an epoch
+	epoch     uint64            // increments whenever Compact() remaps dense NodeIDs
 }
 
 // intern returns the NodeID for key, assigning the next ID on first
 // sight. Writer-only.
 func (in *interner) intern(key string) NodeID {
-	if v, ok := in.ids.Load(key); ok {
-		return v.(NodeID)
+	if in.writerIDs == nil {
+		in.writerIDs = make(map[string]NodeID)
+		for i, k := range in.keys {
+			in.writerIDs[k] = NodeID(i + 1) // #nosec G115 -- bounded by len(in.keys)
+		}
+	}
+	if id, ok := in.writerIDs[key]; ok {
+		return id
 	}
 	if len(in.keys) >= math.MaxUint32-1 {
 		// uint32 identity space exhausted. Unreachable in practice
@@ -57,6 +64,7 @@ func (in *interner) intern(key string) NodeID {
 	}
 	id := NodeID(len(in.keys) + 1) // #nosec G115 -- bounded above
 	in.keys = append(in.keys, key)
+	in.writerIDs[key] = id
 	in.ids.Store(key, id)
 	return id
 }

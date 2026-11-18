@@ -165,6 +165,11 @@ report() {
     $8 > 0 {
       churn_cpu += $6; churn_rate += $8; churn_n++
       churn_evals += $10; churn_evus += $10 * $11
+      if ($12 + 0 > 0) {
+        churn_wev += $12; churn_wapp += $13; churn_wpod += $14
+        churn_wev_cpu += $6; churn_wev_evalcore += $10 * $11 * 1e-6
+        churn_wev_rate += $8; churn_wev_evals += $10; churn_wev_n++
+      }
     }
     END {
       if (quiet_n < 2) {
@@ -192,12 +197,18 @@ report() {
       print "▸ EXTRAPOLATED, not measured — linear in pod count, which holds only"
       print "  while the per-object caches dominate and nothing starts swapping:"
       print ""
-      for (n = 200000; n <= 1000000; n *= 5)
-        printf "  %9d pods   %8.2f GiB resident\n", n, (fixed + krss * n / 1024) / 1024
+      if (hi_pods < 200000)
+        printf "  %9d pods   %8.2f GiB resident\n", 200000, (fixed + krss * 200000 / 1024) / 1024
+      printf "  %9d pods   %8.2f GiB resident\n", 1000000, (fixed + krss * 1000000 / 1024) / 1024
       print ""
-      print "  Quote these as extrapolation. The 200k rung is measurable on a"
-      print "  large machine with tuned etcd and should be MEASURED before it is"
-      print "  quoted; the 1M rung is headroom arithmetic and cannot be."
+      if (hi_pods >= 200000) {
+        print "  The 200k rung is MEASURED directly in the ladder above; the 1M"
+        print "  rung remains linear headroom arithmetic."
+      } else {
+        print "  Quote these as extrapolation. The 200k rung is measurable on a"
+        print "  large machine with tuned etcd and should be MEASURED before it is"
+        print "  quoted; the 1M rung is headroom arithmetic and cannot be."
+      }
 
       if (maxkib > 0) {
         print ""
@@ -239,14 +250,27 @@ report() {
         "evaluator share", churn_evus / churn_n * 1e-6
       printf "  %-24s %8.4f core   (decode, reflector, GC included)\n", \
         "whole process", churn_cpu / churn_n
-      print ""
-      print "  Read the last two as a split, not as a rate per event. §6.6.1"
-      print "  models the cost per WATCH EVENT, and nothing in the tree counts"
-      print "  watch events, so that decomposition stays modelled — what is"
-      print "  measurable here is per EVALUATION, and the two differ by however"
-      print "  many events the coalescing window folded into one. Quoting a"
-      print "  per-evaluation figure as a per-event one would overstate it by"
-      print "  exactly that factor."
+      if (churn_wev_n > 0 && churn_wev > 0) {
+        ev_mean = churn_wev / churn_wev_n
+        app_pct = churn_wapp / churn_wev * 100
+        printf "  %-24s %8.1f /s     (%.1f%% applied, %.1f%% inert)\n", \
+          "watch events (#491)", ev_mean, app_pct, 100 - app_pct
+        if (churn_wev_rate > 0)
+          printf "  %-24s %8.2f        (pod watch events / pod lifecycle)\n", \
+            "pod events / lifecycle", churn_wpod / churn_wev_rate
+        if (churn_wev_evals > 0)
+          printf "  %-24s %8.1f        (watch events folded per evaluation)\n", \
+            "coalescer folding", churn_wev / churn_wev_evals
+        printf "  %-24s %8.1f µs     (whole process; %.1f µs ingest/GC + %.1f µs eval)\n", \
+          "per watch event", churn_wev_cpu / churn_wev * 1e6, \
+          (churn_wev_cpu - churn_wev_evalcore) / churn_wev * 1e6, \
+          churn_wev_evalcore / churn_wev * 1e6
+      } else {
+        print ""
+        print "  Read the last two as a split, not as a rate per event: these rungs"
+        print "  predate lookout_leeway_watch_events_total (#491), so only the"
+        print "  per-evaluation denominator was recorded."
+      }
       exit failed
     }
   ' "$LADDER"
@@ -267,7 +291,7 @@ require_kwok_installed
 bin="$(leeway_bin)"
 
 nodes="$(kubectl get nodes --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
-pods="$(kubectl get pods -A --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+pods="$(cluster_pod_count)"
 
 echo "▸ cluster: $nodes nodes, $pods pods ($(fake_node_count) faked by kwok)"
 echo "▸ binary:  $bin"
@@ -361,10 +385,16 @@ fi
 eval_hist() {
   awk -v m="$1" '$1 ~ "^"m"([{ ]|$)" { s += $NF } END { printf "%.6f", s }'
 }
+watch_ev_sum() {
+  awk -v f="$1" '/^lookout_leeway_watch_events_total(\{| )/ { if (f == "" || index($0, f) > 0) s += $NF } END { printf "%.0f", s }'
+}
 t_open="$(date +%s.%N)"
 open_metrics="$(curl -sf "http://$addr/metrics" || true)"
 evals_open="$(eval_hist lookout_leeway_evaluation_duration_seconds_count <<<"$open_metrics")"
 evsum_open="$(eval_hist lookout_leeway_evaluation_duration_seconds_sum <<<"$open_metrics")"
+ev_tot_open="$(watch_ev_sum "" <<<"$open_metrics")"
+ev_app_open="$(watch_ev_sum 'outcome="applied"' <<<"$open_metrics")"
+ev_pod_open="$(watch_ev_sum 'resource="pod"' <<<"$open_metrics")"
 
 # CPU over the window, from /proc rather than from `time`: this has to
 # be steady state, and a whole-process total would carry the LIST.
@@ -421,12 +451,26 @@ heap_mb="$(awk '/^go_memstats_heap_inuse_bytes /{ printf "%.1f", $2 / 1048576; f
 # figure beside it is the whole process, decode included.
 evals_close="$(eval_hist lookout_leeway_evaluation_duration_seconds_count <<<"$metrics")"
 evsum_close="$(eval_hist lookout_leeway_evaluation_duration_seconds_sum <<<"$metrics")"
+ev_tot_close="$(watch_ev_sum "" <<<"$metrics")"
+ev_app_close="$(watch_ev_sum 'outcome="applied"' <<<"$metrics")"
+ev_pod_close="$(watch_ev_sum 'resource="pod"' <<<"$metrics")"
 read -r evals_per_s eval_us <<<"$(awk \
   -v c0="$evals_open" -v c1="$evals_close" \
   -v s0="$evsum_open" -v s1="$evsum_close" \
   -v t0="$t_open" -v t1="$t_close" 'BEGIN {
     dc = c1 - c0; dt = t1 - t0
     printf "%.2f %.1f", (dt > 0 ? dc / dt : 0), (dc > 0 ? (s1 - s0) / dc * 1e6 : 0)
+  }')"
+read -r watch_ev_per_s watch_app_per_s watch_pod_per_s <<<"$(awk \
+  -v a0="$ev_tot_open" -v a1="$ev_tot_close" \
+  -v b0="$ev_app_open" -v b1="$ev_app_close" \
+  -v p0="$ev_pod_open" -v p1="$ev_pod_close" \
+  -v t0="$t_open" -v t1="$t_close" 'BEGIN {
+    dt = t1 - t0
+    printf "%.1f %.1f %.1f",
+      (dt > 0 && a1 >= a0 ? (a1 - a0) / dt : 0),
+      (dt > 0 && b1 >= b0 ? (b1 - b0) / dt : 0),
+      (dt > 0 && p1 >= p0 ? (p1 - p0) / dt : 0)
   }')"
 
 # p99 off the histogram buckets, interpolation-free: the smallest
@@ -482,12 +526,23 @@ if ((CHURN > 0)); then
   churn_rate="$(awk -v c="$CHURNED" -v w="$WINDOW" 'BEGIN { printf "%.1f", c / w }')"
   printf '  %-22s %s /s counted (%s rollout drivers)\n' \
     "pod lifecycle churn" "$churn_rate" "$CHURN"
+  awk -v ev="$watch_ev_per_s" -v app="$watch_app_per_s" -v pod="$watch_pod_per_s" -v ch="$churn_rate" 'BEGIN {
+    if (ev <= 0) exit
+    printf "  %-22s %.1f /s (%.1f%% applied, %.1f%% inert)\n",
+      "watch events", ev, app / ev * 100, (ev - app) / ev * 100
+    if (ch > 0)
+      printf "  %-22s %.1f /s (%.2f pod watch events / lifecycle)\n",
+        "pod watch events", pod, pod / ch
+  }'
   # Whole-process CPU divided by the rate the subsystem actually reacts
   # at. Not by the pod rate — see ON DENOMINATORS in the header.
-  awk -v cpu="$cpu_core" -v r="$evals_per_s" -v us="$eval_us" 'BEGIN {
-    if (r <= 0) exit
-    printf "  %-22s %.4f core of %.4f\n",
-      "evaluator share", r * us * 1e-6, cpu
+  awk -v cpu="$cpu_core" -v r="$evals_per_s" -v us="$eval_us" -v ev="$watch_ev_per_s" 'BEGIN {
+    if (r > 0)
+      printf "  %-22s %.4f core of %.4f\n",
+        "evaluator share", r * us * 1e-6, cpu
+    if (ev > 0)
+      printf "  %-22s %.1f µs/watch-event whole process (%.1f events/eval)\n",
+        "per-watch-event cost", cpu / ev * 1e6, (r > 0 ? ev / r : 0)
   }'
 fi
 
@@ -506,9 +561,10 @@ if [[ -n "$void" ]]; then
 fi
 
 mkdir -p "$(dirname "$LADDER")"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$nodes" "$pods" "$subjects" "$ready" "$peak_mb" "$cpu_core" "${p99_ms/-1/0}" \
-  "$churn_rate" "$heap_mb" "$evals_per_s" "$eval_us" >>"$LADDER"
+  "$churn_rate" "$heap_mb" "$evals_per_s" "$eval_us" \
+  "$watch_ev_per_s" "$watch_app_per_s" "$watch_pod_per_s" >>"$LADDER"
 
 # The p99 ceiling is judged here rather than in report(): it is a
 # property of this one rung and needs no ladder. The row is written

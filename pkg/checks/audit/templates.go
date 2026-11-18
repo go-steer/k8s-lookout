@@ -17,6 +17,7 @@ package audit
 import (
 	"context"
 	"sort"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,23 @@ type podTemplate struct {
 // read as selecting nothing.
 func listPodTemplates(ctx context.Context, client kubernetes.Interface, ns string, tolerate bool) ([]podTemplate, []kindRefusal, error) {
 	snap := snapshotFor(ctx, client, ns)
+	var warm sync.WaitGroup
+	for _, fn := range []func(){
+		func() { _, _, _ = snap.Deployments(ctx) },
+		func() { _, _, _ = snap.StatefulSets(ctx) },
+		func() { _, _, _ = snap.DaemonSets(ctx) },
+		func() { _, _, _ = snap.CronJobs(ctx) },
+		func() { _, _, _ = snap.Jobs(ctx) },
+		func() { _, _, _ = snap.UnownedPods(ctx) },
+	} {
+		warm.Add(1)
+		go func() {
+			defer warm.Done()
+			fn()
+		}()
+	}
+	warm.Wait()
+
 	var out []podTemplate
 	add := func(kind, namespace, name string, labels map[string]string, spec corev1.PodSpec) {
 		out = append(out, podTemplate{

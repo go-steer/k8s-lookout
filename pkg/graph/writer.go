@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -147,13 +148,17 @@ type pendingDelta struct {
 
 // batch is the next snapshot under construction: full map clones of
 // the previous snapshot (plain-map COW, §6.2), mutated freely until
-// published. Edge slices are cloned on first modification so the
-// previous snapshot's storage is never touched.
+// published. Edge slices are cloned on first modification per batch so
+// the previous snapshot's storage is never touched while bulk builds
+// and multi-pod flushes avoid O(N^2) per-edge slice reallocations.
 type batch struct {
-	nodes map[NodeID]nodeInfo
-	out   map[NodeID][]Edge
-	in    map[NodeID][]Edge
-	edges int
+	nodes    map[NodeID]nodeInfo
+	out      map[NodeID][]Edge
+	in       map[NodeID][]Edge
+	edges    int
+	fresh    bool
+	ownedOut map[NodeID]bool
+	ownedIn  map[NodeID]bool
 }
 
 // FromObjects is the initial-sync path (§6.3): it consumes the full
@@ -180,7 +185,7 @@ func (w *Writer) FromObjects(objs iter.Seq[any]) error {
 	if closed {
 		return ErrClosed
 	}
-	b := w.newBatch()
+	b := w.newBatchSized(len(list))
 	for _, o := range list {
 		if w.onChange != nil {
 			// Seed change tracking without emitting records: initial
@@ -223,7 +228,7 @@ func (w *Writer) flushLocked() {
 	if len(pending) == 0 && w.g.snap.Load() != nil {
 		return
 	}
-	b := w.newBatch()
+	b := w.newBatchSized(len(pending))
 	var recs []ChangeRecord
 	for _, pd := range pending {
 		if w.onChange == nil {
@@ -305,14 +310,16 @@ func (w *Writer) compactBatchLocked(b *batch) {
 
 	remap := make(map[NodeID]NodeID, len(oldIDs))
 	nextIntern := &interner{
-		keys:  make([]string, len(oldIDs)),
-		epoch: w.intern.epoch + 1,
+		writerIDs: make(map[string]NodeID, len(oldIDs)),
+		keys:      make([]string, len(oldIDs)),
+		epoch:     w.intern.epoch + 1,
 	}
 	for i, oldID := range oldIDs {
 		newID := NodeID(i + 1) // #nosec G115 -- bounded by existing NodeID count
 		remap[oldID] = newID
 		k := w.intern.keys[oldID-1]
 		nextIntern.keys[i] = k
+		nextIntern.writerIDs[k] = newID
 		nextIntern.ids.Store(k, newID)
 	}
 
@@ -408,19 +415,39 @@ func (w *Writer) compactBatchLocked(b *batch) {
 // COW representation; it is measured by BenchmarkSnapshotSwap and is
 // a primary input to the §15 Q5 compaction gate.
 func (w *Writer) newBatch() *batch {
+	return w.newBatchSized(0)
+}
+
+func (w *Writer) newBatchSized(hint int) *batch {
 	prev := w.g.snap.Load()
 	if prev == nil {
+		nodeCap := hint * 2
+		if hint > 64 {
+			if len(w.declared) == 0 {
+				w.declared = make(map[NodeID][]halfEdge, hint)
+			}
+			if len(w.refcnt) == 0 {
+				w.refcnt = make(map[NodeID]int, nodeCap)
+			}
+			if len(w.intern.keys) == 0 {
+				w.intern.keys = make([]string, 0, nodeCap)
+				w.intern.writerIDs = make(map[string]NodeID, nodeCap)
+			}
+		}
 		return &batch{
-			nodes: make(map[NodeID]nodeInfo),
-			out:   make(map[NodeID][]Edge),
-			in:    make(map[NodeID][]Edge),
+			nodes: make(map[NodeID]nodeInfo, nodeCap),
+			out:   make(map[NodeID][]Edge, hint),
+			in:    make(map[NodeID][]Edge, hint),
+			fresh: true,
 		}
 	}
 	return &batch{
-		nodes: maps.Clone(prev.nodes),
-		out:   maps.Clone(prev.out),
-		in:    maps.Clone(prev.in),
-		edges: prev.edges,
+		nodes:    maps.Clone(prev.nodes),
+		out:      maps.Clone(prev.out),
+		in:       maps.Clone(prev.in),
+		edges:    prev.edges,
+		ownedOut: make(map[NodeID]bool),
+		ownedIn:  make(map[NodeID]bool),
 	}
 }
 
@@ -583,13 +610,21 @@ func (w *Writer) setSelectorEdge(b *batch, src, pod NodeID, kind EdgeKind, want 
 
 // addEdge inserts e into the batch adjacency (idempotent).
 func (w *Writer) addEdge(b *batch, e halfEdge) {
-	out, added := insertEdge(b.out[e.From], Edge{To: e.To, Kind: e.Kind})
+	outOwned := b.fresh || b.ownedOut[e.From]
+	out, nowOutOwned, added := insertBatchEdge(b.out[e.From], Edge{To: e.To, Kind: e.Kind}, outOwned)
 	if !added {
 		return
 	}
 	b.out[e.From] = out
-	in, _ := insertEdge(b.in[e.To], Edge{To: e.From, Kind: e.Kind})
+	if !b.fresh && nowOutOwned {
+		b.ownedOut[e.From] = true
+	}
+	inOwned := b.fresh || b.ownedIn[e.To]
+	in, nowInOwned, _ := insertBatchEdge(b.in[e.To], Edge{To: e.From, Kind: e.Kind}, inOwned)
 	b.in[e.To] = in
+	if !b.fresh && nowInOwned {
+		b.ownedIn[e.To] = true
+	}
 	w.refcnt[e.From]++
 	w.refcnt[e.To]++
 	b.edges++
@@ -601,13 +636,29 @@ func (w *Writer) addEdge(b *batch, e halfEdge) {
 // removeEdge deletes e from the batch adjacency (idempotent) and
 // garbage-collects endpoints that end up unreferenced.
 func (w *Writer) removeEdge(b *batch, e halfEdge) {
-	out, removed := deleteEdge(b.out[e.From], Edge{To: e.To, Kind: e.Kind})
+	outOwned := b.fresh || b.ownedOut[e.From]
+	out, nowOutOwned, removed := deleteBatchEdge(b.out[e.From], Edge{To: e.To, Kind: e.Kind}, outOwned)
 	if !removed {
 		return
 	}
 	storeEdges(b.out, e.From, out)
-	in, _ := deleteEdge(b.in[e.To], Edge{To: e.From, Kind: e.Kind})
+	if !b.fresh {
+		if len(out) == 0 {
+			delete(b.ownedOut, e.From)
+		} else if nowOutOwned {
+			b.ownedOut[e.From] = true
+		}
+	}
+	inOwned := b.fresh || b.ownedIn[e.To]
+	in, nowInOwned, _ := deleteBatchEdge(b.in[e.To], Edge{To: e.From, Kind: e.Kind}, inOwned)
 	storeEdges(b.in, e.To, in)
+	if !b.fresh {
+		if len(in) == 0 {
+			delete(b.ownedIn, e.To)
+		} else if nowInOwned {
+			b.ownedIn[e.To] = true
+		}
+	}
 	w.refcnt[e.From]--
 	w.refcnt[e.To]--
 	b.edges--
@@ -635,39 +686,72 @@ func edgeLess(a, b Edge) bool {
 	return a.To < b.To
 }
 
-// findEdge binary-searches s for e, returning the insertion index
-// and whether e is present.
+// findEdge locates e in sorted s, fast-pathing monotonic tail appends
+// (the common case during FromObjects and initial sync) before falling
+// back to binary search.
 func findEdge(s []Edge, e Edge) (int, bool) {
-	i := sort.Search(len(s), func(i int) bool { return !edgeLess(s[i], e) })
-	return i, i < len(s) && s[i] == e
+	n := len(s)
+	if n == 0 || edgeLess(s[n-1], e) {
+		return n, false
+	}
+	if s[n-1] == e {
+		return n - 1, true
+	}
+	i := sort.Search(n, func(i int) bool { return !edgeLess(s[i], e) })
+	return i, i < n && s[i] == e
 }
 
-// insertEdge returns a *fresh* slice with e inserted in order
-// (published snapshots may alias the input's backing array, so
-// in-place mutation is forbidden). added=false if already present.
-func insertEdge(s []Edge, e Edge) (out []Edge, added bool) {
+// insertBatchEdge inserts e in order. When owned is false (s may alias
+// a previously published snapshot), s is cloned once with amortized
+// growth capacity; once owned is true within the current batch,
+// subsequent insertions mutate s in place in O(1) amortized for tail
+// appends.
+func insertBatchEdge(s []Edge, e Edge, owned bool) (out []Edge, nowOwned bool, added bool) {
 	i, present := findEdge(s, e)
 	if present {
-		return s, false
+		return s, owned, false
 	}
-	out = make([]Edge, 0, len(s)+1)
-	out = append(out, s[:i]...)
-	out = append(out, e)
-	out = append(out, s[i:]...)
-	return out, true
+	if !owned {
+		growCap := max(len(s)+1, len(s)*2)
+		out = make([]Edge, 0, growCap)
+		out = append(out, s[:i]...)
+		out = append(out, e)
+		out = append(out, s[i:]...)
+		return out, true, true
+	}
+	if i == len(s) {
+		return append(s, e), true, true
+	}
+	return slices.Insert(s, i, e), true, true
 }
 
-// deleteEdge returns a fresh slice with e removed; removed=false if
-// absent.
-func deleteEdge(s []Edge, e Edge) (out []Edge, removed bool) {
+// deleteBatchEdge removes e while preserving published-snapshot
+// immutability when owned is false.
+func deleteBatchEdge(s []Edge, e Edge, owned bool) (out []Edge, nowOwned bool, removed bool) {
 	i, present := findEdge(s, e)
 	if !present {
-		return s, false
+		return s, owned, false
 	}
-	out = make([]Edge, 0, len(s)-1)
-	out = append(out, s[:i]...)
-	out = append(out, s[i+1:]...)
-	return out, true
+	if len(s) == 1 {
+		return nil, true, true
+	}
+	if !owned {
+		out = make([]Edge, 0, len(s)-1)
+		out = append(out, s[:i]...)
+		out = append(out, s[i+1:]...)
+		return out, true, true
+	}
+	return slices.Delete(s, i, i+1), true, true
+}
+
+func insertEdge(s []Edge, e Edge) ([]Edge, bool) {
+	out, _, added := insertBatchEdge(s, e, false)
+	return out, added
+}
+
+func deleteEdge(s []Edge, e Edge) ([]Edge, bool) {
+	out, _, removed := deleteBatchEdge(s, e, false)
+	return out, removed
 }
 
 // validateObject checks that obj is a supported typed object.

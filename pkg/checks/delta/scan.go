@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
@@ -118,6 +119,40 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 	if nodesOn {
 		occupancy = make(map[string]int)
 	}
+	var (
+		prefetchWG sync.WaitGroup
+
+		wlDeps []appsv1.Deployment
+		wlStss []appsv1.StatefulSet
+		wlDss  []appsv1.DaemonSet
+		wlJobs []batchv1.Job
+		wlCjs  []batchv1.CronJob
+		wlErr  error
+
+		prefetchedNodes []corev1.Node
+		nodesErr        error
+	)
+	if s.classes[classPods] {
+		prefetchWG.Add(1)
+		go func() {
+			defer prefetchWG.Done()
+			wlErr = firstErr(
+				func() (err error) { wlDeps, err = listDeployments(ctx, s.client, s.ns); return },
+				func() (err error) { wlStss, err = listStatefulSets(ctx, s.client, s.ns); return },
+				func() (err error) { wlDss, err = listDaemonSets(ctx, s.client, s.ns); return },
+				func() (err error) { wlJobs, err = listJobs(ctx, s.client, s.ns); return },
+				func() (err error) { wlCjs, err = listCronJobs(ctx, s.client, s.ns); return },
+			)
+		}()
+	}
+	if nodesOn {
+		prefetchWG.Add(1)
+		go func() {
+			defer prefetchWG.Done()
+			prefetchedNodes, nodesErr = listNodes(ctx, s.client)
+		}()
+	}
+
 	if s.classes[classPods] || nodesOn {
 		findingsBase := len(s.findings)
 		err := streamPods(ctx, s.client, s.ns, func() {
@@ -155,11 +190,13 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 				parts = append(parts, PartNodes)
 			}
 			if !s.refuse(err, parts...) {
+				prefetchWG.Wait()
 				return 0, nil, err
 			}
 			podsRefused = true
 		}
 	}
+	prefetchWG.Wait()
 
 	if s.classes[classPods] {
 		if !podsRefused {
@@ -169,20 +206,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 			s.scheduledPods = scheduledPods
 		}
 
-		var (
-			deps []appsv1.Deployment
-			stss []appsv1.StatefulSet
-			dss  []appsv1.DaemonSet
-			jobs []batchv1.Job
-			cjs  []batchv1.CronJob
-		)
-		err := firstErr(
-			func() (err error) { deps, err = listDeployments(ctx, s.client, s.ns); return },
-			func() (err error) { stss, err = listStatefulSets(ctx, s.client, s.ns); return },
-			func() (err error) { dss, err = listDaemonSets(ctx, s.client, s.ns); return },
-			func() (err error) { jobs, err = listJobs(ctx, s.client, s.ns); return },
-			func() (err error) { cjs, err = listCronJobs(ctx, s.client, s.ns); return },
-		)
+		deps, stss, dss, jobs, cjs, err := wlDeps, wlStss, wlDss, wlJobs, wlCjs, wlErr
 		switch {
 		case err == nil:
 			scanned += len(deps) + len(stss) + len(dss) + len(jobs) + len(cjs)
@@ -226,7 +250,7 @@ func (s *scanner) scan(ctx context.Context) (int, []emit.Finding, error) {
 	}
 
 	if nodesOn && !podsRefused {
-		nodes, err := listNodes(ctx, s.client)
+		nodes, err := prefetchedNodes, nodesErr
 		if err != nil {
 			if !s.refuse(err, PartNodes) {
 				return 0, nil, err

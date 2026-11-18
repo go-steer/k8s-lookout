@@ -292,6 +292,12 @@ func loadComputeClassIndex(ctx context.Context, deps Deps, client kubernetes.Int
 		classes:         map[string]decodedClassInfo{},
 	}
 
+	waitWarm := snap.warm(
+		func() { _, _, _ = snap.ServicesByNamespace(ctx) },
+		func() { _, _, _ = snap.Nodes(ctx) },
+	)
+	defer waitWarm()
+
 	templates, refused, err := listPodTemplates(ctx, client, listNS, true)
 	if err != nil {
 		return nil, err

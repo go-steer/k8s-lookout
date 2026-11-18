@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 const (
@@ -95,6 +96,64 @@ type Options struct {
 	Target *Target
 }
 
+// maxClientShards bounds parallel HTTP/2 TLS connections opened by a single
+// typed kubernetes.Interface when multi-namespace sweeps fan out across cores.
+// All shards share one rest.Config RateLimiter and fail-fast Dial closure so
+// --kube-qps / --kube-burst and unreachable negative-caching behave identically
+// to a single Clientset while avoiding a single-socket TLS/HTTP2 bottleneck on
+// multi-GiB 200k-pod reads.
+const maxClientShards = 8
+
+type shardedClient struct {
+	kubernetes.Interface
+	cfg    *rest.Config
+	mu     sync.Mutex
+	shards [maxClientShards]kubernetes.Interface
+}
+
+func newShardedClient(cfg *rest.Config) (kubernetes.Interface, error) {
+	shared := rest.CopyConfig(cfg)
+	if shared.RateLimiter == nil && shared.QPS > 0 {
+		burst := shared.Burst
+		if burst <= 0 {
+			burst = DefaultBurst
+		}
+		shared.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(shared.QPS, burst)
+	}
+	primary, err := kubernetes.NewForConfig(rest.CopyConfig(shared))
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	sc := &shardedClient{
+		Interface: primary,
+		cfg:       shared,
+	}
+	sc.shards[0] = primary
+	return sc, nil
+}
+
+func clientShard(client kubernetes.Interface, idx int) kubernetes.Interface {
+	sc, ok := client.(*shardedClient)
+	if !ok || sc == nil || sc.cfg == nil || sc.cfg.Transport != nil || idx <= 0 {
+		return client
+	}
+	slot := idx % maxClientShards
+	if slot == 0 {
+		return sc.Interface
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if s := sc.shards[slot]; s != nil {
+		return s
+	}
+	s, err := kubernetes.NewForConfig(rest.CopyConfig(sc.cfg))
+	if err != nil {
+		return sc.Interface
+	}
+	sc.shards[slot] = s
+	return s
+}
+
 // BuildClient constructs a kubernetes.Interface from the options
 // (see BuildConfig for resolution precedence).
 func BuildClient(opts Options) (kubernetes.Interface, error) {
@@ -102,11 +161,7 @@ func BuildClient(opts Options) (kubernetes.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-	return client, nil
+	return newShardedClient(cfg)
 }
 
 // BuildDynamicClient constructs a dynamic.Interface from the same
@@ -132,11 +187,7 @@ func BuildDynamicClient(opts Options) (dynamic.Interface, error) {
 // kubeconfig/in-cluster path — pkg/kube stays cloud-free.
 func BuildClientFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
 	cfg = ensureTypedDefaults(cfg)
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-	return client, nil
+	return newShardedClient(cfg)
 }
 
 // BuildDynamicClientFromConfig is BuildClientFromConfig for the dynamic
@@ -213,7 +264,7 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 	if cfg.ContentType == "" {
 		cfg.ContentType = DefaultContentType
 	}
-	if cfg.Dial == nil || opts.DialTimeout > 0 {
+	if (cfg.Dial == nil && cfg.Transport == nil) || opts.DialTimeout > 0 {
 		cfg.Dial = newFailFastDialer(opts.DialTimeout)
 	}
 	if opts.CallerToken != nil {
@@ -228,11 +279,11 @@ func ensureTypedDefaults(cfg *rest.Config) *rest.Config {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.Dial != nil && cfg.AcceptContentTypes != "" && cfg.ContentType != "" {
+	if (cfg.Dial != nil || cfg.Transport != nil) && cfg.AcceptContentTypes != "" && cfg.ContentType != "" {
 		return cfg
 	}
 	out := rest.CopyConfig(cfg)
-	if out.Dial == nil {
+	if out.Dial == nil && out.Transport == nil {
 		out.Dial = newFailFastDialer(DefaultDialTimeout)
 	}
 	if out.AcceptContentTypes == "" {

@@ -36,7 +36,9 @@
 #   KWOKCTL_RUNTIME          kwokctl runtime (default: binary)
 #   KWOKCTL_ETCD_QUOTA       etcd --quota-backend-bytes (default: 8Gi)
 #   KWOKCTL_CONTROLLER_PORT  host port for fake kubelet (default: 10247)
-#   KWOKCTL_SYNC_WORKERS     controller-manager worker concurrency (default: 30)
+#   KWOKCTL_SYNC_WORKERS     controller-manager worker concurrency (default: 50)
+#   KWOKCTL_NODE_WORKERS     kwok-controller node stage/lease workers (default: 32)
+#   KWOKCTL_POD_WORKERS      kwok-controller pod stage workers (default: 64)
 
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -44,7 +46,9 @@ set -euo pipefail
 RUNTIME="${KWOKCTL_RUNTIME:-binary}"
 ETCD_QUOTA="${KWOKCTL_ETCD_QUOTA:-8Gi}"
 CONTROLLER_PORT="${KWOKCTL_CONTROLLER_PORT:-10247}"
-SYNC_WORKERS="${KWOKCTL_SYNC_WORKERS:-30}"
+SYNC_WORKERS="${KWOKCTL_SYNC_WORKERS:-50}"
+NODE_WORKERS="${KWOKCTL_NODE_WORKERS:-32}"
+POD_WORKERS="${KWOKCTL_POD_WORKERS:-64}"
 
 command -v kubectl >/dev/null 2>&1 || {
   echo "ERROR: kubectl not found on PATH" >&2
@@ -62,6 +66,14 @@ else
   cfg="$(mktemp "${TMPDIR:-/tmp}/kwokctl-cfg.XXXXXX.yaml")"
   trap 'rm -f "$cfg"' EXIT
   cat >"$cfg" <<YAML
+apiVersion: config.kwok.x-k8s.io/v1alpha1
+kind: KwokConfiguration
+options:
+  nodePlayStageParallelism: ${NODE_WORKERS}
+  podPlayStageParallelism: ${POD_WORKERS}
+  nodeLeaseParallelism: ${NODE_WORKERS}
+  podsOnNodeSyncParallelism: 16
+---
 apiVersion: config.kwok.x-k8s.io/v1alpha1
 kind: KwokctlConfiguration
 componentsPatches:

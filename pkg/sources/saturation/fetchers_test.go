@@ -394,7 +394,7 @@ func TestMetricsPodFetcher_PaginatesPodList(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("got %d samples across 2 pod pages, want 4", len(got))
 	}
-	if len(seenOpts) != 2 || seenOpts[0].Limit != kube.DefaultPageLimit || seenOpts[1].Limit != kube.DefaultPageLimit || seenOpts[1].Continue != "page-2" {
+	if len(seenOpts) != 2 || seenOpts[0].Limit <= 0 || seenOpts[0].Limit > kube.DefaultPageLimit || seenOpts[1].Limit != kube.DefaultPageLimit || seenOpts[1].Continue != "page-2" {
 		t.Fatalf("unexpected pod list options: %+v", seenOpts)
 	}
 }

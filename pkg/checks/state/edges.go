@@ -526,15 +526,7 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 	}
 
 	steps := []func() error{
-		func() error {
-			return listPagesTrim("pods", func(o metav1.ListOptions) ([]corev1.Pod, string, error) {
-				l, err := client.CoreV1().Pods(ns).List(ctx, o)
-				if err != nil {
-					return nil, "", err
-				}
-				return l.Items, l.Continue, nil
-			}, kube.TrimReadPod, func(p *corev1.Pod) { ix.pods[key(p.Namespace, p.Name)] = p; graphObj(p) })
-		},
+		func() error { return ix.loadPods(ctx, client, ns) },
 		func() error {
 			// Nodes are cluster-scoped and ingested for the graph
 			// only: they resolve pods' RunsOn edges so blast-radius
@@ -798,6 +790,29 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 			return nil, err
 		}
 	}
+	ix.sortLists()
+	return ix, nil
+}
+
+func (ix *index) loadPods(ctx context.Context, client kubernetes.Interface, ns string) error {
+	items, err := kube.ListClusterPodsTrim(ctx, client, ns)
+	if err != nil {
+		return fmt.Errorf("listing pods: %w", err)
+	}
+	if len(items) > 0 {
+		ix.pods = make(map[string]*corev1.Pod, len(items))
+		ix.graphObjs = make([]any, 0, len(items)+1024)
+	}
+	for i := range items {
+		p := &items[i]
+		ix.pods[key(p.Namespace, p.Name)] = p
+		ix.graphObjs = append(ix.graphObjs, p)
+		ix.scanned++
+	}
+	return nil
+}
+
+func (ix *index) sortLists() {
 	sort.Slice(ix.ingresses, func(i, j int) bool {
 		return key(ix.ingresses[i].Namespace, ix.ingresses[i].Name) < key(ix.ingresses[j].Namespace, ix.ingresses[j].Name)
 	})
@@ -810,5 +825,4 @@ func listCluster(ctx context.Context, client kubernetes.Interface, ns string, op
 	for _, s := range ix.slicesByService {
 		sort.Slice(s, func(i, j int) bool { return s[i].Name < s[j].Name })
 	}
-	return ix, nil
 }

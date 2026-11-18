@@ -56,6 +56,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -249,41 +250,75 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 		}
 		typedClient = kube.WrapClient(ctx, typedClient)
 	}
-	var dyn dynamic.Interface
-	getDynamic := func() (dynamic.Interface, error) {
-		if dyn != nil {
-			return dyn, nil
-		}
+	getDynamic := sync.OnceValues(func() (dynamic.Interface, error) {
 		if l.deps.Dynamic == nil {
 			return nil, fmt.Errorf("dynamic client not configured")
 		}
-		var err error
-		dyn, err = l.deps.Dynamic(ctx)
-		return dyn, err
+		return l.deps.Dynamic(ctx)
+	})
+
+	type kindResult struct {
+		items  []object
+		err    error
+		rawErr bool
+	}
+	now := l.now()
+	results := make([]kindResult, len(kinds))
+	workers := min(6, len(kinds))
+	if workers > 0 {
+		idxCh := make(chan int, len(kinds))
+		for i := range kinds {
+			idxCh <- i
+		}
+		close(idxCh)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range idxCh {
+					k := kinds[idx]
+					var (
+						items   []object
+						handled bool
+						kErr    error
+					)
+					if typedClient != nil {
+						items, handled, kErr = listTypedKind(ctx, typedClient, k, ns, now)
+					}
+					if !handled {
+						dc, dErr := getDynamic()
+						if dErr != nil {
+							results[idx] = kindResult{err: dErr, rawErr: true}
+							continue
+						}
+						items, kErr = listKind(ctx, dc, k, ns, now)
+					}
+					results[idx] = kindResult{items: items, err: kErr}
+				}
+			}()
+		}
+		wg.Wait()
 	}
 
+	totalItems := 0
+	for i := range results {
+		if results[i].err == nil {
+			totalItems += len(results[i].items)
+		}
+	}
 	var (
-		objects []object
+		objects = make([]object, 0, totalItems)
 		skipped []string
 		refused []emit.Finding
 		listed  int
 	)
-	now := l.now()
-	for _, k := range kinds {
-		var items []object
-		handled := false
-		if typedClient != nil {
-			items, handled, err = listTypedKind(ctx, typedClient, k, ns, now)
-		}
-		if !handled {
-			var dc dynamic.Interface
-			dc, err = getDynamic()
-			if err != nil {
-				return 0, err
+	for i, k := range kinds {
+		res := results[i]
+		if res.err != nil {
+			if res.rawErr {
+				return 0, res.err
 			}
-			items, err = listKind(ctx, dc, k, ns, now)
-		}
-		if err != nil {
 			// A refusal is a RESULT, not an error. The caller may be
 			// allowed to list sixteen kinds and not the seventeenth
 			// (an operator role without secrets is the usual one), and
@@ -291,21 +326,22 @@ func (l *lister) run(ctx context.Context, inv emit.Invocation) (int, error) {
 			// was not allowed to look" is the difference between a
 			// finding and a blind spot — so it is reported, on the one
 			// line that cannot be missed, instead of failing the run.
-			if reason, tolerable := skipReason(err); tolerable {
+			if reason, tolerable := skipReason(res.err); tolerable {
 				skipped = append(skipped, k.kind+":"+reason)
 				// The note stays the one-line digest; the record says
 				// why and what grant fixes it, in the wording every
 				// other refusal uses (#584).
-				if r, ok := checks.ForbiddenRefusal(err); ok {
+				if r, ok := checks.ForbiddenRefusal(res.err); ok {
 					refused = append(refused, checks.RefusedFinding(r,
 						k.kind+" objects not listed: their absence here is a blind spot, not a fact"))
 				}
 				continue
 			}
-			return 0, fmt.Errorf("listing %s: %w", k.gvr.Resource, err)
+			return 0, fmt.Errorf("listing %s: %w", k.gvr.Resource, res.err)
 		}
 		listed++
-		objects = append(objects, items...)
+		objects = append(objects, res.items...)
+		results[i].items = nil
 	}
 
 	if err := inv.Out.Note("kinds", strconv.Itoa(listed)); err != nil {
