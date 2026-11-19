@@ -120,16 +120,17 @@ func (w *Writer) applyPod(b *batch, op Op, pod *corev1.Pod) {
 	if pod.Spec.NodeName != "" {
 		decl = append(decl, halfEdge{From: id, To: w.node(b, KindNode, "", pod.Spec.NodeName), Kind: EdgeRunsOn})
 	}
-	containers := make([]corev1.Container, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
-	containers = append(containers, pod.Spec.InitContainers...)
-	containers = append(containers, pod.Spec.Containers...)
-	for i := range containers {
-		c := &containers[i]
-		cid := w.node(b, KindContainer, ns, pod.Name+"/"+c.Name)
-		w.observe(b, cid, KindContainer)
-		decl = append(decl, halfEdge{From: id, To: cid, Kind: EdgeContains})
-		decl = append(decl, w.containerMounts(b, ns, id, c)...)
+	addContainers := func(cs []corev1.Container) {
+		for i := range cs {
+			c := &cs[i]
+			cid := w.node(b, KindContainer, ns, pod.Name+"/"+c.Name)
+			w.observe(b, cid, KindContainer)
+			decl = append(decl, halfEdge{From: id, To: cid, Kind: EdgeContains})
+			decl = append(decl, w.containerMounts(b, ns, id, c)...)
+		}
 	}
+	addContainers(pod.Spec.InitContainers)
+	addContainers(pod.Spec.Containers)
 	decl = append(decl, w.volumeMounts(b, ns, id, pod.Spec.Volumes)...)
 	w.setDeclared(b, id, decl)
 
@@ -138,13 +139,25 @@ func (w *Writer) applyPod(b *batch, op Op, pod *corev1.Pod) {
 	// the pod's current labels.
 	set := labels.Set(pod.Labels)
 	pods := w.podLabels[ns]
+	hadPod := false
 	if pods == nil {
 		pods = make(map[NodeID]labels.Set)
 		w.podLabels[ns] = pods
+	} else {
+		_, hadPod = pods[id]
 	}
 	pods[id] = set
 	for src, ent := range w.selectors[ns] {
-		w.setSelectorEdge(b, src, id, ent.kind, ent.sel.Matches(set))
+		matches := ent.sel.Matches(set)
+		if !hadPod {
+			if matches {
+				e := halfEdge{From: src, To: id, Kind: ent.kind}
+				w.addEdge(b, e)
+				w.declared[src] = append(w.declared[src], e)
+			}
+			continue
+		}
+		w.setSelectorEdge(b, src, id, ent.kind, matches)
 	}
 }
 

@@ -103,6 +103,13 @@ if ((pods > capacity)); then
   echo "Raise the node count or lower the replicas." >&2
   exit 2
 fi
+pinned_workloads=$(((WORKLOADS + 4) / 10))
+max_pinned_per_node=$(((pinned_workloads + NODES - 1) / NODES))
+if ((max_pinned_per_node * REPLICAS > 110)); then
+  echo "ERROR: pinned archetype places $((max_pinned_per_node * REPLICAS)) pods on one node (allocatable.pods=110)." >&2
+  echo "Raise the node count or lower the replicas." >&2
+  exit 2
+fi
 
 # kind's default pod subnet is 10.244.0.0/16 and node-ipam hands out a
 # /24 per node, so it runs dry at 256 nodes: every node past that gets
@@ -323,8 +330,23 @@ apply_stdin() {
 
 emit_nodes | apply_stdin nodes
 echo "▸ waiting for kwok to bring them Ready"
-kubectl wait --for=condition=Ready nodes -l "$FAKE_NODE_LABEL" --timeout=300s >/dev/null
-echo "  ✓ $(fake_node_count) fake nodes Ready"
+target_nodes="$(fake_node_count)"
+((target_nodes < NODES)) && target_nodes="$NODES"
+node_timeout=300
+((target_nodes >= 1500)) && node_timeout=900
+node_deadline=$((SECONDS + node_timeout))
+while :; do
+  ready_nodes="$(kubectl get nodes -l "$FAKE_NODE_LABEL" --chunk-size=0 --no-headers 2>/dev/null \
+    | awk '$2 == "Ready" || $2 ~ /^Ready,/ {c++} END {print c+0}')"
+  ((ready_nodes >= target_nodes)) && break
+  if ((SECONDS >= node_deadline)); then
+    printf '\r  ✗ only %s/%s fake nodes Ready after %ss\n' "$ready_nodes" "$target_nodes" "$node_timeout" >&2
+    exit 1
+  fi
+  printf '\r  … %s/%s Ready ' "$ready_nodes" "$target_nodes"
+  sleep 2
+done
+printf '\r  ✓ %s fake nodes Ready          \n' "$ready_nodes"
 
 # ---- namespaces ----------------------------------------------------------
 
@@ -512,9 +534,12 @@ ${POD_ANNOTATIONS_BLOCK}
 EOF
 
   # pinned: narrow placement to exactly one node, so the placement
-  # claim has a real eligible_nodes=1 to report.
+  # claim has a real eligible_nodes=1 to report. Divide by 10 first:
+  # `i` always ends in 5 here, so `i % NODES` on any decimal node count
+  # uses only NODES/10 nodes and stacks two 50-replica Deployments (100
+  # pinned pods + unpinned pods > 110 allocatable.pods) onto one node.
   if ((arch == 5)); then
-    printf -v pin_node 'kwok-node-%04d' "$((i % NODES))"
+    printf -v pin_node 'kwok-node-%04d' "$(((i / 10) % NODES))"
     printf '        kubernetes.io/hostname: %s\n' "$pin_node"
   fi
 
@@ -590,20 +615,34 @@ echo "  ✓ workloads applied"
 echo "▸ waiting for pods to reach Running (kwok fast-forwards them)"
 default_timeout=600
 ((pods >= 50000)) && default_timeout=1200
+((pods >= 150000)) && default_timeout=2700
 scale_timeout="${KWOK_SCALE_TIMEOUT:-$default_timeout}"
 deadline=$((SECONDS + scale_timeout))
+running=0
 while :; do
-  running="$(kubectl get pods -A -l "$FLEET_LABEL" --field-selector=status.phase=Running \
-    --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
-  ((running >= pods)) && break
+  # Poll Deployment readyReplicas during the scheduling storm (~4,500 Table
+  # rows vs 200,500 padded Pod objects = 45× less kube-apiserver heap per poll),
+  # then confirm pod-level Running status once all Deployments report ready.
+  sampled="$(fleet_deployment_ready_pods || true)"
+  if [[ "$sampled" =~ ^[0-9]+$ ]]; then
+    if ((sampled >= pods)); then
+      confirmed="$(fleet_pod_count Running || true)"
+      if [[ "$confirmed" =~ ^[0-9]+$ ]]; then
+        running="$confirmed"
+        ((running >= pods)) && break
+      fi
+    else
+      running="$sampled"
+    fi
+  fi
   if ((SECONDS >= deadline)); then
-    printf '\r  ⚠ only %s/%s pods Running after %ss — continuing anyway\n' "$running" "$pods" "$scale_timeout" >&2
-    break
+    printf '\r  ✗ only %s/%s pods Running after %ss\n' "$running" "$pods" "$scale_timeout" >&2
+    exit 1
   fi
   printf '\r  … %s/%s Running ' "$running" "$pods"
-  sleep 5
+  sleep 8
 done
-((running >= pods)) && printf '\r  ✓ %s pods Running          \n' "$running"
+printf '\r  ✓ %s pods Running          \n' "$running"
 
 # A fleet that is up but underweight is worse than no fleet: it produces
 # numbers, and the numbers are wrong in the flattering direction. Check

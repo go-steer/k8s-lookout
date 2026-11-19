@@ -115,6 +115,12 @@ func runAuditNamespaces(ctx context.Context, deps Deps, inv emit.Invocation) (in
 		return 0, err
 	}
 	ctx, snap := ensureSnapshot(ctx, client, listNS)
+	waitWarm := snap.warm(
+		func() { _, _, _ = snap.Namespaces(ctx) },
+		func() { _, _, _ = snap.ResourceQuotas(ctx) },
+		func() { _, _, _ = snap.LimitRanges(ctx) },
+	)
+	defer waitWarm()
 
 	templates, tmplRefused, err := listPodTemplates(ctx, client, listNS, true)
 	if err != nil {

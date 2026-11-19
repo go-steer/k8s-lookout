@@ -305,25 +305,41 @@ func (s *Snapshot) ActivePodLabels(ctx context.Context) ([]ActivePodLabelSet, *c
 	return s.activePodLbls, s.podScanRefused, s.podScanErr
 }
 
+type podScanEntry struct {
+	active    ActivePodLabelSet
+	hasActive bool
+	unowned   *corev1.Pod
+}
+
+func (s *Snapshot) warm(fns ...func()) func() {
+	var wg sync.WaitGroup
+	for _, fn := range fns {
+		wg.Add(1)
+		go func(f func()) {
+			defer wg.Done()
+			f()
+		}(fn)
+	}
+	return wg.Wait
+}
+
 func (s *Snapshot) scanPods(ctx context.Context) {
 	s.podScanOnce.Do(func() {
-		var unowned []corev1.Pod
-		var active []ActivePodLabelSet
-		err := kube.StreamClusterPods(ctx, s.client, s.ns, nil, func() {
-			unowned = nil
-			active = nil
-		}, func(p *corev1.Pod) {
+		entries, err := kube.ListClusterPodsMap(ctx, s.client, s.ns, func(p *corev1.Pod) (podScanEntry, bool) {
+			var e podScanEntry
 			if p.Status.Phase != corev1.PodFailed && p.Status.Phase != corev1.PodSucceeded {
-				active = append(active, ActivePodLabelSet{
+				e.active = ActivePodLabelSet{
 					Namespace: p.Namespace,
 					Labels:    p.Labels,
-				})
+				}
+				e.hasActive = true
 			}
 			if len(p.OwnerReferences) == 0 {
 				cp := *p
 				kube.TrimReadPod(&cp)
-				unowned = append(unowned, cp)
+				e.unowned = &cp
 			}
+			return e, e.hasActive || e.unowned != nil
 		})
 		if err != nil {
 			if r, ok := checks.ForbiddenRefusal(err); ok {
@@ -332,6 +348,29 @@ func (s *Snapshot) scanPods(ctx context.Context) {
 			}
 			s.podScanErr = fmt.Errorf("listing pods: %w", err)
 			return
+		}
+		activeCount := 0
+		unownedCount := 0
+		for i := range entries {
+			if entries[i].hasActive {
+				activeCount++
+			}
+			if entries[i].unowned != nil {
+				unownedCount++
+			}
+		}
+		active := make([]ActivePodLabelSet, 0, activeCount)
+		var unowned []corev1.Pod
+		if unownedCount > 0 {
+			unowned = make([]corev1.Pod, 0, unownedCount)
+		}
+		for i := range entries {
+			if entries[i].hasActive {
+				active = append(active, entries[i].active)
+			}
+			if entries[i].unowned != nil {
+				unowned = append(unowned, *entries[i].unowned)
+			}
 		}
 		sort.Slice(unowned, func(i, j int) bool {
 			if unowned[i].Namespace != unowned[j].Namespace {

@@ -245,19 +245,90 @@ var credentialFlagRefSuffixes = []string{"-name", "-ref", "-file", "-path", "-di
 // the same shape legitimately carries references (`secretName:
 // db-credentials`) and names must survive.
 func MaskString(s string) string {
-	if s == "" {
+	if len(s) < 4 {
 		return s
 	}
-	s = rePEMPrivateKey.ReplaceAllString(s, Redacted)
-	s = rePrivateKeyJSON.ReplaceAllString(s, "${1}"+Redacted+"${2}")
-	s = maskAuthHeaders(s)
-	s = reJWT.ReplaceAllString(s, Redacted)
-	s = reVendorToken.ReplaceAllString(s, Redacted)
-	s = reAWSKeyID.ReplaceAllString(s, Redacted)
-	s = reURLPassword.ReplaceAllString(s, "${1}"+Redacted+"@")
-	s = maskCredentialFlags(s)
-	s = maskInlineAssignments(s)
+	if strings.Contains(s, "-----BEGIN ") {
+		s = rePEMPrivateKey.ReplaceAllString(s, Redacted)
+	}
+	if strings.Contains(s, "private_key") {
+		s = rePrivateKeyJSON.ReplaceAllString(s, "${1}"+Redacted+"${2}")
+	}
+	if len(s) >= 10 && hasAuthKeywordCI(s) {
+		s = maskAuthHeaders(s)
+	}
+	if len(s) >= 20 && strings.Contains(s, "eyJ") {
+		s = reJWT.ReplaceAllString(s, Redacted)
+	}
+	if len(s) >= 5 && hasVendorTokenSubstr(s) {
+		s = reVendorToken.ReplaceAllString(s, Redacted)
+	}
+	if len(s) >= 20 && (strings.Contains(s, "AKIA") || strings.Contains(s, "ASIA")) {
+		s = reAWSKeyID.ReplaceAllString(s, Redacted)
+	}
+	if strings.IndexByte(s, '@') >= 0 && strings.Contains(s, "://") {
+		s = reURLPassword.ReplaceAllString(s, "${1}"+Redacted+"@")
+	}
+	if hasFlagCandidate(s) {
+		s = maskCredentialFlags(s)
+	}
+	if strings.IndexByte(s, '=') >= 0 {
+		s = maskInlineAssignments(s)
+	}
 	return s
+}
+
+func hasAuthKeywordCI(s string) bool {
+	n := len(s)
+	for i := 0; i+5 <= n; i++ {
+		c := s[i] | 0x20
+		if c != 'b' {
+			continue
+		}
+		if (s[i+1]|0x20) == 'a' && (s[i+2]|0x20) == 's' && (s[i+3]|0x20) == 'i' && (s[i+4]|0x20) == 'c' {
+			return true
+		}
+		if i+6 <= n && (s[i+1]|0x20) == 'e' && (s[i+2]|0x20) == 'a' && (s[i+3]|0x20) == 'r' && (s[i+4]|0x20) == 'e' && (s[i+5]|0x20) == 'r' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVendorTokenSubstr(s string) bool {
+	return strings.Contains(s, "AIza") ||
+		strings.Contains(s, "ya29.") ||
+		strings.Contains(s, "ghp_") ||
+		strings.Contains(s, "github_pat_") ||
+		strings.Contains(s, "xox") ||
+		strings.Contains(s, "sk_live_") ||
+		strings.Contains(s, "glpat-")
+}
+
+// hasFlagCandidate reports whether s can possibly match reCredentialFlag:
+// it must contain a flag separator ('=', ' ', or '\t') and a '-' at index 0
+// or preceded by a non-[0-9A-Za-z_-] byte.
+func hasFlagCandidate(s string) bool {
+	hasSep := false
+	hasDash := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '=', ' ', '\t':
+			hasSep = true
+		case '-':
+			if i == 0 || !isFlagWordByte(s[i-1]) {
+				hasDash = true
+			}
+		}
+		if hasSep && hasDash {
+			return true
+		}
+	}
+	return false
+}
+
+func isFlagWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
 
 // maskAuthHeaders masks Authorization/Proxy-Authorization headers of any

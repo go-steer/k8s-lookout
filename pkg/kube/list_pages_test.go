@@ -625,3 +625,102 @@ func TestStreamClusterPodsFallsBackSequentiallyWhenNamespacesForbidden(t *testin
 		t.Fatalf("got %v, want [p1 p2]", got)
 	}
 }
+
+func TestListClusterPodsMapAndTrimParallelMultiNamespace(t *testing.T) {
+	var goneOnce atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				ListMeta: metav1.ListMeta{Continue: "more"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-0", Name: "probe"}}},
+			})
+		case "/api/v1/namespaces":
+			_ = json.NewEncoder(w).Encode(corev1.NamespaceList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "NamespaceList"},
+				Items: []corev1.Namespace{
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-0"}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-1"}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "ns-2"}},
+				},
+			})
+		case "/api/v1/namespaces/ns-0/pods":
+			if r.URL.Query().Get("continue") == "" {
+				_ = json.NewEncoder(w).Encode(corev1.PodList{
+					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+					ListMeta: metav1.ListMeta{Continue: "p2"},
+					Items: []corev1.Pod{{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace:     "ns-0",
+							Name:          "keep-0",
+							ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kcm"}},
+						},
+					}},
+				})
+				return
+			}
+			if !goneOnce.Swap(true) {
+				w.WriteHeader(http.StatusGone)
+				_ = json.NewEncoder(w).Encode(apierrors.NewResourceExpired("expired").ErrStatus)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-0", Name: "drop-0"}}},
+			})
+		case "/api/v1/namespaces/ns-1/pods":
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "keep-1"}}},
+			})
+		case "/api/v1/namespaces/ns-2/pods":
+			_ = json.NewEncoder(w).Encode(corev1.PodList{
+				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
+				Items:    []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "ns-2", Name: "drop-2"}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := BuildClient(Options{
+		Target: &Target{Name: "test", Config: &rest.Config{Host: srv.URL}},
+	})
+	if err != nil {
+		t.Fatalf("BuildClient: %v", err)
+	}
+
+	mapped, err := ListClusterPodsMap(context.Background(), client, "", func(p *corev1.Pod) (string, bool) {
+		if len(p.Name) >= 4 && p.Name[:4] == "keep" {
+			return p.Namespace + "/" + p.Name, true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatalf("ListClusterPodsMap: %v", err)
+	}
+	gotMap := map[string]int{}
+	for _, s := range mapped {
+		gotMap[s]++
+	}
+	wantMap := map[string]int{"ns-0/keep-0": 1, "ns-1/keep-1": 1}
+	if !reflect.DeepEqual(gotMap, wantMap) {
+		t.Fatalf("mapped = %v, want %v", gotMap, wantMap)
+	}
+
+	trimmed, err := ListClusterPodsTrim(context.Background(), client, "")
+	if err != nil {
+		t.Fatalf("ListClusterPodsTrim: %v", err)
+	}
+	if len(trimmed) != 4 {
+		t.Fatalf("len(trimmed) = %d, want 4", len(trimmed))
+	}
+	for i := range trimmed {
+		if trimmed[i].ManagedFields != nil {
+			t.Errorf("pod %s ManagedFields not trimmed", trimmed[i].Name)
+		}
+	}
+}

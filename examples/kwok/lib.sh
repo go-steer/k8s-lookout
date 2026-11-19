@@ -92,6 +92,95 @@ fake_node_count() {
   fake_nodes | grep -c . || true
 }
 
+# cluster_pod_count — fast watch-cache-backed pod count across all namespaces.
+# Shards `--chunk-size=0` server-side Table reads per namespace in parallel:
+# each namespace stays far below etcd's 2 GiB gRPC frame limit even at 200k+
+# padded pods, and `limit=0` with no fieldSelector lets kube-apiserver serve
+# directly from its in-memory watch cache instead of pinning a 40-page etcd
+# snapshot.
+cluster_pod_count() {
+  local tmpdir ns active=0 failed=0 pid
+  local -a pids=()
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/kwok-podcnt.XXXXXX")"
+  echo 0 >"$tmpdir/_zero"
+  while read -r ns; do
+    [[ -n "$ns" ]] || continue
+    (
+      set -euo pipefail
+      kubectl get pods -n "$ns" --chunk-size=0 --no-headers --request-timeout=120s 2>/dev/null \
+        | awk 'END {print NR+0}' >"$tmpdir/$ns"
+    ) &
+    pids+=("$!")
+    active=$((active + 1))
+    if ((active >= 4)); then
+      for pid in "${pids[@]}"; do
+        wait "$pid" || failed=1
+      done
+      pids=()
+      active=0
+    fi
+  done < <(kubectl get namespaces --chunk-size=0 --no-headers --request-timeout=60s 2>/dev/null | awk '{print $1}')
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+  if ((failed)); then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+  awk '{s += $1} END {print s+0}' "$tmpdir"/*
+  rm -rf "$tmpdir"
+}
+
+# fleet_pod_count [phase] — fast watch-cache-backed count of synthetic fleet
+# pods across all namespaces (optionally filtered to a single STATUS phase,
+# e.g. `fleet_pod_count Running`, without passing an unindexed
+# `--field-selector=status.phase=...` that would bypass the watch cache).
+# In single-namespace `kubectl get pods -n <ns> --no-headers` Table output,
+# columns are `NAME READY STATUS RESTARTS AGE`, so `$3` is always STATUS.
+fleet_pod_count() {
+  local phase="${1:-}" tmpdir ns active=0 failed=0 pid
+  local -a pids=()
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/kwok-fleetcnt.XXXXXX")"
+  echo 0 >"$tmpdir/_zero"
+  while read -r ns; do
+    [[ -n "$ns" ]] || continue
+    (
+      set -euo pipefail
+      kubectl get pods -n "$ns" -l "$FLEET_LABEL" --chunk-size=0 --no-headers --request-timeout=120s 2>/dev/null \
+        | awk -v p="$phase" 'p == "" || $3 == p {c++} END {print c+0}' >"$tmpdir/$ns"
+    ) &
+    pids+=("$!")
+    active=$((active + 1))
+    if ((active >= 4)); then
+      for pid in "${pids[@]}"; do
+        wait "$pid" || failed=1
+      done
+      pids=()
+      active=0
+    fi
+  done < <(kubectl get namespaces --chunk-size=0 --no-headers --request-timeout=60s 2>/dev/null | awk '{print $1}')
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+  if ((failed)); then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+  awk '{s += $1} END {print s+0}' "$tmpdir"/*
+  rm -rf "$tmpdir"
+}
+
+# fleet_deployment_ready_pods — total ready replicas summed across all fleet
+# Deployments via a single watch-cache Table read (~4,500 rows in ~1s at 200k+
+# pods, avoiding 3+ GB pod-table serializations on every readiness poll).
+fleet_deployment_ready_pods() {
+  (
+    set -euo pipefail
+    kubectl get deployments -A -l "$FLEET_LABEL" --chunk-size=0 --no-headers --request-timeout=60s 2>/dev/null \
+      | awk '{split($3, a, "/"); c += a[1]} END {print c+0}'
+  )
+}
+
 # ---- driving the fleet ----------------------------------------------------
 
 # fleet_churn <seconds> <workers> — roll fleet Deployments as fast as
@@ -118,17 +207,18 @@ fake_node_count() {
 # window needs a fleet wider than workers × seconds.
 fleet_churn() {
   local secs="$1" workers="$2" deadline w
+  local -a targets pids=()
   deadline="$(($(date +%s) + secs))"
 
-  local -a targets
   mapfile -t targets < <(kubectl get deployments -A -l "$FLEET_LABEL" \
     --chunk-size=0 --no-headers 2>/dev/null | awk '{print $1 "/" $2}' || true)
   ((${#targets[@]})) || return 0
 
   for ((w = 0; w < workers; w++)); do
     _fleet_churn_worker "$w" "$workers" "$deadline" "${targets[@]}" &
+    pids+=("$!")
   done
-  wait
+  ((${#pids[@]} > 0)) && wait "${pids[@]}" || true
 }
 
 # Worker $1 of $2 takes every $2-th entry, so no two workers ever roll
@@ -138,13 +228,17 @@ _fleet_churn_worker() {
   local w="$1" workers="$2" deadline="$3"
   shift 3
   local -a targets=("$@")
-  local n=${#targets[@]} i entry
+  local n=${#targets[@]} i entry ts
 
   i="$w"
   while (($(date +%s) < deadline)); do
     entry="${targets[$((i % n))]}"
-    kubectl rollout restart deployment \
-      -n "${entry%%/*}" "${entry##*/}" >/dev/null 2>&1 || true
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)-${w}-${i}"
+    kubectl patch deployment \
+      -n "${entry%%/*}" "${entry##*/}" \
+      --type=merge \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"${ts}\"}}}}}" \
+      >/dev/null 2>&1 || true
     i=$((i + workers))
   done
 }
@@ -154,14 +248,40 @@ _fleet_churn_worker() {
 # lifecycle count: what happened, rather than what a driver asked for.
 # Timestamps are second-granularity UTC in a fixed layout, so a string
 # compare is a time compare.
-# Uses raw REST streaming + `tr` line-splitting rather than `kubectl get -o jsonpath`:
-# at 100k+ padded pods, `kubectl -o jsonpath` unmarshals ~1.8 GB of JSON
-# into Go maps (~36 GiB RSS), and `kubectl get --raw` emits a single
-# ~2 GB line that trips GNU grep's line buffer unless split on commas.
+# Uses per-namespace raw REST streaming + `tr` line-splitting rather than
+# a single cluster-wide `kubectl get -o jsonpath` or unpaginated `/api/v1/pods`:
+# at 100k–200k+ padded pods, `kubectl -o jsonpath` unmarshals ~3.1 GB of JSON
+# into Go maps (~60+ GiB RSS), an unpaginated cluster-wide raw GET exceeds
+# etcd gRPC's 2 GiB protobuf frame ceiling, and `kubectl get --raw` emits a
+# single multi-hundred-MB line per namespace that trips GNU grep's line buffer
+# unless split on commas.
 fleet_pods_created_since() {
-  kubectl get --raw "/api/v1/pods?labelSelector=${FLEET_LABEL}" 2>/dev/null \
-    | tr ',' '\n' \
-    | awk -F'"' -v since="$1" '$2 == "creationTimestamp" && $4 >= since { n++ } END { print n + 0 }'
+  local since="$1" tmpdir ns active=0 pid
+  local -a pids=()
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/kwok-created.XXXXXX")"
+  echo 0 >"$tmpdir/_zero"
+  while read -r ns; do
+    [[ -n "$ns" ]] || continue
+    (
+      kubectl get --raw "/api/v1/namespaces/${ns}/pods?labelSelector=${FLEET_LABEL}&resourceVersion=0" --request-timeout=120s 2>/dev/null \
+        | tr ',' '\n' \
+        | awk -F'"' -v since="$since" '$2 == "creationTimestamp" && $4 >= since { n++ } END { print n + 0 }' >"$tmpdir/$ns" || true
+    ) &
+    pids+=("$!")
+    active=$((active + 1))
+    if ((active >= 3)); then
+      for pid in "${pids[@]}"; do
+        wait "$pid" || true
+      done
+      pids=()
+      active=0
+    fi
+  done < <(kubectl get namespaces -l "$FLEET_LABEL" --chunk-size=0 --no-headers --request-timeout=60s 2>/dev/null | awk '{print $1}')
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+  awk '{s += $1} END {print s+0}' "$tmpdir"/*
+  rm -rf "$tmpdir"
 }
 
 # kwokctl_bin — resolve $KWOKCTL_BIN, `kwokctl` on PATH, or download the
@@ -211,11 +331,15 @@ kwokctl_bin() {
 
 require_kwok_installed() {
   if is_kwokctl_context; then
-    if ! kubectl get crd stages.kwok.x-k8s.io >/dev/null 2>&1; then
-      echo "ERROR: kwok Stage CRD is not installed in '$EXAMPLES_CONTEXT' — run examples/kwok/kwokctl-up first" >&2
-      exit 1
-    fi
-    return 0
+    local attempt
+    for attempt in 1 2 3; do
+      if kubectl get crd stages.kwok.x-k8s.io >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep "$attempt"
+    done
+    echo "ERROR: kwok Stage CRD is not installed in '$EXAMPLES_CONTEXT' — run examples/kwok/kwokctl-up first" >&2
+    exit 1
   fi
   if ! kubectl -n kube-system get deploy kwok-controller >/dev/null 2>&1; then
     echo "ERROR: kwok-controller is not installed — run examples/kwok/up first" >&2

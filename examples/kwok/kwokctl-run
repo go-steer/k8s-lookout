@@ -24,6 +24,7 @@
 # Usage:
 #   examples/kwok/kwokctl-run [nodes] [workloads] [replicas]
 #   examples/kwok/kwokctl-run                    # 2,000 nodes, 5,000 workloads, 100,500 pods
+#   examples/kwok/kwokctl-run 4000 5000 50       # 4,000 nodes, 5,000 workloads, 200,500 pods
 #   examples/kwok/kwokctl-run 400 1000 10        # smaller quick tier (~9,100 pods)
 #
 # Env:
@@ -63,6 +64,11 @@ for n in "$NODES" "$WORKLOADS" "$REPLICAS"; do
     exit 2
   fi
 done
+
+approx_pods=$(((WORKLOADS / 10) * (1 + 8 * REPLICAS)))
+if [[ -z "${KWOKCTL_ETCD_QUOTA:-}" ]] && ((approx_pods > 120000)); then
+  export KWOKCTL_ETCD_QUOTA="32Gi"
+fi
 
 WATCH_TSV="$STATE_DIR/watch-scale.tsv"
 BENCH_TSV="$STATE_DIR/bench.tsv"
@@ -153,7 +159,7 @@ watch_addr="127.0.0.1:${watch_port}"
 watch_log="$STATE_DIR/watch-scale.log"
 
 watch_nodes="$(kubectl get nodes --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
-watch_pods="$(kubectl get pods -A --chunk-size=0 --no-headers 2>/dev/null | grep -c . || true)"
+watch_pods="$(cluster_pod_count)"
 
 "$LOOKOUT_BIN" watch \
   --dry-run \
@@ -233,16 +239,8 @@ printf '  %-24s %s core\n' "steady-state CPU" "$watch_cpu_core"
 
 echo
 echo "━━━ [7/8] Running read-path benchmark suite (BENCH_REQUIRE_DEFAULT_TIMEOUT=$REQUIRE_DEFAULT_TO) ━━━"
-BENCH_REQUIRE_DEFAULT_TIMEOUT="$REQUIRE_DEFAULT_TO" "$(kwok_root)/bench"
-
-if [[ "$REQUIRE_DEFAULT_TO" == "1" ]]; then
-  bad_rows="$(awk -F'\t' 'NR > 1 && ($4 == "void" || $6 != "ok") { print $1 " (scanned=" $4 ", default_to=" $6 ")" }' "$BENCH_TSV")"
-  if [[ -n "$bad_rows" ]]; then
-    echo "ERROR: bench.tsv contains failed or timed-out commands:" >&2
-    echo "$bad_rows" >&2
-    exit 1
-  fi
-fi
+bench_rc=0
+BENCH_REQUIRE_DEFAULT_TIMEOUT="$REQUIRE_DEFAULT_TO" "$(kwok_root)/bench" || bench_rc=$?
 
 # ---- 8. Rung 2: rollout churn leeway-scale ----------------------------------
 
@@ -283,3 +281,12 @@ awk -F'\t' '
   }
 ' "$BENCH_TSV"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [[ "$REQUIRE_DEFAULT_TO" == "1" ]]; then
+  bad_rows="$(awk -F'\t' 'NR > 1 && ($4 == "void" || $6 != "ok") { print $1 " (scanned=" $4 ", default_to=" $6 ")" }' "$BENCH_TSV")"
+  if [[ -n "$bad_rows" ]] || ((bench_rc != 0)); then
+    echo "ERROR: read-path bench failed or missed shipped default --timeout:" >&2
+    [[ -n "$bad_rows" ]] && echo "$bad_rows" >&2
+    exit 1
+  fi
+fi

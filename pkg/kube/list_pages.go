@@ -35,14 +35,24 @@ import (
 const DefaultPageLimit int64 = 5000
 
 const (
+	// clusterProbePageLimit bounds the initial cluster-wide probe before fanning
+	// out across namespaces: <=500-item clusters complete in 1 API call with zero
+	// Namespaces() lookup, while 200k-pod clusters probe in ~40ms instead of
+	// fetching and discarding a 5,000-pod page on one connection.
+	clusterProbePageLimit int64 = 500
 	// clusterStreamWorkers bounds concurrent per-namespace list workers when a
-	// cluster-wide read spans more than DefaultPageLimit items across multiple
-	// namespaces, parallelizing Protobuf marshal/unmarshal across cores while
-	// staying well inside DefaultBurst=100.
+	// cluster-wide read spans more than clusterProbePageLimit items across
+	// multiple namespaces, parallelizing Protobuf decode across cores and
+	// sharded client connections.
 	clusterStreamWorkers = 12
 	// namespaceStreamPageLimit bounds per-worker page size during parallel
-	// namespace streaming so transient memory stays small across active workers.
+	// namespace streaming so 200k-pod sweeps stay under ~86 requests total
+	// (inside DefaultBurst=100 with zero client-side QPS wait) while halving
+	// transient per-page buffer memory.
 	namespaceStreamPageLimit int64 = 2500
+	// streamPageBuffer caps queued pages between parallel namespace workers and
+	// the sequential consumer goroutine so transient heap memory stays bounded.
+	streamPageBuffer = 4
 )
 
 // ListPages fetches all pages from list using Limit/Continue pagination and
@@ -199,7 +209,7 @@ func ListPagesStream[T any](
 //
 // Small or single-namespace clusters complete in one sequential paginated stream
 // with zero extra API calls. When ns == "" (all namespaces) and page 1 returns a
-// non-empty Continue token (> DefaultPageLimit items), StreamClusterNamespaced
+// non-empty Continue token (> clusterProbePageLimit items), StreamClusterNamespaced
 // probes CoreV1().Namespaces() and fans out bounded concurrent per-namespace
 // workers to parallelize API-server and client Protobuf encoding across cores,
 // while delivering every item sequentially to each on the caller's goroutine.
@@ -214,50 +224,86 @@ func StreamClusterNamespaced[T any](
 	reset func(),
 	each func(*T),
 ) error {
+	return streamClusterPagesNamespaced(ctx, client, ns, func(_ int, targetNS string) func(context.Context, metav1.ListOptions) ([]T, string, error) {
+		return listForNS(targetNS)
+	}, trim, reset, func(page []T) {
+		for i := range page {
+			each(&page[i])
+		}
+	})
+}
+
+func streamClusterPagesNamespaced[T any](
+	ctx context.Context,
+	client kubernetes.Interface,
+	ns string,
+	listForWorkerNS func(worker int, ns string) func(context.Context, metav1.ListOptions) ([]T, string, error),
+	trim func(*T),
+	reset func(),
+	eachPage func([]T),
+) error {
 	raw := unwrapCachedClient(client)
 	if ns != "" {
-		nsList := listForNS(ns)
-		return ListPagesStream(ctx, func(ctx context.Context, opts metav1.ListOptions) ([]T, string, error) {
-			items, next, err := nsList(ctx, opts)
+		nsList := listForWorkerNS(0, ns)
+		opts := metav1.ListOptions{Limit: DefaultPageLimit}
+		restarted := false
+		for {
+			page, next, err := nsList(ctx, opts)
 			if err != nil {
-				return nil, "", err
-			}
-			if trim != nil {
-				for i := range items {
-					trim(&items[i])
+				if (apierrors.IsResourceExpired(err) || apierrors.IsGone(err)) && !restarted {
+					restarted = true
+					if reset != nil {
+						reset()
+					}
+					opts = metav1.ListOptions{Limit: DefaultPageLimit}
+					continue
 				}
+				return err
 			}
-			return items, next, nil
-		}, reset, each)
+			if len(page) > 0 {
+				if trim != nil {
+					for i := range page {
+						trim(&page[i])
+					}
+				}
+				eachPage(page)
+			}
+			if next == "" {
+				return nil
+			}
+			opts.Continue = next
+		}
 	}
 
-	allList := listForNS("")
-	firstPage, next, err := allList(ctx, metav1.ListOptions{Limit: DefaultPageLimit})
+	allList := listForWorkerNS(0, "")
+	firstPage, next, err := allList(ctx, metav1.ListOptions{Limit: clusterProbePageLimit})
 	if err != nil {
 		return err
 	}
 	if next == "" {
-		for i := range firstPage {
+		if len(firstPage) > 0 {
 			if trim != nil {
-				trim(&firstPage[i])
+				for i := range firstPage {
+					trim(&firstPage[i])
+				}
 			}
-			each(&firstPage[i])
+			eachPage(firstPage)
 		}
 		return nil
 	}
 
 	nsNames, nsErr := listNamespaceNames(ctx, raw)
 	if nsErr != nil || len(nsNames) <= 1 {
-		return finishPagesSequential(ctx, allList, firstPage, next, trim, reset, each)
+		return finishPagesSequentialPages(ctx, allList, firstPage, next, trim, reset, eachPage)
 	}
 	firstPage = nil
 
-	err = runParallelNamespaceStream(ctx, nsNames, listForNS, trim, each)
+	err = runParallelNamespacePageStream(ctx, nsNames, listForWorkerNS, trim, eachPage)
 	if err != nil && (apierrors.IsResourceExpired(err) || apierrors.IsGone(err)) && ctx.Err() == nil {
 		if reset != nil {
 			reset()
 		}
-		err = runParallelNamespaceStream(ctx, nsNames, listForNS, trim, each)
+		err = runParallelNamespacePageStream(ctx, nsNames, listForWorkerNS, trim, eachPage)
 	}
 	return err
 }
@@ -284,20 +330,22 @@ func listNamespaceNames(ctx context.Context, client kubernetes.Interface) ([]str
 	})
 }
 
-func finishPagesSequential[T any](
+func finishPagesSequentialPages[T any](
 	ctx context.Context,
 	list func(context.Context, metav1.ListOptions) ([]T, string, error),
 	firstPage []T,
 	next string,
 	trim func(*T),
 	reset func(),
-	each func(*T),
+	eachPage func([]T),
 ) error {
-	for i := range firstPage {
+	if len(firstPage) > 0 {
 		if trim != nil {
-			trim(&firstPage[i])
+			for i := range firstPage {
+				trim(&firstPage[i])
+			}
 		}
-		each(&firstPage[i])
+		eachPage(firstPage)
 	}
 	opts := metav1.ListOptions{Limit: DefaultPageLimit, Continue: next}
 	restarted := false
@@ -314,11 +362,13 @@ func finishPagesSequential[T any](
 			}
 			return err
 		}
-		for i := range page {
+		if len(page) > 0 {
 			if trim != nil {
-				trim(&page[i])
+				for i := range page {
+					trim(&page[i])
+				}
 			}
-			each(&page[i])
+			eachPage(page)
 		}
 		if cont == "" {
 			return nil
@@ -327,12 +377,12 @@ func finishPagesSequential[T any](
 	}
 }
 
-func runParallelNamespaceStream[T any](
+func runParallelNamespacePageStream[T any](
 	ctx context.Context,
 	nsNames []string,
-	listForNS func(string) func(context.Context, metav1.ListOptions) ([]T, string, error),
+	listForWorkerNS func(worker int, ns string) func(context.Context, metav1.ListOptions) ([]T, string, error),
 	trim func(*T),
-	each func(*T),
+	eachPage func([]T),
 ) error {
 	workers := min(clusterStreamWorkers, len(nsNames))
 	workCtx, cancel := context.WithCancel(ctx)
@@ -344,7 +394,7 @@ func runParallelNamespaceStream[T any](
 	}
 	close(nsCh)
 
-	pageCh := make(chan []T, workers)
+	pageCh := make(chan []T, min(streamPageBuffer, workers))
 	var (
 		wg       sync.WaitGroup
 		errOnce  sync.Once
@@ -357,15 +407,15 @@ func runParallelNamespaceStream[T any](
 		})
 	}
 
-	for range workers {
+	for w := range workers {
 		wg.Add(1)
-		go func() {
+		go func(workerIdx int) {
 			defer wg.Done()
 			for nsName := range nsCh {
 				if workCtx.Err() != nil {
 					return
 				}
-				nsList := listForNS(nsName)
+				nsList := listForWorkerNS(workerIdx, nsName)
 				opts := metav1.ListOptions{Limit: namespaceStreamPageLimit}
 				for {
 					page, next, err := nsList(workCtx, opts)
@@ -394,7 +444,7 @@ func runParallelNamespaceStream[T any](
 					opts.Continue = next
 				}
 			}
-		}()
+		}(w)
 	}
 
 	go func() {
@@ -406,9 +456,7 @@ func runParallelNamespaceStream[T any](
 		if workCtx.Err() != nil {
 			continue
 		}
-		for i := range page {
-			each(&page[i])
-		}
+		eachPage(page)
 	}
 	if firstErr != nil {
 		return firstErr
@@ -417,8 +465,10 @@ func runParallelNamespaceStream[T any](
 }
 
 // StreamClusterPods streams Pods in scope ns, consulting any WithListCache
-// wrapper on client first and parallelizing >5,000-pod cluster-wide reads across
-// namespaces while invoking each sequentially on the caller's goroutine.
+// wrapper on client first and parallelizing >500-pod cluster-wide reads across
+// namespaces and sharded HTTP/2 connections while invoking each sequentially on
+// the caller's goroutine. When trim is nil, TrimReadPod is applied inside the
+// worker goroutines so ManagedFields and last-applied blobs are dropped per page.
 func StreamClusterPods(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -440,58 +490,138 @@ func StreamClusterPods(
 		}
 		return nil
 	}
-	return StreamClusterNamespaced(ctx, client, ns, func(targetNS string) func(context.Context, metav1.ListOptions) ([]corev1.Pod, string, error) {
+	if trim == nil {
+		trim = TrimReadPod
+	}
+	raw := unwrapCachedClient(client)
+	return streamClusterPagesNamespaced(ctx, raw, ns, func(worker int, targetNS string) func(context.Context, metav1.ListOptions) ([]corev1.Pod, string, error) {
+		shard := clientShard(raw, worker)
 		return func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
-			l, err := client.CoreV1().Pods(targetNS).List(ctx, opts)
+			l, err := shard.CoreV1().Pods(targetNS).List(ctx, opts)
 			if err != nil {
 				return nil, "", err
 			}
 			return l.Items, l.Continue, nil
 		}
-	}, trim, reset, each)
+	}, trim, reset, func(page []corev1.Pod) {
+		for i := range page {
+			each(&page[i])
+		}
+	})
 }
 
 // ListClusterPodsTrim fetches all Pods in scope ns with TrimReadPod applied per
-// page, using parallel per-namespace workers on >5,000-pod cluster-wide sweeps.
+// page, using parallel per-namespace workers and exact single-pass slice
+// allocation to avoid multi-GiB slice-doubling spikes on 200k-pod sweeps.
 func ListClusterPodsTrim(ctx context.Context, client kubernetes.Interface, ns string) ([]corev1.Pod, error) {
-	var all []corev1.Pod
-	err := StreamClusterPods(ctx, client, ns, TrimReadPod, func() {
-		all = nil
-	}, func(p *corev1.Pod) {
-		all = append(all, *p)
+	if wc, ok := client.(*cachedClient); ok {
+		l, err := wc.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		return slices.Clone(l.Items), nil
+	}
+	raw := unwrapCachedClient(client)
+	var pages [][]corev1.Pod
+	total := 0
+	err := streamClusterPagesNamespaced(ctx, raw, ns, func(worker int, targetNS string) func(context.Context, metav1.ListOptions) ([]corev1.Pod, string, error) {
+		shard := clientShard(raw, worker)
+		return func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+			l, err := shard.CoreV1().Pods(targetNS).List(ctx, opts)
+			if err != nil {
+				return nil, "", err
+			}
+			return l.Items, l.Continue, nil
+		}
+	}, TrimReadPod, func() {
+		pages = nil
+		total = 0
+	}, func(page []corev1.Pod) {
+		pages = append(pages, page)
+		total += len(page)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return slices.Clip(all), nil
+	if len(pages) == 1 {
+		return slices.Clip(pages[0]), nil
+	}
+	all := make([]corev1.Pod, 0, total)
+	for i := range pages {
+		all = append(all, pages[i]...)
+		pages[i] = nil
+	}
+	return all, nil
 }
 
-// ListClusterPodsMap streams all Pods in scope ns and collects compact mapped
-// projections for items where fn returns ok=true, never retaining full Pod
-// objects across pages.
+// ListClusterPodsMap streams all Pods in scope ns, projecting items via fn
+// directly inside the parallel worker goroutines so full Pod pages are dropped
+// immediately per worker without crossing channels or retaining unused fields.
 func ListClusterPodsMap[R any](
 	ctx context.Context,
 	client kubernetes.Interface,
 	ns string,
 	fn func(*corev1.Pod) (R, bool),
 ) ([]R, error) {
-	var all []R
-	err := StreamClusterPods(ctx, client, ns, nil, func() {
-		all = nil
-	}, func(p *corev1.Pod) {
-		if mapped, ok := fn(p); ok {
-			all = append(all, mapped)
+	if wc, ok := client.(*cachedClient); ok {
+		l, err := wc.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
 		}
+		all := make([]R, 0, len(l.Items))
+		for i := range l.Items {
+			if mapped, ok := fn(&l.Items[i]); ok {
+				all = append(all, mapped)
+			}
+		}
+		return slices.Clip(all), nil
+	}
+	raw := unwrapCachedClient(client)
+	var pages [][]R
+	total := 0
+	err := streamClusterPagesNamespaced(ctx, raw, ns, func(worker int, targetNS string) func(context.Context, metav1.ListOptions) ([]R, string, error) {
+		shard := clientShard(raw, worker)
+		return func(ctx context.Context, opts metav1.ListOptions) ([]R, string, error) {
+			l, err := shard.CoreV1().Pods(targetNS).List(ctx, opts)
+			if err != nil {
+				return nil, "", err
+			}
+			var mapped []R
+			for i := range l.Items {
+				if v, ok := fn(&l.Items[i]); ok {
+					if mapped == nil {
+						mapped = make([]R, 0, len(l.Items)-i)
+					}
+					mapped = append(mapped, v)
+				}
+			}
+			return mapped, l.Continue, nil
+		}
+	}, nil, func() {
+		pages = nil
+		total = 0
+	}, func(page []R) {
+		pages = append(pages, page)
+		total += len(page)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return slices.Clip(all), nil
+	if len(pages) == 1 {
+		return slices.Clip(pages[0]), nil
+	}
+	all := make([]R, 0, total)
+	for i := range pages {
+		all = append(all, pages[i]...)
+		pages[i] = nil
+	}
+	return all, nil
 }
 
 // StreamClusterEvents streams corev1.Events in scope ns, parallelizing
-// >5,000-event cluster-wide reads across namespaces while delivering every
-// event sequentially to each on the caller's goroutine.
+// >500-event cluster-wide reads across namespaces and sharded HTTP/2
+// connections while delivering every event sequentially to each on the caller's
+// goroutine.
 func StreamClusterEvents(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -500,15 +630,20 @@ func StreamClusterEvents(
 	each func(*corev1.Event),
 ) error {
 	raw := unwrapCachedClient(client)
-	return StreamClusterNamespaced(ctx, raw, ns, func(targetNS string) func(context.Context, metav1.ListOptions) ([]corev1.Event, string, error) {
+	return streamClusterPagesNamespaced(ctx, raw, ns, func(worker int, targetNS string) func(context.Context, metav1.ListOptions) ([]corev1.Event, string, error) {
+		shard := clientShard(raw, worker)
 		return func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Event, string, error) {
-			l, err := raw.CoreV1().Events(targetNS).List(ctx, opts)
+			l, err := shard.CoreV1().Events(targetNS).List(ctx, opts)
 			if err != nil {
 				return nil, "", err
 			}
 			return l.Items, l.Continue, nil
 		}
-	}, nil, reset, each)
+	}, nil, reset, func(page []corev1.Event) {
+		for i := range page {
+			each(&page[i])
+		}
+	})
 }
 
 // TrimReadPod drops high-overhead metadata from a Pod fetched on the one-shot

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -347,8 +348,18 @@ func listDrainIndex(ctx context.Context, client kubernetes.Interface) (*drainInd
 			return nil
 		},
 	}
+	errs := make([]error, len(steps))
+	var wg sync.WaitGroup
 	for i, step := range steps {
-		err := step()
+		wg.Add(1)
+		go func(idx int, fn func() error) {
+			defer wg.Done()
+			errs[idx] = fn()
+		}(i, step)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
 		if err == nil {
 			continue
 		}

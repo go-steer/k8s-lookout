@@ -79,6 +79,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -289,9 +290,9 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 	}
 	steps := []struct {
 		resource string
-		run      func() error
+		run      func() (int, error)
 	}{
-		{volPods, func() error {
+		{volPods, func() (int, error) {
 			var pods []volumePod
 			podScanned := 0
 			err := kube.StreamClusterPods(ctx, client, ns, nil, func() {
@@ -321,40 +322,45 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				})
 			})
 			if err != nil {
-				return fmt.Errorf("listing pods: %w", err)
+				return 0, fmt.Errorf("listing pods: %w", err)
 			}
 			vix.pods = pods
-			vix.scanned += podScanned
-			return nil
+			return podScanned, nil
 		}},
-		{volPVCs, func() error {
-			return listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
+		{volPVCs, func() (int, error) {
+			n := 0
+			err := listPages("persistentvolumeclaims", func(o metav1.ListOptions) ([]corev1.PersistentVolumeClaim, string, error) {
 				l, err := client.CoreV1().PersistentVolumeClaims(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(c *corev1.PersistentVolumeClaim) { vix.pvcs[key(c.Namespace, c.Name)] = c; vix.scanned++ })
+			}, func(c *corev1.PersistentVolumeClaim) { vix.pvcs[key(c.Namespace, c.Name)] = c; n++ })
+			return n, err
 		}},
-		{volPVs, func() error {
-			return listPages("persistentvolumes", func(o metav1.ListOptions) ([]corev1.PersistentVolume, string, error) {
+		{volPVs, func() (int, error) {
+			n := 0
+			err := listPages("persistentvolumes", func(o metav1.ListOptions) ([]corev1.PersistentVolume, string, error) {
 				l, err := client.CoreV1().PersistentVolumes().List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(pv *corev1.PersistentVolume) { vix.pvs[pv.Name] = pv; vix.scanned++ })
+			}, func(pv *corev1.PersistentVolume) { vix.pvs[pv.Name] = pv; n++ })
+			return n, err
 		}},
-		{volAttachments, func() error {
-			return listPages("volumeattachments", func(o metav1.ListOptions) ([]storagev1.VolumeAttachment, string, error) {
+		{volAttachments, func() (int, error) {
+			n := 0
+			err := listPages("volumeattachments", func(o metav1.ListOptions) ([]storagev1.VolumeAttachment, string, error) {
 				l, err := client.StorageV1().VolumeAttachments().List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(a *storagev1.VolumeAttachment) { vix.attachments = append(vix.attachments, a); vix.scanned++ })
+			}, func(a *storagev1.VolumeAttachment) { vix.attachments = append(vix.attachments, a); n++ })
+			return n, err
 		}},
-		{volNodes, func() error {
+		{volNodes, func() (int, error) {
 			nodeScanned := 0
 			zones := map[string]string{}
 			err := kube.ListPagesStream(ctx, func(ctx context.Context, o metav1.ListOptions) ([]corev1.Node, string, error) {
@@ -371,19 +377,39 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 				zones[n.Name] = volumeNodeZone(n)
 			})
 			if err != nil {
-				return fmt.Errorf("listing nodes: %w", err)
+				return 0, fmt.Errorf("listing nodes: %w", err)
 			}
 			vix.nodeZones = zones
-			vix.scanned += nodeScanned
-			return nil
+			return nodeScanned, nil
 		}},
 	}
+	stepCounts := make([]int, len(steps))
+	stepErrs := make([]error, len(steps))
+	var (
+		wg      sync.WaitGroup
+		wlApply func() error
+	)
+	for i, step := range steps {
+		wg.Add(1)
+		go func(idx int, fn func() (int, error)) {
+			defer wg.Done()
+			stepCounts[idx], stepErrs[idx] = fn()
+		}(i, step.run)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wlApply = vix.fetchWorkloadTemplates(ctx, client, ns)
+	}()
+	wg.Wait()
+
 	// A refused List degrades (#546): the checks that join over it are
 	// skipped with a read.unavailable record (see findings), and the
 	// rest still answer. Any other error stays fatal.
-	for _, step := range steps {
-		err := step.run()
+	for i, step := range steps {
+		err := stepErrs[i]
 		if err == nil {
+			vix.scanned += stepCounts[i]
 			continue
 		}
 		if _, forbidden := ListForbidden(err); forbidden {
@@ -392,7 +418,7 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 		}
 		return nil, err
 	}
-	if err := vix.listWorkloadTemplates(ctx, client, ns); err != nil {
+	if err := wlApply(); err != nil {
 		return nil, err
 	}
 	_ = listPages("storageclasses", func(o metav1.ListOptions) ([]storagev1.StorageClass, string, error) {
@@ -405,96 +431,147 @@ func listVolumeIndex(ctx context.Context, client kubernetes.Interface, ns string
 	return vix, nil
 }
 
-// listWorkloadTemplates pages through the workload kinds whose pod
-// templates (and StatefulSet claim templates) can reference a claim.
-// Unlike the Lists above, a refused one degrades rather than fails
-// (#546): it costs only the unconsumed-claim judgment, so every other
-// volume check still answers. Any other error stays fatal.
-func (vix *volumeIndex) listWorkloadTemplates(ctx context.Context, client kubernetes.Interface, ns string) error {
-	addSpec := func(namespace string, spec *corev1.PodSpec) {
-		for _, v := range spec.Volumes {
+// fetchWorkloadTemplates pages concurrently through the workload kinds whose
+// pod templates (and StatefulSet claim templates) can reference a claim, and
+// returns a deterministic merge closure to apply after main-pass error checks.
+// Unlike the Lists above, a refused one degrades rather than fails (#546): it
+// costs only the unconsumed-claim judgment, so every other volume check still
+// answers. Any other error stays fatal.
+func (vix *volumeIndex) fetchWorkloadTemplates(ctx context.Context, client kubernetes.Interface, ns string) func() error {
+	type wlStepResult struct {
+		claims      []string
+		stsPrefixes map[string][]string
+		scanned     int
+		err         error
+	}
+	collectSpec := func(dst *[]string, namespace string, spec *corev1.PodSpec) {
+		for i := range spec.Volumes {
+			v := &spec.Volumes[i]
 			if v.PersistentVolumeClaim != nil {
-				vix.templateClaims[key(namespace, v.PersistentVolumeClaim.ClaimName)] = true
+				*dst = append(*dst, key(namespace, v.PersistentVolumeClaim.ClaimName))
 			}
 		}
 	}
 	steps := []struct {
 		resource checks.Refusal
-		run      func() error
+		run      func() wlStepResult
 	}{
-		{volResDeployments, func() error {
-			return listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
+		{volResDeployments, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("deployments", func(o metav1.ListOptions) ([]appsv1.Deployment, string, error) {
 				l, err := client.AppsV1().Deployments(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(d *appsv1.Deployment) { addSpec(d.Namespace, &d.Spec.Template.Spec); vix.scanned++ })
+			}, func(d *appsv1.Deployment) {
+				collectSpec(&res.claims, d.Namespace, &d.Spec.Template.Spec)
+				res.scanned++
+			})
+			return res
 		}},
-		{volResStatefulSets, func() error {
-			return listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
+		{volResStatefulSets, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("statefulsets", func(o metav1.ListOptions) ([]appsv1.StatefulSet, string, error) {
 				l, err := client.AppsV1().StatefulSets(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
 			}, func(s *appsv1.StatefulSet) {
-				addSpec(s.Namespace, &s.Spec.Template.Spec)
+				collectSpec(&res.claims, s.Namespace, &s.Spec.Template.Spec)
 				for _, vct := range s.Spec.VolumeClaimTemplates {
-					vix.stsClaimPrefixes[s.Namespace] = append(vix.stsClaimPrefixes[s.Namespace], vct.Name+"-"+s.Name+"-")
+					if res.stsPrefixes == nil {
+						res.stsPrefixes = map[string][]string{}
+					}
+					res.stsPrefixes[s.Namespace] = append(res.stsPrefixes[s.Namespace], vct.Name+"-"+s.Name+"-")
 				}
-				vix.scanned++
+				res.scanned++
 			})
+			return res
 		}},
-		{volResDaemonSets, func() error {
-			return listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
+		{volResDaemonSets, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("daemonsets", func(o metav1.ListOptions) ([]appsv1.DaemonSet, string, error) {
 				l, err := client.AppsV1().DaemonSets(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(d *appsv1.DaemonSet) { addSpec(d.Namespace, &d.Spec.Template.Spec); vix.scanned++ })
+			}, func(d *appsv1.DaemonSet) { collectSpec(&res.claims, d.Namespace, &d.Spec.Template.Spec); res.scanned++ })
+			return res
 		}},
-		{volResReplicaSets, func() error {
-			return listPages("replicasets", func(o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
+		{volResReplicaSets, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("replicasets", func(o metav1.ListOptions) ([]appsv1.ReplicaSet, string, error) {
 				l, err := client.AppsV1().ReplicaSets(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(r *appsv1.ReplicaSet) { addSpec(r.Namespace, &r.Spec.Template.Spec); vix.scanned++ })
+			}, func(r *appsv1.ReplicaSet) {
+				collectSpec(&res.claims, r.Namespace, &r.Spec.Template.Spec)
+				res.scanned++
+			})
+			return res
 		}},
-		{volResJobs, func() error {
-			return listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
+		{volResJobs, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("jobs", func(o metav1.ListOptions) ([]batchv1.Job, string, error) {
 				l, err := client.BatchV1().Jobs(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(j *batchv1.Job) { addSpec(j.Namespace, &j.Spec.Template.Spec); vix.scanned++ })
+			}, func(j *batchv1.Job) { collectSpec(&res.claims, j.Namespace, &j.Spec.Template.Spec); res.scanned++ })
+			return res
 		}},
-		{volResCronJobs, func() error {
-			return listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
+		{volResCronJobs, func() wlStepResult {
+			var res wlStepResult
+			res.err = listPages("cronjobs", func(o metav1.ListOptions) ([]batchv1.CronJob, string, error) {
 				l, err := client.BatchV1().CronJobs(ns).List(ctx, o)
 				if err != nil {
 					return nil, "", err
 				}
 				return l.Items, l.Continue, nil
-			}, func(c *batchv1.CronJob) { addSpec(c.Namespace, &c.Spec.JobTemplate.Spec.Template.Spec); vix.scanned++ })
+			}, func(c *batchv1.CronJob) {
+				collectSpec(&res.claims, c.Namespace, &c.Spec.JobTemplate.Spec.Template.Spec)
+				res.scanned++
+			})
+			return res
 		}},
 	}
-	for _, step := range steps {
-		err := step.run()
-		if err == nil {
-			continue
-		}
-		if _, forbidden := ListForbidden(err); forbidden {
-			vix.unread = append(vix.unread, step.resource)
-			continue
-		}
-		return err
+	results := make([]wlStepResult, len(steps))
+	var wg sync.WaitGroup
+	for i, step := range steps {
+		wg.Add(1)
+		go func(idx int, fn func() wlStepResult) {
+			defer wg.Done()
+			results[idx] = fn()
+		}(i, step.run)
 	}
-	return nil
+	wg.Wait()
+
+	return func() error {
+		for i, step := range steps {
+			res := results[i]
+			if res.err != nil {
+				if _, forbidden := ListForbidden(res.err); forbidden {
+					vix.unread = append(vix.unread, step.resource)
+					continue
+				}
+				return res.err
+			}
+			vix.scanned += res.scanned
+			for _, cl := range res.claims {
+				vix.templateClaims[cl] = true
+			}
+			for nsKey, prefs := range res.stsPrefixes {
+				vix.stsClaimPrefixes[nsKey] = append(vix.stsClaimPrefixes[nsKey], prefs...)
+			}
+		}
+		return nil
+	}
 }
 
 // volumeRefusedCost names, per main-pass List, what `state volumes`
