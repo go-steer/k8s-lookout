@@ -290,6 +290,7 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   - [`milestones/`](./milestones/) — M0–M5 completion records with
     exit-check evidence.
   - [`assessments/`](./assessments/) — competitive & detection-coverage
-    assessments (k8sgpt, LangChain SRE agent).
+    assessments (k8sgpt, LangChain SRE agent, kube-agents event-watcher
+    noise controls).
   - [`appendix-v2-dataplane-intelligence.md`](./appendix-v2-dataplane-intelligence.md)
     — historical only; nothing in it is normative.
