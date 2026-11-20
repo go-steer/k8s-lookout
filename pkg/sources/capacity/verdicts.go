@@ -399,12 +399,9 @@ func (s *Source) LookupPodSchedulingState(namespace, name, uid string) engine.Po
 	}
 	s.mu.Lock()
 	lister := s.podLister
-	synced := s.armed
-	if !synced && s.podSynced != nil {
-		synced = s.podSynced()
-	}
+	armed := s.armed
 	s.mu.Unlock()
-	if lister == nil || !synced {
+	if lister == nil || !armed {
 		return engine.PodSchedulingUnknown
 	}
 	pod, err := lister.Pods(namespace).Get(name)

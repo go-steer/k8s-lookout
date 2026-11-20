@@ -328,7 +328,6 @@ type Source struct {
 	// sampleCluster directly.
 	podLister  corelisters.PodLister
 	nodeLister corelisters.NodeLister
-	podSynced  func() bool
 	// verdicts caches per-pod autoscaler verdicts (TriggeredScaleUp,
 	// NotTriggerScaleUp, FailedScaleUp) recorded pre- and post-arming
 	// (#835). Guarded by its own mutex.
@@ -559,7 +558,6 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 	s.mu.Lock()
 	s.podLister = factory.Core().V1().Pods().Lister()
 	s.nodeLister = nodeFactory.Core().V1().Nodes().Lister()
-	s.podSynced = podH.HasSynced
 	s.mu.Unlock()
 
 	factory.Start(ctx.Done())

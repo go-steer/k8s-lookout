@@ -258,6 +258,12 @@ func TestLookupPodSchedulingState(t *testing.T) {
 	if !cache.WaitForCacheSync(ctx.Done(), podInf.HasSynced) {
 		t.Fatal("pod informer failed to sync")
 	}
+	// Pod informer synced, but capacity source is NOT armed yet (e.g. node or
+	// event informer still syncing, so sweepPending is not running): MUST still
+	// return PodSchedulingUnknown so the gate fails open.
+	if got := s.LookupPodSchedulingState("shop", "unsched", "uid-unsched"); got != engine.PodSchedulingUnknown {
+		t.Fatalf("pod-synced but unarmed lookup = %v, want PodSchedulingUnknown", got)
+	}
 	s.arm()
 
 	cases := []struct {
