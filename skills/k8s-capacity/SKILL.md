@@ -101,7 +101,17 @@ the reactive `FailedScheduling` Event, the CA's `NotTriggerScaleUp`
 (`capacity.pending`), and the aged-pending sweep (`capacity.pending-aged`)
 — all deduping into ONE session (`canonical_reason=FailedScheduling`).
 Expect them in the session you were handed; do not open parallel
-investigations per signal. When the CA decision names the structured why
+investigations per signal. Because `FailedScheduling` is gated on the
+autoscaler's verdict when the `capacity` source is enabled, "the
+autoscaler already declined" (`NotTriggerScaleUp` / `FailedScaleUp`) is
+a likely state on arrival: on legacy-count recorders a declined pod
+opens within ≤5 m and an unruled pod opens at `count >= 5` and
+`span >= 2m` (~20 m on a quiet cluster); on `events.k8s.io/v1`
+series-only recorders (upstream `kube-scheduler` and GKE 1.36/1.37
+schedulers, where occurrences 3+ batch until the 30 m refresh),
+`capacity.pending-aged` critical (15 m) is the primary pager for
+`Reason=Unschedulable` pods while `Reason=SchedulerError` pods fail open
+on event #1. When the CA decision names the structured why
 (`capacity.stockout` / `capacity.quota_blocked` / `capacity.ip_exhausted`,
 GKE provider only), the failure class above is already decided for you;
 otherwise run the sweep commands to determine it.

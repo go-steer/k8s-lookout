@@ -83,53 +83,54 @@ func newFleetMetrics(reg prometheus.Registerer) *fleetMetrics {
 // registry, wire metrics into it, and assert values without
 // stringifying Prometheus output.
 type metrics struct {
-	registry               *prometheus.Registry
-	eventsSeen             *prometheus.CounterVec
-	eventsInjected         *prometheus.CounterVec
-	eventsDedupSuppress    *prometheus.CounterVec
-	eventsFiltered         *prometheus.CounterVec
-	injectErrors           *prometheus.CounterVec
-	injectShrinks          *prometheus.CounterVec
-	sessionCreates         *prometheus.CounterVec
-	activeIncidents        prometheus.Gauge
-	recoveriesObserved     *prometheus.CounterVec
-	recoveriesReverted     prometheus.Counter
-	recoveryTracking       prometheus.Gauge
-	recoveryDrops          *prometheus.CounterVec
-	stormsFormed           prometheus.Counter
-	stormsResolved         prometheus.Counter
-	stormsActive           prometheus.Gauge
-	stormMembers           *prometheus.CounterVec
-	stormUpdates           prometheus.Counter
-	watchboardEntries      *prometheus.CounterVec
-	watchboardDigests      prometheus.Counter
-	watchboardRotations    prometheus.Counter
-	watchboardSessionsLost prometheus.Counter
-	watchboardBuffered     prometheus.Gauge
-	watchboardReattached   *prometheus.CounterVec
-	infoDropped            *prometheus.CounterVec
-	findings               *prometheus.CounterVec
-	storeRecords           *prometheus.CounterVec
-	storeDrops             *prometheus.CounterVec
-	storePruned            *prometheus.CounterVec
-	enrichments            *prometheus.CounterVec
-	enrichmentBytes        prometheus.Histogram
-	enrichmentTruncated    prometheus.Counter
-	enrichmentFailures     *prometheus.CounterVec
-	memoryFacts            *prometheus.CounterVec
-	distillErrors          prometheus.Counter
-	triageOverrides        *prometheus.CounterVec
-	triageFlips            prometheus.Counter
-	triageRegressed        prometheus.Counter
-	crossSourceFollowups   *prometheus.CounterVec
-	repeatFollowups        *prometheus.CounterVec
-	axReminders            *prometheus.CounterVec
-	sinkInfo               *prometheus.GaugeVec
-	runnerUp               prometheus.Gauge
-	runnerRestarts         prometheus.Counter
-	runnerTerminal         *prometheus.GaugeVec
-	sourceDenied           *prometheus.GaugeVec
-	namespaceErrors        *prometheus.CounterVec
+	registry                *prometheus.Registry
+	eventsSeen              *prometheus.CounterVec
+	eventsInjected          *prometheus.CounterVec
+	eventsDedupSuppress     *prometheus.CounterVec
+	eventsFiltered          *prometheus.CounterVec
+	scaleUpVerdictsRejected prometheus.Counter
+	injectErrors            *prometheus.CounterVec
+	injectShrinks           *prometheus.CounterVec
+	sessionCreates          *prometheus.CounterVec
+	activeIncidents         prometheus.Gauge
+	recoveriesObserved      *prometheus.CounterVec
+	recoveriesReverted      prometheus.Counter
+	recoveryTracking        prometheus.Gauge
+	recoveryDrops           *prometheus.CounterVec
+	stormsFormed            prometheus.Counter
+	stormsResolved          prometheus.Counter
+	stormsActive            prometheus.Gauge
+	stormMembers            *prometheus.CounterVec
+	stormUpdates            prometheus.Counter
+	watchboardEntries       *prometheus.CounterVec
+	watchboardDigests       prometheus.Counter
+	watchboardRotations     prometheus.Counter
+	watchboardSessionsLost  prometheus.Counter
+	watchboardBuffered      prometheus.Gauge
+	watchboardReattached    *prometheus.CounterVec
+	infoDropped             *prometheus.CounterVec
+	findings                *prometheus.CounterVec
+	storeRecords            *prometheus.CounterVec
+	storeDrops              *prometheus.CounterVec
+	storePruned             *prometheus.CounterVec
+	enrichments             *prometheus.CounterVec
+	enrichmentBytes         prometheus.Histogram
+	enrichmentTruncated     prometheus.Counter
+	enrichmentFailures      *prometheus.CounterVec
+	memoryFacts             *prometheus.CounterVec
+	distillErrors           prometheus.Counter
+	triageOverrides         *prometheus.CounterVec
+	triageFlips             prometheus.Counter
+	triageRegressed         prometheus.Counter
+	crossSourceFollowups    *prometheus.CounterVec
+	repeatFollowups         *prometheus.CounterVec
+	axReminders             *prometheus.CounterVec
+	sinkInfo                *prometheus.GaugeVec
+	runnerUp                prometheus.Gauge
+	runnerRestarts          prometheus.Counter
+	runnerTerminal          *prometheus.GaugeVec
+	sourceDenied            *prometheus.GaugeVec
+	namespaceErrors         *prometheus.CounterVec
 
 	// reasonSeen tracks the distinct free-form reason values already
 	// admitted to the "reason" label, bounded by reasonLabelCap
@@ -190,8 +191,12 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"reason", "namespace"}),
 		eventsFiltered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_events_filtered_total",
-			Help: "Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed|namespace_excluded|namespace_not_allowed|unhealthy_debounce|crashloop_debounce|imagepull_transient_debounce). The leading-edge debounces deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.",
+			Help: "Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed|namespace_excluded|namespace_not_allowed|unhealthy_debounce|crashloop_debounce|imagepull_transient_debounce|failedscheduling_not_pending|failedscheduling_stale|scaleup_hold|autopilot_scale_to_zero|failedscheduling_min_count|failedscheduling_min_span). The leading-edge debounces and FailedScheduling verdict gate deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.",
 		}, []string{"gate"}),
+		scaleUpVerdictsRejected: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lookout_watch_scaleup_verdicts_rejected_total",
+			Help: "Total TriggeredScaleUp, NotTriggerScaleUp, or FailedScaleUp Pod events ignored by the capacity verdict memo because their reporter (source.component or reportingController) was not cluster-autoscaler.",
+		}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_inject_errors_total",
 			Help: "Total payload deliveries (or incident opens) against the configured sink that returned a non-2xx response or transport error. Counts sink operations regardless of --sink.",
@@ -388,6 +393,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.eventsInjected,
 		m.eventsDedupSuppress,
 		m.eventsFiltered,
+		m.scaleUpVerdictsRejected,
 		m.injectErrors,
 		m.injectShrinks,
 		m.sessionCreates,

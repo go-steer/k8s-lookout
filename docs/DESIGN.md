@@ -598,6 +598,57 @@ Filter, dedup, and the injector are extractions of the shipped
 `filter.go` / `dedup.go` / `injector.go` into `pkg/engine` and `pkg/inject`.
 Storm correlation, severity routing, and enrichment are new stages.
 
+#### `FailedScheduling` autoscaler-verdict gate (#835)
+
+When the `capacity` source is enabled, `pkg/engine.Filter` gates `k8s-event`
+`FailedScheduling` signals in strict order before dedup:
+
+1. **Fail-open pod-state point lookup** on `capacity`'s synced `podLister`:
+   bound (`spec.nodeName != ""` / `phase != Pending` / `PodScheduled=True`),
+   absent, or UID-mismatched pods hold as `failedscheduling_not_pending`
+   (blocking delayed `events.k8s.io/v1` `finishSeries` writes); Pending pods
+   with `PodScheduled=False` and `Reason != Unschedulable` (e.g.
+   `SchedulerError`, which neither `capacity.pending-aged` nor autoscaler
+   verdicts cover) pass immediately; Pending pods with `Reason=Unschedulable`
+   or no `PodScheduled=False` condition yet (informer cache lag) continue into
+   the gate.
+2. **Stale sighting hold** (`> 15m` since `LastSeen`, zero fails open) →
+   `failedscheduling_stale`.
+3. **Autoscaler verdict check** against `capacity`'s bounded per-cluster
+   `(namespace, uid)` verdict memo (4,096 entries with per-namespace fair
+   eviction, TTL `max(--dedup-window, --scaleup-hold + 15m)`, recorded
+   pre-arming from `cluster-autoscaler` `TriggeredScaleUp`,
+   `NotTriggerScaleUp`, and `FailedScaleUp` Pod events; same-second trigger vs
+   decline ties resolve to trigger per `pkg/leeway/scaleup.go`):
+   - `NotTriggerScaleUp` / `FailedScaleUp` strictly predating `LastSeen` at 1 s
+     truncation (`sig.LastSeen.Truncate(1s) > verdict.At.Truncate(1s)`) passes
+     immediately;
+   - `TriggeredScaleUp` within `--scaleup-hold` (default `15m`) of `LastSeen`
+     holds as `scaleup_hold`.
+4. **Autopilot scale-to-zero hold** (`--autopilot-scale-to-zero-hold`, default
+   `true`): when `pkg/cloud.Provider`'s `ClusterConfig.Autopilot` is true
+   (absent provider / unavailable `ClusterConfig` fails open with an explicit
+   startup log line), an exact trimmed message `"no nodes available to schedule
+   pods"` with no autoscaler verdict holds as `autopilot_scale_to_zero`.
+5. **Count and span backstop**: `--failedscheduling-min-count` (default `5`;
+   `0` fails open, `1` disables) → `failedscheduling_min_count`, then
+   `--failedscheduling-min-span` (default `2m`; zero timestamps fail open, `0`
+   disables) → `failedscheduling_min_span`.
+
+**Safety boundaries:** if the `capacity` source is not enabled (e.g.
+`--sources=k8s-events` or `--sources=auto` skipping `capacity`), the entire
+gate auto-disables with one loud startup log line so no pod is ever held up to
+30 m on a series-only scheduler without `capacity.pending-aged` (15 m critical)
+running as the safety net. Because `source.component` / `reportingController`
+is author-written (not authenticated by `kube-apiserver`), any forged
+`cluster-autoscaler` `TriggeredScaleUp` mute is bounded at 15 m by
+`capacity.pending-aged`, which reads Pod conditions rather than Events.
+Disabling all four `(experimental)` knobs disables the entire gate (including
+`not_pending` and `stale`), keeping event-#1 behavior reachable by flag. Per-pod
+gate decisions are logged at most once per 15 m unless the decision changes
+(bounded 50k-entry memo), while `lookout_events_filtered_total{gate}` counts
+every sighting.
+
 ### 7.2 Signal sources
 
 Each source is a package under `pkg/sources` implementing:
@@ -740,15 +791,16 @@ its agent re-diagnosed an unchanged failure each time. Now:
     (second-granular on legacy Events) is compared against sentinel
     wall-clock `ResolvedAt`, a genuine recurrence within the same second
     as resolution can be suppressed once; the next event or
-    `resolved.reverted` covers it. Two `finishSeries` residuals remain
-    outside the `ResolvedAt` guard because `MarkResolved` has not run yet:
-    (a) when recovery tracking is disabled (`--recovery-stable-for=0` or
-    no pod-read RBAC), a post-window flush falls through to Case 3 and
-    opens fresh; (b) when a flush arrives while the tracker is still in
-    `clearing` (before `--recovery-stable-for` elapses), Case 2 treats the
-    advanced timestamp as a `DedupRepeat` reminder into the existing
-    session. Both residuals are closed for `FailedScheduling` by #835's
-    pre-dedup `failedscheduling_not_pending` pod-state lookup.
+    `resolved.reverted` covers it. Two `finishSeries` residuals outside the
+    `ResolvedAt` guard (because `MarkResolved` has not run yet) — (a) recovery
+    tracking disabled (`--recovery-stable-for=0` or no pod-read RBAC), where a
+    post-window flush falls through to Case 3, and (b) a flush arriving while
+    the tracker is still in `clearing` (before `--recovery-stable-for` elapses),
+    where Case 2 treats the advanced timestamp as a `DedupRepeat` reminder —
+    are closed for `FailedScheduling` whenever the `capacity` source is enabled
+    by `#835`'s pre-dedup `failedscheduling_not_pending` pod-state lookup (and
+    remain only when `capacity` is off or for non-`FailedScheduling`
+    series-only emitters).
   - An Event whose timestamp advances strictly past both the last
     processed timestamp and `ResolvedAt` clears the tombstone and opens a
     new incident like any first sighting.

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+BASE_SCALEUP_HOLD=0
+BASE_REJECTED=0
+if [[ -f "$STATE_DIR/pending-scaleup.base" ]]; then
+  # shellcheck disable=SC1090
+  . "$STATE_DIR/pending-scaleup.base"
+fi
+
+echo "▸ verify pending-scaleup Phase A (Pod A: TriggeredScaleUp holds FailedScheduling)"
+want_hold=$((BASE_SCALEUP_HOLD + 1))
+await_metric_ge 360 lookout_events_filtered_total 'gate="scaleup_hold"' "$want_hold"
+pod_a_opens="$(leeway_wire_count pending-scaleup 'kind=k8s-event' 'FailedScheduling' 'hog-scaleup-a')"
+if ((pod_a_opens != 0)); then
+  echo "  ✗ expected 0 k8s-event FailedScheduling opens for hog-scaleup-a under TriggeredScaleUp, got $pod_a_opens" >&2
+  exit 1
+fi
+echo "  ✓ Pod A held under scaleup_hold (0 k8s-event opens)"
+
+echo "▸ verify pending-scaleup Phase B (Pod B: wrong-reporter negative + NotTriggerScaleUp short-circuit)"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hog-scaleup-b
+  namespace: $DEMO_NS
+  labels:
+    app.kubernetes.io/name: hog-scaleup-b
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  restartPolicy: Never
+  containers:
+    - name: hog
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: "64"
+YAML
+
+uid_b="$(kubectl -n "$DEMO_NS" get pod hog-scaleup-b -o jsonpath='{.metadata.uid}')"
+ts_b="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Event
+metadata:
+  name: hog-scaleup-b-forged
+  namespace: $DEMO_NS
+involvedObject:
+  apiVersion: v1
+  kind: Pod
+  name: hog-scaleup-b
+  namespace: $DEMO_NS
+  uid: "$uid_b"
+reason: TriggeredScaleUp
+message: "forged scale-up from unexpected controller"
+type: Normal
+count: 1
+firstTimestamp: "$ts_b"
+lastTimestamp: "$ts_b"
+source:
+  component: fake-controller
+YAML
+want_rejected=$((BASE_REJECTED + 1))
+await_metric_ge 60 lookout_watch_scaleup_verdicts_rejected_total '' "$want_rejected"
+
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Event
+metadata:
+  name: hog-scaleup-b-declined
+  namespace: $DEMO_NS
+involvedObject:
+  apiVersion: v1
+  kind: Pod
+  name: hog-scaleup-b
+  namespace: $DEMO_NS
+  uid: "$uid_b"
+reason: NotTriggerScaleUp
+message: "pod didn't trigger scale-up: 1 max node group size reached"
+type: Normal
+count: 1
+firstTimestamp: "$ts_b"
+lastTimestamp: "$ts_b"
+source:
+  component: cluster-autoscaler
+YAML
+
+await_inject pending-scaleup 360 'kind=k8s-event' 'FailedScheduling' 'hog-scaleup-b' '\\"count\\":[1-9]'

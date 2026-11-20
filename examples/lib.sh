@@ -521,6 +521,38 @@ leeway_wire_count() {
   wc -l <<<"$out" | tr -d ' '
 }
 
+# sentinel_metrics — fetch the in-cluster sentinel's Prometheus /metrics text.
+# Uses kube-apiserver service proxy first and falls back to scraping from
+# stub-daemon (same namespace, admitted by deploy/16-networkpolicy-watcher.yaml).
+sentinel_metrics() {
+  kubectl get --raw "/api/v1/namespaces/$SENTINEL_NS/services/lookout-watch-metrics:9090/proxy/metrics" 2>/dev/null \
+    || kubectl -n "$SENTINEL_NS" exec deploy/stub-daemon -- python -c \
+      "import urllib.request; print(urllib.request.urlopen('http://lookout-watch-metrics:9090/metrics', timeout=5).read().decode())" 2>/dev/null \
+    || true
+}
+
+# sentinel_metric_sum <metric_name> [label_substring] — sum floating-point
+# sample values matching <metric_name> (and optional label substring), rounded
+# to an integer. Prints 0 when the series is absent.
+sentinel_metric_sum() {
+  local name="$1" sub="${2:-}"
+  sentinel_metrics | awk -v m="$name" -v s="$sub" '
+    $0 !~ /^#/ && ($1 == m || index($1, m "{") == 1) && (s == "" || index($1, s) > 0) { sum += $NF }
+    END { printf "%.0f\n", sum + 0 }
+  '
+}
+
+# await_metric_ge <timeout> <metric_name> <label_substring> <min_value>
+await_metric_ge() {
+  local timeout="$1" name="$2" sub="$3" min="$4"
+  _metric_ge() {
+    local val
+    val="$(sentinel_metric_sum "$name" "$sub")"
+    [[ -n "$val" && "$val" -ge "$min" ]]
+  }
+  await "$timeout" "metric ${name}{${sub}} >= ${min}" _metric_ge
+}
+
 # soft <command...> — run a check but only warn on failure (for signals
 # whose timing depends on cluster noise, e.g. storm formation).
 soft() {
