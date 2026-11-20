@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# crash-blip — negative weekly e2e scenario for --settle (#834):
+# redeploys the sentinel with SETTLE=2m (calibrated against live GKE 1.37
+# kubelet BackOff cadence measured 2026-11-20 on shipmind-stage: count=4
+# landed at lastTimestamp-firstTimestamp=99s, well inside client-go's
+# 25-event per-object burst bucket and cleanly below 2m, while the 5th
+# BackOff crosses 2m at ~179s), then runs a pod that exits non-zero 4
+# times via an emptyDir marker (10s+20s+40s backoffs + run time ≈ 75-99s,
+# crossing --backoff-min-count=3 into GateSettle) before stabilizing as
+# Ready inside < 2m.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+stub_mark crash-blip
+
+echo "▸ redeploying sentinel with SETTLE=2m"
+SETTLE=2m "$(examples_root)/sentinel/up"
+
+echo "▸ deploying crash-blip (4 non-zero exits via emptyDir marker, then stays Ready)"
+kubectl -n "$DEMO_NS" delete deployment crash-blip --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+kubectl apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-blip
+  namespace: ${DEMO_NS}
+  labels:
+    app: crash-blip
+    app.kubernetes.io/part-of: lookout-examples
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crash-blip
+  template:
+    metadata:
+      labels:
+        app: crash-blip
+        app.kubernetes.io/part-of: lookout-examples
+    spec:
+      containers:
+        - name: blip
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              n=0
+              [ -f /state/count ] && n="\$(cat /state/count)"
+              n=\$((n + 1))
+              echo "\$n" > /state/count
+              if [ "\$n" -le 4 ]; then
+                echo "blip exit \$n/4"
+                sleep 2
+                exit 1
+              fi
+              echo "blip stabilized on start \$n"
+              exec sleep 86400
+          volumeMounts:
+            - name: state
+              mountPath: /state
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+      volumes:
+        - name: state
+          emptyDir: {}
+YAML

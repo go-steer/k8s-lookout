@@ -89,6 +89,7 @@ Three surfaces to verify on, weakest to strongest:
 | `placement-drift` | replicas pinned to zone-a by a taint, then zone-b comes back (kind-only, explicit) | `leeway.contract_violated` (DoNotSchedule) + `leeway.placement_drift` (ScheduleAnyway), never `domain_unavailable` | sentinel `lookout_leeway_drift` metric |
 | `zone-unavailable` | zone-b's only node cordoned (kind-only, explicit) | exactly ONE `leeway.domain_unavailable` (`taint_exclusion`), no per-workload finding | sentinel `lookout_leeway_domains_unavailable` metric |
 | `gateway-cert` | Gateway HTTPS listener's cert-manager Certificate never issues (installs cert-manager + Envoy Gateway, explicit) | `expiry.warning` critical (`renewal=FAILED`) + `gateway.programming_failed` / `gateway.route_rejected` in the digest | `state gateway` names `listener=https`; the `http` listener stays programmed |
+| `crash-blip` | pod exits 4 times via `emptyDir` marker under `SETTLE=2m`, then stabilizes Ready (explicit, weekly) | zero `k8s-event` `BackOff` injects (held on `GateSettle`) | sentinel `/metrics` (`events_filtered{gate="settle"} >= 1`, `gate_outcomes{gate="settle",outcome="self_resolved"} >= 1`) |
 
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -119,6 +120,11 @@ type dispatcher struct {
 	// SeverityInfo (RouteStore) without dropping the namespace or object
 	// from the watch.
 	excludes *alertExcludeStore
+	// settle, when non-nil, tracks keys held by engine.GateSettle (#834)
+	// so the dispatcher counts forwarded vs self_resolved outcomes and
+	// clamps repeat blips inside Event TTL to their own start. Nil when
+	// --settle=0 (the default).
+	settle *settleTracker
 	// storm, when non-nil, is the §7.5 correlation stage sitting
 	// between dedup and session creation: new incidents pass through
 	// it and may be folded into a kind=storm session instead of
@@ -196,9 +202,29 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 
 	key, downgraded, excludedRule := d.classifySignal(ctx, &sig)
 	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
-	if ok, gate := d.filter.Decide(sig); !ok {
+	filterSig := sig
+	var settleReason string
+	var blipStart time.Time
+	if d.settle != nil && isK8sEventSignal(sig.Kind) {
+		canonical := engine.CanonicalReasonForEvent(sig.Key.Reason, sig.Message)
+		if engine.SettleApplies(canonical, sig.Message) {
+			settleReason = canonical
+			retiredTS, hasRetired := d.dedup.LastRetiredTS(key)
+			if start, clamped := d.settle.BlipStart(sig, canonical, retiredTS, hasRetired); clamped {
+				blipStart = start
+				filterSig.FirstSeen = start
+			}
+		}
+	}
+	if ok, gate := d.filter.Decide(filterSig); !ok {
 		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
+		if gate == engine.GateSettle && settleReason != "" {
+			d.settle.Hold(sig, settleReason, blipStart)
+		}
 		return
+	}
+	if settleReason != "" && d.settle.Release(sig, settleReason) {
+		d.metrics.gateOutcomes.WithLabelValues(engine.GateSettle, settleOutcomeForwarded).Inc()
 	}
 	if excludedRule != nil {
 		d.metrics.alertExcluded.Inc()
@@ -247,6 +273,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	d.dispatchSharedOrDryRun(ctx, sig, key, result)
+}
+
+func isK8sEventSignal(kind string) bool {
+	return kind == engine.KindK8sEvent || kind == engine.KindK8sEventFollowup || kind == ""
 }
 
 func (d *dispatcher) stampClusterIdentity(sig *engine.Signal) {

@@ -14,6 +14,11 @@
 
 package engine
 
+import (
+	"strings"
+	"time"
+)
+
 // defaultReasons is the shipped set of Event.Reason values that
 // trigger investigations. Chosen to cover the top-frequency real
 // failures per docs/k8s-event-agent-design.md §"Event filter
@@ -90,6 +95,20 @@ type FilterConfig struct {
 	// failedScheduling configures the FailedScheduling verdict + count/span
 	// gate (#835). Zero-value leaves the gate disabled.
 	failedScheduling FailedSchedulingConfig
+	// settle is the minimum wall-clock span (LastSeen - FirstSeen) a
+	// settle-family k8s-event failure must last after passing its count
+	// debounce before forwarding (#834). Zero (the default) disables the gate.
+	settle time.Duration
+}
+
+// WithSettle returns a copy of fc configured with the given --settle duration
+// (#834). Non-positive durations leave the settle gate disabled.
+func (fc FilterConfig) WithSettle(d time.Duration) FilterConfig {
+	if d < 0 {
+		d = 0
+	}
+	fc.settle = d
+	return fc
 }
 
 // NewFilterConfig builds a FilterConfig from CLI-shaped inputs.
@@ -164,6 +183,7 @@ const (
 	GateAutopilotScaleToZero       = "autopilot_scale_to_zero"
 	GateFailedSchedulingMinCount   = "failedscheduling_min_count"
 	GateFailedSchedulingMinSpan    = "failedscheduling_min_span"
+	GateSettle                     = "settle"
 )
 
 // Accept returns true if the signal passes every filter rule. The
@@ -227,7 +247,8 @@ func (f *Filter) Decide(sig Signal) (bool, string) {
 		}
 	}
 	if eventKind {
-		switch CanonicalReasonForEvent(sig.Key.Reason, sig.Message) {
+		canonical := CanonicalReasonForEvent(sig.Key.Reason, sig.Message)
+		switch canonical {
 		case "Unhealthy":
 			if belowMinCount(sig.Count, f.cfg.unhealthyMinCount) {
 				return false, GateUnhealthyDebounce
@@ -245,8 +266,47 @@ func (f *Filter) Decide(sig Signal) (bool, string) {
 				return f.decideFailedScheduling(sig)
 			}
 		}
+		if f.cfg.settle > 0 && SettleApplies(canonical, sig.Message) && !settledSpan(sig.FirstSeen, sig.LastSeen, f.cfg.settle) {
+			return false, GateSettle
+		}
 	}
 	return true, ""
+}
+
+// SettleApplies reports whether the canonical reason and message belong to the
+// --settle gate family (#834).
+//
+// Only canonical CrashLoopBackOff (kubelet repeating container-restart BackOff
+// and CrashLoopBackOff; never image-pull BackOff) and two explicitly
+// allowlisted transient Failed startup-race messages are settled:
+//   - prefix "Error: host IP unknown; known addresses:" (DaemonSet pod on a
+//     deleting node),
+//   - prefix "Error: open " + suffix "/etc-hosts: no such file or directory"
+//     (pod deleted mid-start, e.g. Autopilot balloon pods).
+//
+// FailedMount, Unhealthy, ImagePullBackOff, ErrImagePull, FailedScheduling,
+// OOMKilled, Evicted, NodeNotReady, NetworkNotReady, and non-allowlisted Failed
+// are explicitly exempt.
+func SettleApplies(canonicalReason, message string) bool {
+	switch canonicalReason {
+	case "CrashLoopBackOff":
+		return true
+	case "Failed":
+		return strings.HasPrefix(message, "Error: host IP unknown; known addresses:") ||
+			(strings.HasPrefix(message, "Error: open ") &&
+				strings.HasSuffix(message, "/etc-hosts: no such file or directory"))
+	default:
+		return false
+	}
+}
+
+// settledSpan reports whether the Event's own sightings span at least settle.
+// Zero timestamps fail open, matching the count-gate fail-open posture (#833).
+func settledSpan(first, last time.Time, settle time.Duration) bool {
+	if first.IsZero() || last.IsZero() {
+		return true
+	}
+	return last.Sub(first) >= settle
 }
 
 // isK8sEventKind reports whether the signal is the frozen k8s-event

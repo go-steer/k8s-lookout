@@ -88,6 +88,7 @@ type metrics struct {
 	eventsInjected          *prometheus.CounterVec
 	eventsDedupSuppress     *prometheus.CounterVec
 	eventsFiltered          *prometheus.CounterVec
+	gateOutcomes            *prometheus.CounterVec
 	scaleUpVerdictsRejected prometheus.Counter
 	alertExcluded           prometheus.Counter
 	alertExcludeRules       prometheus.Gauge
@@ -194,8 +195,12 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"reason", "namespace"}),
 		eventsFiltered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_events_filtered_total",
-			Help: "Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed|namespace_excluded|namespace_not_allowed|unhealthy_debounce|crashloop_debounce|imagepull_transient_debounce|failedscheduling_not_pending|failedscheduling_stale|scaleup_hold|autopilot_scale_to_zero|failedscheduling_min_count|failedscheduling_min_span). The leading-edge debounces and FailedScheduling verdict gate deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.",
+			Help: "Total signals rejected by the engine filter before dedup, by the rule that rejected them (reason_not_allowed|namespace_excluded|namespace_not_allowed|unhealthy_debounce|crashloop_debounce|imagepull_transient_debounce|failedscheduling_not_pending|failedscheduling_stale|scaleup_hold|autopilot_scale_to_zero|failedscheduling_min_count|failedscheduling_min_span|settle). The leading-edge debounces, settle gate, and FailedScheduling verdict gate deliberately swallow events; without this counter a gate tuned too tight is indistinguishable from a broken watcher.",
 		}, []string{"gate"}),
+		gateOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lookout_watch_gate_outcomes_total",
+			Help: "Total settled-or-cleared outcomes for time-holding filter gates, by gate (settle) and outcome (forwarded when a held failure lasted past --settle and reached dedup, or self_resolved when it went unsighted for --settle plus 5m). Silent when --settle=0 (the default).",
+		}, []string{"gate", "outcome"}),
 		scaleUpVerdictsRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lookout_watch_scaleup_verdicts_rejected_total",
 			Help: "Total TriggeredScaleUp, NotTriggerScaleUp, or FailedScaleUp Pod events ignored by the capacity verdict memo because their reporter (source.component or reportingController) was not cluster-autoscaler or because involvedObject.namespace did not match metadata.namespace.",
@@ -408,6 +413,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.eventsInjected,
 		m.eventsDedupSuppress,
 		m.eventsFiltered,
+		m.gateOutcomes,
 		m.scaleUpVerdictsRejected,
 		m.alertExcluded,
 		m.alertExcludeRules,
