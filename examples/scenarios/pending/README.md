@@ -16,10 +16,13 @@ examples/scenarios/pending/revert
 
 ## What to expect
 
-- **Sentinel (wire)** — `kind=k8s-event` (`FailedScheduling`, `count >= 1`
-  from upstream series-only `kube-scheduler`), followed by
-  `kind=capacity.pending-aged` after ~75s + one capacity poll (60s),
-  naming the pod and how long it has been unschedulable.
+- **Sentinel (wire)** — `kind=capacity.pending-aged` opens first after
+  ~75s + one capacity poll (60s), naming the pod and how long it has been
+  unschedulable. Because `#835`'s `FailedScheduling` gate holds unruled
+  `FailedScheduling` events on kind (`lookout_events_filtered_total{gate="failedscheduling_min_count"} >= 1`),
+  no `kind=k8s-event` opens before `capacity.pending-aged` (the `NotTriggerScaleUp`
+  short-circuit + live `Event.Series` `count >= 1` path is verified by
+  `pending-scaleup`).
 - **Read-path** — `lookout health` scores the pending category
   degraded; `lookout triage events --namespace=lookout-demo` shows
   the scheduler's `FailedScheduling` verdicts.

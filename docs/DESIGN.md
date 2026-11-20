@@ -618,8 +618,10 @@ When the `capacity` source is enabled, `pkg/engine.Filter` gates `k8s-event`
    `(namespace, uid)` verdict memo (4,096 entries with per-namespace fair
    eviction, TTL `max(--dedup-window, --scaleup-hold + 15m)`, recorded
    pre-arming from `cluster-autoscaler` `TriggeredScaleUp`,
-   `NotTriggerScaleUp`, and `FailedScaleUp` Pod events; same-second trigger vs
-   decline ties resolve to trigger per `pkg/leeway/scaleup.go`):
+   `NotTriggerScaleUp`, and `FailedScaleUp` Pod events; keyed on
+   `metadata.namespace` after rejecting `involvedObject.namespace !=
+   metadata.namespace`, with same-second trigger vs decline ties delegated to
+   `pkg/leeway.LatestScaleUp` over 1 s-truncated timestamps):
    - `NotTriggerScaleUp` / `FailedScaleUp` strictly predating `LastSeen` at 1 s
      truncation (`sig.LastSeen.Truncate(1s) > verdict.At.Truncate(1s)`) passes
      immediately;
@@ -637,17 +639,20 @@ When the `capacity` source is enabled, `pkg/engine.Filter` gates `k8s-event`
 
 **Safety boundaries:** if the `capacity` source is not enabled (e.g.
 `--sources=k8s-events` or `--sources=auto` skipping `capacity`), the entire
-gate auto-disables with one loud startup log line so no pod is ever held up to
-30 m on a series-only scheduler without `capacity.pending-aged` (15 m critical)
+gate auto-disables with one loud startup log line (and while `capacity`'s pod
+cache is not yet synced/armed, `PodSchedulingUnknown` fails open) so no pod is
+ever held up to 30 m on a series-only scheduler without `capacity.pending-aged`
 running as the safety net. Because `source.component` / `reportingController`
-is author-written (not authenticated by `kube-apiserver`), any forged
-`cluster-autoscaler` `TriggeredScaleUp` mute is bounded at 15 m by
-`capacity.pending-aged`, which reads Pod conditions rather than Events.
-Disabling all four `(experimental)` knobs disables the entire gate (including
-`not_pending` and `stale`), keeping event-#1 behavior reachable by flag. Per-pod
-gate decisions are logged at most once per 15 m unless the decision changes
-(bounded 50k-entry memo), while `lookout_events_filtered_total{gate}` counts
-every sighting.
+is author-written (not authenticated by `kube-apiserver`), cross-namespace
+spoofing is blocked by rejecting `involvedObject.namespace !=
+metadata.namespace` and keying on `metadata.namespace`, while any
+same-namespace forged `cluster-autoscaler` `TriggeredScaleUp` mute is bounded
+at `max(15m, --pending-age)` by `capacity.pending-aged`, which reads Pod
+conditions rather than Events. Disabling all four `(experimental)` knobs
+disables the entire gate (including `not_pending` and `stale`), keeping
+event-#1 behavior reachable by flag. Per-pod gate decisions are logged at most
+once per 15 m unless the decision changes (bounded 50k-entry memo, suppressing
+overflow), while `lookout_events_filtered_total{gate}` counts every sighting.
 
 ### 7.2 Signal sources
 

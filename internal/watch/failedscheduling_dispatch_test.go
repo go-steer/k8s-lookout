@@ -213,23 +213,59 @@ func TestConfigureFailedSchedulingGate_AutopilotProviderPostures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
 			f, err := parseFlags([]string{"--dry-run"})
 			if err != nil {
 				t.Fatal(err)
 			}
+			dnsPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "kube-dns-1", UID: types.UID("u-dns")},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{{
+						Type:   corev1.PodScheduled,
+						Status: corev1.ConditionFalse,
+						Reason: corev1.PodReasonUnschedulable,
+					}},
+				},
+			}
+			client := fake.NewSimpleClientset(dnsPod)
+			capSrc := capacity.New(client, tc.provider, capacity.Config{PollInterval: time.Hour})
 			filter := engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 0, 0))
-			capSrc := capacity.New(fake.NewSimpleClientset(), tc.provider, capacity.Config{})
 			var logs []string
-			configureFailedSchedulingGate(context.Background(), f, capSrc, tc.provider, filter, newMetrics(), func(format string, args ...any) {
+			configureFailedSchedulingGate(ctx, f, capSrc, tc.provider, filter, newMetrics(), func(format string, args ...any) {
 				logs = append(logs, fmt.Sprintf(format, args...))
 			})
 			joined := strings.Join(logs, "\n")
 			if !strings.Contains(joined, tc.wantLog) {
 				t.Errorf("startup logs %q missing %q", joined, tc.wantLog)
 			}
+
+			// Before capacity syncs/arms (PodSchedulingUnknown), gate must fail
+			// open so no pod is held without capacity.pending-aged running.
+			if ok, gate := filter.Decide(sig); !ok || gate != "" {
+				t.Errorf("unarmed Decide = (%v, %q), want (true, \"\")", ok, gate)
+			}
+
+			// Start capacity so podLister syncs & arms, then verify Autopilot posture.
+			done := make(chan error, 1)
+			go func() { done <- capSrc.Run(ctx, func(engine.Signal) {}) }()
+			deadline := time.Now().Add(5 * time.Second)
+			for !capSrc.HasSynced() {
+				if time.Now().After(deadline) {
+					t.Fatal("capacity source failed to sync")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			ok, gate := filter.Decide(sig)
 			if gate != tc.wantGate || ok != (tc.wantGate == "") {
-				t.Errorf("Decide = (%v, %q), want (%v, %q)", ok, gate, tc.wantGate == "", tc.wantGate)
+				t.Errorf("armed Decide = (%v, %q), want (%v, %q)", ok, gate, tc.wantGate == "", tc.wantGate)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("capacity Run error: %v", err)
 			}
 		})
 	}

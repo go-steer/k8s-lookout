@@ -261,8 +261,9 @@ func (m *fsLogMemo) shouldLog(key, gate string, now time.Time) bool {
 		}
 		if len(m.entries) >= maxFailedSchedulingLogEntries {
 			// Memo full even after sweeping expired entries: never evict live
-			// entries; log this sighting without remembering it.
-			return true
+			// entries and suppress overflow logging to prevent log floods;
+			// lookout_events_filtered_total still counts every sighting.
+			return false
 		}
 	}
 	m.entries[key] = fsLogEntry{gate: gate, at: now}
@@ -324,6 +325,13 @@ func (f *Filter) decideFailedScheduling(sig Signal) (accepted bool, gate string)
 			return false, GateFailedSchedulingNotPending
 		case PodSchedulingOtherFailure:
 			note("pass %s pod=%s/%s (count=%d): pod is Pending with non-Unschedulable PodScheduled=False condition (e.g. SchedulerError); failing open",
+				sig.Key.Reason, sig.Namespace, sig.Name, sig.Count)
+			return true, ""
+		case PodSchedulingUnknown:
+			// Capacity pod cache is not yet synced/armed (so capacity.pending-aged
+			// is not sweeping yet) or lister errored: fail open rather than
+			// holding without the pending-aged safety net.
+			note("pass %s pod=%s/%s (count=%d): capacity pod cache unavailable or not synced yet; failing open",
 				sig.Key.Reason, sig.Namespace, sig.Name, sig.Count)
 			return true, ""
 		}

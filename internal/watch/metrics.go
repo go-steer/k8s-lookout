@@ -195,7 +195,7 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		}, []string{"gate"}),
 		scaleUpVerdictsRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lookout_watch_scaleup_verdicts_rejected_total",
-			Help: "Total TriggeredScaleUp, NotTriggerScaleUp, or FailedScaleUp Pod events ignored by the capacity verdict memo because their reporter (source.component or reportingController) was not cluster-autoscaler.",
+			Help: "Total TriggeredScaleUp, NotTriggerScaleUp, or FailedScaleUp Pod events ignored by the capacity verdict memo because their reporter (source.component or reportingController) was not cluster-autoscaler or because involvedObject.namespace did not match metadata.namespace.",
 		}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_inject_errors_total",

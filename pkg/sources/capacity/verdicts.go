@@ -36,10 +36,11 @@ const (
 	//
 	// Security note: source.component / reportingController is author-written,
 	// not authenticated by kube-apiserver. Filtering on it stops accidental
-	// collisions and casual wrong-reporter events; a principal with
-	// `create events` in a namespace can still forge cluster-autoscaler events,
-	// which is why the FailedScheduling hold is bounded at 15m by
-	// capacity.pending-aged (which reads Pod status conditions, never Events).
+	// collisions and casual wrong-reporter events; keying on ev.Namespace
+	// (and rejecting ev.InvolvedObject.Namespace != ev.Namespace) confines any
+	// forged event to the namespace where its author holds create-events RBAC,
+	// and capacity.pending-aged (which reads Pod status conditions, never
+	// Events) bounds any same-namespace forged mute at max(15m, --pending-age).
 	ScaleUpReporter = "cluster-autoscaler"
 
 	// defaultScaleUpVerdictCap bounds per-cluster verdict entries (#835).
@@ -48,14 +49,31 @@ const (
 	// DefaultScaleUpHold (15m) + FailedSchedulingStaleAfter (15m) = 30m.
 	defaultScaleUpVerdictTTL = engine.DefaultScaleUpHold + engine.FailedSchedulingStaleAfter
 
+	// rejectedVerdictLogEvery rate-limits per-(namespace, reporter, reason,
+	// cause) rejected-verdict log lines so a tenant flooding forged Events
+	// cannot flood sentinel logs.
+	rejectedVerdictLogEvery = 15 * time.Minute
+	maxRejectedLogEntries   = 1024
+
 	verdictKeySep = "/"
 )
 
-func scaleUpVerdictFor(reason string) engine.ScaleUpVerdict {
-	switch reason {
-	case leeway.ReasonTriggeredScaleUp:
+func verdictToLeewayReason(v engine.ScaleUpVerdict) string {
+	switch v {
+	case engine.ScaleUpProvisioning:
+		return leeway.ReasonTriggeredScaleUp
+	case engine.ScaleUpDeclined:
+		return leeway.ReasonNotTriggerScaleUp
+	default:
+		return ""
+	}
+}
+
+func leewayToEngineVerdict(v leeway.ScaleUpVerdict) engine.ScaleUpVerdict {
+	switch v {
+	case leeway.ScaleUpProvisioning:
 		return engine.ScaleUpProvisioning
-	case leeway.ReasonNotTriggerScaleUp, leeway.ReasonFailedScaleUp:
+	case leeway.ScaleUpDeclined:
 		return engine.ScaleUpDeclined
 	default:
 		return engine.ScaleUpUnheard
@@ -95,6 +113,41 @@ func verdictNamespace(key string) string {
 	return ns
 }
 
+// rejectedLogMemo bounds rejected-verdict log volume to at most one line per
+// (namespace, reporter, reason, cause) per 15m (capped at 1024 live entries;
+// overflow suppresses logging while the metric counter still counts every
+// distinct event).
+type rejectedLogMemo struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+func (m *rejectedLogMemo) allow(key string, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entries == nil {
+		m.entries = make(map[string]time.Time)
+	}
+	if last, ok := m.entries[key]; ok {
+		if now.Sub(last) <= rejectedVerdictLogEvery {
+			return false
+		}
+		delete(m.entries, key)
+	}
+	if len(m.entries) >= maxRejectedLogEntries {
+		for k, at := range m.entries {
+			if now.Sub(at) > rejectedVerdictLogEvery {
+				delete(m.entries, k)
+			}
+		}
+		if len(m.entries) >= maxRejectedLogEntries {
+			return false
+		}
+	}
+	m.entries[key] = now
+	return true
+}
+
 type verdictMemo struct {
 	mu      sync.Mutex
 	entries map[string]engine.ScaleUpMark
@@ -125,14 +178,23 @@ func (m *verdictMemo) now() time.Time {
 	return time.Now()
 }
 
-func (m *verdictMemo) Record(namespace, uid string, verdict engine.ScaleUpVerdict, at time.Time) {
+// Record stores an autoscaler verdict for (namespace, uid) at event timestamp
+// at, clamping zero or future stamps to now. Verdict precedence — including
+// FailedScaleUp as declined and same-second trigger-wins ties — delegates
+// directly to leeway.LatestScaleUp over 1s-truncated timestamps so the two
+// subsystems cannot drift (#532, #835).
+func (m *verdictMemo) Record(namespace, uid string, reason string, at time.Time) {
 	key := verdictKey(namespace, uid)
-	if m == nil || key == "" || verdict == engine.ScaleUpUnheard {
+	if m == nil || key == "" || !leeway.IsScaleUpReason(reason) {
 		return
 	}
 	now := m.now()
 	if at.IsZero() || at.After(now) {
 		at = now
+	}
+	verdict := leewayToEngineVerdict(leeway.LatestScaleUp([]leeway.AutoscalerEvent{{Reason: reason, At: at}}, "", time.Time{}))
+	if verdict == engine.ScaleUpUnheard {
+		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -143,12 +205,14 @@ func (m *verdictMemo) Record(namespace, uid string, verdict engine.ScaleUpVerdic
 			return
 		}
 		if prevSec.Equal(atSec) {
-			if prev.Verdict == engine.ScaleUpProvisioning && verdict == engine.ScaleUpDeclined {
+			winner := leewayToEngineVerdict(leeway.LatestScaleUp([]leeway.AutoscalerEvent{
+				{Reason: verdictToLeewayReason(prev.Verdict), At: prevSec},
+				{Reason: reason, At: atSec},
+			}, "", time.Time{}))
+			if winner == prev.Verdict && (prev.Verdict != verdict || prev.At.After(at)) {
 				return
 			}
-			if prev.Verdict == verdict && prev.At.After(at) {
-				return
-			}
+			verdict = winner
 		}
 	} else {
 		m.evictIfFullLocked(now)
@@ -248,9 +312,22 @@ func (m *verdictMemo) evicteeLocked() string {
 	return chosen.key
 }
 
+func (s *Source) rejectVerdict(ev *corev1.Event, reporter, cause, format string, args ...any) {
+	s.rejectedVerdicts.Add(1)
+	s.mu.Lock()
+	hook := s.onVerdictRejected
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	logKey := strings.Join([]string{ev.Namespace, reporter, ev.Reason, cause}, "\x00")
+	if s.rejectedLogs.allow(logKey, s.clock()) {
+		s.logPrintf(format, args...)
+	}
+}
+
 func (s *Source) recordScaleUpVerdict(ev *corev1.Event) {
-	verdict := scaleUpVerdictFor(ev.Reason)
-	if verdict == engine.ScaleUpUnheard {
+	if !leeway.IsScaleUpReason(ev.Reason) {
 		return
 	}
 	if ev.InvolvedObject.Kind != "Pod" {
@@ -258,18 +335,23 @@ func (s *Source) recordScaleUpVerdict(ev *corev1.Event) {
 	}
 	reporter := eventReporter(ev)
 	if reporter != ScaleUpReporter {
-		s.rejectedVerdicts.Add(1)
-		s.mu.Lock()
-		hook := s.onVerdictRejected
-		s.mu.Unlock()
-		if hook != nil {
-			hook()
-		}
-		s.logPrintf("capacity: ignoring %s verdict for pod %s/%s (uid=%s) from unexpected reporter %q (want %q)",
-			ev.Reason, ev.InvolvedObject.Namespace, ev.InvolvedObject.Name, ev.InvolvedObject.UID, reporter, ScaleUpReporter)
+		s.rejectVerdict(ev, reporter, "reporter",
+			"capacity: ignoring %s verdict for pod %s/%s (uid=%s) in event namespace %q from unexpected reporter %q (want %q)",
+			ev.Reason, ev.InvolvedObject.Namespace, ev.InvolvedObject.Name, ev.InvolvedObject.UID, ev.Namespace, reporter, ScaleUpReporter)
 		return
 	}
-	s.verdicts.Record(ev.InvolvedObject.Namespace, string(ev.InvolvedObject.UID), verdict, scaleUpEventTime(ev))
+	// ev.Namespace (metadata.namespace) is the only RBAC-authenticated
+	// coordinate: for events.k8s.io/v1 (eventTime set), involvedObject.namespace
+	// is author-written and not forced to match ev.Namespace. Reject any
+	// cross-namespace claim and key exclusively on ev.Namespace so a tenant
+	// cannot forge or evict verdicts for another namespace's pods (#835).
+	if ev.Namespace == "" || ev.InvolvedObject.Namespace != ev.Namespace {
+		s.rejectVerdict(ev, reporter, "cross_namespace",
+			"capacity: ignoring %s verdict in namespace %q claiming cross-namespace pod %s/%s (uid=%s)",
+			ev.Reason, ev.Namespace, ev.InvolvedObject.Namespace, ev.InvolvedObject.Name, ev.InvolvedObject.UID)
+		return
+	}
+	s.verdicts.Record(ev.Namespace, string(ev.InvolvedObject.UID), ev.Reason, scaleUpEventTime(ev))
 }
 
 // LookupScaleUpVerdict implements engine.ScaleUpVerdictLookup (O(1) lookup by
@@ -291,7 +373,8 @@ func (s *Source) ScaleUpVerdicts() map[string]engine.ScaleUpMark {
 }
 
 // RejectedVerdicts returns the number of autoscaler verdict events ignored
-// because their reporter was not ScaleUpReporter ("cluster-autoscaler").
+// because their reporter was not ScaleUpReporter ("cluster-autoscaler") or
+// because involvedObject.namespace did not match metadata.namespace.
 func (s *Source) RejectedVerdicts() int64 {
 	if s == nil {
 		return 0
@@ -300,8 +383,8 @@ func (s *Source) RejectedVerdicts() int64 {
 }
 
 // WithRejectedVerdictHook registers an optional callback invoked whenever a
-// verdict event is rejected for an unexpected reporter (wired to Prometheus
-// metrics by internal/watch). Call before Run.
+// verdict event is rejected (wired to Prometheus metrics by internal/watch).
+// Call before Run.
 func (s *Source) WithRejectedVerdictHook(fn func()) {
 	s.mu.Lock()
 	s.onVerdictRejected = fn

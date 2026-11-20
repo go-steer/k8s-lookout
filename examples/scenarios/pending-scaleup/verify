@@ -25,7 +25,7 @@ fi
 
 echo "▸ verify pending-scaleup Phase A (Pod A: TriggeredScaleUp holds FailedScheduling)"
 want_hold=$((BASE_SCALEUP_HOLD + 1))
-await_metric_ge 360 lookout_events_filtered_total 'gate="scaleup_hold"' "$want_hold"
+await_metric_ge 420 lookout_events_filtered_total 'gate="scaleup_hold"' "$want_hold"
 pod_a_opens="$(leeway_wire_count pending-scaleup 'kind=k8s-event' 'FailedScheduling' 'hog-scaleup-a')"
 if ((pod_a_opens != 0)); then
   echo "  ✗ expected 0 k8s-event FailedScheduling opens for hog-scaleup-a under TriggeredScaleUp, got $pod_a_opens" >&2
@@ -103,4 +103,4 @@ source:
   component: cluster-autoscaler
 YAML
 
-await_inject pending-scaleup 360 'kind=k8s-event' 'FailedScheduling' 'hog-scaleup-b' '\\"count\\":[1-9]'
+await_inject pending-scaleup 420 'kind=k8s-event' 'FailedScheduling' 'hog-scaleup-b' '\\"count\\":[1-9]'

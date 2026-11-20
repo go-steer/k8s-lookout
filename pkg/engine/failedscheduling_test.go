@@ -130,6 +130,15 @@ func TestFailedSchedulingGate_PodStatePreCheck(t *testing.T) {
 	if ok, gate := f.Decide(sig1); ok || gate != GateFailedSchedulingMinCount {
 		t.Fatalf("Unschedulable count=1 Decide = (%v, %q), want (false, %q)", ok, gate, GateFailedSchedulingMinCount)
 	}
+
+	// PodSchedulingUnknown (capacity pod cache not synced/armed yet →
+	// capacity.pending-aged is not sweeping yet) → fail open immediately.
+	cfg.PodState = stubPodState{state: PodSchedulingUnknown}
+	cfg.Verdicts = stubVerdicts{}
+	f = NewFilter(NewFilterConfig(nil, nil, nil, 0, 0, 0).WithFailedScheduling(cfg))
+	if ok, gate := f.Decide(sig1); !ok || gate != "" {
+		t.Fatalf("PodSchedulingUnknown Decide = (%v, %q), want (true, \"\")", ok, gate)
+	}
 }
 
 func TestFailedSchedulingGate_StaleCheck(t *testing.T) {
@@ -217,6 +226,30 @@ func TestFailedSchedulingGate_VerdictsAndTruncation(t *testing.T) {
 	f = NewFilter(NewFilterConfig(nil, nil, nil, 0, 0, 0).WithFailedScheduling(cfg))
 	if ok, gate := f.Decide(duringHold); !ok || gate != "" {
 		t.Fatalf("scaleup-hold=0 Decide = (%v, %q), want (true, \"\")", ok, gate)
+	}
+
+	// Discriminate sig.LastSeen-based hold from wall clock:
+	// (a) mark is 20m old by wall clock (> 15m), but sighting LastSeen is
+	//     10m ago (LastSeen - mark.At = 10m <= 15m, not stale) → MUST hold!
+	cfg.ScaleUpHold = DefaultScaleUpHold
+	cfg.Verdicts = stubVerdicts{marks: map[string]ScaleUpMark{
+		"default/uid-3": {Verdict: ScaleUpProvisioning, At: now.Add(-20 * time.Minute)},
+	}}
+	f = NewFilter(NewFilterConfig(nil, nil, nil, 0, 0, 0).WithFailedScheduling(cfg))
+	replayInHold := makeFailedScheduling("default", "hog-3", "uid-3", "0/3 nodes", 10, now.Add(-20*time.Minute), now.Add(-10*time.Minute))
+	if ok, gate := f.Decide(replayInHold); ok || gate != GateScaleUpHold {
+		t.Fatalf("LastSeen-relative hold (wall>15m, LastSeen-mark=10m) Decide = (%v, %q), want (false, %q)", ok, gate, GateScaleUpHold)
+	}
+
+	// (b) mark is 10m old by wall clock (<= 15m), but sighting LastSeen is
+	//     16m after mark.At → hold MUST expire and pass on count/span!
+	cfg.Verdicts = stubVerdicts{marks: map[string]ScaleUpMark{
+		"default/uid-4": {Verdict: ScaleUpProvisioning, At: now.Add(-10 * time.Minute)},
+	}}
+	f = NewFilter(NewFilterConfig(nil, nil, nil, 0, 0, 0).WithFailedScheduling(cfg))
+	pastByLastSeen := makeFailedScheduling("default", "hog-4", "uid-4", "0/3 nodes", 10, now.Add(-10*time.Minute), now.Add(6*time.Minute))
+	if ok, gate := f.Decide(pastByLastSeen); !ok || gate != "" {
+		t.Fatalf("LastSeen-relative expiry (wall=10m, LastSeen-mark=16m) Decide = (%v, %q), want (true, \"\")", ok, gate)
 	}
 }
 
@@ -352,5 +385,15 @@ func TestFailedSchedulingGate_PerPodDecisionLogMemo(t *testing.T) {
 	f.Decide(unkeyed)
 	if len(logs) != 5 {
 		t.Fatalf("unkeyed sightings logged %d total lines, want 5", len(logs))
+	}
+
+	// Overflow suppression: when fsLogMemo is full of live entries, new keys
+	// must be suppressed (return false) rather than flooding logs.
+	memo := fsLogMemo{entries: make(map[string]fsLogEntry, maxFailedSchedulingLogEntries), lastSweep: now}
+	for i := range maxFailedSchedulingLogEntries {
+		memo.entries[fmt.Sprintf("k-%d", i)] = fsLogEntry{gate: GateFailedSchedulingMinCount, at: now}
+	}
+	if memo.shouldLog("overflow-pod", GateFailedSchedulingMinCount, now) {
+		t.Fatal("full fsLogMemo shouldLog(overflow-pod) = true, want false (suppress overflow)")
 	}
 }

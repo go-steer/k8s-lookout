@@ -104,16 +104,46 @@ func TestVerdicts_ReporterFilterAndClamping(t *testing.T) {
 	forged := caEvent(leeway.ReasonTriggeredScaleUp, "forged scale-up")
 	forged.Source.Component = "fake-controller"
 	forged.LastTimestamp = metav1.Time{Time: now}
+	// Repeat 3 times within 15m: counter increments each time, but log is
+	// rate-limited to 1 line per (namespace, reporter, reason, cause) per 15m.
+	s.onEvent(forged)
+	s.onEvent(forged)
 	s.onEvent(forged)
 
 	if got := s.LookupScaleUpVerdict("shop", "uid-web-1").Verdict; got != engine.ScaleUpUnheard {
 		t.Fatalf("forged verdict recorded as %v, want unheard", got)
 	}
-	if s.RejectedVerdicts() != 1 || hookCalls != 1 {
-		t.Fatalf("rejected = %d, hookCalls = %d, want 1/1", s.RejectedVerdicts(), hookCalls)
+	if s.RejectedVerdicts() != 3 || hookCalls != 3 {
+		t.Fatalf("rejected = %d, hookCalls = %d, want 3/3", s.RejectedVerdicts(), hookCalls)
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "fake-controller") {
-		t.Fatalf("rejected verdict log = %v, want unexpected reporter log", logs)
+		t.Fatalf("rejected verdict log = %v, want 1 rate-limited unexpected-reporter line", logs)
+	}
+
+	// Cross-namespace spoofing via events.k8s.io/v1 (eventTime + ReportingController):
+	// an Event living in namespace "tenant" claiming a Pod in "kube-system"
+	// MUST be rejected (never stored under kube-system or evicting its marks).
+	crossNS := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "spoof.evt"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind: "Pod", Namespace: "kube-system", Name: "victim", UID: types.UID("uid-victim"),
+		},
+		ReportingController: ScaleUpReporter,
+		Reason:              leeway.ReasonTriggeredScaleUp,
+		EventTime:           metav1.MicroTime{Time: now},
+	}
+	s.onEvent(crossNS)
+	if got := s.LookupScaleUpVerdict("kube-system", "uid-victim").Verdict; got != engine.ScaleUpUnheard {
+		t.Fatalf("cross-namespace spoof stored under kube-system: %v, want unheard", got)
+	}
+	if got := len(s.ScaleUpVerdicts()); got != 0 {
+		t.Fatalf("ScaleUpVerdicts len = %d after rejected events, want 0", got)
+	}
+	if s.RejectedVerdicts() != 4 || hookCalls != 4 {
+		t.Fatalf("after cross-ns spoof rejected = %d, hookCalls = %d, want 4/4", s.RejectedVerdicts(), hookCalls)
+	}
+	if len(logs) != 2 || !strings.Contains(logs[1], "cross-namespace") {
+		t.Fatalf("cross-namespace spoof log = %v, want 2nd line naming cross-namespace", logs)
 	}
 
 	rcEv := caEvent(leeway.ReasonTriggeredScaleUp, "real scale-up via events.k8s.io/v1")
@@ -136,16 +166,16 @@ func TestVerdicts_NamespaceIsolationFairEvictionAndTTL(t *testing.T) {
 	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
 	memo := newVerdictMemo(30*time.Minute, 4, func() time.Time { return now })
 
-	memo.Record("kube-system", "uid-shared", engine.ScaleUpProvisioning, now)
+	memo.Record("kube-system", "uid-shared", leeway.ReasonTriggeredScaleUp, now)
 	if got := memo.Lookup("tenant", "uid-shared").Verdict; got != engine.ScaleUpUnheard {
 		t.Fatalf("cross-namespace lookup = %v, want unheard", got)
 	}
 
-	memo.Record("noisy", "u1", engine.ScaleUpProvisioning, now.Add(1*time.Second))
-	memo.Record("noisy", "u2", engine.ScaleUpProvisioning, now.Add(2*time.Second))
-	memo.Record("noisy", "u3", engine.ScaleUpProvisioning, now.Add(3*time.Second))
+	memo.Record("noisy", "u1", leeway.ReasonTriggeredScaleUp, now.Add(1*time.Second))
+	memo.Record("noisy", "u2", leeway.ReasonTriggeredScaleUp, now.Add(2*time.Second))
+	memo.Record("noisy", "u3", leeway.ReasonTriggeredScaleUp, now.Add(3*time.Second))
 
-	memo.Record("noisy", "u4", engine.ScaleUpProvisioning, now.Add(4*time.Second))
+	memo.Record("noisy", "u4", leeway.ReasonTriggeredScaleUp, now.Add(4*time.Second))
 	if got := memo.Lookup("kube-system", "uid-shared").Verdict; got != engine.ScaleUpProvisioning {
 		t.Fatalf("fair eviction dropped kube-system mark: got %v", got)
 	}
@@ -287,6 +317,41 @@ func TestRun_InitialListRecordsVerdictBeforeArming(t *testing.T) {
 	mu.Unlock()
 	if nEmitted != 0 {
 		t.Fatalf("initial-LIST event emitted %d signals, want 0", nEmitted)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+}
+
+func TestRun_UnchangedRVRedeliverySkipped(t *testing.T) {
+	t.Parallel()
+	forged := caEvent(leeway.ReasonTriggeredScaleUp, "forged scale-up")
+	forged.Name = "forged-rv.evt"
+	forged.ResourceVersion = "42"
+	forged.Source.Component = "fake-controller"
+	client := fake.NewSimpleClientset(forged)
+
+	s := New(client, cloud.NoProvider, Config{PollInterval: time.Hour})
+	s.logf = func(string, ...any) {}
+
+	// Use a short resync period so the informer re-delivers UpdateFunc with
+	// the exact same ResourceVersion ("42"); unchanged-RV filtering must
+	// keep RejectedVerdicts() == 1 (only the initial Add).
+	factory := informers.NewSharedInformerFactory(client, 50*time.Millisecond)
+	s.WithFactory(factory)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, func(engine.Signal) {}) }()
+
+	waitFor(t, func() bool { return s.HasSynced() })
+	time.Sleep(180 * time.Millisecond)
+
+	if got := s.RejectedVerdicts(); got != 1 {
+		t.Fatalf("RejectedVerdicts after resync redeliveries = %d, want 1", got)
 	}
 
 	cancel()

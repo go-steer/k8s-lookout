@@ -78,9 +78,10 @@ func configureFailedSchedulingGate(
 		PodState:                 capSrc,
 		Verdicts:                 capSrc,
 	})
+	muteBound := max(capacity.CriticalPendingAge, f.pendingAge)
 	logf("failedscheduling gate: enabled (min-count=%d, min-span=%s, scaleup-hold=%s, autopilot-scale-to-zero=%t [autopilot=%t]; reporter=%q; forged-event mute bounded at %s by capacity.pending-aged)",
 		f.failedSchedulingMinCount, f.failedSchedulingMinSpan, f.scaleUpHold,
-		f.autopilotScaleToZeroHold, autopilot, capacity.ScaleUpReporter, capacity.CriticalPendingAge)
+		f.autopilotScaleToZeroHold, autopilot, capacity.ScaleUpReporter, muteBound)
 }
 
 func detectAutopilotCluster(ctx context.Context, provider cloud.Provider, logf func(string, ...any)) bool {

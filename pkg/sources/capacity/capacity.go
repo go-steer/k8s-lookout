@@ -334,6 +334,7 @@ type Source struct {
 	// (#835). Guarded by its own mutex.
 	verdicts          *verdictMemo
 	rejectedVerdicts  atomic.Int64
+	rejectedLogs      rejectedLogMemo
 	onVerdictRejected func()
 	// statusMissing dedupes the "no status ConfigMap" log line.
 	statusMissing bool
@@ -507,12 +508,19 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				s.onEvent(ev)
 			}
 		},
-		UpdateFunc: func(_, newObj any) {
-			// Count/LastTimestamp bump = another observation; the
-			// engine dedup decides what is a repeat.
-			if ev, ok := newObj.(*corev1.Event); ok {
-				s.onEvent(ev)
+		UpdateFunc: func(oldObj, newObj any) {
+			// Skip unchanged-ResourceVersion resync/relist redeliveries so
+			// relists do not re-count or re-log rejected verdicts or
+			// re-emit signals.
+			ev, ok := newObj.(*corev1.Event)
+			if !ok {
+				return
 			}
+			if oldEv, ok := oldObj.(*corev1.Event); ok &&
+				oldEv.ResourceVersion != "" && oldEv.ResourceVersion == ev.ResourceVersion {
+				return
+			}
+			s.onEvent(ev)
 		},
 	})
 	if err != nil {

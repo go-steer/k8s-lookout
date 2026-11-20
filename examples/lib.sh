@@ -525,7 +525,7 @@ leeway_wire_count() {
 # Uses kube-apiserver service proxy first and falls back to scraping from
 # stub-daemon (same namespace, admitted by deploy/16-networkpolicy-watcher.yaml).
 sentinel_metrics() {
-  kubectl get --raw "/api/v1/namespaces/$SENTINEL_NS/services/lookout-watch-metrics:9090/proxy/metrics" 2>/dev/null \
+  kubectl --request-timeout=5s get --raw "/api/v1/namespaces/$SENTINEL_NS/services/lookout-watch-metrics:9090/proxy/metrics" 2>/dev/null \
     || kubectl -n "$SENTINEL_NS" exec deploy/stub-daemon -- python -c \
       "import urllib.request; print(urllib.request.urlopen('http://lookout-watch-metrics:9090/metrics', timeout=5).read().decode())" 2>/dev/null \
     || true
