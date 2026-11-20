@@ -93,15 +93,20 @@ Three surfaces to verify on, weakest to strongest:
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
-`scenarios/` also holds ten **UAT fixtures** — `chatty-logs`,
+`scenarios/` also holds eleven **UAT fixtures** — `chatty-logs`,
 `broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`,
 `hpa-thrash`, `cpu-pressure`, `broken-workloads`, `secret-workload`,
-`store-postmortem`.
+`store-postmortem`, `alert-excludes`.
 Same three scripts, different job: nothing is expected on the wire and
 `examples/e2e` skips them. They exist to give a read-path command
 something to report — or, for `broken-workloads` and `secret-workload`,
 to make a shared cluster answerable at all: one namespace whose
 contents are known exactly, and one canary string consumed four ways.
+`alert-excludes` exercises `--alert-excludes` (#836) end-to-end by
+redeploying `examples/sentinel/up` with `ALERT_EXCLUDES` (which mounts a
+ConfigMap and turns on `--store`) and verifying that a crashing `worker`
+pod opens no `k8s-event` session while incrementing
+`lookout_watch_alert_excluded_total` and persisting an `info-stored` row.
 `store-postmortem` is the odd one out twice over: it breaks nothing and
 instead runs a local sentinel writing a graph history, so the `--at`
 commands have a cluster state that no longer exists to answer about,

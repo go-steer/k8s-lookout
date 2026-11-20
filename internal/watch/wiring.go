@@ -926,6 +926,24 @@ func (r *runner) wireDispatcherRoutingAndLoops(
 ) func() {
 	m := r.metrics
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
+	if f.alertExcludes != "" {
+		rules, raw, err := loadAlertExcludesFile(f.alertExcludes)
+		var excludes *alertExcludeStore
+		if err == nil {
+			excludes = newAlertExcludeStore(f.alertExcludes, rules, raw, m, nil)
+		} else {
+			// Only reachable on a multi-cluster supervisor restart after
+			// the file became broken post-startup: keep the last startup-
+			// validated rules in force and surface refused=1 loudly.
+			excludes = newAlertExcludeStore(f.alertExcludes, f.alertExcludeRules, f.alertExcludeRaw, m, nil)
+			_ = excludes.Reload(true)
+		}
+		disp.excludes = excludes
+		startAlertExcludeReloader(ctx, excludes)
+		if occStore == nil {
+			log.Printf("alert-excludes: --store is unset — excluded signals downgrade to info (counted and logged via info-drop) rather than persisting to SQLite; set --store to retain them")
+		}
+	}
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
 			injector:       maskedSink,

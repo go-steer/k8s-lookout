@@ -141,11 +141,12 @@ args:
 
 # -- Extra flags appended after `args` above so callers can pass one or
 # two additional sentinel flags (`--kube-qps`, `--owner`, `--exclude-namespace`,
-# or experimental FailedScheduling gate overrides such as `--scaleup-hold=0`,
-# `--failedscheduling-min-count=1`, `--failedscheduling-min-span=0`,
-# `--autopilot-scale-to-zero-hold=false`) without duplicating the full 11-flag
-# base array. Empty by default so the chart renders identically to kustomize
-# build deploy/.
+# `--alert-excludes=/etc/lookout/alert-excludes.yaml` paired with a ConfigMap
+# in `extraVolumes`/`extraVolumeMounts`, or experimental FailedScheduling gate
+# overrides such as `--scaleup-hold=0`, `--failedscheduling-min-count=1`,
+# `--failedscheduling-min-span=0`, `--autopilot-scale-to-zero-hold=false`)
+# without duplicating the full 11-flag base array. Empty by default so the
+# chart renders identically to kustomize build deploy/.
 extraArgs: []
 
 # -- The bearer token the sentinel presents to the core-agent daemon.
