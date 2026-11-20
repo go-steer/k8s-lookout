@@ -1,6 +1,8 @@
 # lookout watch CLI flag contract (docs/cli-stability-policy.md)
 # Format: <name>\t<type>\t<default>\t<stability>
 access-recheck	duration	"2m0s"	stable
+alert-excludes	string	""	experimental
+autopilot-scale-to-zero-hold	bool	"true"	experimental
 ax-ca-file	string	""	stable
 ax-router-credential-bundle	string	"/run/podidentity.podcert.ate.dev/credential-bundle.pem"	stable
 ax-router-server-name	string	"atenet-router.ate-system.svc"	stable
@@ -42,6 +44,8 @@ expiry-acme-grace	duration	"15m0s"	stable
 expiry-interval	duration	"1h0m0s"	stable
 expiry-namespaces	string	""	stable
 expiry-warn	duration	"336h0m0s"	stable
+failedscheduling-min-count	int	"5"	experimental
+failedscheduling-min-span	duration	"2m0s"	experimental
 gateway-grace	duration	"5m0s"	stable
 graph-snapshot-interval	duration	"5m0s"	stable
 imagepull-transient-min-count	int	"3"	stable
@@ -69,6 +73,7 @@ rollout-observe	duration	"3m0s"	stable
 saturation-interval	duration	"30s"	stable
 saturation-warn	duration	"1h0m0s"	stable
 saturation-window	duration	"1h30m0s"	stable
+scaleup-hold	duration	"15m0s"	experimental
 severity	repeatable	""	stable
 sink	string	"core-agent"	stable
 sink-token-env	string	""	stable

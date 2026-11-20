@@ -671,6 +671,7 @@ type runner struct {
 	token       string               // resolved --token-env daemon bearer (sources reuse it)
 	metricsReg  *prometheus.Registry // process-global scrape registry
 	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
+	excludes    *alertExcludeStore   // per-runner alert-excludes store, reused across supervisor restarts so last-good hot-reloaded rules survive
 	ready       *readiness           // process-global /readyz tracker; nil in tests that drive run directly
 
 	// meterProvider is this cluster's OpenTelemetry MeterProvider
@@ -772,6 +773,11 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	defer cleanupSources()
 	registry := bs.registry
+	var capSrc failedSchedulingSource
+	if bs.capacity != nil {
+		capSrc = bs.capacity
+	}
+	configureFailedSchedulingGate(ctx, f, capSrc, bs.provider, filter, m, log.Printf)
 
 	feed, err := r.wireGraphAndEnrichment(ctx, f, client, reviewer, factories, disp, dedup, occStore, bs)
 	if err != nil {
@@ -921,6 +927,20 @@ func (r *runner) wireDispatcherRoutingAndLoops(
 ) func() {
 	m := r.metrics
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
+	if f.alertExcludes != "" {
+		if r.excludes == nil {
+			r.excludes = newAlertExcludeStore(f.alertExcludes, f.alertExcludeRules, f.alertExcludeRaw, m, nil)
+		} else {
+			// Supervisor restart: re-read from disk while preserving the
+			// last valid hot-reloaded rules in force if the file is now broken.
+			_ = r.excludes.Reload(false)
+		}
+		disp.excludes = r.excludes
+		startAlertExcludeReloader(ctx, r.excludes)
+		if occStore == nil {
+			log.Printf("alert-excludes: --store is unset — excluded signals downgrade to info (counted and logged via info-drop) rather than persisting to SQLite; set --store to retain them")
+		}
+	}
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
 			injector:       maskedSink,
@@ -1031,6 +1051,7 @@ func (r *runner) buildRunnerSources(
 	if err != nil {
 		return nil, sharedFactories{}, cleanup, err
 	}
+	bs.provider = provider
 
 	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespaces())
 	switch {
@@ -1396,6 +1417,7 @@ var recoveryAccess = []sources.Requirement{
 // observers.
 type builtSources struct {
 	registry    *sources.Registry
+	provider    cloud.Provider
 	k8sevents   *k8sevents.Source
 	objState    *objectstate.Source
 	rollout     *rollout.Source
@@ -1569,6 +1591,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg := capacity.DefaultConfig()
 			cfg.PollInterval = f.capacityPoll
 			cfg.PendingAge = f.pendingAge
+			cfg.VerdictTTL = max(f.dedupWindow, f.scaleUpHold+engine.FailedSchedulingStaleAfter)
 			bs.capacity = capacity.New(client, provider, cfg)
 			src = bs.capacity
 		case ingress.Name:

@@ -100,6 +100,7 @@ func caEvent(reason, msg string) *corev1.Event {
 		InvolvedObject: corev1.ObjectReference{
 			Kind: "Pod", Namespace: "shop", Name: "web-1", UID: types.UID("uid-web-1"),
 		},
+		Source:        corev1.EventSource{Component: ScaleUpReporter},
 		Reason:        reason,
 		Message:       msg,
 		Count:         1,

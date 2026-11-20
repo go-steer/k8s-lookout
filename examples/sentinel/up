@@ -27,6 +27,11 @@
 # Env:
 #   LOOKOUT_IMAGE   image to run (default ghcr.io/go-steer/lookout:latest;
 #                   use lookout:examples-dev after kind/up --build)
+#   ALERT_EXCLUDES  optional YAML content or path to an --alert-excludes file;
+#                   when set, creates ConfigMap lookout-alert-excludes, mounts
+#                   it at /etc/lookout/alert-excludes.yaml, passes
+#                   --alert-excludes, and enables --store=/var/lib/lookout/lookout.db
+#                   so excluded info-class signals persist instead of dropping.
 
 . "$(dirname "$0")/../lib.sh"
 require_examples_context
@@ -140,12 +145,43 @@ args=(
 if kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
   args+=("--expiry-acme-grace=60s")
 fi
+patch_ops=(
+  "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"}"
+)
+# Replace volumeMounts and volumes in full (idempotent on re-run and
+# cleans up the alert-excludes mount on revert before the ConfigMap is
+# deleted; deploy/51 defines only lookout-data).
+base_mounts='{"name":"lookout-data","mountPath":"/var/lib/lookout"}'
+base_volumes='{"name":"lookout-data","emptyDir":{}}'
+if [[ -n "${ALERT_EXCLUDES:-}" ]]; then
+  echo "▸ alert-excludes ConfigMap + --store enabled"
+  if [[ -f "$ALERT_EXCLUDES" ]]; then
+    kubectl -n "$SENTINEL_NS" create configmap lookout-alert-excludes \
+      --from-file=alert-excludes.yaml="$ALERT_EXCLUDES" --dry-run=client -o yaml | kubectl apply -f -
+  else
+    kubectl -n "$SENTINEL_NS" create configmap lookout-alert-excludes \
+      --from-literal=alert-excludes.yaml="$ALERT_EXCLUDES" --dry-run=client -o yaml | kubectl apply -f -
+  fi
+  args+=(
+    "--alert-excludes=/etc/lookout/alert-excludes.yaml"
+    "--store=/var/lib/lookout/lookout.db"
+  )
+  patch_ops+=(
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/volumeMounts\",\"value\":[${base_mounts},{\"name\":\"alert-excludes\",\"mountPath\":\"/etc/lookout\",\"readOnly\":true}]}"
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes\",\"value\":[${base_volumes},{\"name\":\"alert-excludes\",\"configMap\":{\"name\":\"lookout-alert-excludes\"}}]}"
+  )
+else
+  patch_ops+=(
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/volumeMounts\",\"value\":[${base_mounts}]}"
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes\",\"value\":[${base_volumes}]}"
+  )
+fi
 args_json="$(printf '"%s",' "${args[@]}")"
 args_json="[${args_json%,}]"
-kubectl -n "$SENTINEL_NS" patch deployment lookout-watch --type=json -p "[
-  {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},
-  {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$args_json}
-]"
+patch_ops+=("{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$args_json}")
+patch_json="$(printf '%s,' "${patch_ops[@]}")"
+patch_json="[${patch_json%,}]"
+kubectl -n "$SENTINEL_NS" patch deployment lookout-watch --type=json -p "$patch_json"
 
 echo "▸ waiting for rollouts"
 kubectl -n "$SENTINEL_NS" rollout status deploy/stub-daemon --timeout=180s

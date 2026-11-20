@@ -17,8 +17,17 @@
 require_examples_context
 
 echo "▸ verify pending"
-# --pending-age=75s + one 60s capacity poll → expect within ~3 minutes.
-await_inject pending 360 'kind=k8s-event' 'FailedScheduling' 'hog-' '\\"count\\":[1-9]'
+# --pending-age=75s + one 60s capacity poll → expect capacity.pending-aged
+# within ~3 minutes. With #835's FailedScheduling gate active (no autoscaler
+# on kind), k8s-event FailedScheduling must be held on failedscheduling_min_count
+# and must NOT open before capacity.pending-aged.
 await_inject pending 360 'capacity.pending' 'hog-'
+k8s_ev_count="$(leeway_wire_count pending 'kind=k8s-event' 'FailedScheduling' 'hog-')"
+if ((k8s_ev_count != 0)); then
+  echo "  ✗ expected 0 k8s-event FailedScheduling opens before capacity.pending-aged, got $k8s_ev_count" >&2
+  exit 1
+fi
+echo "  ✓ k8s-event FailedScheduling held (0 opens before capacity.pending-aged)"
+await_metric_ge 60 lookout_events_filtered_total 'gate="failedscheduling_min_count"' 1
 await_finding 240 'FailedScheduling.*hog-|hog-.*FailedScheduling' -- triage events --namespace="$DEMO_NS"
 await_finding 240 'category=pending status=degraded' -- health
