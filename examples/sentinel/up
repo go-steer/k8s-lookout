@@ -148,6 +148,11 @@ fi
 patch_ops=(
   "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"}"
 )
+# Replace volumeMounts and volumes in full (idempotent on re-run and
+# cleans up the alert-excludes mount on revert before the ConfigMap is
+# deleted; deploy/51 defines only lookout-data).
+base_mounts='{"name":"lookout-data","mountPath":"/var/lib/lookout"}'
+base_volumes='{"name":"lookout-data","emptyDir":{}}'
 if [[ -n "${ALERT_EXCLUDES:-}" ]]; then
   echo "▸ alert-excludes ConfigMap + --store enabled"
   if [[ -f "$ALERT_EXCLUDES" ]]; then
@@ -162,8 +167,13 @@ if [[ -n "${ALERT_EXCLUDES:-}" ]]; then
     "--store=/var/lib/lookout/lookout.db"
   )
   patch_ops+=(
-    "{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/-\",\"value\":{\"name\":\"alert-excludes\",\"mountPath\":\"/etc/lookout\",\"readOnly\":true}}"
-    "{\"op\":\"add\",\"path\":\"/spec/template/spec/volumes/-\",\"value\":{\"name\":\"alert-excludes\",\"configMap\":{\"name\":\"lookout-alert-excludes\"}}}"
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/volumeMounts\",\"value\":[${base_mounts},{\"name\":\"alert-excludes\",\"mountPath\":\"/etc/lookout\",\"readOnly\":true}]}"
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes\",\"value\":[${base_volumes},{\"name\":\"alert-excludes\",\"configMap\":{\"name\":\"lookout-alert-excludes\"}}]}"
+  )
+else
+  patch_ops+=(
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/volumeMounts\",\"value\":[${base_mounts}]}"
+    "{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes\",\"value\":[${base_volumes}]}"
   )
 fi
 args_json="$(printf '"%s",' "${args[@]}")"
