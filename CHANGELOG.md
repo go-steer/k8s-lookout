@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hot-reloadable `--alert-excludes <file>` rules that route matching `lookout watch` signals to `severity=info` (#836, refs #837).**
+  - Adds the `(experimental)` `--alert-excludes <file>` flag to `lookout watch`, letting operators silence noisy workloads or namespaces without dropping them from the watch (`--exclude-namespace`) or demoting an entire signal kind cluster-wide (`--severity`). Matching signals downgrade to `SeverityInfo` (`RouteStore`) — persisted to `--store` when configured, or counted and logged via `info-drop` when `--store` is unset — without opening a session or watchboard entry.
+  - Enforces a strict YAML schema requiring a top-level `excludes:` wrapper (unknown keys rejected), involved-object `kind` (case-insensitive) plus at least one narrowing matcher (`namespace`, `reason` matching wire or canonical reason case-insensitively, or `name` exact or trailing `*` prefix), optional multi-cluster `cluster`/`project`/`location`, and load-time rejection of `kind`-only rules, bare/mid-string `*`, and autoscaler verdict reasons (`TriggeredScaleUp`, `NotTriggerScaleUp`, `FailedScaleUp`). Missing, unreadable, or malformed files at startup, or combining `--alert-excludes` with `--mode=shared`, exit 2.
+  - Evaluates rules after `d.routing.Classify` and `d.triage.Apply` (so operator exclude files always outrank agent `status=escalated` triage records), hot-reloads every 1 m and on `SIGHUP` without restarting (keeping prior valid rules in force and setting `lookout_watch_alert_exclude_refused=1` on a bad reload), logs every active rule on its own line at startup and on reload, and exports `lookout_watch_alert_excluded_total`, `lookout_watch_alert_exclude_rules`, and `lookout_watch_alert_exclude_refused`.
+  - Adds optional `ALERT_EXCLUDES` ConfigMap + `--store` wiring to `examples/sentinel/up` and the `examples/scenarios/alert-excludes` UAT fixture.
+
 ### Changed
 
 - **Gate `FailedScheduling` events on cluster-autoscaler verdicts, pod scheduling state, and count/span backstop, plus Autopilot scale-to-zero hold (#835, refs #837).**

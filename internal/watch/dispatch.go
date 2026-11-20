@@ -111,6 +111,14 @@ type dispatcher struct {
 	// The resolve flip (§9.4 automatic lifecycle) runs in every
 	// mode. Nil when --store is unset.
 	triage *triageOverrides
+	// excludes, when non-nil, holds the operator-declared
+	// --alert-excludes rules (#836). Evaluated in classifySignal AFTER
+	// d.routing.Classify and AFTER d.triage.Apply so an operator exclude
+	// file always outranks agent-written status=escalated or
+	// severity-upgrade triage records. Matching signals downgrade to
+	// SeverityInfo (RouteStore) without dropping the namespace or object
+	// from the watch.
+	excludes *alertExcludeStore
 	// storm, when non-nil, is the §7.5 correlation stage sitting
 	// between dedup and session creation: new incidents pass through
 	// it and may be folded into a kind=storm session instead of
@@ -186,11 +194,14 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 
-	key, downgraded := d.classifySignal(ctx, &sig)
+	key, downgraded, excluded := d.classifySignal(ctx, &sig)
 	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	if ok, gate := d.filter.Decide(sig); !ok {
 		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
 		return
+	}
+	if excluded {
+		d.metrics.alertExcluded.Inc()
 	}
 
 	result := d.dedup.ObserveSignal(key, engine.Observation{
@@ -255,7 +266,7 @@ func (d *dispatcher) stampClusterIdentity(sig *engine.Signal) {
 	}
 }
 
-func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (engine.EventKey, *memory.TriageStatusRecord) {
+func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (engine.EventKey, *memory.TriageStatusRecord, bool) {
 	key := sig.CanonicalKey()
 	sig.PullClass, sig.PullCause = d.pullClass.Resolve(*sig)
 	if sig.Fingerprint == "" {
@@ -269,7 +280,15 @@ func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (en
 	if d.triage != nil && d.mode == "per-incident" {
 		sig.Severity, downgraded = d.triage.Apply(ctx, *sig)
 	}
-	return key, downgraded
+	var excluded bool
+	if d.excludes != nil && d.mode == "per-incident" {
+		if _, matched := d.excludes.Match(*sig); matched {
+			sig.Severity = engine.SeverityInfo
+			downgraded = nil
+			excluded = true
+		}
+	}
+	return key, downgraded, excluded
 }
 
 func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord) {
@@ -309,7 +328,7 @@ func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signa
 }
 
 func (d *dispatcher) routeInfoSignal(sig engine.Signal) bool {
-	if d.mode != "per-incident" || d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore {
+	if d.mode != "per-incident" || (d.routing == nil && d.excludes == nil) || engine.RouteFor(sig.Severity) != engine.RouteStore {
 		return false
 	}
 	d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
@@ -460,7 +479,7 @@ func (d *dispatcher) dispatchSharedOrDryRun(ctx context.Context, sig engine.Sign
 // escalated to critical still opens its own session.
 func (d *dispatcher) opensSessions(sig engine.Signal) bool {
 	return d.mode == "per-incident" &&
-		(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
+		((d.routing == nil && d.excludes == nil) || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
 		(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard)
 }
 

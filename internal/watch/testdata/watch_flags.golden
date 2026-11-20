@@ -1,6 +1,7 @@
 # lookout watch CLI flag contract (docs/cli-stability-policy.md)
 # Format: <name>\t<type>\t<default>\t<stability>
 access-recheck	duration	"2m0s"	stable
+alert-excludes	string	""	experimental
 autopilot-scale-to-zero-hold	bool	"true"	experimental
 ax-ca-file	string	""	stable
 ax-router-credential-bundle	string	"/run/podidentity.podcert.ate.dev/credential-bundle.pem"	stable
