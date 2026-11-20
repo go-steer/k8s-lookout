@@ -320,6 +320,119 @@ func TestSettleDispatch_RepeatBlipAfterResolvedIncidentClampsWithoutMutatingTomb
 	if got := testutil.ToFloat64(d.metrics.gateOutcomes.WithLabelValues(engine.GateSettle, settleOutcomeSelfResolved)); got != 1 {
 		t.Errorf("gate_outcomes_total{settle,self_resolved} = %v, want 1", got)
 	}
+
+	// Redelivering the cleared repeat blip's last sighting (on the reused Event
+	// whose FirstSeen is still t0, 20m earlier!) must stay suppressed — zero
+	// sessions opened, zero extra self_resolved, and #816 tombstone untouched.
+	now = now.Add(1 * time.Minute)
+	d.DispatchSignal(context.Background(), blip)
+	if len(*injects) != 2 {
+		t.Fatalf("redelivered cleared repeat blip opened a session: injects = %d, want 2", len(*injects))
+	}
+	if d.settle.Len() != 0 {
+		t.Fatalf("redelivered cleared repeat blip reopened hold: len = %d, want 0", d.settle.Len())
+	}
+	if ts, ok := d.dedup.LastRetiredTS(sig.CanonicalKey()); !ok || !ts.Equal(sig.LastSeen) {
+		t.Fatalf("redelivered repeat blip mutated #816 tombstone: LastRetiredTS = (%v, %v), want (%v, true)", ts, ok, sig.LastSeen)
+	}
+}
+
+func TestSettleDispatch_RedeliveredRepeatBlipAfterSelfResolvedSuppressed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	d, injects := newSettleTestDispatcher(t, 2*time.Minute, func() time.Time { return now })
+
+	t0 := now
+	sig := crashLoopSignal()
+	sig.Key.Reason = "BackOff"
+	sig.Message = "Back-off restarting failed container worker in pod worker-0"
+	sig.FirstSeen = t0
+	sig.LastSeen = t0.Add(60 * time.Second)
+	sig.Count = 3
+	now = sig.LastSeen
+	d.DispatchSignal(context.Background(), sig)
+	now = sig.LastSeen.Add(7 * time.Minute)
+	if n := sweepAndCountSettle(d); n != 1 {
+		t.Fatalf("blip 1 sweep = %d, want 1", n)
+	}
+
+	// Blip 2 on the same reused Event (FirstSeen still t0, LastSeen t0+20m),
+	// clamped and swept as self_resolved.
+	tBlip2 := t0.Add(20 * time.Minute)
+	blip2 := sig
+	blip2.Count = 5
+	blip2.LastSeen = tBlip2.Add(45 * time.Second)
+	now = blip2.LastSeen
+	d.DispatchSignal(context.Background(), blip2)
+	now = blip2.LastSeen.Add(7 * time.Minute)
+	if n := sweepAndCountSettle(d); n != 1 {
+		t.Fatalf("blip 2 sweep = %d, want 1", n)
+	}
+
+	// Redeliver blip 2's last sighting: reused Event has LastSeen - FirstSeen =
+	// 20m45s >= 2m, but BlipStart clamps to sig.LastSeen so it is held and
+	// Hold ignores the replay without opening a session or double-counting.
+	now = now.Add(1 * time.Minute)
+	d.DispatchSignal(context.Background(), blip2)
+	if len(*injects) != 0 {
+		t.Fatalf("redelivered repeat blip opened %d session(s), want 0", len(*injects))
+	}
+	if d.settle.Len() != 0 {
+		t.Fatalf("redelivered repeat blip reopened hold: len = %d, want 0", d.settle.Len())
+	}
+	now = now.Add(10 * time.Minute)
+	if n := sweepAndCountSettle(d); n != 0 {
+		t.Fatalf("post-replay sweep expired %d, want 0", n)
+	}
+}
+
+func TestSettleDispatch_FreshEventObjectAfterTombstoneUsesOwnFirstSeen(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	d, injects := newSettleTestDispatcher(t, 2*time.Minute, func() time.Time { return now })
+
+	// Blip 1 ends at t0+60s and sweeps.
+	t0 := now
+	sig := crashLoopSignal()
+	sig.Key.Reason = "BackOff"
+	sig.Message = "Back-off restarting failed container worker in pod worker-0"
+	sig.FirstSeen = t0
+	sig.LastSeen = t0.Add(60 * time.Second)
+	sig.Count = 3
+	now = sig.LastSeen
+	d.DispatchSignal(context.Background(), sig)
+	now = sig.LastSeen.Add(7 * time.Minute)
+	if n := sweepAndCountSettle(d); n != 1 {
+		t.Fatalf("blip 1 sweep = %d, want 1", n)
+	}
+
+	// Later, a brand-new Event object appears with FirstSeen = t0+70m (already
+	// after cleared.EventLastSeen = t0+60s) and crosses count=3 at t0+70m35s.
+	// Start must be sig.FirstSeen (t0+70m), NOT over-clamped to t0+70m35s!
+	tFresh := t0.Add(70 * time.Minute)
+	fresh1 := sig
+	fresh1.FirstSeen = tFresh
+	fresh1.LastSeen = tFresh.Add(35 * time.Second)
+	fresh1.Count = 3
+	now = fresh1.LastSeen
+	d.DispatchSignal(context.Background(), fresh1)
+	if len(*injects) != 0 {
+		t.Fatalf("fresh Event at 35s injected: got %d, want 0", len(*injects))
+	}
+
+	// At tFresh+2m05s (only 1m30s after fresh1.LastSeen, but 2m05s after
+	// fresh1.FirstSeen): must forward without the extra 35s delay!
+	fresh2 := fresh1
+	fresh2.LastSeen = tFresh.Add(2*time.Minute + 5*time.Second)
+	fresh2.Count = 5
+	now = fresh2.LastSeen
+	d.DispatchSignal(context.Background(), fresh2)
+	if len(*injects) != 1 {
+		t.Fatalf("fresh Event at 2m05s from its own FirstSeen injects = %d, want 1", len(*injects))
+	}
+	if got := testutil.ToFloat64(d.metrics.gateOutcomes.WithLabelValues(engine.GateSettle, settleOutcomeForwarded)); got != 1 {
+		t.Errorf("gate_outcomes_total{settle,forwarded} = %v, want 1", got)
+	}
 }
 
 func TestSettleDispatch_RestartFailsOpenOnRepeatBlipStart(t *testing.T) {

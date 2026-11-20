@@ -74,6 +74,9 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    # Full weekly run with pending-scaleup (~8-10m) and crash-blip (~8m) sits
+    # around ~70-75m under LOOKOUT_E2E_TIMEOUT_SCALE=2, leaving ~15m of slack;
+    # bump this ceiling when adding the next weekly scenario.
     timeout-minutes: 90
     env:
       # CI runners are slower than the workstation the timings were
