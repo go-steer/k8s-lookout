@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-20
+
+**This release scales every cluster-wide read command and `lookout watch` to 4,000 nodes and 200,500 S8-padded pods without changing any shipped `--timeout`, `--kube-qps`, or `--kube-burst` defaults.** Typed Kubernetes clients negotiate Protobuf by default (#824), high-cardinality lists paginate, trim, and stream across sharded HTTP/2 connections (#825, #830, #831), `pkg/graph` copy-on-write hub-edge slices remove quadratic allocation on dense namespaces (#831), and `pkg/checks/inventory` moves all 22 built-in resources to typed Protobuf listers (#830). At 200,500 pods (`examples/kwok/kwokctl-run 4000 5000 50`, closing #495), all 26/26 read-path commands finish inside their shipped timeouts (`health` 44.7s → 16.4s, `scan` 15.6s, `audit all -A` 11.7s, `triage list -A` 8.5s, `triage events -A` 2.4s), `lookout watch` `/readyz` drops from 333.2s to 43.8s at 6.61 GiB peak RSS, and `leeway` sustains 1,578.5 pod lifecycles/s at 28.80 KiB/pod marginal resident memory. It also moves the Go toolchain to 1.26.11 (#826, clearing GO-2026-6859) and updates 25 Go dependencies (#827).
+
 ### Changed
 
-- **Paginate remaining Kubernetes list calls and trim/stream pages in flight on large clusters.** One-shot and saturation list paths (`triage top`, `triage logs`, `triage changes`, and the `saturation` pod/node fetchers) now chunk `Pods`, `Nodes`, and `Events` reads with `Limit=500` and `Continue` pagination (with single-restart HTTP `410 Gone` recovery) instead of issuing unpaged `List` calls. Added `kube.ListAllPagesTrim`, `kube.ListAllPagesMap`, and `kube.ListPagesStream`, plus safe read-path trimmers (`kube.TrimReadPod`, `kube.TrimReadNode`) applied per page across `kube.WrapClient`, `delta`, `audit.Snapshot`, `stab drain`, and `state` checks; `health`, `bundle`, `triage changes`, `triage top`, `triage list`, and `saturation` now stream or project pages without buffering full untrimmed objects across the cluster, and `state edges` drops Secret/ConfigMap payload values (preserving key names and `tls.crt`) per page.
+- **Scale all 26 cluster-wide read-path commands and `lookout watch` to 4,000 nodes and 200,500 S8-padded pods within shipped `--timeout`, `--kube-qps=50`, and `--kube-burst=100` defaults (#830, #831, closes #495).**
+  - `pkg/kube`: raises `DefaultPageLimit` to `5000`, adds parallel per-namespace pod and event streaming (`StreamClusterPods`, `ListClusterPodsMap`, `StreamClusterEvents`) sharded across up to 8 HTTP/2 TLS connections sharing one `50` QPS / `100` burst rate limiter with `2,500`-pod namespace pages (~86 requests at 200.5k pods), runs `TrimReadPod`, `ListClusterPodsMap`, and pre-sized `ListClusterPodsTrim` inside worker goroutines immediately after Protobuf decode, and adds singleflight `WithListCache` (`kube.DefaultSource()`) so concurrent compositions (`health`, `scan`) share one pod/node snapshot.
+  - `pkg/graph`: adds per-batch copy-on-write edge slice ownership, a monotonic tail fast-path in `findEdge`, and `!hadPod` O(1) append in `applyPod` to eliminate O(N²) hub-edge slice reallocation on 22k-pod namespaces, cutting `health` from `44.7s` to `16.4s` and `lookout watch` `/readyz` from `333.2s` to `43.8s` (`6.61 GiB` peak RSS across all portable sources and the `--storm` graph).
+  - `pkg/checks` and `pkg/emit`: replaces unstructured dynamic reads with typed Protobuf listers/formatters for all 22 built-in GVRs in `pkg/checks/inventory` (`triage list -A`: `125.9s` → `5.7s` at 100.5k pods, `8.5s` at 200.5k pods), fixes O(N² log N) event rollup in `pkg/checks/events` (`435.9s` → `1.4s` at 107k events, `2.4s` at 209k events), shares one `audit.Snapshot` across `audit all` while streaming naked pods without retaining owned pods, projects pods per page into compact domain records across `delta`, `stab` (`drain`, `scaledown`), and `state/volumes` (`1.5–1.8 GiB` peak RSS at 200.5k pods), parallelizes independent list steps across `audit`, `delta`, `inventory`, `stab/drain`, and `state/{edges,volumes}`, and adds lossless byte/substring pre-filters in `pkg/emit` `MaskString`. All 26/26 read-path commands pass `BENCH_REQUIRE_DEFAULT_TIMEOUT=1` at 200,500 S8-padded pods.
+- **Standalone `kwokctl` 200k-pod scale runner and `#491` watch-event counter in `leeway-scale` (#828, #829, #830, #831).** `examples/kwok/kwokctl-up`, `kwokctl-down`, and `kwokctl-run` boot an isolated `kwokctl --runtime=binary` control plane (`$STATE_DIR/kwokctl.kubeconfig`, auto `32 GiB` etcd quota above 120k pods, 64 kwok pod workers, 50 controller workers) to run 100k–200.5k S8-padded-pod benchmarks without Docker or root. `examples/kwok/leeway-scale` now differences `lookout_leeway_watch_events_total{resource,outcome}` (#491) alongside evaluation duration to report raw watch-event rate, `applied` vs `inert` share, coalescer folding ratio, and per-watch-event CPU split (`28.80 KiB/pod` marginal resident, `1,578.5` pod lifecycles/s, `1,893.4` watch events/s, `79.7` events/evaluation, `0` counter mismatches at 200,500 pods). `examples/kwok/bench` adds `ru_maxrss` child peak-RSS measurement and `BENCH_REQUIRE_DEFAULT_TIMEOUT` / `BENCH_MAX_PEAK_MB` CI regression guards.
+- **Paginate remaining Kubernetes list calls and trim/stream pages in flight on large clusters (#825).** One-shot and saturation list paths (`triage top`, `triage logs`, `triage changes`, and the `saturation` pod/node fetchers) now chunk `Pods`, `Nodes`, and `Events` reads with `Continue` pagination (`Limit=500` in #825, raised to `DefaultPageLimit=5000` in #830) and single-restart HTTP `410 Gone` recovery instead of issuing unpaged `List` calls. Added `kube.ListAllPagesTrim`, `kube.ListAllPagesMap`, and `kube.ListPagesStream`, plus safe read-path trimmers (`kube.TrimReadPod`, `kube.TrimReadNode`) applied per page across `kube.WrapClient`, `delta`, `audit.Snapshot`, `stab drain`, and `state` checks; `health`, `bundle`, `triage changes`, `triage top`, `triage list`, and `saturation` now stream or project pages without buffering full untrimmed objects across the cluster, and `state edges` drops Secret/ConfigMap payload values (preserving key names and `tls.crt`) per page.
 - **Typed Kubernetes clients now negotiate Protobuf by default
-  (`pkg/kube/client.go`).** `BuildConfig` and `BuildClientFromConfig` now set
+  (`pkg/kube/client.go`, #824).** `BuildConfig` and `BuildClientFromConfig` now set
   `AcceptContentTypes` to `application/vnd.kubernetes.protobuf,application/json`
   and `ContentType` to `application/vnd.kubernetes.protobuf` whenever the caller
   did not specify an override (landing the `docs/leeway-design.md` §6.1 client
@@ -24,10 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / `BuildDynamicClientFromConfig`) continue using JSON for CRDs, and the raw
   kubelet `/stats/summary` proxy call in `pkg/sources/saturation` explicitly
   requests `application/json`.
+- **Go module dependencies (#827).** Updates 25 direct dependencies across
+  `k8s.io/{api,apimachinery,client-go,metrics}` (`v0.37.2`),
+  `cloud.google.com/go/*`, `google.golang.org/{api,grpc}`,
+  `go.opentelemetry.io/otel/*` (`v1.47.0`),
+  `github.com/prometheus/client_golang` (`v1.25.0`),
+  `github.com/spiffe/go-spiffe/v2` (`v2.9.0`), `golang.org/x/oauth2`
+  (`v0.38.0`), and `modernc.org/sqlite` (`v1.62.0`).
 
 ### Security
 
-- **Go toolchain 1.26.11**, clearing GO-2026-6859 (`net/http` HTTP/1 server
+- **Go toolchain 1.26.11 (#826)**, clearing GO-2026-6859 (`net/http` HTTP/1 server
   crash due to `MaxBytesReader` header race). No lookout code changes;
   `govulncheck` is clean again.
 
