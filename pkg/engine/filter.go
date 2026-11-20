@@ -218,15 +218,15 @@ func (f *Filter) Decide(sig Signal) (bool, string) {
 	if eventKind {
 		switch CanonicalReasonForEvent(sig.Key.Reason, sig.Message) {
 		case "Unhealthy":
-			if sig.Count < f.cfg.unhealthyMinCount {
+			if sig.Count > 0 && sig.Count < f.cfg.unhealthyMinCount {
 				return false, GateUnhealthyDebounce
 			}
 		case "CrashLoopBackOff":
-			if sig.Count < f.cfg.backoffMinCount {
+			if sig.Count > 0 && sig.Count < f.cfg.backoffMinCount {
 				return false, GateCrashLoopDebounce
 			}
 		case "ImagePullBackOff":
-			if sig.PullClass == PullClassRetryable && sig.Count < f.cfg.imagePullTransientMinCount {
+			if sig.PullClass == PullClassRetryable && sig.Count > 0 && sig.Count < f.cfg.imagePullTransientMinCount {
 				return false, GatePullTransient
 			}
 		}

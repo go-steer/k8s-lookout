@@ -411,3 +411,98 @@ func TestWorkloadTimelineReplicaSetsRefused(t *testing.T) {
 		t.Errorf("contract: %v", err)
 	}
 }
+
+// TestSeriesFallback verifies issue #833 on the read path (`triage events`):
+// events.k8s.io/v1 series-only Events populate count and last_seen from
+// Series.{Count,LastObservedTime} (so an Event whose EventTime predates
+// --since still survives when Series.LastObservedTime is fresh), first
+// occurrences with Series == nil report count=1, and legacy fields win when
+// both are populated.
+func TestSeriesFallback(t *testing.T) {
+	objs := []runtime.Object{
+		// 1. Series-only repeat whose EventTime (40m ago) is older than --since=15m
+		//    but Series.LastObservedTime (2m ago) is inside the window.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-repeat"},
+			InvolvedObject: objRef("Pod", "prod", "hog-repeat", "u-repeat"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: 3 Insufficient cpu.",
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-40 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            9,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-2 * time.Minute)},
+			},
+			ReportingController: "default-scheduler",
+		},
+		// 2. Series-only first occurrence (EventTime set, Series == nil, Count == 0).
+		&corev1.Event{
+			ObjectMeta:          metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-first"},
+			InvolvedObject:      objRef("Pod", "prod", "hog-first", "u-first"),
+			Type:                corev1.EventTypeWarning,
+			Reason:              "FailedScheduling",
+			Message:             "0/3 nodes are available: 3 Insufficient memory.",
+			EventTime:           metav1.MicroTime{Time: testNow.Add(-5 * time.Minute)},
+			ReportingController: "default-scheduler",
+		},
+		// 3. Both legacy and Series populated: legacy Count and LastTimestamp win.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-both"},
+			InvolvedObject: objRef("Pod", "prod", "hog-both", "u-both"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: legacy wins.",
+			Count:          7,
+			FirstTimestamp: ago(10 * time.Minute),
+			LastTimestamp:  ago(3 * time.Minute),
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-10 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            2,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-1 * time.Minute)},
+			},
+			Source: corev1.EventSource{Component: "default-scheduler"},
+		},
+	}
+
+	recs, summary := runRecords(t, testCommand(objs...), "--namespace=prod", "--since=15m", "--per-object")
+	if summary["scanned"] != "3" {
+		t.Errorf("scanned = %s, want 3", summary["scanned"])
+	}
+	if len(recs) != 3 {
+		t.Fatalf("findings = %d, want 3 (series repeat must survive --since=15m):\n%v", len(recs), recs)
+	}
+	byName := make(map[string]record, len(recs))
+	for _, r := range recs {
+		byName[r["name"]] = r
+	}
+
+	rep := byName["hog-repeat"]
+	if rep["count"] != "9" {
+		t.Errorf("hog-repeat count = %q, want 9", rep["count"])
+	}
+	if rep["first_seen"] != ago(40*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-repeat first_seen = %q, want %s", rep["first_seen"], ago(40*time.Minute).UTC().Format(time.RFC3339))
+	}
+	if rep["last_seen"] != ago(2*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-repeat last_seen = %q, want %s", rep["last_seen"], ago(2*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	first := byName["hog-first"]
+	if first["count"] != "1" {
+		t.Errorf("hog-first count = %q, want 1", first["count"])
+	}
+	wantFirstTS := ago(5 * time.Minute).UTC().Format(time.RFC3339)
+	if first["first_seen"] != wantFirstTS || first["last_seen"] != wantFirstTS {
+		t.Errorf("hog-first first_seen/last_seen = %q/%q, want both %s", first["first_seen"], first["last_seen"], wantFirstTS)
+	}
+
+	both := byName["hog-both"]
+	if both["count"] != "7" {
+		t.Errorf("hog-both count = %q, want 7 (legacy wins)", both["count"])
+	}
+	if both["last_seen"] != ago(3*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-both last_seen = %q, want %s (legacy wins)", both["last_seen"], ago(3*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	checktest.VerifyContract(t, testCommand(objs...), "--namespace=prod", "--since=15m")
+}

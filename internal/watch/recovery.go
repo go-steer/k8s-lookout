@@ -49,7 +49,7 @@ func (d *dispatcher) deferSiblingResolved(ctx context.Context, sig engine.Signal
 			}
 		}
 	}
-	d.dedup.MarkResolved(rootKey)
+	d.dedup.MarkResolvedIfUnresolved(rootKey)
 	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
 	return false
 }

@@ -379,3 +379,63 @@ func TestFilter_Accept_EmptyNamespaceK8sEventKeepsFrozenBehavior(t *testing.T) {
 		t.Error("empty-namespace k8s-event must keep being rejected by a namespace allow-list (frozen behavior)")
 	}
 }
+
+// TestFilter_Accept_ZeroCountFailsOpen pins issue #833: an emitter that
+// populates neither legacy Count nor Series leaves sig.Count == 0. All three
+// count gates must fail open on Count <= 0 rather than silencing incidents
+// forever, while still rejecting Count == 1 below the threshold.
+func TestFilter_Accept_ZeroCountFailsOpen(t *testing.T) {
+	t.Parallel()
+	f := NewFilter(NewFilterConfig(nil, nil, nil, 0, 0, 0))
+	cases := []struct {
+		name     string
+		sigZero  Signal
+		sigOne   Signal
+		wantGate string
+	}{
+		{
+			name:     "Unhealthy",
+			sigZero:  makeEvent("Unhealthy", "default", 0),
+			sigOne:   makeEvent("Unhealthy", "default", 1),
+			wantGate: GateUnhealthyDebounce,
+		},
+		{
+			name:     "CrashLoopBackOff",
+			sigZero:  makeEvent("CrashLoopBackOff", "default", 0),
+			sigOne:   makeEvent("CrashLoopBackOff", "default", 1),
+			wantGate: GateCrashLoopDebounce,
+		},
+		{
+			name:     "BackOff crash-loop",
+			sigZero:  makeEventMsg("BackOff", "Back-off restarting failed container app", "default", 0),
+			sigOne:   makeEventMsg("BackOff", "Back-off restarting failed container app", "default", 1),
+			wantGate: GateCrashLoopDebounce,
+		},
+		{
+			name:     "ImagePullBackOff retryable",
+			sigZero:  makePullEvent("ImagePullBackOff", `Back-off pulling image "gcr.io/x/y:v1"`, PullClassRetryable, 0),
+			sigOne:   makePullEvent("ImagePullBackOff", `Back-off pulling image "gcr.io/x/y:v1"`, PullClassRetryable, 1),
+			wantGate: GatePullTransient,
+		},
+		{
+			name:     "BackOff image-pull retryable",
+			sigZero:  makePullEvent("BackOff", `Back-off pulling image "gcr.io/x/y:v1"`, PullClassRetryable, 0),
+			sigOne:   makePullEvent("BackOff", `Back-off pulling image "gcr.io/x/y:v1"`, PullClassRetryable, 1),
+			wantGate: GatePullTransient,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if ok, gate := f.Decide(tc.sigZero); !ok || gate != "" {
+				t.Errorf("Count=0 Decide = (%v, %q), want (true, \"\")", ok, gate)
+			}
+			if !f.Accept(tc.sigZero) {
+				t.Error("Count=0 Accept = false, want true")
+			}
+			if ok, gate := f.Decide(tc.sigOne); ok || gate != tc.wantGate {
+				t.Errorf("Count=1 Decide = (%v, %q), want (false, %q)", ok, gate, tc.wantGate)
+			}
+		})
+	}
+}

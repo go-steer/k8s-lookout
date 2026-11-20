@@ -207,12 +207,12 @@ func TestRecoveryFlipExpiresOverride(t *testing.T) {
 	}
 
 	// (3) the symptom recurs on the same pod after the dedup window
-	// (newer event activity + lapsed 1ns cooldown = the retry safety
-	// net): with the record resolved, routing follows the signal's
-	// own class again — it pages.
+	// (newer event activity strictly after MarkResolved's ResolvedAt +
+	// lapsed 1ns cooldown = the retry safety net): with the record
+	// resolved, routing follows the signal's own class again — it pages.
 	time.Sleep(time.Millisecond) // let the 1ns window lapse
 	recurrence := sig
-	recurrence.LastSeen = sig.LastSeen.Add(time.Hour)
+	recurrence.LastSeen = time.Now().Add(time.Hour)
 	d.DispatchSignal(ctx, recurrence)
 	byRoute := occurrencesByRoute(t, s)
 	if len(byRoute[store.RouteInjected]) != 1 {

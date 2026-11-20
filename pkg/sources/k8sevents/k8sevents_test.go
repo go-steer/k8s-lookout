@@ -480,3 +480,186 @@ func TestSource_DropsReDeliveriesOfAnUnchangedEvent(t *testing.T) {
 		t.Fatalf("signals = %d (last count %d), want exactly 2: the Add and the real update", len(got), got[len(got)-1].Count)
 	}
 }
+
+func TestToTriageEvent_SeriesFallback(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Minute)
+	t2 := t0.Add(5 * time.Minute)
+
+	base := func() *corev1.Event {
+		return &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "hog.evt",
+				Namespace: "default",
+			},
+			Reason:  "FailedScheduling",
+			Message: "0/3 nodes are available: 3 Insufficient cpu.",
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "Pod",
+				Name:      "hog-abc",
+				Namespace: "default",
+				UID:       "uid-hog",
+			},
+			Type: corev1.EventTypeWarning,
+		}
+	}
+
+	cases := []struct {
+		name      string
+		mutate    func(*corev1.Event)
+		wantCount int
+		wantFirst time.Time
+		wantLast  time.Time
+	}{
+		{
+			name: "legacy-only",
+			mutate: func(ev *corev1.Event) {
+				ev.Count = 7
+				ev.FirstTimestamp = metav1.Time{Time: t1}
+				ev.LastTimestamp = metav1.Time{Time: t2}
+			},
+			wantCount: 7,
+			wantFirst: t1,
+			wantLast:  t2,
+		},
+		{
+			name: "series-only first occurrence",
+			mutate: func(ev *corev1.Event) {
+				ev.EventTime = metav1.MicroTime{Time: t1}
+			},
+			wantCount: 1,
+			wantFirst: t1,
+			wantLast:  t1,
+		},
+		{
+			name: "series-only repeat",
+			mutate: func(ev *corev1.Event) {
+				ev.EventTime = metav1.MicroTime{Time: t1}
+				ev.Series = &corev1.EventSeries{
+					Count:            5,
+					LastObservedTime: metav1.MicroTime{Time: t2},
+				}
+			},
+			wantCount: 5,
+			wantFirst: t1,
+			wantLast:  t2,
+		},
+		{
+			name: "both populated legacy wins",
+			mutate: func(ev *corev1.Event) {
+				ev.Count = 7
+				ev.FirstTimestamp = metav1.Time{Time: t0}
+				ev.LastTimestamp = metav1.Time{Time: t2}
+				ev.EventTime = metav1.MicroTime{Time: t0}
+				ev.Series = &corev1.EventSeries{
+					Count:            2,
+					LastObservedTime: metav1.MicroTime{Time: t1},
+				}
+			},
+			wantCount: 7,
+			wantFirst: t0,
+			wantLast:  t2,
+		},
+		{
+			name: "neither count series nor eventTime",
+			mutate: func(ev *corev1.Event) {
+				ev.CreationTimestamp = metav1.Time{Time: t0}
+			},
+			wantCount: 0,
+			wantFirst: t0,
+			wantLast:  t0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := base()
+			tc.mutate(ev)
+			got := toTriageEvent(ev)
+			if got.Count != tc.wantCount {
+				t.Errorf("Count = %d, want %d", got.Count, tc.wantCount)
+			}
+			if !got.FirstSeen.Equal(tc.wantFirst) {
+				t.Errorf("FirstSeen = %s, want %s", got.FirstSeen, tc.wantFirst)
+			}
+			if !got.LastSeen.Equal(tc.wantLast) {
+				t.Errorf("LastSeen = %s, want %s", got.LastSeen, tc.wantLast)
+			}
+		})
+	}
+}
+
+// TestSource_SeriesEventAddAndUpdate verifies an events.k8s.io/v1 series-only
+// FailedScheduling Event transitioning across informer Add (Series == nil) and
+// Update (Series{Count: 2, LastObservedTime: T2}) emits Count=1/T1 then Count=2/T2.
+func TestSource_SeriesEventAddAndUpdate(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset()
+	rec := newSignalRecorder()
+	src := New(client, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- src.Run(ctx, rec.emit) }()
+	waitArmed(ctx, t, src)
+
+	t1 := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(3 * time.Minute)
+	ev := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "hog-pod.evt",
+			Namespace:       "checkout",
+			ResourceVersion: "1",
+		},
+		Reason:  "FailedScheduling",
+		Message: "0/3 nodes are available: 3 Insufficient cpu.",
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "Pod",
+			Name:      "hog-pod",
+			Namespace: "checkout",
+			UID:       "uid-series-1",
+		},
+		EventTime: metav1.MicroTime{Time: t1},
+		Type:      corev1.EventTypeWarning,
+	}
+	if _, err := client.CoreV1().Events("checkout").Create(ctx, ev, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create series event: %v", err)
+	}
+	select {
+	case <-rec.first:
+	case <-ctx.Done():
+		t.Fatal("no signal for series Add")
+	}
+
+	ev2 := ev.DeepCopy()
+	ev2.ResourceVersion = "2"
+	ev2.Series = &corev1.EventSeries{
+		Count:            2,
+		LastObservedTime: metav1.MicroTime{Time: t2},
+	}
+	if _, err := client.CoreV1().Events("checkout").Update(ctx, ev2, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update series event: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(rec.snapshot()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	got := rec.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("signals = %d, want 2 (Add + Series Update)", len(got))
+	}
+	if got[0].Count != 1 || !got[0].FirstSeen.Equal(t1) || !got[0].LastSeen.Equal(t1) {
+		t.Errorf("Add signal = (count=%d first=%s last=%s), want (1, %s, %s)",
+			got[0].Count, got[0].FirstSeen, got[0].LastSeen, t1, t1)
+	}
+	if got[1].Count != 2 || !got[1].FirstSeen.Equal(t1) || !got[1].LastSeen.Equal(t2) {
+		t.Errorf("Update signal = (count=%d first=%s last=%s), want (2, %s, %s)",
+			got[1].Count, got[1].FirstSeen, got[1].LastSeen, t1, t2)
+	}
+}

@@ -275,9 +275,11 @@ func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (en
 func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord) {
 	d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	if result.Replay {
-		// Issue #816: the Event re-delivered unchanged after its incident
-		// resolved. No session, and not a failed open to retry either.
-		log.Printf("dedup %s pod=%s/%s (replay of a resolved incident's Event, last_seen unchanged — suppressed)",
+		// Issues #816 / #833: either an unchanged Event relist or a
+		// delayed events.k8s.io/v1 finishSeries flush whose
+		// lastObservedTime predates resolution. No session, and not a
+		// failed open to retry either.
+		log.Printf("dedup %s pod=%s/%s (replay of a resolved incident's Event — suppressed)",
 			sig.Key.Reason, sig.Namespace, sig.Name)
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
 		return

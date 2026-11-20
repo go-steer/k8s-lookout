@@ -124,6 +124,7 @@ type dedupEntry struct {
 type repeatState struct {
 	SessionClass  bool      `json:"session_class,omitempty"`
 	Resolved      bool      `json:"resolved,omitempty"`
+	ResolvedAt    time.Time `json:"resolved_at,omitzero"`
 	RepeatCount   int       `json:"repeat_count,omitempty"`
 	Step          int       `json:"step,omitempty"`
 	LastInjectAt  time.Time `json:"last_inject_at,omitzero"`
@@ -156,8 +157,9 @@ func (r *repeatState) markUndelivered(change string) {
 	r.LastChange = change
 }
 
-func (r *repeatState) markResolved() {
+func (r *repeatState) markResolved(at time.Time) {
 	r.Resolved = true
+	r.ResolvedAt = at
 }
 
 func (r *repeatState) resetForUnbind(now time.Time, count int) {
@@ -253,11 +255,12 @@ type DedupResult struct {
 	// that owns the incident alive (§7.5 idle TTL), which the
 	// pre-#599 reopen used to do as a side effect.
 	Absorbed bool
-	// Replay marks a DedupDuplicate for activity an incident that has
-	// since resolved and been retired already handled (issue #816): the
-	// Event re-delivered unchanged by an informer relist. It has no
-	// session, and the dispatcher must not read that as a failed open to
-	// retry (#84/#96): the incident it belonged to is over.
+	// Replay marks a DedupDuplicate for activity a resolved incident
+	// already handled (issues #816, #833): either an Event re-delivered
+	// unchanged by an informer relist, or a delayed events.k8s.io/v1
+	// finishSeries flush whose lastObservedTime predates resolution. It
+	// has no session, and the dispatcher must not read that as a failed
+	// open to retry (#84/#96): the incident it belonged to is over.
 	Replay bool
 }
 
@@ -332,6 +335,7 @@ type DedupCache struct {
 // replay test, nothing that routes.
 type tombstone struct {
 	EventLastTS time.Time // the Event's LastTimestamp last processed
+	ResolvedAt  time.Time // wall clock when MarkResolved closed the incident (#833)
 	LastSeen    time.Time // wall clock of the entry's last real activity
 }
 
@@ -678,6 +682,17 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 				// and never a retry: there is no open to retry.
 				return DedupResult{Kind: DedupDuplicate, Count: 1, Replay: true}
 			}
+			if !tomb.ResolvedAt.IsZero() && !obs.LastTS.After(tomb.ResolvedAt) {
+				// Delayed events.k8s.io/v1 finishSeries flush whose
+				// lastObservedTime predates resolution (issue #833):
+				// record the flushed Event timestamp and refresh the
+				// tombstone's TTL anchor for the apiserver's renewed
+				// Event lease, without opening an incident.
+				tomb.EventLastTS = obs.LastTS
+				tomb.LastSeen = now
+				c.tombstones[key] = tomb
+				return DedupResult{Kind: DedupDuplicate, Count: 1, Replay: true}
+			}
 			// The Event moved on: genuinely new activity, which opens
 			// a new incident like any first sighting.
 			delete(c.tombstones, key)
@@ -690,8 +705,23 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 	if !obs.LastTS.After(entry.EventLastTS) {
 		// Case 1: replay. Same activity we already processed;
 		// don't advance LastSeen (retry cooldown untouched).
+		if entry.Resolved {
+			return DedupResult{Kind: DedupDuplicate, Count: entry.Count, Replay: true}
+		}
 		entry.Count++
 		return DedupResult{Kind: DedupDuplicate, SessionID: entry.SessionID, Count: entry.Count, Storm: entry.Storm}
+	}
+	if entry.Resolved && !entry.ResolvedAt.IsZero() && !obs.LastTS.After(entry.ResolvedAt) {
+		// Delayed finishSeries flush arriving before the resolved entry
+		// retired to a tombstone (issue #833). Suppress as Replay; if
+		// the entry was already past its retirement window (sweep not
+		// yet due), retire it now with the renewed TTL anchor.
+		entry.EventLastTS = obs.LastTS
+		if c.window > 0 && now.Sub(entry.LastSeen) > c.window {
+			entry.LastSeen = now
+			c.retireLocked(key, entry)
+		}
+		return DedupResult{Kind: DedupDuplicate, Count: entry.Count, Replay: true}
 	}
 	// Sibling-folded pods (§7.7, issue #641): delegate repeat cadence
 	// and count tracking onto the shared root entry so N crashing pods
@@ -829,13 +859,31 @@ func (c *DedupCache) Unbind(key EventKey) {
 	e.resetForUnbind(now, e.Count)
 }
 
-// MarkResolved records that key's incident was resolved (§7.4).
+// MarkResolved records that key's incident was resolved (§7.4),
+// stamping the wall-clock resolution time so delayed events.k8s.io/v1
+// finishSeries flushes whose lastObservedTime predates resolution stay
+// suppressed as replays (issue #833).
 func (c *DedupCache) MarkResolved(key EventKey) {
 	key.Reason = CanonicalReason(key.Reason)
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if entry, ok := c.entries[key]; ok {
-		entry.markResolved()
+		entry.markResolved(now)
+	}
+}
+
+// MarkResolvedIfUnresolved marks key resolved only when it is not
+// already resolved. Used by sibling-fold recovery coalescing when a
+// sibling clears after rootKey already cleared, so rootKey keeps its
+// original ResolvedAt timestamp (issue #833).
+func (c *DedupCache) MarkResolvedIfUnresolved(key EventKey) {
+	key.Reason = CanonicalReason(key.Reason)
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok && !entry.Resolved {
+		entry.markResolved(now)
 	}
 }
 
@@ -1332,7 +1380,11 @@ func (c *DedupCache) retireLocked(k EventKey, e *dedupEntry) {
 		}
 		delete(c.tombstones, oldest)
 	}
-	c.tombstones[k] = tombstone{EventLastTS: e.EventLastTS, LastSeen: e.LastSeen}
+	c.tombstones[k] = tombstone{
+		EventLastTS: e.EventLastTS,
+		ResolvedAt:  e.ResolvedAt,
+		LastSeen:    e.LastSeen,
+	}
 }
 
 func (c *DedupCache) evictionTierLocked(k EventKey, e *dedupEntry, now time.Time) int {

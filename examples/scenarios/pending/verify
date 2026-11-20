@@ -18,5 +18,7 @@ require_examples_context
 
 echo "▸ verify pending"
 # --pending-age=75s + one 60s capacity poll → expect within ~3 minutes.
+await_inject pending 360 'kind=k8s-event' 'FailedScheduling' 'hog-' '\\"count\\":[1-9]'
 await_inject pending 360 'capacity.pending' 'hog-'
+await_finding 240 'FailedScheduling.*hog-|hog-.*FailedScheduling' -- triage events --namespace="$DEMO_NS"
 await_finding 240 'category=pending status=degraded' -- health

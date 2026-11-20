@@ -717,20 +717,31 @@ its agent re-diagnosed an unchanged failure each time. Now:
   meets an incident first as a pure reminder.
 - After the incident resolves, a recurrence opens fresh, as before. Replays
   (an Event's `LastTimestamp` not advancing) never reach any of this, and
-  that includes replays after the incident is over (#816):
+  that includes replays after the incident is over (#816, #833):
   - A resolved entry leaves the cache one window after its last activity,
     so routing and the cross-source joins stop reaching its session. It
-    leaves a **replay tombstone** behind: the key and the Event timestamp
-    it last processed, kept for the replay TTL (max(1h, 4 windows); the API
-    server keeps an Event for an hour after its last update, its default
-    `--event-ttl`).
-  - An Event re-delivered by a relist with that timestamp unchanged is a
-    suppressed duplicate marked `Replay`. It has no session, and the
-    dispatcher does not mistake it for a failed open to retry (#84/#96).
-  - An Event whose timestamp has advanced clears the tombstone and opens a
+    leaves a **replay tombstone** behind: the key, the Event timestamp it
+    last processed, and the wall-clock `ResolvedAt` timestamp when
+    `MarkResolved` closed the incident, kept for the replay TTL
+    (max(1h, 4 windows); the API server keeps an Event for an hour after
+    its last update, its default `--event-ttl`).
+  - An Event re-delivered by a relist with that timestamp unchanged — or a
+    delayed `events.k8s.io/v1` `finishSeries` flush whose
+    `Series.LastObservedTime` advances past the previously seen timestamp
+    but is still `<= ResolvedAt` (#833) — is a suppressed duplicate marked
+    `Replay` (whether the resolved entry is already tombstoned or still in
+    the cache awaiting retirement). It has no session, and the dispatcher
+    does not mistake it for a failed open to retry (#84/#96). When a
+    pre-resolution `finishSeries` flush updates the Event in the API
+    server, the tombstone records the flushed timestamp and refreshes its
+    TTL anchor once to cover the Event's renewed 1-hour lease.
+  - An Event whose timestamp advances strictly past both the last
+    processed timestamp and `ResolvedAt` clears the tombstone and opens a
     new incident like any first sighting.
-  - Tombstones are memory-only and bounded like the entries. The snapshot
-    format is unchanged, so older binaries still read it.
+  - Tombstones are memory-only and bounded like the entries. `ResolvedAt`
+    rides on live resolved entries in `--dedup-persist` as an additive
+    `resolved_at` field (`omitzero`), so older binaries still read the
+    snapshot and older snapshots load cleanly with a zero `ResolvedAt`.
   - The `k8s-events` source is the first line: it drops an informer
     `Update` whose `ResourceVersion` hasn't changed (a resync, or a
     relist's Replace), so most re-deliveries never become signals. That

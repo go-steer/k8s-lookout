@@ -352,8 +352,11 @@ func (s *Source) toSignal(ev *corev1.Event) engine.Signal {
 }
 
 // toTriageEvent flattens a *corev1.Event to the internal payload
-// shape. Timestamps prefer LastTimestamp (kubelet-set); fall back
-// to EventTime / CreationTimestamp per k8s API convention.
+// shape. Legacy core/v1 fields (Count, FirstTimestamp, LastTimestamp)
+// win when set; events.k8s.io/v1 emitters (upstream and GKE 1.37
+// schedulers — issue #833) populate EventTime on occurrence #1
+// (Series == nil → count 1) and Series.{Count,LastObservedTime} from
+// occurrence #2 onward.
 func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 	first := ev.FirstTimestamp.Time
 	if first.IsZero() {
@@ -362,7 +365,19 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 	if first.IsZero() {
 		first = ev.CreationTimestamp.Time
 	}
+	count := max(int(ev.Count), 0)
 	last := ev.LastTimestamp.Time
+	if ev.Series != nil {
+		if count == 0 && ev.Series.Count > 0 {
+			count = int(ev.Series.Count)
+		}
+		if last.IsZero() {
+			last = ev.Series.LastObservedTime.Time
+		}
+	}
+	if count == 0 && !ev.EventTime.IsZero() {
+		count = 1 // first occurrence of a series (Series is nil until occurrence #2)
+	}
 	if last.IsZero() {
 		last = ev.EventTime.Time
 	}
@@ -389,7 +404,7 @@ func toTriageEvent(ev *corev1.Event) engine.TriageEvent {
 		ControllerRef: "", // needs the pod, which the Event does not carry: Source.toSignal fills it (owner.go)
 		Node:          nodeFromSource(ev),
 		Labels:        labelsFromMeta(ev.ObjectMeta),
-		Count:         int(ev.Count),
+		Count:         count,
 		Type:          ev.Type,
 	}
 }
